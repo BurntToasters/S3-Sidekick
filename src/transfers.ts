@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { $ } from "./utils.ts";
+import { $, escapeHtml } from "./utils.ts";
 import { state } from "./state.ts";
 
 export interface TransferItem {
@@ -106,7 +106,7 @@ async function processQueue(): Promise<void> {
 
   processing = false;
 
-  if (onComplete) {
+  if (onComplete && queue.some((t) => t.status === "done")) {
     onComplete();
   }
 }
@@ -142,10 +142,10 @@ function renderQueue(): void {
       return (
         `<div class="transfer-item" data-id="${t.id}">` +
         `<span class="transfer-status ${statusClass}">${statusIcon}</span>` +
-        `<span class="transfer-name">${escapeForDisplay(t.fileName)}</span>` +
+        `<span class="transfer-name">${escapeHtml(t.fileName)}</span>` +
         `<span class="transfer-arrow">&rarr;</span>` +
-        `<span class="transfer-key">${escapeForDisplay(t.key)}</span>` +
-        (t.status === "error" ? `<span class="transfer-error" title="${escapeForDisplay(t.error || "")}">${escapeForDisplay(t.error || "Error")}</span>` : "") +
+        `<span class="transfer-key">${escapeHtml(t.key)}</span>` +
+        (t.status === "error" ? `<span class="transfer-error" title="${escapeHtml(t.error || "")}">${escapeHtml(t.error || "Error")}</span>` : "") +
         `</div>`
       );
     })
@@ -161,14 +161,6 @@ function updateBadge(): void {
     badge.textContent = active > 0 ? String(active) : "";
     badge.style.display = active > 0 ? "" : "none";
   }
-}
-
-function escapeForDisplay(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 
 function guessContentType(name: string): string {

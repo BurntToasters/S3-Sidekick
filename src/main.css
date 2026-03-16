@@ -275,6 +275,14 @@ html, body {
   align-items: center;
   gap: 6px;
   max-width: 500px;
+  overflow: hidden;
+}
+
+.object-name__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .object-size {
@@ -470,6 +478,21 @@ input[type="checkbox"]:checked::after {
   border: solid var(--accent-text);
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
+}
+
+input[type="checkbox"]:indeterminate {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+input[type="checkbox"]:indeterminate::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 6px;
+  width: 8px;
+  height: 2px;
+  background: var(--accent-text);
 }
 
 .toggle-row {

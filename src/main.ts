@@ -43,7 +43,7 @@ import {
   enqueuePaths,
   setTransferCompleteHandler,
 } from "./transfers.ts";
-import { basename } from "./utils.ts";
+import { basename, formatSize } from "./utils.ts";
 
 function setStatus(text: string): void {
   dom.statusEl.textContent = text;
@@ -121,8 +121,13 @@ async function handleBookmarkSave(): Promise<void> {
     return;
   }
 
-  const url = new URL(endpoint);
-  const name = url.hostname.split(".")[0] || endpoint;
+  let name = endpoint;
+  try {
+    const url = new URL(endpoint);
+    name = url.hostname.split(".")[0] || endpoint;
+  } catch {
+    name = endpoint.replace(/^https?:\/\//, "").split(/[:/]/)[0] || endpoint;
+  }
 
   await addBookmark({
     name,
@@ -182,7 +187,7 @@ async function handleDownload(): Promise<void> {
         key,
         destination,
       });
-      setStatus(`Downloaded ${fileName} (${formatBytes(size)}).`);
+      setStatus(`Downloaded ${fileName} (${formatSize(size)}).`);
     } catch (err) {
       setStatus(`Download failed: ${err}`);
     }
@@ -516,13 +521,13 @@ function wireEvents(): void {
       if (confirm?.classList.contains("active")) return;
 
       const infoOverlay = document.getElementById("info-overlay");
-      if (infoOverlay && !infoOverlay.hidden) {
+      if (infoOverlay?.classList.contains("active")) {
         closeInfoPanel();
         return;
       }
 
       const licensesOverlay = document.getElementById("licenses-overlay");
-      if (licensesOverlay && !licensesOverlay.hidden) {
+      if (licensesOverlay?.classList.contains("active")) {
         closeLicensesModal();
         return;
       }
@@ -542,6 +547,7 @@ function wireEvents(): void {
     if (e.key === "Delete" && state.selectedKeys.size > 0) {
       const active = document.activeElement;
       if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
+      if (document.querySelector(".modal-overlay.active, .confirm-overlay.active")) return;
       handleDelete();
     }
 
@@ -555,14 +561,6 @@ function wireEvents(): void {
     setConnectionInputs(bookmark.endpoint, bookmark.region, bookmark.access_key, bookmark.secret_key);
     setStatus(`Loaded bookmark "${bookmark.name}".`);
   });
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / Math.pow(1024, i);
-  return `${i === 0 ? value : value.toFixed(1)} ${units[i]}`;
 }
 
 async function init(): Promise<void> {

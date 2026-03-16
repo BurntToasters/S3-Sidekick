@@ -147,7 +147,7 @@ export function renderObjectTable(): void {
     rows.push(
       `<tr class="object-row object-row--folder" data-prefix="${escapeHtml(prefix)}">
         <td class="col-check"><input type="checkbox" class="row-check" /></td>
-        <td class="object-name"><span class="icon-folder"></span>${escapeHtml(name)}</td>
+        <td class="object-name"><span class="icon-folder"></span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">&mdash;</td>
         <td class="object-modified">&mdash;</td>
       </tr>`
@@ -160,7 +160,7 @@ export function renderObjectTable(): void {
     rows.push(
       `<tr class="object-row object-row--file" data-key="${escapeHtml(obj.key)}">
         <td class="col-check"><input type="checkbox" class="row-check" /></td>
-        <td class="object-name"><span class="icon-file"></span>${escapeHtml(name)}</td>
+        <td class="object-name"><span class="icon-file"></span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">${formatSize(obj.size)}</td>
         <td class="object-modified">${formatDate(obj.last_modified)}</td>
       </tr>`
@@ -173,10 +173,10 @@ export function renderObjectTable(): void {
     tbody.innerHTML = rows.join("");
   }
 
-  state.selectedKeys.clear();
   dom.objectPanel.style.display = "";
   dom.emptyState.style.display = "none";
 
+  updateSelectionUI();
   updateObjectCount();
   updateLoadMore();
   updateSortIndicators();
