@@ -1,0 +1,186 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            label: win-x64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            bundles: nsis
+            label: win-arm64
+          - os: macos-latest
+            target: universal-apple-darwin
+            bundles: dmg,app
+            label: mac-universal
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
+            label: linux-x64
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
+            label: linux-arm64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install ARM64 cross-compilation toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu
+          echo "PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+
+      - run: npm ci
+      - run: npm run sync-version
+
+      - name: Build
+        run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Create macOS zip
+        if: runner.os == 'macOS'
+        run: node scripts/zip-macos.js
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.label }}
+          path: |
+            src-tauri/target/**/bundle/**/*.exe
+            src-tauri/target/**/bundle/**/*.exe.sig
+            src-tauri/target/**/bundle/**/*.msi
+            src-tauri/target/**/bundle/**/*.msi.sig
+            src-tauri/target/**/bundle/**/*.nsis.zip
+            src-tauri/target/**/bundle/**/*.nsis.zip.sig
+            src-tauri/target/**/bundle/**/*.dmg
+            src-tauri/target/**/bundle/**/*.dmg.sig
+            src-tauri/target/**/bundle/**/*.zip
+            src-tauri/target/**/bundle/**/*.zip.sig
+            src-tauri/target/**/bundle/**/*.app.tar.gz
+            src-tauri/target/**/bundle/**/*.app.tar.gz.sig
+            src-tauri/target/**/bundle/**/*.AppImage
+            src-tauri/target/**/bundle/**/*.AppImage.sig
+            src-tauri/target/**/bundle/**/*.AppImage.tar.gz
+            src-tauri/target/**/bundle/**/*.AppImage.tar.gz.sig
+            src-tauri/target/**/bundle/**/*.deb
+            src-tauri/target/**/bundle/**/*.deb.sig
+            src-tauri/target/**/bundle/**/*.rpm
+            src-tauri/target/**/bundle/**/*.rpm.sig
+            src-tauri/target/**/bundle/**/latest.json
+
+  sign-and-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Flatten artifacts into release/
+        run: |
+          mkdir -p release
+          find release-artifacts -type f \( \
+            -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' \
+            -o -name '*.rpm' -o -name '*.zip' \
+            -o -name '*.AppImage' -o -name '*.tar.gz' -o -name '*.sig' \
+            -o -name 'latest.json' \
+          \) -exec cp -n {} release/ \;
+          ls -lh release/
+
+      - name: Import GPG key
+        if: env.HAS_GPG_KEY == 'true'
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+
+      - name: Sign and upload
+        run: node scripts/gpg-sign.js
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
