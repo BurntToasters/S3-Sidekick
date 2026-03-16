@@ -3,14 +3,32 @@
 import fs from "fs";
 import path from "path";
 
+const FLATPAK_BUILD_DIR_PREFIX = "flatpak-build";
 const TAURI_TARGET_DIR = path.join("src-tauri", "target");
 
 const CLEAN_TARGETS = {
   clean: ["dist"],
   "clean-release": ["release"],
   "clean-release-artifacts": ["release", "dist"],
-  "clean-all": ["dist", "release"],
+  "clean-all": ["dist", "release", "flatpak-repo"],
 };
+
+function listFlatpakBuildDirs(cwd) {
+  try {
+    return fs
+      .readdirSync(cwd, { withFileTypes: true })
+      .filter((entry) => {
+        if (!entry.isDirectory()) return false;
+        return (
+          entry.name === FLATPAK_BUILD_DIR_PREFIX ||
+          entry.name.startsWith(`${FLATPAK_BUILD_DIR_PREFIX}-`)
+        );
+      })
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
 
 function listTauriBundleDirs(cwd) {
   const targetRoot = path.join(cwd, TAURI_TARGET_DIR);
@@ -49,8 +67,16 @@ function getCleanTargets(mode, cwd) {
     throw new Error(`Unknown clean mode "${mode}"`);
   }
 
-  if (mode === "clean-release-artifacts" || mode === "clean-all") {
+  if (mode === "clean-release-artifacts") {
     return Array.from(new Set([...baseTargets, ...listTauriBundleDirs(cwd)]));
+  }
+
+  if (mode === "clean-all") {
+    return Array.from(new Set([
+      ...baseTargets,
+      ...listFlatpakBuildDirs(cwd),
+      ...listTauriBundleDirs(cwd),
+    ]));
   }
 
   return baseTargets;

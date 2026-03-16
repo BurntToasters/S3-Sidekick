@@ -1,0 +1,45 @@
+app-id: run.rosie.s3-sidekick
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node22
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: s3-sidekick
+separate-locales: false
+
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --share=network
+  - --device=dri
+  - --filesystem=host
+
+modules:
+  - name: s3-sidekick
+    buildsystem: simple
+    build-options:
+      build-args:
+        - --share=network
+      append-path: /usr/lib/sdk/node22/bin:/usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/s3-sidekick/cargo
+        RUSTUP_HOME: /run/build/s3-sidekick/rustup
+        npm_config_cache: /run/build/s3-sidekick/npm-cache
+        HUSKY: '0'
+    build-commands:
+      - npm ci
+      - npm run sync-version
+      - npm run licenses
+      - npm run build
+      - npx tauri build --no-bundle
+      - install -Dm755 src-tauri/target/release/s3-sidekick /app/bin/s3-sidekick
+      - install -Dm644 run.rosie.s3-sidekick.desktop /app/share/applications/run.rosie.s3-sidekick.desktop
+      - install -Dm644 run.rosie.s3-sidekick.metainfo.xml /app/share/metainfo/run.rosie.s3-sidekick.metainfo.xml
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/run.rosie.s3-sidekick.png
+      - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/run.rosie.s3-sidekick.png
+      - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/run.rosie.s3-sidekick.png
+    sources:
+      - type: dir
+        path: .

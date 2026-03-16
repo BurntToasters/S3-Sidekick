@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop">
+  <id>run.rosie.s3-sidekick</id>
+  <name>S3 Sidekick</name>
+  <summary>Desktop client for S3-compatible object storage</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MPL-2.0</project_license>
+  <description>
+    <p>S3 Sidekick is a cross-platform desktop client for S3-compatible object storage.</p>
+  </description>
+  <launchable type="desktop-id">run.rosie.s3-sidekick.desktop</launchable>
+  <categories>
+    <category>Network</category>
+    <category>Utility</category>
+  </categories>
+  <url type="homepage">https://github.com/BurntToasters/S3-Sidekick</url>
+  <url type="bugtracker">https://github.com/BurntToasters/S3-Sidekick/issues</url>
+  <content_rating type="oars-1.1" />
+  <releases>
+        <release version="0.1.0" date="2026-03-16"/>
+  </releases>
+</component>

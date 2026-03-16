@@ -30,16 +30,18 @@
     "build:linux:x64": "npm run sync-version && npm run licenses && dotenv -e .env -- tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb,rpm",
     "build:linux:arm64": "npm run sync-version && npm run licenses && dotenv -e .env -- tauri build --target aarch64-unknown-linux-gnu --bundles appimage,deb,rpm",
     "build:linux": "npm run build:linux:x64 && npm run build:linux:arm64",
-    "release:prepare": "npm run dist:clean-release-artifacts",
+    "flatpak:bundle": "flatpak-builder --repo=flatpak-repo --force-clean flatpak-build run.rosie.s3-sidekick.yml && flatpak build-bundle flatpak-repo dist/S3-Sidekick-Linux.flatpak run.rosie.s3-sidekick",
+    "flatpak:clean": "rm -rf flatpak-build flatpak-repo",
+    "release:prepare": "npm run dist:clean-release-artifacts && node scripts/update-metainfo.js",
     "release:finalize": "dotenv -e .env -- node scripts/post-release-assets.js",
     "release:win": "npm run release:prepare && npm run build:win && npm run release:sign:gpg && npm run release:finalize",
     "release:mac": "npm run release:prepare && npm run build:mac:universal && npm run build:mac:zip && npm run release:sign:gpg && npm run release:finalize",
     "release:mac:ssh": "npm run mac:ssh:keychain && npm run release:mac",
-    "release:linux": "npm run release:prepare && npm run build:linux && npm run release:sign:gpg && npm run release:finalize",
-    "release:linux:x64": "npm run release:prepare && npm run build:linux:x64 && npm run release:sign:gpg && npm run release:finalize",
-    "release:linux:arm64": "npm run release:prepare && npm run build:linux:arm64 && npm run release:sign:gpg && npm run release:finalize",
+    "release:linux": "npm run release:prepare && npm run build:linux && npm run flatpak:clean && npm run flatpak:bundle && npm run release:sign:gpg && npm run release:finalize",
+    "release:linux:x64": "npm run release:prepare && npm run build:linux:x64 && npm run flatpak:clean && npm run flatpak:bundle && npm run release:sign:gpg && npm run release:finalize",
+    "release:linux:arm64": "npm run release:prepare && npm run build:linux:arm64 && npm run flatpak:clean && npm run flatpak:bundle && npm run release:sign:gpg && npm run release:finalize",
     "release:sign:gpg": "dotenv -e .env -- node scripts/gpg-sign.js",
-    "setup:deb": "sudo apt update && sudo apt install -y build-essential curl wget file libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libglib2.0-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf"
+    "setup:deb": "sudo apt update && sudo apt install -y build-essential curl wget file libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libglib2.0-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf flatpak flatpak-builder && sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo && sudo flatpak install -y flathub org.gnome.Platform//48 org.gnome.Sdk//48 org.freedesktop.Sdk.Extension.node22//24.08 org.freedesktop.Sdk.Extension.rust-stable//24.08"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
