@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>S3 Sidekick</title>
+  <link rel="stylesheet" href="main.css" />
+</head>
+<body>
+  <div id="app" class="app">
+
+    <header class="header">
+      <div class="header__brand">S3 Sidekick</div>
+      <div class="header__actions">
+        <span id="connection-status" class="connection-badge connection-badge--off">Disconnected</span>
+        <button id="settings-btn" class="btn btn--icon" title="Settings">&#9881;</button>
+      </div>
+    </header>
+
+    <div class="connection-bar">
+      <input id="conn-endpoint" class="field" type="text" placeholder="Endpoint (e.g. https://nyc3.digitaloceanspaces.com)" />
+      <input id="conn-region" class="field field--sm" type="text" placeholder="Region (e.g. nyc3)" />
+      <input id="conn-access-key" class="field" type="text" placeholder="Access Key" />
+      <input id="conn-secret-key" class="field" type="password" placeholder="Secret Key" />
+      <button id="bookmark-save-btn" class="btn btn--icon" title="Bookmark this connection">&#9734;</button>
+      <button id="connect-btn" class="btn btn--primary">Connect</button>
+      <button id="disconnect-btn" class="btn btn--ghost" style="display:none">Disconnect</button>
+    </div>
+
+    <div class="main-layout">
+
+      <aside id="bucket-panel" class="sidebar">
+        <div class="sidebar__header">Buckets</div>
+        <ul id="bucket-list" class="list"></ul>
+      </aside>
+
+      <section class="content">
+        <div class="content-toolbar">
+          <nav id="breadcrumb" class="breadcrumb"></nav>
+          <div class="content-toolbar__actions">
+            <button id="btn-refresh" class="btn btn--icon" title="Refresh">&#8635;</button>
+            <button id="btn-new-folder" class="btn btn--icon" title="New Folder">&#128193;</button>
+            <button id="btn-upload" class="btn btn--icon" title="Upload Files">&#8593;</button>
+          </div>
+        </div>
+
+        <div id="empty-state" class="empty-state">
+          <p>Connect to an S3-compatible endpoint to browse objects.</p>
+        </div>
+
+        <div id="object-panel" class="object-panel" style="display:none">
+          <table class="object-table">
+            <thead>
+              <tr>
+                <th class="col-check"><input id="select-all" type="checkbox" title="Select all" /></th>
+                <th class="col-sortable" data-sort="name">Name <span class="sort-indicator" id="sort-name">&#9650;</span></th>
+                <th class="col-sortable" data-sort="size">Size <span class="sort-indicator" id="sort-size"></span></th>
+                <th class="col-sortable" data-sort="modified">Last Modified <span class="sort-indicator" id="sort-modified"></span></th>
+              </tr>
+            </thead>
+            <tbody id="object-tbody"></tbody>
+          </table>
+          <div id="load-more-row" class="load-more-row" style="display:none">
+            <button id="btn-load-more" class="btn btn--ghost">Load more...</button>
+            <span id="object-count" class="object-count"></span>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <footer class="statusbar">
+      <span id="status"></span>
+      <div class="statusbar__right">
+        <span id="statusbar-count" class="statusbar__count"></span>
+        <button id="transfer-toggle" class="btn btn--icon statusbar__transfer" title="Transfers">&#8645;<span id="transfer-badge" class="transfer-badge" style="display:none"></span></button>
+        <span id="version-label"></span>
+      </div>
+    </footer>
+
+  </div>
+
+  <div id="settings-overlay" class="modal-overlay">
+    <div class="modal">
+      <div class="modal__header">
+        <h2>Settings</h2>
+        <button id="settings-close" class="btn btn--icon">&#10005;</button>
+      </div>
+      <div class="modal__body">
+        <div class="setting-section">General</div>
+        <div class="setting-item">
+          <label for="setting-theme">Theme</label>
+          <select id="setting-theme" class="field">
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+        <div id="updater-section">
+          <div class="setting-item">
+            <label class="toggle-row">
+              <input id="setting-updates" type="checkbox" />
+              <span>Check for updates automatically</span>
+            </label>
+          </div>
+          <div class="setting-item">
+            <label>Check for updates now</label>
+            <button id="settings-check-updates" class="btn">Check now</button>
+          </div>
+        </div>
+        <div id="updater-unsupported" style="display:none">
+          <div class="setting-item">
+            <span class="text-secondary" style="font-size:12px">Auto-updates are not available for this package format. Update through your package manager.</span>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <label>Open-source licenses</label>
+          <button id="show-licenses" class="btn">View</button>
+        </div>
+
+        <div class="setting-section">Bookmarks</div>
+        <ul id="bookmark-list" class="bookmark-list"></ul>
+
+        <div class="setting-section">Danger Zone</div>
+        <div class="setting-item">
+          <label>Reset all settings to defaults</label>
+          <button id="settings-reset" class="btn btn--danger">Reset</button>
+        </div>
+      </div>
+      <div class="modal__footer">
+        <button id="settings-cancel" class="btn btn--ghost">Cancel</button>
+        <button id="settings-save" class="btn btn--primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirm-overlay" class="confirm-overlay">
+    <div class="confirm-box">
+      <div id="confirm-title" class="confirm-box__title"></div>
+      <div id="confirm-message" class="confirm-box__message"></div>
+      <div class="confirm-box__actions">
+        <button id="confirm-cancel" class="btn btn--ghost">Cancel</button>
+        <button id="confirm-ok" class="btn btn--danger">Reset &amp; Restart</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="licenses-overlay" class="modal-overlay" hidden>
+    <div class="modal modal--wide">
+      <div class="modal__header">
+        <h2>Open-Source Licenses</h2>
+        <button id="close-licenses" class="btn btn--icon">&#10005;</button>
+      </div>
+      <div class="modal__body">
+        <div id="licenses-list" class="licenses-list">Loading&#8230;</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="info-overlay" class="modal-overlay" hidden>
+    <div class="modal modal--wide">
+      <div class="modal__header">
+        <h2 id="info-title">File Info</h2>
+        <button id="info-close" class="btn btn--icon">&#10005;</button>
+      </div>
+      <div class="info-tabs">
+        <button class="info-tab info-tab--active" data-tab="general">General</button>
+        <button class="info-tab" data-tab="permissions">Permissions</button>
+        <button class="info-tab" data-tab="metadata">Metadata</button>
+        <button class="info-tab" data-tab="s3">S3</button>
+      </div>
+      <div id="info-body" class="modal__body">
+        <div class="metadata-loading">Loading&#8230;</div>
+      </div>
+      <div class="modal__footer">
+        <button id="info-cancel" class="btn btn--ghost">Cancel</button>
+        <button id="info-save" class="btn btn--primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="transfer-overlay" class="transfer-popup" hidden>
+    <div class="transfer-popup__header">
+      <span>Transfers</span>
+      <div class="transfer-popup__actions">
+        <button id="transfer-clear" class="btn btn--ghost btn--sm">Clear done</button>
+        <button id="transfer-close" class="btn btn--icon">&#10005;</button>
+      </div>
+    </div>
+    <div id="transfer-list" class="transfer-list">
+      <div class="transfer-empty">No transfers</div>
+    </div>
+  </div>
+
+  <script type="module" src="main.ts"></script>
+</body>
+</html>
