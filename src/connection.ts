@@ -98,6 +98,7 @@ export async function refreshObjects(
   state.prefixes = response.prefixes;
   state.continuationToken = response.next_continuation_token;
   state.hasMore = response.truncated;
+  state.selectedKeys.clear();
 }
 
 export async function loadMoreObjects(): Promise<void> {

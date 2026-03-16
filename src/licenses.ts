@@ -8,12 +8,12 @@ export interface LicenseEntry {
 }
 
 export function openLicensesModal() {
-  $("licenses-overlay").hidden = false;
+  $("licenses-overlay").classList.add("active");
   renderLicenses();
 }
 
 export function closeLicensesModal() {
-  $("licenses-overlay").hidden = true;
+  $("licenses-overlay").classList.remove("active");
 }
 
 async function renderLicenses() {

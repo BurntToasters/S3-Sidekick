@@ -585,10 +585,10 @@ fn get_platform_info() -> String {
 fn updater_supported() -> bool {
     #[cfg(target_os = "linux")]
     {
-        if std::env::var("APPIMAGE").is_ok() {
+        if std::env::var("FLATPAK_ID").is_ok() || std::path::Path::new("/.flatpak-info").exists() {
             return false;
         }
-        if std::env::var("FLATPAK_ID").is_ok() || std::path::Path::new("/.flatpak-info").exists() {
+        if std::env::var("APPIMAGE").is_err() {
             return false;
         }
     }

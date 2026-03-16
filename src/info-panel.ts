@@ -39,7 +39,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   if (keys.length > 1) {
     currentKey = "";
     title.textContent = `${keys.length} items selected`;
-    overlay.hidden = false;
+    overlay.classList.add("active");
     saveBtn.style.display = "none";
     setTabsVisible(false);
     const body = $("info-body");
@@ -54,7 +54,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
 
   currentKey = keys[0];
   title.textContent = basename(currentKey);
-  overlay.hidden = false;
+  overlay.classList.add("active");
   saveBtn.style.display = "";
   saveBtn.disabled = true;
   setTabsVisible(true);
@@ -84,7 +84,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     saveBtn.disabled = false;
     renderTab();
   } catch (err) {
-    body.innerHTML = `<div class="metadata-loading">Failed to load: ${err}</div>`;
+    body.innerHTML = `<div class="metadata-loading">Failed to load: ${escapeHtml(String(err))}</div>`;
   }
 }
 
@@ -166,7 +166,7 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
         key: currentKey,
       });
     } catch (err) {
-      body.innerHTML = `<div class="metadata-loading">Failed to load permissions: ${err}</div>`;
+      body.innerHTML = `<div class="metadata-loading">Failed to load permissions: ${escapeHtml(String(err))}</div>`;
       return;
     }
   }
@@ -302,7 +302,7 @@ export async function saveInfoPanel(): Promise<void> {
 }
 
 export function closeInfoPanel(): void {
-  $("info-overlay").hidden = true;
+  $("info-overlay").classList.remove("active");
   headData = null;
   aclData = null;
   metadataRows = [];
