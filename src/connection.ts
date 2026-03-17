@@ -110,7 +110,12 @@ export async function loadMoreObjects(): Promise<void> {
     continuationToken: state.continuationToken,
   });
   state.objects = state.objects.concat(response.objects);
-  state.prefixes = state.prefixes.concat(response.prefixes);
+  const existingPrefixes = new Set(state.prefixes);
+  for (const p of response.prefixes) {
+    if (!existingPrefixes.has(p)) {
+      state.prefixes.push(p);
+    }
+  }
   state.continuationToken = response.next_continuation_token;
   state.hasMore = response.truncated;
 }

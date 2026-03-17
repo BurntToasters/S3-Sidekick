@@ -1521,6 +1521,13 @@ async fn create_folder(
         s3.client.clone().ok_or("Not connected")?
     };
 
+    if key.as_bytes().iter().any(|&b| b == 0) {
+        return Err("Object key contains invalid characters".to_string());
+    }
+    if key.len() > 1024 {
+        return Err("Object key is too long (max 1024 characters)".to_string());
+    }
+
     let folder_key = if key.ends_with('/') {
         key
     } else {
@@ -1960,8 +1967,8 @@ fn updater_support_info() -> UpdaterSupportInfo {
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("Only http(s) URLs are allowed".to_string());
+    if !url.starts_with("https://") {
+        return Err("Only https:// URLs are allowed".to_string());
     }
 
     let status = if cfg!(target_os = "windows") {
@@ -1989,7 +1996,10 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
-            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+            let dominated_by_nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
+            if !dominated_by_nvidia {
+                std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+            }
         }
     }
 

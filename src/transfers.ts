@@ -262,12 +262,17 @@ async function processQueue(): Promise<void> {
     workers.push(runWorker());
   }
 
+  function claimNextItem(): TransferItem | null {
+    const item = queue.find((t) => t.status === "queued");
+    if (item) item.status = "uploading";
+    return item ?? null;
+  }
+
   async function runWorker() {
     while (true) {
-      const item = queue.find((t) => t.status === "queued");
+      const item = claimNextItem();
       if (!item) break;
 
-      item.status = "uploading";
       renderQueue();
 
       try {

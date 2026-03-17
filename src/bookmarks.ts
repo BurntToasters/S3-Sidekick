@@ -140,14 +140,15 @@ async function persistBookmarks(): Promise<void> {
   await persistPromise;
 }
 
-export async function addBookmark(bookmark: Bookmark): Promise<void> {
+export async function addBookmark(bookmark: Bookmark): Promise<boolean> {
   const exists = bookmarks.some(
     (b) =>
       b.endpoint === bookmark.endpoint && b.access_key === bookmark.access_key,
   );
-  if (exists) return;
+  if (exists) return false;
   bookmarks.push(bookmark);
   await persistBookmarks();
+  return true;
 }
 
 export async function removeBookmark(index: number): Promise<void> {
