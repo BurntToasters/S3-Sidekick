@@ -1,4 +1,4 @@
-import { escapeHtml } from "./utils.ts";
+import { escapeHtml, twemojiIcon } from "./utils.ts";
 
 export type ActivityType = "info" | "success" | "error" | "warning";
 
@@ -101,12 +101,18 @@ function syncCollapseState(): void {
   if (!collapseButton) return;
 
   if (collapsed) {
-    collapseButton.innerHTML = "&#9656;";
+    collapseButton.innerHTML = twemojiIcon("27a1", {
+      className: "twemoji-icon",
+      decorative: true,
+    });
     collapseButton.title = "Expand activity";
     collapseButton.setAttribute("aria-label", "Expand activity");
     collapseButton.setAttribute("aria-expanded", "false");
   } else {
-    collapseButton.innerHTML = "&#9660;";
+    collapseButton.innerHTML = twemojiIcon("2b07", {
+      className: "twemoji-icon",
+      decorative: true,
+    });
     collapseButton.title = "Collapse activity";
     collapseButton.setAttribute("aria-label", "Collapse activity");
     collapseButton.setAttribute("aria-expanded", "true");
@@ -123,12 +129,24 @@ function formatTime(d: Date): string {
 function typeIcon(type: ActivityType): string {
   switch (type) {
     case "success":
-      return "&#10003;";
+      return twemojiIcon("2705", {
+        className: "twemoji-icon twemoji-icon--activity-status",
+        decorative: true,
+      });
     case "error":
-      return "&#10007;";
+      return twemojiIcon("274c", {
+        className: "twemoji-icon twemoji-icon--activity-status",
+        decorative: true,
+      });
     case "warning":
-      return "&#9888;";
+      return twemojiIcon("26a0", {
+        className: "twemoji-icon twemoji-icon--activity-status",
+        decorative: true,
+      });
     default:
-      return "&#8226;";
+      return twemojiIcon("2139", {
+        className: "twemoji-icon twemoji-icon--activity-status",
+        decorative: true,
+      });
   }
 }

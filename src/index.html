@@ -22,7 +22,13 @@
             title="Settings"
             aria-label="Settings"
           >
-            &#9881;
+            <img
+              class="twemoji-icon"
+              src="/twemoji/2699.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
           </button>
         </div>
       </header>
@@ -62,7 +68,13 @@
           title="Bookmark this connection"
           aria-label="Bookmark this connection"
         >
-          &#9734;
+          <img
+            class="twemoji-icon"
+            src="/twemoji/2b50.svg"
+            alt=""
+            aria-hidden="true"
+            draggable="false"
+          />
         </button>
         <button id="connect-btn" class="btn btn--primary">Connect</button>
         <button
@@ -103,7 +115,13 @@
                 title="Toggle buckets"
                 aria-label="Toggle buckets"
               >
-                &#9776;
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/1f5c2.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
               </button>
               <nav id="breadcrumb" class="breadcrumb"></nav>
             </div>
@@ -121,7 +139,14 @@
                 title="Refresh (F5)"
                 aria-label="Refresh"
               >
-                &#8635;<span class="shortcut-chip">F5</span>
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/1f504.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+                <span class="shortcut-chip">F5</span>
               </button>
               <button
                 id="btn-new-folder"
@@ -129,7 +154,14 @@
                 title="New Folder (Ctrl+N)"
                 aria-label="New folder"
               >
-                &#128193;<span class="shortcut-chip">⌃N</span>
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/1f4c1.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+                <span class="shortcut-chip">⌃N</span>
               </button>
               <button
                 id="btn-upload"
@@ -137,7 +169,14 @@
                 title="Upload Files (Ctrl+U)"
                 aria-label="Upload files"
               >
-                &#8593;<span class="shortcut-chip">⌃U</span>
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/2b06.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+                <span class="shortcut-chip">⌃U</span>
               </button>
               <button
                 id="btn-upload-folder"
@@ -145,7 +184,14 @@
                 title="Upload Folder (Ctrl+Shift+U)"
                 aria-label="Upload folder"
               >
-                &#128193;&#8593;<span class="shortcut-chip">⌃⇧U</span>
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/1f4e4.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+                <span class="shortcut-chip">⌃⇧U</span>
               </button>
             </div>
           </div>
@@ -177,7 +223,14 @@
                       aria-label="Sort by name"
                     >
                       Name
-                      <span class="sort-indicator" id="sort-name">&#9650;</span>
+                      <span class="sort-indicator" id="sort-name"
+                        ><img
+                          class="twemoji-icon twemoji-icon--sort"
+                          src="/twemoji/2b06.svg"
+                          alt=""
+                          aria-hidden="true"
+                          draggable="false"
+                      /></span>
                     </button>
                   </th>
                   <th class="col-sortable" data-sort="size" aria-sort="none">
@@ -227,7 +280,13 @@
             title="Activity log"
             aria-label="Activity log"
           >
-            &#9776;<span
+            <img
+              class="twemoji-icon"
+              src="/twemoji/1f4cb.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            /><span
               id="activity-badge"
               class="transfer-badge activity-badge"
               style="display: none"
@@ -240,7 +299,13 @@
             aria-label="Transfers"
             hidden
           >
-            &#8645;<span
+            <img
+              class="twemoji-icon"
+              src="/twemoji/1f4e5.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            /><span
               id="transfer-badge"
               class="transfer-badge"
               style="display: none"
@@ -262,7 +327,13 @@
         <div class="modal__header">
           <h2 id="settings-heading">Settings</h2>
           <button id="settings-close" class="btn btn--icon" aria-label="Close">
-            &#10005;
+            <img
+              class="twemoji-icon"
+              src="/twemoji/274c.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
           </button>
         </div>
         <div class="settings-tabs" role="tablist">
@@ -489,10 +560,32 @@
         <div class="modal__header">
           <h2 id="licenses-heading">Open-Source Licenses</h2>
           <button id="close-licenses" class="btn btn--icon" aria-label="Close">
-            &#10005;
+            <img
+              class="twemoji-icon"
+              src="/twemoji/274c.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
           </button>
         </div>
         <div class="modal__body">
+          <div class="licenses-attribution text-secondary">
+            Emoji graphics by
+            <a
+              href="https://github.com/jdecked/twemoji"
+              target="_blank"
+              rel="noopener"
+              >Twemoji</a
+            >
+            are licensed under
+            <a
+              href="https://creativecommons.org/licenses/by/4.0/"
+              target="_blank"
+              rel="noopener"
+              >CC-BY 4.0</a
+            >.
+          </div>
           <div id="licenses-list" class="licenses-list">
             <div class="metadata-loading">
               <span class="spinner"></span>Loading&#8230;
@@ -513,7 +606,13 @@
         <div class="modal__header">
           <h2 id="info-title">File Info</h2>
           <button id="info-close" class="btn btn--icon" aria-label="Close">
-            &#10005;
+            <img
+              class="twemoji-icon"
+              src="/twemoji/274c.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
           </button>
         </div>
         <div class="info-tabs" role="tablist">
@@ -585,7 +684,13 @@
             aria-label="Collapse transfers"
             aria-expanded="true"
           >
-            &#9660;
+            <img
+              class="twemoji-icon"
+              src="/twemoji/2b07.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
           </button>
           <button id="transfer-clear" class="btn btn--ghost btn--sm">
             Clear done
@@ -595,7 +700,13 @@
             class="btn btn--icon"
             aria-label="Close transfers"
           >
-            &#10005;
+            <img
+              class="twemoji-icon"
+              src="/twemoji/274c.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
           </button>
         </div>
       </div>
@@ -615,7 +726,13 @@
             aria-label="Collapse activity"
             aria-expanded="true"
           >
-            &#9660;
+            <img
+              class="twemoji-icon"
+              src="/twemoji/2b07.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
           </button>
           <button id="activity-clear" class="btn btn--ghost btn--sm">
             Clear
@@ -625,7 +742,13 @@
             class="btn btn--icon"
             aria-label="Close activity log"
           >
-            &#10005;
+            <img
+              class="twemoji-icon"
+              src="/twemoji/274c.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
           </button>
         </div>
       </div>
@@ -645,7 +768,13 @@
         <div class="modal__header">
           <h2 id="preview-title">Preview</h2>
           <button id="preview-close" class="btn btn--icon" aria-label="Close">
-            &#10005;
+            <img
+              class="twemoji-icon"
+              src="/twemoji/274c.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
           </button>
         </div>
         <div id="preview-body" class="modal__body preview-body"></div>

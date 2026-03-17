@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { $, escapeHtml, formatSize, formatDate, basename } from "./utils.ts";
+import {
+  $,
+  escapeHtml,
+  formatSize,
+  formatDate,
+  basename,
+  twemojiIcon,
+} from "./utils.ts";
 import { state } from "./state.ts";
 
 interface HeadObjectResponse {
@@ -245,7 +252,7 @@ function renderEntryRows(): void {
     if (i > 0) {
       const delBtn = document.createElement("button");
       delBtn.className = "btn btn--icon metadata-entry__delete";
-      delBtn.innerHTML = "&#10005;";
+      delBtn.innerHTML = twemojiIcon("274c", { decorative: true });
       delBtn.title = "Remove";
       delBtn.addEventListener("click", () => {
         metadataRows.splice(i, 1);

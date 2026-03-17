@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { $, escapeHtml } from "./utils.ts";
+import { $, escapeHtml, twemojiIcon } from "./utils.ts";
 import { state } from "./state.ts";
 import { logActivity } from "./activity-log.ts";
 
@@ -368,16 +368,28 @@ function renderQueue(): void {
       let statusIcon = "";
       let statusClass = "";
       if (t.status === "queued") {
-        statusIcon = "&#9711;";
+        statusIcon = twemojiIcon("23f3", {
+          className: "twemoji-icon twemoji-icon--transfer-status",
+          decorative: true,
+        });
         statusClass = "transfer-status--queued";
       } else if (t.status === "uploading") {
-        statusIcon = "&#8635;";
+        statusIcon = twemojiIcon("1f504", {
+          className: "twemoji-icon twemoji-icon--transfer-status",
+          decorative: true,
+        });
         statusClass = "transfer-status--active";
       } else if (t.status === "done") {
-        statusIcon = "&#10003;";
+        statusIcon = twemojiIcon("2705", {
+          className: "twemoji-icon twemoji-icon--transfer-status",
+          decorative: true,
+        });
         statusClass = "transfer-status--done";
       } else {
-        statusIcon = "&#10007;";
+        statusIcon = twemojiIcon("274c", {
+          className: "twemoji-icon twemoji-icon--transfer-status",
+          decorative: true,
+        });
         statusClass = "transfer-status--error";
       }
 
@@ -393,7 +405,16 @@ function renderQueue(): void {
             `</div>`
           : "";
       const target = t.operation === "download" ? (t.destination ?? "") : t.key;
-      const arrow = t.operation === "download" ? "&larr;" : "&rarr;";
+      const arrow =
+        t.operation === "download"
+          ? twemojiIcon("2b05", {
+              className: "twemoji-icon twemoji-icon--transfer-arrow",
+              decorative: true,
+            })
+          : twemojiIcon("27a1", {
+              className: "twemoji-icon twemoji-icon--transfer-arrow",
+              decorative: true,
+            });
 
       return (
         `<div class="transfer-item" data-id="${t.id}">` +
@@ -472,12 +493,18 @@ function syncCollapseState(): void {
   if (!collapseButton) return;
 
   if (collapsed) {
-    collapseButton.innerHTML = "&#9656;";
+    collapseButton.innerHTML = twemojiIcon("27a1", {
+      className: "twemoji-icon",
+      decorative: true,
+    });
     collapseButton.title = "Expand transfers";
     collapseButton.setAttribute("aria-label", "Expand transfers");
     collapseButton.setAttribute("aria-expanded", "false");
   } else {
-    collapseButton.innerHTML = "&#9660;";
+    collapseButton.innerHTML = twemojiIcon("2b07", {
+      className: "twemoji-icon",
+      decorative: true,
+    });
     collapseButton.title = "Collapse transfers";
     collapseButton.setAttribute("aria-label", "Collapse transfers");
     collapseButton.setAttribute("aria-expanded", "true");

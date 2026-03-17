@@ -274,6 +274,20 @@ body.platform-linux {
   line-height: 1.2;
 }
 
+.twemoji-icon {
+  width: 1em;
+  height: 1em;
+  display: inline-block;
+  vertical-align: -0.14em;
+  flex-shrink: 0;
+}
+
+.btn--icon .twemoji-icon {
+  width: 18px;
+  height: 18px;
+  vertical-align: middle;
+}
+
 .breadcrumb {
   padding: 8px 16px;
   font-size: 13px;
@@ -400,14 +414,16 @@ body.platform-linux {
   color: var(--text-secondary);
 }
 
-.icon-folder::before {
-  content: "📁";
-  font-size: 14px;
+.icon-folder,
+.icon-file {
+  display: inline-flex;
+  align-items: center;
 }
 
-.icon-file::before {
-  content: "📄";
-  font-size: 14px;
+.twemoji-icon--inline {
+  width: 14px;
+  height: 14px;
+  vertical-align: middle;
 }
 
 .list {
@@ -803,6 +819,9 @@ input[type="checkbox"]:indeterminate::after {
   line-height: 1;
   border-radius: 3px;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .bookmark__delete:hover {
@@ -982,6 +1001,14 @@ input[type="checkbox"]:indeterminate::after {
   font-size: 9px;
   margin-left: 2px;
   color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+}
+
+.twemoji-icon--sort {
+  width: 10px;
+  height: 10px;
+  vertical-align: middle;
 }
 
 .load-more-row {
@@ -1354,6 +1381,14 @@ input[type="checkbox"]:indeterminate::after {
   font-size: 12px;
   width: 16px;
   text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.twemoji-icon--transfer-status {
+  width: 13px;
+  height: 13px;
 }
 
 .transfer-status--queued {
@@ -1395,6 +1430,12 @@ input[type="checkbox"]:indeterminate::after {
 .transfer-arrow {
   color: var(--text-secondary);
   flex-shrink: 0;
+}
+
+.twemoji-icon--transfer-arrow {
+  width: 12px;
+  height: 12px;
+  vertical-align: middle;
 }
 
 .transfer-key {
@@ -1566,6 +1607,14 @@ input[type="checkbox"]:indeterminate::after {
 .activity-icon {
   width: 14px;
   text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.twemoji-icon--activity-status {
+  width: 13px;
+  height: 13px;
 }
 
 .activity-icon--info {
@@ -1588,6 +1637,12 @@ input[type="checkbox"]:indeterminate::after {
   min-width: 0;
   line-height: 1.4;
   word-break: break-word;
+}
+
+.licenses-attribution {
+  margin-bottom: 10px;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .activity-empty {
