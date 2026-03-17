@@ -40,7 +40,9 @@ function els() {
     box: document.querySelector(".dialog-box") as HTMLElement,
     title: document.getElementById("dialog-title")!,
     message: document.getElementById("dialog-message")!,
-    inputWrapper: document.querySelector(".dialog-input-wrapper") as HTMLElement,
+    inputWrapper: document.querySelector(
+      ".dialog-input-wrapper",
+    ) as HTMLElement,
     inputIcon: document.getElementById("dialog-input-icon") as HTMLElement,
     input: document.getElementById("dialog-input") as HTMLInputElement,
     cancel: document.getElementById("dialog-cancel") as HTMLButtonElement,
@@ -49,16 +51,19 @@ function els() {
 }
 
 function shakeDialogBox(box: HTMLElement) {
-  box.animate([
-    { transform: "translateX(0)" },
-    { transform: "translateX(-8px)" },
-    { transform: "translateX(7px)" },
-    { transform: "translateX(-6px)" },
-    { transform: "translateX(5px)" },
-    { transform: "translateX(-3px)" },
-    { transform: "translateX(2px)" },
-    { transform: "translateX(0)" },
-  ], { duration: 400, easing: "ease" });
+  box.animate(
+    [
+      { transform: "translateX(0)" },
+      { transform: "translateX(-8px)" },
+      { transform: "translateX(7px)" },
+      { transform: "translateX(-6px)" },
+      { transform: "translateX(5px)" },
+      { transform: "translateX(-3px)" },
+      { transform: "translateX(2px)" },
+      { transform: "translateX(0)" },
+    ],
+    { duration: 400, easing: "ease" },
+  );
 }
 
 function present(config: DialogConfig): Promise<string | boolean | null> {
