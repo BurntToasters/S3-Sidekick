@@ -47,7 +47,7 @@
     "release:linux:x64": "npm run release:prepare && npm run build:linux:x64 && npm run flatpak:clean && npm run flatpak:bundle && npm run release:sign:gpg && npm run release:finalize",
     "release:linux:arm64": "npm run release:prepare && npm run build:linux:arm64 && npm run flatpak:clean && npm run flatpak:bundle && npm run release:sign:gpg && npm run release:finalize",
     "release:sign:gpg": "dotenv -e .env -- node scripts/gpg-sign.js",
-    "setup:deb": "sudo apt update && sudo apt install -y build-essential curl wget file libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libglib2.0-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf flatpak flatpak-builder && sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo && sudo flatpak install -y flathub org.gnome.Platform//48 org.gnome.Sdk//48 org.freedesktop.Sdk.Extension.node22//24.08 org.freedesktop.Sdk.Extension.rust-stable//24.08"
+    "setup:deb": "sudo apt update && sudo apt install -y build-essential curl wget file libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libglib2.0-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf flatpak flatpak-builder && sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo && sudo flatpak install -y flathub org.gnome.Platform//48 org.gnome.Sdk//48 org.freedesktop.Sdk.Extension.node22//24.08 org.freedesktop.Sdk.Extension.rust-stable//24.08 && rustup toolchain install 1.91.1 --profile minimal && rustup default 1.91.1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
