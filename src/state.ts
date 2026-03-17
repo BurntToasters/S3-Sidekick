@@ -35,16 +35,40 @@ export const state = {
 };
 
 export const dom = {
-  get app() { return $("app"); },
-  get bucketList() { return $("bucket-list"); },
-  get objectTbody() { return $("object-tbody"); },
-  get breadcrumb() { return $("breadcrumb"); },
-  get statusEl() { return $("status"); },
-  get versionLabel() { return $("version-label"); },
-  get connectBtn() { return $<HTMLButtonElement>("connect-btn"); },
-  get disconnectBtn() { return $<HTMLButtonElement>("disconnect-btn"); },
-  get connectionStatus() { return $("connection-status"); },
-  get emptyState() { return $("empty-state"); },
-  get objectPanel() { return $("object-panel"); },
-  get bucketPanel() { return $("bucket-panel"); },
+  get app() {
+    return $("app");
+  },
+  get bucketList() {
+    return $("bucket-list");
+  },
+  get objectTbody() {
+    return $("object-tbody");
+  },
+  get breadcrumb() {
+    return $("breadcrumb");
+  },
+  get statusEl() {
+    return $("status");
+  },
+  get versionLabel() {
+    return $("version-label");
+  },
+  get connectBtn() {
+    return $<HTMLButtonElement>("connect-btn");
+  },
+  get disconnectBtn() {
+    return $<HTMLButtonElement>("disconnect-btn");
+  },
+  get connectionStatus() {
+    return $("connection-status");
+  },
+  get emptyState() {
+    return $("empty-state");
+  },
+  get objectPanel() {
+    return $("object-panel");
+  },
+  get bucketPanel() {
+    return $("bucket-panel");
+  },
 };

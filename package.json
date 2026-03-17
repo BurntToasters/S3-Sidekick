@@ -8,6 +8,12 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:all": "node scripts/test-all.js",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.{ts,css,html}\" \".github/workflows/*.{yml,yaml}\" \"scripts/test-all.js\" \"scripts/flatpak-bundle.js\" \"vitest.config.ts\"",
+    "format:check": "prettier --check \"src/**/*.{ts,css,html}\" \".github/workflows/*.{yml,yaml}\" \"scripts/test-all.js\" \"scripts/flatpak-bundle.js\" \"vitest.config.ts\"",
     "start": "npm run tauri:dev",
     "tauri": "tauri",
     "licenses": "npx npm-license-crawler --production --json public/licenses.json",
@@ -30,7 +36,7 @@
     "build:linux:x64": "npm run sync-version && npm run licenses && dotenv -e .env -- tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb,rpm",
     "build:linux:arm64": "npm run sync-version && npm run licenses && dotenv -e .env -- tauri build --target aarch64-unknown-linux-gnu --bundles appimage,deb,rpm",
     "build:linux": "npm run build:linux:x64 && npm run build:linux:arm64",
-    "flatpak:bundle": "flatpak-builder --repo=flatpak-repo --force-clean flatpak-build run.rosie.s3-sidekick.yml && flatpak build-bundle flatpak-repo dist/S3-Sidekick-Linux.flatpak run.rosie.s3-sidekick",
+    "flatpak:bundle": "node scripts/flatpak-bundle.js",
     "flatpak:clean": "rm -rf flatpak-build flatpak-repo",
     "release:prepare": "npm run dist:clean-release-artifacts && node scripts/update-metainfo.js",
     "release:finalize": "dotenv -e .env -- node scripts/post-release-assets.js",
@@ -54,8 +60,11 @@
     "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^25.2.1",
     "dotenv-cli": "^8.0.0",
+    "jsdom": "^29.0.0",
     "npm-license-crawler": "^0.2.1",
+    "prettier": "^3.8.1",
     "typescript": "^5.6.0",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vitest": "^4.1.0"
   }
 }

@@ -43,7 +43,9 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     saveBtn.style.display = "none";
     setTabsVisible(false);
     const body = $("info-body");
-    const listItems = keys.map((k) => `<li>${escapeHtml(basename(k))}</li>`).join("");
+    const listItems = keys
+      .map((k) => `<li>${escapeHtml(basename(k))}</li>`)
+      .join("");
     body.innerHTML =
       `<div class="metadata-batch-info">` +
       `<p>Selected ${keys.length} items:</p>` +
@@ -74,9 +76,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
       key: currentKey,
     });
 
-    metadataRows = [
-      { key: "Content-Type", value: headData.content_type },
-    ];
+    metadataRows = [{ key: "Content-Type", value: headData.content_type }];
     for (const [k, v] of Object.entries(headData.metadata)) {
       metadataRows.push({ key: k, value: v });
     }
@@ -131,10 +131,18 @@ function renderGeneral(body: HTMLElement): void {
     infoRow("Content Type", headData.content_type),
     infoRow("Last Modified", formatDate(headData.last_modified)),
     infoRow("ETag", headData.etag, true),
-    headData.cache_control ? infoRow("Cache-Control", headData.cache_control) : "",
-    headData.content_disposition ? infoRow("Content-Disposition", headData.content_disposition) : "",
-    headData.content_encoding ? infoRow("Content-Encoding", headData.content_encoding) : "",
-  ].filter(Boolean).join("");
+    headData.cache_control
+      ? infoRow("Cache-Control", headData.cache_control)
+      : "",
+    headData.content_disposition
+      ? infoRow("Content-Disposition", headData.content_disposition)
+      : "",
+    headData.content_encoding
+      ? infoRow("Content-Encoding", headData.content_encoding)
+      : "",
+  ]
+    .filter(Boolean)
+    .join("");
 
   buildUrlAsync(body);
 }
@@ -153,7 +161,9 @@ async function buildUrlAsync(body: HTMLElement): Promise<void> {
         `<span class="metadata-value-url" title="${escapeHtml(url)}">${escapeHtml(url)}</span>`;
       body.appendChild(urlRow);
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 async function renderPermissions(body: HTMLElement): Promise<void> {
@@ -254,7 +264,10 @@ function renderS3(body: HTMLElement): void {
   if (!headData) return;
   body.innerHTML = [
     infoRow("Storage Class", headData.storage_class || "STANDARD"),
-    infoRow("Server-Side Encryption", headData.server_side_encryption || "None"),
+    infoRow(
+      "Server-Side Encryption",
+      headData.server_side_encryption || "None",
+    ),
     infoRow("ETag", headData.etag, true),
   ].join("");
 }
@@ -272,7 +285,10 @@ function infoRow(label: string, value: string, mono = false): string {
 export async function saveInfoPanel(): Promise<void> {
   if (!currentKey) return;
 
-  const contentType = metadataRows.length > 0 ? metadataRows[0].value : "application/octet-stream";
+  const contentType =
+    metadataRows.length > 0
+      ? metadataRows[0].value
+      : "application/octet-stream";
   const customMeta: Record<string, string> = {};
   for (let i = 1; i < metadataRows.length; i++) {
     const k = metadataRows[i].key.trim();

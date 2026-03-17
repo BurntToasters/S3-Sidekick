@@ -40,8 +40,7 @@ function listTauriBundleDirs(cwd) {
       if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
         results.push(path.relative(cwd, fullPath));
       }
-    } catch {
-    }
+    } catch {}
   };
 
   addIfDir(path.join(targetRoot, "release", "bundle"));
@@ -55,8 +54,7 @@ function listTauriBundleDirs(cwd) {
       addIfDir(path.join(base, "debug", "bundle"));
       addIfDir(path.join(base, "bundle"));
     }
-  } catch {
-  }
+  } catch {}
 
   return Array.from(new Set(results));
 }
@@ -72,11 +70,13 @@ function getCleanTargets(mode, cwd) {
   }
 
   if (mode === "clean-all") {
-    return Array.from(new Set([
-      ...baseTargets,
-      ...listFlatpakBuildDirs(cwd),
-      ...listTauriBundleDirs(cwd),
-    ]));
+    return Array.from(
+      new Set([
+        ...baseTargets,
+        ...listFlatpakBuildDirs(cwd),
+        ...listTauriBundleDirs(cwd),
+      ]),
+    );
   }
 
   return baseTargets;
@@ -89,9 +89,19 @@ function cleanDirs(mode) {
   for (const relativeDir of dirs) {
     const dir = path.resolve(cwd, relativeDir);
     try {
-      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
+      fs.rmSync(dir, {
+        recursive: true,
+        force: true,
+        maxRetries: 8,
+        retryDelay: 100,
+      });
     } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      if (
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
         continue;
       }
 
@@ -117,6 +127,6 @@ if (
 }
 
 console.error(
-  "Usage: node scripts/dist-tools.js <clean|clean-release|clean-release-artifacts|clean-all>"
+  "Usage: node scripts/dist-tools.js <clean|clean-release|clean-release-artifacts|clean-all>",
 );
 process.exit(1);

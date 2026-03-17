@@ -18,7 +18,7 @@ export function showContextMenu(
   x: number,
   y: number,
   items: MenuItem[],
-  onAction: (action: string) => void
+  onAction: (action: string) => void,
 ): void {
   hideContextMenu();
 

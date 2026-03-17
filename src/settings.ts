@@ -14,6 +14,7 @@ import {
   type Bookmark,
 } from "./bookmarks.ts";
 import { isUpdaterEnabled } from "./updater.ts";
+import { refreshSecuritySettingsUI } from "./security.ts";
 
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
 
@@ -42,35 +43,46 @@ export async function loadSettings(): Promise<void> {
 export async function saveSettings(): Promise<void> {
   const payload = mergeSettingsPayload(
     state.currentSettings,
-    state.settingsExtras
+    state.settingsExtras,
   );
   await invoke("save_settings", { json: payload });
   state.lastPersistedSettings = { ...state.currentSettings };
 }
 
 export function populateSettingsModal(): void {
-  const themeSelect = document.getElementById("setting-theme") as HTMLSelectElement | null;
+  const themeSelect = document.getElementById(
+    "setting-theme",
+  ) as HTMLSelectElement | null;
   if (themeSelect) themeSelect.value = state.currentSettings.theme;
 
-  const updatesCheckbox = document.getElementById("setting-updates") as HTMLInputElement | null;
-  if (updatesCheckbox) updatesCheckbox.checked = state.currentSettings.autoCheckUpdates;
+  const updatesCheckbox = document.getElementById(
+    "setting-updates",
+  ) as HTMLInputElement | null;
+  if (updatesCheckbox)
+    updatesCheckbox.checked = state.currentSettings.autoCheckUpdates;
 
   const supported = isUpdaterEnabled();
   const updaterSection = document.getElementById("updater-section");
   const updaterUnsupported = document.getElementById("updater-unsupported");
   if (updaterSection) updaterSection.style.display = supported ? "" : "none";
-  if (updaterUnsupported) updaterUnsupported.style.display = supported ? "none" : "";
+  if (updaterUnsupported)
+    updaterUnsupported.style.display = supported ? "none" : "";
 
   refreshBookmarkListUI();
+  void refreshSecuritySettingsUI();
 }
 
 export function readSettingsModal(): void {
-  const themeSelect = document.getElementById("setting-theme") as HTMLSelectElement | null;
+  const themeSelect = document.getElementById(
+    "setting-theme",
+  ) as HTMLSelectElement | null;
   if (themeSelect) {
     state.currentSettings.theme = themeSelect.value as UserSettings["theme"];
   }
 
-  const updatesCheckbox = document.getElementById("setting-updates") as HTMLInputElement | null;
+  const updatesCheckbox = document.getElementById(
+    "setting-updates",
+  ) as HTMLInputElement | null;
   if (updatesCheckbox) {
     state.currentSettings.autoCheckUpdates = updatesCheckbox.checked;
   }
@@ -86,7 +98,16 @@ export async function closeSettingsModal(save: boolean): Promise<void> {
   if (save) {
     readSettingsModal();
     applyTheme(state.currentSettings.theme);
-    await saveSettings();
+    try {
+      await saveSettings();
+    } catch (err) {
+      applyTheme(state.lastPersistedSettings.theme);
+      state.currentSettings = { ...state.lastPersistedSettings };
+      const statusEl = document.getElementById("status");
+      if (statusEl)
+        statusEl.textContent = `Failed to save settings: ${String(err)}`;
+      return;
+    }
   } else {
     applyTheme(state.lastPersistedSettings.theme);
     state.currentSettings = { ...state.lastPersistedSettings };
@@ -98,7 +119,7 @@ export async function closeSettingsModal(save: boolean): Promise<void> {
 export async function resetSettings(): Promise<void> {
   const confirmed = await showConfirm(
     "Reset Settings",
-    "This will reset all settings to their defaults and restart the app. Bookmarks and saved connections will be removed."
+    "This will reset all settings to their defaults and restart the app. Bookmarks and saved connections will be removed.",
   );
   if (!confirmed) return;
 
@@ -154,6 +175,6 @@ async function refreshBookmarkListUI(): Promise<void> {
     async (index) => {
       await removeBookmark(index);
       refreshBookmarkListUI();
-    }
+    },
   );
 }

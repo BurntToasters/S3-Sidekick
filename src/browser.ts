@@ -22,17 +22,21 @@ export function clearSelection(): void {
 export function updateSelectionUI(): void {
   const rows = dom.objectTbody.querySelectorAll<HTMLElement>(".object-row");
   for (const row of rows) {
-    const key = row.dataset.key ?? ("prefix:" + row.dataset.prefix);
+    const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
     const cb = row.querySelector<HTMLInputElement>(".row-check");
     const selected = state.selectedKeys.has(key);
     row.classList.toggle("object-row--selected", selected);
     if (cb) cb.checked = selected;
   }
   const allKeys = getSelectableKeys();
-  const selectAll = document.getElementById("select-all") as HTMLInputElement | null;
+  const selectAll = document.getElementById(
+    "select-all",
+  ) as HTMLInputElement | null;
   if (selectAll) {
-    selectAll.checked = allKeys.length > 0 && allKeys.every((k) => state.selectedKeys.has(k));
-    selectAll.indeterminate = !selectAll.checked && allKeys.some((k) => state.selectedKeys.has(k));
+    selectAll.checked =
+      allKeys.length > 0 && allKeys.every((k) => state.selectedKeys.has(k));
+    selectAll.indeterminate =
+      !selectAll.checked && allKeys.some((k) => state.selectedKeys.has(k));
   }
 }
 
@@ -45,7 +49,8 @@ export function handleRowClick(key: string, e: MouseEvent): void {
     const startIdx = allKeys.indexOf(lastClickedKey);
     const endIdx = allKeys.indexOf(key);
     if (startIdx >= 0 && endIdx >= 0) {
-      const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+      const [from, to] =
+        startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
       for (let i = from; i <= to; i++) {
         state.selectedKeys.add(allKeys[i]);
       }
@@ -129,7 +134,7 @@ export function renderBucketList(): void {
   el.innerHTML = state.buckets
     .map(
       (b) =>
-        `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}" data-bucket="${escapeHtml(b.name)}">${escapeHtml(b.name)}</li>`
+        `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}" data-bucket="${escapeHtml(b.name)}">${escapeHtml(b.name)}</li>`,
     )
     .join("");
 }
@@ -139,7 +144,7 @@ export function renderObjectTable(): void {
   const rows: string[] = [];
 
   const sortedPrefixes = [...state.prefixes].sort((a, b) =>
-    state.sortAsc ? a.localeCompare(b) : b.localeCompare(a)
+    state.sortAsc ? a.localeCompare(b) : b.localeCompare(a),
   );
 
   for (const prefix of sortedPrefixes) {
@@ -150,7 +155,7 @@ export function renderObjectTable(): void {
         <td class="object-name"><span class="icon-folder"></span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">&mdash;</td>
         <td class="object-modified">&mdash;</td>
-      </tr>`
+      </tr>`,
     );
   }
 
@@ -163,7 +168,7 @@ export function renderObjectTable(): void {
         <td class="object-name"><span class="icon-file"></span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">${formatSize(obj.size)}</td>
         <td class="object-modified">${formatDate(obj.last_modified)}</td>
-      </tr>`
+      </tr>`,
     );
   }
 
@@ -186,8 +191,10 @@ function updateObjectCount(): void {
   const fileCount = state.objects.filter((o) => !o.is_folder).length;
   const folderCount = state.prefixes.length;
   const parts: string[] = [];
-  if (folderCount > 0) parts.push(`${folderCount} folder${folderCount !== 1 ? "s" : ""}`);
-  if (fileCount > 0) parts.push(`${fileCount} file${fileCount !== 1 ? "s" : ""}`);
+  if (folderCount > 0)
+    parts.push(`${folderCount} folder${folderCount !== 1 ? "s" : ""}`);
+  if (fileCount > 0)
+    parts.push(`${fileCount} file${fileCount !== 1 ? "s" : ""}`);
 
   const countEl = document.getElementById("statusbar-count");
   if (countEl) countEl.textContent = parts.join(", ");
@@ -206,7 +213,7 @@ export function renderBreadcrumb(): void {
   const parts: string[] = [];
 
   parts.push(
-    `<span class="breadcrumb__segment breadcrumb__segment--root" data-prefix="">${escapeHtml(state.currentBucket)}</span>`
+    `<span class="breadcrumb__segment breadcrumb__segment--root" data-prefix="">${escapeHtml(state.currentBucket)}</span>`,
   );
 
   if (state.currentPrefix) {
@@ -215,7 +222,7 @@ export function renderBreadcrumb(): void {
     for (const seg of segments) {
       accumulated += seg + "/";
       parts.push(
-        `<span class="breadcrumb__sep">/</span><span class="breadcrumb__segment" data-prefix="${escapeHtml(accumulated)}">${escapeHtml(seg)}</span>`
+        `<span class="breadcrumb__sep">/</span><span class="breadcrumb__segment" data-prefix="${escapeHtml(accumulated)}">${escapeHtml(seg)}</span>`,
       );
     }
   }

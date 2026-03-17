@@ -20,7 +20,7 @@ export async function connect(
   endpoint: string,
   region: string,
   accessKey: string,
-  secretKey: string
+  secretKey: string,
 ): Promise<void> {
   state.connecting = true;
   try {
@@ -57,7 +57,7 @@ export async function saveConnection(
   endpoint: string,
   region: string,
   accessKey: string,
-  secretKey: string
+  secretKey: string,
 ): Promise<void> {
   const config: ConnectionConfig = {
     endpoint,
@@ -84,7 +84,7 @@ export async function refreshBuckets(): Promise<void> {
 
 export async function refreshObjects(
   bucket: string,
-  prefix: string
+  prefix: string,
 ): Promise<void> {
   state.currentBucket = bucket;
   state.currentPrefix = prefix;

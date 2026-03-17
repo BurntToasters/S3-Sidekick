@@ -6,7 +6,7 @@
   --border: #d1d5db;
   --text: #1a1a1a;
   --text-secondary: #6b7280;
-  --accent: #0078D4;
+  --accent: #0078d4;
   --accent-hover: #006abc;
   --accent-text: #ffffff;
   --danger: #dc2626;
@@ -29,7 +29,7 @@
     --border: #404040;
     --text: #e5e5e5;
     --text-secondary: #9ca3af;
-    --accent: #60CDFF;
+    --accent: #60cdff;
     --accent-hover: #4db8e8;
     --accent-text: #1a1a1a;
     --badge-off-bg: #374151;
@@ -47,7 +47,7 @@
   --border: #404040;
   --text: #e5e5e5;
   --text-secondary: #9ca3af;
-  --accent: #60CDFF;
+  --accent: #60cdff;
   --accent-hover: #4db8e8;
   --accent-text: #1a1a1a;
   --badge-off-bg: #374151;
@@ -64,7 +64,8 @@
   padding: 0;
 }
 
-html, body {
+html,
+body {
   height: 100%;
   overflow: hidden;
   font-family: var(--font);
@@ -368,7 +369,9 @@ html, body {
   cursor: pointer;
   gap: 6px;
   white-space: nowrap;
-  transition: background 0.15s, border-color 0.15s;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
   -webkit-app-region: no-drag;
 }
 
@@ -573,8 +576,33 @@ input[type="checkbox"]:indeterminate::after {
   gap: 12px;
 }
 
+.setting-item--stacked {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
 .setting-item label {
   font-size: 13px;
+}
+
+.security-controls {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.security-controls__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.security-warning {
+  color: var(--danger);
+  font-size: 12px;
 }
 
 .setting-section {
@@ -749,7 +777,9 @@ input[type="checkbox"]:indeterminate::after {
   transition: background 0.15s;
 }
 
-.license-card__header::-webkit-details-marker { display: none; }
+.license-card__header::-webkit-details-marker {
+  display: none;
+}
 
 .license-card__header:hover {
   background: var(--bg-hover);
@@ -847,7 +877,9 @@ input[type="checkbox"]:indeterminate::after {
   cursor: pointer;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
-  transition: color 0.15s, border-color 0.15s;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
 }
 
 .info-tab:hover {
@@ -1063,6 +1095,18 @@ input[type="checkbox"]:indeterminate::after {
   animation: modal-in 0.15s ease;
 }
 
+.transfer-popup--collapsed {
+  max-height: none;
+}
+
+.transfer-popup--collapsed .transfer-popup__header {
+  border-bottom: 0;
+}
+
+.transfer-popup--collapsed .transfer-list {
+  display: none;
+}
+
 .transfer-popup__header {
   display: flex;
   align-items: center;
@@ -1104,10 +1148,18 @@ input[type="checkbox"]:indeterminate::after {
   text-align: center;
 }
 
-.transfer-status--queued { color: var(--text-secondary); }
-.transfer-status--active { color: var(--accent); }
-.transfer-status--done { color: var(--badge-on-text); }
-.transfer-status--error { color: var(--danger); }
+.transfer-status--queued {
+  color: var(--text-secondary);
+}
+.transfer-status--active {
+  color: var(--accent);
+}
+.transfer-status--done {
+  color: var(--badge-on-text);
+}
+.transfer-status--error {
+  color: var(--danger);
+}
 
 .transfer-name {
   flex-shrink: 0;

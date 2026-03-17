@@ -6,6 +6,7 @@ export interface TransferItem {
   id: number;
   fileName: string;
   filePath: string;
+  browserFile?: File;
   key: string;
   size: number;
   status: "queued" | "uploading" | "done" | "error";
@@ -16,13 +17,23 @@ let nextId = 1;
 let queue: TransferItem[] = [];
 let processing = false;
 let onComplete: (() => void) | null = null;
+let collapsed = false;
+
+export function initTransferQueueUI(): void {
+  syncTransferVisibility();
+  syncCollapseState();
+  updateBadge();
+  updateClearButton();
+}
 
 export function setTransferCompleteHandler(handler: () => void): void {
   onComplete = handler;
 }
 
 export function showTransferQueue(): void {
+  if (queue.length === 0) return;
   $("transfer-overlay").hidden = false;
+  syncCollapseState();
   renderQueue();
 }
 
@@ -31,23 +42,44 @@ export function hideTransferQueue(): void {
 }
 
 export function toggleTransferQueue(): void {
+  if (queue.length === 0) return;
   const overlay = $("transfer-overlay");
   overlay.hidden = !overlay.hidden;
-  if (!overlay.hidden) renderQueue();
+  if (!overlay.hidden) {
+    syncCollapseState();
+    renderQueue();
+  }
+}
+
+export function toggleTransferCollapsed(): void {
+  const overlay = $("transfer-overlay");
+  if (overlay.hidden) return;
+  collapsed = !collapsed;
+  syncCollapseState();
 }
 
 export function clearCompletedTransfers(): void {
-  queue = queue.filter((t) => t.status === "queued" || t.status === "uploading");
+  queue = queue.filter(
+    (t) => t.status === "queued" || t.status === "uploading",
+  );
   renderQueue();
 }
 
-export function enqueueFiles(files: FileList | File[], targetPrefix: string): void {
+export function enqueueFiles(
+  files: FileList | File[],
+  targetPrefix: string,
+): void {
   for (const file of Array.from(files)) {
+    const filePath =
+      typeof (file as { path?: unknown }).path === "string"
+        ? ((file as { path?: string }).path ?? "")
+        : "";
     const key = targetPrefix + file.name;
     queue.push({
       id: nextId++,
       fileName: file.name,
-      filePath: (file as any).path || "",
+      filePath,
+      browserFile: file,
       key,
       size: file.size,
       status: "queued",
@@ -80,6 +112,7 @@ export function enqueuePaths(paths: string[], targetPrefix: string): void {
 async function processQueue(): Promise<void> {
   if (processing) return;
   processing = true;
+  let completedThisRun = false;
 
   while (true) {
     const item = queue.find((t) => t.status === "queued");
@@ -90,13 +123,29 @@ async function processQueue(): Promise<void> {
 
     try {
       const contentType = guessContentType(item.fileName);
-      await invoke("upload_object", {
-        bucket: state.currentBucket,
-        key: item.key,
-        filePath: item.filePath,
-        contentType,
-      });
+      if (item.filePath) {
+        await invoke("upload_object", {
+          bucket: state.currentBucket,
+          key: item.key,
+          filePath: item.filePath,
+          contentType,
+        });
+      } else if (item.browserFile) {
+        const bytes = Array.from(
+          new Uint8Array(await item.browserFile.arrayBuffer()),
+        );
+        await invoke("upload_object_bytes", {
+          bucket: state.currentBucket,
+          key: item.key,
+          bytes,
+          contentType,
+        });
+        item.browserFile = undefined;
+      } else {
+        throw new Error("No upload source available for transfer item.");
+      }
       item.status = "done";
+      completedThisRun = true;
     } catch (err) {
       item.status = "error";
       item.error = String(err);
@@ -106,7 +155,7 @@ async function processQueue(): Promise<void> {
 
   processing = false;
 
-  if (onComplete && queue.some((t) => t.status === "done")) {
+  if (onComplete && completedThisRun) {
     onComplete();
   }
 }
@@ -118,6 +167,8 @@ function renderQueue(): void {
   if (queue.length === 0) {
     list.innerHTML = `<div class="transfer-empty">No transfers</div>`;
     updateBadge();
+    updateClearButton();
+    syncTransferVisibility();
     return;
   }
 
@@ -145,21 +196,79 @@ function renderQueue(): void {
         `<span class="transfer-name">${escapeHtml(t.fileName)}</span>` +
         `<span class="transfer-arrow">&rarr;</span>` +
         `<span class="transfer-key">${escapeHtml(t.key)}</span>` +
-        (t.status === "error" ? `<span class="transfer-error" title="${escapeHtml(t.error || "")}">${escapeHtml(t.error || "Error")}</span>` : "") +
+        (t.status === "error"
+          ? `<span class="transfer-error" title="${escapeHtml(t.error || "")}">${escapeHtml(t.error || "Error")}</span>`
+          : "") +
         `</div>`
       );
     })
     .join("");
 
   updateBadge();
+  updateClearButton();
+  syncTransferVisibility();
 }
 
 function updateBadge(): void {
-  const active = queue.filter((t) => t.status === "queued" || t.status === "uploading").length;
+  const active = queue.filter(
+    (t) => t.status === "queued" || t.status === "uploading",
+  ).length;
   const badge = document.getElementById("transfer-badge");
   if (badge) {
     badge.textContent = active > 0 ? String(active) : "";
     badge.style.display = active > 0 ? "" : "none";
+  }
+}
+
+function updateClearButton(): void {
+  const button = document.getElementById(
+    "transfer-clear",
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  const hasCompleted = queue.some(
+    (t) => t.status === "done" || t.status === "error",
+  );
+  button.disabled = !hasCompleted;
+}
+
+function syncTransferVisibility(): void {
+  const overlay = document.getElementById(
+    "transfer-overlay",
+  ) as HTMLDivElement | null;
+  const toggle = document.getElementById(
+    "transfer-toggle",
+  ) as HTMLButtonElement | null;
+  const shouldShow = queue.length > 0;
+
+  if (toggle) {
+    toggle.hidden = !shouldShow;
+  }
+
+  if (overlay && !shouldShow) {
+    overlay.hidden = true;
+  }
+}
+
+function syncCollapseState(): void {
+  const overlay = document.getElementById("transfer-overlay");
+  const collapseButton = document.getElementById(
+    "transfer-collapse",
+  ) as HTMLButtonElement | null;
+  if (!overlay) return;
+
+  overlay.classList.toggle("transfer-popup--collapsed", collapsed);
+  if (!collapseButton) return;
+
+  if (collapsed) {
+    collapseButton.innerHTML = "&#9656;";
+    collapseButton.title = "Expand transfers";
+    collapseButton.setAttribute("aria-label", "Expand transfers");
+    collapseButton.setAttribute("aria-expanded", "false");
+  } else {
+    collapseButton.innerHTML = "&#9660;";
+    collapseButton.title = "Collapse transfers";
+    collapseButton.setAttribute("aria-label", "Collapse transfers");
+    collapseButton.setAttribute("aria-expanded", "true");
   }
 }
 
