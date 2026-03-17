@@ -75,7 +75,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       el.cancel.removeEventListener("click", onCancel);
       el.ok.removeEventListener("click", onOk);
       el.input.removeEventListener("keydown", onInputKey);
-      document.removeEventListener("keydown", onEscape);
+      document.removeEventListener("keydown", onEscape, true);
       active = false;
       if (queue.length > 0) {
         const next = queue.shift()!;

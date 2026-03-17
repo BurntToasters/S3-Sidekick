@@ -45,3 +45,13 @@ modules:
     sources:
       - type: dir
         path: .
+        skip:
+          - .git
+          - .github
+          - node_modules
+          - release
+          - release-artifacts
+          - dist
+          - src-tauri/target
+          - target
+          - "*.log"

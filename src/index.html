@@ -123,7 +123,11 @@
                   draggable="false"
                 />
               </button>
-              <nav id="breadcrumb" class="breadcrumb"></nav>
+              <nav
+                id="breadcrumb"
+                class="breadcrumb"
+                aria-label="Breadcrumb"
+              ></nav>
             </div>
             <input
               id="filter-input"
@@ -279,6 +283,8 @@
             class="btn btn--icon statusbar__transfer"
             title="Activity log"
             aria-label="Activity log"
+            aria-controls="activity-overlay"
+            aria-expanded="false"
           >
             <img
               class="twemoji-icon"
@@ -297,6 +303,8 @@
             class="btn btn--icon statusbar__transfer"
             title="Transfers"
             aria-label="Transfers"
+            aria-controls="transfer-overlay"
+            aria-expanded="false"
             hidden
           >
             <img
@@ -404,6 +412,13 @@
                   <input id="setting-updates" type="checkbox" />
                   <span>Check for updates automatically</span>
                 </label>
+              </div>
+              <div class="setting-item">
+                <label for="setting-update-channel">Update channel</label>
+                <select id="setting-update-channel" class="field field--sm">
+                  <option value="release">Release</option>
+                  <option value="beta">Beta</option>
+                </select>
               </div>
               <div class="setting-item">
                 <label>Check for updates now</label>
@@ -679,9 +694,11 @@
         <div class="transfer-popup__actions">
           <button
             id="transfer-collapse"
+            type="button"
             class="btn btn--icon"
             title="Collapse transfers"
             aria-label="Collapse transfers"
+            aria-controls="transfer-list"
             aria-expanded="true"
           >
             <img
@@ -721,9 +738,11 @@
         <div class="activity-popup__actions">
           <button
             id="activity-collapse"
+            type="button"
             class="btn btn--icon"
             title="Collapse activity"
             aria-label="Collapse activity"
+            aria-controls="activity-list"
             aria-expanded="true"
           >
             <img

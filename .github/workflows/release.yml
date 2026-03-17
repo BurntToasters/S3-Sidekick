@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
@@ -82,7 +82,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
@@ -162,7 +162,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
 
       - name: Install Flatpak tooling
@@ -191,14 +191,18 @@ jobs:
   sign-and-publish:
     needs: [build, flatpak]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     env:
       HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+      GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -207,7 +211,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
-          merge-multiple: true
+
+      - name: Verify required artifact bundles
+        run: |
+          required=(
+            artifacts-win-x64
+            artifacts-win-arm64
+            artifacts-mac-universal
+            artifacts-linux-x64
+            artifacts-flatpak-x64
+          )
+          for name in "${required[@]}"; do
+            if [ ! -d "release-artifacts/$name" ]; then
+              echo "Missing required artifact bundle: $name" >&2
+              exit 1
+            fi
+          done
 
       - name: Flatten artifacts into release/
         run: |
@@ -226,8 +245,22 @@ jobs:
           \) | sort)
           ls -lh release/
 
+      - name: Validate signing configuration
+        run: |
+          if [ "${HAS_GPG_KEY}" != "true" ]; then
+            echo "Missing GPG_PRIVATE_KEY secret." >&2
+            exit 1
+          fi
+          if [ -z "${GPG_KEY_ID}" ]; then
+            echo "Missing GPG_KEY_ID secret." >&2
+            exit 1
+          fi
+          if [ -z "${GPG_PASSPHRASE}" ]; then
+            echo "Missing GPG_PASSPHRASE secret." >&2
+            exit 1
+          fi
+
       - name: Import GPG key
-        if: env.HAS_GPG_KEY == 'true'
         run: |
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
         env:

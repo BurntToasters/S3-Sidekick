@@ -21,6 +21,8 @@
   --sidebar-width: 220px;
   --sidebar-min: 180px;
   --sidebar-max: 420px;
+  --twemoji-filter: saturate(0.38) brightness(0.95) contrast(0.96);
+  --twemoji-opacity: 0.9;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -39,6 +41,8 @@
     --badge-off-text: #9ca3af;
     --badge-on-bg: #14532d;
     --badge-on-text: #86efac;
+    --twemoji-filter: saturate(0.3) brightness(0.88) contrast(0.94);
+    --twemoji-opacity: 0.86;
   }
 }
 
@@ -57,6 +61,8 @@
   --badge-off-text: #9ca3af;
   --badge-on-bg: #14532d;
   --badge-on-text: #86efac;
+  --twemoji-filter: saturate(0.3) brightness(0.88) contrast(0.94);
+  --twemoji-opacity: 0.86;
 }
 
 *,
@@ -280,6 +286,10 @@ body.platform-linux {
   display: inline-block;
   vertical-align: -0.14em;
   flex-shrink: 0;
+  filter: var(--twemoji-filter);
+  opacity: var(--twemoji-opacity);
+  pointer-events: none;
+  user-select: none;
 }
 
 .btn--icon .twemoji-icon {
@@ -1643,6 +1653,27 @@ input[type="checkbox"]:indeterminate::after {
   margin-bottom: 10px;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.licenses-attribution a {
+  color: var(--accent);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.licenses-attribution a:visited {
+  color: var(--accent);
+}
+
+.licenses-attribution a:hover {
+  color: var(--accent-hover);
+}
+
+.licenses-attribution a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .activity-empty {

@@ -38,6 +38,7 @@ export interface TransferRunSummary {
 }
 
 const MAX_CONCURRENT = 3;
+const BROWSER_UPLOAD_BYTES_LIMIT = 16 * 1024 * 1024;
 let nextId = 1;
 let queue: TransferItem[] = [];
 let processing = false;
@@ -86,18 +87,21 @@ export function setTransferCompleteHandler(
 export function showTransferQueue(): void {
   if (queue.length === 0) return;
   $("transfer-overlay").hidden = false;
+  syncOverlayToggleState();
   syncCollapseState();
   renderQueue();
 }
 
 export function hideTransferQueue(): void {
   $("transfer-overlay").hidden = true;
+  syncOverlayToggleState();
 }
 
 export function toggleTransferQueue(): void {
   if (queue.length === 0) return;
   const overlay = $("transfer-overlay");
   overlay.hidden = !overlay.hidden;
+  syncOverlayToggleState();
   if (!overlay.hidden) {
     syncCollapseState();
     renderQueue();
@@ -105,8 +109,6 @@ export function toggleTransferQueue(): void {
 }
 
 export function toggleTransferCollapsed(): void {
-  const overlay = $("transfer-overlay");
-  if (overlay.hidden) return;
   collapsed = !collapsed;
   syncCollapseState();
 }
@@ -293,6 +295,12 @@ async function processQueue(): Promise<void> {
               transferId: item.id,
             });
           } else if (item.browserFile) {
+            if (item.browserFile.size > BROWSER_UPLOAD_BYTES_LIMIT) {
+              throw new Error(
+                `Browser upload fallback is limited to ${Math.floor(BROWSER_UPLOAD_BYTES_LIMIT / (1024 * 1024))}MB. ` +
+                  "Use file-path based upload for larger files.",
+              );
+            }
             const bytes = Array.from(
               new Uint8Array(await item.browserFile.arrayBuffer()),
             );
@@ -475,11 +483,15 @@ function syncTransferVisibility(): void {
 
   if (toggle) {
     toggle.hidden = !shouldShow;
+    if (!shouldShow) {
+      toggle.setAttribute("aria-expanded", "false");
+    }
   }
 
   if (overlay && !shouldShow) {
     overlay.hidden = true;
   }
+  syncOverlayToggleState();
 }
 
 function syncCollapseState(): void {
@@ -493,7 +505,7 @@ function syncCollapseState(): void {
   if (!collapseButton) return;
 
   if (collapsed) {
-    collapseButton.innerHTML = twemojiIcon("27a1", {
+    collapseButton.innerHTML = twemojiIcon("2b06", {
       className: "twemoji-icon",
       decorative: true,
     });
@@ -509,6 +521,15 @@ function syncCollapseState(): void {
     collapseButton.setAttribute("aria-label", "Collapse transfers");
     collapseButton.setAttribute("aria-expanded", "true");
   }
+}
+
+function syncOverlayToggleState(): void {
+  const overlay = document.getElementById("transfer-overlay");
+  const toggle = document.getElementById(
+    "transfer-toggle",
+  ) as HTMLButtonElement | null;
+  if (!overlay || !toggle || toggle.hidden) return;
+  toggle.setAttribute("aria-expanded", String(!overlay.hidden));
 }
 
 function guessContentType(name: string): string {

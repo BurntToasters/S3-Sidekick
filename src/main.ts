@@ -34,7 +34,12 @@ import {
   updateSelectionUI,
   toggleSort,
 } from "./browser.ts";
-import { initUpdater, autoCheckUpdates, checkUpdates } from "./updater.ts";
+import {
+  initUpdater,
+  autoCheckUpdates,
+  checkUpdates,
+  setUpdateChannel,
+} from "./updater.ts";
 import { addBookmark } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
@@ -273,7 +278,7 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
   return nodes.filter(
     (node) =>
       !node.hasAttribute("disabled") &&
-      !node.hasAttribute("aria-hidden") &&
+      node.getAttribute("aria-hidden") !== "true" &&
       (node.offsetWidth > 0 ||
         node.offsetHeight > 0 ||
         node.getClientRects().length > 0),
@@ -414,35 +419,13 @@ async function uniqueDownloadEntries(
     state.platformName === "windows" || state.platformName === "macos";
   const dedupeKey = (name: string) =>
     caseInsensitive ? name.toLowerCase() : name;
-  const pathDedupeKey = (path: string) =>
-    caseInsensitive ? path.toLowerCase() : path;
-  const existingDestinations = new Set<string>();
-  const missingDestinations = new Set<string>();
-
-  async function destinationExists(candidateName: string): Promise<boolean> {
-    const destination = joinPath(destinationDir, candidateName);
-    const key = pathDedupeKey(destination);
-    if (existingDestinations.has(key)) return true;
-    if (missingDestinations.has(key)) return false;
-
-    const exists = await invoke<boolean>("path_exists", { path: destination });
-    if (exists) {
-      existingDestinations.add(key);
-    } else {
-      missingDestinations.add(key);
-    }
-    return exists;
-  }
 
   for (const key of keys) {
     const base = basename(key);
     const { stem, ext } = splitNameExt(base);
     let candidate = base;
     let n = 2;
-    while (
-      taken.has(dedupeKey(candidate)) ||
-      (await destinationExists(candidate))
-    ) {
+    while (taken.has(dedupeKey(candidate))) {
       candidate = `${stem} (${n})${ext}`;
       n += 1;
     }
@@ -1174,8 +1157,15 @@ function wireEvents(): void {
   document
     .getElementById("settings-check-updates")!
     .addEventListener("click", () => {
+      const persistedChannel = state.lastPersistedSettings.updateChannel;
+      const channelSelect = document.getElementById(
+        "setting-update-channel",
+      ) as HTMLSelectElement | null;
+      setUpdateChannel(channelSelect?.value === "beta" ? "beta" : "release");
       closeSettingsModal(false);
-      checkUpdates();
+      void checkUpdates().finally(() => {
+        setUpdateChannel(persistedChannel);
+      });
     });
 
   document
