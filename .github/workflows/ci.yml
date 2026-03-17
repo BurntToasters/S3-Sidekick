@@ -15,7 +15,7 @@ concurrency:
 
 env:
   NODE_VERSION: "22"
-  RUST_VERSION: "1.91.1"
+  RUST_VERSION: "stable"
 
 jobs:
   verify:

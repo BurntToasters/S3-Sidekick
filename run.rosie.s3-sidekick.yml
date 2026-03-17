@@ -28,12 +28,12 @@ modules:
       env:
         CARGO_HOME: /run/build/s3-sidekick/cargo
         RUSTUP_HOME: /run/build/s3-sidekick/rustup
-        RUSTUP_TOOLCHAIN: 1.91.1
+        RUSTUP_TOOLCHAIN: stable
         npm_config_cache: /run/build/s3-sidekick/npm-cache
         HUSKY: '0'
     build-commands:
-      - rustup toolchain install 1.91.1 --profile minimal
-      - rustup default 1.91.1
+      - rustup toolchain install stable --profile minimal
+      - rustup default stable
       - npm ci
       - npm run sync-version
       - npm run licenses
