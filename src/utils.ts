@@ -57,3 +57,26 @@ export function basename(key: string): string {
   const idx = key.lastIndexOf("/");
   return idx >= 0 ? key.slice(idx + 1) : key;
 }
+
+interface TwemojiIconOptions {
+  className?: string;
+  alt?: string;
+  decorative?: boolean;
+}
+
+export function twemojiAsset(codepoint: string): string {
+  return `/twemoji/${codepoint}.svg`;
+}
+
+export function twemojiIcon(
+  codepoint: string,
+  options: TwemojiIconOptions = {},
+): string {
+  const className = options.className ?? "twemoji-icon";
+  const alt = options.alt ?? "";
+  const decorative = options.decorative ?? alt.length === 0;
+  return (
+    `<img class="${escapeHtml(className)}" src="${twemojiAsset(codepoint)}" alt="${escapeHtml(alt)}"` +
+    `${decorative ? ' aria-hidden="true"' : ""} draggable="false" />`
+  );
+}

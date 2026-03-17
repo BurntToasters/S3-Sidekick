@@ -1,5 +1,11 @@
 import { state, dom } from "./state.ts";
-import { escapeHtml, formatSize, formatDate, basename } from "./utils.ts";
+import {
+  escapeHtml,
+  formatSize,
+  formatDate,
+  basename,
+  twemojiIcon,
+} from "./utils.ts";
 import { refreshObjects } from "./connection.ts";
 
 export function getSelectableKeys(): string[] {
@@ -130,7 +136,15 @@ function updateSortIndicators(): void {
     const el = document.getElementById("sort-" + col);
     if (el) {
       if (state.sortColumn === col) {
-        el.innerHTML = state.sortAsc ? "&#9650;" : "&#9660;";
+        el.innerHTML = state.sortAsc
+          ? twemojiIcon("2b06", {
+              className: "twemoji-icon twemoji-icon--sort",
+              decorative: true,
+            })
+          : twemojiIcon("2b07", {
+              className: "twemoji-icon twemoji-icon--sort",
+              decorative: true,
+            });
       } else {
         el.innerHTML = "";
       }
@@ -182,7 +196,7 @@ export function renderObjectTable(): void {
     rows.push(
       `<tr class="object-row object-row--folder" data-prefix="${escapeHtml(prefix)}" tabindex="0">
         <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select folder ${escapeHtml(name)}" /></td>
-        <td class="object-name"><span class="icon-folder"></span><span class="object-name__text">${escapeHtml(name)}</span></td>
+        <td class="object-name"><span class="icon-folder">${twemojiIcon("1f4c1", { className: "twemoji-icon twemoji-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">&mdash;</td>
         <td class="object-modified">&mdash;</td>
       </tr>`,
@@ -195,7 +209,7 @@ export function renderObjectTable(): void {
     rows.push(
       `<tr class="object-row object-row--file" data-key="${escapeHtml(obj.key)}" tabindex="0">
         <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select file ${escapeHtml(name)}" /></td>
-        <td class="object-name"><span class="icon-file"></span><span class="object-name__text">${escapeHtml(name)}</span></td>
+        <td class="object-name"><span class="icon-file">${twemojiIcon("1f4c4", { className: "twemoji-icon twemoji-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">${formatSize(obj.size)}</td>
         <td class="object-modified">${formatDate(obj.last_modified)}</td>
       </tr>`,
