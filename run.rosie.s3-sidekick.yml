@@ -36,7 +36,7 @@ modules:
       - npm run sync-version
       - npm run licenses
       - npm run build
-      - npx tauri build --no-bundle
+      - unset CFLAGS CXXFLAGS CFLAGS_x86_64_unknown_linux_gnu && npx tauri build --no-bundle
       - install -Dm755 src-tauri/target/release/s3-sidekick /app/bin/s3-sidekick
       - install -Dm644 run.rosie.s3-sidekick.desktop /app/share/applications/run.rosie.s3-sidekick.desktop
       - install -Dm644 run.rosie.s3-sidekick.metainfo.xml /app/share/metainfo/run.rosie.s3-sidekick.metainfo.xml
