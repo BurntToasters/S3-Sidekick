@@ -13,6 +13,7 @@ export type MenuItem = MenuAction | MenuSeparator;
 
 let activeMenu: HTMLElement | null = null;
 let dismissHandler: ((e: MouseEvent) => void) | null = null;
+let keyHandler: ((e: KeyboardEvent) => void) | null = null;
 
 export function showContextMenu(
   x: number,
@@ -59,6 +60,34 @@ export function showContextMenu(
 
   activeMenu = menu;
 
+  const buttons = Array.from(
+    menu.querySelectorAll<HTMLButtonElement>(
+      ".context-menu__item:not(:disabled)",
+    ),
+  );
+  if (buttons.length > 0) buttons[0].focus();
+
+  keyHandler = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      hideContextMenu();
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const focused = document.activeElement as HTMLElement | null;
+      const idx = focused ? buttons.indexOf(focused as HTMLButtonElement) : -1;
+      let next: number;
+      if (e.key === "ArrowDown") {
+        next = idx < buttons.length - 1 ? idx + 1 : 0;
+      } else {
+        next = idx > 0 ? idx - 1 : buttons.length - 1;
+      }
+      buttons[next]?.focus();
+    }
+  };
+
   dismissHandler = (e: MouseEvent) => {
     if (!menu.contains(e.target as Node)) {
       hideContextMenu();
@@ -66,6 +95,7 @@ export function showContextMenu(
   };
   setTimeout(() => {
     document.addEventListener("mousedown", dismissHandler!);
+    document.addEventListener("keydown", keyHandler!);
   }, 0);
 }
 
@@ -77,5 +107,9 @@ export function hideContextMenu(): void {
   if (dismissHandler) {
     document.removeEventListener("mousedown", dismissHandler);
     dismissHandler = null;
+  }
+  if (keyHandler) {
+    document.removeEventListener("keydown", keyHandler);
+    keyHandler = null;
   }
 }

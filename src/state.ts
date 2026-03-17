@@ -31,7 +31,9 @@ export const state = {
   hasMore: false,
   sortColumn: "name" as "name" | "size" | "modified",
   sortAsc: true,
+  filterText: "",
   platformName: "",
+  statusTimeout: undefined as ReturnType<typeof setTimeout> | undefined,
 };
 
 export const dom = {

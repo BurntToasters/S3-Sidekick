@@ -10,6 +10,7 @@ export interface Bookmark {
 }
 
 let bookmarks: Bookmark[] = [];
+let persistPromise: Promise<void> = Promise.resolve();
 
 export function getBookmarks(): Bookmark[] {
   return bookmarks;
@@ -129,11 +130,14 @@ export async function loadBookmarks(): Promise<void> {
 }
 
 async function persistBookmarks(): Promise<void> {
-  const raw = await invoke<string>("load_settings");
-  const parsed = parseJsonObject(raw) ?? {};
-  parsed._bookmarks = bookmarks;
-  await invoke("save_settings", { json: JSON.stringify(parsed, null, 2) });
-  await saveBookmarksBackupSafe(bookmarks);
+  persistPromise = persistPromise.then(async () => {
+    const raw = await invoke<string>("load_settings");
+    const parsed = parseJsonObject(raw) ?? {};
+    parsed._bookmarks = bookmarks;
+    await invoke("save_settings", { json: JSON.stringify(parsed, null, 2) });
+    await saveBookmarksBackupSafe(bookmarks);
+  });
+  await persistPromise;
 }
 
 export async function addBookmark(bookmark: Bookmark): Promise<void> {
@@ -147,6 +151,7 @@ export async function addBookmark(bookmark: Bookmark): Promise<void> {
 }
 
 export async function removeBookmark(index: number): Promise<void> {
+  if (index < 0 || index >= bookmarks.length) return;
   bookmarks.splice(index, 1);
   await persistBookmarks();
 }
@@ -189,7 +194,7 @@ export function renderBookmarkList(
     );
     if (item) {
       const idx = parseInt(item.dataset.index!, 10);
-      onSelect(bookmarks[idx]);
+      if (idx >= 0 && idx < bookmarks.length) onSelect(bookmarks[idx]);
     }
   };
 }

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { state } from "./state.ts";
 import {
@@ -15,6 +16,7 @@ import {
 } from "./bookmarks.ts";
 import { isUpdaterEnabled } from "./updater.ts";
 import { refreshSecuritySettingsUI } from "./security.ts";
+import { showConfirm } from "./dialogs.ts";
 
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
 
@@ -49,6 +51,19 @@ export async function saveSettings(): Promise<void> {
   state.lastPersistedSettings = { ...state.currentSettings };
 }
 
+export function switchSettingsTab(tab: string): void {
+  const tabs = document.querySelectorAll<HTMLElement>(".settings-tab");
+  for (const t of tabs) {
+    const isActive = t.dataset.settingsTab === tab;
+    t.classList.toggle("settings-tab--active", isActive);
+    t.setAttribute("aria-selected", String(isActive));
+  }
+  const panels = document.querySelectorAll<HTMLElement>(".settings-panel");
+  for (const p of panels) {
+    p.style.display = p.dataset.settingsPanel === tab ? "" : "none";
+  }
+}
+
 export function populateSettingsModal(): void {
   const themeSelect = document.getElementById(
     "setting-theme",
@@ -70,6 +85,17 @@ export function populateSettingsModal(): void {
 
   refreshBookmarkListUI();
   void refreshSecuritySettingsUI();
+
+  const versionEl = document.getElementById("settings-version");
+  if (versionEl) {
+    getVersion().then((v) => {
+      versionEl.textContent = `v${v}`;
+    });
+  }
+  const platformEl = document.getElementById("settings-platform");
+  if (platformEl) platformEl.textContent = state.platformName || "Unknown";
+
+  switchSettingsTab("general");
 }
 
 export function readSettingsModal(): void {
@@ -120,6 +146,7 @@ export async function resetSettings(): Promise<void> {
   const confirmed = await showConfirm(
     "Reset Settings",
     "This will reset all settings to their defaults and restart the app. Bookmarks and saved connections will be removed.",
+    { okLabel: "Reset & Restart", okDanger: true },
   );
   if (!confirmed) return;
 
@@ -127,37 +154,6 @@ export async function resetSettings(): Promise<void> {
   await invoke("save_settings", { json: defaults });
   await invoke("save_connection", { json: "" });
   await relaunch();
-}
-
-function showConfirm(title: string, message: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const overlay = document.getElementById("confirm-overlay")!;
-    document.getElementById("confirm-title")!.textContent = title;
-    document.getElementById("confirm-message")!.textContent = message;
-    overlay.classList.add("active");
-
-    const cancelBtn = document.getElementById("confirm-cancel")!;
-    const okBtn = document.getElementById("confirm-ok")!;
-
-    function cleanup() {
-      overlay.classList.remove("active");
-      cancelBtn.removeEventListener("click", onCancel);
-      okBtn.removeEventListener("click", onOk);
-    }
-
-    function onCancel() {
-      cleanup();
-      resolve(false);
-    }
-
-    function onOk() {
-      cleanup();
-      resolve(true);
-    }
-
-    cancelBtn.addEventListener("click", onCancel);
-    okBtn.addEventListener("click", onOk);
-  });
 }
 
 async function refreshBookmarkListUI(): Promise<void> {

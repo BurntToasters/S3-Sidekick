@@ -8,6 +8,7 @@ import {
   closeSettingsModal,
   resetSettings,
   setBookmarkSelectHandler,
+  switchSettingsTab,
 } from "./settings.ts";
 import {
   connect,
@@ -23,10 +24,12 @@ import {
   renderObjectTable,
   renderBreadcrumb,
   navigateToFolder,
+  navigateUp,
   selectBucket,
   showEmptyState,
   handleRowClick,
   handleSelectAll,
+  getSelectableKeys,
   clearSelection,
   updateSelectionUI,
   toggleSort,
@@ -60,10 +63,23 @@ import {
   ensureSecurityReady,
   handleSecurityChangePassword,
   handleSecurityToggle,
+  handleLockNow,
+  handleLockTimeoutChange,
 } from "./security.ts";
+import { showConfirm, showPrompt, isDialogActive } from "./dialogs.ts";
 
-function setStatus(text: string): void {
+function setStatus(text: string, autoResetMs?: number): void {
+  if (state.statusTimeout !== undefined) {
+    clearTimeout(state.statusTimeout);
+    state.statusTimeout = undefined;
+  }
   dom.statusEl.textContent = text;
+  if (autoResetMs && autoResetMs > 0) {
+    state.statusTimeout = setTimeout(() => {
+      dom.statusEl.textContent = "";
+      state.statusTimeout = undefined;
+    }, autoResetMs);
+  }
 }
 
 function setConnectionUI(connected: boolean): void {
@@ -125,11 +141,11 @@ async function handleConnect(): Promise<void> {
   try {
     await connect(endpoint, region, accessKey, secretKey);
     setConnectionUI(true);
-    setStatus("Connected.");
+    setStatus("Connected.", 5000);
     try {
       await saveConnection(endpoint, region, accessKey, secretKey);
     } catch (saveErr) {
-      setStatus(`Connected (credentials not saved: ${saveErr}).`);
+      setStatus(`Connected (credentials not saved: ${saveErr}).`, 5000);
     }
     await refreshBuckets();
     renderBucketList();
@@ -148,7 +164,7 @@ async function handleDisconnect(): Promise<void> {
   await disconnect();
   setConnectionUI(false);
   showEmptyState();
-  setStatus("Disconnected.");
+  setStatus("Disconnected.", 5000);
 }
 
 async function handleBookmarkSave(): Promise<void> {
@@ -174,7 +190,7 @@ async function handleBookmarkSave(): Promise<void> {
       access_key: accessKey,
       secret_key: secretKey,
     });
-    setStatus(`Bookmarked "${name}".`);
+    setStatus(`Bookmarked "${name}".`, 5000);
   } catch (err) {
     setStatus(`Failed to save bookmark: ${err}`);
   }
@@ -192,7 +208,11 @@ async function handleDelete(): Promise<void> {
     keys.length === 1
       ? `Delete "${basename(keys[0])}"?`
       : `Delete ${keys.length} items?`;
-  if (!window.confirm(msg)) return;
+  const confirmed = await showConfirm("Delete", msg, {
+    okLabel: "Delete",
+    okDanger: true,
+  });
+  if (!confirmed) return;
 
   try {
     setStatus(`Deleting ${keys.length} item(s)...`);
@@ -200,7 +220,7 @@ async function handleDelete(): Promise<void> {
       bucket: state.currentBucket,
       keys,
     });
-    setStatus(`Deleted ${deleted} item(s).`);
+    setStatus(`Deleted ${deleted} item(s).`, 5000);
     clearSelection();
     await refreshObjects(state.currentBucket, state.currentPrefix);
     renderObjectTable();
@@ -229,7 +249,7 @@ async function handleDownload(): Promise<void> {
         key,
         destination,
       });
-      setStatus(`Downloaded ${fileName} (${formatSize(size)}).`);
+      setStatus(`Downloaded ${fileName} (${formatSize(size)}).`, 5000);
     } catch (err) {
       setStatus(`Download failed: ${err}`);
     }
@@ -246,7 +266,7 @@ async function handleCopyUrl(): Promise<void> {
       key: keys[0],
     });
     await navigator.clipboard.writeText(url);
-    setStatus("URL copied to clipboard.");
+    setStatus("URL copied to clipboard.", 5000);
   } catch (err) {
     setStatus(`Failed to copy URL: ${err}`);
   }
@@ -258,7 +278,9 @@ async function handleRename(): Promise<void> {
 
   const oldKey = keys[0];
   const oldName = basename(oldKey);
-  const newName = window.prompt("Rename to:", oldName);
+  const newName = await showPrompt("Rename", "Enter new name:", {
+    inputDefault: oldName,
+  });
   if (!newName || newName === oldName) return;
 
   const prefix = oldKey.slice(0, oldKey.length - oldName.length);
@@ -271,7 +293,7 @@ async function handleRename(): Promise<void> {
       oldKey,
       newKey,
     });
-    setStatus(`Renamed to "${newName}".`);
+    setStatus(`Renamed to "${newName}".`, 5000);
     clearSelection();
     await refreshObjects(state.currentBucket, state.currentPrefix);
     renderObjectTable();
@@ -286,7 +308,9 @@ async function handleCreateFolder(): Promise<void> {
     return;
   }
 
-  const name = window.prompt("New folder name:");
+  const name = await showPrompt("New Folder", "Enter folder name:", {
+    inputPlaceholder: "Folder name",
+  });
   if (!name) return;
 
   const key = state.currentPrefix + name;
@@ -297,7 +321,7 @@ async function handleCreateFolder(): Promise<void> {
       bucket: state.currentBucket,
       key,
     });
-    setStatus(`Created folder "${name}".`);
+    setStatus(`Created folder "${name}".`, 5000);
     await refreshObjects(state.currentBucket, state.currentPrefix);
     renderObjectTable();
   } catch (err) {
@@ -431,6 +455,10 @@ function wireEvents(): void {
   document
     .getElementById("settings-btn")!
     .addEventListener("click", openSettingsModal);
+  document.querySelector(".settings-tabs")!.addEventListener("click", (e) => {
+    const tab = (e.target as HTMLElement).closest<HTMLElement>(".settings-tab");
+    if (tab?.dataset.settingsTab) switchSettingsTab(tab.dataset.settingsTab);
+  });
   document
     .getElementById("settings-close")!
     .addEventListener("click", () => closeSettingsModal(false));
@@ -510,6 +538,16 @@ function wireEvents(): void {
     .addEventListener("click", () => {
       void handleSecurityChangePassword(setStatus);
     });
+  document
+    .getElementById("security-lock-btn")!
+    .addEventListener("click", () => {
+      void handleLockNow(setStatus);
+    });
+  document
+    .getElementById("security-lock-timeout")!
+    .addEventListener("change", () => {
+      void handleLockTimeoutChange();
+    });
 
   document
     .getElementById("btn-refresh")!
@@ -520,6 +558,14 @@ function wireEvents(): void {
   document
     .getElementById("btn-upload")!
     .addEventListener("click", handleUploadButton);
+
+  const filterInput = document.getElementById(
+    "filter-input",
+  ) as HTMLInputElement;
+  filterInput.addEventListener("input", () => {
+    state.filterText = filterInput.value;
+    renderObjectTable();
+  });
 
   document
     .getElementById("btn-load-more")!
@@ -637,8 +683,7 @@ function wireEvents(): void {
     if (e.key === "Escape") {
       hideContextMenu();
 
-      const confirm = document.getElementById("confirm-overlay");
-      if (confirm?.classList.contains("active")) return;
+      if (isDialogActive()) return;
 
       const infoOverlay = document.getElementById("info-overlay");
       if (infoOverlay?.classList.contains("active")) {
@@ -672,7 +717,7 @@ function wireEvents(): void {
       )
         return;
       if (
-        document.querySelector(".modal-overlay.active, .confirm-overlay.active")
+        document.querySelector(".modal-overlay.active, .dialog-overlay.active")
       )
         return;
       handleDelete();
@@ -681,6 +726,55 @@ function wireEvents(): void {
     if (e.key === "F5" || (e.ctrlKey && e.key === "r")) {
       e.preventDefault();
       handleRefresh();
+    }
+
+    const inInput =
+      document.activeElement?.tagName === "INPUT" ||
+      document.activeElement?.tagName === "TEXTAREA";
+    const modalOpen = !!document.querySelector(
+      ".modal-overlay.active, .dialog-overlay.active",
+    );
+
+    if (!modalOpen && !inInput) {
+      if (e.key === "F2" && state.selectedKeys.size === 1) {
+        e.preventDefault();
+        handleRename();
+      }
+
+      if (e.key === "Backspace" || (e.altKey && e.key === "ArrowUp")) {
+        e.preventDefault();
+        navigateUp();
+      }
+    }
+
+    if (!modalOpen && e.ctrlKey) {
+      if (e.key === "a" && !inInput) {
+        e.preventDefault();
+        const allKeys = getSelectableKeys();
+        for (const k of allKeys) state.selectedKeys.add(k);
+        updateSelectionUI();
+      }
+
+      if (e.key === "u") {
+        e.preventDefault();
+        handleUploadButton();
+      }
+
+      if (e.key === "n" && !inInput) {
+        e.preventDefault();
+        handleCreateFolder();
+      }
+
+      if (e.key === "f") {
+        e.preventDefault();
+        const filterEl = document.getElementById(
+          "filter-input",
+        ) as HTMLInputElement | null;
+        if (filterEl) {
+          filterEl.focus();
+          filterEl.select();
+        }
+      }
     }
   });
 
@@ -691,7 +785,7 @@ function wireEvents(): void {
       bookmark.access_key,
       bookmark.secret_key,
     );
-    setStatus(`Loaded bookmark "${bookmark.name}".`);
+    setStatus(`Loaded bookmark "${bookmark.name}".`, 5000);
   });
 }
 

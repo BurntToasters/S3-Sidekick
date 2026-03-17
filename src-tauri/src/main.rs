@@ -12,13 +12,22 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use zeroize::Zeroize;
 
 const PBKDF2_ITERATIONS: u32 = 210_000;
+const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
 const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 
-static UNLOCKED_KEY: OnceLock<Mutex<Option<[u8; KEY_LEN]>>> = OnceLock::new();
+struct KeyState {
+    key: Option<[u8; KEY_LEN]>,
+    last_activity: Option<Instant>,
+    lock_timeout_secs: u64,
+}
+
+static KEY_STATE: OnceLock<Mutex<KeyState>> = OnceLock::new();
 
 struct S3State {
     client: Option<Client>,
@@ -34,6 +43,14 @@ struct SecurityConfig {
     encryption_enabled: bool,
     salt: String,
     verifier: String,
+    #[serde(default)]
+    lock_timeout_minutes: u16,
+    #[serde(default = "default_pbkdf2_iterations")]
+    pbkdf2_iterations: u32,
+}
+
+fn default_pbkdf2_iterations() -> u32 {
+    PBKDF2_ITERATIONS
 }
 
 #[derive(serde::Serialize)]
@@ -41,6 +58,7 @@ struct SecurityStatus {
     initialized: bool,
     encryption_enabled: bool,
     unlocked: bool,
+    lock_timeout_minutes: u16,
 }
 
 #[derive(serde::Serialize)]
@@ -102,29 +120,69 @@ fn security_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("security.json"))
 }
 
-fn unlocked_key_store() -> &'static Mutex<Option<[u8; KEY_LEN]>> {
-    UNLOCKED_KEY.get_or_init(|| Mutex::new(None))
+fn key_state() -> &'static Mutex<KeyState> {
+    KEY_STATE.get_or_init(|| {
+        Mutex::new(KeyState {
+            key: None,
+            last_activity: None,
+            lock_timeout_secs: 0,
+        })
+    })
 }
 
 fn is_unlocked() -> bool {
-    unlocked_key_store()
-        .lock()
-        .map(|k| k.is_some())
-        .unwrap_or(false)
+    let mut guard = key_state().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.key.is_none() {
+        return false;
+    }
+    if guard.lock_timeout_secs > 0 {
+        if let Some(last) = guard.last_activity {
+            if last.elapsed() >= Duration::from_secs(guard.lock_timeout_secs) {
+                if let Some(ref mut k) = guard.key {
+                    k.zeroize();
+                }
+                guard.key = None;
+                guard.last_activity = None;
+                return false;
+            }
+        }
+    }
+    true
 }
 
-fn set_unlocked_key(key: Option<[u8; KEY_LEN]>) -> Result<(), String> {
-    let mut guard = unlocked_key_store().lock().map_err(|e| e.to_string())?;
-    *guard = key;
+fn set_unlocked_key(key: Option<[u8; KEY_LEN]>, lock_timeout_secs: u64) -> Result<(), String> {
+    let mut guard = key_state().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut old_key) = guard.key {
+        old_key.zeroize();
+    }
+    guard.last_activity = if key.is_some() {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    guard.key = key;
+    guard.lock_timeout_secs = lock_timeout_secs;
     Ok(())
 }
 
 fn require_unlocked_key() -> Result<[u8; KEY_LEN], String> {
-    let guard = unlocked_key_store().lock().map_err(|e| e.to_string())?;
-    guard
-        .as_ref()
-        .copied()
-        .ok_or_else(|| "Encrypted storage is locked. Unlock with your password.".to_string())
+    let mut guard = key_state().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.lock_timeout_secs > 0 {
+        if let Some(last) = guard.last_activity {
+            if last.elapsed() >= Duration::from_secs(guard.lock_timeout_secs) {
+                if let Some(ref mut k) = guard.key {
+                    k.zeroize();
+                }
+                guard.key = None;
+                guard.last_activity = None;
+            }
+        }
+    }
+    let key = guard
+        .key
+        .ok_or_else(|| "Encrypted storage is locked. Unlock with your password.".to_string())?;
+    guard.last_activity = Some(Instant::now());
+    Ok(key)
 }
 
 fn default_security_config() -> SecurityConfig {
@@ -133,6 +191,8 @@ fn default_security_config() -> SecurityConfig {
         encryption_enabled: false,
         salt: String::new(),
         verifier: String::new(),
+        lock_timeout_minutes: 0,
+        pbkdf2_iterations: PBKDF2_ITERATIONS,
     }
 }
 
@@ -150,12 +210,22 @@ fn load_security_config(app: &tauri::AppHandle) -> Result<SecurityConfig, String
 fn save_security_config(app: &tauri::AppHandle, config: &SecurityConfig) -> Result<(), String> {
     let path = security_path(app)?;
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())
+    atomic_write(&path, &json)
 }
 
-fn derive_key(password: &str, salt: &[u8]) -> [u8; KEY_LEN] {
+fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), String> {
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, data).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
+fn derive_key(password: &str, salt: &[u8], iterations: u32) -> [u8; KEY_LEN] {
     let mut key = [0u8; KEY_LEN];
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, PBKDF2_ITERATIONS, &mut key);
+    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut key);
     key
 }
 
@@ -241,7 +311,7 @@ fn write_protected_file(
         json.to_string()
     };
 
-    std::fs::write(path, output).map_err(|e| e.to_string())
+    atomic_write(path, &output)
 }
 
 struct MigrationPlan {
@@ -328,16 +398,16 @@ fn build_rekey_plans(
 
 fn rollback_migration(plans: &[MigrationPlan], upto: usize) -> Result<(), String> {
     for plan in plans.iter().take(upto).rev() {
-        std::fs::write(&plan.path, &plan.original).map_err(|e| e.to_string())?;
+        atomic_write(&plan.path, &plan.original)?;
     }
     Ok(())
 }
 
 fn apply_migration(plans: &[MigrationPlan]) -> Result<(), String> {
     for (idx, plan) in plans.iter().enumerate() {
-        if let Err(err) = std::fs::write(&plan.path, &plan.transformed) {
+        if let Err(err) = atomic_write(&plan.path, &plan.transformed) {
             let _ = rollback_migration(plans, idx);
-            return Err(err.to_string());
+            return Err(err);
         }
     }
     Ok(())
@@ -348,6 +418,7 @@ fn security_status(config: &SecurityConfig) -> SecurityStatus {
         initialized: config.initialized,
         encryption_enabled: config.encryption_enabled,
         unlocked: is_unlocked(),
+        lock_timeout_minutes: config.lock_timeout_minutes,
     }
 }
 
@@ -418,8 +489,10 @@ fn initialize_security(
             encryption_enabled: false,
             salt: String::new(),
             verifier: String::new(),
+            lock_timeout_minutes: 0,
+            pbkdf2_iterations: 0,
         };
-        set_unlocked_key(None)?;
+        set_unlocked_key(None, 0)?;
         save_security_config(&app, &config)?;
         return Ok(security_status(&config));
     }
@@ -432,7 +505,7 @@ fn initialize_security(
     }
     let mut salt = [0u8; SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut salt);
-    let key = derive_key(&pw, &salt);
+    let key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
     let verifier = key_verifier(&key);
 
     let plans = build_migration_plans(&app, true, &key)?;
@@ -443,20 +516,22 @@ fn initialize_security(
         encryption_enabled: true,
         salt: B64.encode(salt),
         verifier: B64.encode(verifier),
+        lock_timeout_minutes: 0,
+        pbkdf2_iterations: PBKDF2_ITERATIONS,
     };
     if let Err(err) = save_security_config(&app, &config) {
         let _ = rollback_migration(&plans, plans.len());
         return Err(err);
     }
-    set_unlocked_key(Some(key))?;
+    set_unlocked_key(Some(key), 0)?;
     Ok(security_status(&config))
 }
 
 #[tauri::command]
 fn unlock_security(app: tauri::AppHandle, password: String) -> Result<SecurityStatus, String> {
-    let config = load_security_config(&app)?;
+    let mut config = load_security_config(&app)?;
     if !config.initialized || !config.encryption_enabled {
-        set_unlocked_key(None)?;
+        set_unlocked_key(None, 0)?;
         return Ok(security_status(&config));
     }
 
@@ -470,13 +545,40 @@ fn unlock_security(app: tauri::AppHandle, password: String) -> Result<SecuritySt
         return Err("Invalid security verifier length".to_string());
     }
 
-    let key = derive_key(&password, &salt);
+    if config.pbkdf2_iterations < MIN_PBKDF2_ITERATIONS {
+        return Err(
+            "Security configuration appears corrupted (iteration count too low). Please reset security.".to_string(),
+        );
+    }
+
+    let key = derive_key(&password, &salt, config.pbkdf2_iterations);
     let verifier = key_verifier(&key);
     if verifier.as_slice() != expected_verifier.as_slice() {
         return Err("Invalid password".to_string());
     }
 
-    set_unlocked_key(Some(key))?;
+    let timeout_secs = config.lock_timeout_minutes as u64 * 60;
+    set_unlocked_key(Some(key), timeout_secs)?;
+
+    if config.pbkdf2_iterations < PBKDF2_ITERATIONS {
+        let mut new_salt = [0u8; SALT_LEN];
+        rand::rngs::OsRng.fill_bytes(&mut new_salt);
+        let new_key = derive_key(&password, &new_salt, PBKDF2_ITERATIONS);
+        let new_verifier = key_verifier(&new_key);
+
+        let plans = build_rekey_plans(&app, &key, &new_key)?;
+        apply_migration(&plans)?;
+
+        config.salt = B64.encode(new_salt);
+        config.verifier = B64.encode(new_verifier);
+        config.pbkdf2_iterations = PBKDF2_ITERATIONS;
+        if let Err(err) = save_security_config(&app, &config) {
+            let _ = rollback_migration(&plans, plans.len());
+            return Err(err);
+        }
+        set_unlocked_key(Some(new_key), timeout_secs)?;
+    }
+
     Ok(security_status(&config))
 }
 
@@ -504,7 +606,7 @@ fn set_security_encryption(
         }
         let mut salt = [0u8; SALT_LEN];
         rand::rngs::OsRng.fill_bytes(&mut salt);
-        let key = derive_key(&pw, &salt);
+        let key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
         let verifier = key_verifier(&key);
 
         let plans = build_migration_plans(&app, true, &key)?;
@@ -512,11 +614,12 @@ fn set_security_encryption(
         config.encryption_enabled = true;
         config.salt = B64.encode(salt);
         config.verifier = B64.encode(verifier);
+        config.pbkdf2_iterations = PBKDF2_ITERATIONS;
         if let Err(err) = save_security_config(&app, &config) {
             let _ = rollback_migration(&plans, plans.len());
             return Err(err);
         }
-        set_unlocked_key(Some(key))?;
+        set_unlocked_key(Some(key), config.lock_timeout_minutes as u64 * 60)?;
         return Ok(security_status(&config));
     }
 
@@ -526,7 +629,7 @@ fn set_security_encryption(
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid security salt: {}", e))?;
-    let key = derive_key(&current_password, &salt);
+    let key = derive_key(&current_password, &salt, config.pbkdf2_iterations);
     let verifier = key_verifier(&key);
     let expected_verifier = B64
         .decode(&config.verifier)
@@ -544,7 +647,7 @@ fn set_security_encryption(
         let _ = rollback_migration(&plans, plans.len());
         return Err(err);
     }
-    set_unlocked_key(None)?;
+    set_unlocked_key(None, 0)?;
     Ok(security_status(&config))
 }
 
@@ -568,7 +671,7 @@ fn change_security_password(
     let old_salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid security salt: {}", e))?;
-    let old_key = derive_key(&current_password, &old_salt);
+    let old_key = derive_key(&current_password, &old_salt, config.pbkdf2_iterations);
     let old_verifier = key_verifier(&old_key);
     let expected_verifier = B64
         .decode(&config.verifier)
@@ -579,7 +682,7 @@ fn change_security_password(
 
     let mut new_salt = [0u8; SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut new_salt);
-    let new_key = derive_key(&new_password, &new_salt);
+    let new_key = derive_key(&new_password, &new_salt, PBKDF2_ITERATIONS);
     let new_verifier = key_verifier(&new_key);
 
     let plans = build_rekey_plans(&app, &old_key, &new_key)?;
@@ -587,12 +690,33 @@ fn change_security_password(
 
     config.salt = B64.encode(new_salt);
     config.verifier = B64.encode(new_verifier);
+    config.pbkdf2_iterations = PBKDF2_ITERATIONS;
     if let Err(err) = save_security_config(&app, &config) {
         let _ = rollback_migration(&plans, plans.len());
         return Err(err);
     }
-    set_unlocked_key(Some(new_key))?;
+    set_unlocked_key(Some(new_key), config.lock_timeout_minutes as u64 * 60)?;
 
+    Ok(security_status(&config))
+}
+
+#[tauri::command]
+fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+    let config = load_security_config(&app)?;
+    if config.encryption_enabled {
+        set_unlocked_key(None, 0)?;
+    }
+    Ok(security_status(&config))
+}
+
+#[tauri::command]
+fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Result<SecurityStatus, String> {
+    let mut config = load_security_config(&app)?;
+    config.lock_timeout_minutes = minutes;
+    save_security_config(&app, &config)?;
+    if let Ok(mut guard) = key_state().lock() {
+        guard.lock_timeout_secs = minutes as u64 * 60;
+    }
     Ok(security_status(&config))
 }
 
@@ -1167,8 +1291,12 @@ fn open_external_url(url: String) -> Result<(), String> {
 fn main() {
     #[cfg(target_os = "linux")]
     {
-        std::env::set_var("GDK_BACKEND", "x11");
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        if std::env::var("GDK_BACKEND").is_err() {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
+        if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        }
     }
 
     let builder = tauri::Builder::default()
@@ -1213,6 +1341,8 @@ fn main() {
             unlock_security,
             set_security_encryption,
             change_security_password,
+            lock_security,
+            set_lock_timeout,
             get_platform_info,
             updater_supported,
             updater_support_info,

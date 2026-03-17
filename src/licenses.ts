@@ -18,7 +18,7 @@ export function closeLicensesModal() {
 
 async function renderLicenses() {
   const container = $("licenses-list");
-  container.textContent = "Loading\u2026";
+  container.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
 
   try {
     const resp = await fetch("/licenses.json");
