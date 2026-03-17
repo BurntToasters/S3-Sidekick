@@ -317,6 +317,11 @@ function syncModalLayerState(): void {
   const overlay = getActiveModalOverlay();
   const hasActiveOverlay = !!overlay;
 
+  document.body.classList.toggle("modal-open", hasActiveOverlay);
+  if (hasActiveOverlay) {
+    hideContextMenu();
+  }
+
   if (hasActiveOverlay && !modalLayerActive) {
     focusBeforeModal =
       document.activeElement instanceof HTMLElement

@@ -196,7 +196,13 @@ body.platform-linux {
   cursor: col-resize;
   flex-shrink: 0;
   position: relative;
-  background: transparent;
+  background: linear-gradient(
+    to right,
+    transparent 2px,
+    rgba(127, 127, 127, 0.2) 2px,
+    rgba(127, 127, 127, 0.2) 6px,
+    transparent 6px
+  );
 }
 
 .sidebar-resizer::after {
@@ -206,13 +212,21 @@ body.platform-linux {
   top: 0;
   bottom: 0;
   width: 2px;
-  background: transparent;
-  transition: background 0.12s ease;
+  background: var(--border);
+  opacity: 0.9;
+  transition:
+    background 0.12s ease,
+    opacity 0.12s ease,
+    width 0.12s ease,
+    left 0.12s ease;
 }
 
 .sidebar-resizer:hover::after,
 .sidebar-resizer.sidebar-resizer--active::after {
   background: var(--accent);
+  opacity: 1;
+  width: 3px;
+  left: 2px;
 }
 
 .sidebar-resizer:focus-visible {
@@ -662,7 +676,7 @@ input[type="checkbox"]:indeterminate::after {
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: 260;
 }
 
 .modal-overlay.active {
@@ -709,6 +723,19 @@ input[type="checkbox"]:indeterminate::after {
   gap: 16px;
 }
 
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#updater-section,
+#updater-unsupported {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .modal__footer {
   display: flex;
   justify-content: flex-end;
@@ -721,7 +748,8 @@ input[type="checkbox"]:indeterminate::after {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
+  padding: 2px 0;
 }
 
 .setting-item--stacked {
@@ -729,8 +757,18 @@ input[type="checkbox"]:indeterminate::after {
   flex-direction: column;
 }
 
+.settings-panel .setting-item > label:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-panel .setting-item > :last-child {
+  margin-left: auto;
+}
+
 .setting-item label {
   font-size: 13px;
+  line-height: 1.35;
 }
 
 .security-controls {
@@ -759,7 +797,8 @@ input[type="checkbox"]:indeterminate::after {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
-  padding-top: 8px;
+  margin-top: 4px;
+  padding-top: 12px;
   border-top: 1px solid var(--border);
 }
 
@@ -865,7 +904,23 @@ input[type="checkbox"]:indeterminate::after {
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: 200;
+  z-index: 320;
+}
+
+body.modal-open {
+  overflow: hidden;
+}
+
+body.modal-open .app,
+body.modal-open .transfer-popup,
+body.modal-open .activity-popup,
+body.modal-open .context-menu {
+  pointer-events: none;
+}
+
+body.modal-open .modal-overlay.active,
+body.modal-open .dialog-overlay.active {
+  pointer-events: auto;
 }
 
 .dialog-overlay.active {
