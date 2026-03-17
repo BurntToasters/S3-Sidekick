@@ -10,6 +10,7 @@ interface PromptOptions {
   inputType?: "text" | "password";
   inputPlaceholder?: string;
   inputDefault?: string;
+  validate?: (value: string) => Promise<boolean>;
 }
 
 interface AlertOptions {
@@ -27,6 +28,7 @@ interface DialogConfig {
   inputType: "text" | "password";
   inputPlaceholder: string;
   inputDefault: string;
+  validate?: (value: string) => Promise<boolean>;
 }
 
 const queue: (() => void)[] = [];
@@ -35,12 +37,28 @@ let active = false;
 function els() {
   return {
     overlay: document.getElementById("dialog-overlay")!,
+    box: document.querySelector(".dialog-box") as HTMLElement,
     title: document.getElementById("dialog-title")!,
     message: document.getElementById("dialog-message")!,
+    inputWrapper: document.querySelector(".dialog-input-wrapper") as HTMLElement,
+    inputIcon: document.getElementById("dialog-input-icon") as HTMLElement,
     input: document.getElementById("dialog-input") as HTMLInputElement,
     cancel: document.getElementById("dialog-cancel") as HTMLButtonElement,
     ok: document.getElementById("dialog-ok") as HTMLButtonElement,
   };
+}
+
+function shakeDialogBox(box: HTMLElement) {
+  box.animate([
+    { transform: "translateX(0)" },
+    { transform: "translateX(-8px)" },
+    { transform: "translateX(7px)" },
+    { transform: "translateX(-6px)" },
+    { transform: "translateX(5px)" },
+    { transform: "translateX(-3px)" },
+    { transform: "translateX(2px)" },
+    { transform: "translateX(0)" },
+  ], { duration: 400, easing: "ease" });
 }
 
 function present(config: DialogConfig): Promise<string | boolean | null> {
@@ -50,10 +68,13 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.title.textContent = config.title;
     el.message.textContent = config.message;
 
-    el.input.style.display = config.showInput ? "" : "none";
+    el.inputWrapper.style.display = config.showInput ? "" : "none";
     el.input.type = config.inputType;
     el.input.placeholder = config.inputPlaceholder;
     el.input.value = config.inputDefault;
+
+    const isPassword = config.inputType === "password";
+    el.inputWrapper.classList.toggle("dialog-input-wrapper--icon", isPassword);
 
     el.cancel.style.display = config.showCancel ? "" : "none";
     el.cancel.textContent = config.cancelLabel;
@@ -88,7 +109,18 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       resolve(config.showInput ? null : false);
     }
 
-    function onOk() {
+    async function onOk() {
+      if (config.validate) {
+        el.ok.disabled = true;
+        const ok = await config.validate(el.input.value);
+        el.ok.disabled = false;
+        if (!ok) {
+          shakeDialogBox(el.box);
+          el.input.value = "";
+          el.input.focus();
+          return;
+        }
+      }
       cleanup();
       resolve(config.showInput ? el.input.value : true);
     }
@@ -170,6 +202,7 @@ export function showPrompt(
         inputType: options?.inputType ?? "text",
         inputPlaceholder: options?.inputPlaceholder ?? "",
         inputDefault: options?.inputDefault ?? "",
+        validate: options?.validate,
       }) as Promise<string | null>,
   );
 }

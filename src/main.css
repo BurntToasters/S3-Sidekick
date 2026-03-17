@@ -950,10 +950,35 @@ body.modal-open .dialog-overlay.active {
   white-space: pre-line;
 }
 
-.dialog-box__input {
-  width: 100%;
+.dialog-input-wrapper {
+  position: relative;
   margin-bottom: 20px;
 }
+
+.dialog-input-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  display: none;
+}
+
+.dialog-input-wrapper--icon .dialog-input-icon {
+  display: block;
+}
+
+.dialog-box__input {
+  width: 100%;
+  margin-bottom: 0;
+}
+
+.dialog-input-wrapper--icon .dialog-box__input {
+  padding-left: 34px;
+}
+
 
 .dialog-box__actions {
   display: flex;
