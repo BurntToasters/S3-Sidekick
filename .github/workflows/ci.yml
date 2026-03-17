@@ -39,7 +39,11 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri -> target
+          cache-targets: false
+          prefix-key: v2-${{ matrix.os }}
+          key: ${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
