@@ -140,25 +140,24 @@ export async function ensureSecurityReady(): Promise<boolean> {
   if (!status.encryption_enabled) return true;
   if (status.unlocked) return true;
 
-  while (true) {
-    const password = await showPrompt(
-      "Unlock",
-      "Enter your password to unlock encrypted credentials:",
-      { inputType: "password", inputPlaceholder: "Password" },
-    );
-    if (password === null) return false;
-    if (!password) {
-      await showAlert("Error", "Password is required.");
-      continue;
-    }
-
-    try {
-      status = await unlockSecurity(password);
-      if (status.unlocked) return true;
-    } catch (err) {
-      await showAlert("Error", `Failed to unlock credentials: ${err}`);
-    }
-  }
+  const password = await showPrompt(
+    "Unlock",
+    "Enter your password to unlock encrypted credentials:",
+    {
+      inputType: "password",
+      inputPlaceholder: "Password",
+      validate: async (value) => {
+        if (!value) return false;
+        try {
+          status = await unlockSecurity(value);
+          return status.unlocked;
+        } catch {
+          return false;
+        }
+      },
+    },
+  );
+  return password !== null && status.unlocked;
 }
 
 export async function refreshSecuritySettingsUI(): Promise<void> {
@@ -255,14 +254,21 @@ export async function handleSecurityToggle(
       const password = await showPrompt(
         "Unlock",
         "Enter your password to unlock encrypted credentials:",
-        { inputType: "password", inputPlaceholder: "Password" },
+        {
+          inputType: "password",
+          inputPlaceholder: "Password",
+          validate: async (value) => {
+            if (!value) return false;
+            try {
+              await unlockSecurity(value);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+        },
       );
       if (password === null) return;
-      if (!password) {
-        await showAlert("Error", "Password is required.");
-        return;
-      }
-      await unlockSecurity(password);
       setStatus("Credentials unlocked.");
     } else if (status.encryption_enabled) {
       const shouldDisable = await showConfirm(
