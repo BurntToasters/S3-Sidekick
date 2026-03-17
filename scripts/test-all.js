@@ -17,6 +17,8 @@ const colors = {
   green: "\x1b[32m",
   red: "\x1b[31m",
 };
+const defaultTimeoutMs = 300_000;
+const rustTimeoutMs = process.platform === "win32" ? 1_200_000 : 600_000;
 
 function createInitialResults() {
   return {
@@ -59,15 +61,16 @@ function parseTest(output, results) {
   }
 }
 
-function runCommand(name, command, args, parser, results) {
+function runCommand(name, command, args, parser, results, options = {}) {
   console.log(`${colors.blue}${colors.bold}Running ${name}...${colors.reset}`);
   const useShell = process.platform === "win32" && /\.cmd$/i.test(command);
+  const timeout = options.timeout ?? defaultTimeoutMs;
   const run = spawnSync(command, args, {
     encoding: "utf8",
     stdio: "pipe",
     shell: useShell,
     windowsHide: true,
-    timeout: 300_000,
+    timeout,
   });
 
   const output = `${run.stdout || ""}${run.stderr || ""}`;
@@ -173,6 +176,7 @@ function main() {
     ["check", "--manifest-path", "src-tauri/Cargo.toml"],
     null,
     results,
+    { timeout: rustTimeoutMs },
   );
 
   return printSummary(results);
