@@ -373,19 +373,17 @@ export function closeInfoPanel(): void {
   currentKey = "";
 }
 
-let statusTimeout: ReturnType<typeof setTimeout> | undefined;
-
 function setStatus(text: string, autoResetMs?: number): void {
-  if (statusTimeout !== undefined) {
-    clearTimeout(statusTimeout);
-    statusTimeout = undefined;
+  if (state.statusTimeout !== undefined) {
+    clearTimeout(state.statusTimeout);
+    state.statusTimeout = undefined;
   }
   const el = document.getElementById("status");
   if (el) el.textContent = text;
   if (autoResetMs && autoResetMs > 0) {
-    statusTimeout = setTimeout(() => {
+    state.statusTimeout = setTimeout(() => {
       if (el) el.textContent = "";
-      statusTimeout = undefined;
+      state.statusTimeout = undefined;
     }, autoResetMs);
   }
 }

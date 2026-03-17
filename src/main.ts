@@ -186,6 +186,24 @@ function applyPlatformClass(): void {
   }
 }
 
+function updateShortcutChips(): void {
+  const isMac = state.platformName === "macos";
+  const chips = document.querySelectorAll<HTMLElement>(".shortcut-chip");
+  for (const chip of chips) {
+    const text = chip.textContent ?? "";
+    if (isMac) {
+      chip.textContent = text
+        .replace(/^Ctrl\+/i, "\u2318")
+        .replace(/^\u2303/, "\u2318");
+    } else {
+      chip.textContent = text
+        .replace(/^\u2318/, "Ctrl+")
+        .replace(/^\u2303/, "Ctrl+")
+        .replace(/\u21e7/, "Shift+");
+    }
+  }
+}
+
 function isMobileSidebarMode(): boolean {
   return window.matchMedia("(max-width: 900px)").matches;
 }
@@ -231,12 +249,13 @@ function splitNameExt(fileName: string): { stem: string; ext: string } {
   return { stem: fileName.slice(0, idx), ext: fileName.slice(idx) };
 }
 
-function pathSeparator(base: string): string {
-  return base.includes("\\") ? "\\" : "/";
+function pathSeparator(): string {
+  if (state.platformName === "windows") return "\\";
+  return "/";
 }
 
 function joinPath(base: string, leaf: string): string {
-  const sep = pathSeparator(base);
+  const sep = pathSeparator();
   const trimmed =
     base.endsWith("\\") || base.endsWith("/") ? base.slice(0, -1) : base;
   return `${trimmed}${sep}${leaf}`;
@@ -452,7 +471,7 @@ function getConnectionInputs() {
   ).value.trim();
   const secretKey = (
     document.getElementById("conn-secret-key") as HTMLInputElement
-  ).value;
+  ).value.trim();
   return { endpoint, region, accessKey, secretKey };
 }
 
@@ -533,14 +552,18 @@ async function handleBookmarkSave(): Promise<void> {
   }
 
   try {
-    await addBookmark({
+    const added = await addBookmark({
       name,
       endpoint,
       region,
       access_key: accessKey,
       secret_key: secretKey,
     });
-    setStatus(`Bookmarked "${name}".`, 5000);
+    if (added) {
+      setStatus(`Bookmarked "${name}".`, 5000);
+    } else {
+      setStatus(`Bookmark for this endpoint already exists.`, 5000);
+    }
   } catch (err) {
     setStatus(`Failed to save bookmark: ${err}`);
   }
@@ -552,7 +575,18 @@ function getSelectedFileKeys(): string[] {
 
 async function handleDelete(): Promise<void> {
   const keys = getSelectedFileKeys();
-  if (keys.length === 0) return;
+  if (keys.length === 0) {
+    const hasFolders = Array.from(state.selectedKeys).some((k) =>
+      k.startsWith("prefix:"),
+    );
+    if (hasFolders) {
+      setStatus(
+        "Folder deletion is not supported. Select individual files to delete.",
+        5000,
+      );
+    }
+    return;
+  }
 
   const msg =
     keys.length === 1
@@ -1312,14 +1346,22 @@ function wireEvents(): void {
     }, FILTER_INPUT_DEBOUNCE_MS);
   });
 
-  document
-    .getElementById("btn-load-more")!
-    .addEventListener("click", async () => {
-      setStatus("Loading more...");
+  const loadMoreBtn = document.getElementById(
+    "btn-load-more",
+  ) as HTMLButtonElement;
+  loadMoreBtn.addEventListener("click", async () => {
+    loadMoreBtn.disabled = true;
+    loadMoreBtn.textContent = "Loading\u2026";
+    setStatus("Loading more...");
+    try {
       await loadMoreObjects();
       renderObjectTable();
       setStatus("");
-    });
+    } finally {
+      loadMoreBtn.disabled = false;
+      loadMoreBtn.textContent = "Load more";
+    }
+  });
 
   document.querySelectorAll<HTMLElement>(".sort-trigger").forEach((trigger) => {
     trigger.addEventListener("click", () => {
@@ -1389,7 +1431,7 @@ function wireEvents(): void {
     if (!row) return;
     if ((e.target as HTMLElement).closest(".row-check")) return;
 
-    if (e.key === " " || e.key === "Spacebar") {
+    if (e.key === " ") {
       e.preventDefault();
       const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
       if (state.selectedKeys.has(key)) {
@@ -1422,10 +1464,13 @@ function wireEvents(): void {
   });
 
   dom.objectTbody.addEventListener("dblclick", (e) => {
-    const row = (e.target as HTMLElement).closest<HTMLElement>(
-      ".object-row--file",
-    );
+    const row = (e.target as HTMLElement).closest<HTMLElement>(".object-row");
     if (!row) return;
+    if (row.classList.contains("object-row--folder")) {
+      const prefix = row.dataset.prefix;
+      if (prefix !== undefined) void navigateToFolder(prefix);
+      return;
+    }
     const key = row.dataset.key;
     if (!key) return;
     if (canPreview(basename(key))) {
@@ -1603,7 +1648,7 @@ function wireEvents(): void {
         updateSelectionUI();
       }
 
-      if (key === "u") {
+      if (key === "u" && !inInput) {
         e.preventDefault();
         if (e.shiftKey) {
           handleUploadFolderButton();
@@ -1664,6 +1709,7 @@ async function init(): Promise<void> {
 
   state.platformName = await invoke<string>("get_platform_info");
   applyPlatformClass();
+  updateShortcutChips();
   const version = await getVersion();
   dom.versionLabel.textContent = `v${version}`;
 

@@ -93,9 +93,15 @@ export function showContextMenu(
       hideContextMenu();
     }
   };
+  const pendingDismiss = dismissHandler;
+  const pendingKey = keyHandler;
   setTimeout(() => {
-    document.addEventListener("mousedown", dismissHandler!);
-    document.addEventListener("keydown", keyHandler!);
+    if (dismissHandler === pendingDismiss && pendingDismiss) {
+      document.addEventListener("mousedown", pendingDismiss);
+    }
+    if (keyHandler === pendingKey && pendingKey) {
+      document.addEventListener("keydown", pendingKey);
+    }
   }, 0);
 }
 

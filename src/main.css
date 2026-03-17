@@ -395,7 +395,7 @@ body.platform-linux {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: 500px;
+  max-width: min(500px, 50vw);
   overflow: hidden;
 }
 
@@ -1016,8 +1016,8 @@ input[type="checkbox"]:indeterminate::after {
 }
 
 .twemoji-icon--sort {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   vertical-align: middle;
 }
 
@@ -1547,7 +1547,7 @@ input[type="checkbox"]:indeterminate::after {
 .activity-popup {
   position: fixed;
   bottom: 32px;
-  right: 452px;
+  right: calc(min(420px, 100vw - 24px) + 32px);
   width: min(420px, calc(100vw - 24px));
   max-height: 320px;
   background: var(--bg-surface);
