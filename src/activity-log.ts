@@ -11,6 +11,7 @@ interface ActivityEntry {
 const MAX_ENTRIES = 200;
 let entries: ActivityEntry[] = [];
 let visible = false;
+let collapsed = false;
 
 export function logActivity(
   message: string,
@@ -30,7 +31,17 @@ export function toggleActivityLog(): void {
   const nextVisible = overlay.hidden;
   overlay.hidden = !nextVisible;
   visible = nextVisible;
-  if (visible) renderActivityLog();
+  if (visible) {
+    syncCollapseState();
+    renderActivityLog();
+  }
+}
+
+export function toggleActivityCollapsed(): void {
+  const overlay = document.getElementById("activity-overlay");
+  if (!overlay || overlay.hidden) return;
+  collapsed = !collapsed;
+  syncCollapseState();
 }
 
 export function hideActivityLog(): void {
@@ -77,6 +88,29 @@ function updateBadge(): void {
   if (!badge) return;
   badge.textContent = entries.length > 0 ? String(entries.length) : "";
   badge.style.display = entries.length > 0 ? "" : "none";
+}
+
+function syncCollapseState(): void {
+  const overlay = document.getElementById("activity-overlay");
+  if (!overlay) return;
+  overlay.classList.toggle("activity-popup--collapsed", collapsed);
+
+  const collapseButton = document.getElementById(
+    "activity-collapse",
+  ) as HTMLButtonElement | null;
+  if (!collapseButton) return;
+
+  if (collapsed) {
+    collapseButton.innerHTML = "&#9656;";
+    collapseButton.title = "Expand activity";
+    collapseButton.setAttribute("aria-label", "Expand activity");
+    collapseButton.setAttribute("aria-expanded", "false");
+  } else {
+    collapseButton.innerHTML = "&#9660;";
+    collapseButton.title = "Collapse activity";
+    collapseButton.setAttribute("aria-label", "Collapse activity");
+    collapseButton.setAttribute("aria-expanded", "true");
+  }
 }
 
 function formatTime(d: Date): string {

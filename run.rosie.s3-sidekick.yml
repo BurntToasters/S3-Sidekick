@@ -14,7 +14,9 @@ finish-args:
   - --socket=wayland
   - --share=network
   - --device=dri
-  - --filesystem=host
+  - --filesystem=xdg-download:rw
+  - --filesystem=xdg-documents:rw
+  - --filesystem=xdg-desktop:rw
 
 modules:
   - name: s3-sidekick

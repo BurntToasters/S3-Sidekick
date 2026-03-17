@@ -110,6 +110,7 @@ jobs:
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
       - run: npm ci
+      - run: npm run release:prepare
       - run: npm run sync-version
       - run: npm run licenses
 
@@ -176,6 +177,7 @@ jobs:
             org.freedesktop.Sdk.Extension.rust-stable//24.08
 
       - run: npm ci
+      - run: npm run release:prepare
       - run: npm run sync-version
       - run: npm run flatpak:clean
       - run: npm run flatpak:bundle

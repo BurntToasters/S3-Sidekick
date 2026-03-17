@@ -65,6 +65,7 @@ import { canPreview, openPreview, closePreview } from "./preview.ts";
 import {
   logActivity,
   toggleActivityLog,
+  toggleActivityCollapsed,
   hideActivityLog,
   clearActivityLog,
 } from "./activity-log.ts";
@@ -104,6 +105,14 @@ interface TransfersExtensionAPI {
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 420;
 const SIDEBAR_STORAGE_KEY = "s3-sidekick.sidebar.width";
+const FILTER_INPUT_DEBOUNCE_MS = 120;
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+let filterInputDebounce: ReturnType<typeof setTimeout> | undefined;
+let modalLayerObserver: MutationObserver | null = null;
+let modalLayerActive = false;
+let focusBeforeModal: HTMLElement | null = null;
 
 function setStatus(text: string, autoResetMs?: number): void {
   if (state.statusTimeout !== undefined) {
@@ -235,23 +244,205 @@ function hasAccelModifier(e: KeyboardEvent): boolean {
   return e.ctrlKey;
 }
 
-function uniqueDownloadEntries(
+function isEditableElement(el: Element | null): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  const tag = el.tagName;
+  return (
+    el.isContentEditable ||
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT"
+  );
+}
+
+function getActiveModalOverlay(): HTMLElement | null {
+  const overlays = document.querySelectorAll<HTMLElement>(
+    ".modal-overlay.active, .dialog-overlay.active",
+  );
+  return overlays.length > 0 ? overlays[overlays.length - 1] : null;
+}
+
+function isModalLayerActive(): boolean {
+  return getActiveModalOverlay() !== null;
+}
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  const nodes = Array.from(
+    container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+  );
+  return nodes.filter(
+    (node) =>
+      !node.hasAttribute("disabled") &&
+      !node.hasAttribute("aria-hidden") &&
+      (node.offsetWidth > 0 ||
+        node.offsetHeight > 0 ||
+        node.getClientRects().length > 0),
+  );
+}
+
+function focusFirstInOverlay(overlay: HTMLElement): void {
+  const focusable = getFocusableElements(overlay);
+  const target = focusable[0] ?? overlay;
+  if (target === overlay && target.tabIndex < 0) {
+    target.tabIndex = -1;
+  }
+  target.focus();
+}
+
+function syncModalLayerState(): void {
+  const overlay = getActiveModalOverlay();
+  const hasActiveOverlay = !!overlay;
+
+  if (hasActiveOverlay && !modalLayerActive) {
+    focusBeforeModal =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+  } else if (!hasActiveOverlay && modalLayerActive) {
+    const restore = focusBeforeModal;
+    focusBeforeModal = null;
+    if (restore && document.contains(restore)) {
+      restore.focus();
+    }
+  }
+  modalLayerActive = hasActiveOverlay;
+
+  const appRoot = document.getElementById("app") as HTMLElement | null;
+  if (appRoot) {
+    if (hasActiveOverlay) {
+      appRoot.setAttribute("aria-hidden", "true");
+    } else {
+      appRoot.removeAttribute("aria-hidden");
+    }
+    if ("inert" in appRoot) {
+      (appRoot as HTMLElement & { inert: boolean }).inert = hasActiveOverlay;
+    }
+  }
+
+  if (overlay) {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !overlay.contains(active)) {
+      focusFirstInOverlay(overlay);
+    }
+  }
+}
+
+function trapFocusInModalLayer(e: KeyboardEvent): void {
+  if (e.key !== "Tab") return;
+  const overlay = getActiveModalOverlay();
+  if (!overlay) return;
+
+  const focusable = getFocusableElements(overlay);
+  if (focusable.length === 0) {
+    e.preventDefault();
+    if (overlay.tabIndex < 0) overlay.tabIndex = -1;
+    overlay.focus();
+    return;
+  }
+
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+
+  if (!active || !overlay.contains(active)) {
+    e.preventDefault();
+    first.focus();
+    return;
+  }
+
+  if (e.shiftKey && active === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+function handleTabListArrowKey(
+  e: KeyboardEvent,
+  tabs: HTMLElement[],
+  activate: (tab: HTMLElement) => void,
+): void {
+  if (tabs.length === 0) return;
+  if (
+    e.key !== "ArrowRight" &&
+    e.key !== "ArrowLeft" &&
+    e.key !== "ArrowDown" &&
+    e.key !== "ArrowUp" &&
+    e.key !== "Home" &&
+    e.key !== "End"
+  ) {
+    return;
+  }
+
+  const focused = (e.target as HTMLElement).closest<HTMLElement>(
+    '[role="tab"]',
+  );
+  if (!focused) return;
+  const index = tabs.indexOf(focused);
+  if (index < 0) return;
+
+  e.preventDefault();
+
+  let nextIndex = index;
+  if (e.key === "Home") {
+    nextIndex = 0;
+  } else if (e.key === "End") {
+    nextIndex = tabs.length - 1;
+  } else if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+    nextIndex = (index + 1) % tabs.length;
+  } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+    nextIndex = (index - 1 + tabs.length) % tabs.length;
+  }
+
+  const nextTab = tabs[nextIndex];
+  activate(nextTab);
+  nextTab.focus();
+}
+
+async function uniqueDownloadEntries(
   keys: string[],
   destinationDir: string,
-): DownloadQueueEntry[] {
+): Promise<DownloadQueueEntry[]> {
   const taken = new Set<string>();
   const entries: DownloadQueueEntry[] = [];
   const caseInsensitive =
     state.platformName === "windows" || state.platformName === "macos";
   const dedupeKey = (name: string) =>
     caseInsensitive ? name.toLowerCase() : name;
+  const pathDedupeKey = (path: string) =>
+    caseInsensitive ? path.toLowerCase() : path;
+  const existingDestinations = new Set<string>();
+  const missingDestinations = new Set<string>();
+
+  async function destinationExists(candidateName: string): Promise<boolean> {
+    const destination = joinPath(destinationDir, candidateName);
+    const key = pathDedupeKey(destination);
+    if (existingDestinations.has(key)) return true;
+    if (missingDestinations.has(key)) return false;
+
+    const exists = await invoke<boolean>("path_exists", { path: destination });
+    if (exists) {
+      existingDestinations.add(key);
+    } else {
+      missingDestinations.add(key);
+    }
+    return exists;
+  }
 
   for (const key of keys) {
     const base = basename(key);
     const { stem, ext } = splitNameExt(base);
     let candidate = base;
     let n = 2;
-    while (taken.has(dedupeKey(candidate))) {
+    while (
+      taken.has(dedupeKey(candidate)) ||
+      (await destinationExists(candidate))
+    ) {
       candidate = `${stem} (${n})${ext}`;
       n += 1;
     }
@@ -432,7 +623,7 @@ async function handleDownload(): Promise<void> {
       directory: true,
     });
     if (!selected || Array.isArray(selected)) return;
-    entries.push(...uniqueDownloadEntries(keys, selected));
+    entries.push(...(await uniqueDownloadEntries(keys, selected)));
   }
 
   if (entries.length === 0) return;
@@ -700,16 +891,16 @@ async function queueDroppedPaths(
 function handleBucketContextMenu(e: MouseEvent): void {
   if (!state.connected) return;
 
-  const bucketItem = (e.target as HTMLElement).closest<HTMLElement>(
-    ".list__item",
+  const bucketButton = (e.target as HTMLElement).closest<HTMLElement>(
+    ".list__item-btn",
   );
   const inBucketPanel = (e.target as HTMLElement).closest("#bucket-panel");
   if (!inBucketPanel) return;
 
   e.preventDefault();
 
-  if (bucketItem?.dataset.bucket) {
-    const bucket = bucketItem.dataset.bucket;
+  if (bucketButton?.dataset.bucket) {
+    const bucket = bucketButton.dataset.bucket;
     const menuItems: MenuItem[] = [
       { label: "Open Bucket", action: "open-bucket" },
       { label: "Copy Bucket Name", action: "copy-bucket-name" },
@@ -953,9 +1144,20 @@ function wireEvents(): void {
   document
     .getElementById("settings-btn")!
     .addEventListener("click", openSettingsModal);
-  document.querySelector(".settings-tabs")!.addEventListener("click", (e) => {
+  const settingsTabs = document.querySelector<HTMLElement>(".settings-tabs");
+  settingsTabs!.addEventListener("click", (e) => {
     const tab = (e.target as HTMLElement).closest<HTMLElement>(".settings-tab");
     if (tab?.dataset.settingsTab) switchSettingsTab(tab.dataset.settingsTab);
+  });
+  settingsTabs!.addEventListener("keydown", (e) => {
+    const tabs = Array.from(
+      document.querySelectorAll<HTMLElement>(".settings-tab"),
+    );
+    handleTabListArrowKey(e as KeyboardEvent, tabs, (tab) => {
+      if (tab.dataset.settingsTab) {
+        switchSettingsTab(tab.dataset.settingsTab);
+      }
+    });
   });
   document
     .getElementById("settings-close")!
@@ -1009,9 +1211,20 @@ function wireEvents(): void {
     if (e.target === e.currentTarget) closeInfoPanel();
   });
 
-  document.querySelector(".info-tabs")!.addEventListener("click", (e) => {
+  const infoTabs = document.querySelector<HTMLElement>(".info-tabs");
+  infoTabs!.addEventListener("click", (e) => {
     const tab = (e.target as HTMLElement).closest<HTMLElement>(".info-tab");
     if (tab?.dataset.tab) switchTab(tab.dataset.tab);
+  });
+  infoTabs!.addEventListener("keydown", (e) => {
+    const tabs = Array.from(
+      document.querySelectorAll<HTMLElement>(".info-tab"),
+    );
+    handleTabListArrowKey(e as KeyboardEvent, tabs, (tab) => {
+      if (tab.dataset.tab) {
+        switchTab(tab.dataset.tab);
+      }
+    });
   });
 
   document
@@ -1031,6 +1244,15 @@ function wireEvents(): void {
     logActivity(`Transfer queue events unavailable: ${String(err)}`, "warning");
   });
   window.addEventListener("beforeunload", () => {
+    if (filterInputDebounce !== undefined) {
+      clearTimeout(filterInputDebounce);
+      filterInputDebounce = undefined;
+    }
+    if (modalLayerObserver) {
+      modalLayerObserver.disconnect();
+      modalLayerObserver = null;
+    }
+    document.removeEventListener("keydown", trapFocusInModalLayer, true);
     void disposeTransferQueueUI();
   });
 
@@ -1044,6 +1266,9 @@ function wireEvents(): void {
   document
     .getElementById("activity-toggle")!
     .addEventListener("click", toggleActivityLog);
+  document
+    .getElementById("activity-collapse")!
+    .addEventListener("click", toggleActivityCollapsed);
   document
     .getElementById("activity-close")!
     .addEventListener("click", hideActivityLog);
@@ -1088,7 +1313,13 @@ function wireEvents(): void {
   ) as HTMLInputElement;
   filterInput.addEventListener("input", () => {
     state.filterText = filterInput.value;
-    renderObjectTable();
+    if (filterInputDebounce !== undefined) {
+      clearTimeout(filterInputDebounce);
+    }
+    filterInputDebounce = setTimeout(() => {
+      renderObjectTable();
+      filterInputDebounce = undefined;
+    }, FILTER_INPUT_DEBOUNCE_MS);
   });
 
   document
@@ -1100,17 +1331,20 @@ function wireEvents(): void {
       setStatus("");
     });
 
-  document.querySelectorAll<HTMLElement>(".col-sortable").forEach((th) => {
-    th.addEventListener("click", () => {
-      const col = th.dataset.sort as "name" | "size" | "modified";
+  document.querySelectorAll<HTMLElement>(".sort-trigger").forEach((trigger) => {
+    trigger.addEventListener("click", () => {
+      const th = trigger.closest<HTMLElement>(".col-sortable");
+      const col = th?.dataset.sort as "name" | "size" | "modified" | undefined;
       if (col) toggleSort(col);
     });
   });
 
   dom.bucketList.addEventListener("click", (e) => {
-    const item = (e.target as HTMLElement).closest<HTMLElement>(".list__item");
-    if (!item) return;
-    const bucket = item.dataset.bucket;
+    const button = (e.target as HTMLElement).closest<HTMLElement>(
+      ".list__item-btn",
+    );
+    if (!button) return;
+    const bucket = button.dataset.bucket;
     if (bucket) {
       void selectBucket(bucket)
         .then(() => closeSidebarOnMobile())
@@ -1129,11 +1363,11 @@ function wireEvents(): void {
     const target = e.target as HTMLElement;
     const row = target.closest<HTMLElement>(".object-row");
     if (!row) return;
+    if (target.closest(".row-check")) return;
 
     if (
       row.classList.contains("object-row--folder") &&
-      !target.closest(".col-check") &&
-      !target.classList.contains("row-check")
+      !target.closest(".col-check")
     ) {
       const prefix = row.dataset.prefix;
       if (prefix !== undefined) navigateToFolder(prefix);
@@ -1142,6 +1376,59 @@ function wireEvents(): void {
 
     const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
     handleRowClick(key, e);
+  });
+
+  dom.objectTbody.addEventListener("change", (e) => {
+    const input = (e.target as HTMLElement).closest<HTMLInputElement>(
+      ".row-check",
+    );
+    if (!input) return;
+    const row = input.closest<HTMLElement>(".object-row");
+    if (!row) return;
+    const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
+    if (input.checked) {
+      state.selectedKeys.add(key);
+    } else {
+      state.selectedKeys.delete(key);
+    }
+    updateSelectionUI();
+  });
+
+  dom.objectTbody.addEventListener("keydown", (e) => {
+    const row = (e.target as HTMLElement).closest<HTMLElement>(".object-row");
+    if (!row) return;
+    if ((e.target as HTMLElement).closest(".row-check")) return;
+
+    if (e.key === " " || e.key === "Spacebar") {
+      e.preventDefault();
+      const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
+      if (state.selectedKeys.has(key)) {
+        state.selectedKeys.delete(key);
+      } else {
+        state.selectedKeys.add(key);
+      }
+      updateSelectionUI();
+      return;
+    }
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (row.classList.contains("object-row--folder")) {
+        const prefix = row.dataset.prefix;
+        if (prefix !== undefined) {
+          void navigateToFolder(prefix);
+        }
+        return;
+      }
+
+      const key = row.dataset.key;
+      if (!key) return;
+      if (canPreview(basename(key))) {
+        void openPreview(key);
+      } else {
+        void openInfoPanel([key]);
+      }
+    }
   });
 
   dom.objectTbody.addEventListener("dblclick", (e) => {
@@ -1221,6 +1508,22 @@ function wireEvents(): void {
 
   wireLayoutControls();
 
+  if (!modalLayerObserver) {
+    modalLayerObserver = new MutationObserver(() => {
+      syncModalLayerState();
+    });
+    document
+      .querySelectorAll<HTMLElement>(".modal-overlay, .dialog-overlay")
+      .forEach((overlay) => {
+        modalLayerObserver!.observe(overlay, {
+          attributes: true,
+          attributeFilter: ["class", "hidden"],
+        });
+      });
+    document.addEventListener("keydown", trapFocusInModalLayer, true);
+  }
+  syncModalLayerState();
+
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       hideContextMenu();
@@ -1271,36 +1574,26 @@ function wireEvents(): void {
       }
     }
 
-    if (e.key === "Delete" && state.selectedKeys.size > 0) {
-      const active = document.activeElement;
-      if (
-        active &&
-        (active.tagName === "INPUT" || active.tagName === "TEXTAREA")
-      )
-        return;
-      if (
-        document.querySelector(".modal-overlay.active, .dialog-overlay.active")
-      )
-        return;
-      handleDelete();
-    }
-
+    const inInput = isEditableElement(document.activeElement);
+    const modalOpen = isModalLayerActive();
     const accel = hasAccelModifier(e);
     const key = e.key.toLowerCase();
 
-    if (e.key === "F5" || (accel && key === "r")) {
-      e.preventDefault();
-      handleRefresh();
+    if (e.key === "Delete" && state.selectedKeys.size > 0) {
+      if (inInput || modalOpen) return;
+      handleDelete();
     }
 
-    const inInput =
-      document.activeElement?.tagName === "INPUT" ||
-      document.activeElement?.tagName === "TEXTAREA";
-    const modalOpen = !!document.querySelector(
-      ".modal-overlay.active, .dialog-overlay.active",
-    );
+    if (e.key === "F5" || (accel && key === "r")) {
+      e.preventDefault();
+      if (modalOpen) return;
+      handleRefresh();
+      return;
+    }
 
-    if (!modalOpen && !inInput) {
+    if (modalOpen) return;
+
+    if (!inInput) {
       if (e.key === "F2" && state.selectedKeys.size === 1) {
         e.preventDefault();
         handleRename();
@@ -1312,7 +1605,7 @@ function wireEvents(): void {
       }
     }
 
-    if (!modalOpen && accel) {
+    if (accel) {
       if (key === "a" && !inInput) {
         e.preventDefault();
         const allKeys = getSelectableKeys();
@@ -1359,31 +1652,46 @@ function wireEvents(): void {
 }
 
 async function init(): Promise<void> {
+  wireEvents();
+
   const securityReady = await ensureSecurityReady();
   if (!securityReady) {
     setStatus(
       "Secure storage is locked. Saved settings and credentials are unavailable.",
     );
-    return;
+    logActivity(
+      "Secure storage is locked. Saved settings and credentials are unavailable.",
+      "warning",
+    );
   }
 
-  await loadSettings();
+  try {
+    await loadSettings();
+  } catch (err) {
+    setStatus(`Failed to load settings: ${String(err)}`);
+    logActivity(`Failed to load settings: ${String(err)}`, "error");
+  }
 
   state.platformName = await invoke<string>("get_platform_info");
   applyPlatformClass();
   const version = await getVersion();
   dom.versionLabel.textContent = `v${version}`;
 
-  wireEvents();
-
-  const saved = await loadConnection();
-  if (saved) {
-    setConnectionInputs(
-      saved.endpoint,
-      saved.region,
-      saved.access_key,
-      saved.secret_key,
-    );
+  if (securityReady) {
+    try {
+      const saved = await loadConnection();
+      if (saved) {
+        setConnectionInputs(
+          saved.endpoint,
+          saved.region,
+          saved.access_key,
+          saved.secret_key,
+        );
+      }
+    } catch (err) {
+      setStatus(`Failed to load saved connection: ${String(err)}`);
+      logActivity(`Failed to load saved connection: ${String(err)}`, "error");
+    }
   }
 
   await initUpdater();

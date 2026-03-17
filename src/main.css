@@ -284,6 +284,10 @@ body.platform-linux {
 }
 
 .breadcrumb__segment {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
   cursor: pointer;
   color: var(--accent);
 }
@@ -413,7 +417,6 @@ body.platform-linux {
 
 .list__item {
   padding: 6px 14px;
-  cursor: pointer;
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
@@ -427,6 +430,23 @@ body.platform-linux {
 .list__item--active {
   background: var(--bg-active);
   font-weight: 600;
+}
+
+.list__item-btn {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+  padding: 0;
+}
+
+.list__item-btn:focus-visible,
+.sort-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .list__empty {
@@ -626,7 +646,7 @@ input[type="checkbox"]:indeterminate::after {
 .modal {
   background: var(--bg-surface);
   border-radius: var(--radius-lg);
-  width: 420px;
+  width: min(420px, 92vw);
   max-height: 80vh;
   overflow-y: auto;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
@@ -827,7 +847,7 @@ input[type="checkbox"]:indeterminate::after {
   background: var(--bg-surface);
   border-radius: var(--radius-lg);
   padding: 24px;
-  width: 360px;
+  width: min(360px, 92vw);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
   animation: modal-in 0.15s ease;
 }
@@ -858,7 +878,7 @@ input[type="checkbox"]:indeterminate::after {
 }
 
 .modal--wide {
-  width: 560px;
+  width: min(560px, 94vw);
 }
 
 .licenses-list {
@@ -938,10 +958,22 @@ input[type="checkbox"]:indeterminate::after {
 }
 
 .col-sortable {
-  cursor: pointer;
   user-select: none;
 }
 
+.sort-trigger {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.sort-trigger:hover,
 .col-sortable:hover {
   color: var(--text);
 }
@@ -1086,16 +1118,17 @@ input[type="checkbox"]:indeterminate::after {
   padding: 0 4px !important;
 }
 
-.row-check {
-  pointer-events: none;
-}
-
 .object-row--selected {
   background: var(--bg-active);
 }
 
 .object-row--selected:hover {
   background: var(--bg-active);
+}
+
+.object-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .object-panel--dragover {
@@ -1258,7 +1291,7 @@ input[type="checkbox"]:indeterminate::after {
   position: fixed;
   bottom: 32px;
   right: 16px;
-  width: 420px;
+  width: min(420px, calc(100vw - 24px));
   max-height: 320px;
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -1445,6 +1478,7 @@ input[type="checkbox"]:indeterminate::after {
 
 .activity-badge {
   background: #0ea5e9;
+  color: #05263b;
 }
 
 .statusbar__right {
@@ -1463,7 +1497,7 @@ input[type="checkbox"]:indeterminate::after {
   position: fixed;
   bottom: 32px;
   right: 452px;
-  width: 420px;
+  width: min(420px, calc(100vw - 24px));
   max-height: 320px;
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -1473,6 +1507,18 @@ input[type="checkbox"]:indeterminate::after {
   display: flex;
   flex-direction: column;
   animation: modal-in 0.15s ease;
+}
+
+.activity-popup--collapsed {
+  max-height: none;
+}
+
+.activity-popup--collapsed .activity-popup__header {
+  border-bottom: 0;
+}
+
+.activity-popup--collapsed .activity-list {
+  display: none;
 }
 
 .activity-popup__header {

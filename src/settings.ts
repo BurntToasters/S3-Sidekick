@@ -57,10 +57,13 @@ export function switchSettingsTab(tab: string): void {
     const isActive = t.dataset.settingsTab === tab;
     t.classList.toggle("settings-tab--active", isActive);
     t.setAttribute("aria-selected", String(isActive));
+    t.setAttribute("tabindex", isActive ? "0" : "-1");
   }
   const panels = document.querySelectorAll<HTMLElement>(".settings-panel");
   for (const p of panels) {
-    p.style.display = p.dataset.settingsPanel === tab ? "" : "none";
+    const isActive = p.dataset.settingsPanel === tab;
+    p.hidden = !isActive;
+    p.style.display = isActive ? "" : "none";
   }
 }
 

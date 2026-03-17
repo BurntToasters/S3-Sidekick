@@ -6,12 +6,12 @@
     "main"
   ],
   "permissions": [
-    "core:default",
-    "dialog:allow-open",
-    "dialog:allow-save",
-    "dialog:allow-message",
-    "updater:default",
+    "core:app:default",
+    "core:event:default",
+    "core:window:default",
+    "core:webview:default",
     "dialog:default",
+    "updater:default",
     "process:default",
     "notification:default"
   ]

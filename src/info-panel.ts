@@ -99,6 +99,7 @@ function updateTabUI(): void {
     const isActive = tab.dataset.tab === activeTab;
     tab.classList.toggle("info-tab--active", isActive);
     tab.setAttribute("aria-selected", String(isActive));
+    tab.setAttribute("tabindex", isActive ? "0" : "-1");
   }
 }
 

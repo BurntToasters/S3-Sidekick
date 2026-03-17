@@ -10,7 +10,9 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
@@ -28,6 +30,7 @@ struct KeyState {
 }
 
 static KEY_STATE: OnceLock<Mutex<KeyState>> = OnceLock::new();
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct S3State {
     client: Option<Client>,
@@ -127,6 +130,66 @@ fn security_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("security.json"))
 }
 
+fn parse_user_path(raw: &str, label: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{} path is required", label));
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(format!("{} path must be absolute: {}", label, trimmed));
+    }
+    Ok(path)
+}
+
+fn validate_existing_path(raw: &str, label: &str) -> Result<PathBuf, String> {
+    let path = parse_user_path(raw, label)?;
+    if !path.exists() {
+        return Err(format!("{} path does not exist: {}", label, path.display()));
+    }
+    Ok(path)
+}
+
+fn validate_destination_path(raw: &str) -> Result<PathBuf, String> {
+    let destination = parse_user_path(raw, "Destination")?;
+    if destination.exists() {
+        return Err(format!(
+            "Destination already exists: {}",
+            destination.display()
+        ));
+    }
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "Destination must include a parent directory: {}",
+            destination.display()
+        )
+    })?;
+    if !parent.exists() {
+        return Err(format!(
+            "Destination directory does not exist: {}",
+            parent.display()
+        ));
+    }
+    if !parent.is_dir() {
+        return Err(format!(
+            "Destination parent is not a directory: {}",
+            parent.display()
+        ));
+    }
+    Ok(destination)
+}
+
+fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
+    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let suffix = format!("{}.{}.{}.tmp", purpose, pid, counter);
+    let extension = match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{}.{}", ext, suffix),
+        _ => suffix,
+    };
+    path.with_extension(extension)
+}
+
 fn key_state() -> &'static Mutex<KeyState> {
     KEY_STATE.get_or_init(|| {
         Mutex::new(KeyState {
@@ -221,8 +284,17 @@ fn save_security_config(app: &tauri::AppHandle, config: &SecurityConfig) -> Resu
 }
 
 fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), String> {
-    let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, data).map_err(|e| e.to_string())?;
+    let tmp_path = make_temp_path(path, "atomic");
+    let mut tmp_file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp_path)
+        .map_err(|e| e.to_string())?;
+    tmp_file
+        .write_all(data.as_bytes())
+        .map_err(|e| e.to_string())?;
+    tmp_file.sync_all().map_err(|e| e.to_string())?;
+    drop(tmp_file);
     if let Err(e) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e.to_string());
@@ -1032,12 +1104,14 @@ async fn upload_object(
     content_type: String,
     transfer_id: u32,
 ) -> Result<(), String> {
+    let upload_path = validate_existing_path(&file_path, "Upload file")?;
+
     let client = {
         let s3 = state.0.lock().map_err(|e| e.to_string())?;
         s3.client.clone().ok_or("Not connected")?
     };
 
-    let file_size = tokio::fs::metadata(&file_path)
+    let file_size = tokio::fs::metadata(&upload_path)
         .await
         .map(|m| m.len())
         .unwrap_or(0);
@@ -1057,14 +1131,14 @@ async fn upload_object(
             &client,
             &bucket,
             &key,
-            &file_path,
+            &upload_path,
             &content_type,
             transfer_id,
             file_size,
         )
         .await?;
     } else {
-        let body = aws_sdk_s3::primitives::ByteStream::from_path(std::path::Path::new(&file_path))
+        let body = aws_sdk_s3::primitives::ByteStream::from_path(upload_path.as_path())
             .await
             .map_err(|e| format!("Failed to open file stream: {}", e))?;
 
@@ -1096,7 +1170,7 @@ async fn upload_multipart(
     client: &Client,
     bucket: &str,
     key: &str,
-    file_path: &str,
+    file_path: &Path,
     content_type: &str,
     transfer_id: u32,
     file_size: u64,
@@ -1316,6 +1390,11 @@ async fn download_object(
     key: String,
     destination: String,
 ) -> Result<u64, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let destination_path = validate_destination_path(&destination)?;
+    let temp_path = make_temp_path(&destination_path, "download");
+
     let client = {
         let s3 = state.0.lock().map_err(|e| e.to_string())?;
         s3.client.clone().ok_or("Not connected")?
@@ -1330,22 +1409,47 @@ async fn download_object(
         .map_err(|e| format!("Failed to download: {}", e))?;
 
     let mut reader = output.body.into_async_read();
-    let mut file =
-        std::fs::File::create(&destination).map_err(|e| format!("Failed to create file: {}", e))?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .await
+        .map_err(|e| format!("Failed to create temp file: {}", e))?;
     let mut written = 0u64;
     let mut buf = [0u8; 64 * 1024];
 
     loop {
-        let count = tokio::io::AsyncReadExt::read(&mut reader, &mut buf)
+        let count = reader
+            .read(&mut buf)
             .await
-            .map_err(|e| format!("Failed to read body: {}", e))?;
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&temp_path);
+                format!("Failed to read body: {}", e)
+            })?;
         if count == 0 {
             break;
         }
 
-        file.write_all(&buf[..count])
-            .map_err(|e| format!("Failed to write file: {}", e))?;
+        file.write_all(&buf[..count]).await.map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!("Failed to write temp file: {}", e)
+        })?;
         written += count as u64;
+    }
+
+    file.flush().await.map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!("Failed to flush temp file: {}", e)
+    })?;
+    file.sync_all().await.map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!("Failed to sync temp file: {}", e)
+    })?;
+    drop(file);
+
+    if let Err(e) = std::fs::rename(&temp_path, &destination_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("Failed to finalize download: {}", e));
     }
 
     Ok(written)
@@ -1684,7 +1788,7 @@ fn list_local_files_recursive(roots: Vec<String>) -> Result<Vec<LocalFileEntry>,
         if trimmed.is_empty() {
             continue;
         }
-        normalized_roots.push(std::path::PathBuf::from(trimmed));
+        normalized_roots.push(validate_existing_path(trimmed, "Selected root")?);
     }
 
     if normalized_roots.is_empty() {
@@ -1737,6 +1841,12 @@ fn list_local_files_recursive(roots: Vec<String>) -> Result<Vec<LocalFileEntry>,
     }
 
     Ok(entries)
+}
+
+#[tauri::command]
+fn path_exists(path: String) -> Result<bool, String> {
+    let path = parse_user_path(&path, "Path")?;
+    Ok(path.exists())
 }
 
 #[tauri::command]
@@ -1846,6 +1956,7 @@ fn main() {
             generate_presigned_url,
             preview_object,
             list_local_files_recursive,
+            path_exists,
             load_settings,
             save_settings,
             load_connection,

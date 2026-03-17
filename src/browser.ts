@@ -158,7 +158,11 @@ export function renderBucketList(): void {
   el.innerHTML = state.buckets
     .map(
       (b) =>
-        `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}" data-bucket="${escapeHtml(b.name)}">${escapeHtml(b.name)}</li>`,
+        `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}">` +
+        `<button type="button" class="list__item-btn" data-bucket="${escapeHtml(b.name)}" aria-label="Open bucket ${escapeHtml(b.name)}"${b.name === state.currentBucket ? ' aria-current="true"' : ""}>` +
+        `${escapeHtml(b.name)}` +
+        `</button>` +
+        `</li>`,
     )
     .join("");
 }
@@ -176,8 +180,8 @@ export function renderObjectTable(): void {
   for (const prefix of sortedPrefixes) {
     const name = basename(prefix);
     rows.push(
-      `<tr class="object-row object-row--folder" data-prefix="${escapeHtml(prefix)}">
-        <td class="col-check"><input type="checkbox" class="row-check" /></td>
+      `<tr class="object-row object-row--folder" data-prefix="${escapeHtml(prefix)}" tabindex="0">
+        <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select folder ${escapeHtml(name)}" /></td>
         <td class="object-name"><span class="icon-folder"></span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">&mdash;</td>
         <td class="object-modified">&mdash;</td>
@@ -189,8 +193,8 @@ export function renderObjectTable(): void {
   for (const obj of sortedFiles) {
     const name = basename(obj.key);
     rows.push(
-      `<tr class="object-row object-row--file" data-key="${escapeHtml(obj.key)}">
-        <td class="col-check"><input type="checkbox" class="row-check" /></td>
+      `<tr class="object-row object-row--file" data-key="${escapeHtml(obj.key)}" tabindex="0">
+        <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select file ${escapeHtml(name)}" /></td>
         <td class="object-name"><span class="icon-file"></span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">${formatSize(obj.size)}</td>
         <td class="object-modified">${formatDate(obj.last_modified)}</td>
@@ -239,7 +243,7 @@ export function renderBreadcrumb(): void {
   const parts: string[] = [];
 
   parts.push(
-    `<span class="breadcrumb__segment breadcrumb__segment--root" data-prefix="">${escapeHtml(state.currentBucket)}</span>`,
+    `<button type="button" class="breadcrumb__segment breadcrumb__segment--root" data-prefix="" aria-label="Open bucket root ${escapeHtml(state.currentBucket)}">${escapeHtml(state.currentBucket)}</button>`,
   );
 
   if (state.currentPrefix) {
@@ -248,7 +252,7 @@ export function renderBreadcrumb(): void {
     for (const seg of segments) {
       accumulated += seg + "/";
       parts.push(
-        `<span class="breadcrumb__sep">/</span><span class="breadcrumb__segment" data-prefix="${escapeHtml(accumulated)}">${escapeHtml(seg)}</span>`,
+        `<span class="breadcrumb__sep">/</span><button type="button" class="breadcrumb__segment" data-prefix="${escapeHtml(accumulated)}" aria-label="Open folder ${escapeHtml(seg)}">${escapeHtml(seg)}</button>`,
       );
     }
   }

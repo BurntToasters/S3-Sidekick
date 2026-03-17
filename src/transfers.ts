@@ -44,6 +44,7 @@ let processing = false;
 let onComplete: ((summary: TransferRunSummary) => void) | null = null;
 let collapsed = false;
 let progressUnlisten: UnlistenFn | null = null;
+let renderQueued = false;
 
 export async function initTransferQueueUI(): Promise<void> {
   syncTransferVisibility();
@@ -62,7 +63,7 @@ export async function initTransferQueueUI(): Promise<void> {
       if (item) {
         item.progress = total_bytes > 0 ? (bytes_sent / total_bytes) * 100 : 0;
         item.totalBytes = total_bytes;
-        renderQueue();
+        queueRender();
       }
     });
   }
@@ -334,6 +335,20 @@ async function processQueue(): Promise<void> {
       hadDownload: completedDownloadThisRun,
     });
   }
+}
+
+function queueRender(): void {
+  if (renderQueued) return;
+  renderQueued = true;
+  const scheduler =
+    typeof window !== "undefined" &&
+    typeof window.requestAnimationFrame === "function"
+      ? window.requestAnimationFrame.bind(window)
+      : (cb: FrameRequestCallback) => globalThis.setTimeout(() => cb(0), 16);
+  scheduler(() => {
+    renderQueued = false;
+    renderQueue();
+  });
 }
 
 function renderQueue(): void {

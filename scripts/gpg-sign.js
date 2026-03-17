@@ -123,7 +123,7 @@ function cleanArtifactBaseName(name) {
   if (/\.nsis\.zip$/i.test(name)) return name;
 
   if (/\.dmg$/i.test(name)) return "S3-Sidekick-macOS.dmg";
-  if (/^S3.Sidekick\.zip$/i.test(name)) return "S3-Sidekick-macOS.zip";
+  if (/^S3\.Sidekick\.zip$/i.test(name)) return "S3-Sidekick-macOS.zip";
 
   if (/x64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-x64.exe";
   if (/arm64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-arm64.exe";
@@ -253,14 +253,19 @@ function generateUpdaterManifests(files) {
   }
 
   const manifests = new Map();
+  const requiredTargetKeys = new Set();
+  const missingSignatures = [];
   for (const [name] of byName) {
     if (name.endsWith(".sig")) continue;
     const targets = resolveUpdaterTargets(name);
     if (targets.length === 0) continue;
+    for (const target of targets) {
+      requiredTargetKeys.add(`${target.os}-${target.arch}`);
+    }
 
     const sigPath = signatureByBaseName.get(name);
     if (!sigPath) {
-      console.log(`  ~ Skipped updater manifest entry for ${name} (missing ${name}.sig)`);
+      missingSignatures.push(`${name}.sig`);
       continue;
     }
 
@@ -291,7 +296,18 @@ function generateUpdaterManifests(files) {
     }
   }
 
+  if (missingSignatures.length > 0) {
+    const sorted = Array.from(new Set(missingSignatures)).sort((a, b) =>
+      a.localeCompare(b),
+    );
+    throw new Error(
+      `Missing updater signature file(s): ${sorted.join(", ")}. ` +
+        "Every updater-target artifact must include a matching .sig file.",
+    );
+  }
+
   const generated = [];
+  const generatedTargetKeys = new Set();
   for (const manifestName of Array.from(manifests.keys()).sort()) {
     const manifest = manifests.get(manifestName);
     const output = {
@@ -306,6 +322,19 @@ function generateUpdaterManifests(files) {
     fs.writeFileSync(dest, JSON.stringify(output, null, 2) + "\n");
     console.log(`  + ${manifestName} (${Object.keys(output.platforms).length} platform entries)`);
     generated.push(dest);
+    const targetKey = parseManifestTargetKey(manifestName);
+    if (targetKey) {
+      generatedTargetKeys.add(targetKey);
+    }
+  }
+
+  const missingTargets = Array.from(requiredTargetKeys)
+    .filter((targetKey) => !generatedTargetKeys.has(targetKey))
+    .sort((a, b) => a.localeCompare(b));
+  if (missingTargets.length > 0) {
+    throw new Error(
+      `Updater manifest generation is incomplete for target(s): ${missingTargets.join(", ")}.`,
+    );
   }
 
   return generated;
