@@ -14,7 +14,7 @@ import {
   removeBookmark,
   type Bookmark,
 } from "./bookmarks.ts";
-import { isUpdaterEnabled } from "./updater.ts";
+import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
 import { refreshSecuritySettingsUI } from "./security.ts";
 import { showConfirm } from "./dialogs.ts";
 
@@ -40,6 +40,7 @@ export async function loadSettings(): Promise<void> {
   state.lastPersistedSettings = { ...result.settings };
   state.settingsExtras = result.extras;
   applyTheme(state.currentSettings.theme);
+  setUpdateChannel(state.currentSettings.updateChannel);
 }
 
 export async function saveSettings(): Promise<void> {
@@ -79,6 +80,13 @@ export function populateSettingsModal(): void {
   if (updatesCheckbox)
     updatesCheckbox.checked = state.currentSettings.autoCheckUpdates;
 
+  const channelSelect = document.getElementById(
+    "setting-update-channel",
+  ) as HTMLSelectElement | null;
+  if (channelSelect) {
+    channelSelect.value = state.currentSettings.updateChannel;
+  }
+
   const supported = isUpdaterEnabled();
   const updaterSection = document.getElementById("updater-section");
   const updaterUnsupported = document.getElementById("updater-unsupported");
@@ -114,6 +122,15 @@ export function readSettingsModal(): void {
   ) as HTMLInputElement | null;
   if (updatesCheckbox) {
     state.currentSettings.autoCheckUpdates = updatesCheckbox.checked;
+  }
+
+  const channelSelect = document.getElementById(
+    "setting-update-channel",
+  ) as HTMLSelectElement | null;
+  if (channelSelect) {
+    state.currentSettings.updateChannel =
+      channelSelect.value === "beta" ? "beta" : "release";
+    setUpdateChannel(state.currentSettings.updateChannel);
   }
 }
 
@@ -156,7 +173,12 @@ export async function resetSettings(): Promise<void> {
   const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
   await invoke("save_settings", { json: defaults });
   await invoke("save_connection", { json: "" });
-  await relaunch();
+
+  try {
+    await relaunch();
+  } catch {
+    window.location.assign(window.location.href);
+  }
 }
 
 async function refreshBookmarkListUI(): Promise<void> {

@@ -16,12 +16,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 const PBKDF2_ITERATIONS: u32 = 210_000;
 const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
 const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
+const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOCAL_SCAN_FILES: usize = 20_000;
+const MAX_LOCAL_SCAN_DEPTH: usize = 64;
 
 struct KeyState {
     key: Option<[u8; KEY_LEN]>,
@@ -31,6 +36,7 @@ struct KeyState {
 
 static KEY_STATE: OnceLock<Mutex<KeyState>> = OnceLock::new();
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
+static STORAGE_OP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct S3State {
     client: Option<Client>,
@@ -39,6 +45,33 @@ struct S3State {
 }
 
 struct AppState(Mutex<S3State>);
+
+fn lock_s3_state<'a>(
+    state: &'a tauri::State<'a, AppState>,
+) -> Result<std::sync::MutexGuard<'a, S3State>, String> {
+    match state.0.lock() {
+        Ok(guard) => Ok(guard),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn lock_storage_ops() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    STORAGE_OP_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|err| err.to_string())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct SecurityConfig {
@@ -285,11 +318,13 @@ fn save_security_config(app: &tauri::AppHandle, config: &SecurityConfig) -> Resu
 
 fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), String> {
     let tmp_path = make_temp_path(path, "atomic");
-    let mut tmp_file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&tmp_path)
-        .map_err(|e| e.to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut tmp_file = options.open(&tmp_path).map_err(|e| e.to_string())?;
     tmp_file
         .write_all(data.as_bytes())
         .map_err(|e| e.to_string())?;
@@ -505,6 +540,7 @@ use tauri::{Emitter, Manager};
 
 #[tauri::command]
 fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
+    let _storage_guard = lock_storage_ops()?;
     let path = settings_path(&app)?;
     let security = load_security_config(&app)?;
     read_protected_file(&path, "{}", &security)
@@ -512,6 +548,7 @@ fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let _storage_guard = lock_storage_ops()?;
     let path = settings_path(&app)?;
     let security = load_security_config(&app)?;
     write_protected_file(&path, &json, &security)
@@ -519,6 +556,7 @@ fn save_settings(app: tauri::AppHandle, json: String) -> Result<(), String> {
 
 #[tauri::command]
 fn load_connection(app: tauri::AppHandle) -> Result<String, String> {
+    let _storage_guard = lock_storage_ops()?;
     let path = connection_path(&app)?;
     let security = load_security_config(&app)?;
     read_protected_file(&path, "", &security)
@@ -526,6 +564,7 @@ fn load_connection(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 fn save_connection(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let _storage_guard = lock_storage_ops()?;
     let path = connection_path(&app)?;
     let security = load_security_config(&app)?;
     write_protected_file(&path, &json, &security)
@@ -533,6 +572,7 @@ fn save_connection(app: tauri::AppHandle, json: String) -> Result<(), String> {
 
 #[tauri::command]
 fn load_bookmarks_backup(app: tauri::AppHandle) -> Result<String, String> {
+    let _storage_guard = lock_storage_ops()?;
     let path = bookmarks_backup_path(&app)?;
     let security = load_security_config(&app)?;
     read_protected_file(&path, "[]", &security)
@@ -540,6 +580,7 @@ fn load_bookmarks_backup(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 fn save_bookmarks_backup(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let _storage_guard = lock_storage_ops()?;
     let path = bookmarks_backup_path(&app)?;
     let security = load_security_config(&app)?;
     write_protected_file(&path, &json, &security)
@@ -547,6 +588,7 @@ fn save_bookmarks_backup(app: tauri::AppHandle, json: String) -> Result<(), Stri
 
 #[tauri::command]
 fn get_security_status(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+    let _storage_guard = lock_storage_ops()?;
     let config = load_security_config(&app)?;
     Ok(security_status(&config))
 }
@@ -557,6 +599,7 @@ fn initialize_security(
     enable_encryption: bool,
     password: Option<String>,
 ) -> Result<SecurityStatus, String> {
+    let _storage_guard = lock_storage_ops()?;
     let current = load_security_config(&app)?;
     if current.initialized {
         return Ok(security_status(&current));
@@ -608,6 +651,7 @@ fn initialize_security(
 
 #[tauri::command]
 fn unlock_security(app: tauri::AppHandle, password: String) -> Result<SecurityStatus, String> {
+    let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.initialized || !config.encryption_enabled {
         set_unlocked_key(None, 0)?;
@@ -632,7 +676,7 @@ fn unlock_security(app: tauri::AppHandle, password: String) -> Result<SecuritySt
 
     let key = derive_key(&password, &salt, config.pbkdf2_iterations);
     let verifier = key_verifier(&key);
-    if verifier.as_slice() != expected_verifier.as_slice() {
+    if !constant_time_eq(verifier.as_slice(), expected_verifier.as_slice()) {
         return Err("Invalid password".to_string());
     }
 
@@ -668,6 +712,7 @@ fn set_security_encryption(
     current_password: Option<String>,
     new_password: Option<String>,
 ) -> Result<SecurityStatus, String> {
+    let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.initialized {
         return Err("Security is not initialized".to_string());
@@ -713,7 +758,7 @@ fn set_security_encryption(
     let expected_verifier = B64
         .decode(&config.verifier)
         .map_err(|e| format!("Invalid security verifier: {}", e))?;
-    if verifier.as_slice() != expected_verifier.as_slice() {
+    if !constant_time_eq(verifier.as_slice(), expected_verifier.as_slice()) {
         return Err("Invalid password".to_string());
     }
 
@@ -736,6 +781,7 @@ fn change_security_password(
     current_password: String,
     new_password: String,
 ) -> Result<SecurityStatus, String> {
+    let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.initialized || !config.encryption_enabled {
         return Err("Encryption is not enabled".to_string());
@@ -755,7 +801,7 @@ fn change_security_password(
     let expected_verifier = B64
         .decode(&config.verifier)
         .map_err(|e| format!("Invalid security verifier: {}", e))?;
-    if old_verifier.as_slice() != expected_verifier.as_slice() {
+    if !constant_time_eq(old_verifier.as_slice(), expected_verifier.as_slice()) {
         return Err("Invalid password".to_string());
     }
 
@@ -781,6 +827,7 @@ fn change_security_password(
 
 #[tauri::command]
 fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+    let _storage_guard = lock_storage_ops()?;
     let config = load_security_config(&app)?;
     if config.encryption_enabled {
         set_unlocked_key(None, 0)?;
@@ -790,6 +837,7 @@ fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
 
 #[tauri::command]
 fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Result<SecurityStatus, String> {
+    let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     config.lock_timeout_minutes = minutes;
     save_security_config(&app, &config)?;
@@ -826,7 +874,7 @@ async fn connect(
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
-    let mut s3 = state.0.lock().map_err(|e| e.to_string())?;
+    let mut s3 = lock_s3_state(&state)?;
     s3.client = Some(client);
     s3.endpoint = endpoint;
     s3.region = region;
@@ -836,7 +884,7 @@ async fn connect(
 
 #[tauri::command]
 fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut s3 = state.0.lock().map_err(|e| e.to_string())?;
+    let mut s3 = lock_s3_state(&state)?;
     s3.client = None;
     s3.endpoint.clear();
     s3.region.clear();
@@ -846,7 +894,7 @@ fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 async fn list_buckets(state: tauri::State<'_, AppState>) -> Result<Vec<BucketInfo>, String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -877,7 +925,7 @@ async fn list_objects(
     continuation_token: String,
 ) -> Result<ListObjectsResponse, String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -995,7 +1043,7 @@ async fn head_object(
     key: String,
 ) -> Result<HeadObjectResponse, String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1044,7 +1092,7 @@ async fn update_metadata(
     metadata: HashMap<String, String>,
 ) -> Result<(), String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1075,7 +1123,7 @@ async fn delete_objects(
     keys: Vec<String>,
 ) -> Result<u32, String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1107,7 +1155,7 @@ async fn upload_object(
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
 
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1289,8 +1337,15 @@ async fn upload_object_bytes(
     content_type: String,
     transfer_id: u32,
 ) -> Result<(), String> {
+    if bytes.len() > MAX_UPLOAD_OBJECT_BYTES {
+        return Err(format!(
+            "Browser upload fallback is limited to {} MB.",
+            MAX_UPLOAD_OBJECT_BYTES / (1024 * 1024)
+        ));
+    }
+
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1337,7 +1392,7 @@ async fn get_object_acl(
     key: String,
 ) -> Result<AclResponse, String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1396,7 +1451,7 @@ async fn download_object(
     let temp_path = make_temp_path(&destination_path, "download");
 
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1462,7 +1517,7 @@ async fn create_folder(
     key: String,
 ) -> Result<(), String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1492,7 +1547,7 @@ async fn rename_object(
     new_key: String,
 ) -> Result<(), String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1533,7 +1588,7 @@ fn build_object_url(
     bucket: String,
     key: String,
 ) -> Result<String, String> {
-    let s3 = state.0.lock().map_err(|e| e.to_string())?;
+    let s3 = lock_s3_state(&state)?;
     if s3.endpoint.is_empty() {
         return Err("Not connected".to_string());
     }
@@ -1555,7 +1610,7 @@ async fn generate_presigned_url(
     expires_in_secs: u64,
 ) -> Result<String, String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1581,7 +1636,7 @@ async fn preview_object(
     key: String,
 ) -> Result<PreviewResponse, String> {
     let client = {
-        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
@@ -1688,6 +1743,13 @@ fn collect_local_files_from_root(
     };
 
     if root_meta.is_file() {
+        if entries.len() >= MAX_LOCAL_SCAN_FILES {
+            warnings.push(format!(
+                "Stopped scanning after reaching file limit ({}).",
+                MAX_LOCAL_SCAN_FILES
+            ));
+            return;
+        }
         entries.push(LocalFileEntry {
             file_path: absolute_path_string(root),
             relative_path: normalize_slashes(std::path::Path::new(label)),
@@ -1699,8 +1761,8 @@ fn collect_local_files_from_root(
         return;
     }
 
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
         let iter = match std::fs::read_dir(&dir) {
             Ok(iter) => iter,
             Err(err) => {
@@ -1739,7 +1801,15 @@ fn collect_local_files_from_root(
             };
 
             if file_type.is_dir() {
-                stack.push(path);
+                if depth >= MAX_LOCAL_SCAN_DEPTH {
+                    warnings.push(format!(
+                        "Skipping directory '{}' because maximum recursion depth ({}) was reached.",
+                        path.to_string_lossy(),
+                        MAX_LOCAL_SCAN_DEPTH
+                    ));
+                    continue;
+                }
+                stack.push((path, depth + 1));
                 continue;
             }
             if !file_type.is_file() {
@@ -1771,6 +1841,13 @@ fn collect_local_files_from_root(
             };
             let rel_with_root = std::path::Path::new(label).join(rel_under_root);
 
+            if entries.len() >= MAX_LOCAL_SCAN_FILES {
+                warnings.push(format!(
+                    "Stopped scanning after reaching file limit ({}).",
+                    MAX_LOCAL_SCAN_FILES
+                ));
+                return;
+            }
             entries.push(LocalFileEntry {
                 file_path: absolute_path_string(&path),
                 relative_path: normalize_slashes(&rel_with_root),
@@ -1841,12 +1918,6 @@ fn list_local_files_recursive(roots: Vec<String>) -> Result<Vec<LocalFileEntry>,
     }
 
     Ok(entries)
-}
-
-#[tauri::command]
-fn path_exists(path: String) -> Result<bool, String> {
-    let path = parse_user_path(&path, "Path")?;
-    Ok(path.exists())
 }
 
 #[tauri::command]
@@ -1956,7 +2027,6 @@ fn main() {
             generate_presigned_url,
             preview_object,
             list_local_files_recursive,
-            path_exists,
             load_settings,
             save_settings,
             load_connection,

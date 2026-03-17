@@ -1,13 +1,16 @@
 export type ThemePreference = "system" | "light" | "dark";
+export type UpdateChannel = "release" | "beta";
 
 export interface UserSettings {
   theme: ThemePreference;
   autoCheckUpdates: boolean;
+  updateChannel: UpdateChannel;
 }
 
 export const SETTING_DEFAULTS: UserSettings = {
   theme: "system",
   autoCheckUpdates: true,
+  updateChannel: "release",
 };
 
 export function normalizeUserSettings(
@@ -23,7 +26,12 @@ export function normalizeUserSettings(
       ? raw.autoCheckUpdates
       : SETTING_DEFAULTS.autoCheckUpdates;
 
-  return { theme, autoCheckUpdates };
+  const updateChannel =
+    raw.updateChannel === "beta" || raw.updateChannel === "release"
+      ? raw.updateChannel
+      : SETTING_DEFAULTS.updateChannel;
+
+  return { theme, autoCheckUpdates, updateChannel };
 }
 
 export interface LoadSettingsResult {

@@ -37,6 +37,7 @@ let headData: HeadObjectResponse | null = null;
 let aclData: AclResponse | null = null;
 let metadataRows: { key: string; value: string }[] = [];
 let activeTab = "general";
+let panelRequestToken = 0;
 
 export async function openInfoPanel(keys: string[]): Promise<void> {
   const overlay = $("info-overlay");
@@ -44,6 +45,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   const saveBtn = $<HTMLButtonElement>("info-save");
 
   if (keys.length > 1) {
+    panelRequestToken += 1;
     currentKey = "";
     title.textContent = `${keys.length} items selected`;
     overlay.classList.add("active");
@@ -61,7 +63,9 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     return;
   }
 
+  const requestToken = ++panelRequestToken;
   currentKey = keys[0];
+  const selectedKey = currentKey;
   title.textContent = basename(currentKey);
   overlay.classList.add("active");
   saveBtn.style.display = "";
@@ -78,10 +82,13 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
 
   try {
-    headData = await invoke<HeadObjectResponse>("head_object", {
+    const nextHeadData = await invoke<HeadObjectResponse>("head_object", {
       bucket: state.currentBucket,
-      key: currentKey,
+      key: selectedKey,
     });
+    if (requestToken !== panelRequestToken || currentKey !== selectedKey)
+      return;
+    headData = nextHeadData;
 
     metadataRows = [{ key: "Content-Type", value: headData.content_type }];
     for (const [k, v] of Object.entries(headData.metadata)) {
@@ -91,6 +98,8 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     saveBtn.disabled = false;
     renderTab();
   } catch (err) {
+    if (requestToken !== panelRequestToken || currentKey !== selectedKey)
+      return;
     body.innerHTML = `<div class="metadata-loading">Failed to load: ${escapeHtml(String(err))}</div>`;
   }
 }
@@ -154,16 +163,25 @@ function renderGeneral(body: HTMLElement): void {
     .filter(Boolean)
     .join("");
 
-  buildUrlAsync(body);
+  void buildUrlAsync(body, currentKey, panelRequestToken);
 }
 
-async function buildUrlAsync(body: HTMLElement): Promise<void> {
+async function buildUrlAsync(
+  body: HTMLElement,
+  expectedKey: string,
+  requestToken: number,
+): Promise<void> {
   try {
     const url = await invoke<string>("build_object_url", {
       bucket: state.currentBucket,
-      key: currentKey,
+      key: expectedKey,
     });
-    if (activeTab === "general" && url) {
+    if (
+      requestToken === panelRequestToken &&
+      activeTab === "general" &&
+      currentKey === expectedKey &&
+      url
+    ) {
       const urlRow = document.createElement("div");
       urlRow.className = "metadata-info-row";
       urlRow.innerHTML =
@@ -177,15 +195,32 @@ async function buildUrlAsync(body: HTMLElement): Promise<void> {
 }
 
 async function renderPermissions(body: HTMLElement): Promise<void> {
+  const requestToken = panelRequestToken;
+  const selectedKey = currentKey;
   body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading permissions&#8230;</div>`;
 
   if (!aclData) {
     try {
-      aclData = await invoke<AclResponse>("get_object_acl", {
+      const nextAclData = await invoke<AclResponse>("get_object_acl", {
         bucket: state.currentBucket,
-        key: currentKey,
+        key: selectedKey,
       });
+      if (
+        requestToken !== panelRequestToken ||
+        currentKey !== selectedKey ||
+        activeTab !== "permissions"
+      ) {
+        return;
+      }
+      aclData = nextAclData;
     } catch (err) {
+      if (
+        requestToken !== panelRequestToken ||
+        currentKey !== selectedKey ||
+        activeTab !== "permissions"
+      ) {
+        return;
+      }
       body.innerHTML = `<div class="metadata-loading">Failed to load permissions: ${escapeHtml(String(err))}</div>`;
       return;
     }
@@ -254,6 +289,7 @@ function renderEntryRows(): void {
       delBtn.className = "btn btn--icon metadata-entry__delete";
       delBtn.innerHTML = twemojiIcon("274c", { decorative: true });
       delBtn.title = "Remove";
+      delBtn.setAttribute("aria-label", "Remove metadata row");
       delBtn.addEventListener("click", () => {
         metadataRows.splice(i, 1);
         renderEntryRows();
@@ -293,7 +329,8 @@ function infoRow(label: string, value: string, mono = false): string {
 }
 
 export async function saveInfoPanel(): Promise<void> {
-  if (!currentKey) return;
+  const selectedKey = currentKey;
+  if (!selectedKey) return;
 
   const contentType =
     metadataRows.length > 0
@@ -313,7 +350,7 @@ export async function saveInfoPanel(): Promise<void> {
   try {
     await invoke("update_metadata", {
       bucket: state.currentBucket,
-      key: currentKey,
+      key: selectedKey,
       contentType,
       metadata: customMeta,
     });
@@ -328,6 +365,7 @@ export async function saveInfoPanel(): Promise<void> {
 }
 
 export function closeInfoPanel(): void {
+  panelRequestToken += 1;
   $("info-overlay").classList.remove("active");
   headData = null;
   aclData = null;

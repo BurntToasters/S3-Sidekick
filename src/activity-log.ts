@@ -31,6 +31,7 @@ export function toggleActivityLog(): void {
   const nextVisible = overlay.hidden;
   overlay.hidden = !nextVisible;
   visible = nextVisible;
+  syncVisibilityState();
   if (visible) {
     syncCollapseState();
     renderActivityLog();
@@ -39,7 +40,7 @@ export function toggleActivityLog(): void {
 
 export function toggleActivityCollapsed(): void {
   const overlay = document.getElementById("activity-overlay");
-  if (!overlay || overlay.hidden) return;
+  if (!overlay) return;
   collapsed = !collapsed;
   syncCollapseState();
 }
@@ -48,6 +49,7 @@ export function hideActivityLog(): void {
   const overlay = document.getElementById("activity-overlay");
   if (overlay) overlay.hidden = true;
   visible = false;
+  syncVisibilityState();
 }
 
 export function clearActivityLog(): void {
@@ -101,7 +103,7 @@ function syncCollapseState(): void {
   if (!collapseButton) return;
 
   if (collapsed) {
-    collapseButton.innerHTML = twemojiIcon("27a1", {
+    collapseButton.innerHTML = twemojiIcon("2b06", {
       className: "twemoji-icon",
       decorative: true,
     });
@@ -117,6 +119,14 @@ function syncCollapseState(): void {
     collapseButton.setAttribute("aria-label", "Collapse activity");
     collapseButton.setAttribute("aria-expanded", "true");
   }
+}
+
+function syncVisibilityState(): void {
+  const toggleButton = document.getElementById(
+    "activity-toggle",
+  ) as HTMLButtonElement | null;
+  if (!toggleButton) return;
+  toggleButton.setAttribute("aria-expanded", String(visible));
 }
 
 function formatTime(d: Date): string {
