@@ -60,33 +60,36 @@ function run({ now = new Date() } = {}) {
     throw new Error("Could not locate releases section");
   }
 
-  const releaseSelfClosingRegex = /<release\b[^>]*\/>/;
-  const releasePairedRegex = /<release\b[^>]*>[\s\S]*?<\/release>/;
+  const releaseTagRegex = /<release\b[^>]*\/>|<release\b[^>]*>[\s\S]*?<\/release>/g;
+  const releaseVersionRegex = /version="([^"]+)"/;
+  const existingReleaseTags = releasesSectionMatch[0].match(releaseTagRegex) || [];
 
-  const currentReleaseMatch =
-    releasesSectionMatch[0].match(releaseSelfClosingRegex) ||
-    releasesSectionMatch[0].match(/<release\b[^>]*>/);
+  const rebuiltEntries = [];
+  let replacedCurrentVersion = false;
 
-  if (currentReleaseMatch) {
-    const currentReleaseTag = currentReleaseMatch[0];
-    const currentVersionMatch = currentReleaseTag.match(/version="([^"]+)"/);
-    const currentDateMatch = currentReleaseTag.match(/date="([^"]+)"/);
-    const currentVersion = currentVersionMatch ? currentVersionMatch[1] : null;
-    const currentDate = currentDateMatch ? currentDateMatch[1] : null;
+  for (const rawTag of existingReleaseTags) {
+    const tag = rawTag.trim();
+    const versionMatch = tag.match(releaseVersionRegex);
+    const tagVersion = versionMatch ? versionMatch[1] : "";
 
-    if (currentVersion === version && currentDate === dateStr) {
-      return { updated: false, version, date: dateStr };
+    if (tagVersion === version) {
+      if (!replacedCurrentVersion) {
+        rebuiltEntries.push(newReleaseTag.trim());
+        replacedCurrentVersion = true;
+      }
+      continue;
     }
+
+    rebuiltEntries.push(tag);
   }
 
-  let updatedSection = releasesSectionMatch[0];
-  if (releaseSelfClosingRegex.test(updatedSection)) {
-    updatedSection = updatedSection.replace(releaseSelfClosingRegex, newReleaseTag);
-  } else if (releasePairedRegex.test(updatedSection)) {
-    updatedSection = updatedSection.replace(releasePairedRegex, newReleaseTag);
-  } else {
-    updatedSection = updatedSection.replace(/<releases>\s*/, `<releases>\n${newReleaseTag}\n${baseIndent}`);
+  if (!replacedCurrentVersion) {
+    rebuiltEntries.unshift(newReleaseTag.trim());
   }
+
+  const updatedSection = `<releases>\n${rebuiltEntries
+    .map((tag) => `${releaseIndent}${tag}`)
+    .join("\n")}\n${baseIndent}</releases>`;
 
   if (updatedSection === releasesSectionMatch[0]) {
     return { updated: false, version, date: dateStr };

@@ -171,19 +171,37 @@
                     data-sort="name"
                     aria-sort="ascending"
                   >
-                    Name
-                    <span class="sort-indicator" id="sort-name">&#9650;</span>
+                    <button
+                      type="button"
+                      class="sort-trigger"
+                      aria-label="Sort by name"
+                    >
+                      Name
+                      <span class="sort-indicator" id="sort-name">&#9650;</span>
+                    </button>
                   </th>
                   <th class="col-sortable" data-sort="size" aria-sort="none">
-                    Size <span class="sort-indicator" id="sort-size"></span>
+                    <button
+                      type="button"
+                      class="sort-trigger"
+                      aria-label="Sort by size"
+                    >
+                      Size <span class="sort-indicator" id="sort-size"></span>
+                    </button>
                   </th>
                   <th
                     class="col-sortable"
                     data-sort="modified"
                     aria-sort="none"
                   >
-                    Last Modified
-                    <span class="sort-indicator" id="sort-modified"></span>
+                    <button
+                      type="button"
+                      class="sort-trigger"
+                      aria-label="Sort by last modified"
+                    >
+                      Last Modified
+                      <span class="sort-indicator" id="sort-modified"></span>
+                    </button>
                   </th>
                 </tr>
               </thead>
@@ -219,6 +237,7 @@
             id="transfer-toggle"
             class="btn btn--icon statusbar__transfer"
             title="Transfers"
+            aria-label="Transfers"
             hidden
           >
             &#8645;<span
@@ -249,39 +268,57 @@
         <div class="settings-tabs" role="tablist">
           <button
             class="settings-tab settings-tab--active"
+            id="settings-tab-general"
             data-settings-tab="general"
             role="tab"
             aria-selected="true"
+            aria-controls="settings-panel-general"
+            tabindex="0"
           >
             General
           </button>
           <button
             class="settings-tab"
+            id="settings-tab-bookmarks"
             data-settings-tab="bookmarks"
             role="tab"
             aria-selected="false"
+            aria-controls="settings-panel-bookmarks"
+            tabindex="-1"
           >
             Bookmarks
           </button>
           <button
             class="settings-tab"
+            id="settings-tab-security"
             data-settings-tab="security"
             role="tab"
             aria-selected="false"
+            aria-controls="settings-panel-security"
+            tabindex="-1"
           >
             Security
           </button>
           <button
             class="settings-tab"
+            id="settings-tab-about"
             data-settings-tab="about"
             role="tab"
             aria-selected="false"
+            aria-controls="settings-panel-about"
+            tabindex="-1"
           >
             About
           </button>
         </div>
         <div class="modal__body">
-          <div class="settings-panel" data-settings-panel="general">
+          <div
+            class="settings-panel"
+            id="settings-panel-general"
+            data-settings-panel="general"
+            role="tabpanel"
+            aria-labelledby="settings-tab-general"
+          >
             <div class="setting-item">
               <label for="setting-theme">Theme</label>
               <select id="setting-theme" class="field">
@@ -321,16 +358,22 @@
 
           <div
             class="settings-panel"
+            id="settings-panel-bookmarks"
             data-settings-panel="bookmarks"
-            style="display: none"
+            role="tabpanel"
+            aria-labelledby="settings-tab-bookmarks"
+            hidden
           >
             <ul id="bookmark-list" class="bookmark-list"></ul>
           </div>
 
           <div
             class="settings-panel"
+            id="settings-panel-security"
             data-settings-panel="security"
-            style="display: none"
+            role="tabpanel"
+            aria-labelledby="settings-tab-security"
+            hidden
           >
             <div class="setting-item setting-item--stacked">
               <label>Credential Encryption</label>
@@ -390,8 +433,11 @@
 
           <div
             class="settings-panel"
+            id="settings-panel-about"
             data-settings-panel="about"
-            style="display: none"
+            role="tabpanel"
+            aria-labelledby="settings-tab-about"
+            hidden
           >
             <div class="setting-item">
               <label>Version</label>
@@ -473,33 +519,45 @@
         <div class="info-tabs" role="tablist">
           <button
             class="info-tab info-tab--active"
+            id="info-tab-general"
             data-tab="general"
             role="tab"
             aria-selected="true"
+            aria-controls="info-body"
+            tabindex="0"
           >
             General
           </button>
           <button
             class="info-tab"
+            id="info-tab-permissions"
             data-tab="permissions"
             role="tab"
             aria-selected="false"
+            aria-controls="info-body"
+            tabindex="-1"
           >
             Permissions
           </button>
           <button
             class="info-tab"
+            id="info-tab-metadata"
             data-tab="metadata"
             role="tab"
             aria-selected="false"
+            aria-controls="info-body"
+            tabindex="-1"
           >
             Metadata
           </button>
           <button
             class="info-tab"
+            id="info-tab-s3"
             data-tab="s3"
             role="tab"
             aria-selected="false"
+            aria-controls="info-body"
+            tabindex="-1"
           >
             S3
           </button>
@@ -550,6 +608,15 @@
       <div class="activity-popup__header">
         <span>Activity</span>
         <div class="activity-popup__actions">
+          <button
+            id="activity-collapse"
+            class="btn btn--icon"
+            title="Collapse activity"
+            aria-label="Collapse activity"
+            aria-expanded="true"
+          >
+            &#9660;
+          </button>
           <button id="activity-clear" class="btn btn--ghost btn--sm">
             Clear
           </button>
