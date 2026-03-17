@@ -74,15 +74,39 @@
         </button>
       </div>
 
-      <div class="main-layout">
+      <div id="main-layout" class="main-layout">
+        <button
+          id="sidebar-backdrop"
+          class="sidebar-backdrop"
+          aria-label="Close bucket sidebar"
+          hidden
+        ></button>
         <aside id="bucket-panel" class="sidebar">
           <div class="sidebar__header">Buckets</div>
           <ul id="bucket-list" class="list"></ul>
         </aside>
+        <div
+          id="sidebar-resizer"
+          class="sidebar-resizer"
+          role="separator"
+          tabindex="0"
+          aria-label="Resize bucket sidebar"
+          aria-orientation="vertical"
+        ></div>
 
         <section class="content">
           <div class="content-toolbar">
-            <nav id="breadcrumb" class="breadcrumb"></nav>
+            <div class="content-toolbar__left">
+              <button
+                id="sidebar-toggle"
+                class="btn btn--icon sidebar-toggle"
+                title="Toggle buckets"
+                aria-label="Toggle buckets"
+              >
+                &#9776;
+              </button>
+              <nav id="breadcrumb" class="breadcrumb"></nav>
+            </div>
             <input
               id="filter-input"
               class="field filter-input"
@@ -114,6 +138,14 @@
                 aria-label="Upload files"
               >
                 &#8593;<span class="shortcut-chip">⌃U</span>
+              </button>
+              <button
+                id="btn-upload-folder"
+                class="btn btn--icon"
+                title="Upload Folder (Ctrl+Shift+U)"
+                aria-label="Upload folder"
+              >
+                &#128193;&#8593;<span class="shortcut-chip">⌃⇧U</span>
               </button>
             </div>
           </div>
@@ -171,6 +203,18 @@
         <span id="status" role="status" aria-live="polite"></span>
         <div class="statusbar__right">
           <span id="statusbar-count" class="statusbar__count"></span>
+          <button
+            id="activity-toggle"
+            class="btn btn--icon statusbar__transfer"
+            title="Activity log"
+            aria-label="Activity log"
+          >
+            &#9776;<span
+              id="activity-badge"
+              class="transfer-badge activity-badge"
+              style="display: none"
+            ></span>
+          </button>
           <button
             id="transfer-toggle"
             class="btn btn--icon statusbar__transfer"
@@ -499,6 +543,45 @@
       </div>
       <div id="transfer-list" class="transfer-list">
         <div class="transfer-empty">No transfers</div>
+      </div>
+    </div>
+
+    <div id="activity-overlay" class="activity-popup" hidden>
+      <div class="activity-popup__header">
+        <span>Activity</span>
+        <div class="activity-popup__actions">
+          <button id="activity-clear" class="btn btn--ghost btn--sm">
+            Clear
+          </button>
+          <button
+            id="activity-close"
+            class="btn btn--icon"
+            aria-label="Close activity log"
+          >
+            &#10005;
+          </button>
+        </div>
+      </div>
+      <div id="activity-list" class="activity-list">
+        <div class="activity-empty">No activity yet</div>
+      </div>
+    </div>
+
+    <div
+      id="preview-overlay"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="preview-title"
+    >
+      <div class="modal modal--wide preview-modal">
+        <div class="modal__header">
+          <h2 id="preview-title">Preview</h2>
+          <button id="preview-close" class="btn btn--icon" aria-label="Close">
+            &#10005;
+          </button>
+        </div>
+        <div id="preview-body" class="modal__body preview-body"></div>
       </div>
     </div>
 

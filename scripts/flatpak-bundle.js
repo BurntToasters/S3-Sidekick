@@ -67,6 +67,10 @@ function detectArch() {
 }
 
 function main() {
+  if (process.platform !== "linux") {
+    throw new Error("Flatpak bundling is only supported on Linux hosts.");
+  }
+
   run("flatpak-builder", [
     "--repo=flatpak-repo",
     "--force-clean",

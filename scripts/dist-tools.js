@@ -10,6 +10,7 @@ const CLEAN_TARGETS = {
   clean: ["dist"],
   "clean-release": ["release"],
   "clean-release-artifacts": ["release", "dist"],
+  "clean-flatpak": ["flatpak-repo"],
   "clean-all": ["dist", "release", "flatpak-repo"],
 };
 
@@ -69,6 +70,10 @@ function getCleanTargets(mode, cwd) {
     return Array.from(new Set([...baseTargets, ...listTauriBundleDirs(cwd)]));
   }
 
+  if (mode === "clean-flatpak") {
+    return Array.from(new Set([...baseTargets, ...listFlatpakBuildDirs(cwd)]));
+  }
+
   if (mode === "clean-all") {
     return Array.from(
       new Set([
@@ -120,6 +125,7 @@ if (
   mode === "clean" ||
   mode === "clean-release" ||
   mode === "clean-release-artifacts" ||
+  mode === "clean-flatpak" ||
   mode === "clean-all"
 ) {
   cleanDirs(mode);
@@ -127,6 +133,6 @@ if (
 }
 
 console.error(
-  "Usage: node scripts/dist-tools.js <clean|clean-release|clean-release-artifacts|clean-all>",
+  "Usage: node scripts/dist-tools.js <clean|clean-release|clean-release-artifacts|clean-flatpak|clean-all>",
 );
 process.exit(1);

@@ -18,6 +18,9 @@
   --mono: "Cascadia Code", "Consolas", "SF Mono", monospace;
   --radius: 6px;
   --radius-lg: 10px;
+  --sidebar-width: 220px;
+  --sidebar-min: 180px;
+  --sidebar-max: 420px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -73,6 +76,19 @@ body {
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
+}
+
+body.platform-windows {
+  --font: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+}
+
+body.platform-macos {
+  --font:
+    "SF Pro Text", "SF Pro Display", -apple-system, "Helvetica Neue", sans-serif;
+}
+
+body.platform-linux {
+  --font: "Noto Sans", "Ubuntu", "Cantarell", sans-serif;
 }
 
 .app {
@@ -136,16 +152,19 @@ body {
   display: flex;
   flex: 1;
   overflow: hidden;
+  position: relative;
 }
 
 .sidebar {
-  width: 220px;
-  min-width: 180px;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-min);
+  max-width: var(--sidebar-max);
   border-right: 1px solid var(--border);
   background: var(--bg-surface);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  flex-shrink: 0;
 }
 
 .sidebar__header {
@@ -163,6 +182,45 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
+}
+
+.sidebar-resizer {
+  width: 8px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  position: relative;
+  background: transparent;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer.sidebar-resizer--active::after {
+  background: var(--accent);
+}
+
+.sidebar-resizer:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.sidebar-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 40;
+  display: none;
 }
 
 .content-toolbar {
@@ -172,6 +230,13 @@ body {
   border-bottom: 1px solid var(--border);
   background: var(--bg-surface);
   min-height: 34px;
+}
+
+.content-toolbar__left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
 }
 
 .content-toolbar__actions {
@@ -187,6 +252,12 @@ body {
   padding: 4px 8px;
   font-size: 12px;
   flex-shrink: 0;
+}
+
+.sidebar-toggle {
+  display: none;
+  margin-left: 6px;
+  font-size: 16px;
 }
 
 .shortcut-chip {
@@ -1235,7 +1306,7 @@ input[type="checkbox"]:indeterminate::after {
 
 .transfer-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   padding: 5px 14px;
   font-size: 12px;
@@ -1266,11 +1337,26 @@ input[type="checkbox"]:indeterminate::after {
 }
 
 .transfer-name {
-  flex-shrink: 0;
+  flex-shrink: 1;
   max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.transfer-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.transfer-main__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .transfer-arrow {
@@ -1297,6 +1383,35 @@ input[type="checkbox"]:indeterminate::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.transfer-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.transfer-progress {
+  flex: 1;
+  min-width: 0;
+  height: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.transfer-progress__bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.12s linear;
+}
+
+.transfer-progress__label {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 
 .transfer-empty {
@@ -1328,15 +1443,284 @@ input[type="checkbox"]:indeterminate::after {
   padding: 2px 6px;
 }
 
+.activity-badge {
+  background: #0ea5e9;
+}
+
 .statusbar__right {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .btn--sm {
   padding: 3px 8px;
   font-size: 11px;
+}
+
+.activity-popup {
+  position: fixed;
+  bottom: 32px;
+  right: 452px;
+  width: 420px;
+  max-height: 320px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  z-index: 150;
+  display: flex;
+  flex-direction: column;
+  animation: modal-in 0.15s ease;
+}
+
+.activity-popup__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.activity-popup__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.activity-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.activity-entry {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: start;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+}
+
+.activity-entry:hover {
+  background: var(--bg-hover);
+}
+
+.activity-time {
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.activity-icon {
+  width: 14px;
+  text-align: center;
+}
+
+.activity-icon--info {
+  color: var(--text-secondary);
+}
+
+.activity-icon--success {
+  color: var(--badge-on-text);
+}
+
+.activity-icon--error {
+  color: var(--danger);
+}
+
+.activity-icon--warning {
+  color: #f59e0b;
+}
+
+.activity-msg {
+  min-width: 0;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.activity-empty {
+  padding: 20px 14px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.preview-modal {
+  width: min(900px, 92vw);
+  max-height: 86vh;
+}
+
+.preview-body {
+  min-height: 260px;
+  overflow: auto;
+}
+
+.preview-text {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.preview-image {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.preview-image img {
+  max-width: 100%;
+  max-height: 65vh;
+  object-fit: contain;
+}
+
+.preview-unsupported {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.preview-truncated {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+@media (max-width: 980px) {
+  .transfer-popup,
+  .activity-popup {
+    right: 8px;
+    left: 8px;
+    width: auto;
+  }
+
+  .activity-popup {
+    bottom: 360px;
+    max-height: 260px;
+  }
+}
+
+@media (max-width: 1180px) {
+  .connection-bar .field {
+    flex: 1;
+    min-width: 170px;
+  }
+
+  .content-toolbar {
+    gap: 8px;
+  }
+
+  .filter-input {
+    width: 120px;
+  }
+}
+
+@media (max-width: 900px) {
+  .main-layout {
+    isolation: isolate;
+  }
+
+  .sidebar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: min(78vw, 320px);
+    min-width: 0;
+    max-width: none;
+    transform: translateX(-104%);
+    transition: transform 0.18s ease;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+    z-index: 60;
+  }
+
+  .main-layout.main-layout--sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .main-layout.main-layout--sidebar-open .sidebar-backdrop {
+    display: block;
+  }
+
+  .sidebar-resizer {
+    display: none;
+  }
+
+  .sidebar-toggle {
+    display: inline-flex;
+  }
+
+  .breadcrumb {
+    padding-left: 8px;
+  }
+
+  .content-toolbar {
+    flex-wrap: wrap;
+    padding-bottom: 4px;
+  }
+
+  .content-toolbar__actions {
+    width: 100%;
+    justify-content: flex-end;
+    padding-right: 8px;
+  }
+
+  .filter-input {
+    margin-left: auto;
+    margin-right: 8px;
+  }
+
+  .statusbar {
+    padding: 4px 8px;
+  }
+}
+
+@media (max-width: 700px) {
+  .connection-bar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .connection-bar .field {
+    min-width: 0;
+    width: 100%;
+  }
+
+  #conn-endpoint,
+  #conn-access-key,
+  #conn-secret-key {
+    grid-column: 1 / span 2;
+  }
+
+  #bookmark-save-btn,
+  #connect-btn,
+  #disconnect-btn {
+    justify-self: stretch;
+  }
+
+  .shortcut-chip {
+    display: none;
+  }
+
+  .statusbar__right {
+    gap: 4px;
+  }
 }
 
 ::-webkit-scrollbar {
