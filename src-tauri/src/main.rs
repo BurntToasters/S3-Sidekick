@@ -32,7 +32,7 @@ pub(crate) fn lock_s3_state<'a>(
 ) -> Result<std::sync::MutexGuard<'a, S3State>, String> {
     match state.0.lock() {
         Ok(guard) => Ok(guard),
-        Err(err) => Err(err.to_string()),
+        Err(err) => Err(format!("Mutex poisoned: {}", err)),
     }
 }
 
