@@ -538,8 +538,19 @@ async function uploadAsset(uploadUrl, filePath) {
           if (res.statusCode < 300) {
             resolve(true);
           } else if (res.statusCode === 422) {
-            console.log(`  ~ ${fileName} (already uploaded)`);
-            resolve(true);
+            let detail = data;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed && typeof parsed.message === "string") {
+                detail = parsed.message;
+              }
+            } catch {
+            }
+            reject(
+              new Error(
+                `Upload ${fileName} was rejected (422): ${detail}. Remove the conflicting release asset and retry.`,
+              ),
+            );
           } else {
             reject(new Error(`Upload ${fileName} failed ${res.statusCode}: ${data}`));
           }

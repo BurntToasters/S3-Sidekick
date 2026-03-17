@@ -96,6 +96,13 @@ struct ListObjectsResponse {
     next_continuation_token: String,
 }
 
+#[derive(serde::Serialize)]
+struct LocalFileEntry {
+    file_path: String,
+    relative_path: String,
+    size: u64,
+}
+
 fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -422,7 +429,7 @@ fn security_status(config: &SecurityConfig) -> SecurityStatus {
     }
 }
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[tauri::command]
 fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
@@ -880,6 +887,35 @@ struct AclResponse {
     grants: Vec<AclGrant>,
 }
 
+#[derive(serde::Serialize, Clone)]
+struct UploadProgress {
+    transfer_id: u32,
+    bytes_sent: u64,
+    total_bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+struct PreviewResponse {
+    content_type: String,
+    data: String,
+    is_text: bool,
+    truncated: bool,
+    total_size: i64,
+}
+
+fn is_text_content_type(ct: &str) -> bool {
+    ct.starts_with("text/")
+        || ct == "application/json"
+        || ct == "application/xml"
+        || ct == "application/javascript"
+        || ct == "image/svg+xml"
+        || ct == "application/x-yaml"
+        || ct == "application/toml"
+}
+
+const MULTIPART_THRESHOLD: u64 = 50 * 1024 * 1024;
+const PART_SIZE: usize = 10 * 1024 * 1024;
+
 #[tauri::command]
 async fn head_object(
     state: tauri::State<'_, AppState>,
@@ -940,7 +976,7 @@ async fn update_metadata(
         s3.client.clone().ok_or("Not connected")?
     };
 
-    let source = format!("{}/{}", &bucket, &key);
+    let source = encode_copy_source(&bucket, &key);
     let mut req = client
         .copy_object()
         .bucket(&bucket)
@@ -988,46 +1024,211 @@ async fn delete_objects(
 
 #[tauri::command]
 async fn upload_object(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     bucket: String,
     key: String,
     file_path: String,
     content_type: String,
+    transfer_id: u32,
 ) -> Result<(), String> {
     let client = {
         let s3 = state.0.lock().map_err(|e| e.to_string())?;
         s3.client.clone().ok_or("Not connected")?
     };
 
-    let body = aws_sdk_s3::primitives::ByteStream::from_path(std::path::Path::new(&file_path))
+    let file_size = tokio::fs::metadata(&file_path)
         .await
-        .map_err(|e| format!("Failed to open file stream: {}", e))?;
+        .map(|m| m.len())
+        .unwrap_or(0);
 
-    let mut req = client.put_object().bucket(&bucket).key(&key).body(body);
+    let _ = app.emit(
+        "upload-progress",
+        UploadProgress {
+            transfer_id,
+            bytes_sent: 0,
+            total_bytes: file_size,
+        },
+    );
 
-    if !content_type.is_empty() {
-        req = req.content_type(&content_type);
+    if file_size >= MULTIPART_THRESHOLD {
+        upload_multipart(
+            &app,
+            &client,
+            &bucket,
+            &key,
+            &file_path,
+            &content_type,
+            transfer_id,
+            file_size,
+        )
+        .await?;
+    } else {
+        let body = aws_sdk_s3::primitives::ByteStream::from_path(std::path::Path::new(&file_path))
+            .await
+            .map_err(|e| format!("Failed to open file stream: {}", e))?;
+
+        let mut req = client.put_object().bucket(&bucket).key(&key).body(body);
+
+        if !content_type.is_empty() {
+            req = req.content_type(&content_type);
+        }
+
+        req.send()
+            .await
+            .map_err(|e| format!("Failed to upload: {}", e))?;
     }
 
-    req.send()
+    let _ = app.emit(
+        "upload-progress",
+        UploadProgress {
+            transfer_id,
+            bytes_sent: file_size,
+            total_bytes: file_size,
+        },
+    );
+
+    Ok(())
+}
+
+async fn upload_multipart(
+    app: &tauri::AppHandle,
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    file_path: &str,
+    content_type: &str,
+    transfer_id: u32,
+    file_size: u64,
+) -> Result<(), String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut create_req = client.create_multipart_upload().bucket(bucket).key(key);
+    if !content_type.is_empty() {
+        create_req = create_req.content_type(content_type);
+    }
+
+    let create_output = create_req
+        .send()
         .await
-        .map_err(|e| format!("Failed to upload: {}", e))?;
+        .map_err(|e| format!("Failed to create multipart upload: {}", e))?;
+
+    let upload_id = create_output
+        .upload_id()
+        .ok_or("No upload ID returned")?
+        .to_string();
+
+    let mut file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+
+    let mut completed_parts = Vec::new();
+    let mut part_number = 1i32;
+    let mut bytes_sent = 0u64;
+
+    loop {
+        let mut buf = vec![0u8; PART_SIZE];
+        let mut read = 0;
+        while read < PART_SIZE {
+            let n = file
+                .read(&mut buf[read..])
+                .await
+                .map_err(|e| format!("Failed to read file: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            read += n;
+        }
+        if read == 0 {
+            break;
+        }
+        buf.truncate(read);
+
+        let body = aws_sdk_s3::primitives::ByteStream::from(buf);
+        let part_output = client
+            .upload_part()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .part_number(part_number)
+            .body(body)
+            .send()
+            .await;
+
+        match part_output {
+            Ok(output) => {
+                let etag = output.e_tag().unwrap_or_default().to_string();
+                completed_parts.push(
+                    aws_sdk_s3::types::CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(etag)
+                        .build(),
+                );
+                bytes_sent += read as u64;
+                let _ = app.emit(
+                    "upload-progress",
+                    UploadProgress {
+                        transfer_id,
+                        bytes_sent,
+                        total_bytes: file_size,
+                    },
+                );
+                part_number += 1;
+            }
+            Err(e) => {
+                let _ = client
+                    .abort_multipart_upload()
+                    .bucket(bucket)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .send()
+                    .await;
+                return Err(format!("Failed to upload part {}: {}", part_number, e));
+            }
+        }
+    }
+
+    let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+        .set_parts(Some(completed_parts))
+        .build();
+
+    client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(&upload_id)
+        .multipart_upload(completed_upload)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to complete multipart upload: {}", e))?;
 
     Ok(())
 }
 
 #[tauri::command]
 async fn upload_object_bytes(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     bucket: String,
     key: String,
     bytes: Vec<u8>,
     content_type: String,
+    transfer_id: u32,
 ) -> Result<(), String> {
     let client = {
         let s3 = state.0.lock().map_err(|e| e.to_string())?;
         s3.client.clone().ok_or("Not connected")?
     };
+
+    let total = bytes.len() as u64;
+    let _ = app.emit(
+        "upload-progress",
+        UploadProgress {
+            transfer_id,
+            bytes_sent: 0,
+            total_bytes: total,
+        },
+    );
 
     let mut req = client
         .put_object()
@@ -1042,6 +1243,15 @@ async fn upload_object_bytes(
     req.send()
         .await
         .map_err(|e| format!("Failed to upload: {}", e))?;
+
+    let _ = app.emit(
+        "upload-progress",
+        UploadProgress {
+            transfer_id,
+            bytes_sent: total,
+            total_bytes: total,
+        },
+    );
 
     Ok(())
 }
@@ -1182,7 +1392,7 @@ async fn rename_object(
         s3.client.clone().ok_or("Not connected")?
     };
 
-    let source = format!("{}/{}", &bucket, &old_key);
+    let source = encode_copy_source(&bucket, &old_key);
     client
         .copy_object()
         .bucket(&bucket)
@@ -1203,6 +1413,16 @@ async fn rename_object(
     Ok(())
 }
 
+fn encode_copy_source(bucket: &str, key: &str) -> String {
+    let encoded_bucket = urlencoding::encode(bucket);
+    let encoded_key = key
+        .split('/')
+        .map(|segment| urlencoding::encode(segment).to_string())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("{}/{}", encoded_bucket, encoded_key)
+}
+
 #[tauri::command]
 fn build_object_url(
     state: tauri::State<'_, AppState>,
@@ -1221,6 +1441,302 @@ fn build_object_url(
         .collect::<Vec<_>>()
         .join("/");
     Ok(format!("{}/{}/{}", base, encoded_bucket, encoded_key))
+}
+
+#[tauri::command]
+async fn generate_presigned_url(
+    state: tauri::State<'_, AppState>,
+    bucket: String,
+    key: String,
+    expires_in_secs: u64,
+) -> Result<String, String> {
+    let client = {
+        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    let presigning_config =
+        aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(expires_in_secs))
+            .map_err(|e| format!("Invalid expiration: {}", e))?;
+
+    let presigned = client
+        .get_object()
+        .bucket(&bucket)
+        .key(&key)
+        .presigned(presigning_config)
+        .await
+        .map_err(|e| format!("Failed to generate presigned URL: {}", e))?;
+
+    Ok(presigned.uri().to_string())
+}
+
+#[tauri::command]
+async fn preview_object(
+    state: tauri::State<'_, AppState>,
+    bucket: String,
+    key: String,
+) -> Result<PreviewResponse, String> {
+    let client = {
+        let s3 = state.0.lock().map_err(|e| e.to_string())?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    let head = client
+        .head_object()
+        .bucket(&bucket)
+        .key(&key)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get object info: {}", e))?;
+
+    let total_size = head.content_length().unwrap_or(0);
+    let content_type = head
+        .content_type()
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    const MAX_PREVIEW: i64 = 1_048_576;
+    let truncated = total_size > MAX_PREVIEW;
+
+    let mut req = client.get_object().bucket(&bucket).key(&key);
+    if truncated {
+        req = req.range(format!("bytes=0-{}", MAX_PREVIEW - 1));
+    }
+
+    let output = req
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download preview: {}", e))?;
+
+    let bytes = output
+        .body
+        .collect()
+        .await
+        .map_err(|e| format!("Failed to read preview body: {}", e))?
+        .into_bytes();
+
+    let is_text = is_text_content_type(&content_type);
+
+    let data = if is_text {
+        String::from_utf8_lossy(&bytes).to_string()
+    } else {
+        B64.encode(&bytes)
+    };
+
+    Ok(PreviewResponse {
+        content_type,
+        data,
+        is_text,
+        truncated,
+        total_size,
+    })
+}
+
+fn normalize_slashes(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn absolute_path_string(path: &std::path::Path) -> String {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical.to_string_lossy().to_string();
+    }
+    if path.is_absolute() {
+        return path.to_string_lossy().to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path).to_string_lossy().to_string(),
+        Err(_) => path.to_string_lossy().to_string(),
+    }
+}
+
+fn root_label(root: &std::path::Path) -> String {
+    if let Some(name) = root.file_name().and_then(|n| n.to_str()) {
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+
+    let normalized = normalize_slashes(root);
+    normalized
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("root")
+        .to_string()
+}
+
+fn collect_local_files_from_root(
+    root: &std::path::Path,
+    label: &str,
+    entries: &mut Vec<LocalFileEntry>,
+    warnings: &mut Vec<String>,
+) {
+    let root_meta = match std::fs::metadata(root) {
+        Ok(meta) => meta,
+        Err(err) => {
+            warnings.push(format!(
+                "Cannot access selected path '{}': {}",
+                root.to_string_lossy(),
+                err
+            ));
+            return;
+        }
+    };
+
+    if root_meta.is_file() {
+        entries.push(LocalFileEntry {
+            file_path: absolute_path_string(root),
+            relative_path: normalize_slashes(std::path::Path::new(label)),
+            size: root_meta.len(),
+        });
+        return;
+    }
+    if !root_meta.is_dir() {
+        return;
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let iter = match std::fs::read_dir(&dir) {
+            Ok(iter) => iter,
+            Err(err) => {
+                warnings.push(format!(
+                    "Cannot read directory '{}': {}",
+                    dir.to_string_lossy(),
+                    err
+                ));
+                continue;
+            }
+        };
+
+        for entry_result in iter {
+            let entry = match entry_result {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Cannot read directory entry in '{}': {}",
+                        dir.to_string_lossy(),
+                        err
+                    ));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Cannot inspect '{}': {}",
+                        path.to_string_lossy(),
+                        err
+                    ));
+                    continue;
+                }
+            };
+
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Cannot read metadata for '{}': {}",
+                        path.to_string_lossy(),
+                        err
+                    ));
+                    continue;
+                }
+            };
+
+            let rel_under_root = match path.strip_prefix(root) {
+                Ok(rel) => rel,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Cannot build relative path for '{}': {}",
+                        path.to_string_lossy(),
+                        err
+                    ));
+                    continue;
+                }
+            };
+            let rel_with_root = std::path::Path::new(label).join(rel_under_root);
+
+            entries.push(LocalFileEntry {
+                file_path: absolute_path_string(&path),
+                relative_path: normalize_slashes(&rel_with_root),
+                size: meta.len(),
+            });
+        }
+    }
+}
+
+#[tauri::command]
+fn list_local_files_recursive(roots: Vec<String>) -> Result<Vec<LocalFileEntry>, String> {
+    let mut normalized_roots = Vec::new();
+    for root in roots {
+        let trimmed = root.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        normalized_roots.push(std::path::PathBuf::from(trimmed));
+    }
+
+    if normalized_roots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut base_counts: HashMap<String, usize> = HashMap::new();
+    for root in &normalized_roots {
+        let base = root_label(root);
+        *base_counts.entry(base).or_insert(0) += 1;
+    }
+
+    let mut duplicate_positions: HashMap<String, usize> = HashMap::new();
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+
+    for root in &normalized_roots {
+        let base = root_label(root);
+        let total = *base_counts.get(&base).unwrap_or(&1);
+        let label = if total > 1 {
+            let next = duplicate_positions.entry(base.clone()).or_insert(0);
+            *next += 1;
+            format!("{} ({})", base, next)
+        } else {
+            base
+        };
+        collect_local_files_from_root(root, &label, &mut entries, &mut warnings);
+    }
+
+    entries.sort_by(|a, b| {
+        a.relative_path
+            .cmp(&b.relative_path)
+            .then(a.file_path.cmp(&b.file_path))
+    });
+
+    if !warnings.is_empty() {
+        let sample = warnings.iter().take(3).cloned().collect::<Vec<_>>().join(" | ");
+        eprintln!(
+            "list_local_files_recursive skipped {} path(s). Sample: {}",
+            warnings.len(),
+            sample
+        );
+    }
+
+    if entries.is_empty() && !warnings.is_empty() {
+        return Err(format!(
+            "No readable files were found. {} additional path error(s) occurred.",
+            warnings.len()
+        ));
+    }
+
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -1291,9 +1807,6 @@ fn open_external_url(url: String) -> Result<(), String> {
 fn main() {
     #[cfg(target_os = "linux")]
     {
-        if std::env::var("GDK_BACKEND").is_err() {
-            std::env::set_var("GDK_BACKEND", "x11");
-        }
         if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
             std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
         }
@@ -1330,6 +1843,9 @@ fn main() {
             create_folder,
             rename_object,
             build_object_url,
+            generate_presigned_url,
+            preview_object,
+            list_local_files_recursive,
             load_settings,
             save_settings,
             load_connection,

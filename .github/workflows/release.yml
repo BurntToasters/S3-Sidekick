@@ -12,9 +12,16 @@ concurrency:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Guard release branch
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "Release workflow must be run from refs/heads/main (current: ${GITHUB_REF})." >&2
+            exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -34,6 +41,7 @@ jobs:
 
       - run: npm ci
       - run: npm run test:all
+      - run: npm run build
 
   build:
     needs: verify
@@ -45,24 +53,30 @@ jobs:
             target: x86_64-pc-windows-msvc
             bundles: nsis
             label: win-x64
+            experimental: false
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             bundles: nsis
             label: win-arm64
+            experimental: false
           - os: macos-latest
             target: universal-apple-darwin
             bundles: dmg,app
             label: mac-universal
+            experimental: false
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             bundles: appimage,deb,rpm
             label: linux-x64
+            experimental: false
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             bundles: appimage,deb,rpm
             label: linux-arm64
+            experimental: true
 
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
     steps:
       - uses: actions/checkout@v4
 
@@ -174,7 +188,7 @@ jobs:
 
   sign-and-publish:
     needs: [build, flatpak]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
       HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
     steps:
@@ -196,11 +210,18 @@ jobs:
       - name: Flatten artifacts into release/
         run: |
           mkdir -p release
-          find release-artifacts -type f \( \
+          while IFS= read -r file; do
+            base="$(basename "$file")"
+            if [ -e "release/$base" ]; then
+              echo "Duplicate artifact basename detected: $base" >&2
+              exit 1
+            fi
+            cp "$file" "release/$base"
+          done < <(find release-artifacts -type f \( \
             -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' \
             -o -name '*.rpm' -o -name '*.flatpak' -o -name '*.zip' \
             -o -name '*.AppImage' -o -name '*.tar.gz' -o -name '*.sig' \
-          \) -exec cp -n {} release/ \;
+          \) | sort)
           ls -lh release/
 
       - name: Import GPG key

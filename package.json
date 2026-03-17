@@ -37,7 +37,7 @@
     "build:linux:arm64": "npm run sync-version && npm run licenses && dotenv -e .env -- tauri build --target aarch64-unknown-linux-gnu --bundles appimage,deb,rpm",
     "build:linux": "npm run build:linux:x64 && npm run build:linux:arm64",
     "flatpak:bundle": "node scripts/flatpak-bundle.js",
-    "flatpak:clean": "rm -rf flatpak-build flatpak-repo",
+    "flatpak:clean": "node scripts/dist-tools.js clean-flatpak",
     "release:prepare": "npm run dist:clean-release-artifacts && node scripts/update-metainfo.js",
     "release:finalize": "dotenv -e .env -- node scripts/post-release-assets.js",
     "release:win": "npm run release:prepare && npm run build:win && npm run release:sign:gpg && npm run release:finalize",
