@@ -31,9 +31,10 @@ async function renderLicenses() {
       card.className = "license-card";
 
       const href = entry.repository ? safeHref(entry.repository) : "";
-      const repoLink = href && href !== "#"
-        ? `<a href="${href}" target="_blank" rel="noopener">${escapeHtml(entry.repository!)}</a>`
-        : "N/A";
+      const repoLink =
+        href && href !== "#"
+          ? `<a href="${href}" target="_blank" rel="noopener">${escapeHtml(entry.repository!)}</a>`
+          : "N/A";
 
       card.innerHTML =
         `<summary class="license-card__header">` +

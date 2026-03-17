@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { state, dom } from "./state.ts";
 import {
   loadSettings,
@@ -34,16 +34,33 @@ import {
 import { initUpdater, autoCheckUpdates, checkUpdates } from "./updater.ts";
 import { addBookmark } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
-import { showContextMenu, hideContextMenu, type MenuItem } from "./context-menu.ts";
-import { openInfoPanel, closeInfoPanel, saveInfoPanel, switchTab } from "./info-panel.ts";
+import {
+  showContextMenu,
+  hideContextMenu,
+  type MenuItem,
+} from "./context-menu.ts";
+import {
+  openInfoPanel,
+  closeInfoPanel,
+  saveInfoPanel,
+  switchTab,
+} from "./info-panel.ts";
 import {
   toggleTransferQueue,
+  toggleTransferCollapsed,
   hideTransferQueue,
   clearCompletedTransfers,
   enqueuePaths,
   setTransferCompleteHandler,
+  initTransferQueueUI,
+  enqueueFiles,
 } from "./transfers.ts";
 import { basename, formatSize } from "./utils.ts";
+import {
+  ensureSecurityReady,
+  handleSecurityChangePassword,
+  handleSecurityToggle,
+} from "./security.ts";
 
 function setStatus(text: string): void {
   dom.statusEl.textContent = text;
@@ -65,18 +82,34 @@ function setConnectionUI(connected: boolean): void {
 }
 
 function getConnectionInputs() {
-  const endpoint = (document.getElementById("conn-endpoint") as HTMLInputElement).value.trim();
-  const region = (document.getElementById("conn-region") as HTMLInputElement).value.trim();
-  const accessKey = (document.getElementById("conn-access-key") as HTMLInputElement).value.trim();
-  const secretKey = (document.getElementById("conn-secret-key") as HTMLInputElement).value;
+  const endpoint = (
+    document.getElementById("conn-endpoint") as HTMLInputElement
+  ).value.trim();
+  const region = (
+    document.getElementById("conn-region") as HTMLInputElement
+  ).value.trim();
+  const accessKey = (
+    document.getElementById("conn-access-key") as HTMLInputElement
+  ).value.trim();
+  const secretKey = (
+    document.getElementById("conn-secret-key") as HTMLInputElement
+  ).value;
   return { endpoint, region, accessKey, secretKey };
 }
 
-function setConnectionInputs(endpoint: string, region: string, accessKey: string, secretKey: string): void {
-  (document.getElementById("conn-endpoint") as HTMLInputElement).value = endpoint;
+function setConnectionInputs(
+  endpoint: string,
+  region: string,
+  accessKey: string,
+  secretKey: string,
+): void {
+  (document.getElementById("conn-endpoint") as HTMLInputElement).value =
+    endpoint;
   (document.getElementById("conn-region") as HTMLInputElement).value = region;
-  (document.getElementById("conn-access-key") as HTMLInputElement).value = accessKey;
-  (document.getElementById("conn-secret-key") as HTMLInputElement).value = secretKey;
+  (document.getElementById("conn-access-key") as HTMLInputElement).value =
+    accessKey;
+  (document.getElementById("conn-secret-key") as HTMLInputElement).value =
+    secretKey;
 }
 
 async function handleConnect(): Promise<void> {
@@ -91,9 +124,13 @@ async function handleConnect(): Promise<void> {
 
   try {
     await connect(endpoint, region, accessKey, secretKey);
-    await saveConnection(endpoint, region, accessKey, secretKey);
     setConnectionUI(true);
     setStatus("Connected.");
+    try {
+      await saveConnection(endpoint, region, accessKey, secretKey);
+    } catch (saveErr) {
+      setStatus(`Connected (credentials not saved: ${saveErr}).`);
+    }
     await refreshBuckets();
     renderBucketList();
     if (state.buckets.length > 0) {
@@ -129,14 +166,18 @@ async function handleBookmarkSave(): Promise<void> {
     name = endpoint.replace(/^https?:\/\//, "").split(/[:/]/)[0] || endpoint;
   }
 
-  await addBookmark({
-    name,
-    endpoint,
-    region,
-    access_key: accessKey,
-    secret_key: secretKey,
-  });
-  setStatus(`Bookmarked "${name}".`);
+  try {
+    await addBookmark({
+      name,
+      endpoint,
+      region,
+      access_key: accessKey,
+      secret_key: secretKey,
+    });
+    setStatus(`Bookmarked "${name}".`);
+  } catch (err) {
+    setStatus(`Failed to save bookmark: ${err}`);
+  }
 }
 
 function getSelectedFileKeys(): string[] {
@@ -147,9 +188,10 @@ async function handleDelete(): Promise<void> {
   const keys = getSelectedFileKeys();
   if (keys.length === 0) return;
 
-  const msg = keys.length === 1
-    ? `Delete "${basename(keys[0])}"?`
-    : `Delete ${keys.length} items?`;
+  const msg =
+    keys.length === 1
+      ? `Delete "${basename(keys[0])}"?`
+      : `Delete ${keys.length} items?`;
   if (!window.confirm(msg)) return;
 
   try {
@@ -281,21 +323,21 @@ async function handleUploadButton(): Promise<void> {
     setStatus("Connect to a bucket first.");
     return;
   }
-  const input = document.createElement("input");
-  input.type = "file";
-  input.multiple = true;
-  input.addEventListener("change", () => {
-    if (!input.files || input.files.length === 0) return;
-    const paths: string[] = [];
-    for (const file of Array.from(input.files)) {
-      const path = (file as any).path;
-      if (path) paths.push(path);
-    }
-    if (paths.length > 0) {
-      enqueuePaths(paths, state.currentPrefix);
-    }
+
+  const selected = await open({
+    title: "Select files to upload",
+    multiple: true,
+    directory: false,
   });
-  input.click();
+  if (!selected) return;
+
+  const paths = Array.isArray(selected) ? selected : [selected];
+  const filePaths = paths.filter(
+    (value): value is string => typeof value === "string",
+  );
+  if (filePaths.length > 0) {
+    enqueuePaths(filePaths, state.currentPrefix);
+  }
 }
 
 function handleContextMenu(e: MouseEvent): void {
@@ -303,14 +345,19 @@ function handleContextMenu(e: MouseEvent): void {
   if (!row) {
     if ((e.target as HTMLElement).closest("#object-panel")) {
       e.preventDefault();
-      showContextMenu(e.clientX, e.clientY, [
-        { label: "New Folder", action: "new-folder" },
-        { separator: true },
-        { label: "Refresh", action: "refresh" },
-      ], (action) => {
-        if (action === "new-folder") handleCreateFolder();
-        else if (action === "refresh") handleRefresh();
-      });
+      showContextMenu(
+        e.clientX,
+        e.clientY,
+        [
+          { label: "New Folder", action: "new-folder" },
+          { separator: true },
+          { label: "Refresh", action: "refresh" },
+        ],
+        (action) => {
+          if (action === "new-folder") handleCreateFolder();
+          else if (action === "refresh") handleRefresh();
+        },
+      );
     }
     return;
   }
@@ -345,8 +392,14 @@ function handleContextMenu(e: MouseEvent): void {
       items.push({ label: "Copy URL", action: "copy-url" });
       items.push({ label: "Rename", action: "rename" });
     } else {
-      items.push({ label: `Get Info (${fileKeys.length} items)`, action: "info" });
-      items.push({ label: `Download ${fileKeys.length} items`, action: "download" });
+      items.push({
+        label: `Get Info (${fileKeys.length} items)`,
+        action: "info",
+      });
+      items.push({
+        label: `Download ${fileKeys.length} items`,
+        action: "download",
+      });
     }
     items.push({ separator: true });
     items.push({
@@ -371,33 +424,61 @@ function wireEvents(): void {
   dom.connectBtn.addEventListener("click", handleConnect);
   dom.disconnectBtn.addEventListener("click", handleDisconnect);
 
-  document.getElementById("bookmark-save-btn")!.addEventListener("click", handleBookmarkSave);
+  document
+    .getElementById("bookmark-save-btn")!
+    .addEventListener("click", handleBookmarkSave);
 
-  document.getElementById("settings-btn")!.addEventListener("click", openSettingsModal);
-  document.getElementById("settings-close")!.addEventListener("click", () => closeSettingsModal(false));
-  document.getElementById("settings-cancel")!.addEventListener("click", () => closeSettingsModal(false));
-  document.getElementById("settings-save")!.addEventListener("click", () => closeSettingsModal(true));
-  document.getElementById("settings-reset")!.addEventListener("click", resetSettings);
-  document.getElementById("settings-check-updates")!.addEventListener("click", () => {
-    closeSettingsModal(false);
-    checkUpdates();
-  });
-
-  document.getElementById("show-licenses")!.addEventListener("click", openLicensesModal);
-  document.getElementById("close-licenses")!.addEventListener("click", closeLicensesModal);
-  document.getElementById("licenses-overlay")!.addEventListener("click", (e) => {
-    if (e.target === e.currentTarget) closeLicensesModal();
-  });
-
-  document.getElementById("settings-overlay")!.addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).classList.contains("modal-overlay")) {
+  document
+    .getElementById("settings-btn")!
+    .addEventListener("click", openSettingsModal);
+  document
+    .getElementById("settings-close")!
+    .addEventListener("click", () => closeSettingsModal(false));
+  document
+    .getElementById("settings-cancel")!
+    .addEventListener("click", () => closeSettingsModal(false));
+  document
+    .getElementById("settings-save")!
+    .addEventListener("click", () => closeSettingsModal(true));
+  document
+    .getElementById("settings-reset")!
+    .addEventListener("click", resetSettings);
+  document
+    .getElementById("settings-check-updates")!
+    .addEventListener("click", () => {
       closeSettingsModal(false);
-    }
-  });
+      checkUpdates();
+    });
 
-  document.getElementById("info-close")!.addEventListener("click", closeInfoPanel);
-  document.getElementById("info-cancel")!.addEventListener("click", closeInfoPanel);
-  document.getElementById("info-save")!.addEventListener("click", saveInfoPanel);
+  document
+    .getElementById("show-licenses")!
+    .addEventListener("click", openLicensesModal);
+  document
+    .getElementById("close-licenses")!
+    .addEventListener("click", closeLicensesModal);
+  document
+    .getElementById("licenses-overlay")!
+    .addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) closeLicensesModal();
+    });
+
+  document
+    .getElementById("settings-overlay")!
+    .addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).classList.contains("modal-overlay")) {
+        closeSettingsModal(false);
+      }
+    });
+
+  document
+    .getElementById("info-close")!
+    .addEventListener("click", closeInfoPanel);
+  document
+    .getElementById("info-cancel")!
+    .addEventListener("click", closeInfoPanel);
+  document
+    .getElementById("info-save")!
+    .addEventListener("click", saveInfoPanel);
   document.getElementById("info-overlay")!.addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closeInfoPanel();
   });
@@ -407,20 +488,47 @@ function wireEvents(): void {
     if (tab?.dataset.tab) switchTab(tab.dataset.tab);
   });
 
-  document.getElementById("transfer-toggle")!.addEventListener("click", toggleTransferQueue);
-  document.getElementById("transfer-close")!.addEventListener("click", hideTransferQueue);
-  document.getElementById("transfer-clear")!.addEventListener("click", clearCompletedTransfers);
+  document
+    .getElementById("transfer-toggle")!
+    .addEventListener("click", toggleTransferQueue);
+  document
+    .getElementById("transfer-collapse")!
+    .addEventListener("click", toggleTransferCollapsed);
+  document
+    .getElementById("transfer-close")!
+    .addEventListener("click", hideTransferQueue);
+  document
+    .getElementById("transfer-clear")!
+    .addEventListener("click", clearCompletedTransfers);
+  initTransferQueueUI();
 
-  document.getElementById("btn-refresh")!.addEventListener("click", handleRefresh);
-  document.getElementById("btn-new-folder")!.addEventListener("click", handleCreateFolder);
-  document.getElementById("btn-upload")!.addEventListener("click", handleUploadButton);
-
-  document.getElementById("btn-load-more")!.addEventListener("click", async () => {
-    setStatus("Loading more...");
-    await loadMoreObjects();
-    renderObjectTable();
-    setStatus("");
+  document.getElementById("security-toggle")!.addEventListener("click", () => {
+    void handleSecurityToggle(setStatus);
   });
+  document
+    .getElementById("security-change-password")!
+    .addEventListener("click", () => {
+      void handleSecurityChangePassword(setStatus);
+    });
+
+  document
+    .getElementById("btn-refresh")!
+    .addEventListener("click", handleRefresh);
+  document
+    .getElementById("btn-new-folder")!
+    .addEventListener("click", handleCreateFolder);
+  document
+    .getElementById("btn-upload")!
+    .addEventListener("click", handleUploadButton);
+
+  document
+    .getElementById("btn-load-more")!
+    .addEventListener("click", async () => {
+      setStatus("Loading more...");
+      await loadMoreObjects();
+      renderObjectTable();
+      setStatus("");
+    });
 
   document.querySelectorAll<HTMLElement>(".col-sortable").forEach((th) => {
     th.addEventListener("click", () => {
@@ -441,18 +549,24 @@ function wireEvents(): void {
     const row = target.closest<HTMLElement>(".object-row");
     if (!row) return;
 
-    if (row.classList.contains("object-row--folder") && !target.closest(".col-check") && !target.classList.contains("row-check")) {
+    if (
+      row.classList.contains("object-row--folder") &&
+      !target.closest(".col-check") &&
+      !target.classList.contains("row-check")
+    ) {
       const prefix = row.dataset.prefix;
       if (prefix !== undefined) navigateToFolder(prefix);
       return;
     }
 
-    const key = row.dataset.key ?? ("prefix:" + row.dataset.prefix);
+    const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
     handleRowClick(key, e);
   });
 
   dom.objectTbody.addEventListener("dblclick", (e) => {
-    const row = (e.target as HTMLElement).closest<HTMLElement>(".object-row--file");
+    const row = (e.target as HTMLElement).closest<HTMLElement>(
+      ".object-row--file",
+    );
     if (!row) return;
     const key = row.dataset.key;
     if (key) openInfoPanel([key]);
@@ -470,7 +584,9 @@ function wireEvents(): void {
   });
 
   dom.breadcrumb.addEventListener("click", (e) => {
-    const seg = (e.target as HTMLElement).closest<HTMLElement>(".breadcrumb__segment");
+    const seg = (e.target as HTMLElement).closest<HTMLElement>(
+      ".breadcrumb__segment",
+    );
     if (!seg) return;
     const prefix = seg.dataset.prefix;
     if (prefix !== undefined) navigateToFolder(prefix);
@@ -497,11 +613,15 @@ function wireEvents(): void {
     if (files && files.length > 0) {
       const paths: string[] = [];
       for (const file of Array.from(files)) {
-        const path = (file as any).path;
-        if (path) paths.push(path);
+        const maybePath = (file as { path?: unknown }).path;
+        if (typeof maybePath === "string" && maybePath.length > 0) {
+          paths.push(maybePath);
+        }
       }
       if (paths.length > 0) {
         enqueuePaths(paths, state.currentPrefix);
+      } else {
+        enqueueFiles(files, state.currentPrefix);
       }
     }
   });
@@ -546,8 +666,15 @@ function wireEvents(): void {
 
     if (e.key === "Delete" && state.selectedKeys.size > 0) {
       const active = document.activeElement;
-      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
-      if (document.querySelector(".modal-overlay.active, .confirm-overlay.active")) return;
+      if (
+        active &&
+        (active.tagName === "INPUT" || active.tagName === "TEXTAREA")
+      )
+        return;
+      if (
+        document.querySelector(".modal-overlay.active, .confirm-overlay.active")
+      )
+        return;
       handleDelete();
     }
 
@@ -558,12 +685,25 @@ function wireEvents(): void {
   });
 
   setBookmarkSelectHandler((bookmark) => {
-    setConnectionInputs(bookmark.endpoint, bookmark.region, bookmark.access_key, bookmark.secret_key);
+    setConnectionInputs(
+      bookmark.endpoint,
+      bookmark.region,
+      bookmark.access_key,
+      bookmark.secret_key,
+    );
     setStatus(`Loaded bookmark "${bookmark.name}".`);
   });
 }
 
 async function init(): Promise<void> {
+  const securityReady = await ensureSecurityReady();
+  if (!securityReady) {
+    setStatus(
+      "Secure storage is locked. Saved settings and credentials are unavailable.",
+    );
+    return;
+  }
+
   await loadSettings();
 
   state.platformName = await invoke<string>("get_platform_info");
@@ -574,7 +714,12 @@ async function init(): Promise<void> {
 
   const saved = await loadConnection();
   if (saved) {
-    setConnectionInputs(saved.endpoint, saved.region, saved.access_key, saved.secret_key);
+    setConnectionInputs(
+      saved.endpoint,
+      saved.region,
+      saved.access_key,
+      saved.secret_key,
+    );
   }
 
   await initUpdater();

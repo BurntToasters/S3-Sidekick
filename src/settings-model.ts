@@ -10,7 +10,9 @@ export const SETTING_DEFAULTS: UserSettings = {
   autoCheckUpdates: true,
 };
 
-export function normalizeUserSettings(raw: Partial<UserSettings>): UserSettings {
+export function normalizeUserSettings(
+  raw: Partial<UserSettings>,
+): UserSettings {
   const theme =
     raw.theme === "light" || raw.theme === "dark" || raw.theme === "system"
       ? raw.theme
@@ -35,7 +37,11 @@ export function parseSettingsRaw(json: string): LoadSettingsResult {
   let malformed = false;
   try {
     parsed = JSON.parse(json);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
       parsed = {};
       malformed = true;
     }
@@ -66,7 +72,7 @@ export function parseSettingsRaw(json: string): LoadSettingsResult {
 
 export function mergeSettingsPayload(
   settings: UserSettings,
-  extras: Record<string, unknown>
+  extras: Record<string, unknown>,
 ): string {
   return JSON.stringify({ ...extras, ...settings }, null, 2);
 }

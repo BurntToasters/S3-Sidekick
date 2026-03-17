@@ -15,43 +15,131 @@ export function getBookmarks(): Bookmark[] {
   return bookmarks;
 }
 
-export async function loadBookmarks(): Promise<void> {
-  const raw = await invoke<string>("load_settings");
-  let parsed: Record<string, unknown> = {};
+function isBookmark(value: unknown): value is Bookmark {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Bookmark;
+  return (
+    typeof row.name === "string" &&
+    typeof row.endpoint === "string" &&
+    typeof row.region === "string" &&
+    typeof row.access_key === "string" &&
+    typeof row.secret_key === "string"
+  );
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function readBookmarksField(data: Record<string, unknown>): {
+  values: Bookmark[];
+  corrupted: boolean;
+} {
+  if (!Object.hasOwn(data, "_bookmarks")) {
+    return { values: [], corrupted: false };
+  }
+  const raw = data._bookmarks;
+  if (!Array.isArray(raw)) {
+    return { values: [], corrupted: true };
+  }
+  if (!raw.every(isBookmark)) {
+    return { values: [], corrupted: true };
+  }
+  return { values: [...raw], corrupted: false };
+}
+
+async function loadBackupBookmarks(): Promise<Bookmark[] | null> {
+  let raw = "[]";
+  try {
+    raw = await invoke<string>("load_bookmarks_backup");
+  } catch {
+    return null;
+  }
+  let parsed: unknown = [];
   try {
     parsed = JSON.parse(raw);
   } catch {
-    parsed = {};
+    return null;
   }
-  const stored = parsed._bookmarks;
-  if (Array.isArray(stored)) {
-    bookmarks = stored.filter(
-      (b): b is Bookmark =>
-        typeof b === "object" &&
-        b !== null &&
-        typeof (b as Bookmark).name === "string" &&
-        typeof (b as Bookmark).endpoint === "string"
-    );
-  } else {
-    bookmarks = [];
+  if (!Array.isArray(parsed) || !parsed.every(isBookmark)) {
+    return null;
   }
+  return [...parsed];
+}
+
+async function saveBookmarksBackupSafe(next: Bookmark[]): Promise<void> {
+  try {
+    await invoke("save_bookmarks_backup", {
+      json: JSON.stringify(next, null, 2),
+    });
+  } catch (err) {
+    console.warn("Failed to update bookmark backup:", err);
+  }
+}
+
+async function repairSettingsBookmarks(
+  parsed: Record<string, unknown>,
+  next: Bookmark[],
+): Promise<void> {
+  parsed._bookmarks = next;
+  await invoke("save_settings", { json: JSON.stringify(parsed, null, 2) });
+}
+
+export async function loadBookmarks(): Promise<void> {
+  let raw = "{}";
+  try {
+    raw = await invoke<string>("load_settings");
+  } catch {
+    const backup = await loadBackupBookmarks();
+    bookmarks = backup ?? [];
+    return;
+  }
+  const parsed = parseJsonObject(raw);
+  if (parsed) {
+    const primary = readBookmarksField(parsed);
+    if (!primary.corrupted) {
+      bookmarks = primary.values;
+      await saveBookmarksBackupSafe(bookmarks);
+      return;
+    }
+  }
+  const backup = await loadBackupBookmarks();
+  if (backup) {
+    bookmarks = backup;
+    if (parsed) {
+      try {
+        await repairSettingsBookmarks(parsed, bookmarks);
+      } catch {}
+    }
+    return;
+  }
+  bookmarks = [];
 }
 
 async function persistBookmarks(): Promise<void> {
   const raw = await invoke<string>("load_settings");
-  let parsed: Record<string, unknown> = {};
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    parsed = {};
-  }
+  const parsed = parseJsonObject(raw) ?? {};
   parsed._bookmarks = bookmarks;
   await invoke("save_settings", { json: JSON.stringify(parsed, null, 2) });
+  await saveBookmarksBackupSafe(bookmarks);
 }
 
 export async function addBookmark(bookmark: Bookmark): Promise<void> {
   const exists = bookmarks.some(
-    (b) => b.endpoint === bookmark.endpoint && b.access_key === bookmark.access_key
+    (b) =>
+      b.endpoint === bookmark.endpoint && b.access_key === bookmark.access_key,
   );
   if (exists) return;
   bookmarks.push(bookmark);
@@ -66,7 +154,7 @@ export async function removeBookmark(index: number): Promise<void> {
 export function renderBookmarkList(
   listEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
-  onDelete: (index: number) => void
+  onDelete: (index: number) => void,
 ): void {
   if (bookmarks.length === 0) {
     listEl.innerHTML = `<li class="bookmark-empty">No bookmarks saved</li>`;
@@ -82,19 +170,23 @@ export function renderBookmarkList(
             <div class="bookmark__endpoint">${escapeHtml(b.endpoint)} (${escapeHtml(b.region)})</div>
           </div>
           <button class="bookmark__delete" data-delete="${i}" title="Remove bookmark">&#10005;</button>
-        </li>`
+        </li>`,
     )
     .join("");
 
   listEl.onclick = (e) => {
-    const deleteBtn = (e.target as HTMLElement).closest<HTMLElement>("[data-delete]");
+    const deleteBtn = (e.target as HTMLElement).closest<HTMLElement>(
+      "[data-delete]",
+    );
     if (deleteBtn) {
       e.stopPropagation();
       const idx = parseInt(deleteBtn.dataset.delete!, 10);
       onDelete(idx);
       return;
     }
-    const item = (e.target as HTMLElement).closest<HTMLElement>(".bookmark-item");
+    const item = (e.target as HTMLElement).closest<HTMLElement>(
+      ".bookmark-item",
+    );
     if (item) {
       const idx = parseInt(item.dataset.index!, 10);
       onSelect(bookmarks[idx]);

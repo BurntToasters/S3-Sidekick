@@ -29,7 +29,6 @@ const RELEASE_PUB_DATE = process.env.RELEASE_PUB_DATE || new Date().toISOString(
 
 const ext = (e) => (n) => n.toLowerCase().endsWith(e);
 const rx = (r) => (n) => r.test(n);
-const exact = (f) => (n) => n === f;
 const isPerTargetManifest = rx(/^latest-[a-z0-9]+-[a-z0-9_]+\.json$/i);
 const isChecksumTextName = rx(/^SHA256SUMS(?:-[a-z0-9_]+(?:-[a-z0-9_]+)?)?\.txt$/i);
 
@@ -44,7 +43,6 @@ const ARTIFACT_RULES = [
   rx(/\.appimage\.tar\.gz$/i),
   rx(/\.(?:exe|msi|dmg|deb|rpm|flatpak|appimage|zip)\.sig$/i),
   rx(/\.tar\.gz\.sig$/i),
-  exact("latest.json"),
   isPerTargetManifest,
 ];
 
@@ -66,7 +64,7 @@ const SEARCH_DIRS = [
 ];
 
 function artifactMatchesVersion(name) {
-  if (name === "latest.json" || isPerTargetManifest(name)) return true;
+  if (isPerTargetManifest(name)) return true;
   const versions = name.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/g);
   if (!versions || versions.length === 0) return true;
   return versions.includes(VERSION);
@@ -143,12 +141,15 @@ function cleanArtifactBaseName(name) {
 }
 
 function cleanArtifactName(name) {
-  if (name === "latest.json") return name;
   if (name.endsWith(".sig")) {
     const base = name.slice(0, -4);
     return `${cleanArtifactBaseName(base)}.sig`;
   }
   return cleanArtifactBaseName(name);
+}
+
+function shouldUploadReleaseEntry(name) {
+  return isArtifact(name) || name.endsWith(".asc") || isChecksumTextName(name);
 }
 
 const FALLBACK_INSTALLER_PRIORITY = {
@@ -585,7 +586,10 @@ async function main() {
   const release = await getOrCreateRelease();
   console.log(`  Release: ${release.html_url || TAG}`);
 
-  const everything = fs.readdirSync(releaseDir).map((n) => path.join(releaseDir, n));
+  const everything = fs
+    .readdirSync(releaseDir)
+    .filter((name) => shouldUploadReleaseEntry(name))
+    .map((n) => path.join(releaseDir, n));
   for (const f of everything) {
     await uploadAsset(release.upload_url, f);
     console.log(`  ^ ${path.basename(f)}`);
