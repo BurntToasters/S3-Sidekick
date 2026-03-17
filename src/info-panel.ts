@@ -68,7 +68,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   metadataRows = [];
 
   const body = $("info-body");
-  body.innerHTML = `<div class="metadata-loading">Loading&#8230;</div>`;
+  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
 
   try {
     headData = await invoke<HeadObjectResponse>("head_object", {
@@ -96,7 +96,9 @@ function setTabsVisible(visible: boolean): void {
 function updateTabUI(): void {
   const tabs = document.querySelectorAll<HTMLElement>(".info-tab");
   for (const tab of tabs) {
-    tab.classList.toggle("info-tab--active", tab.dataset.tab === activeTab);
+    const isActive = tab.dataset.tab === activeTab;
+    tab.classList.toggle("info-tab--active", isActive);
+    tab.setAttribute("aria-selected", String(isActive));
   }
 }
 
@@ -167,7 +169,7 @@ async function buildUrlAsync(body: HTMLElement): Promise<void> {
 }
 
 async function renderPermissions(body: HTMLElement): Promise<void> {
-  body.innerHTML = `<div class="metadata-loading">Loading permissions&#8230;</div>`;
+  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading permissions&#8230;</div>`;
 
   if (!aclData) {
     try {
@@ -308,7 +310,7 @@ export async function saveInfoPanel(): Promise<void> {
       metadata: customMeta,
     });
     closeInfoPanel();
-    setStatus("Metadata updated.");
+    setStatus("Metadata updated.", 5000);
   } catch (err) {
     setStatus(`Failed to update metadata: ${err}`);
   } finally {
@@ -325,7 +327,19 @@ export function closeInfoPanel(): void {
   currentKey = "";
 }
 
-function setStatus(text: string): void {
+let statusTimeout: ReturnType<typeof setTimeout> | undefined;
+
+function setStatus(text: string, autoResetMs?: number): void {
+  if (statusTimeout !== undefined) {
+    clearTimeout(statusTimeout);
+    statusTimeout = undefined;
+  }
   const el = document.getElementById("status");
   if (el) el.textContent = text;
+  if (autoResetMs && autoResetMs > 0) {
+    statusTimeout = setTimeout(() => {
+      if (el) el.textContent = "";
+      statusTimeout = undefined;
+    }, autoResetMs);
+  }
 }

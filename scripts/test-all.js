@@ -23,6 +23,7 @@ function createInitialResults() {
     typecheck: { status: "pending" },
     format: { status: "pending" },
     test: { status: "pending", passed: null, failed: null, files: null },
+    rust: { status: "pending" },
   };
 }
 
@@ -66,6 +67,7 @@ function runCommand(name, command, args, parser, results) {
     stdio: "pipe",
     shell: useShell,
     windowsHide: true,
+    timeout: 300_000,
   });
 
   const output = `${run.stdout || ""}${run.stderr || ""}`;
@@ -135,6 +137,13 @@ ${colors.reset}`);
         : ""
     }${results.test.files ? `, ${results.test.files} files` : ""})`,
   );
+  console.log(
+    `${colors.bold}Rust Check:${colors.reset} ${
+      results.rust.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
 
   console.log("");
   if (allPassed) {
@@ -158,6 +167,13 @@ function main() {
   runCommand("typecheck", npm, ["run", "typecheck"], null, results);
   runCommand("format", npm, ["run", "format:check"], null, results);
   runCommand("test", npm, ["run", "test"], parseTest, results);
+  runCommand(
+    "rust",
+    "cargo",
+    ["check", "--manifest-path", "src-tauri/Cargo.toml"],
+    null,
+    results,
+  );
 
   return printSummary(results);
 }

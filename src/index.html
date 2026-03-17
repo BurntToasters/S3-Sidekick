@@ -16,7 +16,12 @@
             class="connection-badge connection-badge--off"
             >Disconnected</span
           >
-          <button id="settings-btn" class="btn btn--icon" title="Settings">
+          <button
+            id="settings-btn"
+            class="btn btn--icon"
+            title="Settings"
+            aria-label="Settings"
+          >
             &#9881;
           </button>
         </div>
@@ -28,29 +33,34 @@
           class="field"
           type="text"
           placeholder="Endpoint (e.g. https://nyc3.digitaloceanspaces.com)"
+          aria-label="Endpoint URL"
         />
         <input
           id="conn-region"
           class="field field--sm"
           type="text"
           placeholder="Region (e.g. nyc3)"
+          aria-label="Region"
         />
         <input
           id="conn-access-key"
           class="field"
           type="text"
           placeholder="Access Key"
+          aria-label="Access key"
         />
         <input
           id="conn-secret-key"
           class="field"
           type="password"
           placeholder="Secret Key"
+          aria-label="Secret key"
         />
         <button
           id="bookmark-save-btn"
           class="btn btn--icon"
           title="Bookmark this connection"
+          aria-label="Bookmark this connection"
         >
           &#9734;
         </button>
@@ -73,23 +83,37 @@
         <section class="content">
           <div class="content-toolbar">
             <nav id="breadcrumb" class="breadcrumb"></nav>
+            <input
+              id="filter-input"
+              class="field filter-input"
+              type="text"
+              placeholder="Filter..."
+              aria-label="Filter objects"
+            />
             <div class="content-toolbar__actions">
-              <button id="btn-refresh" class="btn btn--icon" title="Refresh">
-                &#8635;
+              <button
+                id="btn-refresh"
+                class="btn btn--icon"
+                title="Refresh (F5)"
+                aria-label="Refresh"
+              >
+                &#8635;<span class="shortcut-chip">F5</span>
               </button>
               <button
                 id="btn-new-folder"
                 class="btn btn--icon"
-                title="New Folder"
+                title="New Folder (Ctrl+N)"
+                aria-label="New folder"
               >
-                &#128193;
+                &#128193;<span class="shortcut-chip">⌃N</span>
               </button>
               <button
                 id="btn-upload"
                 class="btn btn--icon"
-                title="Upload Files"
+                title="Upload Files (Ctrl+U)"
+                aria-label="Upload files"
               >
-                &#8593;
+                &#8593;<span class="shortcut-chip">⌃U</span>
               </button>
             </div>
           </div>
@@ -103,16 +127,29 @@
               <thead>
                 <tr>
                   <th class="col-check">
-                    <input id="select-all" type="checkbox" title="Select all" />
+                    <input
+                      id="select-all"
+                      type="checkbox"
+                      title="Select all"
+                      aria-label="Select all"
+                    />
                   </th>
-                  <th class="col-sortable" data-sort="name">
+                  <th
+                    class="col-sortable"
+                    data-sort="name"
+                    aria-sort="ascending"
+                  >
                     Name
                     <span class="sort-indicator" id="sort-name">&#9650;</span>
                   </th>
-                  <th class="col-sortable" data-sort="size">
+                  <th class="col-sortable" data-sort="size" aria-sort="none">
                     Size <span class="sort-indicator" id="sort-size"></span>
                   </th>
-                  <th class="col-sortable" data-sort="modified">
+                  <th
+                    class="col-sortable"
+                    data-sort="modified"
+                    aria-sort="none"
+                  >
                     Last Modified
                     <span class="sort-indicator" id="sort-modified"></span>
                   </th>
@@ -131,7 +168,7 @@
       </div>
 
       <footer class="statusbar">
-        <span id="status"></span>
+        <span id="status" role="status" aria-live="polite"></span>
         <div class="statusbar__right">
           <span id="statusbar-count" class="statusbar__count"></span>
           <button
@@ -151,84 +188,179 @@
       </footer>
     </div>
 
-    <div id="settings-overlay" class="modal-overlay">
+    <div
+      id="settings-overlay"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-heading"
+    >
       <div class="modal">
         <div class="modal__header">
-          <h2>Settings</h2>
-          <button id="settings-close" class="btn btn--icon">&#10005;</button>
+          <h2 id="settings-heading">Settings</h2>
+          <button id="settings-close" class="btn btn--icon" aria-label="Close">
+            &#10005;
+          </button>
+        </div>
+        <div class="settings-tabs" role="tablist">
+          <button
+            class="settings-tab settings-tab--active"
+            data-settings-tab="general"
+            role="tab"
+            aria-selected="true"
+          >
+            General
+          </button>
+          <button
+            class="settings-tab"
+            data-settings-tab="bookmarks"
+            role="tab"
+            aria-selected="false"
+          >
+            Bookmarks
+          </button>
+          <button
+            class="settings-tab"
+            data-settings-tab="security"
+            role="tab"
+            aria-selected="false"
+          >
+            Security
+          </button>
+          <button
+            class="settings-tab"
+            data-settings-tab="about"
+            role="tab"
+            aria-selected="false"
+          >
+            About
+          </button>
         </div>
         <div class="modal__body">
-          <div class="setting-section">General</div>
-          <div class="setting-item">
-            <label for="setting-theme">Theme</label>
-            <select id="setting-theme" class="field">
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </div>
-          <div id="updater-section">
+          <div class="settings-panel" data-settings-panel="general">
             <div class="setting-item">
-              <label class="toggle-row">
-                <input id="setting-updates" type="checkbox" />
-                <span>Check for updates automatically</span>
-              </label>
+              <label for="setting-theme">Theme</label>
+              <select id="setting-theme" class="field">
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
             </div>
-            <div class="setting-item">
-              <label>Check for updates now</label>
-              <button id="settings-check-updates" class="btn">Check now</button>
-            </div>
-          </div>
-          <div id="updater-unsupported" style="display: none">
-            <div class="setting-item">
-              <span class="text-secondary" style="font-size: 12px"
-                >Auto-updates are not available for this package format. Update
-                through your package manager.</span
-              >
-            </div>
-          </div>
-
-          <div class="setting-item">
-            <label>Open-source licenses</label>
-            <button id="show-licenses" class="btn">View</button>
-          </div>
-
-          <div class="setting-section">Bookmarks</div>
-          <ul id="bookmark-list" class="bookmark-list"></ul>
-
-          <div class="setting-section">Security</div>
-          <div class="setting-item setting-item--stacked">
-            <label>Credential Encryption</label>
-            <div class="security-controls">
-              <span id="security-status-text" class="text-secondary"
-                >Loading...</span
-              >
-              <div class="security-controls__actions">
-                <button id="security-toggle" class="btn">
-                  Enable Encryption
-                </button>
-                <button
-                  id="security-change-password"
-                  class="btn btn--ghost"
-                  style="display: none"
-                >
-                  Change Password
+            <div id="updater-section">
+              <div class="setting-item">
+                <label class="toggle-row">
+                  <input id="setting-updates" type="checkbox" />
+                  <span>Check for updates automatically</span>
+                </label>
+              </div>
+              <div class="setting-item">
+                <label>Check for updates now</label>
+                <button id="settings-check-updates" class="btn">
+                  Check now
                 </button>
               </div>
             </div>
-            <div
-              id="security-warning"
-              class="security-warning"
-              style="display: none"
-            >
-              Warning: saved credentials are stored unencrypted on this device.
+            <div id="updater-unsupported" style="display: none">
+              <div class="setting-item">
+                <span class="text-secondary" style="font-size: 12px"
+                  >Auto-updates are not available for this package format.
+                  Update through your package manager.</span
+                >
+              </div>
+            </div>
+            <div class="setting-section">Danger Zone</div>
+            <div class="setting-item">
+              <label>Reset all settings to defaults</label>
+              <button id="settings-reset" class="btn btn--danger">Reset</button>
             </div>
           </div>
 
-          <div class="setting-section">Danger Zone</div>
-          <div class="setting-item">
-            <label>Reset all settings to defaults</label>
-            <button id="settings-reset" class="btn btn--danger">Reset</button>
+          <div
+            class="settings-panel"
+            data-settings-panel="bookmarks"
+            style="display: none"
+          >
+            <ul id="bookmark-list" class="bookmark-list"></ul>
+          </div>
+
+          <div
+            class="settings-panel"
+            data-settings-panel="security"
+            style="display: none"
+          >
+            <div class="setting-item setting-item--stacked">
+              <label>Credential Encryption</label>
+              <div class="security-controls">
+                <span id="security-status-text" class="text-secondary"
+                  ><span class="spinner"></span> Loading...</span
+                >
+                <div class="security-controls__actions">
+                  <button id="security-toggle" class="btn">
+                    Enable Encryption
+                  </button>
+                  <button
+                    id="security-change-password"
+                    class="btn btn--ghost"
+                    style="display: none"
+                  >
+                    Change Password
+                  </button>
+                </div>
+              </div>
+              <div
+                id="security-warning"
+                class="security-warning"
+                style="display: none"
+              >
+                Warning: saved credentials are stored unencrypted on this
+                device.
+              </div>
+            </div>
+            <div
+              id="security-lock-settings"
+              class="setting-item"
+              style="display: none"
+            >
+              <label for="security-lock-timeout"
+                >Auto-lock after inactivity</label
+              >
+              <select id="security-lock-timeout" class="field field--sm">
+                <option value="0">Never</option>
+                <option value="5">5 minutes</option>
+                <option value="15">15 minutes</option>
+                <option value="30">30 minutes</option>
+                <option value="60">1 hour</option>
+              </select>
+            </div>
+            <div
+              id="security-lock-action"
+              class="setting-item"
+              style="display: none"
+            >
+              <label>Lock encrypted storage now</label>
+              <button id="security-lock-btn" class="btn btn--ghost">
+                Lock Now
+              </button>
+            </div>
+          </div>
+
+          <div
+            class="settings-panel"
+            data-settings-panel="about"
+            style="display: none"
+          >
+            <div class="setting-item">
+              <label>Version</label>
+              <span id="settings-version" class="text-secondary"></span>
+            </div>
+            <div class="setting-item">
+              <label>Platform</label>
+              <span id="settings-platform" class="text-secondary"></span>
+            </div>
+            <div class="setting-item">
+              <label>Open-source licenses</label>
+              <button id="show-licenses" class="btn">View</button>
+            </div>
           </div>
         </div>
         <div class="modal__footer">
@@ -238,47 +370,100 @@
       </div>
     </div>
 
-    <div id="confirm-overlay" class="confirm-overlay">
-      <div class="confirm-box">
-        <div id="confirm-title" class="confirm-box__title"></div>
-        <div id="confirm-message" class="confirm-box__message"></div>
-        <div class="confirm-box__actions">
-          <button id="confirm-cancel" class="btn btn--ghost">Cancel</button>
-          <button id="confirm-ok" class="btn btn--danger">
-            Reset &amp; Restart
-          </button>
+    <div
+      id="dialog-overlay"
+      class="dialog-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="dialog-title"
+    >
+      <div class="dialog-box">
+        <div id="dialog-title" class="dialog-box__title"></div>
+        <div id="dialog-message" class="dialog-box__message"></div>
+        <input id="dialog-input" class="field dialog-box__input" type="text" />
+        <div class="dialog-box__actions">
+          <button id="dialog-cancel" class="btn btn--ghost">Cancel</button>
+          <button id="dialog-ok" class="btn btn--primary">OK</button>
         </div>
       </div>
     </div>
 
-    <div id="licenses-overlay" class="modal-overlay">
+    <div
+      id="licenses-overlay"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="licenses-heading"
+    >
       <div class="modal modal--wide">
         <div class="modal__header">
-          <h2>Open-Source Licenses</h2>
-          <button id="close-licenses" class="btn btn--icon">&#10005;</button>
+          <h2 id="licenses-heading">Open-Source Licenses</h2>
+          <button id="close-licenses" class="btn btn--icon" aria-label="Close">
+            &#10005;
+          </button>
         </div>
         <div class="modal__body">
-          <div id="licenses-list" class="licenses-list">Loading&#8230;</div>
+          <div id="licenses-list" class="licenses-list">
+            <div class="metadata-loading">
+              <span class="spinner"></span>Loading&#8230;
+            </div>
+          </div>
         </div>
       </div>
     </div>
 
-    <div id="info-overlay" class="modal-overlay">
+    <div
+      id="info-overlay"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="info-title"
+    >
       <div class="modal modal--wide">
         <div class="modal__header">
           <h2 id="info-title">File Info</h2>
-          <button id="info-close" class="btn btn--icon">&#10005;</button>
+          <button id="info-close" class="btn btn--icon" aria-label="Close">
+            &#10005;
+          </button>
         </div>
-        <div class="info-tabs">
-          <button class="info-tab info-tab--active" data-tab="general">
+        <div class="info-tabs" role="tablist">
+          <button
+            class="info-tab info-tab--active"
+            data-tab="general"
+            role="tab"
+            aria-selected="true"
+          >
             General
           </button>
-          <button class="info-tab" data-tab="permissions">Permissions</button>
-          <button class="info-tab" data-tab="metadata">Metadata</button>
-          <button class="info-tab" data-tab="s3">S3</button>
+          <button
+            class="info-tab"
+            data-tab="permissions"
+            role="tab"
+            aria-selected="false"
+          >
+            Permissions
+          </button>
+          <button
+            class="info-tab"
+            data-tab="metadata"
+            role="tab"
+            aria-selected="false"
+          >
+            Metadata
+          </button>
+          <button
+            class="info-tab"
+            data-tab="s3"
+            role="tab"
+            aria-selected="false"
+          >
+            S3
+          </button>
         </div>
         <div id="info-body" class="modal__body">
-          <div class="metadata-loading">Loading&#8230;</div>
+          <div class="metadata-loading">
+            <span class="spinner"></span>Loading&#8230;
+          </div>
         </div>
         <div class="modal__footer">
           <button id="info-cancel" class="btn btn--ghost">Cancel</button>
@@ -303,7 +488,13 @@
           <button id="transfer-clear" class="btn btn--ghost btn--sm">
             Clear done
           </button>
-          <button id="transfer-close" class="btn btn--icon">&#10005;</button>
+          <button
+            id="transfer-close"
+            class="btn btn--icon"
+            aria-label="Close transfers"
+          >
+            &#10005;
+          </button>
         </div>
       </div>
       <div id="transfer-list" class="transfer-list">

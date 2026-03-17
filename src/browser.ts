@@ -19,6 +19,14 @@ export function clearSelection(): void {
   updateSelectionUI();
 }
 
+function clearFilter(): void {
+  state.filterText = "";
+  const input = document.getElementById(
+    "filter-input",
+  ) as HTMLInputElement | null;
+  if (input) input.value = "";
+}
+
 export function updateSelectionUI(): void {
   const rows = dom.objectTbody.querySelectorAll<HTMLElement>(".object-row");
   for (const row of rows) {
@@ -81,7 +89,12 @@ export function handleSelectAll(checked: boolean): void {
 }
 
 function getSortedObjects() {
-  const files = state.objects.filter((o) => !o.is_folder);
+  const filter = state.filterText.toLowerCase();
+  const files = state.objects.filter(
+    (o) =>
+      !o.is_folder &&
+      (!filter || basename(o.key).toLowerCase().includes(filter)),
+  );
   const col = state.sortColumn;
   const asc = state.sortAsc;
 
@@ -122,6 +135,17 @@ function updateSortIndicators(): void {
         el.innerHTML = "";
       }
     }
+    const th = document.querySelector<HTMLElement>(`th[data-sort="${col}"]`);
+    if (th) {
+      th.setAttribute(
+        "aria-sort",
+        state.sortColumn === col
+          ? state.sortAsc
+            ? "ascending"
+            : "descending"
+          : "none",
+      );
+    }
   }
 }
 
@@ -143,9 +167,11 @@ export function renderObjectTable(): void {
   const tbody = dom.objectTbody;
   const rows: string[] = [];
 
-  const sortedPrefixes = [...state.prefixes].sort((a, b) =>
-    state.sortAsc ? a.localeCompare(b) : b.localeCompare(a),
-  );
+  const filter = state.filterText.toLowerCase();
+
+  const sortedPrefixes = [...state.prefixes]
+    .filter((p) => !filter || basename(p).toLowerCase().includes(filter))
+    .sort((a, b) => (state.sortAsc ? a.localeCompare(b) : b.localeCompare(a)));
 
   for (const prefix of sortedPrefixes) {
     const name = basename(prefix);
@@ -231,6 +257,7 @@ export function renderBreadcrumb(): void {
 }
 
 export async function navigateToFolder(prefix: string): Promise<void> {
+  clearFilter();
   await refreshObjects(state.currentBucket, prefix);
   renderObjectTable();
   renderBreadcrumb();
@@ -245,6 +272,7 @@ export async function navigateUp(): Promise<void> {
 }
 
 export async function selectBucket(name: string): Promise<void> {
+  clearFilter();
   state.currentPrefix = "";
   await refreshObjects(name, "");
   renderBucketList();

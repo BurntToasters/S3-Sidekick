@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import { showConfirm, showPrompt, showAlert } from "./dialogs.ts";
 
 export interface SecurityStatus {
   initialized: boolean;
   encryption_enabled: boolean;
   unlocked: boolean;
+  lock_timeout_minutes: number;
 }
 
 type StatusSetter = (text: string) => void;
@@ -48,20 +50,40 @@ async function changeSecurityPassword(
   });
 }
 
-function promptForNewPassword(): string | null {
-  const first = window.prompt(
+async function lockSecurity(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>("lock_security");
+}
+
+async function setLockTimeoutMinutes(minutes: number): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>("set_lock_timeout", { minutes });
+}
+
+async function promptForNewPassword(): Promise<string | null> {
+  const first = await showPrompt(
+    "Set Password",
     "Set a password to encrypt saved credentials (AES-256):",
+    { inputType: "password", inputPlaceholder: "Password (8+ characters)" },
   );
   if (first === null) return null;
   if (first.length < 8) {
-    window.alert("Password must be at least 8 characters.");
+    await showAlert(
+      "Invalid Password",
+      "Password must be at least 8 characters.",
+    );
     return null;
   }
 
-  const confirm = window.prompt("Confirm password:");
-  if (confirm === null) return null;
-  if (first !== confirm) {
-    window.alert("Passwords do not match.");
+  const confirmed = await showPrompt(
+    "Confirm Password",
+    "Confirm your password:",
+    {
+      inputType: "password",
+      inputPlaceholder: "Confirm password",
+    },
+  );
+  if (confirmed === null) return null;
+  if (first !== confirmed) {
+    await showAlert("Password Mismatch", "Passwords do not match.");
     return null;
   }
   return first;
@@ -72,33 +94,36 @@ export async function ensureSecurityReady(): Promise<boolean> {
   try {
     status = await getSecurityStatus();
   } catch (err) {
-    window.alert(`Failed to read security status: ${err}`);
+    await showAlert("Error", `Failed to read security status: ${err}`);
     return false;
   }
 
   if (!status.initialized) {
-    const enableEncryption = window.confirm(
+    const enableEncryption = await showConfirm(
+      "Credential Encryption",
       "Enable credential encryption?\n\nRecommended: Yes.\nCredentials and bookmarks will be encrypted with AES-256 and protected by your password.",
+      { okLabel: "Enable", cancelLabel: "Skip" },
     );
 
     if (enableEncryption) {
-      const password = promptForNewPassword();
+      const password = await promptForNewPassword();
       if (!password) {
-        const continueUnencrypted = window.confirm(
+        const continueUnencrypted = await showConfirm(
+          "Continue?",
           "Encryption setup was canceled.\nContinue with unencrypted credential storage?",
         );
         if (!continueUnencrypted) return false;
         try {
           status = await initializeSecurity(false, null);
         } catch (err) {
-          window.alert(`Failed to initialize security: ${err}`);
+          await showAlert("Error", `Failed to initialize security: ${err}`);
           return false;
         }
       } else {
         try {
           status = await initializeSecurity(true, password);
         } catch (err) {
-          window.alert(`Failed to enable encryption: ${err}`);
+          await showAlert("Error", `Failed to enable encryption: ${err}`);
           return false;
         }
       }
@@ -106,7 +131,7 @@ export async function ensureSecurityReady(): Promise<boolean> {
       try {
         status = await initializeSecurity(false, null);
       } catch (err) {
-        window.alert(`Failed to initialize security: ${err}`);
+        await showAlert("Error", `Failed to initialize security: ${err}`);
         return false;
       }
     }
@@ -116,12 +141,14 @@ export async function ensureSecurityReady(): Promise<boolean> {
   if (status.unlocked) return true;
 
   while (true) {
-    const password = window.prompt(
+    const password = await showPrompt(
+      "Unlock",
       "Enter your password to unlock encrypted credentials:",
+      { inputType: "password", inputPlaceholder: "Password" },
     );
     if (password === null) return false;
     if (!password) {
-      window.alert("Password is required.");
+      await showAlert("Error", "Password is required.");
       continue;
     }
 
@@ -129,7 +156,7 @@ export async function ensureSecurityReady(): Promise<boolean> {
       status = await unlockSecurity(password);
       if (status.unlocked) return true;
     } catch (err) {
-      window.alert(`Failed to unlock credentials: ${err}`);
+      await showAlert("Error", `Failed to unlock credentials: ${err}`);
     }
   }
 }
@@ -143,6 +170,11 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
     "security-change-password",
   ) as HTMLButtonElement | null;
   const warning = document.getElementById("security-warning");
+  const lockSettings = document.getElementById("security-lock-settings");
+  const lockAction = document.getElementById("security-lock-action");
+  const lockTimeoutSelect = document.getElementById(
+    "security-lock-timeout",
+  ) as HTMLSelectElement | null;
   if (!statusText || !toggleBtn || !changeBtn || !warning) return;
 
   try {
@@ -153,18 +185,33 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
       toggleBtn.textContent = "Initialize Security";
       changeBtn.style.display = "none";
       warning.style.display = "";
+      if (lockSettings) lockSettings.style.display = "none";
+      if (lockAction) lockAction.style.display = "none";
     } else if (status.encryption_enabled) {
-      statusText.textContent = status.unlocked
-        ? "Encrypted (AES-256) and unlocked"
-        : "Encrypted (locked)";
-      toggleBtn.textContent = "Disable Encryption";
-      changeBtn.style.display = "";
+      if (status.unlocked) {
+        statusText.textContent = "Encrypted (AES-256) and unlocked";
+        toggleBtn.textContent = "Disable Encryption";
+        changeBtn.style.display = "";
+        if (lockSettings) lockSettings.style.display = "";
+        if (lockAction) lockAction.style.display = "";
+      } else {
+        statusText.textContent = "Encrypted (locked)";
+        toggleBtn.textContent = "Unlock";
+        changeBtn.style.display = "none";
+        if (lockSettings) lockSettings.style.display = "none";
+        if (lockAction) lockAction.style.display = "none";
+      }
       warning.style.display = "none";
+      if (lockTimeoutSelect) {
+        lockTimeoutSelect.value = String(status.lock_timeout_minutes);
+      }
     } else {
       statusText.textContent = "Unencrypted";
       toggleBtn.textContent = "Enable Encryption";
       changeBtn.style.display = "none";
       warning.style.display = "";
+      if (lockSettings) lockSettings.style.display = "none";
+      if (lockAction) lockAction.style.display = "none";
     }
   } catch (err) {
     statusText.textContent = `Security status error: ${err}`;
@@ -180,17 +227,19 @@ export async function handleSecurityToggle(
   try {
     status = await getSecurityStatus();
   } catch (err) {
-    window.alert(`Failed to read security status: ${err}`);
+    await showAlert("Error", `Failed to read security status: ${err}`);
     return;
   }
 
   try {
     if (!status.initialized) {
-      const enable = window.confirm(
+      const enable = await showConfirm(
+        "Initialize Security",
         "Security is not initialized yet. Enable encryption now?",
+        { okLabel: "Enable", cancelLabel: "Skip" },
       );
       if (enable) {
-        const password = promptForNewPassword();
+        const password = await promptForNewPassword();
         if (!password) return;
         await initializeSecurity(true, password);
         setStatus("Credential encryption enabled.");
@@ -202,18 +251,35 @@ export async function handleSecurityToggle(
       return;
     }
 
-    if (status.encryption_enabled) {
-      const shouldDisable = window.confirm(
+    if (status.encryption_enabled && !status.unlocked) {
+      const password = await showPrompt(
+        "Unlock",
+        "Enter your password to unlock encrypted credentials:",
+        { inputType: "password", inputPlaceholder: "Password" },
+      );
+      if (password === null) return;
+      if (!password) {
+        await showAlert("Error", "Password is required.");
+        return;
+      }
+      await unlockSecurity(password);
+      setStatus("Credentials unlocked.");
+    } else if (status.encryption_enabled) {
+      const shouldDisable = await showConfirm(
+        "Disable Encryption",
         "Disable encryption?\n\nSaved credentials and bookmarks will be stored unencrypted.",
+        { okLabel: "Disable", okDanger: true },
       );
       if (!shouldDisable) return;
 
-      const currentPassword = window.prompt(
+      const currentPassword = await showPrompt(
+        "Current Password",
         "Enter your current password to decrypt stored credentials:",
+        { inputType: "password", inputPlaceholder: "Current password" },
       );
       if (currentPassword === null) return;
       if (!currentPassword) {
-        window.alert("Current password is required.");
+        await showAlert("Error", "Current password is required.");
         return;
       }
 
@@ -222,7 +288,7 @@ export async function handleSecurityToggle(
         "Credential encryption disabled. Saved credentials are unencrypted.",
       );
     } else {
-      const newPassword = promptForNewPassword();
+      const newPassword = await promptForNewPassword();
       if (!newPassword) return;
 
       await setSecurityEncryption(true, null, newPassword);
@@ -231,21 +297,25 @@ export async function handleSecurityToggle(
 
     await refreshSecuritySettingsUI();
   } catch (err) {
-    window.alert(`Security update failed: ${err}`);
+    await showAlert("Error", `Security update failed: ${err}`);
   }
 }
 
 export async function handleSecurityChangePassword(
   setStatus: StatusSetter,
 ): Promise<void> {
-  const currentPassword = window.prompt("Enter current password:");
+  const currentPassword = await showPrompt(
+    "Current Password",
+    "Enter your current password:",
+    { inputType: "password", inputPlaceholder: "Current password" },
+  );
   if (currentPassword === null) return;
   if (!currentPassword) {
-    window.alert("Current password is required.");
+    await showAlert("Error", "Current password is required.");
     return;
   }
 
-  const newPassword = promptForNewPassword();
+  const newPassword = await promptForNewPassword();
   if (!newPassword) return;
 
   try {
@@ -253,6 +323,29 @@ export async function handleSecurityChangePassword(
     setStatus("Credential encryption password updated.");
     await refreshSecuritySettingsUI();
   } catch (err) {
-    window.alert(`Failed to change password: ${err}`);
+    await showAlert("Error", `Failed to change password: ${err}`);
+  }
+}
+
+export async function handleLockNow(setStatus: StatusSetter): Promise<void> {
+  try {
+    await lockSecurity();
+    setStatus("Encrypted storage locked.");
+    await refreshSecuritySettingsUI();
+  } catch (err) {
+    await showAlert("Error", `Failed to lock: ${err}`);
+  }
+}
+
+export async function handleLockTimeoutChange(): Promise<void> {
+  const select = document.getElementById(
+    "security-lock-timeout",
+  ) as HTMLSelectElement | null;
+  if (!select) return;
+
+  try {
+    await setLockTimeoutMinutes(Number(select.value));
+  } catch (err) {
+    await showAlert("Error", `Failed to set lock timeout: ${err}`);
   }
 }

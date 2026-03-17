@@ -97,6 +97,7 @@ jobs:
 
       - run: npm ci
       - run: npm run sync-version
+      - run: npm run licenses
 
       - name: Build
         run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
@@ -138,8 +139,41 @@ jobs:
             src-tauri/target/**/bundle/**/*.rpm
             src-tauri/target/**/bundle/**/*.rpm.sig
 
+  flatpak:
+    needs: verify
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub \
+            org.gnome.Platform//48 \
+            org.gnome.Sdk//48 \
+            org.freedesktop.Sdk.Extension.node22//24.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//24.08
+
+      - run: npm ci
+      - run: npm run sync-version
+      - run: npm run flatpak:clean
+      - run: npm run flatpak:bundle
+
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-flatpak-x64
+          path: dist/*.flatpak
+
   sign-and-publish:
-    needs: build
+    needs: [build, flatpak]
     runs-on: ubuntu-latest
     env:
       HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
@@ -164,7 +198,7 @@ jobs:
           mkdir -p release
           find release-artifacts -type f \( \
             -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' \
-            -o -name '*.rpm' -o -name '*.zip' \
+            -o -name '*.rpm' -o -name '*.flatpak' -o -name '*.zip' \
             -o -name '*.AppImage' -o -name '*.tar.gz' -o -name '*.sig' \
           \) -exec cp -n {} release/ \;
           ls -lh release/
