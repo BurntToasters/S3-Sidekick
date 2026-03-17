@@ -27,9 +27,11 @@ modules:
       append-path: /run/build/s3-sidekick/cargo/bin:/usr/lib/sdk/node22/bin:/usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/s3-sidekick/cargo
+        RUSTUP_HOME: /run/build/s3-sidekick/rustup
         npm_config_cache: /run/build/s3-sidekick/npm-cache
         HUSKY: '0'
     build-commands:
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
       - npm ci
       - npm run sync-version
       - npm run licenses
