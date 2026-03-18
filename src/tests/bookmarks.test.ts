@@ -139,3 +139,111 @@ describe("bookmarks fallback and backup sync", () => {
     expect(JSON.parse(lastBackupJson)).toEqual([]);
   });
 });
+
+function standardMock(initial: unknown[] = []) {
+  let settingsPayload: Record<string, unknown> = { _bookmarks: initial };
+  mockInvoke.mockImplementation(async (command, args) => {
+    if (command === "load_settings") return JSON.stringify(settingsPayload);
+    if (command === "save_settings") {
+      settingsPayload = JSON.parse((args as { json: string }).json);
+      return undefined;
+    }
+    if (command === "save_bookmarks_backup") return undefined;
+    throw new Error(`Unexpected invoke command: ${String(command)}`);
+  });
+}
+
+describe("renderBookmarkBar", () => {
+  it("creates bookmark chip buttons for loaded bookmarks", async () => {
+    standardMock([alphaBookmark, betaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const container = document.createElement("div");
+    bookmarks.renderBookmarkBar(container, () => {});
+
+    const chips = container.querySelectorAll("button.bookmark-chip");
+    expect(chips).toHaveLength(2);
+  });
+
+  it("shows the bookmark name on each chip", async () => {
+    standardMock([alphaBookmark, betaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const container = document.createElement("div");
+    bookmarks.renderBookmarkBar(container, () => {});
+
+    const chips = container.querySelectorAll("button.bookmark-chip");
+    expect(chips[0].textContent).toContain("alpha");
+    expect(chips[1].textContent).toContain("beta");
+  });
+
+  it("includes a region span when the bookmark has a region", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const container = document.createElement("div");
+    bookmarks.renderBookmarkBar(container, () => {});
+
+    const regionSpan = container.querySelector(".bookmark-chip__region");
+    expect(regionSpan).not.toBeNull();
+    expect(regionSpan!.textContent).toBe("us-east-1");
+  });
+
+  it("calls onSelect with the correct bookmark when a chip is clicked", async () => {
+    standardMock([alphaBookmark, betaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const onSelect = vi.fn();
+    const container = document.createElement("div");
+    bookmarks.renderBookmarkBar(container, onSelect);
+
+    const chips = container.querySelectorAll("button.bookmark-chip");
+    (chips[1] as HTMLButtonElement).click();
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith(betaBookmark);
+  });
+
+  it("renders nothing when the bookmarks array is empty", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const container = document.createElement("div");
+    container.innerHTML = "<span>placeholder</span>";
+    bookmarks.renderBookmarkBar(container, () => {});
+
+    expect(container.innerHTML).toBe("");
+    expect(container.children).toHaveLength(0);
+  });
+});
+
+describe("setBookmarkChangeHandler", () => {
+  it("invokes the handler when addBookmark is called", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const handler = vi.fn();
+    bookmarks.setBookmarkChangeHandler(handler);
+    await bookmarks.addBookmark(alphaBookmark);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("invokes the handler when removeBookmark is called", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const handler = vi.fn();
+    bookmarks.setBookmarkChangeHandler(handler);
+    await bookmarks.removeBookmark(0);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
