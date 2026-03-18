@@ -80,6 +80,7 @@ import {
   handleSecurityToggle,
   handleLockNow,
   handleLockTimeoutChange,
+  handleBiometricToggle,
 } from "./security.ts";
 import { showConfirm, showPrompt, isDialogActive } from "./dialogs.ts";
 
@@ -1323,6 +1324,9 @@ function wireEvents(): void {
     .addEventListener("change", () => {
       void handleLockTimeoutChange();
     });
+  document.getElementById("biometric-toggle")!.addEventListener("click", () => {
+    void handleBiometricToggle(setStatus);
+  });
 
   document
     .getElementById("btn-refresh")!
