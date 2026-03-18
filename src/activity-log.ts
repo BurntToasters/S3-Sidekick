@@ -22,6 +22,7 @@ export function logActivity(
     entries = entries.slice(entries.length - MAX_ENTRIES);
   }
   updateBadge();
+  updateClearButton();
   if (visible) renderActivityLog();
 }
 
@@ -55,7 +56,13 @@ export function hideActivityLog(): void {
 export function clearActivityLog(): void {
   entries = [];
   updateBadge();
-  if (visible) renderActivityLog();
+  updateClearButton();
+  if (visible) {
+    renderActivityLog();
+    if (entries.length === 0) {
+      hideActivityLog();
+    }
+  }
 }
 
 function renderActivityLog(): void {
@@ -90,6 +97,14 @@ function updateBadge(): void {
   if (!badge) return;
   badge.textContent = entries.length > 0 ? String(entries.length) : "";
   badge.style.display = entries.length > 0 ? "" : "none";
+}
+
+function updateClearButton(): void {
+  const button = document.getElementById(
+    "activity-clear",
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  button.disabled = entries.length === 0;
 }
 
 function syncCollapseState(): void {
