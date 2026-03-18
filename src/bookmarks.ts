@@ -169,14 +169,16 @@ export function renderBookmarkList(
 
   listEl.innerHTML = bookmarks
     .map(
-      (b, i) =>
-        `<li class="bookmark-item" data-index="${i}">
+      (b, i) => {
+        const regionPart = b.region ? ` (${escapeHtml(b.region)})` : "";
+        return `<li class="bookmark-item" data-index="${i}">
           <div style="flex:1;min-width:0">
             <div class="bookmark__name">${escapeHtml(b.name)}</div>
-            <div class="bookmark__endpoint">${escapeHtml(b.endpoint)} (${escapeHtml(b.region)})</div>
+            <div class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</div>
           </div>
           <button class="bookmark__delete" data-delete="${i}" title="Remove bookmark">${twemojiIcon("274c", { className: "twemoji-icon twemoji-icon--bookmark-delete", decorative: true })}</button>
-        </li>`,
+        </li>`;
+      },
     )
     .join("");
 
