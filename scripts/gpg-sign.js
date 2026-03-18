@@ -28,6 +28,13 @@ const RELEASE_DOWNLOAD_BASE_URL = (
 const TAG_DOWNLOAD_BASE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${encodeURIComponent(TAG)}`;
 const RELEASE_NOTES = process.env.RELEASE_NOTES || "";
 const RELEASE_PUB_DATE = process.env.RELEASE_PUB_DATE || new Date().toISOString();
+const REQUIRED_LINUX_TARGETS = (process.env.REQUIRED_LINUX_TARGETS || "x86_64").trim();
+const REQUIRE_LINUX_AARCH64 = /^(1|true|yes|on)$/i.test(
+  String(process.env.REQUIRE_LINUX_AARCH64 || "").trim(),
+);
+const ENFORCE_LINUX_X64_PACKAGE_SET = !/^(0|false|no|off)$/i.test(
+  String(process.env.ENFORCE_LINUX_X64_PACKAGE_SET || "true").trim(),
+);
 
 const ext = (e) => (n) => n.toLowerCase().endsWith(e);
 const rx = (r) => (n) => r.test(n);
@@ -86,6 +93,27 @@ function clearReleaseStaging() {
     if (isArtifact(name) || name.endsWith(".asc") || isChecksumTextName(name)) {
       fs.rmSync(fullPath, { force: true });
     }
+  }
+}
+
+function clearPreStagedUpdaterManifests() {
+  if (!fs.existsSync(releaseDir)) return;
+  const removed = [];
+  for (const name of fs.readdirSync(releaseDir)) {
+    if (!isPerTargetManifest(name)) continue;
+    const fullPath = path.join(releaseDir, name);
+    let isFile = false;
+    try {
+      isFile = fs.statSync(fullPath).isFile();
+    } catch {
+      continue;
+    }
+    if (!isFile) continue;
+    fs.rmSync(fullPath, { force: true });
+    removed.push(name);
+  }
+  if (removed.length > 0) {
+    console.log(`  ~ Removed ${removed.length} stale updater manifest(s) from release/`);
   }
 }
 
@@ -170,6 +198,90 @@ function inferArchFromName(name) {
   return null;
 }
 
+function normalizeArchToken(token) {
+  const normalized = token.toLowerCase();
+  if (normalized === "aarch64" || normalized === "arm64") return "aarch64";
+  if (normalized === "x86_64" || normalized === "amd64" || normalized === "x64") return "x86_64";
+  if (normalized === "i686" || normalized === "x86") return "i686";
+  return null;
+}
+
+function requiredLinuxTargetKeys(channelVariants) {
+  const tokens = REQUIRED_LINUX_TARGETS
+    .split(/[,\s]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (REQUIRE_LINUX_AARCH64) {
+    tokens.push("aarch64");
+  }
+
+  const targetKeys = new Set();
+  for (const token of tokens) {
+    const explicitMatch = token.toLowerCase().match(/^(linux(?:-beta)?)-([a-z0-9_]+)$/);
+    if (explicitMatch) {
+      const targetName = explicitMatch[1];
+      const arch = normalizeArchToken(explicitMatch[2]);
+      if (!arch) {
+        throw new Error(
+          `Invalid REQUIRED_LINUX_TARGETS entry "${token}". Use arch names like x64/aarch64 or full keys like linux-x86_64.`,
+        );
+      }
+      if (targetName === "linux-beta" && !IS_PRERELEASE) {
+        throw new Error(
+          `Invalid REQUIRED_LINUX_TARGETS entry "${token}" for stable version ${VERSION}; linux-beta targets are only generated for prereleases.`,
+        );
+      }
+      targetKeys.add(`${targetName}-${arch}`);
+      continue;
+    }
+
+    const arch = normalizeArchToken(token);
+    if (!arch) {
+      throw new Error(
+        `Invalid REQUIRED_LINUX_TARGETS entry "${token}". Use arch names like x64/aarch64 or full keys like linux-x86_64.`,
+      );
+    }
+    for (const channel of channelVariants) {
+      targetKeys.add(`linux${channel.targetSuffix}-${arch}`);
+    }
+  }
+  return targetKeys;
+}
+
+function canPopulateFallbackTarget(target) {
+  return target.os !== "linux";
+}
+
+function assertLinuxX64PackageSet(byName) {
+  if (!ENFORCE_LINUX_X64_PACKAGE_SET) {
+    return;
+  }
+
+  const installers = new Set();
+  for (const [name] of byName) {
+    if (name.endsWith(".sig")) continue;
+    const targets = resolveUpdaterTargets(name);
+    for (const target of targets) {
+      if (target.os === "linux" && target.arch === "x86_64") {
+        installers.add(target.installer);
+      }
+    }
+  }
+
+  if (installers.size === 0) {
+    return;
+  }
+
+  const requiredInstallers = ["appimage", "deb", "rpm"];
+  const missing = requiredInstallers.filter((installer) => !installers.has(installer));
+  if (missing.length > 0) {
+    throw new Error(
+      `Incomplete Linux x86_64 bundle set: missing ${missing.join(", ")} artifact(s). ` +
+        "Expected AppImage, deb, and rpm artifacts before signing.",
+    );
+  }
+}
+
 function resolveUpdaterTargets(name) {
   const targets = [];
   if (/\.app\.tar\.gz$/i.test(name)) {
@@ -250,6 +362,8 @@ function generateUpdaterManifests(files) {
     byName.set(path.basename(filePath), filePath);
   }
 
+  assertLinuxX64PackageSet(byName);
+
   const signatureByBaseName = new Map();
   for (const [name, filePath] of byName) {
     if (name.endsWith(".sig")) {
@@ -263,6 +377,8 @@ function generateUpdaterManifests(files) {
   if (IS_PRERELEASE) {
     channelVariants.push({ targetSuffix: "-beta", baseUrl: TAG_DOWNLOAD_BASE_URL });
   }
+  const expectedLinuxTargetKeys = requiredLinuxTargetKeys(channelVariants);
+  const generatedLinuxAppImageTargets = new Set();
   const missingSignatures = [];
   for (const [name] of byName) {
     if (name.endsWith(".sig")) continue;
@@ -300,9 +416,16 @@ function generateUpdaterManifests(files) {
         const installerKey = `${targetName}-${target.arch}-${target.installer}`;
         const fallbackKey = `${targetName}-${target.arch}`;
         manifest.platforms[installerKey] = { url, signature };
+        if (target.os === "linux" && target.installer === "appimage") {
+          generatedLinuxAppImageTargets.add(fallbackKey);
+        }
 
         const priority = FALLBACK_INSTALLER_PRIORITY[target.os]?.[target.installer] ?? 0;
-        if (!manifest.platforms[fallbackKey] || priority > manifest.fallbackPriority) {
+        if (
+          priority > 0 &&
+          canPopulateFallbackTarget(target) &&
+          (!manifest.platforms[fallbackKey] || priority > manifest.fallbackPriority)
+        ) {
           manifest.platforms[fallbackKey] = { url, signature };
           manifest.fallbackPriority = priority;
         }
@@ -348,6 +471,16 @@ function generateUpdaterManifests(files) {
   if (missingTargets.length > 0) {
     throw new Error(
       `Updater manifest generation is incomplete for target(s): ${missingTargets.join(", ")}.`,
+    );
+  }
+
+  const missingLinuxTargets = Array.from(expectedLinuxTargetKeys)
+    .filter((targetKey) => !generatedLinuxAppImageTargets.has(targetKey))
+    .sort((a, b) => a.localeCompare(b));
+  if (missingLinuxTargets.length > 0) {
+    throw new Error(
+      `Missing required Linux AppImage updater target(s): ${missingLinuxTargets.join(", ")}. ` +
+        "Provide matching AppImage + .sig artifacts or adjust REQUIRED_LINUX_TARGETS/REQUIRE_LINUX_AARCH64.",
     );
   }
 
@@ -443,8 +576,15 @@ function collectArtifacts() {
     return [...collected, ...manifests];
   }
 
+  clearPreStagedUpdaterManifests();
   const staged = fs.readdirSync(releaseDir)
-    .filter((n) => isArtifact(n) && artifactMatchesVersion(n) && !n.endsWith(".asc") && !isChecksumTextName(n))
+    .filter((n) =>
+      isArtifact(n) &&
+      !isPerTargetManifest(n) &&
+      artifactMatchesVersion(n) &&
+      !n.endsWith(".asc") &&
+      !isChecksumTextName(n)
+    )
     .map((n) => path.join(releaseDir, n));
 
   if (staged.length === 0) {
