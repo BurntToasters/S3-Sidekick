@@ -11,6 +11,11 @@ export interface Bookmark {
 
 let bookmarks: Bookmark[] = [];
 let persistPromise: Promise<void> = Promise.resolve();
+let onChangeCallback: (() => void) | null = null;
+
+export function setBookmarkChangeHandler(handler: () => void): void {
+  onChangeCallback = handler;
+}
 
 export function getBookmarks(): Bookmark[] {
   return bookmarks;
@@ -148,6 +153,7 @@ export async function addBookmark(bookmark: Bookmark): Promise<boolean> {
   if (exists) return false;
   bookmarks.push(bookmark);
   await persistBookmarks();
+  onChangeCallback?.();
   return true;
 }
 
@@ -155,6 +161,28 @@ export async function removeBookmark(index: number): Promise<void> {
   if (index < 0 || index >= bookmarks.length) return;
   bookmarks.splice(index, 1);
   await persistBookmarks();
+  onChangeCallback?.();
+}
+
+export function renderBookmarkBar(
+  barEl: HTMLElement,
+  onSelect: (bookmark: Bookmark) => void,
+): void {
+  barEl.innerHTML = "";
+  if (bookmarks.length === 0) return;
+
+  for (let i = 0; i < bookmarks.length; i++) {
+    const b = bookmarks[i];
+    const chip = document.createElement("button");
+    chip.className = "bookmark-chip";
+    chip.title = b.endpoint;
+    const regionSuffix = b.region
+      ? ` <span class="bookmark-chip__region">${escapeHtml(b.region)}</span>`
+      : "";
+    chip.innerHTML = escapeHtml(b.name) + regionSuffix;
+    chip.addEventListener("click", () => onSelect(b));
+    barEl.appendChild(chip);
+  }
 }
 
 export function renderBookmarkList(

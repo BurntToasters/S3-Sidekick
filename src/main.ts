@@ -40,7 +40,7 @@ import {
   checkUpdates,
   setUpdateChannel,
 } from "./updater.ts";
-import { addBookmark } from "./bookmarks.ts";
+import { addBookmark, renderBookmarkBar, loadBookmarks, setBookmarkChangeHandler } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
   showContextMenu,
@@ -132,6 +132,20 @@ function setStatus(text: string, autoResetMs?: number): void {
       state.statusTimeout = undefined;
     }, autoResetMs);
   }
+}
+
+function refreshBookmarkBar(): void {
+  const bar = document.getElementById("bookmark-bar");
+  if (!bar) return;
+  renderBookmarkBar(bar, (bookmark) => {
+    setConnectionInputs(
+      bookmark.endpoint,
+      bookmark.region,
+      bookmark.access_key,
+      bookmark.secret_key,
+    );
+    setStatus(`Loaded bookmark "${bookmark.name}".`, 5000);
+  });
 }
 
 function setConnectionUI(connected: boolean): void {
@@ -1027,6 +1041,8 @@ function wireLayoutControls(): void {
     dragging = false;
     resizer.classList.remove("sidebar-resizer--active");
     document.body.style.cursor = "";
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
     const width = readSidebarWidth();
     persistSidebarWidth(width);
     updateResizerAria(width);
@@ -1040,6 +1056,8 @@ function wireLayoutControls(): void {
     dragStartWidth = sidebar.getBoundingClientRect().width;
     resizer.classList.add("sidebar-resizer--active");
     document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
   });
 
   resizer.addEventListener("keydown", (event) => {
@@ -1064,9 +1082,6 @@ function wireLayoutControls(): void {
     persistSidebarWidth(clamped);
     updateResizerAria(clamped);
   });
-
-  document.addEventListener("mousemove", onMouseMove);
-  document.addEventListener("mouseup", onMouseUp);
 }
 
 function handleContextMenu(e: MouseEvent): void {
@@ -1730,6 +1745,12 @@ async function init(): Promise<void> {
   dom.versionLabel.textContent = `v${version}`;
 
   if (securityReady) {
+    try {
+      await loadBookmarks();
+      setBookmarkChangeHandler(refreshBookmarkBar);
+      refreshBookmarkBar();
+    } catch {}
+
     try {
       const saved = await loadConnection();
       if (saved) {

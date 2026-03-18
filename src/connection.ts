@@ -73,7 +73,18 @@ export async function loadConnection(): Promise<ConnectionConfig | null> {
   const raw = await invoke<string>("load_connection");
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as ConnectionConfig;
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      typeof (parsed as Record<string, unknown>).endpoint === "string" &&
+      typeof (parsed as Record<string, unknown>).region === "string" &&
+      typeof (parsed as Record<string, unknown>).access_key === "string" &&
+      typeof (parsed as Record<string, unknown>).secret_key === "string"
+    ) {
+      return parsed as ConnectionConfig;
+    }
+    return null;
   } catch {
     return null;
   }
