@@ -14,7 +14,6 @@ pub fn clear_stored_key() {
     platform::remove_key();
 }
 
-// Removed is_cancellation_error
 #[tauri::command]
 pub(crate) fn biometric_available() -> bool {
     is_available()
@@ -48,17 +47,17 @@ pub(crate) async fn disable_biometric(app: tauri::AppHandle) -> Result<SecurityS
 }
 
 #[tauri::command]
-pub(crate) async fn unlock_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+pub(crate) async fn unlock_biometric(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+) -> Result<SecurityStatus, String> {
     let _guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.encryption_enabled || !config.biometric_enrolled {
         return Err("Biometric unlock is not configured".to_string());
     }
 
-    let key = match platform::retrieve_key() {
-        Ok(k) => k,
-        Err(e) => return Err(e),
-    };
+    let key = platform::retrieve_key(Some(&window))?;
 
     let expected = B64
         .decode(&config.verifier)
@@ -223,7 +222,7 @@ mod platform {
         }
     }
 
-    pub fn retrieve_key() -> Result<[u8; KEY_LEN], String> {
+    pub fn retrieve_key(_window: Option<&tauri::Window>) -> Result<[u8; KEY_LEN], String> {
         unsafe {
             let dict = new_dict();
             set_base_attrs(dict);
@@ -279,18 +278,24 @@ mod platform {
 mod platform {
     use super::KEY_LEN;
     use std::ptr;
+    use std::thread;
+    use std::time::Duration;
 
-    use windows::core::{HSTRING, PCWSTR, PWSTR};
+    use windows::core::{factory, Error, HSTRING, PCWSTR, PWSTR};
+    use windows::Foundation::IAsyncOperation;
     use windows::Security::Credentials::UI::{
         UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
     };
-    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::Foundation::{FILETIME, HWND};
     use windows::Win32::Security::Credentials::{
         CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST,
-        CRED_PERSIST_ENTERPRISE, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+        CRED_PERSIST_ENTERPRISE, CRED_TYPE_GENERIC,
     };
+    use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
 
     const TARGET: &str = "run.rosie.s3-sidekick/biometric-key";
+    const WINDOWS_HELLO_RETRY_HRESULT: i32 = 0x80098044u32 as i32;
+    const WINDOWS_CREDREAD_RETRY_DELAY_MS: u64 = 500;
 
     fn to_wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -302,12 +307,36 @@ mod platform {
         matches!(result, Ok(UserConsentVerifierAvailability::Available))
     }
 
-    fn verify_user() -> Result<(), String> {
+    fn is_retryable_error(err: &Error) -> bool {
+        err.code().0 == WINDOWS_HELLO_RETRY_HRESULT
+    }
+
+    fn verify_user(window: Option<&tauri::Window>) -> Result<(), String> {
         let message = HSTRING::from("Unlock S3 Sidekick encrypted storage");
-        let result = UserConsentVerifier::RequestVerificationAsync(&message)
-            .map_err(|e| format!("Windows Hello error: {}", e))?
-            .get()
-            .map_err(|e| format!("Windows Hello error: {}", e))?;
+        let result = if let Some(win) = window {
+            let raw_hwnd = win
+                .hwnd()
+                .map_err(|e| format!("Failed to get window handle: {}", e))?;
+            let hwnd = HWND(raw_hwnd.0 as *mut _);
+            let interop: IUserConsentVerifierInterop =
+                factory::<UserConsentVerifier, IUserConsentVerifierInterop>()
+                    .map_err(|e| format!("Windows Hello interop factory error: {}", e))?;
+            unsafe {
+                interop
+                    .RequestVerificationForWindowAsync::<
+                        HWND,
+                        IAsyncOperation<UserConsentVerificationResult>,
+                    >(hwnd, &message)
+                    .map_err(|e| format!("Windows Hello interop error: {}", e))?
+                    .get()
+                    .map_err(|e| format!("Windows Hello error: {}", e))?
+            }
+        } else {
+            UserConsentVerifier::RequestVerificationAsync(&message)
+                .map_err(|e| format!("Windows Hello error: {}", e))?
+                .get()
+                .map_err(|e| format!("Windows Hello error: {}", e))?
+        };
 
         match result {
             UserConsentVerificationResult::Verified => Ok(()),
@@ -349,21 +378,43 @@ mod platform {
         }
     }
 
-    pub fn retrieve_key() -> Result<[u8; KEY_LEN], String> {
-        verify_user()?;
+    pub fn retrieve_key(window: Option<&tauri::Window>) -> Result<[u8; KEY_LEN], String> {
+        verify_user(window)?;
 
         let target_wide = to_wide(TARGET);
         let mut pcred: *mut CREDENTIALW = ptr::null_mut();
+        let mut read_err: Option<Error> = None;
+
+        for attempt in 0..2 {
+            pcred = ptr::null_mut();
+            let result = unsafe {
+                CredReadW(
+                    PCWSTR(target_wide.as_ptr()),
+                    CRED_TYPE_GENERIC,
+                    0,
+                    &mut pcred,
+                )
+            };
+            match result {
+                Ok(_) => {
+                    read_err = None;
+                    break;
+                }
+                Err(err) if attempt == 0 && is_retryable_error(&err) => {
+                    thread::sleep(Duration::from_millis(WINDOWS_CREDREAD_RETRY_DELAY_MS));
+                }
+                Err(err) => {
+                    read_err = Some(err);
+                    break;
+                }
+            }
+        }
+
+        if let Some(err) = read_err {
+            return Err(format!("Failed to read credential: {}", err));
+        }
 
         unsafe {
-            CredReadW(
-                PCWSTR(target_wide.as_ptr()),
-                CRED_TYPE_GENERIC,
-                0,
-                &mut pcred,
-            )
-            .map_err(|e| format!("Failed to read credential: {}", e))?;
-
             if pcred.is_null() {
                 return Err("No biometric credential found".to_string());
             }
@@ -410,7 +461,7 @@ mod platform {
         Err("Biometric authentication is not supported on this platform".to_string())
     }
 
-    pub fn retrieve_key() -> Result<[u8; KEY_LEN], String> {
+    pub fn retrieve_key(_window: Option<&tauri::Window>) -> Result<[u8; KEY_LEN], String> {
         Err("Biometric authentication is not supported on this platform".to_string())
     }
 
