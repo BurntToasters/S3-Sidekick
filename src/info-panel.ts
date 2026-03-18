@@ -446,9 +446,7 @@ async function saveBatchMetadata(): Promise<void> {
     closeInfoPanel();
     setStatus(`Metadata updated on ${succeeded} file(s).`, 5000);
   } else {
-    setStatus(
-      `Metadata updated on ${succeeded} file(s), ${failed} failed.`,
-    );
+    setStatus(`Metadata updated on ${succeeded} file(s), ${failed} failed.`);
   }
 }
 
