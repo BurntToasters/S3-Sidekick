@@ -24,6 +24,7 @@ pub(crate) struct S3State {
     pub client: Option<Client>,
     pub endpoint: String,
     pub region: String,
+    pub bucket_hint: Option<String>,
 }
 
 pub(crate) struct AppState(pub Mutex<S3State>);
@@ -223,6 +224,7 @@ fn main() {
             client: None,
             endpoint: String::new(),
             region: String::new(),
+            bucket_hint: None,
         })))
         .invoke_handler(tauri::generate_handler![
             s3::connect,
