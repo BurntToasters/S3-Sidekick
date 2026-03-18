@@ -43,6 +43,7 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
+            rpm \
             libgtk-3-dev \
             libdbus-1-dev
 
@@ -106,6 +107,7 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
+            rpm \
             libgtk-3-dev \
             libdbus-1-dev
 
@@ -133,6 +135,26 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Verify Linux x64 bundle outputs
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          check_bundle() {
+            label="$1"
+            pattern="$2"
+            count="$(find src-tauri/target -type f -name "$pattern" | wc -l | tr -d ' ')"
+            echo "$label: $count"
+            if [ "$count" -eq 0 ]; then
+              echo "Missing required Linux x64 artifact: $label ($pattern)" >&2
+              exit 1
+            fi
+          }
+          check_bundle "AppImage" "*.AppImage"
+          check_bundle "AppImage signature" "*.AppImage.sig"
+          check_bundle "Deb package" "*.deb"
+          check_bundle "Deb signature" "*.deb.sig"
+          check_bundle "RPM package" "*.rpm"
+          check_bundle "RPM signature" "*.rpm.sig"
 
       - name: Create macOS zip
         if: runner.os == 'macOS'
