@@ -17,14 +17,14 @@ if (conf.version !== version) {
 
 const cargoPath = path.join(root, "src-tauri", "Cargo.toml");
 let cargo = fs.readFileSync(cargoPath, "utf-8");
-const packageSectionPattern = /(\[package\][\s\S]*?)(\n\[[^\]]+\]|$)/m;
+const packageSectionPattern = /(\[package\][\s\S]*?)(\r?\n\[[^\]]+\]|$)/;
 const packageSectionMatch = cargo.match(packageSectionPattern);
 
 let updated = cargo;
 if (packageSectionMatch) {
   const packageSection = packageSectionMatch[1];
   const nextPackageSection = packageSection.replace(
-    /^(version\s*=\s*)"[^"]*"/m,
+    /^(\s*version\s*=\s*)"[^"]*"/m,
     `$1"${version}"`,
   );
   if (nextPackageSection !== packageSection) {
