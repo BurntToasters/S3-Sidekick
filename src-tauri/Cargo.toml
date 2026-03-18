@@ -8,10 +8,6 @@ edition = "2021"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-[[bin]]
-name = "bin_test"
-path = "src/bin_test.rs"
-
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
