@@ -11,6 +11,8 @@ export interface SecurityStatus {
 }
 
 type StatusSetter = (text: string) => void;
+const WINDOWS_STARTUP_BIOMETRIC_DELAY_MS = 800;
+const WINDOWS_STARTUP_FOCUS_WAIT_MS = 2500;
 
 async function getSecurityStatus(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>("get_security_status");
@@ -76,6 +78,63 @@ function biometricLabel(platform: string): string {
   if (platform === "macos") return "Touch ID";
   if (platform === "windows") return "Windows Hello";
   return "Biometric";
+}
+
+function errorText(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (
+    err &&
+    typeof err === "object" &&
+    "message" in err &&
+    typeof (err as { message?: unknown }).message === "string"
+  ) {
+    return (err as { message: string }).message;
+  }
+  return String(err);
+}
+
+function isCancellationError(err: unknown): boolean {
+  const text = errorText(err).toLowerCase();
+  return text.includes("canceled") || text.includes("cancelled");
+}
+
+function extractErrorCode(err: unknown): string | null {
+  const match = errorText(err).match(/0x[0-9a-fA-F]+/);
+  return match ? match[0] : null;
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForWindowFocus(timeoutMs: number): Promise<void> {
+  if (document.visibilityState === "visible" && document.hasFocus()) return;
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const timer = setTimeout(finish, timeoutMs);
+    const onFocus = () => {
+      if (document.visibilityState === "visible" && document.hasFocus()) {
+        finish();
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible" && document.hasFocus()) {
+        finish();
+      }
+    };
+
+    function finish(): void {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      resolve();
+    }
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+  });
 }
 
 async function promptForNewPassword(): Promise<string | null> {
@@ -161,18 +220,33 @@ export async function ensureSecurityReady(): Promise<boolean> {
   if (status.unlocked) return true;
 
   let biometricAttempted = false;
+  let biometricErrorCode: string | null = null;
+  let biometricCanceled = false;
+  const platform = await invoke<string>("get_platform_info").catch(
+    () => "unknown",
+  );
   if (status.biometric_available && status.biometric_enrolled) {
+    if (platform === "windows") {
+      await waitForWindowFocus(WINDOWS_STARTUP_FOCUS_WAIT_MS);
+      await delay(WINDOWS_STARTUP_BIOMETRIC_DELAY_MS);
+    }
     try {
       status = await unlockBiometric();
       if (status.unlocked) return true;
     } catch (err) {
-      console.error("Biometric unlock failed:", err);
       biometricAttempted = true;
+      biometricErrorCode = extractErrorCode(err);
+      biometricCanceled = isCancellationError(err);
+      console.error("Biometric unlock failed:", err);
     }
   }
 
   const unlockMessage = biometricAttempted
-    ? "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
+    ? biometricCanceled
+      ? "Biometric authentication was canceled.\nEnter your password to unlock encrypted credentials:"
+      : biometricErrorCode
+        ? `Biometric authentication was not completed (${biometricErrorCode}).\nEnter your password to unlock encrypted credentials:`
+        : "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
     : "Enter your password to unlock encrypted credentials:";
   const password = await showPrompt("Unlock", unlockMessage, {
     inputType: "password",
