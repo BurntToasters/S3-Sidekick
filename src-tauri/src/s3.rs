@@ -96,6 +96,98 @@ fn encode_copy_source(bucket: &str, key: &str) -> String {
     format!("{}/{}", encoded_bucket, encoded_key)
 }
 
+fn parse_endpoint_host(endpoint: &str) -> Option<String> {
+    let trimmed = endpoint.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let after_scheme = match trimmed.split_once("://") {
+        Some((_, rest)) => rest,
+        None => trimmed,
+    };
+    let authority = after_scheme.split('/').next()?.trim();
+    if authority.is_empty() {
+        return None;
+    }
+
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    if host_port.starts_with('[') {
+        return None;
+    }
+
+    let host = host_port
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('.');
+    if host.is_empty() {
+        return None;
+    }
+
+    Some(host.to_ascii_lowercase())
+}
+
+fn is_region_like_label(label: &str) -> bool {
+    let parts: Vec<&str> = label.split('-').collect();
+    if parts.len() < 3 || parts.iter().any(|p| p.is_empty()) {
+        return false;
+    }
+    if parts[0].len() != 2 || !parts[0].chars().all(|c| c.is_ascii_lowercase()) {
+        return false;
+    }
+    if !parts
+        .last()
+        .map(|p| p.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    parts[1..parts.len() - 1]
+        .iter()
+        .all(|segment| segment.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+}
+
+fn infer_region_from_host(host: &str) -> Option<String> {
+    if host == "s3.amazonaws.com" || host.ends_with(".s3.amazonaws.com") {
+        return Some("us-east-1".to_string());
+    }
+
+    let do_suffix = ".digitaloceanspaces.com";
+    if host.ends_with(do_suffix) {
+        let prefix = host.trim_end_matches(do_suffix).trim_end_matches('.');
+        if !prefix.is_empty() {
+            return prefix.rsplit('.').next().map(|s| s.to_string());
+        }
+    }
+
+    for label in host.split('.') {
+        if is_region_like_label(label) {
+            return Some(label.to_string());
+        }
+    }
+
+    None
+}
+
+fn resolve_region(endpoint: &str, region: &str) -> Result<String, String> {
+    let provided = region.trim();
+    if !provided.is_empty() {
+        return Ok(provided.to_string());
+    }
+
+    let host = parse_endpoint_host(endpoint).ok_or_else(|| {
+        "Region is required when endpoint host cannot be parsed. Enter region (for example: nyc3 or us-east-1)."
+            .to_string()
+    })?;
+
+    infer_region_from_host(&host).ok_or_else(|| {
+        "Region is required for this endpoint. Enter region manually (for example: nyc3 or us-east-1)."
+            .to_string()
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn connect(
     state: tauri::State<'_, AppState>,
@@ -103,13 +195,19 @@ pub(crate) async fn connect(
     region: String,
     access_key: String,
     secret_key: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    let endpoint = endpoint.trim().to_string();
+    if endpoint.is_empty() {
+        return Err("Endpoint is required".to_string());
+    }
+    let resolved_region = resolve_region(&endpoint, &region)?;
+
     let creds =
         aws_sdk_s3::config::Credentials::new(&access_key, &secret_key, None, None, "s3-sidekick");
 
     let config = aws_sdk_s3::config::Builder::new()
         .endpoint_url(&endpoint)
-        .region(aws_sdk_s3::config::Region::new(region.clone()))
+        .region(aws_sdk_s3::config::Region::new(resolved_region.clone()))
         .credentials_provider(creds)
         .force_path_style(true)
         .behavior_version_latest()
@@ -126,9 +224,9 @@ pub(crate) async fn connect(
     let mut s3 = lock_s3_state(&state)?;
     s3.client = Some(client);
     s3.endpoint = endpoint;
-    s3.region = region;
+    s3.region = resolved_region.clone();
 
-    Ok(())
+    Ok(resolved_region)
 }
 
 #[tauri::command]
