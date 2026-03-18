@@ -552,8 +552,13 @@ body.platform-linux {
   background: transparent;
 }
 
-.btn--ghost:hover {
+.btn--ghost:hover:not(:disabled) {
   background: var(--bg-hover);
+}
+
+.btn--ghost:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .btn--icon {
@@ -1527,6 +1532,22 @@ body.modal-open .dialog-overlay.active {
   vertical-align: middle;
 }
 
+.transfer-cancel {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  align-self: center;
+}
+.transfer-cancel:hover:not(:disabled) {
+  color: var(--danger);
+}
+
 .transfer-key {
   flex: 1;
   min-width: 0;
@@ -1607,8 +1628,8 @@ body.modal-open .dialog-overlay.active {
 }
 
 .activity-badge {
-  background: #0ea5e9;
-  color: #05263b;
+  background: var(--accent);
+  color: var(--accent-text);
 }
 
 .statusbar__right {

@@ -86,7 +86,10 @@ fn key_state() -> &'static Mutex<KeyState> {
 }
 
 fn is_unlocked() -> bool {
-    let mut guard = key_state().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = match key_state().lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
     if guard.key.is_none() {
         return false;
     }
@@ -106,7 +109,7 @@ fn is_unlocked() -> bool {
 }
 
 pub(crate) fn set_unlocked_key(key: Option<[u8; KEY_LEN]>, lock_timeout_secs: u64) -> Result<(), String> {
-    let mut guard = key_state().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = key_state().lock().map_err(|_| "Internal key state error".to_string())?;
     if let Some(ref mut old_key) = guard.key {
         old_key.zeroize();
     }
@@ -121,7 +124,7 @@ pub(crate) fn set_unlocked_key(key: Option<[u8; KEY_LEN]>, lock_timeout_secs: u6
 }
 
 pub(crate) fn require_unlocked_key() -> Result<[u8; KEY_LEN], String> {
-    let mut guard = key_state().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = key_state().lock().map_err(|_| "Internal key state error".to_string())?;
     if guard.lock_timeout_secs > 0 {
         if let Some(last) = guard.last_activity {
             if last.elapsed() >= Duration::from_secs(guard.lock_timeout_secs) {
@@ -702,7 +705,7 @@ pub(crate) async fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Res
     let mut config = load_security_config(&app)?;
     config.lock_timeout_minutes = minutes;
     save_security_config(&app, &config)?;
-    let mut guard = key_state().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = key_state().lock().map_err(|_| "Internal key state error".to_string())?;
     guard.lock_timeout_secs = minutes as u64 * 60;
     drop(guard);
     Ok(security_status(&config))

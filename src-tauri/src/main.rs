@@ -236,6 +236,7 @@ fn main() {
             s3::upload_object_bytes,
             s3::get_object_acl,
             s3::download_object,
+            s3::cancel_transfer,
             s3::create_folder,
             s3::rename_object,
             s3::build_object_url,
