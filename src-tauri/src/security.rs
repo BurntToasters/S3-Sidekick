@@ -428,6 +428,9 @@ pub(crate) async fn initialize_security(
     if pw.len() < 8 {
         return Err("Password must be at least 8 characters".to_string());
     }
+    if pw.len() > 256 {
+        return Err("Password must be at most 256 characters".to_string());
+    }
     let mut salt = [0u8; SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut salt);
     let mut key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
@@ -507,6 +510,11 @@ pub(crate) async fn unlock_security(app: tauri::AppHandle, password: String) -> 
         let plans = build_rekey_plans(&app, &key, &new_key)?;
         apply_migration(&plans)?;
 
+        if config.biometric_enrolled {
+            crate::biometric::clear_stored_key();
+            config.biometric_enrolled = false;
+        }
+
         config.salt = B64.encode(new_salt);
         config.verifier = B64.encode(new_verifier);
         new_verifier.zeroize();
@@ -551,6 +559,9 @@ pub(crate) async fn set_security_encryption(
             .ok_or_else(|| "New password is required".to_string())?;
         if pw.len() < 8 {
             return Err("Password must be at least 8 characters".to_string());
+        }
+        if pw.len() > 256 {
+            return Err("Password must be at most 256 characters".to_string());
         }
         let mut salt = [0u8; SALT_LEN];
         rand::rngs::OsRng.fill_bytes(&mut salt);
@@ -638,6 +649,9 @@ pub(crate) async fn change_security_password(
     }
     if new_password.len() < 8 {
         return Err("New password must be at least 8 characters".to_string());
+    }
+    if new_password.len() > 256 {
+        return Err("New password must be at most 256 characters".to_string());
     }
 
     let old_salt = B64

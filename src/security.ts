@@ -93,9 +93,14 @@ function errorText(err: unknown): string {
   return String(err);
 }
 
-function isCancellationError(err: unknown): boolean {
+export function isCancellationError(err: unknown): boolean {
   const text = errorText(err).toLowerCase();
   return text.includes("canceled") || text.includes("cancelled");
+}
+
+export function isCredentialRemovedError(err: unknown): boolean {
+  const text = errorText(err).toLowerCase();
+  return text.includes("credential was removed") || text.includes("no longer valid");
 }
 
 function extractErrorCode(err: unknown): string | null {
@@ -222,6 +227,7 @@ export async function ensureSecurityReady(): Promise<boolean> {
   let biometricAttempted = false;
   let biometricErrorCode: string | null = null;
   let biometricCanceled = false;
+  let biometricCredentialRemoved = false;
   const platform = await invoke<string>("get_platform_info").catch(
     () => "unknown",
   );
@@ -237,16 +243,20 @@ export async function ensureSecurityReady(): Promise<boolean> {
       biometricAttempted = true;
       biometricErrorCode = extractErrorCode(err);
       biometricCanceled = isCancellationError(err);
+      biometricCredentialRemoved = isCredentialRemovedError(err);
       console.error("Biometric unlock failed:", err);
     }
   }
 
+  const label = biometricLabel(platform);
   const unlockMessage = biometricAttempted
-    ? biometricCanceled
-      ? "Biometric authentication was canceled.\nEnter your password to unlock encrypted credentials:"
-      : biometricErrorCode
-        ? `Biometric authentication was not completed (${biometricErrorCode}).\nEnter your password to unlock encrypted credentials:`
-        : "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
+    ? biometricCredentialRemoved
+      ? `${label} credential was removed from the system.\nPlease unlock with your password, then re-enable ${label} in Settings.`
+      : biometricCanceled
+        ? "Biometric authentication was canceled.\nEnter your password to unlock encrypted credentials:"
+        : biometricErrorCode
+          ? `Biometric authentication was not completed (${biometricErrorCode}).\nEnter your password to unlock encrypted credentials:`
+          : "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
     : "Enter your password to unlock encrypted credentials:";
   const password = await showPrompt("Unlock", unlockMessage, {
     inputType: "password",
