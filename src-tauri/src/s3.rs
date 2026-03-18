@@ -356,6 +356,7 @@ pub(crate) async fn connect(
     s3.client = Some(client);
     s3.endpoint = normalized;
     s3.region = resolved_region.clone();
+    s3.bucket_hint = bucket_hint;
 
     Ok(resolved_region)
 }
@@ -364,6 +365,7 @@ pub(crate) async fn connect(
 pub(crate) fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut s3 = lock_s3_state(&state)?;
     s3.client = None;
+    s3.bucket_hint = None;
     s3.endpoint.clear();
     s3.region.clear();
     Ok(())
@@ -371,27 +373,39 @@ pub(crate) fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String
 
 #[tauri::command]
 pub(crate) async fn list_buckets(state: tauri::State<'_, AppState>) -> Result<Vec<BucketInfo>, String> {
-    let client = {
+    let (client, bucket_hint) = {
         let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
+        (s3.client.clone().ok_or("Not connected")?, s3.bucket_hint.clone())
     };
 
-    let output = client
-        .list_buckets()
-        .send()
-        .await
-        .map_err(|e| format!("Failed to list buckets: {}", e))?;
-
-    let buckets = output
-        .buckets()
-        .iter()
-        .map(|b| BucketInfo {
-            name: b.name().unwrap_or_default().to_string(),
-            creation_date: b.creation_date().map(|d| d.to_string()).unwrap_or_default(),
-        })
-        .collect();
-
-    Ok(buckets)
+    match client.list_buckets().send().await {
+        Ok(output) => {
+            let buckets = output
+                .buckets()
+                .iter()
+                .map(|b| BucketInfo {
+                    name: b.name().unwrap_or_default().to_string(),
+                    creation_date: b.creation_date().map(|d| d.to_string()).unwrap_or_default(),
+                })
+                .collect();
+            Ok(buckets)
+        }
+        Err(err) => {
+            // If list_buckets is denied (scoped key), return the bucket hint.
+            use aws_sdk_s3::error::SdkError;
+            let is_access_denied = matches!(&err, SdkError::ServiceError(ctx)
+                if ctx.raw().status().as_u16() == 403);
+            if is_access_denied {
+                if let Some(name) = bucket_hint {
+                    return Ok(vec![BucketInfo {
+                        name,
+                        creation_date: String::new(),
+                    }]);
+                }
+            }
+            Err(format_sdk_error("Failed to list buckets", &err))
+        }
+    }
 }
 
 #[tauri::command]
