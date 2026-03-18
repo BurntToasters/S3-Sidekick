@@ -57,7 +57,22 @@ pub(crate) async fn unlock_biometric(
         return Err("Biometric unlock is not configured".to_string());
     }
 
-    let key = platform::retrieve_key(Some(&window))?;
+    let key = match platform::retrieve_key(Some(&window)) {
+        Ok(k) => k,
+        Err(err) => {
+            let is_not_found = err.contains("0x80070490") || err.contains("Element not found");
+            if is_not_found {
+                config.biometric_enrolled = false;
+                let _ = save_security_config(&app, &config);
+                platform::remove_key();
+                return Err(
+                    "Biometric credential was removed from the system. Please unlock with your password and re-enable biometric unlock."
+                        .to_string(),
+                );
+            }
+            return Err(err);
+        }
+    };
 
     let expected = B64
         .decode(&config.verifier)
@@ -295,7 +310,10 @@ mod platform {
 
     const TARGET: &str = "run.rosie.s3-sidekick/biometric-key";
     const WINDOWS_HELLO_RETRY_HRESULT: i32 = 0x80098044u32 as i32;
+    const WINDOWS_HELLO_NOT_FOUND_HRESULT: i32 = 0x80070490u32 as i32;
     const WINDOWS_CREDREAD_RETRY_DELAY_MS: u64 = 500;
+    const WINDOWS_HELLO_VERIFY_RETRY_DELAY_MS: u64 = 800;
+    const WINDOWS_HELLO_VERIFY_MAX_RETRIES: usize = 2;
 
     fn to_wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -308,43 +326,67 @@ mod platform {
     }
 
     fn is_retryable_error(err: &Error) -> bool {
-        err.code().0 == WINDOWS_HELLO_RETRY_HRESULT
+        let code = err.code().0;
+        code == WINDOWS_HELLO_RETRY_HRESULT || code == WINDOWS_HELLO_NOT_FOUND_HRESULT
     }
 
-    fn verify_user(window: Option<&tauri::Window>) -> Result<(), String> {
+    enum VerifyError {
+        WindowsHello(Error),
+        Other(String),
+    }
+
+    fn verify_user_once(window: Option<&tauri::Window>) -> Result<(), VerifyError> {
         let message = HSTRING::from("Unlock S3 Sidekick encrypted storage");
         let result = if let Some(win) = window {
             let raw_hwnd = win
                 .hwnd()
-                .map_err(|e| format!("Failed to get window handle: {}", e))?;
+                .map_err(|e| VerifyError::Other(format!("Failed to get window handle: {}", e)))?;
             let hwnd = HWND(raw_hwnd.0 as *mut _);
             let interop: IUserConsentVerifierInterop =
                 factory::<UserConsentVerifier, IUserConsentVerifierInterop>()
-                    .map_err(|e| format!("Windows Hello interop factory error: {}", e))?;
+                    .map_err(|e| VerifyError::Other(format!("Windows Hello interop factory error: {}", e)))?;
             unsafe {
                 interop
                     .RequestVerificationForWindowAsync::<
                         HWND,
                         IAsyncOperation<UserConsentVerificationResult>,
                     >(hwnd, &message)
-                    .map_err(|e| format!("Windows Hello interop error: {}", e))?
+                    .map_err(VerifyError::WindowsHello)?
                     .get()
-                    .map_err(|e| format!("Windows Hello error: {}", e))?
+                    .map_err(VerifyError::WindowsHello)?
             }
         } else {
             UserConsentVerifier::RequestVerificationAsync(&message)
-                .map_err(|e| format!("Windows Hello error: {}", e))?
+                .map_err(VerifyError::WindowsHello)?
                 .get()
-                .map_err(|e| format!("Windows Hello error: {}", e))?
+                .map_err(VerifyError::WindowsHello)?
         };
 
         match result {
             UserConsentVerificationResult::Verified => Ok(()),
             UserConsentVerificationResult::Canceled => {
-                Err("Authentication was canceled".to_string())
+                Err(VerifyError::Other("Authentication was canceled".to_string()))
             }
-            _ => Err("Windows Hello authentication failed".to_string()),
+            _ => Err(VerifyError::Other("Windows Hello authentication failed".to_string())),
         }
+    }
+
+    fn verify_user(window: Option<&tauri::Window>) -> Result<(), String> {
+        for attempt in 0..WINDOWS_HELLO_VERIFY_MAX_RETRIES {
+            match verify_user_once(window) {
+                Ok(()) => return Ok(()),
+                Err(VerifyError::WindowsHello(e)) if attempt + 1 < WINDOWS_HELLO_VERIFY_MAX_RETRIES => {
+                    if is_retryable_error(&e) {
+                        thread::sleep(Duration::from_millis(WINDOWS_HELLO_VERIFY_RETRY_DELAY_MS));
+                        continue;
+                    }
+                    return Err(format!("Windows Hello error: {}", e));
+                }
+                Err(VerifyError::WindowsHello(e)) => return Err(format!("Windows Hello error: {}", e)),
+                Err(VerifyError::Other(msg)) => return Err(msg),
+            }
+        }
+        Err("Windows Hello authentication failed after retries".to_string())
     }
 
     pub fn store_key(key: &[u8; KEY_LEN]) -> Result<(), String> {

@@ -21,6 +21,7 @@
   --sidebar-width: 220px;
   --sidebar-min: 180px;
   --sidebar-max: 420px;
+  --warning: #f59e0b;
   --twemoji-filter: saturate(0.38) brightness(0.95) contrast(0.96);
   --twemoji-opacity: 0.9;
 }
@@ -41,6 +42,7 @@
     --badge-off-text: #9ca3af;
     --badge-on-bg: #14532d;
     --badge-on-text: #86efac;
+    --warning: #fbbf24;
     --twemoji-filter: saturate(0.3) brightness(0.88) contrast(0.94);
     --twemoji-opacity: 0.86;
   }
@@ -61,6 +63,7 @@
   --badge-off-text: #9ca3af;
   --badge-on-bg: #14532d;
   --badge-on-text: #86efac;
+  --warning: #fbbf24;
   --twemoji-filter: saturate(0.3) brightness(0.88) contrast(0.94);
   --twemoji-opacity: 0.86;
 }
@@ -117,6 +120,57 @@ body.platform-linux {
 .header__brand {
   font-size: 16px;
   font-weight: 600;
+}
+
+.bookmark-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 0 12px;
+  -webkit-app-region: no-drag;
+  scrollbar-width: none;
+}
+
+.bookmark-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.bookmark-bar:empty {
+  padding: 0;
+}
+
+.bookmark-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+
+.bookmark-chip:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.bookmark-chip:active {
+  opacity: 0.8;
+}
+
+.bookmark-chip__region {
+  color: var(--text-secondary);
+  font-weight: 400;
 }
 
 .header__actions {
@@ -1740,7 +1794,7 @@ body.modal-open .dialog-overlay.active {
 }
 
 .activity-icon--warning {
-  color: #f59e0b;
+  color: var(--warning);
 }
 
 .activity-msg {
@@ -1971,4 +2025,12 @@ body.modal-open .dialog-overlay.active {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+    animation-iteration-count: 1 !important;
+  }
 }
