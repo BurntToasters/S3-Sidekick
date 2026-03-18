@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod biometric;
 mod files;
 mod platform;
 mod s3;
@@ -254,6 +255,10 @@ fn main() {
             security::change_security_password,
             security::lock_security,
             security::set_lock_timeout,
+            biometric::biometric_available,
+            biometric::enable_biometric,
+            biometric::disable_biometric,
+            biometric::unlock_biometric,
             platform::get_platform_info,
             platform::updater_supported,
             platform::updater_support_info,
