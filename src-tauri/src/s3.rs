@@ -221,6 +221,50 @@ fn resolve_region(endpoint: &str, region: &str) -> Result<String, String> {
     })
 }
 
+/// Normalize an endpoint string into a full URL suitable for the AWS SDK.
+
+fn normalize_endpoint(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+
+    // Ensure scheme is present.
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{}", trimmed)
+    };
+
+    // Split into scheme + authority
+    let (scheme, after_scheme) = with_scheme.split_once("://").unwrap();
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+
+    // Separate host from optional port.
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
+        _ => (authority, None),
+    };
+
+    let host_lower = host.to_ascii_lowercase();
+
+    let do_suffix = ".digitaloceanspaces.com";
+    let normalized_host = if host_lower.ends_with(do_suffix) {
+        let prefix = host_lower.trim_end_matches(do_suffix);
+        let parts: Vec<&str> = prefix.split('.').collect();
+
+        if parts.len() >= 2 {
+            format!("{}{}", parts[parts.len() - 1], do_suffix)
+        } else {
+            host_lower
+        }
+    } else {
+        host_lower
+    };
+
+    match port {
+        Some(p) => format!("{}://{}:{}", scheme, normalized_host, p),
+        None => format!("{}://{}", scheme, normalized_host),
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn connect(
     state: tauri::State<'_, AppState>,
@@ -234,12 +278,13 @@ pub(crate) async fn connect(
         return Err("Endpoint is required".to_string());
     }
     let resolved_region = resolve_region(&endpoint, &region)?;
+    let normalized = normalize_endpoint(&endpoint);
 
     let creds =
         aws_sdk_s3::config::Credentials::new(&access_key, &secret_key, None, None, "s3-sidekick");
 
     let config = aws_sdk_s3::config::Builder::new()
-        .endpoint_url(&endpoint)
+        .endpoint_url(&normalized)
         .region(aws_sdk_s3::config::Region::new(resolved_region.clone()))
         .credentials_provider(creds)
         .force_path_style(true)
@@ -256,7 +301,7 @@ pub(crate) async fn connect(
 
     let mut s3 = lock_s3_state(&state)?;
     s3.client = Some(client);
-    s3.endpoint = endpoint;
+    s3.endpoint = normalized;
     s3.region = resolved_region.clone();
 
     Ok(resolved_region)
@@ -1301,5 +1346,69 @@ mod tests {
     fn encode_copy_source_encodes_bucket_special_chars() {
         let result = encode_copy_source("my bucket", "key");
         assert!(result.starts_with("my%20bucket/"));
+    }
+
+    #[test]
+    fn normalize_endpoint_adds_https_scheme() {
+        assert_eq!(
+            normalize_endpoint("sfo3.digitaloceanspaces.com"),
+            "https://sfo3.digitaloceanspaces.com"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_preserves_existing_scheme() {
+        assert_eq!(
+            normalize_endpoint("https://sfo3.digitaloceanspaces.com"),
+            "https://sfo3.digitaloceanspaces.com"
+        );
+        assert_eq!(
+            normalize_endpoint("http://localhost:9000"),
+            "http://localhost:9000"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_strips_do_bucket_subdomain() {
+        assert_eq!(
+            normalize_endpoint("https://fortis.sfo3.digitaloceanspaces.com"),
+            "https://sfo3.digitaloceanspaces.com"
+        );
+        assert_eq!(
+            normalize_endpoint("fortis.sfo3.digitaloceanspaces.com"),
+            "https://sfo3.digitaloceanspaces.com"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_keeps_region_only_do_host() {
+        assert_eq!(
+            normalize_endpoint("https://nyc3.digitaloceanspaces.com"),
+            "https://nyc3.digitaloceanspaces.com"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_strips_trailing_path() {
+        assert_eq!(
+            normalize_endpoint("https://sfo3.digitaloceanspaces.com/fortis"),
+            "https://sfo3.digitaloceanspaces.com"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_preserves_port() {
+        assert_eq!(
+            normalize_endpoint("http://minio.local:9000"),
+            "http://minio.local:9000"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_strips_trailing_slash() {
+        assert_eq!(
+            normalize_endpoint("https://s3.amazonaws.com/"),
+            "https://s3.amazonaws.com"
+        );
     }
 }
