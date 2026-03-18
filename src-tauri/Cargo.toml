@@ -41,6 +41,7 @@ windows = { version = "0.58", features = [
     "Foundation",
     "Win32_Security_Credentials",
     "Win32_Foundation",
+    "Win32_System_WinRT",
 ] }
 
 [profile.release]
