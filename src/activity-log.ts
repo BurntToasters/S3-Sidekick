@@ -23,7 +23,7 @@ export function logActivity(
   }
   updateBadge();
   updateClearButton();
-  if (visible) renderActivityLog();
+  renderActivityLog();
 }
 
 export function toggleActivityLog(): void {
@@ -57,12 +57,7 @@ export function clearActivityLog(): void {
   entries = [];
   updateBadge();
   updateClearButton();
-  if (visible) {
-    renderActivityLog();
-    if (entries.length === 0) {
-      hideActivityLog();
-    }
-  }
+  renderActivityLog();
 }
 
 function renderActivityLog(): void {

@@ -221,6 +221,81 @@ fn resolve_region(endpoint: &str, region: &str) -> Result<String, String> {
     })
 }
 
+/// Normalize an endpoint string into a full URL suitable for the AWS SDK.
+fn normalize_endpoint(raw: &str) -> (String, Option<String>) {
+    let trimmed = raw.trim().trim_end_matches('/');
+
+    // Ensure scheme is present.
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{}", trimmed)
+    };
+
+    let (scheme, after_scheme) = with_scheme.split_once("://").unwrap();
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let path = after_scheme
+        .strip_prefix(authority)
+        .unwrap_or("")
+        .trim_matches('/');
+
+    // Separate host from optional port.
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
+        _ => (authority, None),
+    };
+
+    let host_lower = host.to_ascii_lowercase();
+    let mut bucket_hint: Option<String> = None;
+
+    // Extract bucket from path if present
+    if !path.is_empty() {
+        let first_segment = path.split('/').next().unwrap_or("");
+        if !first_segment.is_empty() {
+            bucket_hint = Some(first_segment.to_string());
+        }
+    }
+
+    let do_suffix = ".digitaloceanspaces.com";
+    let normalized_host = if host_lower.ends_with(do_suffix) {
+        let prefix = host_lower.trim_end_matches(do_suffix);
+        let parts: Vec<&str> = prefix.split('.').collect();
+        if parts.len() >= 2 {
+            if bucket_hint.is_none() {
+                bucket_hint = Some(parts[0].to_string());
+            }
+            format!("{}{}", parts[parts.len() - 1], do_suffix)
+        } else {
+            host_lower
+        }
+    } else {
+        host_lower
+    };
+
+    let url = match port {
+        Some(p) => format!("{}://{}:{}", scheme, normalized_host, p),
+        None => format!("{}://{}", scheme, normalized_host),
+    };
+
+    (url, bucket_hint)
+}
+
+fn format_sdk_error<E: std::fmt::Debug>(prefix: &str, err: &aws_sdk_s3::error::SdkError<E>) -> String {
+    use aws_sdk_s3::error::SdkError;
+    match err {
+        SdkError::ServiceError(ctx) => {
+            let raw = ctx.raw();
+            let status = raw.status().as_u16();
+            let body = String::from_utf8_lossy(raw.body().bytes().unwrap_or(&[]));
+            format!("{} (HTTP {}): {}", prefix, status, body)
+        }
+        SdkError::DispatchFailure(err) => {
+            format!("{} (dispatch): {:?}", prefix, err)
+        }
+        other => format!("{}: {:?}", prefix, other),
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn connect(
     state: tauri::State<'_, AppState>,
@@ -234,12 +309,13 @@ pub(crate) async fn connect(
         return Err("Endpoint is required".to_string());
     }
     let resolved_region = resolve_region(&endpoint, &region)?;
+    let (normalized, bucket_hint) = normalize_endpoint(&endpoint);
 
     let creds =
         aws_sdk_s3::config::Credentials::new(&access_key, &secret_key, None, None, "s3-sidekick");
 
     let config = aws_sdk_s3::config::Builder::new()
-        .endpoint_url(&endpoint)
+        .endpoint_url(&normalized)
         .region(aws_sdk_s3::config::Region::new(resolved_region.clone()))
         .credentials_provider(creds)
         .force_path_style(true)
@@ -248,16 +324,39 @@ pub(crate) async fn connect(
 
     let client = Client::from_conf(config);
 
-    client
-        .list_buckets()
-        .send()
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
+    // Verify connectivity. Try list_buckets first; if that gets AccessDenied
+    // (common with scoped keys on DO Spaces), fall back to head_bucket using
+    // the bucket extracted from the endpoint URL.
+    let list_result = client.list_buckets().send().await;
+    if let Err(list_err) = &list_result {
+        let is_access_denied = {
+            use aws_sdk_s3::error::SdkError;
+            matches!(list_err, SdkError::ServiceError(ctx)
+                if ctx.raw().status().as_u16() == 403)
+        };
+        if is_access_denied {
+            if let Some(ref bucket) = bucket_hint {
+                // Fall back: verify we can at least reach this specific bucket.
+                client
+                    .head_bucket()
+                    .bucket(bucket)
+                    .send()
+                    .await
+                    .map_err(|e| format_sdk_error("Connection failed", &e))?;
+            } else {
+                // No bucket hint to fall back on — report the 403.
+                return Err(format_sdk_error("Connection failed", list_err));
+            }
+        } else {
+            return Err(format_sdk_error("Connection failed", list_err));
+        }
+    }
 
     let mut s3 = lock_s3_state(&state)?;
     s3.client = Some(client);
-    s3.endpoint = endpoint;
+    s3.endpoint = normalized;
     s3.region = resolved_region.clone();
+    s3.bucket_hint = bucket_hint;
 
     Ok(resolved_region)
 }
@@ -266,6 +365,7 @@ pub(crate) async fn connect(
 pub(crate) fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut s3 = lock_s3_state(&state)?;
     s3.client = None;
+    s3.bucket_hint = None;
     s3.endpoint.clear();
     s3.region.clear();
     Ok(())
@@ -273,27 +373,39 @@ pub(crate) fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String
 
 #[tauri::command]
 pub(crate) async fn list_buckets(state: tauri::State<'_, AppState>) -> Result<Vec<BucketInfo>, String> {
-    let client = {
+    let (client, bucket_hint) = {
         let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
+        (s3.client.clone().ok_or("Not connected")?, s3.bucket_hint.clone())
     };
 
-    let output = client
-        .list_buckets()
-        .send()
-        .await
-        .map_err(|e| format!("Failed to list buckets: {}", e))?;
-
-    let buckets = output
-        .buckets()
-        .iter()
-        .map(|b| BucketInfo {
-            name: b.name().unwrap_or_default().to_string(),
-            creation_date: b.creation_date().map(|d| d.to_string()).unwrap_or_default(),
-        })
-        .collect();
-
-    Ok(buckets)
+    match client.list_buckets().send().await {
+        Ok(output) => {
+            let buckets = output
+                .buckets()
+                .iter()
+                .map(|b| BucketInfo {
+                    name: b.name().unwrap_or_default().to_string(),
+                    creation_date: b.creation_date().map(|d| d.to_string()).unwrap_or_default(),
+                })
+                .collect();
+            Ok(buckets)
+        }
+        Err(err) => {
+            // If list_buckets is denied (scoped key), return the bucket hint.
+            use aws_sdk_s3::error::SdkError;
+            let is_access_denied = matches!(&err, SdkError::ServiceError(ctx)
+                if ctx.raw().status().as_u16() == 403);
+            if is_access_denied {
+                if let Some(name) = bucket_hint {
+                    return Ok(vec![BucketInfo {
+                        name,
+                        creation_date: String::new(),
+                    }]);
+                }
+            }
+            Err(format_sdk_error("Failed to list buckets", &err))
+        }
+    }
 }
 
 #[tauri::command]
@@ -1301,5 +1413,57 @@ mod tests {
     fn encode_copy_source_encodes_bucket_special_chars() {
         let result = encode_copy_source("my bucket", "key");
         assert!(result.starts_with("my%20bucket/"));
+    }
+
+    #[test]
+    fn normalize_endpoint_adds_https_scheme() {
+        let (url, bucket) = normalize_endpoint("sfo3.digitaloceanspaces.com");
+        assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
+        assert_eq!(bucket, None);
+    }
+
+    #[test]
+    fn normalize_endpoint_preserves_existing_scheme() {
+        let (url, _) = normalize_endpoint("https://sfo3.digitaloceanspaces.com");
+        assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
+        let (url, _) = normalize_endpoint("http://localhost:9000");
+        assert_eq!(url, "http://localhost:9000");
+    }
+
+    #[test]
+    fn normalize_endpoint_strips_do_bucket_subdomain() {
+        let (url, bucket) = normalize_endpoint("https://fortis.sfo3.digitaloceanspaces.com");
+        assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
+        assert_eq!(bucket, Some("fortis".to_string()));
+
+        let (url, bucket) = normalize_endpoint("fortis.sfo3.digitaloceanspaces.com");
+        assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
+        assert_eq!(bucket, Some("fortis".to_string()));
+    }
+
+    #[test]
+    fn normalize_endpoint_keeps_region_only_do_host() {
+        let (url, bucket) = normalize_endpoint("https://nyc3.digitaloceanspaces.com");
+        assert_eq!(url, "https://nyc3.digitaloceanspaces.com");
+        assert_eq!(bucket, None);
+    }
+
+    #[test]
+    fn normalize_endpoint_strips_trailing_path_as_bucket() {
+        let (url, bucket) = normalize_endpoint("https://sfo3.digitaloceanspaces.com/fortis");
+        assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
+        assert_eq!(bucket, Some("fortis".to_string()));
+    }
+
+    #[test]
+    fn normalize_endpoint_preserves_port() {
+        let (url, _) = normalize_endpoint("http://minio.local:9000");
+        assert_eq!(url, "http://minio.local:9000");
+    }
+
+    #[test]
+    fn normalize_endpoint_strips_trailing_slash() {
+        let (url, _) = normalize_endpoint("https://s3.amazonaws.com/");
+        assert_eq!(url, "https://s3.amazonaws.com");
     }
 }
