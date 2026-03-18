@@ -507,7 +507,12 @@ async function handleConnect(): Promise<void> {
   setStatus("Connecting...");
 
   try {
-    const resolvedRegion = await connect(endpoint, region, accessKey, secretKey);
+    const resolvedRegion = await connect(
+      endpoint,
+      region,
+      accessKey,
+      secretKey,
+    );
     (document.getElementById("conn-region") as HTMLInputElement).value =
       resolvedRegion;
     setConnectionUI(true);
