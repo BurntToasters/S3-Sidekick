@@ -173,23 +173,19 @@ export async function ensureSecurityReady(): Promise<boolean> {
   const unlockMessage = biometricAttempted
     ? "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
     : "Enter your password to unlock encrypted credentials:";
-  const password = await showPrompt(
-    "Unlock",
-    unlockMessage,
-    {
-      inputType: "password",
-      inputPlaceholder: "Password",
-      validate: async (value) => {
-        if (!value) return false;
-        try {
-          status = await unlockSecurity(value);
-          return status.unlocked;
-        } catch {
-          return false;
-        }
-      },
+  const password = await showPrompt("Unlock", unlockMessage, {
+    inputType: "password",
+    inputPlaceholder: "Password",
+    validate: async (value) => {
+      if (!value) return false;
+      try {
+        status = await unlockSecurity(value);
+        return status.unlocked;
+      } catch {
+        return false;
+      }
     },
-  );
+  });
   return password !== null && status.unlocked;
 }
 
@@ -250,13 +246,17 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
         if (status.biometric_available && status.unlocked) {
           biometricSettings.style.display = "";
           const biometricLabelEl = biometricSettings.querySelector("label");
-          if (biometricLabelEl) biometricLabelEl.textContent = `${label} Unlock`;
+          if (biometricLabelEl)
+            biometricLabelEl.textContent = `${label} Unlock`;
           biometricToggle.textContent = status.biometric_enrolled
             ? `Disable ${label}`
             : `Enable ${label}`;
-          biometricToggle.setAttribute("aria-label", status.biometric_enrolled
-            ? `Disable ${label} unlock`
-            : `Enable ${label} unlock`);
+          biometricToggle.setAttribute(
+            "aria-label",
+            status.biometric_enrolled
+              ? `Disable ${label} unlock`
+              : `Enable ${label} unlock`,
+          );
         } else {
           biometricSettings.style.display = "none";
         }
