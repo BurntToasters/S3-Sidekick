@@ -64,7 +64,7 @@ const PREVIEWABLE_IMAGE_EXTS = new Set([
 let activePreviewObjectUrl: string | null = null;
 
 function canPreview(name: string): boolean {
-  const ext = name.split(".").pop()?.toLowerCase() || "";
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
   return PREVIEWABLE_TEXT_EXTS.has(ext) || PREVIEWABLE_IMAGE_EXTS.has(ext);
 }
 

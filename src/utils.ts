@@ -64,6 +64,17 @@ interface TwemojiIconOptions {
   decorative?: boolean;
 }
 
+export function isEditableElement(el: Element | null): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  const tag = el.tagName;
+  return (
+    el.isContentEditable ||
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT"
+  );
+}
+
 export function twemojiAsset(codepoint: string): string {
   return `/twemoji/${codepoint}.svg`;
 }
