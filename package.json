@@ -1,6 +1,6 @@
 {
   "name": "s3-sidekick",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "private": true,
   "description": "A Cross-Platform Desktop client for S3-compatible Object Storage.",
   "type": "module",
@@ -12,6 +12,8 @@
     "test:watch": "vitest",
     "test:all": "node scripts/test-all.js",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.{ts,css,html}\" \".github/workflows/*.{yml,yaml}\" \"scripts/test-all.js\" \"scripts/flatpak-bundle.js\" \"vitest.config.ts\"",
     "format:check": "prettier --check \"src/**/*.{ts,css,html}\" \".github/workflows/*.{yml,yaml}\" \"scripts/test-all.js\" \"scripts/flatpak-bundle.js\" \"vitest.config.ts\"",
     "start": "npm run tauri:dev",
@@ -61,7 +63,10 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^25.2.1",
+    "@typescript-eslint/eslint-plugin": "^8.57.1",
+    "@typescript-eslint/parser": "^8.57.1",
     "dotenv-cli": "^8.0.0",
+    "eslint": "^10.0.3",
     "jsdom": "^29.0.0",
     "npm-license-crawler": "^0.2.1",
     "prettier": "^3.8.1",
