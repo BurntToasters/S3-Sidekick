@@ -1,8 +1,9 @@
 use aws_sdk_s3::types::{Delete, MetadataDirective, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::Emitter;
 
@@ -11,6 +12,38 @@ use crate::{lock_s3_state, make_temp_path, validate_destination_path, validate_e
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 const MULTIPART_THRESHOLD: u64 = 50 * 1024 * 1024;
 const PART_SIZE: usize = 10 * 1024 * 1024;
+const MULTIPART_COPY_PART_SIZE: u64 = 500 * 1024 * 1024;
+const MULTIPART_COPY_THRESHOLD: i64 = 5_368_709_120;
+
+static CANCELLED_TRANSFERS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+
+fn cancelled_set() -> &'static Mutex<HashSet<u32>> {
+    CANCELLED_TRANSFERS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn is_cancelled(transfer_id: u32) -> bool {
+    cancelled_set()
+        .lock()
+        .map(|set| set.contains(&transfer_id))
+        .unwrap_or(false)
+}
+
+fn mark_cancelled(transfer_id: u32) {
+    if let Ok(mut set) = cancelled_set().lock() {
+        set.insert(transfer_id);
+    }
+}
+
+fn clear_cancelled(transfer_id: u32) {
+    if let Ok(mut set) = cancelled_set().lock() {
+        set.remove(&transfer_id);
+    }
+}
+
+#[tauri::command]
+pub(crate) fn cancel_transfer(transfer_id: u32) {
+    mark_cancelled(transfer_id);
+}
 
 #[derive(serde::Serialize)]
 pub(crate) struct BucketInfo {
@@ -515,6 +548,11 @@ pub(crate) async fn upload_object(
         )
         .await?;
     } else {
+        if is_cancelled(transfer_id) {
+            clear_cancelled(transfer_id);
+            return Err("Transfer cancelled".to_string());
+        }
+
         let body = aws_sdk_s3::primitives::ByteStream::from_path(upload_path.as_path())
             .await
             .map_err(|e| format!("Failed to open file stream: {}", e))?;
@@ -538,6 +576,7 @@ pub(crate) async fn upload_object(
             total_bytes: file_size,
         },
     );
+    clear_cancelled(transfer_id);
 
     Ok(())
 }
@@ -578,6 +617,18 @@ async fn upload_multipart(
     let mut bytes_sent = 0u64;
 
     loop {
+        if is_cancelled(transfer_id) {
+            clear_cancelled(transfer_id);
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+            return Err("Transfer cancelled".to_string());
+        }
+
         let mut buf = vec![0u8; PART_SIZE];
         let mut read = 0;
         while read < PART_SIZE {
@@ -643,7 +694,7 @@ async fn upload_multipart(
         .set_parts(Some(completed_parts))
         .build();
 
-    client
+    if let Err(e) = client
         .complete_multipart_upload()
         .bucket(bucket)
         .key(key)
@@ -651,7 +702,16 @@ async fn upload_multipart(
         .multipart_upload(completed_upload)
         .send()
         .await
-        .map_err(|e| format!("Failed to complete multipart upload: {}", e))?;
+    {
+        let _ = client
+            .abort_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .send()
+            .await;
+        return Err(format!("Failed to complete multipart upload: {}", e));
+    }
 
     Ok(())
 }
@@ -769,10 +829,12 @@ pub(crate) async fn get_object_acl(
 
 #[tauri::command]
 pub(crate) async fn download_object(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     bucket: String,
     key: String,
     destination: String,
+    transfer_id: u32,
 ) -> Result<u64, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -784,6 +846,11 @@ pub(crate) async fn download_object(
         s3.client.clone().ok_or("Not connected")?
     };
 
+    if is_cancelled(transfer_id) {
+        clear_cancelled(transfer_id);
+        return Err("Transfer cancelled".to_string());
+    }
+
     let output = client
         .get_object()
         .bucket(&bucket)
@@ -791,6 +858,16 @@ pub(crate) async fn download_object(
         .send()
         .await
         .map_err(|e| format!("Failed to download: {}", e))?;
+
+    let total_bytes = output.content_length().unwrap_or(0) as u64;
+    let _ = app.emit(
+        "download-progress",
+        UploadProgress {
+            transfer_id,
+            bytes_sent: 0,
+            total_bytes,
+        },
+    );
 
     let mut reader = output.body.into_async_read();
     let mut file = tokio::fs::OpenOptions::new()
@@ -800,9 +877,18 @@ pub(crate) async fn download_object(
         .await
         .map_err(|e| format!("Failed to create temp file: {}", e))?;
     let mut written = 0u64;
+    let mut last_emitted = 0u64;
     let mut buf = [0u8; 64 * 1024];
+    const PROGRESS_INTERVAL: u64 = 256 * 1024;
 
     loop {
+        if is_cancelled(transfer_id) {
+            clear_cancelled(transfer_id);
+            drop(file);
+            let _ = std::fs::remove_file(&temp_path);
+            return Err("Transfer cancelled".to_string());
+        }
+
         let count = reader
             .read(&mut buf)
             .await
@@ -819,6 +905,18 @@ pub(crate) async fn download_object(
             format!("Failed to write temp file: {}", e)
         })?;
         written += count as u64;
+
+        if written - last_emitted >= PROGRESS_INTERVAL {
+            let _ = app.emit(
+                "download-progress",
+                UploadProgress {
+                    transfer_id,
+                    bytes_sent: written,
+                    total_bytes,
+                },
+            );
+            last_emitted = written;
+        }
     }
 
     file.flush().await.map_err(|e| {
@@ -835,6 +933,16 @@ pub(crate) async fn download_object(
         let _ = std::fs::remove_file(&temp_path);
         return Err(format!("Failed to finalize download: {}", e));
     }
+
+    let _ = app.emit(
+        "download-progress",
+        UploadProgress {
+            transfer_id,
+            bytes_sent: written,
+            total_bytes: written,
+        },
+    );
+    clear_cancelled(transfer_id);
 
     Ok(written)
 }
@@ -856,6 +964,12 @@ pub(crate) async fn create_folder(
     if key.len() > 1024 {
         return Err("Object key is too long (max 1024 characters)".to_string());
     }
+    if key.split('/').any(|seg| seg == "..") {
+        return Err("Object key must not contain '..' path segments".to_string());
+    }
+    if key.contains("//") {
+        return Err("Object key must not contain consecutive slashes".to_string());
+    }
 
     let folder_key = if key.ends_with('/') {
         key
@@ -875,6 +989,102 @@ pub(crate) async fn create_folder(
     Ok(())
 }
 
+async fn copy_object_multipart(
+    client: &Client,
+    bucket: &str,
+    source_key: &str,
+    dest_key: &str,
+    total_size: i64,
+) -> Result<(), String> {
+    let create_output = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key(dest_key)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create multipart copy: {}", e))?;
+
+    let upload_id = create_output
+        .upload_id()
+        .ok_or("No upload ID returned for multipart copy")?
+        .to_string();
+
+    let copy_source = encode_copy_source(bucket, source_key);
+    let mut completed_parts = Vec::new();
+    let mut part_number = 1i32;
+    let mut offset = 0u64;
+    let size = total_size as u64;
+
+    while offset < size {
+        let end = std::cmp::min(offset + MULTIPART_COPY_PART_SIZE, size) - 1;
+        let range = format!("bytes={}-{}", offset, end);
+
+        let part_result = client
+            .upload_part_copy()
+            .bucket(bucket)
+            .key(dest_key)
+            .upload_id(&upload_id)
+            .copy_source(&copy_source)
+            .copy_source_range(&range)
+            .part_number(part_number)
+            .send()
+            .await;
+
+        match part_result {
+            Ok(output) => {
+                let etag = output
+                    .copy_part_result()
+                    .and_then(|r| r.e_tag())
+                    .unwrap_or_default()
+                    .to_string();
+                completed_parts.push(
+                    aws_sdk_s3::types::CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(etag)
+                        .build(),
+                );
+                offset = end + 1;
+                part_number += 1;
+            }
+            Err(e) => {
+                let _ = client
+                    .abort_multipart_upload()
+                    .bucket(bucket)
+                    .key(dest_key)
+                    .upload_id(&upload_id)
+                    .send()
+                    .await;
+                return Err(format!("Failed to copy part {}: {}", part_number, e));
+            }
+        }
+    }
+
+    let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+        .set_parts(Some(completed_parts))
+        .build();
+
+    if let Err(e) = client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key(dest_key)
+        .upload_id(&upload_id)
+        .multipart_upload(completed_upload)
+        .send()
+        .await
+    {
+        let _ = client
+            .abort_multipart_upload()
+            .bucket(bucket)
+            .key(dest_key)
+            .upload_id(&upload_id)
+            .send()
+            .await;
+        return Err(format!("Failed to complete multipart copy: {}", e));
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn rename_object(
     state: tauri::State<'_, AppState>,
@@ -887,15 +1097,29 @@ pub(crate) async fn rename_object(
         s3.client.clone().ok_or("Not connected")?
     };
 
-    let source = encode_copy_source(&bucket, &old_key);
-    client
-        .copy_object()
+    let head = client
+        .head_object()
         .bucket(&bucket)
-        .key(&new_key)
-        .copy_source(&source)
+        .key(&old_key)
         .send()
         .await
-        .map_err(|e| format!("Failed to copy: {}", e))?;
+        .map_err(|e| format!("Failed to get object info: {}", e))?;
+
+    let size = head.content_length().unwrap_or(0);
+
+    if size >= MULTIPART_COPY_THRESHOLD {
+        copy_object_multipart(&client, &bucket, &old_key, &new_key, size).await?;
+    } else {
+        let source = encode_copy_source(&bucket, &old_key);
+        client
+            .copy_object()
+            .bucket(&bucket)
+            .key(&new_key)
+            .copy_source(&source)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to copy: {}", e))?;
+    }
 
     if let Err(e) = client
         .delete_object()
@@ -998,12 +1222,18 @@ pub(crate) async fn preview_object(
         .await
         .map_err(|e| format!("Failed to download preview: {}", e))?;
 
-    let bytes = output
+    let raw_bytes = output
         .body
         .collect()
         .await
         .map_err(|e| format!("Failed to read preview body: {}", e))?
         .into_bytes();
+
+    let bytes = if raw_bytes.len() > MAX_PREVIEW as usize {
+        raw_bytes.slice(..MAX_PREVIEW as usize)
+    } else {
+        raw_bytes
+    };
 
     let is_text = is_text_content_type(&content_type);
 

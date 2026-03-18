@@ -45,6 +45,7 @@ let processing = false;
 let onComplete: ((summary: TransferRunSummary) => void) | null = null;
 let collapsed = false;
 let progressUnlisten: UnlistenFn | null = null;
+let downloadProgressUnlisten: UnlistenFn | null = null;
 let renderQueued = false;
 
 export async function initTransferQueueUI(): Promise<void> {
@@ -68,12 +69,47 @@ export async function initTransferQueueUI(): Promise<void> {
       }
     });
   }
+
+  if (!downloadProgressUnlisten) {
+    downloadProgressUnlisten = await listen<{
+      transfer_id: number;
+      bytes_sent: number;
+      total_bytes: number;
+    }>("download-progress", (event) => {
+      const { transfer_id, bytes_sent, total_bytes } = event.payload;
+      const item = queue.find((t) => t.id === transfer_id);
+      if (item) {
+        item.progress = total_bytes > 0 ? (bytes_sent / total_bytes) * 100 : 0;
+        item.totalBytes = total_bytes;
+        queueRender();
+      }
+    });
+  }
+
+  const list = document.getElementById("transfer-list");
+  if (list && !list.dataset.cancelBound) {
+    list.dataset.cancelBound = "1";
+    list.addEventListener("click", (e) => {
+      const btn = (e.target as HTMLElement).closest(".transfer-cancel");
+      if (!btn) return;
+      const row = btn.closest(".transfer-item");
+      if (!row) return;
+      const id = Number((row as HTMLElement).dataset.id);
+      if (!id) return;
+      cancelTransferItem(id);
+    });
+  }
 }
 
 export async function disposeTransferQueueUI(): Promise<void> {
   if (progressUnlisten) {
     const unlisten = progressUnlisten;
     progressUnlisten = null;
+    await unlisten();
+  }
+  if (downloadProgressUnlisten) {
+    const unlisten = downloadProgressUnlisten;
+    downloadProgressUnlisten = null;
     await unlisten();
   }
 }
@@ -118,6 +154,9 @@ export function clearCompletedTransfers(): void {
     (t) => t.status === "queued" || t.status === "uploading",
   );
   renderQueue();
+  if (queue.length === 0) {
+    hideTransferQueue();
+  }
 }
 
 export function enqueueFiles(
@@ -284,6 +323,7 @@ async function processQueue(): Promise<void> {
             bucket: item.bucket,
             key: item.key,
             destination: item.destination,
+            transferId: item.id,
           });
           item.totalBytes = size;
           item.progress = 100;
@@ -445,6 +485,9 @@ function renderQueue(): void {
           ? `<span class="transfer-error" title="${escapeHtml(t.error || "")}">${escapeHtml(t.error || "Error")}</span>`
           : "") +
         `</div>` +
+        (t.status === "queued" || t.status === "uploading"
+          ? `<button class="transfer-cancel btn--ghost" title="Cancel" aria-label="Cancel transfer">&times;</button>`
+          : "") +
         `</div>`
       );
     })
@@ -535,6 +578,22 @@ function syncOverlayToggleState(): void {
   ) as HTMLButtonElement | null;
   if (!overlay || !toggle || toggle.hidden) return;
   toggle.setAttribute("aria-expanded", String(!overlay.hidden));
+}
+
+async function cancelTransferItem(id: number): Promise<void> {
+  const item = queue.find((t) => t.id === id);
+  if (!item) return;
+  if (item.status === "queued") {
+    item.status = "error";
+    item.error = "Cancelled";
+    renderQueue();
+  } else if (item.status === "uploading") {
+    try {
+      await invoke("cancel_transfer", { transferId: id });
+    } catch {
+      // best-effort
+    }
+  }
 }
 
 function guessContentType(name: string): string {
