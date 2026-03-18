@@ -29,11 +29,40 @@ pub(crate) fn detect_update_mode() -> &'static str {
         if std::env::var("FLATPAK_ID").is_ok() || std::path::Path::new("/.flatpak-info").exists() {
             return "flatpak";
         }
-        if std::env::var("APPIMAGE").is_err() {
-            return "manual";
+        if linux_native_updater_supported() {
+            return "native";
         }
+        return "manual";
     }
     "native"
+}
+
+#[cfg(target_os = "linux")]
+fn linux_native_updater_supported() -> bool {
+    if std::env::var_os("APPIMAGE").is_some() {
+        return true;
+    }
+
+    let Ok(executable_path) = std::env::current_exe() else {
+        return false;
+    };
+
+    package_query_succeeded("dpkg-query", &["-S", "--"], &executable_path)
+        || package_query_succeeded("rpm", &["-qf"], &executable_path)
+}
+
+#[cfg(target_os = "linux")]
+fn package_query_succeeded(
+    program: &str,
+    args: &[&str],
+    executable_path: &std::path::Path,
+) -> bool {
+    Command::new(program)
+        .args(args)
+        .arg(executable_path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
