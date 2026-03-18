@@ -1154,7 +1154,7 @@ function handleContextMenu(e: MouseEvent): void {
       items.push({ label: "Rename", action: "rename" });
     } else {
       items.push({
-        label: `Get Info (${fileKeys.length} items)`,
+        label: `Edit Metadata (${fileKeys.length} items)`,
         action: "info",
       });
       items.push({

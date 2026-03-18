@@ -76,7 +76,7 @@ function artifactMatchesVersion(name) {
   if (isPerTargetManifest(name)) return true;
   const versions = name.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/g);
   if (!versions || versions.length === 0) return true;
-  return versions.includes(VERSION);
+  return versions.some((v) => v === VERSION || v.replace(/-\d+$/, "") === VERSION);
 }
 
 function clearReleaseStaging() {

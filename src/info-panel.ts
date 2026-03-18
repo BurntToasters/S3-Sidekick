@@ -33,6 +33,7 @@ interface AclResponse {
 }
 
 let currentKey = "";
+let batchKeys: string[] = [];
 let headData: HeadObjectResponse | null = null;
 let aclData: AclResponse | null = null;
 let metadataRows: { key: string; value: string }[] = [];
@@ -47,21 +48,32 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   if (keys.length > 1) {
     panelRequestToken += 1;
     currentKey = "";
-    title.textContent = `${keys.length} items selected`;
+    batchKeys = keys.filter((k) => !k.startsWith("prefix:"));
+    metadataRows = [{ key: "", value: "" }];
+
+    if (batchKeys.length === 0) {
+      title.textContent = `${keys.length} items selected`;
+      overlay.classList.add("active");
+      saveBtn.style.display = "none";
+      setTabsVisible(false);
+      const body = $("info-body");
+      body.innerHTML =
+        `<div class="metadata-batch-info">` +
+        `<p>Selected ${keys.length} folder(s). Metadata editing applies to files only.</p>` +
+        `</div>`;
+      return;
+    }
+
+    title.textContent = `${batchKeys.length} items selected`;
     overlay.classList.add("active");
-    saveBtn.style.display = "none";
+    saveBtn.style.display = "";
+    saveBtn.disabled = false;
     setTabsVisible(false);
-    const body = $("info-body");
-    const listItems = keys
-      .map((k) => `<li>${escapeHtml(basename(k))}</li>`)
-      .join("");
-    body.innerHTML =
-      `<div class="metadata-batch-info">` +
-      `<p>Selected ${keys.length} items:</p>` +
-      `<ul class="metadata-batch-list">${listItems}</ul>` +
-      `</div>`;
+    renderBatchView($("info-body"), batchKeys);
     return;
   }
+
+  batchKeys = [];
 
   const requestToken = ++panelRequestToken;
   currentKey = keys[0];
@@ -243,6 +255,26 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
   body.innerHTML = html;
 }
 
+function renderBatchView(body: HTMLElement, keys: string[]): void {
+  const listItems = keys
+    .map((k) => `<li>${escapeHtml(basename(k))}</li>`)
+    .join("");
+  body.innerHTML =
+    `<div class="metadata-batch-info">` +
+    `<p>Selected ${keys.length} items:</p>` +
+    `<ul class="metadata-batch-list">${listItems}</ul>` +
+    `</div>` +
+    `<div class="setting-section">Add Metadata</div>` +
+    `<p class="metadata-batch-hint">Headers below will be merged into each file's existing metadata.</p>` +
+    `<div id="metadata-entries"></div>` +
+    `<button id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
+  renderEntryRows();
+  $("metadata-add-row").addEventListener("click", () => {
+    metadataRows.push({ key: "", value: "" });
+    renderEntryRows();
+  });
+}
+
 function renderMetadata(body: HTMLElement): void {
   let html = `<div id="metadata-entries"></div>`;
   html += `<button id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
@@ -257,6 +289,7 @@ function renderMetadata(body: HTMLElement): void {
 function renderEntryRows(): void {
   const container = $("metadata-entries");
   container.innerHTML = "";
+  const isBatch = batchKeys.length > 0;
 
   for (let i = 0; i < metadataRows.length; i++) {
     const row = document.createElement("div");
@@ -267,7 +300,7 @@ function renderEntryRows(): void {
     keyInput.className = "field metadata-entry__key";
     keyInput.value = metadataRows[i].key;
     keyInput.placeholder = "Header name";
-    keyInput.readOnly = i === 0;
+    keyInput.readOnly = !isBatch && i === 0;
     keyInput.addEventListener("input", () => {
       metadataRows[i].key = keyInput.value;
     });
@@ -284,7 +317,7 @@ function renderEntryRows(): void {
     row.appendChild(keyInput);
     row.appendChild(valInput);
 
-    if (i > 0) {
+    if (isBatch || i > 0) {
       const delBtn = document.createElement("button");
       delBtn.className = "btn btn--icon metadata-entry__delete";
       delBtn.innerHTML = twemojiIcon("274c", { decorative: true });
@@ -329,6 +362,11 @@ function infoRow(label: string, value: string, mono = false): string {
 }
 
 export async function saveInfoPanel(): Promise<void> {
+  if (batchKeys.length > 0) {
+    await saveBatchMetadata();
+    return;
+  }
+
   const selectedKey = currentKey;
   if (!selectedKey) return;
 
@@ -364,6 +402,56 @@ export async function saveInfoPanel(): Promise<void> {
   }
 }
 
+async function saveBatchMetadata(): Promise<void> {
+  const newMeta: Record<string, string> = {};
+  for (const row of metadataRows) {
+    const k = row.key.trim();
+    if (k) newMeta[k] = row.value;
+  }
+
+  if (Object.keys(newMeta).length === 0) {
+    setStatus("Add at least one metadata header to apply.");
+    return;
+  }
+
+  const saveBtn = $<HTMLButtonElement>("info-save");
+  saveBtn.disabled = true;
+  let succeeded = 0;
+  let failed = 0;
+
+  for (const key of batchKeys) {
+    saveBtn.textContent = `Saving ${succeeded + failed + 1}/${batchKeys.length}\u2026`;
+    try {
+      const head = await invoke<HeadObjectResponse>("head_object", {
+        bucket: state.currentBucket,
+        key,
+      });
+      const merged: Record<string, string> = { ...head.metadata, ...newMeta };
+      await invoke("update_metadata", {
+        bucket: state.currentBucket,
+        key,
+        contentType: head.content_type,
+        metadata: merged,
+      });
+      succeeded++;
+    } catch {
+      failed++;
+    }
+  }
+
+  saveBtn.disabled = false;
+  saveBtn.textContent = "Save";
+
+  if (failed === 0) {
+    closeInfoPanel();
+    setStatus(`Metadata updated on ${succeeded} file(s).`, 5000);
+  } else {
+    setStatus(
+      `Metadata updated on ${succeeded} file(s), ${failed} failed.`,
+    );
+  }
+}
+
 export function closeInfoPanel(): void {
   panelRequestToken += 1;
   $("info-overlay").classList.remove("active");
@@ -371,6 +459,7 @@ export function closeInfoPanel(): void {
   aclData = null;
   metadataRows = [];
   currentKey = "";
+  batchKeys = [];
 }
 
 function setStatus(text: string, autoResetMs?: number): void {
