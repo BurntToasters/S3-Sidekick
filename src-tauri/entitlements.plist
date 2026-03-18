@@ -7,6 +7,12 @@
     <key>com.apple.security.network.client</key>
     <true/>
     <key>com.apple.application-identifier</key>
-    <string>run.rosie.s3-sidekick</string>
+    <string>FYJZP8B2KG.run.rosie.s3-sidekick</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>FYJZP8B2KG</string>
+    <key>keychain-access-groups</key>
+    <array>
+      <string>FYJZP8B2KG.run.rosie.s3-sidekick</string>
+    </array>
   </dict>
 </plist>
