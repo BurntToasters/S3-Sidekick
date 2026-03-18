@@ -17,12 +17,16 @@ beforeEach(() => {
 describe("isCredentialRemovedError", () => {
   it("returns true for error strings containing 'credential was removed'", async () => {
     const { isCredentialRemovedError } = await loadSecurityModule();
-    expect(isCredentialRemovedError("The credential was removed from the system")).toBe(true);
+    expect(
+      isCredentialRemovedError("The credential was removed from the system"),
+    ).toBe(true);
   });
 
   it("returns true for error strings containing 'no longer valid'", async () => {
     const { isCredentialRemovedError } = await loadSecurityModule();
-    expect(isCredentialRemovedError("Biometric key is no longer valid")).toBe(true);
+    expect(isCredentialRemovedError("Biometric key is no longer valid")).toBe(
+      true,
+    );
   });
 
   it("returns false for unrelated error strings", async () => {
