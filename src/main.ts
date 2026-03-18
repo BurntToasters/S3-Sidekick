@@ -40,7 +40,12 @@ import {
   checkUpdates,
   setUpdateChannel,
 } from "./updater.ts";
-import { addBookmark, renderBookmarkBar, loadBookmarks, setBookmarkChangeHandler } from "./bookmarks.ts";
+import {
+  addBookmark,
+  renderBookmarkBar,
+  loadBookmarks,
+  setBookmarkChangeHandler,
+} from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
   showContextMenu,

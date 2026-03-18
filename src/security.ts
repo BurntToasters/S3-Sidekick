@@ -100,7 +100,9 @@ export function isCancellationError(err: unknown): boolean {
 
 export function isCredentialRemovedError(err: unknown): boolean {
   const text = errorText(err).toLowerCase();
-  return text.includes("credential was removed") || text.includes("no longer valid");
+  return (
+    text.includes("credential was removed") || text.includes("no longer valid")
+  );
 }
 
 function extractErrorCode(err: unknown): string | null {
