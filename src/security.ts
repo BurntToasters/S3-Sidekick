@@ -6,6 +6,8 @@ export interface SecurityStatus {
   encryption_enabled: boolean;
   unlocked: boolean;
   lock_timeout_minutes: number;
+  biometric_available: boolean;
+  biometric_enrolled: boolean;
 }
 
 type StatusSetter = (text: string) => void;
@@ -56,6 +58,24 @@ async function lockSecurity(): Promise<SecurityStatus> {
 
 async function setLockTimeoutMinutes(minutes: number): Promise<SecurityStatus> {
   return invoke<SecurityStatus>("set_lock_timeout", { minutes });
+}
+
+async function enableBiometric(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>("enable_biometric");
+}
+
+async function disableBiometric(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>("disable_biometric");
+}
+
+async function unlockBiometric(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>("unlock_biometric");
+}
+
+function biometricLabel(platform: string): string {
+  if (platform === "macos") return "Touch ID";
+  if (platform === "windows") return "Windows Hello";
+  return "Biometric";
 }
 
 async function promptForNewPassword(): Promise<string | null> {
@@ -140,9 +160,22 @@ export async function ensureSecurityReady(): Promise<boolean> {
   if (!status.encryption_enabled) return true;
   if (status.unlocked) return true;
 
+  let biometricAttempted = false;
+  if (status.biometric_available && status.biometric_enrolled) {
+    try {
+      status = await unlockBiometric();
+      if (status.unlocked) return true;
+    } catch {
+      biometricAttempted = true;
+    }
+  }
+
+  const unlockMessage = biometricAttempted
+    ? "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
+    : "Enter your password to unlock encrypted credentials:";
   const password = await showPrompt(
     "Unlock",
-    "Enter your password to unlock encrypted credentials:",
+    unlockMessage,
     {
       inputType: "password",
       inputPlaceholder: "Password",
@@ -174,10 +207,18 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
   const lockTimeoutSelect = document.getElementById(
     "security-lock-timeout",
   ) as HTMLSelectElement | null;
+  const biometricSettings = document.getElementById(
+    "security-biometric-settings",
+  );
+  const biometricToggle = document.getElementById(
+    "biometric-toggle",
+  ) as HTMLButtonElement | null;
   if (!statusText || !toggleBtn || !changeBtn || !warning) return;
 
   try {
     const status = await getSecurityStatus();
+    const platform = await invoke<string>("get_platform_info");
+    const label = biometricLabel(platform);
 
     if (!status.initialized) {
       statusText.textContent = "Not initialized";
@@ -186,6 +227,7 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
       warning.style.display = "";
       if (lockSettings) lockSettings.style.display = "none";
       if (lockAction) lockAction.style.display = "none";
+      if (biometricSettings) biometricSettings.style.display = "none";
     } else if (status.encryption_enabled) {
       if (status.unlocked) {
         statusText.textContent = "Encrypted (AES-256) and unlocked";
@@ -204,6 +246,21 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
       if (lockTimeoutSelect) {
         lockTimeoutSelect.value = String(status.lock_timeout_minutes);
       }
+      if (biometricSettings && biometricToggle) {
+        if (status.biometric_available && status.unlocked) {
+          biometricSettings.style.display = "";
+          const biometricLabelEl = biometricSettings.querySelector("label");
+          if (biometricLabelEl) biometricLabelEl.textContent = `${label} Unlock`;
+          biometricToggle.textContent = status.biometric_enrolled
+            ? `Disable ${label}`
+            : `Enable ${label}`;
+          biometricToggle.setAttribute("aria-label", status.biometric_enrolled
+            ? `Disable ${label} unlock`
+            : `Enable ${label} unlock`);
+        } else {
+          biometricSettings.style.display = "none";
+        }
+      }
     } else {
       statusText.textContent = "Unencrypted";
       toggleBtn.textContent = "Enable Encryption";
@@ -211,21 +268,26 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
       warning.style.display = "";
       if (lockSettings) lockSettings.style.display = "none";
       if (lockAction) lockAction.style.display = "none";
+      if (biometricSettings) biometricSettings.style.display = "none";
     }
   } catch (err) {
     statusText.textContent = `Security status error: ${err}`;
-    toggleBtn.disabled = true;
-    changeBtn.disabled = true;
   }
 }
 
 export async function handleSecurityToggle(
   setStatus: StatusSetter,
 ): Promise<void> {
+  const toggleBtn = document.getElementById(
+    "security-toggle",
+  ) as HTMLButtonElement | null;
+  if (toggleBtn) toggleBtn.disabled = true;
+
   let status: SecurityStatus;
   try {
     status = await getSecurityStatus();
   } catch (err) {
+    if (toggleBtn) toggleBtn.disabled = false;
     await showAlert("Error", `Failed to read security status: ${err}`);
     return;
   }
@@ -251,6 +313,17 @@ export async function handleSecurityToggle(
     }
 
     if (status.encryption_enabled && !status.unlocked) {
+      if (status.biometric_available && status.biometric_enrolled) {
+        try {
+          await unlockBiometric();
+          setStatus("Credentials unlocked.");
+          await refreshSecuritySettingsUI();
+          return;
+        } catch {
+          // biometric failed — fall through to password
+        }
+      }
+
       const password = await showPrompt(
         "Unlock",
         "Enter your password to unlock encrypted credentials:",
@@ -304,6 +377,8 @@ export async function handleSecurityToggle(
     await refreshSecuritySettingsUI();
   } catch (err) {
     await showAlert("Error", `Security update failed: ${err}`);
+  } finally {
+    if (toggleBtn) toggleBtn.disabled = false;
   }
 }
 
@@ -353,5 +428,33 @@ export async function handleLockTimeoutChange(): Promise<void> {
     await setLockTimeoutMinutes(Number(select.value));
   } catch (err) {
     await showAlert("Error", `Failed to set lock timeout: ${err}`);
+  }
+}
+
+export async function handleBiometricToggle(
+  setStatus: StatusSetter,
+): Promise<void> {
+  const btn = document.getElementById(
+    "biometric-toggle",
+  ) as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
+
+  try {
+    const status = await getSecurityStatus();
+    const platform = await invoke<string>("get_platform_info");
+    const label = biometricLabel(platform);
+
+    if (status.biometric_enrolled) {
+      await disableBiometric();
+      setStatus(`${label} disabled.`);
+    } else {
+      await enableBiometric();
+      setStatus(`${label} enabled.`);
+    }
+    await refreshSecuritySettingsUI();
+  } catch (err) {
+    await showAlert("Error", `Biometric update failed: ${err}`);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }

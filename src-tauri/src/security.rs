@@ -6,6 +6,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
 use crate::{atomic_write, bookmarks_backup_path, connection_path, lock_storage_ops, settings_path, security_path};
@@ -22,6 +23,14 @@ struct KeyState {
     lock_timeout_secs: u64,
 }
 
+impl Drop for KeyState {
+    fn drop(&mut self) {
+        if let Some(ref mut k) = self.key {
+            k.zeroize();
+        }
+    }
+}
+
 static KEY_STATE: OnceLock<Mutex<KeyState>> = OnceLock::new();
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -34,6 +43,8 @@ pub(crate) struct SecurityConfig {
     pub lock_timeout_minutes: u16,
     #[serde(default = "default_pbkdf2_iterations")]
     pub pbkdf2_iterations: u32,
+    #[serde(default)]
+    pub biometric_enrolled: bool,
 }
 
 fn default_pbkdf2_iterations() -> u32 {
@@ -46,6 +57,8 @@ pub(crate) struct SecurityStatus {
     encryption_enabled: bool,
     unlocked: bool,
     lock_timeout_minutes: u16,
+    biometric_available: bool,
+    biometric_enrolled: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -55,15 +68,11 @@ struct EncryptedPayload {
     ciphertext: String,
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
-    let mut diff = 0u8;
-    for (a, b) in left.iter().zip(right.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0
+    left.ct_eq(right).into()
 }
 
 fn key_state() -> &'static Mutex<KeyState> {
@@ -96,7 +105,7 @@ fn is_unlocked() -> bool {
     true
 }
 
-fn set_unlocked_key(key: Option<[u8; KEY_LEN]>, lock_timeout_secs: u64) -> Result<(), String> {
+pub(crate) fn set_unlocked_key(key: Option<[u8; KEY_LEN]>, lock_timeout_secs: u64) -> Result<(), String> {
     let mut guard = key_state().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut old_key) = guard.key {
         old_key.zeroize();
@@ -139,6 +148,7 @@ fn default_security_config() -> SecurityConfig {
         verifier: String::new(),
         lock_timeout_minutes: 0,
         pbkdf2_iterations: PBKDF2_ITERATIONS,
+        biometric_enrolled: false,
     }
 }
 
@@ -149,11 +159,21 @@ pub(crate) fn load_security_config(app: &tauri::AppHandle) -> Result<SecurityCon
     }
 
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str::<SecurityConfig>(&raw)
-        .map_err(|e| format!("Invalid security config: {}", e))
+    match serde_json::from_str::<SecurityConfig>(&raw) {
+        Ok(config) => Ok(config),
+        Err(e) => {
+            let backup = path.with_extension("json.corrupt");
+            let _ = std::fs::rename(&path, &backup);
+            Err(format!(
+                "Security config was corrupted and has been backed up to '{}'. Please restart the app. ({})",
+                backup.display(),
+                e
+            ))
+        }
+    }
 }
 
-fn save_security_config(app: &tauri::AppHandle, config: &SecurityConfig) -> Result<(), String> {
+pub(crate) fn save_security_config(app: &tauri::AppHandle, config: &SecurityConfig) -> Result<(), String> {
     let path = security_path(app)?;
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)
@@ -165,7 +185,7 @@ fn derive_key(password: &str, salt: &[u8], iterations: u32) -> [u8; KEY_LEN] {
     key
 }
 
-fn key_verifier(key: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
+pub(crate) fn key_verifier(key: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
     let mut hasher = Sha256::new();
     hasher.update(key);
     hasher.update(b"s3-sidekick-vault-verifier");
@@ -342,19 +362,26 @@ fn rollback_migration(plans: &[MigrationPlan], upto: usize) -> Result<(), String
 fn apply_migration(plans: &[MigrationPlan]) -> Result<(), String> {
     for (idx, plan) in plans.iter().enumerate() {
         if let Err(err) = atomic_write(&plan.path, &plan.transformed) {
-            let _ = rollback_migration(plans, idx);
+            if let Err(rb_err) = rollback_migration(plans, idx) {
+                return Err(format!(
+                    "{}. CRITICAL: Rollback also failed: {}. Manual recovery may be needed.",
+                    err, rb_err
+                ));
+            }
             return Err(err);
         }
     }
     Ok(())
 }
 
-fn security_status(config: &SecurityConfig) -> SecurityStatus {
+pub(crate) fn security_status(config: &SecurityConfig) -> SecurityStatus {
     SecurityStatus {
         initialized: config.initialized,
         encryption_enabled: config.encryption_enabled,
         unlocked: is_unlocked(),
         lock_timeout_minutes: config.lock_timeout_minutes,
+        biometric_available: crate::biometric::is_available(),
+        biometric_enrolled: config.biometric_enrolled,
     }
 }
 
@@ -385,6 +412,7 @@ pub(crate) fn initialize_security(
             verifier: String::new(),
             lock_timeout_minutes: 0,
             pbkdf2_iterations: 0,
+            biometric_enrolled: false,
         };
         set_unlocked_key(None, 0)?;
         save_security_config(&app, &config)?;
@@ -399,8 +427,8 @@ pub(crate) fn initialize_security(
     }
     let mut salt = [0u8; SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut salt);
-    let key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
-    let verifier = key_verifier(&key);
+    let mut key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
+    let mut verifier = key_verifier(&key);
 
     let plans = build_migration_plans(&app, true, &key)?;
     apply_migration(&plans)?;
@@ -412,12 +440,21 @@ pub(crate) fn initialize_security(
         verifier: B64.encode(verifier),
         lock_timeout_minutes: 0,
         pbkdf2_iterations: PBKDF2_ITERATIONS,
+        biometric_enrolled: false,
     };
+    verifier.zeroize();
     if let Err(err) = save_security_config(&app, &config) {
-        let _ = rollback_migration(&plans, plans.len());
+        key.zeroize();
+        if let Err(rb_err) = rollback_migration(&plans, plans.len()) {
+            return Err(format!(
+                "{}. CRITICAL: Rollback also failed: {}. Manual recovery may be needed.",
+                err, rb_err
+            ));
+        }
         return Err(err);
     }
     set_unlocked_key(Some(key), 0)?;
+    key.zeroize();
     Ok(security_status(&config))
 }
 
@@ -446,11 +483,14 @@ pub(crate) fn unlock_security(app: tauri::AppHandle, password: String) -> Result
         );
     }
 
-    let key = derive_key(&password, &salt, config.pbkdf2_iterations);
-    let verifier = key_verifier(&key);
+    let mut key = derive_key(&password, &salt, config.pbkdf2_iterations);
+    let mut verifier = key_verifier(&key);
     if !constant_time_eq(verifier.as_slice(), expected_verifier.as_slice()) {
+        key.zeroize();
+        verifier.zeroize();
         return Err("Invalid password".to_string());
     }
+    verifier.zeroize();
 
     let timeout_secs = config.lock_timeout_minutes as u64 * 60;
     set_unlocked_key(Some(key), timeout_secs)?;
@@ -458,21 +498,30 @@ pub(crate) fn unlock_security(app: tauri::AppHandle, password: String) -> Result
     if config.pbkdf2_iterations < PBKDF2_ITERATIONS {
         let mut new_salt = [0u8; SALT_LEN];
         rand::rngs::OsRng.fill_bytes(&mut new_salt);
-        let new_key = derive_key(&password, &new_salt, PBKDF2_ITERATIONS);
-        let new_verifier = key_verifier(&new_key);
+        let mut new_key = derive_key(&password, &new_salt, PBKDF2_ITERATIONS);
+        let mut new_verifier = key_verifier(&new_key);
 
         let plans = build_rekey_plans(&app, &key, &new_key)?;
         apply_migration(&plans)?;
 
         config.salt = B64.encode(new_salt);
         config.verifier = B64.encode(new_verifier);
+        new_verifier.zeroize();
         config.pbkdf2_iterations = PBKDF2_ITERATIONS;
         if let Err(err) = save_security_config(&app, &config) {
-            let _ = rollback_migration(&plans, plans.len());
+            new_key.zeroize();
+            if let Err(rb_err) = rollback_migration(&plans, plans.len()) {
+                return Err(format!(
+                    "{}. CRITICAL: Rollback also failed: {}. Manual recovery may be needed.",
+                    err, rb_err
+                ));
+            }
             return Err(err);
         }
         set_unlocked_key(Some(new_key), timeout_secs)?;
+        new_key.zeroize();
     }
+    key.zeroize();
 
     Ok(security_status(&config))
 }
@@ -502,20 +551,28 @@ pub(crate) fn set_security_encryption(
         }
         let mut salt = [0u8; SALT_LEN];
         rand::rngs::OsRng.fill_bytes(&mut salt);
-        let key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
-        let verifier = key_verifier(&key);
+        let mut key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
+        let mut verifier = key_verifier(&key);
 
         let plans = build_migration_plans(&app, true, &key)?;
         apply_migration(&plans)?;
         config.encryption_enabled = true;
         config.salt = B64.encode(salt);
         config.verifier = B64.encode(verifier);
+        verifier.zeroize();
         config.pbkdf2_iterations = PBKDF2_ITERATIONS;
         if let Err(err) = save_security_config(&app, &config) {
-            let _ = rollback_migration(&plans, plans.len());
+            key.zeroize();
+            if let Err(rb_err) = rollback_migration(&plans, plans.len()) {
+                return Err(format!(
+                    "{}. CRITICAL: Rollback also failed: {}. Manual recovery may be needed.",
+                    err, rb_err
+                ));
+            }
             return Err(err);
         }
         set_unlocked_key(Some(key), config.lock_timeout_minutes as u64 * 60)?;
+        key.zeroize();
         return Ok(security_status(&config));
     }
 
@@ -525,22 +582,37 @@ pub(crate) fn set_security_encryption(
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid security salt: {}", e))?;
-    let key = derive_key(&current_password, &salt, config.pbkdf2_iterations);
-    let verifier = key_verifier(&key);
+    let mut key = derive_key(&current_password, &salt, config.pbkdf2_iterations);
+    let mut verifier = key_verifier(&key);
     let expected_verifier = B64
         .decode(&config.verifier)
         .map_err(|e| format!("Invalid security verifier: {}", e))?;
     if !constant_time_eq(verifier.as_slice(), expected_verifier.as_slice()) {
+        key.zeroize();
+        verifier.zeroize();
         return Err("Invalid password".to_string());
     }
+    verifier.zeroize();
 
     let plans = build_migration_plans(&app, false, &key)?;
     apply_migration(&plans)?;
+    key.zeroize();
+
+    if config.biometric_enrolled {
+        crate::biometric::clear_stored_key();
+        config.biometric_enrolled = false;
+    }
+
     config.encryption_enabled = false;
     config.salt.clear();
     config.verifier.clear();
     if let Err(err) = save_security_config(&app, &config) {
-        let _ = rollback_migration(&plans, plans.len());
+        if let Err(rb_err) = rollback_migration(&plans, plans.len()) {
+            return Err(format!(
+                "{}. CRITICAL: Rollback also failed: {}. Manual recovery may be needed.",
+                err, rb_err
+            ));
+        }
         return Err(err);
     }
     set_unlocked_key(None, 0)?;
@@ -568,31 +640,48 @@ pub(crate) fn change_security_password(
     let old_salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid security salt: {}", e))?;
-    let old_key = derive_key(&current_password, &old_salt, config.pbkdf2_iterations);
-    let old_verifier = key_verifier(&old_key);
+    let mut old_key = derive_key(&current_password, &old_salt, config.pbkdf2_iterations);
+    let mut old_verifier = key_verifier(&old_key);
     let expected_verifier = B64
         .decode(&config.verifier)
         .map_err(|e| format!("Invalid security verifier: {}", e))?;
     if !constant_time_eq(old_verifier.as_slice(), expected_verifier.as_slice()) {
+        old_key.zeroize();
+        old_verifier.zeroize();
         return Err("Invalid password".to_string());
     }
+    old_verifier.zeroize();
 
     let mut new_salt = [0u8; SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut new_salt);
-    let new_key = derive_key(&new_password, &new_salt, PBKDF2_ITERATIONS);
-    let new_verifier = key_verifier(&new_key);
+    let mut new_key = derive_key(&new_password, &new_salt, PBKDF2_ITERATIONS);
+    let mut new_verifier = key_verifier(&new_key);
 
     let plans = build_rekey_plans(&app, &old_key, &new_key)?;
     apply_migration(&plans)?;
+    old_key.zeroize();
+
+    if config.biometric_enrolled {
+        crate::biometric::clear_stored_key();
+        config.biometric_enrolled = false;
+    }
 
     config.salt = B64.encode(new_salt);
     config.verifier = B64.encode(new_verifier);
+    new_verifier.zeroize();
     config.pbkdf2_iterations = PBKDF2_ITERATIONS;
     if let Err(err) = save_security_config(&app, &config) {
-        let _ = rollback_migration(&plans, plans.len());
+        new_key.zeroize();
+        if let Err(rb_err) = rollback_migration(&plans, plans.len()) {
+            return Err(format!(
+                "{}. CRITICAL: Rollback also failed: {}. Manual recovery may be needed.",
+                err, rb_err
+            ));
+        }
         return Err(err);
     }
     set_unlocked_key(Some(new_key), config.lock_timeout_minutes as u64 * 60)?;
+    new_key.zeroize();
 
     Ok(security_status(&config))
 }
@@ -613,9 +702,9 @@ pub(crate) fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Result<Se
     let mut config = load_security_config(&app)?;
     config.lock_timeout_minutes = minutes;
     save_security_config(&app, &config)?;
-    if let Ok(mut guard) = key_state().lock() {
-        guard.lock_timeout_secs = minutes as u64 * 60;
-    }
+    let mut guard = key_state().lock().unwrap_or_else(|e| e.into_inner());
+    guard.lock_timeout_secs = minutes as u64 * 60;
+    drop(guard);
     Ok(security_status(&config))
 }
 

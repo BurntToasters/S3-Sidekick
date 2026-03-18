@@ -23,11 +23,25 @@ base64 = "0.22"
 pbkdf2 = "0.12"
 rand = "0.8"
 sha2 = "0.10"
+subtle = "2"
 urlencoding = "2"
 zeroize = "1"
 
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+core-foundation = "0.9"
+security-framework-sys = "2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Security_Credentials_UI",
+    "Foundation",
+    "Win32_Security_Credentials",
+    "Win32_Foundation",
+] }
 
 [profile.release]
 panic = "abort"
