@@ -386,14 +386,14 @@ pub(crate) fn security_status(config: &SecurityConfig) -> SecurityStatus {
 }
 
 #[tauri::command]
-pub(crate) fn get_security_status(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+pub(crate) async fn get_security_status(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     let config = load_security_config(&app)?;
     Ok(security_status(&config))
 }
 
 #[tauri::command]
-pub(crate) fn initialize_security(
+pub(crate) async fn initialize_security(
     app: tauri::AppHandle,
     enable_encryption: bool,
     password: Option<String>,
@@ -459,7 +459,7 @@ pub(crate) fn initialize_security(
 }
 
 #[tauri::command]
-pub(crate) fn unlock_security(app: tauri::AppHandle, password: String) -> Result<SecurityStatus, String> {
+pub(crate) async fn unlock_security(app: tauri::AppHandle, password: String) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.initialized || !config.encryption_enabled {
@@ -527,7 +527,7 @@ pub(crate) fn unlock_security(app: tauri::AppHandle, password: String) -> Result
 }
 
 #[tauri::command]
-pub(crate) fn set_security_encryption(
+pub(crate) async fn set_security_encryption(
     app: tauri::AppHandle,
     enable_encryption: bool,
     current_password: Option<String>,
@@ -620,7 +620,7 @@ pub(crate) fn set_security_encryption(
 }
 
 #[tauri::command]
-pub(crate) fn change_security_password(
+pub(crate) async fn change_security_password(
     app: tauri::AppHandle,
     current_password: String,
     new_password: String,
@@ -687,7 +687,7 @@ pub(crate) fn change_security_password(
 }
 
 #[tauri::command]
-pub(crate) fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+pub(crate) async fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     let config = load_security_config(&app)?;
     if config.encryption_enabled {
@@ -697,7 +697,7 @@ pub(crate) fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatus, Str
 }
 
 #[tauri::command]
-pub(crate) fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Result<SecurityStatus, String> {
+pub(crate) async fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     config.lock_timeout_minutes = minutes;
