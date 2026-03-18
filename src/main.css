@@ -1464,6 +1464,12 @@ body.modal-open .dialog-overlay.active {
   border-radius: 3px;
 }
 
+.metadata-batch-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 4px 0 12px;
+}
+
 .transfer-popup {
   position: fixed;
   bottom: 32px;
