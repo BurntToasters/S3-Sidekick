@@ -28,7 +28,7 @@ const RELEASE_DOWNLOAD_BASE_URL = (
 const TAG_DOWNLOAD_BASE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${encodeURIComponent(TAG)}`;
 const RELEASE_NOTES = process.env.RELEASE_NOTES || "";
 const RELEASE_PUB_DATE = process.env.RELEASE_PUB_DATE || new Date().toISOString();
-const REQUIRED_LINUX_TARGETS = (process.env.REQUIRED_LINUX_TARGETS || "x86_64").trim();
+const REQUIRED_LINUX_TARGETS = (process.env.REQUIRED_LINUX_TARGETS || "").trim();
 const REQUIRE_LINUX_AARCH64 = /^(1|true|yes|on)$/i.test(
   String(process.env.REQUIRE_LINUX_AARCH64 || "").trim(),
 );

@@ -304,3 +304,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          REQUIRED_LINUX_TARGETS: x86_64
