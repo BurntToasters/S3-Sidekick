@@ -14,10 +14,7 @@ pub fn clear_stored_key() {
     platform::remove_key();
 }
 
-fn is_cancellation_error(err: &str) -> bool {
-    err == "Authentication was canceled"
-}
-
+// Removed is_cancellation_error
 #[tauri::command]
 pub(crate) fn biometric_available() -> bool {
     is_available()
@@ -60,13 +57,7 @@ pub(crate) async fn unlock_biometric(app: tauri::AppHandle) -> Result<SecuritySt
 
     let key = match platform::retrieve_key() {
         Ok(k) => k,
-        Err(e) => {
-            if !is_cancellation_error(&e) {
-                config.biometric_enrolled = false;
-                let _ = save_security_config(&app, &config);
-            }
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     };
 
     let expected = B64
@@ -329,14 +320,12 @@ mod platform {
 
     pub fn store_key(key: &[u8; KEY_LEN]) -> Result<(), String> {
         remove_key();
-        match write_credential(key, CRED_PERSIST_LOCAL_MACHINE) {
-            Ok(()) => Ok(()),
-            Err(_) => write_credential(key, CRED_PERSIST_ENTERPRISE),
-        }
+        write_credential(key, CRED_PERSIST_ENTERPRISE)
     }
 
     fn write_credential(key: &[u8; KEY_LEN], persist: CRED_PERSIST) -> Result<(), String> {
         let mut target_name = to_wide(TARGET);
+        let mut user_name = to_wide("s3-sidekick");
         let cred = CREDENTIALW {
             Flags: CRED_FLAGS(0),
             Type: CRED_TYPE_GENERIC,
@@ -352,7 +341,7 @@ mod platform {
             AttributeCount: 0,
             Attributes: ptr::null_mut(),
             TargetAlias: PWSTR::null(),
-            UserName: PWSTR::null(),
+            UserName: PWSTR(user_name.as_mut_ptr()),
         };
 
         unsafe {
@@ -431,18 +420,6 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cancellation_is_detected() {
-        assert!(is_cancellation_error("Authentication was canceled"));
-    }
-
-    #[test]
-    fn non_cancellation_errors_are_not_detected() {
-        assert!(!is_cancellation_error("Authentication failed"));
-        assert!(!is_cancellation_error("Windows Hello error: something"));
-        assert!(!is_cancellation_error(""));
-    }
 
     #[test]
     fn clear_stored_key_does_not_panic() {

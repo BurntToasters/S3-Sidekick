@@ -165,7 +165,8 @@ export async function ensureSecurityReady(): Promise<boolean> {
     try {
       status = await unlockBiometric();
       if (status.unlocked) return true;
-    } catch {
+    } catch (err) {
+      console.error("Biometric unlock failed:", err);
       biometricAttempted = true;
     }
   }
