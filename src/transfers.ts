@@ -54,37 +54,33 @@ export async function initTransferQueueUI(): Promise<void> {
   updateBadge();
   updateClearButton();
 
-  if (!progressUnlisten) {
-    progressUnlisten = await listen<{
-      transfer_id: number;
-      bytes_sent: number;
-      total_bytes: number;
-    }>("upload-progress", (event) => {
-      const { transfer_id, bytes_sent, total_bytes } = event.payload;
-      const item = queue.find((t) => t.id === transfer_id);
-      if (item) {
-        item.progress = total_bytes > 0 ? (bytes_sent / total_bytes) * 100 : 0;
-        item.totalBytes = total_bytes;
-        queueRender();
-      }
-    });
-  }
+  progressUnlisten ??= await listen<{
+    transfer_id: number;
+    bytes_sent: number;
+    total_bytes: number;
+  }>("upload-progress", (event) => {
+    const { transfer_id, bytes_sent, total_bytes } = event.payload;
+    const item = queue.find((t) => t.id === transfer_id);
+    if (item) {
+      item.progress = total_bytes > 0 ? (bytes_sent / total_bytes) * 100 : 0;
+      item.totalBytes = total_bytes;
+      queueRender();
+    }
+  });
 
-  if (!downloadProgressUnlisten) {
-    downloadProgressUnlisten = await listen<{
-      transfer_id: number;
-      bytes_sent: number;
-      total_bytes: number;
-    }>("download-progress", (event) => {
-      const { transfer_id, bytes_sent, total_bytes } = event.payload;
-      const item = queue.find((t) => t.id === transfer_id);
-      if (item) {
-        item.progress = total_bytes > 0 ? (bytes_sent / total_bytes) * 100 : 0;
-        item.totalBytes = total_bytes;
-        queueRender();
-      }
-    });
-  }
+  downloadProgressUnlisten ??= await listen<{
+    transfer_id: number;
+    bytes_sent: number;
+    total_bytes: number;
+  }>("download-progress", (event) => {
+    const { transfer_id, bytes_sent, total_bytes } = event.payload;
+    const item = queue.find((t) => t.id === transfer_id);
+    if (item) {
+      item.progress = total_bytes > 0 ? (bytes_sent / total_bytes) * 100 : 0;
+      item.totalBytes = total_bytes;
+      queueRender();
+    }
+  });
 
   const list = document.getElementById("transfer-list");
   if (list && !list.dataset.cancelBound) {
@@ -96,7 +92,7 @@ export async function initTransferQueueUI(): Promise<void> {
       if (!row) return;
       const id = Number((row as HTMLElement).dataset.id);
       if (!id) return;
-      cancelTransferItem(id);
+      void cancelTransferItem(id);
     });
   }
 }
@@ -194,7 +190,7 @@ export function enqueueFiles(
   }
 
   showTransferQueue();
-  processQueue();
+  void processQueue();
 }
 
 export function enqueuePaths(paths: string[], targetPrefix: string): void {
@@ -225,7 +221,7 @@ export function enqueuePaths(paths: string[], targetPrefix: string): void {
   }
 
   showTransferQueue();
-  processQueue();
+  void processQueue();
 }
 
 export function enqueueFolderEntries(
@@ -260,7 +256,7 @@ export function enqueueFolderEntries(
   }
 
   showTransferQueue();
-  processQueue();
+  void processQueue();
 }
 
 export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
@@ -287,7 +283,7 @@ export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
   }
 
   showTransferQueue();
-  processQueue();
+  void processQueue();
 }
 
 async function processQueue(): Promise<void> {
@@ -482,7 +478,7 @@ function renderQueue(): void {
         `</div>` +
         progressBar +
         (t.status === "error"
-          ? `<span class="transfer-error" title="${escapeHtml(t.error || "")}">${escapeHtml(t.error || "Error")}</span>`
+          ? `<span class="transfer-error" title="${escapeHtml(t.error ?? "")}">${escapeHtml(t.error ?? "Error")}</span>`
           : "") +
         `</div>` +
         (t.status === "queued" || t.status === "uploading"
@@ -597,7 +593,7 @@ async function cancelTransferItem(id: number): Promise<void> {
 }
 
 function guessContentType(name: string): string {
-  const ext = name.split(".").pop()?.toLowerCase() || "";
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
     html: "text/html",
     htm: "text/html",
