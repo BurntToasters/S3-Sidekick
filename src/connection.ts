@@ -21,10 +21,10 @@ export async function connect(
   region: string,
   accessKey: string,
   secretKey: string,
-): Promise<void> {
+): Promise<string> {
   state.connecting = true;
   try {
-    await invoke("connect", {
+    const resolvedRegion = await invoke<string>("connect", {
       endpoint,
       region,
       accessKey,
@@ -32,7 +32,8 @@ export async function connect(
     });
     state.connected = true;
     state.endpoint = endpoint;
-    state.region = region;
+    state.region = resolvedRegion;
+    return resolvedRegion;
   } finally {
     state.connecting = false;
   }

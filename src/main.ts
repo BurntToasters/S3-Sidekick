@@ -498,8 +498,8 @@ function setConnectionInputs(
 
 async function handleConnect(): Promise<void> {
   const { endpoint, region, accessKey, secretKey } = getConnectionInputs();
-  if (!endpoint || !region || !accessKey || !secretKey) {
-    setStatus("All connection fields are required.");
+  if (!endpoint || !accessKey || !secretKey) {
+    setStatus("Endpoint, access key, and secret key are required.");
     return;
   }
 
@@ -507,12 +507,14 @@ async function handleConnect(): Promise<void> {
   setStatus("Connecting...");
 
   try {
-    await connect(endpoint, region, accessKey, secretKey);
+    const resolvedRegion = await connect(endpoint, region, accessKey, secretKey);
+    (document.getElementById("conn-region") as HTMLInputElement).value =
+      resolvedRegion;
     setConnectionUI(true);
     setStatus("Connected.", 5000);
     logActivity(`Connected to ${endpoint}.`, "success");
     try {
-      await saveConnection(endpoint, region, accessKey, secretKey);
+      await saveConnection(endpoint, resolvedRegion, accessKey, secretKey);
     } catch (saveErr) {
       setStatus(`Connected (credentials not saved: ${saveErr}).`, 5000);
       logActivity(
@@ -544,8 +546,8 @@ async function handleDisconnect(): Promise<void> {
 
 async function handleBookmarkSave(): Promise<void> {
   const { endpoint, region, accessKey, secretKey } = getConnectionInputs();
-  if (!endpoint || !region || !accessKey) {
-    setStatus("Fill in endpoint, region, and access key to bookmark.");
+  if (!endpoint || !accessKey) {
+    setStatus("Fill in endpoint and access key to bookmark.");
     return;
   }
 
