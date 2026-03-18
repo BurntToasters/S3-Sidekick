@@ -85,16 +85,8 @@ const VALUE_SUGGESTIONS: Record<string, string[]> = {
     "private, max-age=3600",
     "no-cache, no-store, must-revalidate",
   ],
-  "Content-Disposition": [
-    "inline",
-    "attachment",
-  ],
-  "Content-Encoding": [
-    "gzip",
-    "br",
-    "deflate",
-    "identity",
-  ],
+  "Content-Disposition": ["inline", "attachment"],
+  "Content-Encoding": ["gzip", "br", "deflate", "identity"],
   "Content-Language": [
     "en",
     "en-US",
@@ -355,7 +347,10 @@ function renderMetadata(body: HTMLElement): void {
   });
 }
 
-function buildValueDatalist(id: string, headerName: string): HTMLDataListElement {
+function buildValueDatalist(
+  id: string,
+  headerName: string,
+): HTMLDataListElement {
   const datalist = document.createElement("datalist");
   datalist.id = id;
   const suggestions = VALUE_SUGGESTIONS[headerName] ?? [];

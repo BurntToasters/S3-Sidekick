@@ -280,14 +280,12 @@ function joinPath(base: string, leaf: string): string {
   return `${trimmed}${sep}${leaf}`;
 }
 
-
 function getActiveModalOverlay(): HTMLElement | null {
   const overlays = document.querySelectorAll<HTMLElement>(
     ".modal-overlay.active, .dialog-overlay.active",
   );
   return overlays.length > 0 ? overlays[overlays.length - 1] : null;
 }
-
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {
   const nodes = Array.from(
