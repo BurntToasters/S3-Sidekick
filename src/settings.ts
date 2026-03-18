@@ -94,12 +94,12 @@ export function populateSettingsModal(): void {
   if (updaterUnsupported)
     updaterUnsupported.style.display = supported ? "none" : "";
 
-  refreshBookmarkListUI();
+  void refreshBookmarkListUI();
   void refreshSecuritySettingsUI();
 
   const versionEl = document.getElementById("settings-version");
   if (versionEl) {
-    getVersion().then((v) => {
+    void getVersion().then((v) => {
       versionEl.textContent = `v${v}`;
     });
   }
@@ -195,7 +195,7 @@ async function refreshBookmarkListUI(): Promise<void> {
     },
     async (index) => {
       await removeBookmark(index);
-      refreshBookmarkListUI();
+      void refreshBookmarkListUI();
     },
   );
 }

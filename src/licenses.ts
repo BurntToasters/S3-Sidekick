@@ -9,7 +9,7 @@ export interface LicenseEntry {
 
 export function openLicensesModal() {
   $("licenses-overlay").classList.add("active");
-  renderLicenses();
+  void renderLicenses();
 }
 
 export function closeLicensesModal() {

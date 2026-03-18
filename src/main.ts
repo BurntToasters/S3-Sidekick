@@ -24,12 +24,10 @@ import {
   renderObjectTable,
   renderBreadcrumb,
   navigateToFolder,
-  navigateUp,
   selectBucket,
   showEmptyState,
   handleRowClick,
   handleSelectAll,
-  getSelectableKeys,
   clearSelection,
   updateSelectionUI,
   toggleSort,
@@ -71,6 +69,7 @@ import {
 } from "./transfers.ts";
 import * as transferQueue from "./transfers.ts";
 import { basename, formatSize } from "./utils.ts";
+import { wireKeyboardShortcuts } from "./keyboard.ts";
 import { canPreview, openPreview, closePreview } from "./preview.ts";
 import {
   logActivity,
@@ -87,7 +86,7 @@ import {
   handleLockTimeoutChange,
   handleBiometricToggle,
 } from "./security.ts";
-import { showConfirm, showPrompt, isDialogActive } from "./dialogs.ts";
+import { showConfirm, showPrompt } from "./dialogs.ts";
 
 interface LocalFolderFileEntry {
   file_path: string;
@@ -281,23 +280,6 @@ function joinPath(base: string, leaf: string): string {
   return `${trimmed}${sep}${leaf}`;
 }
 
-function hasAccelModifier(e: KeyboardEvent): boolean {
-  if (state.platformName === "macos") {
-    return e.metaKey && !e.ctrlKey;
-  }
-  return e.ctrlKey;
-}
-
-function isEditableElement(el: Element | null): boolean {
-  if (!(el instanceof HTMLElement)) return false;
-  const tag = el.tagName;
-  return (
-    el.isContentEditable ||
-    tag === "INPUT" ||
-    tag === "TEXTAREA" ||
-    tag === "SELECT"
-  );
-}
 
 function getActiveModalOverlay(): HTMLElement | null {
   const overlays = document.querySelectorAll<HTMLElement>(
@@ -306,9 +288,6 @@ function getActiveModalOverlay(): HTMLElement | null {
   return overlays.length > 0 ? overlays[overlays.length - 1] : null;
 }
 
-function isModalLayerActive(): boolean {
-  return getActiveModalOverlay() !== null;
-}
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {
   const nodes = Array.from(
@@ -643,7 +622,7 @@ async function handleDelete(): Promise<void> {
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
-    setStatus(`Delete failed: ${err}`);
+    setStatus(`Delete failed (${keys.length} item(s)): ${err}`);
     logActivity(`Delete failed: ${String(err)}`, "error");
   }
 }
@@ -700,7 +679,7 @@ async function handleDownload(): Promise<void> {
         "success",
       );
     } catch (err) {
-      setStatus(`Download failed: ${err}`);
+      setStatus(`Download failed for ${basename(entry.key)}: ${err}`);
       logActivity(
         `Download failed for ${basename(entry.key)}: ${String(err)}`,
         "error",
@@ -774,7 +753,7 @@ async function handleRename(): Promise<void> {
     await refreshObjects(state.currentBucket, state.currentPrefix);
     renderObjectTable();
   } catch (err) {
-    setStatus(`Rename failed: ${err}`);
+    setStatus(`Rename failed for "${oldName}": ${err}`);
     logActivity(`Rename failed for ${oldName}: ${String(err)}`, "error");
   }
 }
@@ -1105,10 +1084,10 @@ function handleContextMenu(e: MouseEvent): void {
           { label: "Refresh", action: "refresh" },
         ],
         (action) => {
-          if (action === "new-folder") handleCreateFolder();
-          else if (action === "upload-files") handleUploadButton();
-          else if (action === "upload-folder") handleUploadFolderButton();
-          else if (action === "refresh") handleRefresh();
+          if (action === "new-folder") void handleCreateFolder();
+          else if (action === "upload-files") void handleUploadButton();
+          else if (action === "upload-folder") void handleUploadFolderButton();
+          else if (action === "refresh") void handleRefresh();
         },
       );
     }
@@ -1173,13 +1152,13 @@ function handleContextMenu(e: MouseEvent): void {
 
   showContextMenu(e.clientX, e.clientY, items, (action) => {
     if (action === "preview") void openPreview(fileKeys[0]);
-    else if (action === "info") openInfoPanel(fileKeys);
-    else if (action === "download") handleDownload();
-    else if (action === "copy-url") handleCopyUrl();
-    else if (action === "copy-presigned-url") handleCopyPresignedUrl();
-    else if (action === "rename") handleRename();
-    else if (action === "delete") handleDelete();
-    else if (action === "open-folder") navigateToFolder(prefix);
+    else if (action === "info") void openInfoPanel(fileKeys);
+    else if (action === "download") void handleDownload();
+    else if (action === "copy-url") void handleCopyUrl();
+    else if (action === "copy-presigned-url") void handleCopyPresignedUrl();
+    else if (action === "rename") void handleRename();
+    else if (action === "delete") void handleDelete();
+    else if (action === "open-folder") void navigateToFolder(prefix);
   });
 }
 
@@ -1229,7 +1208,7 @@ function wireEvents(): void {
         "setting-update-channel",
       ) as HTMLSelectElement | null;
       setUpdateChannel(channelSelect?.value === "beta" ? "beta" : "release");
-      closeSettingsModal(false);
+      void closeSettingsModal(false);
       void checkUpdates().finally(() => {
         setUpdateChannel(persistedChannel);
       });
@@ -1251,7 +1230,7 @@ function wireEvents(): void {
     .getElementById("settings-overlay")!
     .addEventListener("click", (e) => {
       if ((e.target as HTMLElement).classList.contains("modal-overlay")) {
-        closeSettingsModal(false);
+        void closeSettingsModal(false);
       }
     });
 
@@ -1438,7 +1417,7 @@ function wireEvents(): void {
       !target.closest(".col-check")
     ) {
       const prefix = row.dataset.prefix;
-      if (prefix !== undefined) navigateToFolder(prefix);
+      if (prefix !== undefined) void navigateToFolder(prefix);
       return;
     }
 
@@ -1533,7 +1512,7 @@ function wireEvents(): void {
     );
     if (!seg) return;
     const prefix = seg.dataset.prefix;
-    if (prefix !== undefined) navigateToFolder(prefix);
+    if (prefix !== undefined) void navigateToFolder(prefix);
   });
 
   const objectPanel = dom.objectPanel;
@@ -1595,120 +1574,14 @@ function wireEvents(): void {
   }
   syncModalLayerState();
 
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      hideContextMenu();
-
-      if (isDialogActive()) return;
-
-      const previewOverlay = document.getElementById("preview-overlay");
-      if (previewOverlay?.classList.contains("active")) {
-        closePreview();
-        return;
-      }
-
-      const infoOverlay = document.getElementById("info-overlay");
-      if (infoOverlay?.classList.contains("active")) {
-        closeInfoPanel();
-        return;
-      }
-
-      const licensesOverlay = document.getElementById("licenses-overlay");
-      if (licensesOverlay?.classList.contains("active")) {
-        closeLicensesModal();
-        return;
-      }
-
-      const transferOverlay = document.getElementById("transfer-overlay");
-      if (transferOverlay && !transferOverlay.hidden) {
-        hideTransferQueue();
-        return;
-      }
-
-      const layout = document.getElementById("main-layout");
-      if (layout?.classList.contains("main-layout--sidebar-open")) {
-        setSidebarOpen(false);
-        return;
-      }
-
-      const activityOverlay = document.getElementById(
-        "activity-overlay",
-      ) as HTMLDivElement | null;
-      if (activityOverlay && !activityOverlay.hidden) {
-        hideActivityLog();
-        return;
-      }
-
-      const overlay = document.getElementById("settings-overlay");
-      if (overlay?.classList.contains("active")) {
-        closeSettingsModal(false);
-      }
-    }
-
-    const inInput = isEditableElement(document.activeElement);
-    const modalOpen = isModalLayerActive();
-    const accel = hasAccelModifier(e);
-    const key = e.key.toLowerCase();
-
-    if (e.key === "Delete" && state.selectedKeys.size > 0) {
-      if (inInput || modalOpen) return;
-      handleDelete();
-    }
-
-    if (e.key === "F5" || (accel && key === "r")) {
-      e.preventDefault();
-      if (modalOpen) return;
-      handleRefresh();
-      return;
-    }
-
-    if (modalOpen) return;
-
-    if (!inInput) {
-      if (e.key === "F2" && state.selectedKeys.size === 1) {
-        e.preventDefault();
-        handleRename();
-      }
-
-      if (e.key === "Backspace" || (e.altKey && e.key === "ArrowUp")) {
-        e.preventDefault();
-        navigateUp();
-      }
-    }
-
-    if (accel) {
-      if (key === "a" && !inInput) {
-        e.preventDefault();
-        const allKeys = getSelectableKeys();
-        for (const k of allKeys) state.selectedKeys.add(k);
-        updateSelectionUI();
-      }
-
-      if (key === "u" && !inInput) {
-        e.preventDefault();
-        if (e.shiftKey) {
-          handleUploadFolderButton();
-        } else {
-          handleUploadButton();
-        }
-      }
-
-      if (key === "n" && !inInput) {
-        e.preventDefault();
-        handleCreateFolder();
-      }
-
-      if (key === "f") {
-        e.preventDefault();
-        const filterEl = document.getElementById(
-          "filter-input",
-        ) as HTMLInputElement | null;
-        if (filterEl) {
-          filterEl.focus();
-          filterEl.select();
-        }
-      }
-    }
+  wireKeyboardShortcuts({
+    setSidebarOpen,
+    handleDelete,
+    handleRefresh,
+    handleRename,
+    handleUploadButton,
+    handleUploadFolderButton,
+    handleCreateFolder,
   });
 
   setBookmarkSelectHandler((bookmark) => {
@@ -1773,7 +1646,7 @@ async function init(): Promise<void> {
   }
 
   await initUpdater();
-  autoCheckUpdates();
+  void autoCheckUpdates();
 }
 
 init().catch((err) => {

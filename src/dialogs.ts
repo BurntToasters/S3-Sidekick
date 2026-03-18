@@ -133,7 +133,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     function onInputKey(e: KeyboardEvent) {
       if (e.key === "Enter") {
         e.preventDefault();
-        onOk();
+        void onOk();
       }
     }
 
@@ -144,7 +144,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
         if (config.showCancel) {
           onCancel();
         } else {
-          onOk();
+          void onOk();
         }
       }
     }
@@ -162,7 +162,7 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   if (!active) return fn();
   return new Promise<T>((resolve) => {
     queue.push(() => {
-      fn().then(resolve);
+      void fn().then(resolve);
     });
   });
 }

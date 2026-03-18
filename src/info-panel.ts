@@ -40,6 +40,75 @@ let metadataRows: { key: string; value: string }[] = [];
 let activeTab = "general";
 let panelRequestToken = 0;
 
+const HEADER_SUGGESTIONS: string[] = [
+  "Content-Type",
+  "Cache-Control",
+  "Content-Disposition",
+  "Content-Encoding",
+  "Content-Language",
+  "Expires",
+];
+
+const VALUE_SUGGESTIONS: Record<string, string[]> = {
+  "Content-Type": [
+    "application/json",
+    "application/octet-stream",
+    "application/pdf",
+    "application/xml",
+    "application/zip",
+    "application/gzip",
+    "application/javascript",
+    "audio/mpeg",
+    "audio/ogg",
+    "font/woff2",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/svg+xml",
+    "image/webp",
+    "text/css",
+    "text/csv",
+    "text/html",
+    "text/plain",
+    "video/mp4",
+    "video/webm",
+  ],
+  "Cache-Control": [
+    "no-cache",
+    "no-store",
+    "max-age=3600",
+    "max-age=86400",
+    "max-age=31536000",
+    "max-age=31536000, immutable",
+    "public, max-age=3600",
+    "public, max-age=86400",
+    "private, max-age=3600",
+    "no-cache, no-store, must-revalidate",
+  ],
+  "Content-Disposition": [
+    "inline",
+    "attachment",
+  ],
+  "Content-Encoding": [
+    "gzip",
+    "br",
+    "deflate",
+    "identity",
+  ],
+  "Content-Language": [
+    "en",
+    "en-US",
+    "es",
+    "fr",
+    "de",
+    "ja",
+    "zh",
+    "pt",
+    "ar",
+    "ru",
+  ],
+};
+
 export async function openInfoPanel(keys: string[]): Promise<void> {
   const overlay = $("info-overlay");
   const title = $("info-title");
@@ -144,7 +213,7 @@ function renderTab(): void {
   if (activeTab === "general") {
     renderGeneral(body);
   } else if (activeTab === "permissions") {
-    renderPermissions(body);
+    void renderPermissions(body);
   } else if (activeTab === "metadata") {
     renderMetadata(body);
   } else if (activeTab === "s3") {
@@ -286,10 +355,32 @@ function renderMetadata(body: HTMLElement): void {
   });
 }
 
+function buildValueDatalist(id: string, headerName: string): HTMLDataListElement {
+  const datalist = document.createElement("datalist");
+  datalist.id = id;
+  const suggestions = VALUE_SUGGESTIONS[headerName] ?? [];
+  for (const s of suggestions) {
+    const opt = document.createElement("option");
+    opt.value = s;
+    datalist.appendChild(opt);
+  }
+  return datalist;
+}
+
 function renderEntryRows(): void {
   const container = $("metadata-entries");
   container.innerHTML = "";
   const isBatch = batchKeys.length > 0;
+
+  // Shared datalist for header names
+  const keyDatalist = document.createElement("datalist");
+  keyDatalist.id = "metadata-header-names";
+  for (const name of HEADER_SUGGESTIONS) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    keyDatalist.appendChild(opt);
+  }
+  container.appendChild(keyDatalist);
 
   for (let i = 0; i < metadataRows.length; i++) {
     const row = document.createElement("div");
@@ -301,15 +392,29 @@ function renderEntryRows(): void {
     keyInput.value = metadataRows[i].key;
     keyInput.placeholder = "Header name";
     keyInput.readOnly = !isBatch && i === 0;
-    keyInput.addEventListener("input", () => {
-      metadataRows[i].key = keyInput.value;
-    });
+    if (!keyInput.readOnly) {
+      keyInput.setAttribute("list", "metadata-header-names");
+    }
+
+    const valDatalistId = `metadata-val-${i}`;
+    const valDatalist = buildValueDatalist(valDatalistId, metadataRows[i].key);
+    container.appendChild(valDatalist);
 
     const valInput = document.createElement("input");
     valInput.type = "text";
     valInput.className = "field metadata-entry__value";
     valInput.value = metadataRows[i].value;
     valInput.placeholder = "Value";
+    valInput.setAttribute("list", valDatalistId);
+
+    keyInput.addEventListener("input", () => {
+      metadataRows[i].key = keyInput.value;
+      // Rebuild value suggestions when header name changes
+      const newDatalist = buildValueDatalist(valDatalistId, keyInput.value);
+      const old = document.getElementById(valDatalistId);
+      if (old) old.replaceWith(newDatalist);
+    });
+
     valInput.addEventListener("input", () => {
       metadataRows[i].value = valInput.value;
     });
