@@ -24,7 +24,7 @@ pub(crate) fn biometric_available() -> bool {
 }
 
 #[tauri::command]
-pub(crate) fn enable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
     let _guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.encryption_enabled {
@@ -41,7 +41,7 @@ pub(crate) fn enable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, 
 }
 
 #[tauri::command]
-pub(crate) fn disable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+pub(crate) async fn disable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
     let _guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     platform::remove_key();
@@ -51,7 +51,7 @@ pub(crate) fn disable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus,
 }
 
 #[tauri::command]
-pub(crate) fn unlock_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+pub(crate) async fn unlock_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
     let _guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.encryption_enabled || !config.biometric_enrolled {
