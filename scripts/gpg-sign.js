@@ -121,11 +121,14 @@ function walk(dir, results = []) {
 }
 
 function cleanArtifactBaseName(name) {
-  if (/\.tar\.gz$/i.test(name)) return name;
+  if (/\.app\.tar\.gz$/i.test(name)) {
+    return "S3-Sidekick-macOS.app.tar.gz";
+  }
   if (/\.nsis\.zip$/i.test(name)) return name;
+  if (/\.tar\.gz$/i.test(name)) return name;
 
   if (/\.dmg$/i.test(name)) return "S3-Sidekick-macOS.dmg";
-  if (/^S3\.Sidekick\.zip$/i.test(name)) return "S3-Sidekick-macOS.zip";
+  if (/^S3(?:[ ._-])Sidekick\.zip$/i.test(name)) return "S3-Sidekick-macOS.zip";
 
   if (/x64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-x64.exe";
   if (/arm64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-arm64.exe";
@@ -367,6 +370,50 @@ function targetKeysForArtifactName(name) {
   );
 }
 
+function normalizePreStagedArtifacts(staged) {
+  const selected = new Map();
+
+  for (const filePath of staged) {
+    const originalName = path.basename(filePath);
+    const cleanName = cleanArtifactName(originalName);
+    let stat;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      continue;
+    }
+
+    const current = selected.get(cleanName);
+    if (!current || stat.mtimeMs > current.mtimeMs) {
+      selected.set(cleanName, {
+        filePath,
+        mtimeMs: stat.mtimeMs,
+        originalName,
+      });
+    }
+  }
+
+  const canonicalPaths = new Set();
+  for (const [cleanName, entry] of selected) {
+    const dest = path.join(releaseDir, cleanName);
+    canonicalPaths.add(path.resolve(dest));
+    if (path.resolve(entry.filePath) !== path.resolve(dest)) {
+      fs.copyFileSync(entry.filePath, dest);
+      console.log(`  + ${entry.originalName} → ${cleanName}`);
+    }
+  }
+
+  for (const filePath of staged) {
+    if (!canonicalPaths.has(path.resolve(filePath))) {
+      fs.rmSync(filePath, { force: true });
+    }
+  }
+
+  return Array.from(selected.keys())
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => path.join(releaseDir, name));
+}
+
 function collectArtifacts() {
   fs.mkdirSync(releaseDir, { recursive: true });
 
@@ -406,8 +453,9 @@ function collectArtifacts() {
   }
 
   console.log(`  Found ${staged.length} pre-staged artifact(s) in release/`);
-  const manifests = generateUpdaterManifests(staged);
-  return Array.from(new Set([...staged, ...manifests]));
+  const normalizedStaged = normalizePreStagedArtifacts(staged);
+  const manifests = generateUpdaterManifests(normalizedStaged);
+  return Array.from(new Set([...normalizedStaged, ...manifests]));
 }
 
 function sha256(filePath) {
