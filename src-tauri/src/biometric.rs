@@ -60,7 +60,9 @@ pub(crate) async fn unlock_biometric(
     let key = match platform::retrieve_key(Some(&window)) {
         Ok(k) => k,
         Err(err) => {
-            let is_not_found = err.contains("0x80070490") || err.contains("Element not found");
+            let is_not_found = err.contains("0x80070490")
+                || err.contains("Element not found")
+                || err.contains("OSStatus -34018");
             if is_not_found {
                 config.biometric_enrolled = false;
                 let _ = save_security_config(&app, &config);
@@ -124,17 +126,9 @@ mod platform {
         static kSecReturnData: *const c_void;
         static kSecMatchLimit: *const c_void;
         static kSecMatchLimitOne: *const c_void;
-        static kSecAttrAccessControl: *const c_void;
+        static kSecAttrAccessible: *const c_void;
         static kSecAttrAccessibleWhenUnlockedThisDeviceOnly: *const c_void;
-        static kSecUseOperationPrompt: *const c_void;
         static kCFBooleanTrue: *const c_void;
-
-        fn SecAccessControlCreateWithFlags(
-            allocator: *const c_void,
-            protection: *const c_void,
-            flags: u64,
-            error: *mut *mut c_void,
-        ) -> *mut c_void;
 
         fn SecItemAdd(attributes: *const c_void, result: *mut *const c_void) -> i32;
         fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
@@ -157,11 +151,104 @@ mod platform {
         static kCFTypeDictionaryValueCallBacks: c_void;
     }
 
-    const BIOMETRY_CURRENT_SET: u64 = 1 << 3;
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
     const SERVICE: &str = "run.rosie.s3-sidekick";
     const ACCOUNT: &str = "biometric-encryption-key";
+
+    // -----------------------------------------------------------------------
+    // Touch ID via LAContext (avoids keychain-access-groups entitlement)
+    // -----------------------------------------------------------------------
+    struct AuthState {
+        result: std::sync::Mutex<Option<bool>>,
+        condvar: std::sync::Condvar,
+    }
+
+    static AUTH_STATE: std::sync::OnceLock<AuthState> = std::sync::OnceLock::new();
+
+    fn auth_state() -> &'static AuthState {
+        AUTH_STATE.get_or_init(|| AuthState {
+            result: std::sync::Mutex::new(None),
+            condvar: std::sync::Condvar::new(),
+        })
+    }
+
+    /// Raw Objective-C block layout for the LAContext reply handler.
+    /// No captured variables — result is communicated via the global AUTH_STATE.
+    #[repr(C)]
+    struct LAReplyBlock {
+        isa: *const c_void,
+        flags: i32,
+        reserved: i32,
+        invoke: unsafe extern "C" fn(*mut LAReplyBlock, i8, *const c_void),
+        descriptor: *const LAReplyBlockDesc,
+    }
+
+    #[repr(C)]
+    struct LAReplyBlockDesc {
+        reserved: usize,
+        size: usize,
+    }
+
+    extern "C" {
+        static _NSConcreteStackBlock: c_void;
+    }
+
+    static LA_REPLY_DESC: LAReplyBlockDesc = LAReplyBlockDesc {
+        reserved: 0,
+        size: std::mem::size_of::<LAReplyBlock>(),
+    };
+
+    unsafe extern "C" fn la_reply_invoke(
+        _block: *mut LAReplyBlock,
+        success: i8,
+        _error: *const c_void,
+    ) {
+        let state = auth_state();
+        *state.result.lock().unwrap() = Some(success != 0);
+        state.condvar.notify_one();
+    }
+
+    fn authenticate_touch_id() -> Result<(), String> {
+        let state = auth_state();
+        *state.result.lock().unwrap() = None;
+
+        unsafe {
+            let cls = objc2::runtime::AnyClass::get(c"LAContext")
+                .ok_or_else(|| "Touch ID not available".to_string())?;
+            let ctx: objc2::rc::Retained<objc2::runtime::AnyObject> =
+                objc2::msg_send![cls, new];
+
+            let reason = CFString::new("Unlock S3 Sidekick encrypted storage");
+
+            let block = LAReplyBlock {
+                isa: &_NSConcreteStackBlock as *const c_void,
+                flags: 0,
+                reserved: 0,
+                invoke: la_reply_invoke,
+                descriptor: &LA_REPLY_DESC,
+            };
+
+            let _: () = objc2::msg_send![
+                &*ctx,
+                evaluatePolicy: 1_isize,
+                localizedReason: reason.as_concrete_TypeRef() as *const c_void,
+                reply: &block as *const LAReplyBlock as *const c_void
+            ];
+
+            // Block stays alive on the stack while we wait for the async callback
+            let mut guard = state.result.lock().unwrap();
+            while guard.is_none() {
+                guard = state.condvar.wait(guard).unwrap();
+            }
+
+            if guard.unwrap() {
+                Ok(())
+            } else {
+                Err("Touch ID authentication failed or was canceled".to_string())
+            }
+        }
+    }
 
     pub fn is_available() -> bool {
         unsafe {
@@ -197,34 +284,19 @@ mod platform {
         remove_key();
 
         unsafe {
-            let mut error: *mut c_void = ptr::null_mut();
-            let access_control = SecAccessControlCreateWithFlags(
-                kCFAllocatorDefault as *const c_void,
-                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-                BIOMETRY_CURRENT_SET,
-                &mut error,
-            );
-            if access_control.is_null() {
-                if !error.is_null() {
-                    CFRelease(error);
-                }
-                return Err(
-                    "Failed to create biometric access control. Touch ID may not be configured."
-                        .to_string(),
-                );
-            }
-
             let dict = new_dict();
             set_base_attrs(dict);
 
             let data = CFData::from_buffer(key);
             CFDictionarySetValue(dict, kSecValueData, data.as_concrete_TypeRef() as _);
-            CFDictionarySetValue(dict, kSecAttrAccessControl, access_control);
+            CFDictionarySetValue(
+                dict,
+                kSecAttrAccessible,
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            );
 
             let status = SecItemAdd(dict, ptr::null_mut());
-
             CFRelease(dict);
-            CFRelease(access_control);
 
             if status == errSecSuccess {
                 Ok(())
@@ -238,14 +310,14 @@ mod platform {
     }
 
     pub fn retrieve_key(_window: Option<&tauri::Window>) -> Result<[u8; KEY_LEN], String> {
+        // Authenticate with Touch ID before reading the key from keychain
+        authenticate_touch_id()?;
+
         unsafe {
             let dict = new_dict();
             set_base_attrs(dict);
             CFDictionarySetValue(dict, kSecReturnData, kCFBooleanTrue);
             CFDictionarySetValue(dict, kSecMatchLimit, kSecMatchLimitOne);
-
-            let prompt = CFString::new("Unlock S3 Sidekick encrypted storage");
-            CFDictionarySetValue(dict, kSecUseOperationPrompt, prompt.as_concrete_TypeRef() as _);
 
             let mut result: *const c_void = ptr::null();
             let status = SecItemCopyMatching(dict, &mut result);
