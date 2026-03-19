@@ -1,4 +1,11 @@
 import { escapeHtml, twemojiIcon } from "./utils.ts";
+import {
+  toggleDrawer,
+  openDrawer,
+  closeDrawer,
+  isDrawerOpen,
+  getActiveTab,
+} from "./bottom-drawer.ts";
 
 export type ActivityType = "info" | "success" | "error" | "warning";
 
@@ -10,8 +17,6 @@ interface ActivityEntry {
 
 const MAX_ENTRIES = 200;
 let entries: ActivityEntry[] = [];
-let visible = false;
-let collapsed = false;
 
 export function logActivity(
   message: string,
@@ -22,41 +27,26 @@ export function logActivity(
     entries = entries.slice(entries.length - MAX_ENTRIES);
   }
   updateBadge();
-  updateClearButton();
   renderActivityLog();
 }
 
 export function toggleActivityLog(): void {
-  const overlay = document.getElementById("activity-overlay");
-  if (!overlay) return;
-  const nextVisible = overlay.hidden;
-  overlay.hidden = !nextVisible;
-  visible = nextVisible;
-  syncVisibilityState();
-  if (visible) {
-    syncCollapseState();
-    renderActivityLog();
-  }
-}
-
-export function toggleActivityCollapsed(): void {
-  const overlay = document.getElementById("activity-overlay");
-  if (!overlay) return;
-  collapsed = !collapsed;
-  syncCollapseState();
+  toggleDrawer("activity");
 }
 
 export function hideActivityLog(): void {
-  const overlay = document.getElementById("activity-overlay");
-  if (overlay) overlay.hidden = true;
-  visible = false;
-  syncVisibilityState();
+  if (isDrawerOpen() && getActiveTab() === "activity") {
+    closeDrawer();
+  }
+}
+
+export function showActivityLog(): void {
+  openDrawer("activity");
 }
 
 export function clearActivityLog(): void {
   entries = [];
   updateBadge();
-  updateClearButton();
   renderActivityLog();
 }
 
@@ -65,7 +55,11 @@ function renderActivityLog(): void {
   if (!list) return;
 
   if (entries.length === 0) {
-    list.innerHTML = `<div class="activity-empty">No activity yet</div>`;
+    list.innerHTML =
+      `<div class="activity-empty">` +
+      `<img class="twemoji-icon empty-state__icon" src="/twemoji/1f4cb.svg" alt="" aria-hidden="true" draggable="false" />` +
+      `<span>No activity yet</span>` +
+      `</div>`;
     return;
   }
 
@@ -89,54 +83,15 @@ function renderActivityLog(): void {
 
 function updateBadge(): void {
   const badge = document.getElementById("activity-badge");
-  if (!badge) return;
-  badge.textContent = entries.length > 0 ? String(entries.length) : "";
-  badge.style.display = entries.length > 0 ? "" : "none";
-}
-
-function updateClearButton(): void {
-  const button = document.getElementById(
-    "activity-clear",
-  ) as HTMLButtonElement | null;
-  if (!button) return;
-  button.disabled = entries.length === 0;
-}
-
-function syncCollapseState(): void {
-  const overlay = document.getElementById("activity-overlay");
-  if (!overlay) return;
-  overlay.classList.toggle("activity-popup--collapsed", collapsed);
-
-  const collapseButton = document.getElementById(
-    "activity-collapse",
-  ) as HTMLButtonElement | null;
-  if (!collapseButton) return;
-
-  if (collapsed) {
-    collapseButton.innerHTML = twemojiIcon("2b06", {
-      className: "twemoji-icon",
-      decorative: true,
-    });
-    collapseButton.title = "Expand activity";
-    collapseButton.setAttribute("aria-label", "Expand activity");
-    collapseButton.setAttribute("aria-expanded", "false");
-  } else {
-    collapseButton.innerHTML = twemojiIcon("2b07", {
-      className: "twemoji-icon",
-      decorative: true,
-    });
-    collapseButton.title = "Collapse activity";
-    collapseButton.setAttribute("aria-label", "Collapse activity");
-    collapseButton.setAttribute("aria-expanded", "true");
+  if (badge) {
+    badge.textContent = entries.length > 0 ? String(entries.length) : "";
+    badge.style.display = entries.length > 0 ? "" : "none";
   }
-}
-
-function syncVisibilityState(): void {
-  const toggleButton = document.getElementById(
-    "activity-toggle",
-  ) as HTMLButtonElement | null;
-  if (!toggleButton) return;
-  toggleButton.setAttribute("aria-expanded", String(visible));
+  const drawerBadge = document.getElementById("drawer-activity-badge");
+  if (drawerBadge) {
+    drawerBadge.textContent = entries.length > 0 ? String(entries.length) : "";
+    drawerBadge.style.display = entries.length > 0 ? "" : "none";
+  }
 }
 
 function formatTime(d: Date): string {

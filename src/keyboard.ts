@@ -5,9 +5,9 @@ import { isDialogActive } from "./dialogs.ts";
 import { closePreview } from "./preview.ts";
 import { closeInfoPanel } from "./info-panel.ts";
 import { closeLicensesModal } from "./licenses.ts";
-import { hideTransferQueue } from "./transfers.ts";
-import { hideActivityLog } from "./activity-log.ts";
+import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
 import { closeSettingsModal } from "./settings.ts";
+import { openPalette, closePalette, isPaletteOpen } from "./command-palette.ts";
 import { navigateUp, getSelectableKeys, updateSelectionUI } from "./browser.ts";
 
 export interface KeyboardHandlers {
@@ -39,6 +39,11 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
     if (e.key === "Escape") {
       hideContextMenu();
 
+      if (isPaletteOpen()) {
+        closePalette();
+        return;
+      }
+
       if (isDialogActive()) return;
 
       const previewOverlay = document.getElementById("preview-overlay");
@@ -59,23 +64,14 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
         return;
       }
 
-      const transferOverlay = document.getElementById("transfer-overlay");
-      if (transferOverlay && !transferOverlay.hidden) {
-        hideTransferQueue();
+      if (isDrawerOpen()) {
+        closeDrawer();
         return;
       }
 
       const layout = document.getElementById("main-layout");
       if (layout?.classList.contains("main-layout--sidebar-open")) {
         handlers.setSidebarOpen(false);
-        return;
-      }
-
-      const activityOverlay = document.getElementById(
-        "activity-overlay",
-      ) as HTMLDivElement | null;
-      if (activityOverlay && !activityOverlay.hidden) {
-        hideActivityLog();
         return;
       }
 
@@ -117,6 +113,13 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
     }
 
     if (accel) {
+      if (key === "k") {
+        e.preventDefault();
+        if (isPaletteOpen()) closePalette();
+        else openPalette();
+        return;
+      }
+
       if (key === "a" && !inInput) {
         e.preventDefault();
         const allKeys = getSelectableKeys();

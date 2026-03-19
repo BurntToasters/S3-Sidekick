@@ -52,6 +52,22 @@ export function updateSelectionUI(): void {
     selectAll.indeterminate =
       !selectAll.checked && allKeys.some((k) => state.selectedKeys.has(k));
   }
+
+  const batchToolbar = document.getElementById(
+    "batch-toolbar",
+  ) as HTMLDivElement | null;
+  const batchCount = document.getElementById(
+    "batch-count",
+  ) as HTMLSpanElement | null;
+  if (batchToolbar && batchCount) {
+    const count = state.selectedKeys.size;
+    if (count >= 2) {
+      batchCount.textContent = `${count} items selected`;
+      batchToolbar.hidden = false;
+    } else {
+      batchToolbar.hidden = true;
+    }
+  }
 }
 
 let lastClickedKey: string | null = null;
@@ -204,13 +220,19 @@ export function renderObjectTable(): void {
   }
 
   const sortedFiles = getSortedObjects();
+  const maxSize = sortedFiles.reduce((m, o) => Math.max(m, o.size), 0);
   for (const obj of sortedFiles) {
     const name = basename(obj.key);
+    const barPct = maxSize > 0 ? Math.round((obj.size / maxSize) * 100) : 0;
+    const barStyle =
+      barPct > 0
+        ? ` style="background:linear-gradient(to right, var(--glow-accent) ${barPct}%, transparent ${barPct}%)"`
+        : "";
     rows.push(
       `<tr class="object-row object-row--file" data-key="${escapeHtml(obj.key)}" tabindex="0">
         <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select file ${escapeHtml(name)}" /></td>
         <td class="object-name"><span class="icon-file">${twemojiIcon("1f4c4", { className: "twemoji-icon twemoji-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
-        <td class="object-size">${formatSize(obj.size)}</td>
+        <td class="object-size"${barStyle}>${formatSize(obj.size)}</td>
         <td class="object-modified">${formatDate(obj.last_modified)}</td>
       </tr>`,
     );

@@ -30,7 +30,9 @@ import {
   handleSelectAll,
   clearSelection,
   updateSelectionUI,
+  getSelectableKeys,
   toggleSort,
+  navigateUp,
 } from "./browser.ts";
 import {
   initUpdater,
@@ -58,8 +60,6 @@ import {
 } from "./info-panel.ts";
 import {
   toggleTransferQueue,
-  toggleTransferCollapsed,
-  hideTransferQueue,
   clearCompletedTransfers,
   enqueuePaths,
   setTransferCompleteHandler,
@@ -74,10 +74,9 @@ import { canPreview, openPreview, closePreview } from "./preview.ts";
 import {
   logActivity,
   toggleActivityLog,
-  toggleActivityCollapsed,
-  hideActivityLog,
   clearActivityLog,
 } from "./activity-log.ts";
+import { initDrawer, getActiveTab } from "./bottom-drawer.ts";
 import {
   ensureSecurityReady,
   handleSecurityChangePassword,
@@ -87,6 +86,7 @@ import {
   handleBiometricToggle,
 } from "./security.ts";
 import { showConfirm, showPrompt } from "./dialogs.ts";
+import { initPalette, registerCommands } from "./command-palette.ts";
 
 interface LocalFolderFileEntry {
   file_path: string;
@@ -1261,18 +1261,18 @@ function wireEvents(): void {
     });
   });
 
+  initDrawer();
   document
     .getElementById("transfer-toggle")!
     .addEventListener("click", toggleTransferQueue);
-  document
-    .getElementById("transfer-collapse")!
-    .addEventListener("click", toggleTransferCollapsed);
-  document
-    .getElementById("transfer-close")!
-    .addEventListener("click", hideTransferQueue);
-  document
-    .getElementById("transfer-clear")!
-    .addEventListener("click", clearCompletedTransfers);
+  document.getElementById("drawer-clear")!.addEventListener("click", () => {
+    const tab = getActiveTab();
+    if (tab === "activity") {
+      clearActivityLog();
+    } else {
+      clearCompletedTransfers();
+    }
+  });
   void initTransferQueueUI().catch((err) => {
     console.error("Failed to initialize transfer queue UI:", err);
     logActivity(`Transfer queue events unavailable: ${String(err)}`, "warning");
@@ -1300,15 +1300,19 @@ function wireEvents(): void {
   document
     .getElementById("activity-toggle")!
     .addEventListener("click", toggleActivityLog);
-  document
-    .getElementById("activity-collapse")!
-    .addEventListener("click", toggleActivityCollapsed);
-  document
-    .getElementById("activity-close")!
-    .addEventListener("click", hideActivityLog);
-  document
-    .getElementById("activity-clear")!
-    .addEventListener("click", clearActivityLog);
+
+  document.getElementById("batch-download")!.addEventListener("click", () => {
+    void handleDownload();
+  });
+  document.getElementById("batch-delete")!.addEventListener("click", () => {
+    void handleDelete();
+  });
+  document.getElementById("batch-copy-urls")!.addEventListener("click", () => {
+    void handleCopyUrl();
+  });
+  document.getElementById("batch-deselect")!.addEventListener("click", () => {
+    clearSelection();
+  });
 
   document.getElementById("security-toggle")!.addEventListener("click", () => {
     void handleSecurityToggle(setStatus);
@@ -1514,16 +1518,39 @@ function wireEvents(): void {
   });
 
   const objectPanel = dom.objectPanel;
+  const dropOverlay = document.getElementById(
+    "drop-zone-overlay",
+  ) as HTMLDivElement;
+  const dropPath = document.getElementById(
+    "drop-zone-path",
+  ) as HTMLParagraphElement;
+  let dragCounter = 0;
+
   objectPanel.addEventListener("dragover", (e) => {
     e.preventDefault();
+  });
+  objectPanel.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    dragCounter++;
+    if (state.connected && state.currentBucket) {
+      dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
+      dropOverlay.hidden = false;
+    }
     objectPanel.classList.add("object-panel--dragover");
   });
   objectPanel.addEventListener("dragleave", () => {
-    objectPanel.classList.remove("object-panel--dragover");
+    dragCounter--;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      objectPanel.classList.remove("object-panel--dragover");
+      dropOverlay.hidden = true;
+    }
   });
   objectPanel.addEventListener("drop", (e) => {
     e.preventDefault();
+    dragCounter = 0;
     objectPanel.classList.remove("object-panel--dragover");
+    dropOverlay.hidden = true;
 
     if (!state.connected || !state.currentBucket) {
       setStatus("Connect to a bucket first.");
@@ -1555,6 +1582,113 @@ function wireEvents(): void {
   });
 
   wireLayoutControls();
+
+  initPalette();
+  const isMac = state.platformName === "macos";
+  const accelLabel = isMac ? "⌘" : "Ctrl+";
+  registerCommands([
+    {
+      id: "upload-files",
+      label: "Upload Files",
+      icon: "1f4e4",
+      shortcut: `${accelLabel}U`,
+      action: () => void handleUploadButton(),
+      available: () => state.connected,
+    },
+    {
+      id: "upload-folder",
+      label: "Upload Folder",
+      icon: "1f4c1",
+      shortcut: `${accelLabel}⇧U`,
+      action: () => void handleUploadFolderButton(),
+      available: () => state.connected,
+    },
+    {
+      id: "create-folder",
+      label: "Create Folder",
+      icon: "1f4c2",
+      shortcut: `${accelLabel}N`,
+      action: () => void handleCreateFolder(),
+      available: () => state.connected,
+    },
+    {
+      id: "refresh",
+      label: "Refresh",
+      icon: "1f504",
+      shortcut: "F5",
+      action: () => void handleRefresh(),
+      available: () => state.connected,
+    },
+    {
+      id: "download",
+      label: "Download Selected",
+      icon: "1f4e5",
+      action: () => void handleDownload(),
+      available: () => state.connected && state.selectedKeys.size > 0,
+    },
+    {
+      id: "delete",
+      label: "Delete Selected",
+      icon: "1f5d1",
+      action: () => void handleDelete(),
+      available: () => state.connected && state.selectedKeys.size > 0,
+    },
+    {
+      id: "select-all",
+      label: "Select All",
+      icon: "2705",
+      shortcut: `${accelLabel}A`,
+      action: () => {
+        const keys = getSelectableKeys();
+        keys.forEach((k) => state.selectedKeys.add(k));
+        updateSelectionUI();
+      },
+      available: () => state.connected,
+    },
+    {
+      id: "deselect-all",
+      label: "Deselect All",
+      icon: "274c",
+      action: () => clearSelection(),
+      available: () => state.selectedKeys.size > 0,
+    },
+    {
+      id: "filter",
+      label: "Filter Objects",
+      icon: "1f50d",
+      shortcut: `${accelLabel}F`,
+      action: () => {
+        const f = document.getElementById(
+          "filter-input",
+        ) as HTMLInputElement | null;
+        if (f) f.focus();
+      },
+      available: () => state.connected,
+    },
+    {
+      id: "activity",
+      label: "Toggle Activity Log",
+      icon: "1f4cb",
+      action: () => toggleActivityLog(),
+    },
+    {
+      id: "settings",
+      label: "Open Settings",
+      icon: "2699",
+      action: () => {
+        document.getElementById("settings-btn")?.click();
+      },
+    },
+    {
+      id: "go-up",
+      label: "Go Up (Parent Folder)",
+      icon: "2b06",
+      action: () => {
+        navigateUp();
+      },
+      available: () => state.connected && state.currentPrefix.length > 0,
+    },
+  ]);
 
   if (!modalLayerObserver) {
     modalLayerObserver = new MutationObserver(() => {
