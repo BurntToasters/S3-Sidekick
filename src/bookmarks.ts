@@ -215,7 +215,9 @@ export function renderBookmarkList(
     if (deleteBtn) {
       e.stopPropagation();
       const idx = parseInt(deleteBtn.dataset.delete!, 10);
-      onDelete(idx);
+      if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
+        onDelete(idx);
+      }
       return;
     }
     const item = (e.target as HTMLElement).closest<HTMLElement>(
@@ -223,7 +225,9 @@ export function renderBookmarkList(
     );
     if (item) {
       const idx = parseInt(item.dataset.index!, 10);
-      if (idx >= 0 && idx < bookmarks.length) onSelect(bookmarks[idx]);
+      if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
+        onSelect(bookmarks[idx]);
+      }
     }
   };
 }

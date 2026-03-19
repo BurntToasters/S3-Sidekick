@@ -181,7 +181,9 @@ export function enqueueFiles(
   }
 
   showTransferQueue();
-  void processQueue();
+  void processQueue().catch((err) =>
+    logActivity(`Transfer processing error: ${String(err)}`, "error"),
+  );
 }
 
 export function enqueuePaths(paths: string[], targetPrefix: string): void {
@@ -212,7 +214,9 @@ export function enqueuePaths(paths: string[], targetPrefix: string): void {
   }
 
   showTransferQueue();
-  void processQueue();
+  void processQueue().catch((err) =>
+    logActivity(`Transfer processing error: ${String(err)}`, "error"),
+  );
 }
 
 export function enqueueFolderEntries(
@@ -247,7 +251,9 @@ export function enqueueFolderEntries(
   }
 
   showTransferQueue();
-  void processQueue();
+  void processQueue().catch((err) =>
+    logActivity(`Transfer processing error: ${String(err)}`, "error"),
+  );
 }
 
 export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
@@ -274,7 +280,9 @@ export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
   }
 
   showTransferQueue();
-  void processQueue();
+  void processQueue().catch((err) =>
+    logActivity(`Transfer processing error: ${String(err)}`, "error"),
+  );
 }
 
 async function processQueue(): Promise<void> {

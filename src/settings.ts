@@ -87,6 +87,15 @@ export function populateSettingsModal(): void {
     channelSelect.value = state.currentSettings.updateChannel;
   }
 
+  const presignedSelect = document.getElementById(
+    "setting-presigned-expiration",
+  ) as HTMLSelectElement | null;
+  if (presignedSelect) {
+    presignedSelect.value = String(
+      state.currentSettings.presignedUrlExpiration,
+    );
+  }
+
   const supported = isUpdaterEnabled();
   const updaterSection = document.getElementById("updater-section");
   const updaterUnsupported = document.getElementById("updater-unsupported");
@@ -131,6 +140,16 @@ export function readSettingsModal(): void {
     state.currentSettings.updateChannel =
       channelSelect.value === "beta" ? "beta" : "release";
     setUpdateChannel(state.currentSettings.updateChannel);
+  }
+
+  const presignedSelect = document.getElementById(
+    "setting-presigned-expiration",
+  ) as HTMLSelectElement | null;
+  if (presignedSelect) {
+    const val = parseInt(presignedSelect.value, 10);
+    if (Number.isFinite(val) && val >= 60 && val <= 604800) {
+      state.currentSettings.presignedUrlExpiration = val;
+    }
   }
 }
 
@@ -182,7 +201,10 @@ export async function resetSettings(): Promise<void> {
 }
 
 export async function incrementLaunchCount(): Promise<number> {
-  const current = typeof state.settingsExtras.launchCount === "number" ? state.settingsExtras.launchCount : 0;
+  const current =
+    typeof state.settingsExtras.launchCount === "number"
+      ? state.settingsExtras.launchCount
+      : 0;
   const next = current + 1;
   state.settingsExtras.launchCount = next;
   await saveSettings();

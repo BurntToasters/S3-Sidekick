@@ -4,7 +4,12 @@ export type DrawerTab = "activity" | "transfers";
 
 let currentTab: DrawerTab = "activity";
 let minimized = false;
-let drawerHeight = parseInt(localStorage.getItem("drawer-height") ?? "240", 10);
+const _parsedHeight = parseInt(
+  localStorage.getItem("drawer-height") ?? "240",
+  10,
+);
+let drawerHeight =
+  Number.isFinite(_parsedHeight) && _parsedHeight >= 120 ? _parsedHeight : 240;
 
 const STORAGE_KEY = "drawer-height";
 const MIN_HEIGHT = 120;
