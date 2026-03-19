@@ -1,6 +1,6 @@
 [package]
 name = "s3-sidekick"
-version = "0.5.1"
+version = "0.5.2"
 description = "Desktop client for Digital Ocean Spaces."
 authors = ["BurntToasters <code@rosie.run>"]
 edition = "2021"
