@@ -9,6 +9,9 @@ import {
   resetSettings,
   setBookmarkSelectHandler,
   switchSettingsTab,
+  incrementLaunchCount,
+  markSupportPromptDismissed,
+  isSupportPromptDismissed,
 } from "./settings.ts";
 import {
   connect,
@@ -85,7 +88,7 @@ import {
   handleLockTimeoutChange,
   handleBiometricToggle,
 } from "./security.ts";
-import { showConfirm, showPrompt } from "./dialogs.ts";
+import { showConfirm, showPrompt, isDialogActive } from "./dialogs.ts";
 import { initPalette, registerCommands } from "./command-palette.ts";
 
 interface LocalFolderFileEntry {
@@ -1727,6 +1730,30 @@ function wireEvents(): void {
   });
 }
 
+async function checkSupportPrompt(): Promise<void> {
+  if (isSupportPromptDismissed()) return;
+  const count = await incrementLaunchCount();
+  if (count !== 2) return;
+
+  setTimeout(() => {
+    if (isDialogActive()) return;
+    const overlay = document.getElementById("support-overlay");
+    if (!overlay) return;
+    overlay.removeAttribute("hidden");
+
+    document.getElementById("support-no")?.addEventListener("click", () => {
+      overlay.setAttribute("hidden", "");
+      void markSupportPromptDismissed();
+    }, { once: true });
+
+    document.getElementById("support-yes")?.addEventListener("click", () => {
+      overlay.setAttribute("hidden", "");
+      void markSupportPromptDismissed();
+      void invoke("open_external_url", { url: "https://rosie.run/support" });
+    }, { once: true });
+  }, 1500);
+}
+
 async function init(): Promise<void> {
   wireEvents();
 
@@ -1743,6 +1770,7 @@ async function init(): Promise<void> {
 
   try {
     await loadSettings();
+    void checkSupportPrompt();
   } catch (err) {
     setStatus(`Failed to load settings: ${String(err)}`);
     logActivity(`Failed to load settings: ${String(err)}`, "error");
