@@ -181,6 +181,23 @@ export async function resetSettings(): Promise<void> {
   }
 }
 
+export async function incrementLaunchCount(): Promise<number> {
+  const current = typeof state.settingsExtras.launchCount === "number" ? state.settingsExtras.launchCount : 0;
+  const next = current + 1;
+  state.settingsExtras.launchCount = next;
+  await saveSettings();
+  return next;
+}
+
+export async function markSupportPromptDismissed(): Promise<void> {
+  state.settingsExtras.supportPromptDismissed = true;
+  await saveSettings();
+}
+
+export function isSupportPromptDismissed(): boolean {
+  return state.settingsExtras.supportPromptDismissed === true;
+}
+
 async function refreshBookmarkListUI(): Promise<void> {
   await loadBookmarks();
   const listEl = document.getElementById("bookmark-list");
