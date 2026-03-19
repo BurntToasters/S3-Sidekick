@@ -5,12 +5,14 @@ export interface UserSettings {
   theme: ThemePreference;
   autoCheckUpdates: boolean;
   updateChannel: UpdateChannel;
+  presignedUrlExpiration: number;
 }
 
 export const SETTING_DEFAULTS: UserSettings = {
   theme: "system",
   autoCheckUpdates: true,
   updateChannel: "release",
+  presignedUrlExpiration: 3600,
 };
 
 export function normalizeUserSettings(
@@ -31,7 +33,16 @@ export function normalizeUserSettings(
       ? raw.updateChannel
       : SETTING_DEFAULTS.updateChannel;
 
-  return { theme, autoCheckUpdates, updateChannel };
+  const rawExpiration = raw.presignedUrlExpiration;
+  const presignedUrlExpiration =
+    typeof rawExpiration === "number" &&
+    Number.isFinite(rawExpiration) &&
+    rawExpiration >= 60 &&
+    rawExpiration <= 604800
+      ? Math.round(rawExpiration)
+      : SETTING_DEFAULTS.presignedUrlExpiration;
+
+  return { theme, autoCheckUpdates, updateChannel, presignedUrlExpiration };
 }
 
 export interface LoadSettingsResult {
