@@ -6,6 +6,7 @@ export interface UserSettings {
   autoCheckUpdates: boolean;
   updateChannel: UpdateChannel;
   presignedUrlExpiration: number;
+  maxConcurrentTransfers: number;
 }
 
 export const SETTING_DEFAULTS: UserSettings = {
@@ -13,6 +14,7 @@ export const SETTING_DEFAULTS: UserSettings = {
   autoCheckUpdates: true,
   updateChannel: "release",
   presignedUrlExpiration: 3600,
+  maxConcurrentTransfers: 3,
 };
 
 export function normalizeUserSettings(
@@ -42,7 +44,22 @@ export function normalizeUserSettings(
       ? Math.round(rawExpiration)
       : SETTING_DEFAULTS.presignedUrlExpiration;
 
-  return { theme, autoCheckUpdates, updateChannel, presignedUrlExpiration };
+  const rawConcurrent = raw.maxConcurrentTransfers;
+  const maxConcurrentTransfers =
+    typeof rawConcurrent === "number" &&
+    Number.isInteger(rawConcurrent) &&
+    rawConcurrent >= 1 &&
+    rawConcurrent <= 10
+      ? rawConcurrent
+      : SETTING_DEFAULTS.maxConcurrentTransfers;
+
+  return {
+    theme,
+    autoCheckUpdates,
+    updateChannel,
+    presignedUrlExpiration,
+    maxConcurrentTransfers,
+  };
 }
 
 export interface LoadSettingsResult {

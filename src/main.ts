@@ -36,6 +36,9 @@ import {
   getSelectableKeys,
   toggleSort,
   navigateUp,
+  navigateBack,
+  navigateForward,
+  clearNavHistory,
   pruneStaleSelection,
 } from "./browser.ts";
 import {
@@ -70,8 +73,9 @@ import {
   initTransferQueueUI,
   enqueueFiles,
   disposeTransferQueueUI,
+  enqueueDownloads,
+  enqueueFolderEntries,
 } from "./transfers.ts";
-import * as transferQueue from "./transfers.ts";
 import {
   basename,
   formatSize,
@@ -96,7 +100,11 @@ import {
   handleBiometricToggle,
 } from "./security.ts";
 import { showConfirm, showPrompt, isDialogActive } from "./dialogs.ts";
-import { initPalette, registerCommands } from "./command-palette.ts";
+import {
+  initPalette,
+  registerCommands,
+  isPaletteOpen,
+} from "./command-palette.ts";
 
 interface LocalFolderFileEntry {
   file_path: string;
@@ -108,18 +116,6 @@ interface DownloadQueueEntry {
   bucket: string;
   key: string;
   destination: string;
-}
-
-interface TransfersExtensionAPI {
-  enqueueDownloads?: (entries: DownloadQueueEntry[]) => void;
-  enqueueFolderEntries?: (
-    entries: LocalFolderFileEntry[],
-    targetPrefix: string,
-  ) => void;
-  enqueueFolderPaths?: (
-    entries: LocalFolderFileEntry[],
-    targetPrefix: string,
-  ) => void;
 }
 
 const SIDEBAR_MIN = 180;
@@ -177,14 +173,8 @@ function setConnectionUI(connected: boolean): void {
   }
 }
 
-function transferExtensions(): TransfersExtensionAPI {
-  return transferQueue as unknown as TransfersExtensionAPI;
-}
-
 function enqueueDownloadTransfers(entries: DownloadQueueEntry[]): boolean {
-  const ext = transferExtensions();
-  if (!ext.enqueueDownloads) return false;
-  ext.enqueueDownloads(entries);
+  enqueueDownloads(entries);
   return true;
 }
 
@@ -192,16 +182,8 @@ function enqueueFolderTransfers(
   entries: LocalFolderFileEntry[],
   targetPrefix: string,
 ): boolean {
-  const ext = transferExtensions();
-  if (ext.enqueueFolderEntries) {
-    ext.enqueueFolderEntries(entries, targetPrefix);
-    return true;
-  }
-  if (ext.enqueueFolderPaths) {
-    ext.enqueueFolderPaths(entries, targetPrefix);
-    return true;
-  }
-  return false;
+  enqueueFolderEntries(entries, targetPrefix);
+  return true;
 }
 
 function applyPlatformClass(): void {
@@ -272,7 +254,7 @@ function applySidebarWidth(width: number): void {
 
 function getActiveModalOverlay(): HTMLElement | null {
   const overlays = document.querySelectorAll<HTMLElement>(
-    ".modal-overlay.active, .dialog-overlay.active",
+    ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden])",
   );
   return overlays.length > 0 ? overlays[overlays.length - 1] : null;
 }
@@ -543,6 +525,8 @@ async function handleDisconnect(): Promise<void> {
   if (filterInput) filterInput.value = "";
 
   await disconnect();
+  clearNavHistory();
+  clearSelection();
   setConnectionUI(false);
   showEmptyState();
   setStatus("Disconnected.", 5000);
@@ -697,13 +681,22 @@ async function handleCopyUrl(): Promise<void> {
   if (keys.length === 0) return;
 
   try {
-    const url = await invoke<string>("build_object_url", {
-      bucket: state.currentBucket,
-      key: keys[0],
-    });
-    await navigator.clipboard.writeText(url);
-    setStatus("URL copied to clipboard.", 5000);
-    logActivity(`Copied URL for ${basename(keys[0])}.`, "success");
+    const urls = await Promise.all(
+      keys.map((key) =>
+        invoke<string>("build_object_url", {
+          bucket: state.currentBucket,
+          key,
+        }),
+      ),
+    );
+    await navigator.clipboard.writeText(urls.join("\n"));
+    if (keys.length === 1) {
+      setStatus("URL copied to clipboard.", 5000);
+      logActivity(`Copied URL for ${basename(keys[0])}.`, "success");
+    } else {
+      setStatus(`Copied ${keys.length} URLs to clipboard.`, 5000);
+      logActivity(`Copied ${keys.length} object URLs.`, "success");
+    }
   } catch (err) {
     setStatus(`Failed to copy URL: ${friendlyError(err)}`);
     logActivity(`Failed to copy URL: ${friendlyError(err)}`, "error");
@@ -711,10 +704,12 @@ async function handleCopyUrl(): Promise<void> {
 }
 
 function formatExpiration(seconds: number): string {
-  if (seconds < 3600) return `${Math.round(seconds / 60)} minutes`;
-  if (seconds < 86400)
-    return `${Math.round(seconds / 3600)} hour${seconds >= 7200 ? "s" : ""}`;
-  return `${Math.round(seconds / 86400)} day${seconds >= 172800 ? "s" : ""}`;
+  const withUnit = (value: number, unit: "minute" | "hour" | "day") =>
+    `${value} ${unit}${value === 1 ? "" : "s"}`;
+  if (seconds < 3600)
+    return withUnit(Math.max(1, Math.round(seconds / 60)), "minute");
+  if (seconds < 86400) return withUnit(Math.round(seconds / 3600), "hour");
+  return withUnit(Math.round(seconds / 86400), "day");
 }
 
 async function handleCopyPresignedUrl(): Promise<void> {
@@ -922,18 +917,13 @@ async function queueDroppedPaths(
   const cleaned = paths.filter((path) => path.trim().length > 0);
   if (cleaned.length === 0) return;
 
-  const ext = transferExtensions();
-  if (!ext.enqueueFolderEntries && !ext.enqueueFolderPaths) {
-    enqueuePaths(cleaned, targetPrefix);
-    return;
-  }
-
   try {
     const entries = await invoke<LocalFolderFileEntry[]>(
       "list_local_files_recursive",
       { roots: cleaned },
     );
-    if (entries.length > 0 && enqueueFolderTransfers(entries, targetPrefix)) {
+    if (entries.length > 0) {
+      enqueueFolderTransfers(entries, targetPrefix);
       return;
     }
   } catch (err) {
@@ -1198,6 +1188,66 @@ function wireEvents(): void {
   dom.connectBtn.addEventListener("click", handleConnect);
   dom.disconnectBtn.addEventListener("click", handleDisconnect);
 
+  const secretToggle = document.getElementById("secret-key-toggle");
+  const secretInput = document.getElementById(
+    "conn-secret-key",
+  ) as HTMLInputElement | null;
+  const secretToggleIcon = document.getElementById(
+    "secret-key-toggle-icon",
+  ) as HTMLImageElement | null;
+  if (secretToggle && secretInput && secretToggleIcon) {
+    secretToggle.addEventListener("click", () => {
+      const showing = secretInput.type === "text";
+      secretInput.type = showing ? "password" : "text";
+      secretToggleIcon.src = showing
+        ? "/twemoji/1f441.svg"
+        : "/twemoji/1f648.svg";
+      secretToggle.setAttribute("aria-pressed", String(!showing));
+      secretToggle.setAttribute(
+        "aria-label",
+        showing ? "Show secret key" : "Hide secret key",
+      );
+    });
+  }
+
+  const providerPreset = document.getElementById(
+    "conn-provider-preset",
+  ) as HTMLSelectElement | null;
+  if (providerPreset) {
+    providerPreset.addEventListener("change", () => {
+      const endpointInput = document.getElementById(
+        "conn-endpoint",
+      ) as HTMLInputElement | null;
+      const regionInput = document.getElementById(
+        "conn-region",
+      ) as HTMLInputElement | null;
+      const preset = providerPreset.value;
+      if (preset === "aws") {
+        if (endpointInput) endpointInput.value = "";
+        if (regionInput) regionInput.value = "us-east-1";
+      } else if (preset === "do") {
+        if (endpointInput)
+          endpointInput.value = "https://nyc3.digitaloceanspaces.com";
+        if (regionInput) regionInput.value = "nyc3";
+      } else if (preset === "backblaze") {
+        if (endpointInput)
+          endpointInput.value = "https://s3.us-west-004.backblazeb2.com";
+        if (regionInput) regionInput.value = "us-west-004";
+      } else if (preset === "cloudflare") {
+        if (endpointInput)
+          endpointInput.value = "https://<account-id>.r2.cloudflarestorage.com";
+        if (regionInput) regionInput.value = "auto";
+      } else if (preset === "minio") {
+        if (endpointInput) endpointInput.value = "http://localhost:9000";
+        if (regionInput) regionInput.value = "us-east-1";
+      } else if (preset === "wasabi") {
+        if (endpointInput) endpointInput.value = "https://s3.wasabisys.com";
+        if (regionInput) regionInput.value = "us-east-1";
+      }
+      providerPreset.value = "";
+    });
+  }
+
   document
     .getElementById("bookmark-save-btn")!
     .addEventListener("click", handleBookmarkSave);
@@ -1369,6 +1419,13 @@ function wireEvents(): void {
   document.getElementById("biometric-toggle")!.addEventListener("click", () => {
     void handleBiometricToggle(setStatus);
   });
+
+  document
+    .getElementById("nav-back")
+    ?.addEventListener("click", () => void navigateBack());
+  document
+    .getElementById("nav-forward")
+    ?.addEventListener("click", () => void navigateForward());
 
   document
     .getElementById("btn-refresh")!
@@ -1667,14 +1724,14 @@ function wireEvents(): void {
       label: "Download Selected",
       icon: "1f4e5",
       action: () => void handleDownload(),
-      available: () => state.connected && state.selectedKeys.size > 0,
+      available: () => state.connected && getSelectedFileKeys().length > 0,
     },
     {
       id: "delete",
       label: "Delete Selected",
       icon: "1f5d1",
       action: () => void handleDelete(),
-      available: () => state.connected && state.selectedKeys.size > 0,
+      available: () => state.connected && getSelectedFileKeys().length > 0,
     },
     {
       id: "select-all",
@@ -1738,7 +1795,9 @@ function wireEvents(): void {
       syncModalLayerState();
     });
     document
-      .querySelectorAll<HTMLElement>(".modal-overlay, .dialog-overlay")
+      .querySelectorAll<HTMLElement>(
+        ".modal-overlay, .dialog-overlay, .support-overlay",
+      )
       .forEach((overlay) => {
         modalLayerObserver!.observe(overlay, {
           attributes: true,
@@ -1771,35 +1830,76 @@ function wireEvents(): void {
 }
 
 async function checkSupportPrompt(): Promise<void> {
-  if (isSupportPromptDismissed()) return;
-  const count = await incrementLaunchCount();
-  if (count !== 2) return;
+  try {
+    if (isSupportPromptDismissed()) return;
+    const count = await incrementLaunchCount();
+    if (count < 2) return;
 
-  setTimeout(() => {
-    if (isDialogActive()) return;
-    const overlay = document.getElementById("support-overlay");
-    if (!overlay) return;
-    overlay.removeAttribute("hidden");
+    setTimeout(() => {
+      if (isDialogActive() || getActiveModalOverlay() || isPaletteOpen())
+        return;
+      const overlay = document.getElementById("support-overlay");
+      const dismissButton = document.getElementById(
+        "support-no",
+      ) as HTMLButtonElement | null;
+      const confirmButton = document.getElementById(
+        "support-yes",
+      ) as HTMLButtonElement | null;
+      if (!overlay || !dismissButton || !confirmButton) return;
 
-    document.getElementById("support-no")?.addEventListener(
-      "click",
-      () => {
+      const persistDismissal = () => {
+        void markSupportPromptDismissed().catch((err) => {
+          console.warn("Failed to persist support prompt dismissal:", err);
+          logActivity("Failed to save support prompt preference.", "warning");
+        });
+      };
+
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
         overlay.setAttribute("hidden", "");
-        void markSupportPromptDismissed();
-      },
-      { once: true },
-    );
+        document.removeEventListener("keydown", onEsc, true);
+        overlay.removeEventListener("click", onOverlayClick);
+        dismissButton.removeEventListener("click", onDismiss);
+        confirmButton.removeEventListener("click", onConfirm);
+      };
 
-    document.getElementById("support-yes")?.addEventListener(
-      "click",
-      () => {
-        overlay.setAttribute("hidden", "");
-        void markSupportPromptDismissed();
+      const onDismiss = () => {
+        close();
+        persistDismissal();
+      };
+
+      const onConfirm = () => {
+        close();
+        persistDismissal();
         void invoke("open_external_url", { url: "https://rosie.run/support" });
-      },
-      { once: true },
-    );
-  }, 1500);
+      };
+
+      const onOverlayClick = (event: MouseEvent) => {
+        if (event.target === overlay) {
+          onDismiss();
+        }
+      };
+
+      const onEsc = (event: KeyboardEvent) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onDismiss();
+      };
+
+      overlay.removeAttribute("hidden");
+      dismissButton.focus();
+      dismissButton.addEventListener("click", onDismiss);
+      confirmButton.addEventListener("click", onConfirm);
+      overlay.addEventListener("click", onOverlayClick);
+      document.addEventListener("keydown", onEsc, true);
+    }, 1500);
+  } catch (err) {
+    console.warn("Support prompt unavailable:", err);
+    logActivity("Support prompt unavailable this launch.", "warning");
+  }
 }
 
 async function init(): Promise<void> {

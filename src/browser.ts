@@ -5,8 +5,32 @@ import {
   formatDate,
   basename,
   twemojiIcon,
+  friendlyError,
 } from "./utils.ts";
 import { refreshObjects } from "./connection.ts";
+
+function hasAccelModifier(e: MouseEvent): boolean {
+  if (state.platformName === "macos") {
+    return e.metaKey && !e.ctrlKey;
+  }
+  return e.ctrlKey;
+}
+
+function setStatus(text: string, autoResetMs?: number): void {
+  if (state.statusTimeout !== undefined) {
+    clearTimeout(state.statusTimeout);
+    state.statusTimeout = undefined;
+  }
+  const el = document.getElementById("status");
+  if (el) el.textContent = text;
+  if (autoResetMs && autoResetMs > 0) {
+    state.statusTimeout = setTimeout(() => {
+      const el2 = document.getElementById("status");
+      if (el2) el2.textContent = "";
+      state.statusTimeout = undefined;
+    }, autoResetMs);
+  }
+}
 
 export function getSelectableKeys(): string[] {
   const keys: string[] = [];
@@ -43,6 +67,8 @@ function clearFilter(): void {
 }
 
 export function updateSelectionUI(): void {
+  pruneStaleSelection();
+
   const rows = dom.objectTbody.querySelectorAll<HTMLElement>(".object-row");
   for (const row of rows) {
     const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
@@ -69,9 +95,11 @@ export function updateSelectionUI(): void {
     "batch-count",
   ) as HTMLSpanElement | null;
   if (batchToolbar && batchCount) {
-    const count = state.selectedKeys.size;
-    if (count >= 2) {
-      batchCount.textContent = `${count} items selected`;
+    const selectedFileCount = Array.from(state.selectedKeys).filter(
+      (key) => !key.startsWith("prefix:"),
+    ).length;
+    if (selectedFileCount >= 2) {
+      batchCount.textContent = `${selectedFileCount} file${selectedFileCount === 1 ? "" : "s"} selected`;
       batchToolbar.hidden = false;
     } else {
       batchToolbar.hidden = true;
@@ -94,7 +122,7 @@ export function handleRowClick(key: string, e: MouseEvent): void {
         state.selectedKeys.add(allKeys[i]);
       }
     }
-  } else if (e.ctrlKey || e.metaKey) {
+  } else if (hasAccelModifier(e)) {
     if (state.selectedKeys.has(key)) {
       state.selectedKeys.delete(key);
     } else {
@@ -305,9 +333,144 @@ export function renderBreadcrumb(): void {
   el.innerHTML = parts.join("");
 }
 
+interface NavEntry {
+  bucket: string;
+  prefix: string;
+}
+
+let navHistory: NavEntry[] = [];
+let navIndex = -1;
+let navSuppressPush = false;
+
+interface ListingSnapshot {
+  currentBucket: string;
+  currentPrefix: string;
+  objects: typeof state.objects;
+  prefixes: typeof state.prefixes;
+  continuationToken: string;
+  hasMore: boolean;
+}
+
+function captureListingSnapshot(): ListingSnapshot {
+  return {
+    currentBucket: state.currentBucket,
+    currentPrefix: state.currentPrefix,
+    objects: [...state.objects],
+    prefixes: [...state.prefixes],
+    continuationToken: state.continuationToken,
+    hasMore: state.hasMore,
+  };
+}
+
+function restoreListingSnapshot(snapshot: ListingSnapshot): void {
+  state.currentBucket = snapshot.currentBucket;
+  state.currentPrefix = snapshot.currentPrefix;
+  state.objects = [...snapshot.objects];
+  state.prefixes = [...snapshot.prefixes];
+  state.continuationToken = snapshot.continuationToken;
+  state.hasMore = snapshot.hasMore;
+}
+
+function resetSelectionForListingChange(): void {
+  state.selectedKeys.clear();
+  lastClickedKey = null;
+}
+
+function pushNav(bucket: string, prefix: string): void {
+  if (navSuppressPush) return;
+  navHistory = navHistory.slice(0, navIndex + 1);
+  navHistory.push({ bucket, prefix });
+  navIndex = navHistory.length - 1;
+  updateNavButtons();
+}
+
+function updateNavButtons(): void {
+  const backBtn = document.getElementById(
+    "nav-back",
+  ) as HTMLButtonElement | null;
+  const fwdBtn = document.getElementById(
+    "nav-forward",
+  ) as HTMLButtonElement | null;
+  if (backBtn) backBtn.disabled = navIndex <= 0;
+  if (fwdBtn) fwdBtn.disabled = navIndex >= navHistory.length - 1;
+}
+
+export function clearNavHistory(): void {
+  navHistory = [];
+  navIndex = -1;
+  navSuppressPush = false;
+  updateNavButtons();
+}
+
+export async function navigateBack(): Promise<void> {
+  if (navIndex <= 0) return;
+  const snapshot = captureListingSnapshot();
+  const prevIndex = navIndex;
+  navIndex--;
+  const entry = navHistory[navIndex];
+  navSuppressPush = true;
+  clearFilter();
+  resetSelectionForListingChange();
+
+  try {
+    if (entry.bucket !== state.currentBucket) {
+      await refreshObjects(entry.bucket, entry.prefix);
+      renderBucketList();
+    } else {
+      await refreshObjects(entry.bucket, entry.prefix);
+    }
+    renderObjectTable();
+    renderBreadcrumb();
+  } catch (err) {
+    navIndex = prevIndex;
+    restoreListingSnapshot(snapshot);
+    renderBucketList();
+    renderObjectTable();
+    renderBreadcrumb();
+    setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
+  } finally {
+    navSuppressPush = false;
+    updateNavButtons();
+  }
+}
+
+export async function navigateForward(): Promise<void> {
+  if (navIndex >= navHistory.length - 1) return;
+  const snapshot = captureListingSnapshot();
+  const prevIndex = navIndex;
+  navIndex++;
+  const entry = navHistory[navIndex];
+  navSuppressPush = true;
+  clearFilter();
+  resetSelectionForListingChange();
+
+  try {
+    if (entry.bucket !== state.currentBucket) {
+      await refreshObjects(entry.bucket, entry.prefix);
+      renderBucketList();
+    } else {
+      await refreshObjects(entry.bucket, entry.prefix);
+    }
+    renderObjectTable();
+    renderBreadcrumb();
+  } catch (err) {
+    navIndex = prevIndex;
+    restoreListingSnapshot(snapshot);
+    renderBucketList();
+    renderObjectTable();
+    renderBreadcrumb();
+    setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
+  } finally {
+    navSuppressPush = false;
+    updateNavButtons();
+  }
+}
+
 export async function navigateToFolder(prefix: string): Promise<void> {
   clearFilter();
+  resetSelectionForListingChange();
   await refreshObjects(state.currentBucket, prefix);
+  pushNav(state.currentBucket, prefix);
   renderObjectTable();
   renderBreadcrumb();
 }
@@ -322,8 +485,10 @@ export async function navigateUp(): Promise<void> {
 
 export async function selectBucket(name: string): Promise<void> {
   clearFilter();
+  resetSelectionForListingChange();
   state.currentPrefix = "";
   await refreshObjects(name, "");
+  pushNav(name, "");
   renderBucketList();
   renderObjectTable();
   renderBreadcrumb();

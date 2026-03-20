@@ -44,7 +44,6 @@ export interface TransferRunSummary {
   hadDownload: boolean;
 }
 
-const MAX_CONCURRENT = 3;
 const BROWSER_UPLOAD_BYTES_LIMIT = 16 * 1024 * 1024;
 let nextId = 1;
 let queue: TransferItem[] = [];
@@ -291,8 +290,9 @@ async function processQueue(): Promise<void> {
   let completedUploadThisRun = false;
   let completedDownloadThisRun = false;
 
+  const maxConcurrent = state.currentSettings.maxConcurrentTransfers;
   const workers: Promise<void>[] = [];
-  for (let i = 0; i < MAX_CONCURRENT; i++) {
+  for (let i = 0; i < maxConcurrent; i++) {
     workers.push(runWorker());
   }
 

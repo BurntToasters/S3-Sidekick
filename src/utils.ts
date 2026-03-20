@@ -13,6 +13,13 @@ export function $$<T extends HTMLElement = HTMLElement>(
   return el;
 }
 
+export function findClosest<T extends HTMLElement = HTMLElement>(
+  e: Event,
+  selector: string,
+): T | null {
+  return (e.target as HTMLElement).closest<T>(selector);
+}
+
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")

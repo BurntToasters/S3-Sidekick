@@ -8,7 +8,13 @@ import { closeLicensesModal } from "./licenses.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
 import { closeSettingsModal } from "./settings.ts";
 import { openPalette, closePalette, isPaletteOpen } from "./command-palette.ts";
-import { navigateUp, getSelectableKeys, updateSelectionUI } from "./browser.ts";
+import {
+  navigateUp,
+  navigateBack,
+  navigateForward,
+  getSelectableKeys,
+  updateSelectionUI,
+} from "./browser.ts";
 
 export interface KeyboardHandlers {
   setSidebarOpen: (open: boolean) => void;
@@ -20,7 +26,7 @@ export interface KeyboardHandlers {
   handleCreateFolder: () => Promise<void>;
 }
 
-function hasAccelModifier(e: KeyboardEvent): boolean {
+export function hasAccelModifier(e: MouseEvent | KeyboardEvent): boolean {
   if (state.platformName === "macos") {
     return e.metaKey && !e.ctrlKey;
   }
@@ -34,6 +40,11 @@ function isModalLayerActive(): boolean {
   return overlays.length > 0;
 }
 
+function isSupportOverlayVisible(): boolean {
+  const overlay = document.getElementById("support-overlay");
+  return !!overlay && !overlay.hasAttribute("hidden");
+}
+
 export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
@@ -41,6 +52,15 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
 
       if (isPaletteOpen()) {
         closePalette();
+        return;
+      }
+
+      if (isSupportOverlayVisible()) {
+        e.preventDefault();
+        const dismiss = document.getElementById(
+          "support-no",
+        ) as HTMLButtonElement | null;
+        dismiss?.click();
         return;
       }
 
@@ -82,9 +102,17 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
     }
 
     const inInput = isEditableElement(document.activeElement);
-    const modalOpen = isModalLayerActive();
+    const modalOpen = isModalLayerActive() || isSupportOverlayVisible();
     const accel = hasAccelModifier(e);
     const key = e.key.toLowerCase();
+
+    if (isPaletteOpen()) {
+      if (accel && key === "k") {
+        e.preventDefault();
+        closePalette();
+      }
+      return;
+    }
 
     if (e.key === "Delete" && state.selectedKeys.size > 0) {
       if (inInput || modalOpen) return;
@@ -109,6 +137,16 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
       if (e.key === "Backspace" || (e.altKey && e.key === "ArrowUp")) {
         e.preventDefault();
         void navigateUp();
+      }
+
+      if (e.altKey && e.key === "ArrowLeft") {
+        e.preventDefault();
+        void navigateBack();
+      }
+
+      if (e.altKey && e.key === "ArrowRight") {
+        e.preventDefault();
+        void navigateForward();
       }
     }
 

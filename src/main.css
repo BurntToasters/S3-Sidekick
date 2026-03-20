@@ -14,7 +14,9 @@
   --badge-off-text: #6b7280;
   --badge-on-bg: #dcfce7;
   --badge-on-text: #166534;
-  --font: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font:
+    "Segoe UI Variable", "Segoe UI", "Ubuntu", "Noto Sans", system-ui,
+    -apple-system, sans-serif;
   --mono: "Cascadia Code", "Consolas", "SF Mono", monospace;
   --radius: 6px;
   --radius-lg: 10px;
@@ -262,6 +264,31 @@ body.platform-linux {
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border-bottom: 1px solid var(--glass-border);
   flex-wrap: wrap;
+}
+
+.field-with-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+}
+
+.field-with-toggle .field {
+  flex: 1;
+  padding-right: 36px;
+}
+
+.field-toggle-btn {
+  position: absolute;
+  right: 4px;
+  padding: 2px;
+  opacity: 0.5;
+  background: transparent;
+  border: none;
+}
+
+.field-toggle-btn:hover {
+  opacity: 1;
 }
 
 .main-layout {
@@ -963,6 +990,14 @@ input[type="checkbox"]:indeterminate::after {
 .btn--danger:hover {
   background: var(--danger);
   color: #fff;
+}
+
+.bookmark-list-toolbar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
 }
 
 .bookmark-list {
@@ -2259,6 +2294,14 @@ body.modal-open .dialog-overlay.active {
   color: var(--text-secondary);
 }
 
+.palette__hint {
+  padding: 6px 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
 .palette__empty {
   padding: 20px 16px;
   text-align: center;
@@ -2336,6 +2379,15 @@ body.modal-open .dialog-overlay.active {
     margin-right: 8px;
   }
 
+  .batch-toolbar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .batch-toolbar__count {
+    width: 100%;
+  }
+
   .statusbar {
     padding: 4px 8px;
   }
@@ -2356,6 +2408,10 @@ body.modal-open .dialog-overlay.active {
   #conn-endpoint,
   #conn-access-key,
   #conn-secret-key {
+    grid-column: 1 / span 2;
+  }
+
+  .field-with-toggle {
     grid-column: 1 / span 2;
   }
 
@@ -2497,5 +2553,24 @@ body.modal-open .dialog-overlay.active {
     transition-duration: 0s !important;
     animation-duration: 0s !important;
     animation-iteration-count: 1 !important;
+  }
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  :root {
+    --glass-bg: rgba(255, 255, 255, 0.97);
+    --glass-bg-heavy: rgba(255, 255, 255, 0.99);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --glass-bg: rgba(30, 30, 30, 0.97);
+      --glass-bg-heavy: rgba(30, 30, 30, 0.99);
+    }
+  }
+
+  [data-theme="dark"] {
+    --glass-bg: rgba(30, 30, 30, 0.97);
+    --glass-bg-heavy: rgba(30, 30, 30, 0.99);
   }
 }
