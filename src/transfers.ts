@@ -101,16 +101,16 @@ export async function initTransferQueueUI(): Promise<void> {
   }
 }
 
-export async function disposeTransferQueueUI(): Promise<void> {
+export function disposeTransferQueueUI(): void {
   if (progressUnlisten) {
     const unlisten = progressUnlisten;
     progressUnlisten = null;
-    await unlisten();
+    unlisten();
   }
   if (downloadProgressUnlisten) {
     const unlisten = downloadProgressUnlisten;
     downloadProgressUnlisten = null;
-    await unlisten();
+    unlisten();
   }
   if (cancelClickHandler) {
     const list = document.getElementById("transfer-list");
@@ -454,7 +454,6 @@ function renderQueue(): void {
       const progressBar =
         t.totalBytes > 0 &&
         (t.status === "uploading" ||
-          t.status === "done" ||
           (t.status === "error" && t.progress > 0))
           ? `<div class="transfer-progress-wrap">` +
             `<div class="transfer-progress"><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
