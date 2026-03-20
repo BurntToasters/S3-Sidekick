@@ -35,6 +35,20 @@
       </header>
 
       <div class="connection-bar">
+        <select
+          id="conn-provider-preset"
+          class="field field--sm"
+          aria-label="Provider preset"
+          title="Choose a storage provider to prefill endpoint"
+        >
+          <option value="">Provider…</option>
+          <option value="aws">AWS S3</option>
+          <option value="do">DigitalOcean Spaces</option>
+          <option value="backblaze">Backblaze B2</option>
+          <option value="cloudflare">Cloudflare R2</option>
+          <option value="minio">MinIO (local)</option>
+          <option value="wasabi">Wasabi</option>
+        </select>
         <input
           id="conn-endpoint"
           class="field"
@@ -56,13 +70,32 @@
           placeholder="Access Key"
           aria-label="Access key"
         />
-        <input
-          id="conn-secret-key"
-          class="field"
-          type="password"
-          placeholder="Secret Key"
-          aria-label="Secret key"
-        />
+        <div class="field-with-toggle">
+          <input
+            id="conn-secret-key"
+            class="field"
+            type="password"
+            placeholder="Secret Key"
+            aria-label="Secret key"
+          />
+          <button
+            id="secret-key-toggle"
+            type="button"
+            class="btn btn--icon field-toggle-btn"
+            title="Show/hide secret key"
+            aria-label="Show secret key"
+            aria-pressed="false"
+          >
+            <img
+              id="secret-key-toggle-icon"
+              class="twemoji-icon"
+              src="/twemoji/1f441.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+          </button>
+        </div>
         <button
           id="bookmark-save-btn"
           class="btn btn--icon"
@@ -119,6 +152,36 @@
                 <img
                   class="twemoji-icon"
                   src="/twemoji/1f5c2.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+              </button>
+              <button
+                id="nav-back"
+                class="btn btn--icon"
+                title="Back (Alt+Left)"
+                aria-label="Navigate back"
+                disabled
+              >
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/2b05.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+              </button>
+              <button
+                id="nav-forward"
+                class="btn btn--icon"
+                title="Forward (Alt+Right)"
+                aria-label="Navigate forward"
+                disabled
+              >
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/27a1.svg"
                   alt=""
                   aria-hidden="true"
                   draggable="false"
@@ -201,10 +264,64 @@
             </div>
           </div>
 
-          <div id="empty-state" class="empty-state">
-            <p>Connect to an S3-compatible endpoint to browse objects.</p>
+          <div id="batch-toolbar" class="batch-toolbar" hidden>
+            <span id="batch-count" class="batch-toolbar__count"></span>
+            <div class="batch-toolbar__actions">
+              <button id="batch-download" class="btn btn--sm">
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/1f4e5.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+                Download
+              </button>
+              <button id="batch-delete" class="btn btn--sm btn--danger">
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/1f5d1.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+                Delete
+              </button>
+              <button id="batch-copy-urls" class="btn btn--sm btn--ghost">
+                Copy URLs
+              </button>
+              <button id="batch-deselect" class="btn btn--sm btn--ghost">
+                Deselect All
+              </button>
+            </div>
           </div>
 
+          <div id="empty-state" class="empty-state">
+            <img
+              class="twemoji-icon empty-state__icon"
+              src="/twemoji/2601.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+            <p class="empty-state__text">
+              Connect to an S3-compatible endpoint to browse objects.
+            </p>
+          </div>
+
+          <div id="drop-zone-overlay" class="drop-zone-overlay" hidden>
+            <div class="drop-zone-overlay__content">
+              <img
+                class="twemoji-icon drop-zone-overlay__icon"
+                src="/twemoji/1f4e4.svg"
+                alt=""
+                aria-hidden="true"
+                draggable="false"
+              />
+              <p class="drop-zone-overlay__text">Drop files to upload</p>
+              <p id="drop-zone-path" class="drop-zone-overlay__path"></p>
+            </div>
+          </div>
           <div id="object-panel" class="object-panel" style="display: none">
             <table class="object-table">
               <thead>
@@ -275,6 +392,137 @@
         </section>
       </div>
 
+      <div id="bottom-drawer" class="bottom-drawer" hidden>
+        <div
+          class="bottom-drawer__resize-handle"
+          role="separator"
+          aria-label="Resize bottom panel"
+          aria-orientation="horizontal"
+          tabindex="0"
+        ></div>
+        <div class="bottom-drawer__header">
+          <div class="bottom-drawer__tabs" role="tablist">
+            <button
+              class="bottom-drawer__tab bottom-drawer__tab--active"
+              id="drawer-tab-activity"
+              role="tab"
+              aria-selected="true"
+              aria-controls="drawer-panel-activity"
+              tabindex="0"
+            >
+              <img
+                class="twemoji-icon"
+                src="/twemoji/1f4cb.svg"
+                alt=""
+                aria-hidden="true"
+                draggable="false"
+              />
+              Activity
+              <span
+                id="drawer-activity-badge"
+                class="drawer-badge"
+                style="display: none"
+              ></span>
+            </button>
+            <button
+              class="bottom-drawer__tab"
+              id="drawer-tab-transfers"
+              role="tab"
+              aria-selected="false"
+              aria-controls="drawer-panel-transfers"
+              tabindex="-1"
+            >
+              <img
+                class="twemoji-icon"
+                src="/twemoji/1f4e5.svg"
+                alt=""
+                aria-hidden="true"
+                draggable="false"
+              />
+              Transfers
+              <span
+                id="drawer-transfer-badge"
+                class="drawer-badge"
+                style="display: none"
+              ></span>
+            </button>
+          </div>
+          <div class="bottom-drawer__actions">
+            <button id="drawer-clear" class="btn btn--ghost btn--sm">
+              Clear
+            </button>
+            <button
+              id="drawer-minimize"
+              class="btn btn--icon"
+              title="Minimize"
+              aria-label="Minimize panel"
+            >
+              <img
+                class="twemoji-icon"
+                src="/twemoji/2b07.svg"
+                alt=""
+                aria-hidden="true"
+                draggable="false"
+              />
+            </button>
+            <button
+              id="drawer-close"
+              class="btn btn--icon"
+              aria-label="Close panel"
+            >
+              <img
+                class="twemoji-icon"
+                src="/twemoji/274c.svg"
+                alt=""
+                aria-hidden="true"
+                draggable="false"
+              />
+            </button>
+          </div>
+        </div>
+        <div class="bottom-drawer__body">
+          <div
+            id="drawer-panel-activity"
+            class="bottom-drawer__panel"
+            role="tabpanel"
+            aria-labelledby="drawer-tab-activity"
+          >
+            <div id="activity-list" class="activity-list">
+              <div class="activity-empty">
+                <img
+                  class="twemoji-icon empty-state__icon"
+                  src="/twemoji/1f4cb.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+                <span>No activity yet</span>
+              </div>
+            </div>
+          </div>
+          <div
+            id="drawer-panel-transfers"
+            class="bottom-drawer__panel"
+            role="tabpanel"
+            aria-labelledby="drawer-tab-transfers"
+            hidden
+          >
+            <div id="transfer-list" class="transfer-list">
+              <div class="transfer-empty">
+                <img
+                  class="twemoji-icon empty-state__icon"
+                  src="/twemoji/1f4e5.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+                <span>No transfers</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <footer class="statusbar">
         <span id="status" role="status" aria-live="polite"></span>
         <div class="statusbar__right">
@@ -284,7 +532,7 @@
             class="btn btn--icon statusbar__transfer"
             title="Activity log"
             aria-label="Activity log"
-            aria-controls="activity-overlay"
+            aria-controls="bottom-drawer"
             aria-expanded="false"
           >
             <img
@@ -304,7 +552,7 @@
             class="btn btn--icon statusbar__transfer"
             title="Transfers"
             aria-label="Transfers"
-            aria-controls="transfer-overlay"
+            aria-controls="bottom-drawer"
             aria-expanded="false"
             hidden
           >
@@ -436,6 +684,31 @@
                 >
               </div>
             </div>
+            <div class="setting-item">
+              <label for="setting-presigned-expiration"
+                >Pre-signed URL expiration</label
+              >
+              <select id="setting-presigned-expiration" class="field field--sm">
+                <option value="300">5 minutes</option>
+                <option value="900">15 minutes</option>
+                <option value="3600">1 hour</option>
+                <option value="21600">6 hours</option>
+                <option value="43200">12 hours</option>
+                <option value="86400">24 hours</option>
+                <option value="604800">7 days</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-max-concurrent">Concurrent transfers</label>
+              <select id="setting-max-concurrent" class="field field--sm">
+                <option value="1">1 (sequential)</option>
+                <option value="2">2</option>
+                <option value="3">3 (default)</option>
+                <option value="5">5</option>
+                <option value="8">8</option>
+                <option value="10">10 (maximum)</option>
+              </select>
+            </div>
             <div class="setting-section">Danger Zone</div>
             <div class="setting-item">
               <label>Reset all settings to defaults</label>
@@ -451,6 +724,21 @@
             aria-labelledby="settings-tab-bookmarks"
             hidden
           >
+            <div class="bookmark-list-toolbar">
+              <button id="bookmarks-export-btn" class="btn btn--ghost btn--sm">
+                Export
+              </button>
+              <button id="bookmarks-import-btn" class="btn btn--ghost btn--sm">
+                Import
+              </button>
+              <input
+                id="bookmarks-import-input"
+                type="file"
+                accept=".json,application/json"
+                style="display: none"
+                aria-hidden="true"
+              />
+            </div>
             <ul id="bookmark-list" class="bookmark-list"></ul>
           </div>
 
@@ -717,94 +1005,6 @@
       </div>
     </div>
 
-    <div id="transfer-overlay" class="transfer-popup" hidden>
-      <div class="transfer-popup__header">
-        <span>Transfers</span>
-        <div class="transfer-popup__actions">
-          <button
-            id="transfer-collapse"
-            type="button"
-            class="btn btn--icon"
-            title="Collapse transfers"
-            aria-label="Collapse transfers"
-            aria-controls="transfer-list"
-            aria-expanded="true"
-          >
-            <img
-              class="twemoji-icon"
-              src="/twemoji/2b07.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
-          </button>
-          <button id="transfer-clear" class="btn btn--ghost btn--sm">
-            Clear done
-          </button>
-          <button
-            id="transfer-close"
-            class="btn btn--icon"
-            aria-label="Close transfers"
-          >
-            <img
-              class="twemoji-icon"
-              src="/twemoji/274c.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
-          </button>
-        </div>
-      </div>
-      <div id="transfer-list" class="transfer-list">
-        <div class="transfer-empty">No transfers</div>
-      </div>
-    </div>
-
-    <div id="activity-overlay" class="activity-popup" hidden>
-      <div class="activity-popup__header">
-        <span>Activity</span>
-        <div class="activity-popup__actions">
-          <button
-            id="activity-collapse"
-            type="button"
-            class="btn btn--icon"
-            title="Collapse activity"
-            aria-label="Collapse activity"
-            aria-controls="activity-list"
-            aria-expanded="true"
-          >
-            <img
-              class="twemoji-icon"
-              src="/twemoji/2b07.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
-          </button>
-          <button id="activity-clear" class="btn btn--ghost btn--sm">
-            Clear
-          </button>
-          <button
-            id="activity-close"
-            class="btn btn--icon"
-            aria-label="Close activity log"
-          >
-            <img
-              class="twemoji-icon"
-              src="/twemoji/274c.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
-          </button>
-        </div>
-      </div>
-      <div id="activity-list" class="activity-list">
-        <div class="activity-empty">No activity yet</div>
-      </div>
-    </div>
-
     <div
       id="preview-overlay"
       class="modal-overlay"
@@ -826,6 +1026,70 @@
           </button>
         </div>
         <div id="preview-body" class="modal__body preview-body"></div>
+      </div>
+    </div>
+
+    <div id="palette-overlay" class="palette-overlay" hidden>
+      <div class="palette">
+        <div class="palette__input-wrap">
+          <img
+            class="twemoji-icon palette__search-icon"
+            src="/twemoji/1f50d.svg"
+            alt=""
+            aria-hidden="true"
+            draggable="false"
+          />
+          <input
+            id="palette-input"
+            class="palette__input"
+            type="text"
+            placeholder="Type a command..."
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <div id="palette-results" class="palette__results"></div>
+      </div>
+    </div>
+
+    <div
+      id="support-overlay"
+      class="support-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="support-title"
+      aria-describedby="support-body"
+      hidden
+    >
+      <div class="support-card">
+        <div class="support-card__icon">
+          <img
+            class="twemoji-icon support-card__twemoji"
+            src="/twemoji/1f9e1.svg"
+            alt=""
+            aria-hidden="true"
+            draggable="false"
+          />
+        </div>
+        <h2 id="support-title" class="support-card__title">
+          Enjoying S3 Sidekick?
+        </h2>
+        <p id="support-body" class="support-card__body">
+          S3 Sidekick is free and open source. If it's been useful to you,
+          consider supporting its development &mdash; it really helps!
+        </p>
+        <div class="support-card__actions">
+          <button id="support-no" class="btn btn--ghost">No Thanks</button>
+          <button id="support-yes" class="btn btn--primary">
+            <img
+              class="twemoji-icon"
+              src="/twemoji/2764.svg"
+              alt="❤️"
+              draggable="false"
+            />
+            Yes, I'd love to!
+          </button>
+        </div>
       </div>
     </div>
 

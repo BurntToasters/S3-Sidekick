@@ -25,16 +25,19 @@ export function showContextMenu(
 
   const menu = document.createElement("div");
   menu.className = "context-menu";
+  menu.setAttribute("role", "menu");
 
   for (const item of items) {
     if (item.separator) {
       const sep = document.createElement("div");
       sep.className = "context-menu__sep";
+      sep.setAttribute("role", "separator");
       menu.appendChild(sep);
       continue;
     }
     const btn = document.createElement("button");
     btn.className = "context-menu__item";
+    btn.setAttribute("role", "menuitem");
     btn.textContent = item.label;
     btn.disabled = !!item.disabled;
     btn.addEventListener("click", (e) => {

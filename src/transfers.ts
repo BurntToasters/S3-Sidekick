@@ -1,8 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { $, escapeHtml, twemojiIcon } from "./utils.ts";
+import { escapeHtml, twemojiIcon } from "./utils.ts";
 import { state } from "./state.ts";
 import { logActivity } from "./activity-log.ts";
+import {
+  openDrawer,
+  closeDrawer,
+  isDrawerOpen,
+  getActiveTab,
+  toggleDrawer,
+} from "./bottom-drawer.ts";
 
 export interface TransferItem {
   id: number;
@@ -37,22 +44,19 @@ export interface TransferRunSummary {
   hadDownload: boolean;
 }
 
-const MAX_CONCURRENT = 3;
 const BROWSER_UPLOAD_BYTES_LIMIT = 16 * 1024 * 1024;
 let nextId = 1;
 let queue: TransferItem[] = [];
 let processing = false;
 let onComplete: ((summary: TransferRunSummary) => void) | null = null;
-let collapsed = false;
 let progressUnlisten: UnlistenFn | null = null;
 let downloadProgressUnlisten: UnlistenFn | null = null;
 let renderQueued = false;
+let cancelClickHandler: ((e: Event) => void) | null = null;
 
 export async function initTransferQueueUI(): Promise<void> {
   syncTransferVisibility();
-  syncCollapseState();
   updateBadge();
-  updateClearButton();
 
   progressUnlisten ??= await listen<{
     transfer_id: number;
@@ -83,9 +87,8 @@ export async function initTransferQueueUI(): Promise<void> {
   });
 
   const list = document.getElementById("transfer-list");
-  if (list && !list.dataset.cancelBound) {
-    list.dataset.cancelBound = "1";
-    list.addEventListener("click", (e) => {
+  if (list && !cancelClickHandler) {
+    cancelClickHandler = (e: Event) => {
       const btn = (e.target as HTMLElement).closest(".transfer-cancel");
       if (!btn) return;
       const row = btn.closest(".transfer-item");
@@ -93,7 +96,8 @@ export async function initTransferQueueUI(): Promise<void> {
       const id = Number((row as HTMLElement).dataset.id);
       if (!id) return;
       void cancelTransferItem(id);
-    });
+    };
+    list.addEventListener("click", cancelClickHandler);
   }
 }
 
@@ -108,6 +112,11 @@ export async function disposeTransferQueueUI(): Promise<void> {
     downloadProgressUnlisten = null;
     await unlisten();
   }
+  if (cancelClickHandler) {
+    const list = document.getElementById("transfer-list");
+    if (list) list.removeEventListener("click", cancelClickHandler);
+    cancelClickHandler = null;
+  }
 }
 
 export function setTransferCompleteHandler(
@@ -118,31 +127,18 @@ export function setTransferCompleteHandler(
 
 export function showTransferQueue(): void {
   if (queue.length === 0) return;
-  $("transfer-overlay").hidden = false;
-  syncOverlayToggleState();
-  syncCollapseState();
+  openDrawer("transfers");
   renderQueue();
 }
 
 export function hideTransferQueue(): void {
-  $("transfer-overlay").hidden = true;
-  syncOverlayToggleState();
-}
-
-export function toggleTransferQueue(): void {
-  if (queue.length === 0) return;
-  const overlay = $("transfer-overlay");
-  overlay.hidden = !overlay.hidden;
-  syncOverlayToggleState();
-  if (!overlay.hidden) {
-    syncCollapseState();
-    renderQueue();
+  if (isDrawerOpen() && getActiveTab() === "transfers") {
+    closeDrawer();
   }
 }
 
-export function toggleTransferCollapsed(): void {
-  collapsed = !collapsed;
-  syncCollapseState();
+export function toggleTransferQueue(): void {
+  toggleDrawer("transfers");
 }
 
 export function clearCompletedTransfers(): void {
@@ -190,7 +186,9 @@ export function enqueueFiles(
   }
 
   showTransferQueue();
-  void processQueue();
+  void processQueue().catch((err) =>
+    logActivity(`Transfer processing error: ${String(err)}`, "error"),
+  );
 }
 
 export function enqueuePaths(paths: string[], targetPrefix: string): void {
@@ -221,7 +219,9 @@ export function enqueuePaths(paths: string[], targetPrefix: string): void {
   }
 
   showTransferQueue();
-  void processQueue();
+  void processQueue().catch((err) =>
+    logActivity(`Transfer processing error: ${String(err)}`, "error"),
+  );
 }
 
 export function enqueueFolderEntries(
@@ -256,7 +256,9 @@ export function enqueueFolderEntries(
   }
 
   showTransferQueue();
-  void processQueue();
+  void processQueue().catch((err) =>
+    logActivity(`Transfer processing error: ${String(err)}`, "error"),
+  );
 }
 
 export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
@@ -283,7 +285,9 @@ export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
   }
 
   showTransferQueue();
-  void processQueue();
+  void processQueue().catch((err) =>
+    logActivity(`Transfer processing error: ${String(err)}`, "error"),
+  );
 }
 
 async function processQueue(): Promise<void> {
@@ -292,8 +296,9 @@ async function processQueue(): Promise<void> {
   let completedUploadThisRun = false;
   let completedDownloadThisRun = false;
 
+  const maxConcurrent = state.currentSettings.maxConcurrentTransfers;
   const workers: Promise<void>[] = [];
-  for (let i = 0; i < MAX_CONCURRENT; i++) {
+  for (let i = 0; i < maxConcurrent; i++) {
     workers.push(runWorker());
   }
 
@@ -405,9 +410,12 @@ function renderQueue(): void {
   if (!list) return;
 
   if (queue.length === 0) {
-    list.innerHTML = `<div class="transfer-empty">No transfers</div>`;
+    list.innerHTML =
+      `<div class="transfer-empty">` +
+      `<img class="twemoji-icon empty-state__icon" src="/twemoji/1f4e5.svg" alt="" aria-hidden="true" draggable="false" />` +
+      `<span>No transfers</span>` +
+      `</div>`;
     updateBadge();
-    updateClearButton();
     syncTransferVisibility();
     return;
   }
@@ -490,7 +498,6 @@ function renderQueue(): void {
     .join("");
 
   updateBadge();
-  updateClearButton();
   syncTransferVisibility();
 }
 
@@ -503,23 +510,14 @@ function updateBadge(): void {
     badge.textContent = active > 0 ? String(active) : "";
     badge.style.display = active > 0 ? "" : "none";
   }
-}
-
-function updateClearButton(): void {
-  const button = document.getElementById(
-    "transfer-clear",
-  ) as HTMLButtonElement | null;
-  if (!button) return;
-  const hasCompleted = queue.some(
-    (t) => t.status === "done" || t.status === "error",
-  );
-  button.disabled = !hasCompleted;
+  const drawerBadge = document.getElementById("drawer-transfer-badge");
+  if (drawerBadge) {
+    drawerBadge.textContent = active > 0 ? String(active) : "";
+    drawerBadge.style.display = active > 0 ? "" : "none";
+  }
 }
 
 function syncTransferVisibility(): void {
-  const overlay = document.getElementById(
-    "transfer-overlay",
-  ) as HTMLDivElement | null;
   const toggle = document.getElementById(
     "transfer-toggle",
   ) as HTMLButtonElement | null;
@@ -531,49 +529,6 @@ function syncTransferVisibility(): void {
       toggle.setAttribute("aria-expanded", "false");
     }
   }
-
-  if (overlay && !shouldShow) {
-    overlay.hidden = true;
-  }
-  syncOverlayToggleState();
-}
-
-function syncCollapseState(): void {
-  const overlay = document.getElementById("transfer-overlay");
-  const collapseButton = document.getElementById(
-    "transfer-collapse",
-  ) as HTMLButtonElement | null;
-  if (!overlay) return;
-
-  overlay.classList.toggle("transfer-popup--collapsed", collapsed);
-  if (!collapseButton) return;
-
-  if (collapsed) {
-    collapseButton.innerHTML = twemojiIcon("2b06", {
-      className: "twemoji-icon",
-      decorative: true,
-    });
-    collapseButton.title = "Expand transfers";
-    collapseButton.setAttribute("aria-label", "Expand transfers");
-    collapseButton.setAttribute("aria-expanded", "false");
-  } else {
-    collapseButton.innerHTML = twemojiIcon("2b07", {
-      className: "twemoji-icon",
-      decorative: true,
-    });
-    collapseButton.title = "Collapse transfers";
-    collapseButton.setAttribute("aria-label", "Collapse transfers");
-    collapseButton.setAttribute("aria-expanded", "true");
-  }
-}
-
-function syncOverlayToggleState(): void {
-  const overlay = document.getElementById("transfer-overlay");
-  const toggle = document.getElementById(
-    "transfer-toggle",
-  ) as HTMLButtonElement | null;
-  if (!overlay || !toggle || toggle.hidden) return;
-  toggle.setAttribute("aria-expanded", String(!overlay.hidden));
 }
 
 async function cancelTransferItem(id: number): Promise<void> {

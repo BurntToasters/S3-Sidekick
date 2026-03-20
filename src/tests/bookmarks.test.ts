@@ -247,3 +247,194 @@ describe("setBookmarkChangeHandler", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("bookmark import/export/list rendering", () => {
+  it("exports bookmarks and validates import payloads", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    expect(JSON.parse(bookmarks.exportBookmarksJson())).toEqual([
+      alphaBookmark,
+    ]);
+
+    await expect(bookmarks.importBookmarksJson("{bad-json")).resolves.toEqual({
+      imported: 0,
+      skipped: 0,
+      error: "Invalid JSON",
+    });
+    await expect(
+      bookmarks.importBookmarksJson('{"not":"array"}'),
+    ).resolves.toEqual({
+      imported: 0,
+      skipped: 0,
+      error: "Expected a JSON array",
+    });
+    await expect(
+      bookmarks.importBookmarksJson('[{"bad":"shape"}]'),
+    ).resolves.toEqual({
+      imported: 0,
+      skipped: 1,
+    });
+
+    const handler = vi.fn();
+    bookmarks.setBookmarkChangeHandler(handler);
+    await expect(
+      bookmarks.importBookmarksJson(
+        JSON.stringify([alphaBookmark, betaBookmark, { nope: true }]),
+      ),
+    ).resolves.toEqual({
+      imported: 1,
+      skipped: 1,
+    });
+    expect(bookmarks.getBookmarks()).toEqual([alphaBookmark, betaBookmark]);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders bookmark list and routes select/delete callbacks", async () => {
+    standardMock([alphaBookmark, betaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const list = document.createElement("ul");
+    const onSelect = vi.fn();
+    const onDelete = vi.fn();
+    bookmarks.renderBookmarkList(list, onSelect, onDelete);
+
+    const second = list.querySelector(
+      '.bookmark-item[data-index="1"]',
+    ) as HTMLLIElement;
+    second.click();
+    expect(onSelect).toHaveBeenCalledWith(betaBookmark);
+
+    const deleteBtn = list.querySelector(
+      '[data-delete="0"]',
+    ) as HTMLButtonElement;
+    deleteBtn.click();
+    expect(onDelete).toHaveBeenCalledWith(0);
+
+    standardMock([]);
+    const bookmarksEmpty = await loadBookmarksModule();
+    await bookmarksEmpty.loadBookmarks();
+    const emptyList = document.createElement("ul");
+    bookmarksEmpty.renderBookmarkList(
+      emptyList,
+      () => {},
+      () => {},
+    );
+    expect(emptyList.textContent).toContain("No bookmarks saved");
+  });
+
+  it("ignores removeBookmark when index is out of range", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockClear();
+
+    await bookmarks.removeBookmark(-1);
+    await bookmarks.removeBookmark(5);
+
+    expect(commandCalls("save_settings")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
+  });
+
+  it("handles invalid primary and backup bookmark payloads", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "load_settings") return "[]";
+      if (command === "load_bookmarks_backup") return '{"not":"array"}';
+      if (command === "save_bookmarks_backup") return undefined;
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    expect(bookmarks.getBookmarks()).toEqual([]);
+
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "load_settings") throw new Error("settings unavailable");
+      if (command === "load_bookmarks_backup") return '{"not":"array"}';
+      if (command === "save_bookmarks_backup") return undefined;
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+    await bookmarks.loadBookmarks();
+    expect(bookmarks.getBookmarks()).toEqual([]);
+  });
+
+  it("rejects duplicate addBookmark and duplicate-only import without persisting", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    await expect(bookmarks.addBookmark(alphaBookmark)).resolves.toBe(true);
+    mockInvoke.mockClear();
+    await expect(bookmarks.addBookmark(alphaBookmark)).resolves.toBe(false);
+    expect(commandCalls("save_settings")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
+
+    await expect(
+      bookmarks.importBookmarksJson(JSON.stringify([alphaBookmark])),
+    ).resolves.toEqual({
+      imported: 0,
+      skipped: 1,
+    });
+    expect(commandCalls("save_settings")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
+  });
+
+  it("renders bookmark entries without region suffix when region is empty", async () => {
+    standardMock([
+      {
+        ...alphaBookmark,
+        region: "",
+      },
+    ]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const bar = document.createElement("div");
+    bookmarks.renderBookmarkBar(bar, () => {});
+    expect(bar.querySelector(".bookmark-chip__region")).toBeNull();
+
+    const list = document.createElement("ul");
+    bookmarks.renderBookmarkList(
+      list,
+      () => {},
+      () => {},
+    );
+    expect(list.textContent).toContain(alphaBookmark.endpoint);
+    expect(list.textContent).not.toContain("()");
+  });
+
+  it("ignores invalid bookmark list click targets and indices", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const list = document.createElement("ul");
+    const onSelect = vi.fn();
+    const onDelete = vi.fn();
+    bookmarks.renderBookmarkList(list, onSelect, onDelete);
+
+    const invalidDelete = document.createElement("button");
+    invalidDelete.dataset.delete = "-1";
+    list.appendChild(invalidDelete);
+    invalidDelete.click();
+
+    const invalidDeleteNaN = document.createElement("button");
+    invalidDeleteNaN.dataset.delete = "abc";
+    list.appendChild(invalidDeleteNaN);
+    invalidDeleteNaN.click();
+
+    const invalidItem = document.createElement("li");
+    invalidItem.className = "bookmark-item";
+    invalidItem.dataset.index = "999";
+    list.appendChild(invalidItem);
+    invalidItem.click();
+
+    list.click();
+
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+});

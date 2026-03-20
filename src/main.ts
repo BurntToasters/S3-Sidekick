@@ -9,6 +9,9 @@ import {
   resetSettings,
   setBookmarkSelectHandler,
   switchSettingsTab,
+  incrementLaunchCount,
+  markSupportPromptDismissed,
+  isSupportPromptDismissed,
 } from "./settings.ts";
 import {
   connect,
@@ -30,7 +33,13 @@ import {
   handleSelectAll,
   clearSelection,
   updateSelectionUI,
+  getSelectableKeys,
   toggleSort,
+  navigateUp,
+  navigateBack,
+  navigateForward,
+  clearNavHistory,
+  pruneStaleSelection,
 } from "./browser.ts";
 import {
   initUpdater,
@@ -58,26 +67,30 @@ import {
 } from "./info-panel.ts";
 import {
   toggleTransferQueue,
-  toggleTransferCollapsed,
-  hideTransferQueue,
   clearCompletedTransfers,
   enqueuePaths,
   setTransferCompleteHandler,
   initTransferQueueUI,
   enqueueFiles,
   disposeTransferQueueUI,
+  enqueueDownloads,
+  enqueueFolderEntries,
 } from "./transfers.ts";
-import * as transferQueue from "./transfers.ts";
-import { basename, formatSize } from "./utils.ts";
+import {
+  basename,
+  formatSize,
+  splitNameExt,
+  joinPath,
+  friendlyError,
+} from "./utils.ts";
 import { wireKeyboardShortcuts } from "./keyboard.ts";
 import { canPreview, openPreview, closePreview } from "./preview.ts";
 import {
   logActivity,
   toggleActivityLog,
-  toggleActivityCollapsed,
-  hideActivityLog,
   clearActivityLog,
 } from "./activity-log.ts";
+import { initDrawer, getActiveTab } from "./bottom-drawer.ts";
 import {
   ensureSecurityReady,
   handleSecurityChangePassword,
@@ -86,7 +99,12 @@ import {
   handleLockTimeoutChange,
   handleBiometricToggle,
 } from "./security.ts";
-import { showConfirm, showPrompt } from "./dialogs.ts";
+import { showConfirm, showPrompt, isDialogActive } from "./dialogs.ts";
+import {
+  initPalette,
+  registerCommands,
+  isPaletteOpen,
+} from "./command-palette.ts";
 
 interface LocalFolderFileEntry {
   file_path: string;
@@ -98,18 +116,6 @@ interface DownloadQueueEntry {
   bucket: string;
   key: string;
   destination: string;
-}
-
-interface TransfersExtensionAPI {
-  enqueueDownloads?: (entries: DownloadQueueEntry[]) => void;
-  enqueueFolderEntries?: (
-    entries: LocalFolderFileEntry[],
-    targetPrefix: string,
-  ) => void;
-  enqueueFolderPaths?: (
-    entries: LocalFolderFileEntry[],
-    targetPrefix: string,
-  ) => void;
 }
 
 const SIDEBAR_MIN = 180;
@@ -167,14 +173,8 @@ function setConnectionUI(connected: boolean): void {
   }
 }
 
-function transferExtensions(): TransfersExtensionAPI {
-  return transferQueue as unknown as TransfersExtensionAPI;
-}
-
 function enqueueDownloadTransfers(entries: DownloadQueueEntry[]): boolean {
-  const ext = transferExtensions();
-  if (!ext.enqueueDownloads) return false;
-  ext.enqueueDownloads(entries);
+  enqueueDownloads(entries);
   return true;
 }
 
@@ -182,16 +182,8 @@ function enqueueFolderTransfers(
   entries: LocalFolderFileEntry[],
   targetPrefix: string,
 ): boolean {
-  const ext = transferExtensions();
-  if (ext.enqueueFolderEntries) {
-    ext.enqueueFolderEntries(entries, targetPrefix);
-    return true;
-  }
-  if (ext.enqueueFolderPaths) {
-    ext.enqueueFolderPaths(entries, targetPrefix);
-    return true;
-  }
-  return false;
+  enqueueFolderEntries(entries, targetPrefix);
+  return true;
 }
 
 function applyPlatformClass(): void {
@@ -260,29 +252,9 @@ function applySidebarWidth(width: number): void {
   document.documentElement.style.setProperty("--sidebar-width", px);
 }
 
-function splitNameExt(fileName: string): { stem: string; ext: string } {
-  const idx = fileName.lastIndexOf(".");
-  if (idx <= 0 || idx === fileName.length - 1) {
-    return { stem: fileName, ext: "" };
-  }
-  return { stem: fileName.slice(0, idx), ext: fileName.slice(idx) };
-}
-
-function pathSeparator(): string {
-  if (state.platformName === "windows") return "\\";
-  return "/";
-}
-
-function joinPath(base: string, leaf: string): string {
-  const sep = pathSeparator();
-  const trimmed =
-    base.endsWith("\\") || base.endsWith("/") ? base.slice(0, -1) : base;
-  return `${trimmed}${sep}${leaf}`;
-}
-
 function getActiveModalOverlay(): HTMLElement | null {
   const overlays = document.querySelectorAll<HTMLElement>(
-    ".modal-overlay.active, .dialog-overlay.active",
+    ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden])",
   );
   return overlays.length > 0 ? overlays[overlays.length - 1] : null;
 }
@@ -454,7 +426,7 @@ async function uniqueDownloadEntries(
     entries.push({
       bucket: state.currentBucket,
       key,
-      destination: joinPath(destinationDir, candidate),
+      destination: joinPath(destinationDir, candidate, state.platformName),
     });
   }
 
@@ -498,6 +470,10 @@ async function handleConnect(): Promise<void> {
     setStatus("Endpoint, access key, and secret key are required.");
     return;
   }
+  if (!/^https?:\/\/.+/i.test(endpoint)) {
+    setStatus("Endpoint must start with http:// or https://.");
+    return;
+  }
 
   dom.connectBtn.disabled = true;
   setStatus("Connecting...");
@@ -529,16 +505,28 @@ async function handleConnect(): Promise<void> {
       await selectBucket(state.buckets[0].name);
     }
   } catch (e) {
-    setStatus(`Connection failed: ${e}`);
+    setStatus(`Connection failed: ${friendlyError(e)}`);
     setConnectionUI(false);
-    logActivity(`Connection failed: ${String(e)}`, "error");
+    logActivity(`Connection failed: ${friendlyError(e)}`, "error");
   } finally {
     dom.connectBtn.disabled = false;
   }
 }
 
 async function handleDisconnect(): Promise<void> {
+  if (filterInputDebounce !== undefined) {
+    clearTimeout(filterInputDebounce);
+    filterInputDebounce = undefined;
+  }
+  state.filterText = "";
+  const filterInput = document.getElementById(
+    "filter-input",
+  ) as HTMLInputElement | null;
+  if (filterInput) filterInput.value = "";
+
   await disconnect();
+  clearNavHistory();
+  clearSelection();
   setConnectionUI(false);
   showEmptyState();
   setStatus("Disconnected.", 5000);
@@ -620,8 +608,8 @@ async function handleDelete(): Promise<void> {
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
-    setStatus(`Delete failed (${keys.length} item(s)): ${err}`);
-    logActivity(`Delete failed: ${String(err)}`, "error");
+    setStatus(`Delete failed (${keys.length} item(s)): ${friendlyError(err)}`);
+    logActivity(`Delete failed: ${friendlyError(err)}`, "error");
   }
 }
 
@@ -677,9 +665,11 @@ async function handleDownload(): Promise<void> {
         "success",
       );
     } catch (err) {
-      setStatus(`Download failed for ${basename(entry.key)}: ${err}`);
+      setStatus(
+        `Download failed for ${basename(entry.key)}: ${friendlyError(err)}`,
+      );
       logActivity(
-        `Download failed for ${basename(entry.key)}: ${String(err)}`,
+        `Download failed for ${basename(entry.key)}: ${friendlyError(err)}`,
         "error",
       );
     }
@@ -691,23 +681,41 @@ async function handleCopyUrl(): Promise<void> {
   if (keys.length === 0) return;
 
   try {
-    const url = await invoke<string>("build_object_url", {
-      bucket: state.currentBucket,
-      key: keys[0],
-    });
-    await navigator.clipboard.writeText(url);
-    setStatus("URL copied to clipboard.", 5000);
-    logActivity(`Copied URL for ${basename(keys[0])}.`, "success");
+    const urls = await Promise.all(
+      keys.map((key) =>
+        invoke<string>("build_object_url", {
+          bucket: state.currentBucket,
+          key,
+        }),
+      ),
+    );
+    await navigator.clipboard.writeText(urls.join("\n"));
+    if (keys.length === 1) {
+      setStatus("URL copied to clipboard.", 5000);
+      logActivity(`Copied URL for ${basename(keys[0])}.`, "success");
+    } else {
+      setStatus(`Copied ${keys.length} URLs to clipboard.`, 5000);
+      logActivity(`Copied ${keys.length} object URLs.`, "success");
+    }
   } catch (err) {
-    setStatus(`Failed to copy URL: ${err}`);
-    logActivity(`Failed to copy URL: ${String(err)}`, "error");
+    setStatus(`Failed to copy URL: ${friendlyError(err)}`);
+    logActivity(`Failed to copy URL: ${friendlyError(err)}`, "error");
   }
+}
+
+function formatExpiration(seconds: number): string {
+  const withUnit = (value: number, unit: "minute" | "hour" | "day") =>
+    `${value} ${unit}${value === 1 ? "" : "s"}`;
+  if (seconds < 3600)
+    return withUnit(Math.max(1, Math.round(seconds / 60)), "minute");
+  if (seconds < 86400) return withUnit(Math.round(seconds / 3600), "hour");
+  return withUnit(Math.round(seconds / 86400), "day");
 }
 
 async function handleCopyPresignedUrl(): Promise<void> {
   const keys = getSelectedFileKeys();
   if (keys.length !== 1) return;
-  const expiresInSecs = 3600;
+  const expiresInSecs = state.currentSettings.presignedUrlExpiration;
 
   try {
     const url = await invoke<string>("generate_presigned_url", {
@@ -716,11 +724,17 @@ async function handleCopyPresignedUrl(): Promise<void> {
       expiresInSecs,
     });
     await navigator.clipboard.writeText(url);
-    setStatus("Pre-signed URL copied (expires in 1 hour).", 5000);
+    setStatus(
+      `Pre-signed URL copied (expires in ${formatExpiration(expiresInSecs)}).`,
+      5000,
+    );
     logActivity(`Copied pre-signed URL for ${basename(keys[0])}.`, "success");
   } catch (err) {
-    setStatus(`Failed to create pre-signed URL: ${err}`);
-    logActivity(`Failed to create pre-signed URL: ${String(err)}`, "error");
+    setStatus(`Failed to create pre-signed URL: ${friendlyError(err)}`);
+    logActivity(
+      `Failed to create pre-signed URL: ${friendlyError(err)}`,
+      "error",
+    );
   }
 }
 
@@ -751,8 +765,8 @@ async function handleRename(): Promise<void> {
     await refreshObjects(state.currentBucket, state.currentPrefix);
     renderObjectTable();
   } catch (err) {
-    setStatus(`Rename failed for "${oldName}": ${err}`);
-    logActivity(`Rename failed for ${oldName}: ${String(err)}`, "error");
+    setStatus(`Rename failed for "${oldName}": ${friendlyError(err)}`);
+    logActivity(`Rename failed for ${oldName}: ${friendlyError(err)}`, "error");
   }
 }
 
@@ -767,7 +781,17 @@ async function handleCreateFolder(): Promise<void> {
   });
   if (!name) return;
 
-  const key = state.currentPrefix + name;
+  const trimmed = name.trim();
+  if (!trimmed) {
+    setStatus("Folder name cannot be empty.");
+    return;
+  }
+  if (trimmed.includes("/")) {
+    setStatus('Folder name cannot contain "/".');
+    return;
+  }
+
+  const key = state.currentPrefix + trimmed;
 
   try {
     setStatus("Creating folder...");
@@ -775,13 +799,16 @@ async function handleCreateFolder(): Promise<void> {
       bucket: state.currentBucket,
       key,
     });
-    setStatus(`Created folder "${name}".`, 5000);
-    logActivity(`Created folder ${name}.`, "success");
+    setStatus(`Created folder "${trimmed}".`, 5000);
+    logActivity(`Created folder ${trimmed}.`, "success");
     await refreshObjects(state.currentBucket, state.currentPrefix);
     renderObjectTable();
   } catch (err) {
-    setStatus(`Failed to create folder: ${err}`);
-    logActivity(`Failed to create folder ${name}: ${String(err)}`, "error");
+    setStatus(`Failed to create folder: ${friendlyError(err)}`);
+    logActivity(
+      `Failed to create folder ${trimmed}: ${friendlyError(err)}`,
+      "error",
+    );
   }
 }
 
@@ -794,7 +821,7 @@ async function handleRefresh(): Promise<void> {
     renderBreadcrumb();
     setStatus("");
   } catch (err) {
-    setStatus(`Refresh failed: ${err}`);
+    setStatus(`Refresh failed: ${friendlyError(err)}`);
   }
 }
 
@@ -806,8 +833,8 @@ async function handleRefreshBuckets(): Promise<void> {
     renderBucketList();
     setStatus("Buckets refreshed.", 3000);
   } catch (err) {
-    setStatus(`Failed to refresh buckets: ${err}`);
-    logActivity(`Failed to refresh buckets: ${String(err)}`, "error");
+    setStatus(`Failed to refresh buckets: ${friendlyError(err)}`);
+    logActivity(`Failed to refresh buckets: ${friendlyError(err)}`, "error");
   }
 }
 
@@ -878,8 +905,8 @@ async function handleUploadFolderButton(): Promise<void> {
       5000,
     );
   } catch (err) {
-    setStatus(`Folder upload failed: ${err}`);
-    logActivity(`Folder upload failed: ${String(err)}`, "error");
+    setStatus(`Folder upload failed: ${friendlyError(err)}`);
+    logActivity(`Folder upload failed: ${friendlyError(err)}`, "error");
   }
 }
 
@@ -890,18 +917,13 @@ async function queueDroppedPaths(
   const cleaned = paths.filter((path) => path.trim().length > 0);
   if (cleaned.length === 0) return;
 
-  const ext = transferExtensions();
-  if (!ext.enqueueFolderEntries && !ext.enqueueFolderPaths) {
-    enqueuePaths(cleaned, targetPrefix);
-    return;
-  }
-
   try {
     const entries = await invoke<LocalFolderFileEntry[]>(
       "list_local_files_recursive",
       { roots: cleaned },
     );
-    if (entries.length > 0 && enqueueFolderTransfers(entries, targetPrefix)) {
+    if (entries.length > 0) {
+      enqueueFolderTransfers(entries, targetPrefix);
       return;
     }
   } catch (err) {
@@ -939,9 +961,11 @@ function handleBucketContextMenu(e: MouseEvent): void {
         void selectBucket(bucket)
           .then(() => closeSidebarOnMobile())
           .catch((err) => {
-            setStatus(`Failed to open bucket "${bucket}": ${err}`);
+            setStatus(
+              `Failed to open bucket "${bucket}": ${friendlyError(err)}`,
+            );
             logActivity(
-              `Failed to open bucket "${bucket}": ${String(err)}`,
+              `Failed to open bucket "${bucket}": ${friendlyError(err)}`,
               "error",
             );
           });
@@ -1164,6 +1188,66 @@ function wireEvents(): void {
   dom.connectBtn.addEventListener("click", handleConnect);
   dom.disconnectBtn.addEventListener("click", handleDisconnect);
 
+  const secretToggle = document.getElementById("secret-key-toggle");
+  const secretInput = document.getElementById(
+    "conn-secret-key",
+  ) as HTMLInputElement | null;
+  const secretToggleIcon = document.getElementById(
+    "secret-key-toggle-icon",
+  ) as HTMLImageElement | null;
+  if (secretToggle && secretInput && secretToggleIcon) {
+    secretToggle.addEventListener("click", () => {
+      const showing = secretInput.type === "text";
+      secretInput.type = showing ? "password" : "text";
+      secretToggleIcon.src = showing
+        ? "/twemoji/1f441.svg"
+        : "/twemoji/1f648.svg";
+      secretToggle.setAttribute("aria-pressed", String(!showing));
+      secretToggle.setAttribute(
+        "aria-label",
+        showing ? "Show secret key" : "Hide secret key",
+      );
+    });
+  }
+
+  const providerPreset = document.getElementById(
+    "conn-provider-preset",
+  ) as HTMLSelectElement | null;
+  if (providerPreset) {
+    providerPreset.addEventListener("change", () => {
+      const endpointInput = document.getElementById(
+        "conn-endpoint",
+      ) as HTMLInputElement | null;
+      const regionInput = document.getElementById(
+        "conn-region",
+      ) as HTMLInputElement | null;
+      const preset = providerPreset.value;
+      if (preset === "aws") {
+        if (endpointInput) endpointInput.value = "";
+        if (regionInput) regionInput.value = "us-east-1";
+      } else if (preset === "do") {
+        if (endpointInput)
+          endpointInput.value = "https://nyc3.digitaloceanspaces.com";
+        if (regionInput) regionInput.value = "nyc3";
+      } else if (preset === "backblaze") {
+        if (endpointInput)
+          endpointInput.value = "https://s3.us-west-004.backblazeb2.com";
+        if (regionInput) regionInput.value = "us-west-004";
+      } else if (preset === "cloudflare") {
+        if (endpointInput)
+          endpointInput.value = "https://<account-id>.r2.cloudflarestorage.com";
+        if (regionInput) regionInput.value = "auto";
+      } else if (preset === "minio") {
+        if (endpointInput) endpointInput.value = "http://localhost:9000";
+        if (regionInput) regionInput.value = "us-east-1";
+      } else if (preset === "wasabi") {
+        if (endpointInput) endpointInput.value = "https://s3.wasabisys.com";
+        if (regionInput) regionInput.value = "us-east-1";
+      }
+      providerPreset.value = "";
+    });
+  }
+
   document
     .getElementById("bookmark-save-btn")!
     .addEventListener("click", handleBookmarkSave);
@@ -1261,18 +1345,18 @@ function wireEvents(): void {
     });
   });
 
+  initDrawer();
   document
     .getElementById("transfer-toggle")!
     .addEventListener("click", toggleTransferQueue);
-  document
-    .getElementById("transfer-collapse")!
-    .addEventListener("click", toggleTransferCollapsed);
-  document
-    .getElementById("transfer-close")!
-    .addEventListener("click", hideTransferQueue);
-  document
-    .getElementById("transfer-clear")!
-    .addEventListener("click", clearCompletedTransfers);
+  document.getElementById("drawer-clear")!.addEventListener("click", () => {
+    const tab = getActiveTab();
+    if (tab === "activity") {
+      clearActivityLog();
+    } else {
+      clearCompletedTransfers();
+    }
+  });
   void initTransferQueueUI().catch((err) => {
     console.error("Failed to initialize transfer queue UI:", err);
     logActivity(`Transfer queue events unavailable: ${String(err)}`, "warning");
@@ -1300,15 +1384,19 @@ function wireEvents(): void {
   document
     .getElementById("activity-toggle")!
     .addEventListener("click", toggleActivityLog);
-  document
-    .getElementById("activity-collapse")!
-    .addEventListener("click", toggleActivityCollapsed);
-  document
-    .getElementById("activity-close")!
-    .addEventListener("click", hideActivityLog);
-  document
-    .getElementById("activity-clear")!
-    .addEventListener("click", clearActivityLog);
+
+  document.getElementById("batch-download")!.addEventListener("click", () => {
+    void handleDownload();
+  });
+  document.getElementById("batch-delete")!.addEventListener("click", () => {
+    void handleDelete();
+  });
+  document.getElementById("batch-copy-urls")!.addEventListener("click", () => {
+    void handleCopyUrl();
+  });
+  document.getElementById("batch-deselect")!.addEventListener("click", () => {
+    clearSelection();
+  });
 
   document.getElementById("security-toggle")!.addEventListener("click", () => {
     void handleSecurityToggle(setStatus);
@@ -1331,6 +1419,13 @@ function wireEvents(): void {
   document.getElementById("biometric-toggle")!.addEventListener("click", () => {
     void handleBiometricToggle(setStatus);
   });
+
+  document
+    .getElementById("nav-back")
+    ?.addEventListener("click", () => void navigateBack());
+  document
+    .getElementById("nav-forward")
+    ?.addEventListener("click", () => void navigateForward());
 
   document
     .getElementById("btn-refresh")!
@@ -1419,8 +1514,10 @@ function wireEvents(): void {
       return;
     }
 
-    const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
-    handleRowClick(key, e);
+    const key =
+      row.dataset.key ??
+      (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
+    if (key) handleRowClick(key, e);
   });
 
   dom.objectTbody.addEventListener("change", (e) => {
@@ -1430,7 +1527,10 @@ function wireEvents(): void {
     if (!input) return;
     const row = input.closest<HTMLElement>(".object-row");
     if (!row) return;
-    const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
+    const key =
+      row.dataset.key ??
+      (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
+    if (!key) return;
     if (input.checked) {
       state.selectedKeys.add(key);
     } else {
@@ -1446,7 +1546,10 @@ function wireEvents(): void {
 
     if (e.key === " ") {
       e.preventDefault();
-      const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
+      const key =
+        row.dataset.key ??
+        (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
+      if (!key) return;
       if (state.selectedKeys.has(key)) {
         state.selectedKeys.delete(key);
       } else {
@@ -1514,16 +1617,39 @@ function wireEvents(): void {
   });
 
   const objectPanel = dom.objectPanel;
+  const dropOverlay = document.getElementById(
+    "drop-zone-overlay",
+  ) as HTMLDivElement;
+  const dropPath = document.getElementById(
+    "drop-zone-path",
+  ) as HTMLParagraphElement;
+  let dragCounter = 0;
+
   objectPanel.addEventListener("dragover", (e) => {
     e.preventDefault();
+  });
+  objectPanel.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    dragCounter++;
+    if (state.connected && state.currentBucket) {
+      dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
+      dropOverlay.hidden = false;
+    }
     objectPanel.classList.add("object-panel--dragover");
   });
   objectPanel.addEventListener("dragleave", () => {
-    objectPanel.classList.remove("object-panel--dragover");
+    dragCounter--;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      objectPanel.classList.remove("object-panel--dragover");
+      dropOverlay.hidden = true;
+    }
   });
   objectPanel.addEventListener("drop", (e) => {
     e.preventDefault();
+    dragCounter = 0;
     objectPanel.classList.remove("object-panel--dragover");
+    dropOverlay.hidden = true;
 
     if (!state.connected || !state.currentBucket) {
       setStatus("Connect to a bucket first.");
@@ -1550,18 +1676,128 @@ function wireEvents(): void {
   setTransferCompleteHandler(async (summary) => {
     if (summary.hadUpload && state.connected && state.currentBucket) {
       await refreshObjects(state.currentBucket, state.currentPrefix);
+      pruneStaleSelection();
       renderObjectTable();
     }
   });
 
   wireLayoutControls();
 
+  initPalette();
+  const isMac = state.platformName === "macos";
+  const accelLabel = isMac ? "⌘" : "Ctrl+";
+  registerCommands([
+    {
+      id: "upload-files",
+      label: "Upload Files",
+      icon: "1f4e4",
+      shortcut: `${accelLabel}U`,
+      action: () => void handleUploadButton(),
+      available: () => state.connected,
+    },
+    {
+      id: "upload-folder",
+      label: "Upload Folder",
+      icon: "1f4c1",
+      shortcut: `${accelLabel}⇧U`,
+      action: () => void handleUploadFolderButton(),
+      available: () => state.connected,
+    },
+    {
+      id: "create-folder",
+      label: "Create Folder",
+      icon: "1f4c2",
+      shortcut: `${accelLabel}N`,
+      action: () => void handleCreateFolder(),
+      available: () => state.connected,
+    },
+    {
+      id: "refresh",
+      label: "Refresh",
+      icon: "1f504",
+      shortcut: "F5",
+      action: () => void handleRefresh(),
+      available: () => state.connected,
+    },
+    {
+      id: "download",
+      label: "Download Selected",
+      icon: "1f4e5",
+      action: () => void handleDownload(),
+      available: () => state.connected && getSelectedFileKeys().length > 0,
+    },
+    {
+      id: "delete",
+      label: "Delete Selected",
+      icon: "1f5d1",
+      action: () => void handleDelete(),
+      available: () => state.connected && getSelectedFileKeys().length > 0,
+    },
+    {
+      id: "select-all",
+      label: "Select All",
+      icon: "2705",
+      shortcut: `${accelLabel}A`,
+      action: () => {
+        const keys = getSelectableKeys();
+        keys.forEach((k) => state.selectedKeys.add(k));
+        updateSelectionUI();
+      },
+      available: () => state.connected,
+    },
+    {
+      id: "deselect-all",
+      label: "Deselect All",
+      icon: "274c",
+      action: () => clearSelection(),
+      available: () => state.selectedKeys.size > 0,
+    },
+    {
+      id: "filter",
+      label: "Filter Objects",
+      icon: "1f50d",
+      shortcut: `${accelLabel}F`,
+      action: () => {
+        const f = document.getElementById(
+          "filter-input",
+        ) as HTMLInputElement | null;
+        if (f) f.focus();
+      },
+      available: () => state.connected,
+    },
+    {
+      id: "activity",
+      label: "Toggle Activity Log",
+      icon: "1f4cb",
+      action: () => toggleActivityLog(),
+    },
+    {
+      id: "settings",
+      label: "Open Settings",
+      icon: "2699",
+      action: () => {
+        document.getElementById("settings-btn")?.click();
+      },
+    },
+    {
+      id: "go-up",
+      label: "Go Up (Parent Folder)",
+      icon: "2b06",
+      action: () => {
+        void navigateUp();
+      },
+      available: () => state.connected && state.currentPrefix.length > 0,
+    },
+  ]);
+
   if (!modalLayerObserver) {
     modalLayerObserver = new MutationObserver(() => {
       syncModalLayerState();
     });
     document
-      .querySelectorAll<HTMLElement>(".modal-overlay, .dialog-overlay")
+      .querySelectorAll<HTMLElement>(
+        ".modal-overlay, .dialog-overlay, .support-overlay",
+      )
       .forEach((overlay) => {
         modalLayerObserver!.observe(overlay, {
           attributes: true,
@@ -1593,6 +1829,79 @@ function wireEvents(): void {
   });
 }
 
+async function checkSupportPrompt(): Promise<void> {
+  try {
+    if (isSupportPromptDismissed()) return;
+    const count = await incrementLaunchCount();
+    if (count < 2) return;
+
+    setTimeout(() => {
+      if (isDialogActive() || getActiveModalOverlay() || isPaletteOpen())
+        return;
+      const overlay = document.getElementById("support-overlay");
+      const dismissButton = document.getElementById(
+        "support-no",
+      ) as HTMLButtonElement | null;
+      const confirmButton = document.getElementById(
+        "support-yes",
+      ) as HTMLButtonElement | null;
+      if (!overlay || !dismissButton || !confirmButton) return;
+
+      const persistDismissal = () => {
+        void markSupportPromptDismissed().catch((err) => {
+          console.warn("Failed to persist support prompt dismissal:", err);
+          logActivity("Failed to save support prompt preference.", "warning");
+        });
+      };
+
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        overlay.setAttribute("hidden", "");
+        document.removeEventListener("keydown", onEsc, true);
+        overlay.removeEventListener("click", onOverlayClick);
+        dismissButton.removeEventListener("click", onDismiss);
+        confirmButton.removeEventListener("click", onConfirm);
+      };
+
+      const onDismiss = () => {
+        close();
+        persistDismissal();
+      };
+
+      const onConfirm = () => {
+        close();
+        persistDismissal();
+        void invoke("open_external_url", { url: "https://rosie.run/support" });
+      };
+
+      const onOverlayClick = (event: MouseEvent) => {
+        if (event.target === overlay) {
+          onDismiss();
+        }
+      };
+
+      const onEsc = (event: KeyboardEvent) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onDismiss();
+      };
+
+      overlay.removeAttribute("hidden");
+      dismissButton.focus();
+      dismissButton.addEventListener("click", onDismiss);
+      confirmButton.addEventListener("click", onConfirm);
+      overlay.addEventListener("click", onOverlayClick);
+      document.addEventListener("keydown", onEsc, true);
+    }, 1500);
+  } catch (err) {
+    console.warn("Support prompt unavailable:", err);
+    logActivity("Support prompt unavailable this launch.", "warning");
+  }
+}
+
 async function init(): Promise<void> {
   wireEvents();
 
@@ -1609,6 +1918,7 @@ async function init(): Promise<void> {
 
   try {
     await loadSettings();
+    void checkSupportPrompt();
   } catch (err) {
     setStatus(`Failed to load settings: ${String(err)}`);
     logActivity(`Failed to load settings: ${String(err)}`, "error");
@@ -1625,7 +1935,10 @@ async function init(): Promise<void> {
       await loadBookmarks();
       setBookmarkChangeHandler(refreshBookmarkBar);
       refreshBookmarkBar();
-    } catch {}
+    } catch (err) {
+      console.warn("Failed to load bookmarks:", err);
+      logActivity("Failed to load bookmarks.", "warning");
+    }
 
     try {
       const saved = await loadConnection();

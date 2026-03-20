@@ -7,6 +7,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::Emitter;
 
+use zeroize::Zeroize;
+
 use crate::{lock_s3_state, make_temp_path, validate_destination_path, validate_existing_path, AppState};
 
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
@@ -301,8 +303,8 @@ pub(crate) async fn connect(
     state: tauri::State<'_, AppState>,
     endpoint: String,
     region: String,
-    access_key: String,
-    secret_key: String,
+    mut access_key: String,
+    mut secret_key: String,
 ) -> Result<String, String> {
     let endpoint = endpoint.trim().to_string();
     if endpoint.is_empty() {
@@ -313,6 +315,10 @@ pub(crate) async fn connect(
 
     let creds =
         aws_sdk_s3::config::Credentials::new(&access_key, &secret_key, None, None, "s3-sidekick");
+
+    // Zeroize the plaintext credential strings now that they've been consumed
+    access_key.zeroize();
+    secret_key.zeroize();
 
     let config = aws_sdk_s3::config::Builder::new()
         .endpoint_url(&normalized)

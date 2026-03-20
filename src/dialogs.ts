@@ -104,8 +104,8 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       document.removeEventListener("keydown", onEscape, true);
       active = false;
       if (queue.length > 0) {
-        const next = queue.shift()!;
-        setTimeout(next, 0);
+        const next = queue.shift();
+        if (next) setTimeout(next, 0);
       }
     }
 

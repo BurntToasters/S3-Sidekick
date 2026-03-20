@@ -8,19 +8,32 @@ const mockListen =
 
 function renderFixture(): void {
   document.body.innerHTML = `
+    <button id="activity-toggle"></button>
+    <span id="activity-badge" style="display:none"></span>
     <button id="transfer-toggle" hidden>
       <span id="transfer-badge" style="display:none"></span>
     </button>
-    <div id="transfer-overlay" class="transfer-popup" hidden>
-      <div class="transfer-popup__header">
-        <span>Transfers</span>
-        <div class="transfer-popup__actions">
-          <button id="transfer-collapse" aria-expanded="true">&#9660;</button>
-          <button id="transfer-clear">Clear done</button>
-          <button id="transfer-close">&#10005;</button>
+    <div id="bottom-drawer" class="bottom-drawer" hidden>
+      <div class="bottom-drawer__resize-handle"></div>
+      <div class="bottom-drawer__header">
+        <div class="bottom-drawer__tabs">
+          <button class="bottom-drawer__tab bottom-drawer__tab--active" id="drawer-tab-activity" role="tab" aria-selected="true" aria-controls="drawer-panel-activity" tabindex="0">Activity <span id="drawer-activity-badge" class="drawer-badge" style="display:none"></span></button>
+          <button class="bottom-drawer__tab" id="drawer-tab-transfers" role="tab" aria-selected="false" aria-controls="drawer-panel-transfers" tabindex="-1">Transfers <span id="drawer-transfer-badge" class="drawer-badge" style="display:none"></span></button>
+        </div>
+        <div class="bottom-drawer__actions">
+          <button id="drawer-clear" class="btn btn--ghost btn--sm">Clear</button>
+          <button id="drawer-minimize" class="btn btn--icon"></button>
+          <button id="drawer-close" class="btn btn--icon"></button>
         </div>
       </div>
-      <div id="transfer-list" class="transfer-list"></div>
+      <div class="bottom-drawer__body">
+        <div id="drawer-panel-activity" class="bottom-drawer__panel" role="tabpanel" aria-labelledby="drawer-tab-activity">
+          <div id="activity-list" class="activity-list"></div>
+        </div>
+        <div id="drawer-panel-transfers" class="bottom-drawer__panel" role="tabpanel" aria-labelledby="drawer-tab-transfers" hidden>
+          <div id="transfer-list" class="transfer-list"></div>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -32,6 +45,8 @@ async function loadTransfersModule() {
   vi.doMock("@tauri-apps/api/event", () => ({
     listen: mockListen,
   }));
+  const drawer = await import("../bottom-drawer.ts");
+  drawer.initDrawer();
   return import("../transfers.ts");
 }
 
@@ -58,16 +73,10 @@ describe("transfers queue UI", () => {
     const toggle = document.getElementById(
       "transfer-toggle",
     ) as HTMLButtonElement;
-    const overlay = document.getElementById(
-      "transfer-overlay",
-    ) as HTMLDivElement;
-    const clearButton = document.getElementById(
-      "transfer-clear",
-    ) as HTMLButtonElement;
+    const drawer = document.getElementById("bottom-drawer") as HTMLDivElement;
 
     expect(toggle.hidden).toBe(true);
-    expect(overlay.hidden).toBe(true);
-    expect(clearButton.disabled).toBe(true);
+    expect(drawer.hidden).toBe(true);
   });
 
   it("shows transfer controls after enqueueing files", async () => {
@@ -78,13 +87,11 @@ describe("transfers queue UI", () => {
     const toggle = document.getElementById(
       "transfer-toggle",
     ) as HTMLButtonElement;
-    const overlay = document.getElementById(
-      "transfer-overlay",
-    ) as HTMLDivElement;
+    const drawer = document.getElementById("bottom-drawer") as HTMLDivElement;
     const list = document.getElementById("transfer-list") as HTMLDivElement;
 
     expect(toggle.hidden).toBe(false);
-    expect(overlay.hidden).toBe(false);
+    expect(drawer.hidden).toBe(false);
     expect(list.textContent).toContain("photo.png");
     expect(mockInvoke).toHaveBeenCalledWith(
       "upload_object",
@@ -94,55 +101,19 @@ describe("transfers queue UI", () => {
     );
   });
 
-  it("hides transfer controls after completed history is cleared", async () => {
+  it("hides transfer toggle after completed history is cleared", async () => {
     const transfers = await loadTransfersModule();
     await transfers.initTransferQueueUI();
     transfers.enqueuePaths(["C:\\tmp\\archive.zip"], "uploads/");
     await flushMicrotasks();
-
-    const clearButton = document.getElementById(
-      "transfer-clear",
-    ) as HTMLButtonElement;
-    expect(clearButton.disabled).toBe(false);
 
     transfers.clearCompletedTransfers();
 
     const toggle = document.getElementById(
       "transfer-toggle",
     ) as HTMLButtonElement;
-    const overlay = document.getElementById(
-      "transfer-overlay",
-    ) as HTMLDivElement;
 
     expect(toggle.hidden).toBe(true);
-    expect(overlay.hidden).toBe(true);
-    expect(clearButton.disabled).toBe(true);
-  });
-
-  it("toggles collapsed state for the transfer popup", async () => {
-    const transfers = await loadTransfersModule();
-    await transfers.initTransferQueueUI();
-    transfers.enqueuePaths(["C:\\tmp\\notes.txt"], "uploads/");
-
-    const overlay = document.getElementById(
-      "transfer-overlay",
-    ) as HTMLDivElement;
-    const collapseButton = document.getElementById(
-      "transfer-collapse",
-    ) as HTMLButtonElement;
-
-    expect(overlay.classList.contains("transfer-popup--collapsed")).toBe(false);
-    expect(collapseButton.getAttribute("aria-expanded")).toBe("true");
-
-    transfers.toggleTransferCollapsed();
-
-    expect(overlay.classList.contains("transfer-popup--collapsed")).toBe(true);
-    expect(collapseButton.getAttribute("aria-expanded")).toBe("false");
-
-    transfers.toggleTransferCollapsed();
-
-    expect(overlay.classList.contains("transfer-popup--collapsed")).toBe(false);
-    expect(collapseButton.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("queues downloads and calls download_object", async () => {
@@ -205,5 +176,375 @@ describe("transfers queue UI", () => {
     transfers.enqueuePaths(["C:\\tmp\\second.txt"], "uploads/");
     await flushMicrotasks();
     expect(onComplete).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses browser-file upload fallback and surfaces oversize browser upload errors", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    state.currentBucket = "bucket-a";
+    await transfers.initTransferQueueUI();
+
+    const small = new File(["hello"], "small.txt", { type: "text/plain" });
+    transfers.enqueueFiles([small], "web/");
+    await flushMicrotasks(4);
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "upload_object_bytes",
+      expect.objectContaining({
+        key: "web/small.txt",
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    transfers.clearCompletedTransfers();
+
+    const tooLarge = {
+      name: "huge.bin",
+      size: 17 * 1024 * 1024,
+      arrayBuffer: async () => new ArrayBuffer(1),
+    } as unknown as File;
+    transfers.enqueueFiles([tooLarge], "web/");
+    await flushMicrotasks(6);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const hugeRow = Array.from(
+      document.querySelectorAll<HTMLDivElement>(".transfer-item"),
+    ).find((row) => row.textContent?.includes("huge.bin"));
+    expect(hugeRow).toBeTruthy();
+    expect(hugeRow?.textContent).toContain("Error");
+  });
+
+  it("supports canceling uploading and queued transfer rows", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    await transfers.initTransferQueueUI();
+
+    let resolveUpload = () => {};
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "upload_object") {
+        return new Promise<void>((resolve) => {
+          resolveUpload = resolve;
+        });
+      }
+      if (cmd === "cancel_transfer") return undefined;
+      return undefined;
+    });
+
+    transfers.enqueuePaths(["C:\\tmp\\slow.txt"], "uploads/");
+    await flushMicrotasks(4);
+    const slowCancel = document.querySelector(
+      ".transfer-item .transfer-cancel",
+    ) as HTMLButtonElement;
+    slowCancel.click();
+    await flushMicrotasks(2);
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "cancel_transfer",
+      expect.objectContaining({
+        transferId: expect.any(Number),
+      }),
+    );
+
+    resolveUpload();
+    await flushMicrotasks(4);
+    transfers.clearCompletedTransfers();
+
+    state.currentSettings.maxConcurrentTransfers = 0;
+    transfers.enqueuePaths(["C:\\tmp\\queued.txt"], "uploads/");
+    await flushMicrotasks(2);
+    const queuedRow = Array.from(
+      document.querySelectorAll<HTMLDivElement>(".transfer-item"),
+    ).find((row) => row.textContent?.includes("queued.txt"));
+    expect(queuedRow).toBeTruthy();
+    (queuedRow?.querySelector(".transfer-cancel") as HTMLButtonElement).click();
+    await flushMicrotasks(2);
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("Cancelled");
+  });
+
+  it("updates progress via transfer events and cleans up listeners on dispose", async () => {
+    let uploadProgressCb: (event: { payload: unknown }) => void = () => {};
+    let downloadProgressCb: (event: { payload: unknown }) => void = () => {};
+    const unlistenUpload = vi.fn(async () => undefined);
+    const unlistenDownload = vi.fn(async () => undefined);
+    mockListen.mockImplementation(async (event, callback) => {
+      if (event === "upload-progress") {
+        uploadProgressCb = callback as (event: { payload: unknown }) => void;
+        return unlistenUpload;
+      }
+      downloadProgressCb = callback as (event: { payload: unknown }) => void;
+      return unlistenDownload;
+    });
+
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    await transfers.initTransferQueueUI();
+
+    transfers.enqueuePaths(["C:\\tmp\\progress-upload.txt"], "uploads/");
+    await flushMicrotasks(4);
+    uploadProgressCb({
+      payload: { transfer_id: 1, bytes_sent: 50, total_bytes: 100 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    transfers.enqueueDownloads([
+      {
+        bucket: "bucket-a",
+        key: "docs/progress-download.txt",
+        destination: "C:\\tmp\\progress-download.txt",
+      },
+    ]);
+    await flushMicrotasks(4);
+    downloadProgressCb({
+      payload: { transfer_id: 2, bytes_sent: 25, total_bytes: 50 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("50%");
+
+    await transfers.disposeTransferQueueUI();
+    expect(unlistenUpload).toHaveBeenCalledTimes(1);
+    expect(unlistenDownload).toHaveBeenCalledTimes(1);
+  });
+
+  it("covers drawer toggle, folder enqueue filtering, and transfer validation errors", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    await transfers.initTransferQueueUI();
+
+    transfers.toggleTransferQueue();
+    expect(
+      (document.getElementById("bottom-drawer") as HTMLDivElement).hidden,
+    ).toBe(false);
+
+    transfers.enqueueFolderEntries(
+      [
+        {
+          file_path: "C:\\tmp\\a.txt",
+          relative_path: "/nested/a.txt",
+          size: 1,
+        },
+        { file_path: "C:\\tmp\\skip.txt", relative_path: "", size: 1 },
+      ],
+      "pref/",
+    );
+    await flushMicrotasks(4);
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("a.txt");
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("pref/nested/a.txt");
+
+    transfers.enqueueDownloads([
+      { bucket: "bucket-a", key: "docs/no-destination.txt", destination: "" },
+    ]);
+    await flushMicrotasks(4);
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("No destination available");
+
+    transfers.enqueuePaths([""], "");
+    await flushMicrotasks(4);
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("No upload source available");
+  });
+
+  it("covers empty-queue visibility guard and unknown content-type fallback", async () => {
+    const transfers = await loadTransfersModule();
+    await transfers.initTransferQueueUI();
+
+    transfers.showTransferQueue();
+    expect(
+      (document.getElementById("bottom-drawer") as HTMLDivElement).hidden,
+    ).toBe(true);
+
+    transfers.enqueuePaths(["C:\\tmp\\noext"], "uploads/");
+    await flushMicrotasks(4);
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "upload_object",
+      expect.objectContaining({
+        filePath: "C:\\tmp\\noext",
+        contentType: "application/octet-stream",
+      }),
+    );
+  });
+
+  it("covers cancel-click guard clauses and unknown transfer id cancellation", async () => {
+    const transfers = await loadTransfersModule();
+    await transfers.initTransferQueueUI();
+    const list = document.getElementById("transfer-list") as HTMLDivElement;
+
+    list.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const detachedCancel = document.createElement("button");
+    detachedCancel.className = "transfer-cancel";
+    list.appendChild(detachedCancel);
+    detachedCancel.click();
+
+    const zeroRow = document.createElement("div");
+    zeroRow.className = "transfer-item";
+    zeroRow.dataset.id = "0";
+    const zeroCancel = document.createElement("button");
+    zeroCancel.className = "transfer-cancel";
+    zeroRow.appendChild(zeroCancel);
+    list.appendChild(zeroRow);
+    zeroCancel.click();
+
+    const missingRow = document.createElement("div");
+    missingRow.className = "transfer-item";
+    missingRow.dataset.id = "999";
+    const missingCancel = document.createElement("button");
+    missingCancel.className = "transfer-cancel";
+    missingRow.appendChild(missingCancel);
+    list.appendChild(missingRow);
+    missingCancel.click();
+    await flushMicrotasks(2);
+
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "cancel_transfer",
+      expect.anything(),
+    );
+  });
+
+  it("covers processing re-entry, requestAnimationFrame fallback, and download filename fallback", async () => {
+    let uploadProgressCb: (event: { payload: unknown }) => void = () => {};
+    mockListen.mockImplementation(async (event, callback) => {
+      if (event === "upload-progress") {
+        uploadProgressCb = callback as (event: { payload: unknown }) => void;
+      }
+      return async () => undefined;
+    });
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    await transfers.initTransferQueueUI();
+
+    const rafValue = window.requestAnimationFrame;
+    Object.defineProperty(window, "requestAnimationFrame", {
+      value: undefined,
+      configurable: true,
+      writable: true,
+    });
+
+    let resolveUpload = () => {};
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "upload_object") {
+        return new Promise<void>((resolve) => {
+          resolveUpload = resolve;
+        });
+      }
+      if (cmd === "download_object") return 10;
+      return undefined;
+    });
+
+    transfers.enqueuePaths(["C:\\tmp\\first.txt"], "uploads/");
+    transfers.enqueuePaths(["C:\\tmp\\second.txt"], "uploads/");
+    uploadProgressCb({
+      payload: { transfer_id: 1, bytes_sent: 1, total_bytes: 2 },
+    });
+    uploadProgressCb({
+      payload: { transfer_id: 1, bytes_sent: 2, total_bytes: 2 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    resolveUpload();
+    await flushMicrotasks(5);
+
+    transfers.enqueueDownloads([
+      {
+        bucket: "bucket-a",
+        key: "docs/folder/",
+        destination: "C:\\tmp\\folder",
+      },
+    ]);
+    await flushMicrotasks(4);
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("docs/folder/");
+
+    Object.defineProperty(window, "requestAnimationFrame", {
+      value: rafValue,
+      configurable: true,
+      writable: true,
+    });
+  });
+
+  it("handles missing transfer list and safe dispose before initialization", async () => {
+    const transfers = await loadTransfersModule();
+    await transfers.disposeTransferQueueUI();
+
+    document.getElementById("transfer-list")?.remove();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    await transfers.initTransferQueueUI();
+    transfers.enqueuePaths(["C:\\tmp\\headless.txt"], "uploads/");
+    await flushMicrotasks(4);
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "upload_object",
+      expect.objectContaining({
+        filePath: "C:\\tmp\\headless.txt",
+      }),
+    );
+  });
+
+  it("covers unknown progress events, queued retention on clear, hide no-op, and file.path uploads", async () => {
+    let uploadProgressCb: (event: { payload: unknown }) => void = () => {};
+    let downloadProgressCb: (event: { payload: unknown }) => void = () => {};
+    mockListen.mockImplementation(async (event, callback) => {
+      if (event === "upload-progress") {
+        uploadProgressCb = callback as (event: { payload: unknown }) => void;
+      } else {
+        downloadProgressCb = callback as (event: { payload: unknown }) => void;
+      }
+      return async () => undefined;
+    });
+
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    await transfers.initTransferQueueUI();
+    transfers.hideTransferQueue();
+
+    state.currentSettings.maxConcurrentTransfers = 0;
+    transfers.enqueuePaths(["C:\\tmp\\queued-only.txt"], "uploads/");
+    await flushMicrotasks(3);
+    uploadProgressCb({
+      payload: { transfer_id: 1, bytes_sent: 0, total_bytes: 0 },
+    });
+    downloadProgressCb({
+      payload: { transfer_id: 1, bytes_sent: 0, total_bytes: 0 },
+    });
+    uploadProgressCb({
+      payload: { transfer_id: 999, bytes_sent: 1, total_bytes: 1 },
+    });
+    downloadProgressCb({
+      payload: { transfer_id: 999, bytes_sent: 1, total_bytes: 1 },
+    });
+    transfers.clearCompletedTransfers();
+    expect(
+      (document.getElementById("transfer-toggle") as HTMLButtonElement).hidden,
+    ).toBe(false);
+
+    state.currentSettings.maxConcurrentTransfers = 1;
+    const pseudoFile = {
+      name: "path-backed.txt",
+      size: 5,
+      path: "C:\\tmp\\path-backed.txt",
+      arrayBuffer: async () => new ArrayBuffer(5),
+    } as unknown as File;
+    transfers.enqueueFiles([pseudoFile], "direct/");
+    await flushMicrotasks(5);
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "upload_object",
+      expect.objectContaining({
+        key: "direct/path-backed.txt",
+        filePath: "C:\\tmp\\path-backed.txt",
+      }),
+    );
   });
 });
