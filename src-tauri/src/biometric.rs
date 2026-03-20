@@ -199,19 +199,26 @@ mod platform {
         size: std::mem::size_of::<LAReplyBlock>(),
     };
 
+    /// Recover the Mutex guard whether the Mutex is poisoned or not.
+    fn lock_auth_result(
+        m: &std::sync::Mutex<Option<bool>>,
+    ) -> std::sync::MutexGuard<'_, Option<bool>> {
+        m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     unsafe extern "C" fn la_reply_invoke(
         _block: *mut LAReplyBlock,
         success: i8,
         _error: *const c_void,
     ) {
         let state = auth_state();
-        *state.result.lock().unwrap() = Some(success != 0);
+        *lock_auth_result(&state.result) = Some(success != 0);
         state.condvar.notify_one();
     }
 
     fn authenticate_touch_id() -> Result<(), String> {
         let state = auth_state();
-        *state.result.lock().unwrap() = None;
+        *lock_auth_result(&state.result) = None;
 
         unsafe {
             let cls = objc2::runtime::AnyClass::get(c"LAContext")
@@ -236,10 +243,19 @@ mod platform {
                 reply: &block as *const LAReplyBlock as *const c_void
             ];
 
-            // Block stays alive on the stack while we wait for the async callback
-            let mut guard = state.result.lock().unwrap();
+            // Block stays alive on the stack while we wait for the async callback.
+            // Use a timeout to prevent indefinite blocking if the callback never fires.
+            let timeout = std::time::Duration::from_secs(120);
+            let mut guard = lock_auth_result(&state.result);
             while guard.is_none() {
-                guard = state.condvar.wait(guard).unwrap();
+                let (new_guard, wait_result) = state
+                    .condvar
+                    .wait_timeout(guard, timeout)
+                    .unwrap_or_else(|e| e.into_inner());
+                guard = new_guard;
+                if wait_result.timed_out() && guard.is_none() {
+                    return Err("Touch ID authentication timed out".to_string());
+                }
             }
 
             if guard.unwrap() {

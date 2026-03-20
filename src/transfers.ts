@@ -52,6 +52,7 @@ let onComplete: ((summary: TransferRunSummary) => void) | null = null;
 let progressUnlisten: UnlistenFn | null = null;
 let downloadProgressUnlisten: UnlistenFn | null = null;
 let renderQueued = false;
+let cancelClickHandler: ((e: Event) => void) | null = null;
 
 export async function initTransferQueueUI(): Promise<void> {
   syncTransferVisibility();
@@ -86,9 +87,8 @@ export async function initTransferQueueUI(): Promise<void> {
   });
 
   const list = document.getElementById("transfer-list");
-  if (list && !list.dataset.cancelBound) {
-    list.dataset.cancelBound = "1";
-    list.addEventListener("click", (e) => {
+  if (list && !cancelClickHandler) {
+    cancelClickHandler = (e: Event) => {
       const btn = (e.target as HTMLElement).closest(".transfer-cancel");
       if (!btn) return;
       const row = btn.closest(".transfer-item");
@@ -96,7 +96,8 @@ export async function initTransferQueueUI(): Promise<void> {
       const id = Number((row as HTMLElement).dataset.id);
       if (!id) return;
       void cancelTransferItem(id);
-    });
+    };
+    list.addEventListener("click", cancelClickHandler);
   }
 }
 
@@ -110,6 +111,11 @@ export async function disposeTransferQueueUI(): Promise<void> {
     const unlisten = downloadProgressUnlisten;
     downloadProgressUnlisten = null;
     await unlisten();
+  }
+  if (cancelClickHandler) {
+    const list = document.getElementById("transfer-list");
+    if (list) list.removeEventListener("click", cancelClickHandler);
+    cancelClickHandler = null;
   }
 }
 
