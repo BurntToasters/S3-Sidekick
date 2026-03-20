@@ -35,7 +35,10 @@ export function initDrawer(): void {
   const handle = drawer.querySelector(
     ".bottom-drawer__resize-handle",
   ) as HTMLElement;
-  if (handle) initResize(handle, drawer);
+  if (handle) {
+    handle.title = "Drag to resize";
+    initResize(handle, drawer);
+  }
 }
 
 export function openDrawer(tab: DrawerTab): void {
@@ -114,6 +117,7 @@ export function switchDrawerTab(tab: DrawerTab): void {
   transfersPanel.hidden = isActivity;
 
   updateClearButton();
+  syncToggleButtons(isDrawerOpen());
 }
 
 export function updateClearButton(): void {
@@ -152,6 +156,14 @@ function syncToggleButtons(open: boolean): void {
 function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {
   let startY = 0;
   let startHeight = 0;
+  const maxHeight = () => Math.round(window.innerHeight * MAX_RATIO);
+
+  const updateHandleAria = () => {
+    handle.setAttribute("aria-valuemin", String(MIN_HEIGHT));
+    handle.setAttribute("aria-valuemax", String(maxHeight()));
+    handle.setAttribute("aria-valuenow", String(Math.round(drawerHeight)));
+    handle.setAttribute("aria-valuetext", `${Math.round(drawerHeight)} pixels`);
+  };
 
   function onMouseMove(e: MouseEvent) {
     const delta = startY - e.clientY;
@@ -161,6 +173,7 @@ function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {
     );
     drawerHeight = Math.round(newHeight);
     drawer.style.height = `${drawerHeight}px`;
+    updateHandleAria();
   }
 
   function onMouseUp() {
@@ -169,6 +182,7 @@ function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {
     document.body.style.userSelect = "";
     document.body.style.cursor = "";
     localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+    updateHandleAria();
   }
 
   handle.addEventListener("mousedown", (e) => {
@@ -180,4 +194,28 @@ function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
   });
+
+  handle.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 40 : 16;
+    let nextHeight: number | null = null;
+
+    if (e.key === "ArrowUp") {
+      nextHeight = drawerHeight + step;
+    } else if (e.key === "ArrowDown") {
+      nextHeight = drawerHeight - step;
+    } else if (e.key === "Home") {
+      nextHeight = MIN_HEIGHT;
+    } else if (e.key === "End") {
+      nextHeight = maxHeight();
+    }
+
+    if (nextHeight === null) return;
+    e.preventDefault();
+    drawerHeight = Math.min(maxHeight(), Math.max(MIN_HEIGHT, nextHeight));
+    drawer.style.height = `${drawerHeight}px`;
+    localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+    updateHandleAria();
+  });
+
+  updateHandleAria();
 }

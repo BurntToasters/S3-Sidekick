@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  $,
+  $$,
+  findClosest,
   escapeHtml,
   safeHref,
   formatSize,
   formatDate,
   basename,
+  isEditableElement,
+  twemojiAsset,
+  twemojiIcon,
   splitNameExt,
   joinPath,
   pathSeparator,
@@ -60,6 +66,65 @@ describe("safeHref", () => {
     expect(safeHref("https://example.com/?a=1&b=2")).toBe(
       "https://example.com/?a=1&amp;b=2",
     );
+  });
+});
+
+describe("DOM helpers", () => {
+  it("$ and $$ resolve elements and throw when not found", () => {
+    document.body.innerHTML = `
+      <div id="root">
+        <button id="run-btn" class="run">Run</button>
+      </div>
+    `;
+    expect($("run-btn").id).toBe("run-btn");
+    const root = $("root");
+    expect($$(".run", root).id).toBe("run-btn");
+    expect(() => $("missing-id")).toThrow("Element #missing-id not found");
+    expect(() => $$(".missing", root)).toThrow("No element matches: .missing");
+  });
+
+  it("findClosest and isEditableElement handle common targets", () => {
+    document.body.innerHTML = `
+      <div class="card">
+        <button class="child">Go</button>
+      </div>
+      <input id="input-el" />
+      <textarea id="textarea-el"></textarea>
+    `;
+
+    const button = document.querySelector(".child") as HTMLButtonElement;
+    const event = new MouseEvent("click", { bubbles: true });
+    Object.defineProperty(event, "target", {
+      value: button,
+      configurable: true,
+    });
+    expect(findClosest(event, ".card")).not.toBeNull();
+    expect(findClosest(event, ".missing")).toBeNull();
+
+    const inputEl = document.getElementById("input-el");
+    const textareaEl = document.getElementById("textarea-el");
+    expect(isEditableElement(inputEl)).toBe(true);
+    expect(isEditableElement(textareaEl)).toBe(true);
+    expect(isEditableElement(document.createElement("div"))).toBe(false);
+    expect(isEditableElement(null)).toBe(false);
+  });
+
+  it("builds twemoji assets/icons with escaped attributes", () => {
+    expect(twemojiAsset("1f680")).toBe("/twemoji/1f680.svg");
+    const decorative = twemojiIcon("1f680", {
+      className: `icon"bad`,
+      alt: "",
+    });
+    expect(decorative).toContain('src="/twemoji/1f680.svg"');
+    expect(decorative).toContain('aria-hidden="true"');
+    expect(decorative).toContain('class="icon&quot;bad"');
+
+    const labeled = twemojiIcon("1f680", {
+      alt: "Rocket",
+      decorative: false,
+    });
+    expect(labeled).toContain('alt="Rocket"');
+    expect(labeled).not.toContain('aria-hidden="true"');
   });
 });
 

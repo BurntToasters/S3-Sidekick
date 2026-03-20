@@ -12,11 +12,14 @@ import {
   loadBookmarks,
   renderBookmarkList,
   removeBookmark,
+  getBookmarks,
+  exportBookmarksJson,
+  importBookmarksJson,
   type Bookmark,
 } from "./bookmarks.ts";
 import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
 import { refreshSecuritySettingsUI } from "./security.ts";
-import { showConfirm } from "./dialogs.ts";
+import { showConfirm, showAlert } from "./dialogs.ts";
 
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
 
@@ -96,6 +99,15 @@ export function populateSettingsModal(): void {
     );
   }
 
+  const concurrentSelect = document.getElementById(
+    "setting-max-concurrent",
+  ) as HTMLSelectElement | null;
+  if (concurrentSelect) {
+    concurrentSelect.value = String(
+      state.currentSettings.maxConcurrentTransfers,
+    );
+  }
+
   const supported = isUpdaterEnabled();
   const updaterSection = document.getElementById("updater-section");
   const updaterUnsupported = document.getElementById("updater-unsupported");
@@ -113,7 +125,15 @@ export function populateSettingsModal(): void {
     });
   }
   const platformEl = document.getElementById("settings-platform");
-  if (platformEl) platformEl.textContent = state.platformName || "Unknown";
+  if (platformEl) {
+    const displayNames: Record<string, string> = {
+      windows: "Windows",
+      macos: "macOS",
+      linux: "Linux",
+    };
+    platformEl.textContent =
+      displayNames[state.platformName] ?? (state.platformName || "Unknown");
+  }
 
   switchSettingsTab("general");
 }
@@ -149,6 +169,16 @@ export function readSettingsModal(): void {
     const val = parseInt(presignedSelect.value, 10);
     if (Number.isFinite(val) && val >= 60 && val <= 604800) {
       state.currentSettings.presignedUrlExpiration = val;
+    }
+  }
+
+  const concurrentSelect = document.getElementById(
+    "setting-max-concurrent",
+  ) as HTMLSelectElement | null;
+  if (concurrentSelect) {
+    const val = parseInt(concurrentSelect.value, 10);
+    if (Number.isInteger(val) && val >= 1 && val <= 10) {
+      state.currentSettings.maxConcurrentTransfers = val;
     }
   }
 }
@@ -220,6 +250,8 @@ export function isSupportPromptDismissed(): boolean {
   return state.settingsExtras.supportPromptDismissed === true;
 }
 
+let bookmarkImportExportWired = false;
+
 async function refreshBookmarkListUI(): Promise<void> {
   await loadBookmarks();
   const listEl = document.getElementById("bookmark-list");
@@ -233,8 +265,69 @@ async function refreshBookmarkListUI(): Promise<void> {
       if (overlay) overlay.classList.remove("active");
     },
     async (index) => {
+      const b = getBookmarks()[index];
+      const name = b?.name ?? "this bookmark";
+      const confirmed = await showConfirm(
+        "Delete Bookmark",
+        `Delete bookmark "${name}"?`,
+        { okLabel: "Delete", okDanger: true },
+      );
+      if (!confirmed) return;
       await removeBookmark(index);
       void refreshBookmarkListUI();
     },
   );
+
+  if (!bookmarkImportExportWired) {
+    bookmarkImportExportWired = true;
+    wireBookmarkImportExport();
+  }
+}
+
+function wireBookmarkImportExport(): void {
+  const exportBtn = document.getElementById("bookmarks-export-btn");
+  const importBtn = document.getElementById("bookmarks-import-btn");
+  const importInput = document.getElementById(
+    "bookmarks-import-input",
+  ) as HTMLInputElement | null;
+
+  exportBtn?.addEventListener("click", () => {
+    const json = exportBookmarksJson();
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "s3-sidekick-bookmarks.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  importBtn?.addEventListener("click", () => {
+    importInput?.click();
+  });
+
+  importInput?.addEventListener("change", () => {
+    const file = importInput.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = reader.result as string;
+      void importBookmarksJson(text).then((result) => {
+        importInput.value = "";
+        if (result.error) {
+          void showAlert("Import Failed", result.error);
+        } else {
+          const msg =
+            `Imported ${result.imported} bookmark(s)` +
+            (result.skipped > 0
+              ? `, skipped ${result.skipped} duplicate(s)`
+              : "") +
+            ".";
+          void showAlert("Import Complete", msg);
+          void refreshBookmarkListUI();
+        }
+      });
+    };
+    reader.readAsText(file);
+  });
 }

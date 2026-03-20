@@ -35,6 +35,20 @@
       </header>
 
       <div class="connection-bar">
+        <select
+          id="conn-provider-preset"
+          class="field field--sm"
+          aria-label="Provider preset"
+          title="Choose a storage provider to prefill endpoint"
+        >
+          <option value="">Provider…</option>
+          <option value="aws">AWS S3</option>
+          <option value="do">DigitalOcean Spaces</option>
+          <option value="backblaze">Backblaze B2</option>
+          <option value="cloudflare">Cloudflare R2</option>
+          <option value="minio">MinIO (local)</option>
+          <option value="wasabi">Wasabi</option>
+        </select>
         <input
           id="conn-endpoint"
           class="field"
@@ -56,13 +70,32 @@
           placeholder="Access Key"
           aria-label="Access key"
         />
-        <input
-          id="conn-secret-key"
-          class="field"
-          type="password"
-          placeholder="Secret Key"
-          aria-label="Secret key"
-        />
+        <div class="field-with-toggle">
+          <input
+            id="conn-secret-key"
+            class="field"
+            type="password"
+            placeholder="Secret Key"
+            aria-label="Secret key"
+          />
+          <button
+            id="secret-key-toggle"
+            type="button"
+            class="btn btn--icon field-toggle-btn"
+            title="Show/hide secret key"
+            aria-label="Show secret key"
+            aria-pressed="false"
+          >
+            <img
+              id="secret-key-toggle-icon"
+              class="twemoji-icon"
+              src="/twemoji/1f441.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+          </button>
+        </div>
         <button
           id="bookmark-save-btn"
           class="btn btn--icon"
@@ -119,6 +152,36 @@
                 <img
                   class="twemoji-icon"
                   src="/twemoji/1f5c2.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+              </button>
+              <button
+                id="nav-back"
+                class="btn btn--icon"
+                title="Back (Alt+Left)"
+                aria-label="Navigate back"
+                disabled
+              >
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/2b05.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+              </button>
+              <button
+                id="nav-forward"
+                class="btn btn--icon"
+                title="Forward (Alt+Right)"
+                aria-label="Navigate forward"
+                disabled
+              >
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/27a1.svg"
                   alt=""
                   aria-hidden="true"
                   draggable="false"
@@ -635,6 +698,17 @@
                 <option value="604800">7 days</option>
               </select>
             </div>
+            <div class="setting-item">
+              <label for="setting-max-concurrent">Concurrent transfers</label>
+              <select id="setting-max-concurrent" class="field field--sm">
+                <option value="1">1 (sequential)</option>
+                <option value="2">2</option>
+                <option value="3">3 (default)</option>
+                <option value="5">5</option>
+                <option value="8">8</option>
+                <option value="10">10 (maximum)</option>
+              </select>
+            </div>
             <div class="setting-section">Danger Zone</div>
             <div class="setting-item">
               <label>Reset all settings to defaults</label>
@@ -650,6 +724,21 @@
             aria-labelledby="settings-tab-bookmarks"
             hidden
           >
+            <div class="bookmark-list-toolbar">
+              <button id="bookmarks-export-btn" class="btn btn--ghost btn--sm">
+                Export
+              </button>
+              <button id="bookmarks-import-btn" class="btn btn--ghost btn--sm">
+                Import
+              </button>
+              <input
+                id="bookmarks-import-input"
+                type="file"
+                accept=".json,application/json"
+                style="display: none"
+                aria-hidden="true"
+              />
+            </div>
             <ul id="bookmark-list" class="bookmark-list"></ul>
           </div>
 
@@ -963,7 +1052,15 @@
       </div>
     </div>
 
-    <div id="support-overlay" class="support-overlay" hidden>
+    <div
+      id="support-overlay"
+      class="support-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="support-title"
+      aria-describedby="support-body"
+      hidden
+    >
       <div class="support-card">
         <div class="support-card__icon">
           <img
@@ -974,8 +1071,10 @@
             draggable="false"
           />
         </div>
-        <h2 class="support-card__title">Enjoying S3 Sidekick?</h2>
-        <p class="support-card__body">
+        <h2 id="support-title" class="support-card__title">
+          Enjoying S3 Sidekick?
+        </h2>
+        <p id="support-body" class="support-card__body">
           S3 Sidekick is free and open source. If it's been useful to you,
           consider supporting its development &mdash; it really helps!
         </p>

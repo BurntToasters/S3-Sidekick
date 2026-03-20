@@ -130,25 +130,28 @@ function renderResults(): void {
     return;
   }
 
-  results.innerHTML = filtered
-    .map((cmd, i) => {
-      const icon = twemojiIcon(cmd.icon, {
-        className: "twemoji-icon",
-        decorative: true,
-      });
-      const activeClass = i === activeIndex ? " palette__item--active" : "";
-      const shortcut = cmd.shortcut
-        ? `<span class="palette__item-shortcut">${escapeHtml(cmd.shortcut)}</span>`
-        : "";
-      return (
-        `<div class="palette__item${activeClass}" data-index="${i}">` +
-        `<span class="palette__item-icon">${icon}</span>` +
-        `<span class="palette__item-label">${escapeHtml(cmd.label)}</span>` +
-        shortcut +
-        `</div>`
-      );
-    })
-    .join("");
+  const hint = `<div class="palette__hint">↑↓ navigate &nbsp;·&nbsp; Enter to run &nbsp;·&nbsp; Esc to close</div>`;
+  results.innerHTML =
+    hint +
+    filtered
+      .map((cmd, i) => {
+        const icon = twemojiIcon(cmd.icon, {
+          className: "twemoji-icon",
+          decorative: true,
+        });
+        const activeClass = i === activeIndex ? " palette__item--active" : "";
+        const shortcut = cmd.shortcut
+          ? `<span class="palette__item-shortcut">${escapeHtml(cmd.shortcut)}</span>`
+          : "";
+        return (
+          `<div class="palette__item${activeClass}" data-index="${i}">` +
+          `<span class="palette__item-icon">${icon}</span>` +
+          `<span class="palette__item-label">${escapeHtml(cmd.label)}</span>` +
+          shortcut +
+          `</div>`
+        );
+      })
+      .join("");
 }
 
 function scrollActiveIntoView(): void {
