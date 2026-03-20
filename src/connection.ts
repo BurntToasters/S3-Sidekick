@@ -100,6 +100,8 @@ export async function refreshObjects(
 ): Promise<void> {
   state.currentBucket = bucket;
   state.currentPrefix = prefix;
+  state.continuationToken = "";
+  state.hasMore = false;
   const response = await invoke<ListObjectsResponse>("list_objects", {
     bucket,
     prefix,

@@ -52,4 +52,11 @@ describe("isCancellationError", () => {
     expect(isCancellationError("permission denied")).toBe(false);
     expect(isCancellationError("timeout")).toBe(false);
   });
+
+  it("handles non-string error values", async () => {
+    const { isCancellationError, isCredentialRemovedError } =
+      await loadSecurityModule();
+    expect(isCancellationError(404)).toBe(false);
+    expect(isCredentialRemovedError({ code: "EKEY" })).toBe(false);
+  });
 });

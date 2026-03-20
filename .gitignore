@@ -20,6 +20,8 @@ node_modules/
 # Optional npm cache directory
 .npm
 
+cargo_error.txt
+
 # dotenv environment variable files
 .env
 .env.*

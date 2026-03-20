@@ -4,6 +4,22 @@ export function $<T extends HTMLElement = HTMLElement>(id: string): T {
   return el as T;
 }
 
+export function $$<T extends HTMLElement = HTMLElement>(
+  selector: string,
+  parent: ParentNode = document,
+): T {
+  const el = parent.querySelector<T>(selector);
+  if (!el) throw new Error(`No element matches: ${selector}`);
+  return el;
+}
+
+export function findClosest<T extends HTMLElement = HTMLElement>(
+  e: Event,
+  selector: string,
+): T | null {
+  return (e.target as HTMLElement).closest<T>(selector);
+}
+
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -90,4 +106,42 @@ export function twemojiIcon(
     `<img class="${escapeHtml(className)}" src="${twemojiAsset(codepoint)}" alt="${escapeHtml(alt)}"` +
     `${decorative ? ' aria-hidden="true"' : ""} draggable="false" />`
   );
+}
+
+export function splitNameExt(fileName: string): { stem: string; ext: string } {
+  const idx = fileName.lastIndexOf(".");
+  if (idx <= 0 || idx === fileName.length - 1) {
+    return { stem: fileName, ext: "" };
+  }
+  return { stem: fileName.slice(0, idx), ext: fileName.slice(idx) };
+}
+
+export function pathSeparator(platform: string): string {
+  if (platform === "windows") return "\\";
+  return "/";
+}
+
+export function joinPath(base: string, leaf: string, platform: string): string {
+  const sep = pathSeparator(platform);
+  const trimmed = base.replace(/[\\/]+$/, "");
+  return `${trimmed}${sep}${leaf}`;
+}
+
+export function friendlyError(err: unknown): string {
+  const msg = String(err);
+  if (/403|Forbidden/i.test(msg))
+    return "Access denied. Check your credentials and permissions.";
+  if (/404|NoSuchBucket|NoSuchKey|NotFound/i.test(msg))
+    return "Resource not found. It may have been deleted or moved.";
+  if (/timeout|timed?\s*out|ETIMEDOUT/i.test(msg))
+    return "Request timed out. Check your network connection and endpoint.";
+  if (/network|ECONNREFUSED|ENOTFOUND|ERR_NAME_NOT_RESOLVED|dns/i.test(msg))
+    return "Network error. Verify the endpoint URL and your internet connection.";
+  if (/401|Unauthorized|InvalidAccessKeyId|SignatureDoesNotMatch/i.test(msg))
+    return "Authentication failed. Verify your access key and secret key.";
+  if (/500|InternalError/i.test(msg))
+    return "Server error. The storage service may be experiencing issues.";
+  if (/slow\s*down|429|TooManyRequests|throttl/i.test(msg))
+    return "Rate limited. Too many requests \u2014 wait a moment and try again.";
+  return msg;
 }

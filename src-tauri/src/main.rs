@@ -219,7 +219,7 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
         .plugin(tauri_plugin_updater::Builder::new().build());
 
-    builder
+    if let Err(err) = builder
         .manage(AppState(Mutex::new(S3State {
             client: None,
             endpoint: String::new(),
@@ -268,7 +268,10 @@ fn main() {
             platform::open_external_url,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running application");
+    {
+        eprintln!("Application error: {}", err);
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]

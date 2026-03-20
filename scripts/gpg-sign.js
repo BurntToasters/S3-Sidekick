@@ -875,6 +875,14 @@ async function main() {
   console.log(`\nS3 Sidekick ${VERSION} — release pipeline\n`);
 
   console.log("[1/5] Checking GPG...");
+  if (!GPG_KEY_ID) {
+    console.error("GPG_KEY_ID is required. Set it in your environment or .env file.");
+    process.exit(1);
+  }
+  if (!GPG_PASSPHRASE) {
+    console.error("GPG_PASSPHRASE is required. Set it in your environment or .env file.");
+    process.exit(1);
+  }
   try {
     execSync("gpg --version", { stdio: "pipe" });
   } catch {

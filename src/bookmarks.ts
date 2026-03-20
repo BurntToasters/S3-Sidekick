@@ -185,6 +185,53 @@ export function renderBookmarkBar(
   }
 }
 
+export function exportBookmarksJson(): string {
+  return JSON.stringify(bookmarks, null, 2);
+}
+
+export async function importBookmarksJson(
+  json: string,
+): Promise<{ imported: number; skipped: number; error?: string }> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return { imported: 0, skipped: 0, error: "Invalid JSON" };
+  }
+
+  if (!Array.isArray(parsed)) {
+    return { imported: 0, skipped: 0, error: "Expected a JSON array" };
+  }
+
+  const valid = parsed.filter(isBookmark);
+  if (valid.length === 0) {
+    return { imported: 0, skipped: parsed.length };
+  }
+
+  let imported = 0;
+  let skipped = 0;
+  for (const b of valid) {
+    const exists = bookmarks.some(
+      (existing) =>
+        existing.endpoint === b.endpoint &&
+        existing.access_key === b.access_key,
+    );
+    if (exists) {
+      skipped++;
+    } else {
+      bookmarks.push(b);
+      imported++;
+    }
+  }
+
+  if (imported > 0) {
+    await persistBookmarks();
+    onChangeCallback?.();
+  }
+
+  return { imported, skipped };
+}
+
 export function renderBookmarkList(
   listEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
@@ -215,7 +262,9 @@ export function renderBookmarkList(
     if (deleteBtn) {
       e.stopPropagation();
       const idx = parseInt(deleteBtn.dataset.delete!, 10);
-      onDelete(idx);
+      if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
+        onDelete(idx);
+      }
       return;
     }
     const item = (e.target as HTMLElement).closest<HTMLElement>(
@@ -223,7 +272,9 @@ export function renderBookmarkList(
     );
     if (item) {
       const idx = parseInt(item.dataset.index!, 10);
-      if (idx >= 0 && idx < bookmarks.length) onSelect(bookmarks[idx]);
+      if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
+        onSelect(bookmarks[idx]);
+      }
     }
   };
 }

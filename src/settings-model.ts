@@ -5,12 +5,16 @@ export interface UserSettings {
   theme: ThemePreference;
   autoCheckUpdates: boolean;
   updateChannel: UpdateChannel;
+  presignedUrlExpiration: number;
+  maxConcurrentTransfers: number;
 }
 
 export const SETTING_DEFAULTS: UserSettings = {
   theme: "system",
   autoCheckUpdates: true,
   updateChannel: "release",
+  presignedUrlExpiration: 3600,
+  maxConcurrentTransfers: 3,
 };
 
 export function normalizeUserSettings(
@@ -31,7 +35,31 @@ export function normalizeUserSettings(
       ? raw.updateChannel
       : SETTING_DEFAULTS.updateChannel;
 
-  return { theme, autoCheckUpdates, updateChannel };
+  const rawExpiration = raw.presignedUrlExpiration;
+  const presignedUrlExpiration =
+    typeof rawExpiration === "number" &&
+    Number.isFinite(rawExpiration) &&
+    rawExpiration >= 60 &&
+    rawExpiration <= 604800
+      ? Math.round(rawExpiration)
+      : SETTING_DEFAULTS.presignedUrlExpiration;
+
+  const rawConcurrent = raw.maxConcurrentTransfers;
+  const maxConcurrentTransfers =
+    typeof rawConcurrent === "number" &&
+    Number.isInteger(rawConcurrent) &&
+    rawConcurrent >= 1 &&
+    rawConcurrent <= 10
+      ? rawConcurrent
+      : SETTING_DEFAULTS.maxConcurrentTransfers;
+
+  return {
+    theme,
+    autoCheckUpdates,
+    updateChannel,
+    presignedUrlExpiration,
+    maxConcurrentTransfers,
+  };
 }
 
 export interface LoadSettingsResult {
