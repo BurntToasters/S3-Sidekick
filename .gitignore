@@ -42,6 +42,9 @@ release/
 flatpak-build/
 flatpak-repo/
 
+# Test coverage
+coverage/
+
 # Generated files
 licenses.json
 public/licenses.json
