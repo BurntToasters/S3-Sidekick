@@ -1,4 +1,4 @@
-use aws_sdk_s3::types::{Delete, MetadataDirective, ObjectIdentifier};
+use aws_sdk_s3::types::{Delete, MetadataDirective, ObjectCannedAcl, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use std::collections::{HashMap, HashSet};
@@ -298,6 +298,43 @@ fn format_sdk_error<E: std::fmt::Debug>(prefix: &str, err: &aws_sdk_s3::error::S
     }
 }
 
+async fn infer_canned_acl_for_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Option<ObjectCannedAcl> {
+    let output = client
+        .get_object_acl()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .ok()?;
+
+    let has_public_read = output.grants().iter().any(|grant| {
+        let is_read = grant
+            .permission()
+            .map(|permission| permission.as_str().eq_ignore_ascii_case("READ"))
+            .unwrap_or(false);
+        if !is_read {
+            return false;
+        }
+
+        let uri = grant
+            .grantee()
+            .and_then(|grantee| grantee.uri())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        uri.contains("allusers")
+    });
+
+    Some(if has_public_read {
+        ObjectCannedAcl::PublicRead
+    } else {
+        ObjectCannedAcl::Private
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn connect(
     state: tauri::State<'_, AppState>,
@@ -540,6 +577,7 @@ pub(crate) async fn update_metadata(
     };
 
     let source = encode_copy_source(&bucket, &key);
+    let preserved_acl = infer_canned_acl_for_object(&client, &bucket, &key).await;
     let mut req = client
         .copy_object()
         .bucket(&bucket)
@@ -547,6 +585,10 @@ pub(crate) async fn update_metadata(
         .copy_source(&source)
         .content_type(&content_type)
         .metadata_directive(MetadataDirective::Replace);
+
+    if let Some(acl) = preserved_acl {
+        req = req.acl(acl);
+    }
 
     for (k, v) in &metadata {
         req = req.metadata(k, v);
@@ -943,6 +985,36 @@ pub(crate) async fn get_object_acl(
         .collect();
 
     Ok(AclResponse { owner, grants })
+}
+
+#[tauri::command]
+pub(crate) async fn set_object_acl(
+    state: tauri::State<'_, AppState>,
+    bucket: String,
+    key: String,
+    visibility: String,
+) -> Result<(), String> {
+    let client = {
+        let s3 = lock_s3_state(&state)?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    let acl = match visibility.trim().to_ascii_lowercase().as_str() {
+        "private" => ObjectCannedAcl::Private,
+        "public-read" => ObjectCannedAcl::PublicRead,
+        other => return Err(format!("Unsupported ACL visibility: {}", other)),
+    };
+
+    client
+        .put_object_acl()
+        .bucket(&bucket)
+        .key(&key)
+        .acl(acl)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to update ACL: {}", e))?;
+
+    Ok(())
 }
 
 #[tauri::command]

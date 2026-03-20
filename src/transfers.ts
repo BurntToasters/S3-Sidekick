@@ -453,8 +453,7 @@ function renderQueue(): void {
       const progressPct = Math.max(0, Math.min(100, Math.round(t.progress)));
       const progressBar =
         t.totalBytes > 0 &&
-        (t.status === "uploading" ||
-          (t.status === "error" && t.progress > 0))
+        (t.status === "uploading" || (t.status === "error" && t.progress > 0))
           ? `<div class="transfer-progress-wrap">` +
             `<div class="transfer-progress"><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
             `<span class="transfer-progress__label">${progressPct}%</span>` +
