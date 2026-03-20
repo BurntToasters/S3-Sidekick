@@ -264,8 +264,8 @@ describe("transfers queue UI", () => {
   it("updates progress via transfer events and cleans up listeners on dispose", async () => {
     let uploadProgressCb: (event: { payload: unknown }) => void = () => {};
     let downloadProgressCb: (event: { payload: unknown }) => void = () => {};
-    const unlistenUpload = vi.fn(async () => undefined);
-    const unlistenDownload = vi.fn(async () => undefined);
+    const unlistenUpload = vi.fn(() => undefined);
+    const unlistenDownload = vi.fn(() => undefined);
     mockListen.mockImplementation(async (event, callback) => {
       if (event === "upload-progress") {
         uploadProgressCb = callback as (event: { payload: unknown }) => void;
@@ -277,7 +277,22 @@ describe("transfers queue UI", () => {
 
     const transfers = await loadTransfersModule();
     const { state } = await import("../state.ts");
-    state.currentSettings.maxConcurrentTransfers = 1;
+    state.currentSettings.maxConcurrentTransfers = 2;
+    let resolveUpload = () => {};
+    let resolveDownload = () => {};
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "upload_object") {
+        return new Promise<void>((resolve) => {
+          resolveUpload = resolve;
+        });
+      }
+      if (cmd === "download_object") {
+        return new Promise<number>((resolve) => {
+          resolveDownload = () => resolve(50);
+        });
+      }
+      return undefined;
+    });
     await transfers.initTransferQueueUI();
 
     transfers.enqueuePaths(["C:\\tmp\\progress-upload.txt"], "uploads/");
@@ -303,6 +318,10 @@ describe("transfers queue UI", () => {
     expect(
       (document.getElementById("transfer-list") as HTMLDivElement).textContent,
     ).toContain("50%");
+
+    resolveUpload();
+    resolveDownload();
+    await flushMicrotasks(4);
 
     await transfers.disposeTransferQueueUI();
     expect(unlistenUpload).toHaveBeenCalledTimes(1);
@@ -417,7 +436,7 @@ describe("transfers queue UI", () => {
       if (event === "upload-progress") {
         uploadProgressCb = callback as (event: { payload: unknown }) => void;
       }
-      return async () => undefined;
+      return () => undefined;
     });
     const transfers = await loadTransfersModule();
     const { state } = await import("../state.ts");
@@ -501,7 +520,7 @@ describe("transfers queue UI", () => {
       } else {
         downloadProgressCb = callback as (event: { payload: unknown }) => void;
       }
-      return async () => undefined;
+      return () => undefined;
     });
 
     const transfers = await loadTransfersModule();

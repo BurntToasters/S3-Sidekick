@@ -172,6 +172,18 @@ describe("info panel", () => {
     });
 
     await info.openInfoPanel(["broken-save.txt"]);
+    info.switchTab("metadata");
+    (document.getElementById("metadata-add-row") as HTMLButtonElement).click();
+    const keyInputs = Array.from(
+      document.querySelectorAll<HTMLInputElement>(".metadata-entry__key"),
+    );
+    const valInputs = Array.from(
+      document.querySelectorAll<HTMLInputElement>(".metadata-entry__value"),
+    );
+    keyInputs[1].value = "Cache-Control";
+    keyInputs[1].dispatchEvent(new Event("input", { bubbles: true }));
+    valInputs[1].value = "no-cache";
+    valInputs[1].dispatchEvent(new Event("input", { bubbles: true }));
     await info.saveInfoPanel();
 
     expect(
@@ -240,6 +252,146 @@ describe("info panel", () => {
     expect(
       (document.getElementById("status") as HTMLDivElement).textContent,
     ).toContain("Metadata updated.");
+  });
+
+  it("updates single-file visibility from private to public", async () => {
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "head_object") return headPayload();
+      if (cmd === "build_object_url") return "";
+      if (cmd === "get_object_acl") {
+        return {
+          owner: "owner-1",
+          grants: [{ grantee: "owner-1", permission: "FULL_CONTROL" }],
+        };
+      }
+      if (cmd === "set_object_acl") return undefined;
+      return undefined;
+    });
+
+    const info = await import("../info-panel.ts");
+    await info.openInfoPanel(["single-acl.txt"]);
+    info.switchTab("permissions");
+    await flushMicrotasks();
+
+    const visibility = document.getElementById(
+      "permissions-visibility",
+    ) as HTMLSelectElement;
+    visibility.value = "public-read";
+    visibility.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await info.saveInfoPanel();
+
+    expect(mockInvoke).toHaveBeenCalledWith("set_object_acl", {
+      bucket: "bucket-a",
+      key: "single-acl.txt",
+      visibility: "public-read",
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "update_metadata",
+      expect.anything(),
+    );
+    expect(
+      (document.getElementById("status") as HTMLDivElement).textContent,
+    ).toContain("Permissions updated.");
+  });
+
+  it("does not rewrite metadata when saving a single file with no edits", async () => {
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "head_object") return headPayload();
+      if (cmd === "build_object_url") return "";
+      if (cmd === "update_metadata") return undefined;
+      if (cmd === "set_object_acl") return undefined;
+      return undefined;
+    });
+
+    const info = await import("../info-panel.ts");
+    await info.openInfoPanel(["no-change.txt"]);
+    await info.saveInfoPanel();
+
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "update_metadata",
+      expect.anything(),
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "set_object_acl",
+      expect.anything(),
+    );
+    expect(
+      (document.getElementById("status") as HTMLDivElement).textContent,
+    ).toContain("No property changes to apply");
+  });
+
+  it("updates batch visibility without requiring metadata edits", async () => {
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "set_object_acl") return undefined;
+      return undefined;
+    });
+
+    const info = await import("../info-panel.ts");
+    await info.openInfoPanel(["alpha.txt", "beta.txt"]);
+
+    const visibility = document.getElementById(
+      "batch-visibility",
+    ) as HTMLSelectElement;
+    visibility.value = "public-read";
+    visibility.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await info.saveInfoPanel();
+
+    expect(mockInvoke).toHaveBeenCalledWith("set_object_acl", {
+      bucket: "bucket-a",
+      key: "alpha.txt",
+      visibility: "public-read",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("set_object_acl", {
+      bucket: "bucket-a",
+      key: "beta.txt",
+      visibility: "public-read",
+    });
+    expect(
+      (document.getElementById("status") as HTMLDivElement).textContent,
+    ).toContain("Permissions updated on 2 file(s).");
+  });
+
+  it("reports partial failures when one of metadata/permissions fails in batch properties", async () => {
+    mockInvoke.mockImplementation(async (cmd, payload) => {
+      const key = (payload as { key?: string } | undefined)?.key;
+      if (cmd === "head_object") {
+        return headPayload({ metadata: { existing: "1" } });
+      }
+      if (cmd === "update_metadata") return undefined;
+      if (cmd === "set_object_acl" && key === "beta.txt") {
+        throw new Error("acl failed");
+      }
+      if (cmd === "set_object_acl") return undefined;
+      return undefined;
+    });
+
+    const info = await import("../info-panel.ts");
+    await info.openInfoPanel(["alpha.txt", "beta.txt"]);
+
+    const visibility = document.getElementById(
+      "batch-visibility",
+    ) as HTMLSelectElement;
+    visibility.value = "public-read";
+    visibility.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const keyInput = document.querySelector<HTMLInputElement>(
+      ".metadata-entry__key",
+    );
+    const valInput = document.querySelector<HTMLInputElement>(
+      ".metadata-entry__value",
+    );
+    keyInput!.value = "Cache-Control";
+    keyInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    valInput!.value = "no-cache";
+    valInput!.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await info.saveInfoPanel();
+
+    expect(
+      (document.getElementById("status") as HTMLDivElement).textContent,
+    ).toContain("1 partial");
   });
 
   it("handles batch selection views and partial batch save failures", async () => {
@@ -437,7 +589,7 @@ describe("info panel", () => {
     await info.saveInfoPanel();
     expect(
       (document.getElementById("status") as HTMLDivElement).textContent,
-    ).toContain("Add at least one metadata header");
+    ).toContain("No property changes to apply");
 
     const addBtn = document.getElementById(
       "metadata-add-row",
