@@ -17,6 +17,7 @@ interface ActivityEntry {
 
 const MAX_ENTRIES = 200;
 let entries: ActivityEntry[] = [];
+let renderScheduled = false;
 
 export function logActivity(
   message: string,
@@ -27,7 +28,13 @@ export function logActivity(
     entries = entries.slice(entries.length - MAX_ENTRIES);
   }
   updateBadge();
-  renderActivityLog();
+  if (!renderScheduled) {
+    renderScheduled = true;
+    queueMicrotask(() => {
+      renderScheduled = false;
+      renderActivityLog();
+    });
+  }
 }
 
 export function toggleActivityLog(): void {
@@ -46,6 +53,7 @@ export function showActivityLog(): void {
 
 export function clearActivityLog(): void {
   entries = [];
+  renderScheduled = false;
   updateBadge();
   renderActivityLog();
 }

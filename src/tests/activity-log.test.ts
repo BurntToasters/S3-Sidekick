@@ -136,6 +136,7 @@ describe("activity log with drawer", () => {
     }
     activity.logActivity("warn message", "warning");
     activity.logActivity("error message", "error");
+    await Promise.resolve(); // flush queueMicrotask so renderActivityLog runs
 
     const list = document.getElementById("activity-list") as HTMLDivElement;
     const renderedEntries = list.querySelectorAll(".activity-entry");
