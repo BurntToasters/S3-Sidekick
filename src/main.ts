@@ -993,7 +993,7 @@ function fileUriToPath(raw: string): string | null {
     if (state.platformName === "windows") {
       if (host && host.toLowerCase() !== "localhost") {
         const uncPath = pathname.replace(/\//g, "\\");
-        return (`\\\\${host}${uncPath}`).trim() || null;
+        return `\\\\${host}${uncPath}`.trim() || null;
       }
       if (/^\/[a-zA-Z]:\//.test(pathname)) {
         pathname = pathname.slice(1);
