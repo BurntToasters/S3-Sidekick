@@ -846,7 +846,7 @@ describe("main integration", () => {
     ]);
   });
 
-  it("builds preview and multi-select metadata context menu variants", async () => {
+  it("builds preview and multi-select properties context menu variants", async () => {
     const { state } = await import("../state.ts");
     await import("../main.ts");
     await flushMicrotasks();
@@ -897,7 +897,7 @@ describe("main integration", () => {
       action?: string;
     }>;
     expect(
-      multiItems.some((item) => item.label === "Edit Metadata (2 items)"),
+      multiItems.some((item) => item.label === "Properties (2 items)"),
     ).toBe(true);
     expect(multiItems.some((item) => item.label === "Download 2 items")).toBe(
       true,
@@ -1104,6 +1104,24 @@ describe("main integration", () => {
     ) as HTMLDivElement;
     objectPanel.dispatchEvent(new Event("dragenter", { bubbles: true }));
     expect(overlay.hidden).toBe(false);
+    const overlayDroppedFile = new File(["overlay"], "overlay.txt");
+    const overlayDrop = new Event("drop", {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(overlayDrop, "dataTransfer", {
+      value: { files: [overlayDroppedFile] },
+      configurable: true,
+    });
+    overlay.dispatchEvent(overlayDrop);
+    await flushMicrotasks();
+    expect(mockEnqueueFiles).toHaveBeenCalledWith(
+      [overlayDroppedFile],
+      "docs/",
+    );
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("Dropped 1 file(s). Queued for upload.");
     objectPanel.dispatchEvent(new Event("dragleave", { bubbles: true }));
     expect(overlay.hidden).toBe(true);
 
@@ -1134,6 +1152,9 @@ describe("main integration", () => {
     objectPanel.dispatchEvent(dropWithPath);
     await flushMicrotasks();
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("Dropped 1 item(s). Queued 1 file(s) for upload.");
 
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "list_local_files_recursive") {
@@ -1152,6 +1173,9 @@ describe("main integration", () => {
     objectPanel.dispatchEvent(dropFallback);
     await flushMicrotasks();
     expect(mockEnqueuePaths).toHaveBeenCalledWith(["C:\\tmp\\a.txt"], "docs/");
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("Dropped 1 file(s). Queued for upload.");
 
     const sidebar = document.getElementById("bucket-panel") as HTMLElement;
     vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
@@ -1310,6 +1334,9 @@ describe("main integration", () => {
     objectPanel.dispatchEvent(dropNoPath);
     await flushMicrotasks();
     expect(mockEnqueueFiles).toHaveBeenCalledWith([droppedFile], "docs/");
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("Dropped 1 file(s). Queued for upload.");
 
     const transferHandler = mockSetTransferCompleteHandler.mock
       .calls[0]?.[0] as
@@ -2485,6 +2512,48 @@ describe("main integration", () => {
     await flushMicrotasks(6);
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
       ["C:\\tmp\\dropped.txt"],
+      "docs/",
+    );
+
+    const uriDrop = new Event("drop", {
+      bubbles: true,
+      cancelable: true,
+    }) as Event & {
+      dataTransfer?: { files: unknown[]; getData: (format: string) => string };
+    };
+    Object.defineProperty(uriDrop, "dataTransfer", {
+      value: {
+        files: [],
+        getData: (format: string) =>
+          format === "text/uri-list" ? "file:///C:/tmp/from-uri.txt" : "",
+      },
+      configurable: true,
+    });
+    objectPanel.dispatchEvent(uriDrop);
+    await flushMicrotasks(6);
+    expect(mockEnqueuePaths).toHaveBeenCalledWith(
+      ["C:\\tmp\\from-uri.txt"],
+      "docs/",
+    );
+
+    const uncUriDrop = new Event("drop", {
+      bubbles: true,
+      cancelable: true,
+    }) as Event & {
+      dataTransfer?: { files: unknown[]; getData: (format: string) => string };
+    };
+    Object.defineProperty(uncUriDrop, "dataTransfer", {
+      value: {
+        files: [],
+        getData: (format: string) =>
+          format === "text/uri-list" ? "file://server/share/unc.txt" : "",
+      },
+      configurable: true,
+    });
+    objectPanel.dispatchEvent(uncUriDrop);
+    await flushMicrotasks(6);
+    expect(mockEnqueuePaths).toHaveBeenCalledWith(
+      ["\\\\server\\share\\unc.txt"],
       "docs/",
     );
 

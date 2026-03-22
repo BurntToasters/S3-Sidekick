@@ -917,6 +917,8 @@ async function queueDroppedPaths(
   const cleaned = paths.filter((path) => path.trim().length > 0);
   if (cleaned.length === 0) return;
 
+  setStatus(`Dropped ${cleaned.length} item(s). Preparing upload...`, 3000);
+
   try {
     const entries = await invoke<LocalFolderFileEntry[]>(
       "list_local_files_recursive",
@@ -924,6 +926,10 @@ async function queueDroppedPaths(
     );
     if (entries.length > 0) {
       enqueueFolderTransfers(entries, targetPrefix);
+      setStatus(
+        `Dropped ${cleaned.length} item(s). Queued ${entries.length} file(s) for upload.`,
+        5000,
+      );
       return;
     }
   } catch (err) {
@@ -934,6 +940,99 @@ async function queueDroppedPaths(
   }
 
   enqueuePaths(cleaned, targetPrefix);
+  setStatus(`Dropped ${cleaned.length} file(s). Queued for upload.`, 5000);
+}
+
+type DroppedDataTransfer = {
+  files?: FileList | File[];
+  items?: DataTransferItemList | ArrayLike<DataTransferItem>;
+  getData?: (format: string) => string;
+} | null;
+
+function collectDroppedFiles(dataTransfer: DroppedDataTransfer): File[] {
+  if (!dataTransfer) return [];
+
+  const rawFiles = dataTransfer.files;
+  if (rawFiles && rawFiles.length > 0) {
+    return Array.from(rawFiles);
+  }
+
+  const rawItems = dataTransfer.items;
+  if (!rawItems || rawItems.length === 0) {
+    return [];
+  }
+
+  const files: File[] = [];
+  for (const item of Array.from(rawItems)) {
+    if (item?.kind !== "file" || typeof item?.getAsFile !== "function") {
+      continue;
+    }
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return files;
+}
+
+function extractNativePaths(files: File[]): string[] {
+  const paths: string[] = [];
+  for (const file of files) {
+    const maybePath = (file as { path?: unknown }).path;
+    if (typeof maybePath === "string" && maybePath.trim().length > 0) {
+      paths.push(maybePath.trim());
+    }
+  }
+  return paths;
+}
+
+function fileUriToPath(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "file:") return null;
+    const host = url.hostname.trim();
+    let pathname = decodeURIComponent(url.pathname);
+    if (state.platformName === "windows") {
+      if (host && host.toLowerCase() !== "localhost") {
+        const uncPath = pathname.replace(/\//g, "\\");
+        return `\\\\${host}${uncPath}`.trim() || null;
+      }
+      if (/^\/[a-zA-Z]:\//.test(pathname)) {
+        pathname = pathname.slice(1);
+      }
+      pathname = pathname.replace(/\//g, "\\");
+    } else if (host) {
+      pathname = `//${host}${pathname}`;
+    }
+    return pathname.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function extractDroppedTextPaths(dataTransfer: DroppedDataTransfer): string[] {
+  if (!dataTransfer || typeof dataTransfer.getData !== "function") return [];
+
+  const text =
+    dataTransfer.getData("text/uri-list") || dataTransfer.getData("text/plain");
+  if (!text || text.trim().length === 0) return [];
+
+  const out: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const value = line.trim();
+    if (!value || value.startsWith("#")) continue;
+    if (/^file:\/\//i.test(value)) {
+      const path = fileUriToPath(value);
+      if (path) out.push(path);
+      continue;
+    }
+    if (
+      /^[a-zA-Z]:[\\/]/.test(value) ||
+      (value.startsWith("/") && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value))
+    ) {
+      out.push(value);
+    }
+  }
+
+  return out;
 }
 
 function handleBucketContextMenu(e: MouseEvent): void {
@@ -1145,7 +1244,7 @@ function handleContextMenu(e: MouseEvent): void {
       if (canPreview(fileName)) {
         items.push({ label: "Preview", action: "preview" });
       }
-      items.push({ label: "Get Info", action: "info" });
+      items.push({ label: "Properties", action: "info" });
       items.push({ label: "Download", action: "download" });
       items.push({ label: "Copy URL", action: "copy-url" });
       items.push({
@@ -1155,7 +1254,7 @@ function handleContextMenu(e: MouseEvent): void {
       items.push({ label: "Rename", action: "rename" });
     } else {
       items.push({
-        label: `Edit Metadata (${fileKeys.length} items)`,
+        label: `Properties (${fileKeys.length} items)`,
         action: "info",
       });
       items.push({
@@ -1385,6 +1484,12 @@ function wireEvents(): void {
     .getElementById("activity-toggle")!
     .addEventListener("click", toggleActivityLog);
 
+  document.getElementById("batch-properties")!.addEventListener("click", () => {
+    const keys = getSelectedFileKeys();
+    if (keys.length > 1) {
+      void openInfoPanel(keys);
+    }
+  });
   document.getElementById("batch-download")!.addEventListener("click", () => {
     void handleDownload();
   });
@@ -1625,9 +1730,54 @@ function wireEvents(): void {
   ) as HTMLParagraphElement;
   let dragCounter = 0;
 
-  objectPanel.addEventListener("dragover", (e) => {
+  const handleDropDragOver = (e: DragEvent): void => {
     e.preventDefault();
-  });
+    e.stopPropagation();
+  };
+
+  const handleObjectDrop = (e: DragEvent): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter = 0;
+    objectPanel.classList.remove("object-panel--dragover");
+    dropOverlay.hidden = true;
+
+    if (!state.connected || !state.currentBucket) {
+      setStatus("Connect to a bucket first.");
+      return;
+    }
+
+    const transfer = e.dataTransfer as DroppedDataTransfer;
+    const files = collectDroppedFiles(transfer);
+    const paths = extractNativePaths(files);
+    if (paths.length > 0) {
+      void queueDroppedPaths(paths, state.currentPrefix);
+      return;
+    }
+
+    const fileUploads = files.filter(
+      (file) => typeof file.name === "string" && file.name.trim().length > 0,
+    );
+    if (fileUploads.length > 0) {
+      enqueueFiles(fileUploads, state.currentPrefix);
+      setStatus(
+        `Dropped ${fileUploads.length} file(s). Queued for upload.`,
+        5000,
+      );
+      return;
+    }
+
+    const textPaths = extractDroppedTextPaths(transfer);
+    if (textPaths.length > 0) {
+      void queueDroppedPaths(textPaths, state.currentPrefix);
+      return;
+    }
+
+    setStatus("No dropped files detected. Try Upload Files instead.", 5000);
+  };
+
+  objectPanel.addEventListener("dragover", handleDropDragOver);
+  dropOverlay.addEventListener("dragover", handleDropDragOver);
   objectPanel.addEventListener("dragenter", (e) => {
     e.preventDefault();
     dragCounter++;
@@ -1645,33 +1795,8 @@ function wireEvents(): void {
       dropOverlay.hidden = true;
     }
   });
-  objectPanel.addEventListener("drop", (e) => {
-    e.preventDefault();
-    dragCounter = 0;
-    objectPanel.classList.remove("object-panel--dragover");
-    dropOverlay.hidden = true;
-
-    if (!state.connected || !state.currentBucket) {
-      setStatus("Connect to a bucket first.");
-      return;
-    }
-
-    const files = e.dataTransfer?.files;
-    if (files && files.length > 0) {
-      const paths: string[] = [];
-      for (const file of Array.from(files)) {
-        const maybePath = (file as { path?: unknown }).path;
-        if (typeof maybePath === "string" && maybePath.length > 0) {
-          paths.push(maybePath);
-        }
-      }
-      if (paths.length > 0) {
-        void queueDroppedPaths(paths, state.currentPrefix);
-      } else {
-        enqueueFiles(files, state.currentPrefix);
-      }
-    }
-  });
+  objectPanel.addEventListener("drop", handleObjectDrop);
+  dropOverlay.addEventListener("drop", handleObjectDrop);
 
   setTransferCompleteHandler(async (summary) => {
     if (summary.hadUpload && state.connected && state.currentBucket) {
