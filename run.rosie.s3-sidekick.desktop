@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=S3 Sidekick
-Exec=s3-sidekick
+Exec=env GDK_BACKEND=x11 s3-sidekick
 Icon=run.rosie.s3-sidekick
 Categories=Network;Utility;
 Terminal=false
