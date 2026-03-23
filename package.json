@@ -30,6 +30,7 @@
     "dist:clean-release-artifacts": "node scripts/dist-tools.js clean-release-artifacts",
     "dist:clean-all": "node scripts/dist-tools.js clean-all",
     "wc": "npm run win-compiler:x64",
+    "vi": "node scripts/vi.js",
     "win-compiler:x64": "powershell -NoProfile -ExecutionPolicy Bypass -NoExit -Command \"& 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Launch-VsDevShell.ps1' -SkipAutomaticLocation",
     "win-compiler:arm64": "powershell -NoProfile -ExecutionPolicy Bypass -NoExit -Command \"& 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Launch-VsDevShell.ps1' -SkipAutomaticLocation -Arch arm64 -HostArch amd64\"",
     "build:win:x64": "npm run sync-version && npm run licenses && dotenv -e .env -- tauri build --target x86_64-pc-windows-msvc --bundles nsis",
