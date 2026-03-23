@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { spawnSync, execSync } = require('child_process');
+import { spawnSync, execSync } from 'child_process';
 
 function run(cmd, args) {
   console.log(`> ${cmd} ${args.join(' ')}`);
