@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { state, dom } from "./state.ts";
 import {
@@ -71,7 +72,6 @@ import {
   enqueuePaths,
   setTransferCompleteHandler,
   initTransferQueueUI,
-  enqueueFiles,
   disposeTransferQueueUI,
   enqueueDownloads,
   enqueueFolderEntries,
@@ -943,98 +943,6 @@ async function queueDroppedPaths(
   setStatus(`Dropped ${cleaned.length} file(s). Queued for upload.`, 5000);
 }
 
-type DroppedDataTransfer = {
-  files?: FileList | File[];
-  items?: DataTransferItemList | ArrayLike<DataTransferItem>;
-  getData?: (format: string) => string;
-} | null;
-
-function collectDroppedFiles(dataTransfer: DroppedDataTransfer): File[] {
-  if (!dataTransfer) return [];
-
-  const rawFiles = dataTransfer.files;
-  if (rawFiles && rawFiles.length > 0) {
-    return Array.from(rawFiles);
-  }
-
-  const rawItems = dataTransfer.items;
-  if (!rawItems || rawItems.length === 0) {
-    return [];
-  }
-
-  const files: File[] = [];
-  for (const item of Array.from(rawItems)) {
-    if (item?.kind !== "file" || typeof item?.getAsFile !== "function") {
-      continue;
-    }
-    const file = item.getAsFile();
-    if (file) files.push(file);
-  }
-  return files;
-}
-
-function extractNativePaths(files: File[]): string[] {
-  const paths: string[] = [];
-  for (const file of files) {
-    const maybePath = (file as { path?: unknown }).path;
-    if (typeof maybePath === "string" && maybePath.trim().length > 0) {
-      paths.push(maybePath.trim());
-    }
-  }
-  return paths;
-}
-
-function fileUriToPath(raw: string): string | null {
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== "file:") return null;
-    const host = url.hostname.trim();
-    let pathname = decodeURIComponent(url.pathname);
-    if (state.platformName === "windows") {
-      if (host && host.toLowerCase() !== "localhost") {
-        const uncPath = pathname.replace(/\//g, "\\");
-        return `\\\\${host}${uncPath}`.trim() || null;
-      }
-      if (/^\/[a-zA-Z]:\//.test(pathname)) {
-        pathname = pathname.slice(1);
-      }
-      pathname = pathname.replace(/\//g, "\\");
-    } else if (host) {
-      pathname = `//${host}${pathname}`;
-    }
-    return pathname.trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-function extractDroppedTextPaths(dataTransfer: DroppedDataTransfer): string[] {
-  if (!dataTransfer || typeof dataTransfer.getData !== "function") return [];
-
-  const text =
-    dataTransfer.getData("text/uri-list") || dataTransfer.getData("text/plain");
-  if (!text || text.trim().length === 0) return [];
-
-  const out: string[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const value = line.trim();
-    if (!value || value.startsWith("#")) continue;
-    if (/^file:\/\//i.test(value)) {
-      const path = fileUriToPath(value);
-      if (path) out.push(path);
-      continue;
-    }
-    if (
-      /^[a-zA-Z]:[\\/]/.test(value) ||
-      (value.startsWith("/") && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value))
-    ) {
-      out.push(value);
-    }
-  }
-
-  return out;
-}
-
 function handleBucketContextMenu(e: MouseEvent): void {
   if (!state.connected) return;
 
@@ -1728,75 +1636,43 @@ function wireEvents(): void {
   const dropPath = document.getElementById(
     "drop-zone-path",
   ) as HTMLParagraphElement;
-  let dragCounter = 0;
 
-  const handleDropDragOver = (e: DragEvent): void => {
+  const suppressDrag = (e: DragEvent): void => {
     e.preventDefault();
     e.stopPropagation();
   };
+  objectPanel.addEventListener("dragover", suppressDrag);
+  dropOverlay.addEventListener("dragover", suppressDrag);
+  objectPanel.addEventListener("drop", suppressDrag);
+  dropOverlay.addEventListener("drop", suppressDrag);
 
-  const handleObjectDrop = (e: DragEvent): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounter = 0;
-    objectPanel.classList.remove("object-panel--dragover");
-    dropOverlay.hidden = true;
-
-    if (!state.connected || !state.currentBucket) {
-      setStatus("Connect to a bucket first.");
-      return;
-    }
-
-    const transfer = e.dataTransfer as DroppedDataTransfer;
-    const files = collectDroppedFiles(transfer);
-    const paths = extractNativePaths(files);
-    if (paths.length > 0) {
-      void queueDroppedPaths(paths, state.currentPrefix);
-      return;
-    }
-
-    const fileUploads = files.filter(
-      (file) => typeof file.name === "string" && file.name.trim().length > 0,
-    );
-    if (fileUploads.length > 0) {
-      enqueueFiles(fileUploads, state.currentPrefix);
-      setStatus(
-        `Dropped ${fileUploads.length} file(s). Queued for upload.`,
-        5000,
-      );
-      return;
-    }
-
-    const textPaths = extractDroppedTextPaths(transfer);
-    if (textPaths.length > 0) {
-      void queueDroppedPaths(textPaths, state.currentPrefix);
-      return;
-    }
-
-    setStatus("No dropped files detected. Try Upload Files instead.", 5000);
-  };
-
-  objectPanel.addEventListener("dragover", handleDropDragOver);
-  dropOverlay.addEventListener("dragover", handleDropDragOver);
-  objectPanel.addEventListener("dragenter", (e) => {
-    e.preventDefault();
-    dragCounter++;
-    if (state.connected && state.currentBucket) {
-      dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
-      dropOverlay.hidden = false;
-    }
-    objectPanel.classList.add("object-panel--dragover");
-  });
-  objectPanel.addEventListener("dragleave", () => {
-    dragCounter--;
-    if (dragCounter <= 0) {
-      dragCounter = 0;
+  void getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type === "enter") {
+      if (state.connected && state.currentBucket) {
+        dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
+        dropOverlay.hidden = false;
+      }
+      objectPanel.classList.add("object-panel--dragover");
+    } else if (event.payload.type === "leave") {
       objectPanel.classList.remove("object-panel--dragover");
       dropOverlay.hidden = true;
+    } else if (event.payload.type === "drop") {
+      objectPanel.classList.remove("object-panel--dragover");
+      dropOverlay.hidden = true;
+
+      if (!state.connected || !state.currentBucket) {
+        setStatus("Connect to a bucket first.");
+        return;
+      }
+
+      const paths = event.payload.paths;
+      if (paths.length > 0) {
+        void queueDroppedPaths(paths, state.currentPrefix);
+      } else {
+        setStatus("No dropped files detected. Try Upload Files instead.", 5000);
+      }
     }
   });
-  objectPanel.addEventListener("drop", handleObjectDrop);
-  dropOverlay.addEventListener("drop", handleObjectDrop);
 
   setTransferCompleteHandler(async (summary) => {
     if (summary.hadUpload && state.connected && state.currentBucket) {
