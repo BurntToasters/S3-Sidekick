@@ -1126,12 +1126,20 @@ describe("main integration", () => {
     ) as HTMLDivElement;
     expect(capturedDragDropHandler).toBeTruthy();
     capturedDragDropHandler!({
-      payload: { type: "enter", paths: ["/tmp/overlay.txt"], position: { x: 0, y: 0 } },
+      payload: {
+        type: "enter",
+        paths: ["/tmp/overlay.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
     expect(overlay.hidden).toBe(false);
 
     capturedDragDropHandler!({
-      payload: { type: "drop", paths: ["/tmp/overlay.txt"], position: { x: 0, y: 0 } },
+      payload: {
+        type: "drop",
+        paths: ["/tmp/overlay.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
     await flushMicrotasks();
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
@@ -1141,7 +1149,11 @@ describe("main integration", () => {
     expect(overlay.hidden).toBe(true);
 
     capturedDragDropHandler!({
-      payload: { type: "enter", paths: ["/tmp/a.txt"], position: { x: 0, y: 0 } },
+      payload: {
+        type: "enter",
+        paths: ["/tmp/a.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
     capturedDragDropHandler!({ payload: { type: "leave" } });
     expect(overlay.hidden).toBe(true);
@@ -1149,7 +1161,11 @@ describe("main integration", () => {
     state.connected = false;
     state.currentBucket = "";
     capturedDragDropHandler!({
-      payload: { type: "drop", paths: ["/tmp/a.txt"], position: { x: 0, y: 0 } },
+      payload: {
+        type: "drop",
+        paths: ["/tmp/a.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
@@ -1158,7 +1174,11 @@ describe("main integration", () => {
     state.connected = true;
     state.currentBucket = "bucket-a";
     capturedDragDropHandler!({
-      payload: { type: "drop", paths: ["C:\\tmp\\a.txt"], position: { x: 0, y: 0 } },
+      payload: {
+        type: "drop",
+        paths: ["C:\\tmp\\a.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
     await flushMicrotasks();
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
@@ -1173,7 +1193,11 @@ describe("main integration", () => {
       return undefined;
     });
     capturedDragDropHandler!({
-      payload: { type: "drop", paths: ["C:\\tmp\\a.txt"], position: { x: 0, y: 0 } },
+      payload: {
+        type: "drop",
+        paths: ["C:\\tmp\\a.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
     await flushMicrotasks();
     expect(mockEnqueuePaths).toHaveBeenCalledWith(["C:\\tmp\\a.txt"], "docs/");
@@ -1324,7 +1348,11 @@ describe("main integration", () => {
     state.currentPrefix = "docs/";
 
     capturedDragDropHandler!({
-      payload: { type: "drop", paths: ["/home/user/local.txt"], position: { x: 0, y: 0 } },
+      payload: {
+        type: "drop",
+        paths: ["/home/user/local.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
     await flushMicrotasks();
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
@@ -2489,7 +2517,11 @@ describe("main integration", () => {
       return undefined;
     });
     capturedDragDropHandler!({
-      payload: { type: "drop", paths: ["C:\\tmp\\dropped.txt"], position: { x: 0, y: 0 } },
+      payload: {
+        type: "drop",
+        paths: ["C:\\tmp\\dropped.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
     await flushMicrotasks(6);
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
@@ -2498,7 +2530,11 @@ describe("main integration", () => {
     );
 
     capturedDragDropHandler!({
-      payload: { type: "drop", paths: ["/home/user/from-tauri.txt"], position: { x: 0, y: 0 } },
+      payload: {
+        type: "drop",
+        paths: ["/home/user/from-tauri.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
     await flushMicrotasks(6);
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
