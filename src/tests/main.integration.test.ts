@@ -264,6 +264,16 @@ vi.mock("../command-palette.ts", () => ({
   isPaletteOpen: mockIsPaletteOpen,
 }));
 
+const mockShouldShowSetupWizard = vi.fn(() => false);
+const mockShowSetupWizard = vi.fn<() => Promise<null>>();
+const mockMarkSetupComplete = vi.fn<() => Promise<void>>();
+
+vi.mock("../setup-wizard.ts", () => ({
+  shouldShowSetupWizard: mockShouldShowSetupWizard,
+  showSetupWizard: mockShowSetupWizard,
+  markSetupComplete: mockMarkSetupComplete,
+}));
+
 const INDEX_HTML = fs.readFileSync(
   path.join(process.cwd(), "src", "index.html"),
   "utf8",
@@ -2326,13 +2336,14 @@ describe("main integration", () => {
     vi.resetModules();
     mountIndexFixture();
     setupMatchMedia(false);
-    mockLoadSettings.mockRejectedValueOnce(new Error("settings failed"));
+    mockLoadSettings.mockRejectedValue(new Error("settings failed"));
     mockEnsureSecurityReady.mockResolvedValue(true);
     await import("../main.ts");
     await flushMicrotasks();
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Failed to load settings");
+    mockLoadSettings.mockReset();
 
     vi.resetModules();
     mountIndexFixture();

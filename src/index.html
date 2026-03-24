@@ -113,7 +113,7 @@
         <button id="connect-btn" class="btn btn--primary">Connect</button>
         <button
           id="disconnect-btn"
-          class="btn btn--ghost"
+          class="btn btn--disconnect"
           style="display: none"
         >
           Disconnect
@@ -1099,6 +1099,231 @@
             />
             Yes, I'd love to!
           </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="setup-wizard-overlay"
+      class="setup-wizard-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="setup-wizard-title"
+      hidden
+    >
+      <div class="setup-wizard-card">
+        <div class="setup-wizard-progress">
+          <div
+            class="setup-wizard-progress__bar"
+            id="setup-wizard-progress-bar"
+          ></div>
+        </div>
+
+        <div class="setup-wizard-step" id="setup-step-welcome" data-step="0">
+          <div class="setup-wizard-step__icon">
+            <img
+              class="twemoji-icon setup-wizard-step__twemoji"
+              src="/twemoji/1f44b.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+          </div>
+          <h2 id="setup-wizard-title" class="setup-wizard-step__title">
+            Welcome to S3 Sidekick
+          </h2>
+          <p class="setup-wizard-step__desc">
+            Let's get you set up. This will only take a moment.
+          </p>
+          <div class="setup-wizard-step__actions">
+            <button
+              id="setup-welcome-next"
+              class="btn btn--primary setup-wizard-btn-wide"
+            >
+              Get Started
+            </button>
+          </div>
+        </div>
+
+        <div
+          class="setup-wizard-step"
+          id="setup-step-theme"
+          data-step="1"
+          hidden
+        >
+          <div class="setup-wizard-step__icon">
+            <img
+              class="twemoji-icon setup-wizard-step__twemoji"
+              src="/twemoji/1f3a8.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+          </div>
+          <h2 class="setup-wizard-step__title">Choose Your Theme</h2>
+          <p class="setup-wizard-step__desc">Pick how S3 Sidekick looks.</p>
+          <div class="setup-wizard-theme-options" id="setup-theme-options">
+            <button class="setup-wizard-theme-btn" data-theme-value="light">
+              <span
+                class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--light"
+              ></span>
+              <span>Light</span>
+            </button>
+            <button class="setup-wizard-theme-btn" data-theme-value="dark">
+              <span
+                class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--dark"
+              ></span>
+              <span>Dark</span>
+            </button>
+            <button
+              class="setup-wizard-theme-btn setup-wizard-theme-btn--active"
+              data-theme-value="system"
+            >
+              <span
+                class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--system"
+              ></span>
+              <span>System</span>
+            </button>
+          </div>
+          <div class="setup-wizard-step__actions">
+            <button id="setup-theme-back" class="btn btn--ghost">Back</button>
+            <button id="setup-theme-next" class="btn btn--primary">Next</button>
+          </div>
+        </div>
+
+        <div
+          class="setup-wizard-step"
+          id="setup-step-encryption"
+          data-step="2"
+          hidden
+        >
+          <div class="setup-wizard-step__icon">
+            <img
+              class="twemoji-icon setup-wizard-step__twemoji"
+              src="/twemoji/1f512.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+          </div>
+          <h2 class="setup-wizard-step__title">Encryption</h2>
+          <p class="setup-wizard-step__desc">
+            Protect saved credentials and bookmarks with AES-256 encryption.
+          </p>
+          <div class="setup-wizard-encryption-form" id="setup-encryption-form">
+            <input
+              id="setup-enc-password"
+              class="field setup-wizard-field"
+              type="password"
+              placeholder="Password (8+ characters)"
+              autocomplete="new-password"
+            />
+            <input
+              id="setup-enc-confirm"
+              class="field setup-wizard-field"
+              type="password"
+              placeholder="Confirm password"
+              autocomplete="new-password"
+            />
+            <p id="setup-enc-error" class="setup-wizard-enc-error" hidden></p>
+            <label
+              id="setup-biometric-label"
+              class="setup-wizard-checkbox-row"
+              hidden
+            >
+              <input id="setup-enc-biometric" type="checkbox" />
+              <span id="setup-biometric-text">Enable biometric unlock</span>
+            </label>
+          </div>
+          <div class="setup-wizard-step__actions">
+            <button id="setup-enc-back" class="btn btn--ghost">Back</button>
+            <button
+              id="setup-enc-skip"
+              class="btn btn--ghost setup-wizard-skip-btn"
+            >
+              Skip (not recommended)
+            </button>
+            <button id="setup-enc-next" class="btn btn--primary">
+              Enable Encryption
+            </button>
+          </div>
+        </div>
+
+        <div
+          class="setup-wizard-step"
+          id="setup-step-updates"
+          data-step="3"
+          hidden
+        >
+          <div class="setup-wizard-step__icon">
+            <img
+              class="twemoji-icon setup-wizard-step__twemoji"
+              src="/twemoji/1f504.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+          </div>
+          <h2 class="setup-wizard-step__title">Updates</h2>
+          <p class="setup-wizard-step__desc">
+            Stay up to date with the latest features and fixes.
+          </p>
+          <div class="setup-wizard-updates-form">
+            <label class="setup-wizard-checkbox-row">
+              <input id="setup-auto-updates" type="checkbox" checked />
+              <span>Automatically check for updates</span>
+            </label>
+            <div class="setup-wizard-channel-row">
+              <label
+                class="setup-wizard-channel-label"
+                for="setup-update-channel"
+                >Update channel</label
+              >
+              <select
+                id="setup-update-channel"
+                class="field setup-wizard-channel-select"
+              >
+                <option value="release">Stable</option>
+                <option value="beta">Beta</option>
+              </select>
+            </div>
+          </div>
+          <div class="setup-wizard-step__actions">
+            <button id="setup-updates-back" class="btn btn--ghost">Back</button>
+            <button id="setup-updates-next" class="btn btn--primary">
+              Finish Setup
+            </button>
+          </div>
+        </div>
+
+        <div
+          class="setup-wizard-step"
+          id="setup-step-done"
+          data-step="4"
+          hidden
+        >
+          <div class="setup-wizard-step__icon">
+            <img
+              class="twemoji-icon setup-wizard-step__twemoji"
+              src="/twemoji/1f680.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+          </div>
+          <h2 class="setup-wizard-step__title">You're All Set!</h2>
+          <p class="setup-wizard-step__desc">
+            S3 Sidekick is ready to go. You can change any of these settings
+            later.
+          </p>
+          <div class="setup-wizard-step__actions">
+            <button
+              id="setup-done-btn"
+              class="btn btn--primary setup-wizard-btn-wide"
+            >
+              Launch S3 Sidekick
+            </button>
+          </div>
         </div>
       </div>
     </div>

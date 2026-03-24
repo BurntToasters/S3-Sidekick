@@ -265,6 +265,7 @@ fn main() {
             security::change_security_password,
             security::lock_security,
             security::set_lock_timeout,
+            security::reset_security,
             biometric::biometric_available,
             biometric::enable_biometric,
             biometric::disable_biometric,

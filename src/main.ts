@@ -105,6 +105,11 @@ import {
   registerCommands,
   isPaletteOpen,
 } from "./command-palette.ts";
+import {
+  shouldShowSetupWizard,
+  showSetupWizard,
+  markSetupComplete,
+} from "./setup-wizard.ts";
 
 interface LocalFolderFileEntry {
   file_path: string;
@@ -147,15 +152,50 @@ function setStatus(text: string, autoResetMs?: number): void {
 function refreshBookmarkBar(): void {
   const bar = document.getElementById("bookmark-bar");
   if (!bar) return;
-  renderBookmarkBar(bar, (bookmark) => {
-    setConnectionInputs(
-      bookmark.endpoint,
-      bookmark.region,
-      bookmark.access_key,
-      bookmark.secret_key,
-    );
-    setStatus(`Loaded bookmark "${bookmark.name}".`, 5000);
-  });
+  renderBookmarkBar(
+    bar,
+    (bookmark) => {
+      void switchToBookmark(
+        bookmark.name,
+        bookmark.endpoint,
+        bookmark.region,
+        bookmark.access_key,
+        bookmark.secret_key,
+      );
+    },
+    state.connected ? state.endpoint : undefined,
+    () => {
+      void handleNewConnection();
+    },
+  );
+}
+
+async function handleNewConnection(): Promise<void> {
+  if (state.connected) {
+    await handleDisconnect();
+  }
+  setConnectionInputs("", "", "", "");
+  (document.getElementById("conn-endpoint") as HTMLInputElement).focus();
+  setStatus("Ready for a new connection.", 5000);
+}
+
+async function switchToBookmark(
+  name: string,
+  endpoint: string,
+  region: string,
+  accessKey: string,
+  secretKey: string,
+): Promise<void> {
+  const wasConnected = state.connected;
+  if (wasConnected) {
+    await handleDisconnect();
+  }
+  setConnectionInputs(endpoint, region, accessKey, secretKey);
+  if (wasConnected) {
+    await handleConnect();
+  } else {
+    setStatus(`Loaded bookmark "${name}".`, 5000);
+  }
 }
 
 function setConnectionUI(connected: boolean): void {
@@ -171,6 +211,7 @@ function setConnectionUI(connected: boolean): void {
     dom.connectBtn.style.display = "";
     dom.disconnectBtn.style.display = "none";
   }
+  refreshBookmarkBar();
 }
 
 function enqueueDownloadTransfers(entries: DownloadQueueEntry[]): boolean {
@@ -1820,13 +1861,13 @@ function wireEvents(): void {
   });
 
   setBookmarkSelectHandler((bookmark) => {
-    setConnectionInputs(
+    void switchToBookmark(
+      bookmark.name,
       bookmark.endpoint,
       bookmark.region,
       bookmark.access_key,
       bookmark.secret_key,
     );
-    setStatus(`Loaded bookmark "${bookmark.name}".`, 5000);
   });
 }
 
@@ -1906,6 +1947,91 @@ async function checkSupportPrompt(): Promise<void> {
 async function init(): Promise<void> {
   wireEvents();
 
+  state.platformName = await invoke<string>("get_platform_info");
+  applyPlatformClass();
+
+  let settingsPreloaded = false;
+  try {
+    await loadSettings();
+    settingsPreloaded = true;
+  } catch {
+    // settings not loadable yet (first launch or locked)
+    // If security is initialized but locked, unlock before checking the wizard
+    // flag — otherwise _setupComplete can't be read and the wizard re-shows.
+    try {
+      const secStatus = await invoke<{
+        initialized: boolean;
+        encryption_enabled: boolean;
+        unlocked: boolean;
+      }>("get_security_status");
+      if (
+        secStatus.initialized &&
+        secStatus.encryption_enabled &&
+        !secStatus.unlocked
+      ) {
+        const unlocked = await ensureSecurityReady();
+        if (unlocked) {
+          try {
+            await loadSettings();
+            settingsPreloaded = true;
+          } catch {
+            // still failed after unlock — fall through to wizard check
+          }
+        }
+      }
+    } catch {
+      // security status unavailable — continue with defaults
+    }
+  }
+
+  if (shouldShowSetupWizard()) {
+    const result = await showSetupWizard();
+    if (result) {
+      state.currentSettings.theme = result.theme;
+      state.currentSettings.autoCheckUpdates = result.autoCheckUpdates;
+      state.currentSettings.updateChannel = result.updateChannel;
+      await markSetupComplete();
+    }
+
+    try {
+      await loadSettings();
+    } catch (err) {
+      setStatus(`Failed to load settings: ${String(err)}`);
+      logActivity(`Failed to load settings: ${String(err)}`, "error");
+    }
+
+    updateShortcutChips();
+    const version = await getVersion();
+    dom.versionLabel.textContent = `v${version}`;
+
+    try {
+      await loadBookmarks();
+      setBookmarkChangeHandler(refreshBookmarkBar);
+      refreshBookmarkBar();
+    } catch (err) {
+      console.warn("Failed to load bookmarks:", err);
+      logActivity("Failed to load bookmarks.", "warning");
+    }
+
+    try {
+      const saved = await loadConnection();
+      if (saved) {
+        setConnectionInputs(
+          saved.endpoint,
+          saved.region,
+          saved.access_key,
+          saved.secret_key,
+        );
+      }
+    } catch {
+      // no saved connection on first launch
+    }
+
+    await initUpdater();
+    void autoCheckUpdates();
+    return;
+  }
+
   const securityReady = await ensureSecurityReady();
   if (!securityReady) {
     setStatus(
@@ -1917,16 +2043,16 @@ async function init(): Promise<void> {
     );
   }
 
-  try {
-    await loadSettings();
-    void checkSupportPrompt();
-  } catch (err) {
-    setStatus(`Failed to load settings: ${String(err)}`);
-    logActivity(`Failed to load settings: ${String(err)}`, "error");
+  if (!settingsPreloaded) {
+    try {
+      await loadSettings();
+    } catch (err) {
+      setStatus(`Failed to load settings: ${String(err)}`);
+      logActivity(`Failed to load settings: ${String(err)}`, "error");
+    }
   }
+  void checkSupportPrompt();
 
-  state.platformName = await invoke<string>("get_platform_info");
-  applyPlatformClass();
   updateShortcutChips();
   const version = await getVersion();
   dom.versionLabel.textContent = `v${version}`;

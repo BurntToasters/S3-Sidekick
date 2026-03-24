@@ -167,14 +167,20 @@ export async function removeBookmark(index: number): Promise<void> {
 export function renderBookmarkBar(
   barEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
+  activeEndpoint?: string,
+  onNewTab?: () => void,
 ): void {
   barEl.innerHTML = "";
-  if (bookmarks.length === 0) return;
+  if (bookmarks.length === 0 && !onNewTab) return;
 
   for (let i = 0; i < bookmarks.length; i++) {
     const b = bookmarks[i];
     const chip = document.createElement("button");
-    chip.className = "bookmark-chip";
+    const isActive =
+      activeEndpoint !== undefined && b.endpoint === activeEndpoint;
+    chip.className = isActive
+      ? "bookmark-chip bookmark-chip--active"
+      : "bookmark-chip";
     chip.title = b.endpoint;
     const regionSuffix = b.region
       ? ` <span class="bookmark-chip__region">${escapeHtml(b.region)}</span>`
@@ -182,6 +188,15 @@ export function renderBookmarkBar(
     chip.innerHTML = escapeHtml(b.name) + regionSuffix;
     chip.addEventListener("click", () => onSelect(b));
     barEl.appendChild(chip);
+  }
+
+  if (onNewTab) {
+    const plusBtn = document.createElement("button");
+    plusBtn.className = "bookmark-chip bookmark-chip--new";
+    plusBtn.title = "New connection";
+    plusBtn.textContent = "+";
+    plusBtn.addEventListener("click", onNewTab);
+    barEl.appendChild(plusBtn);
   }
 }
 
