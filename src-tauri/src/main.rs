@@ -201,6 +201,12 @@ fn save_bookmarks_backup(app: tauri::AppHandle, json: String) -> Result<(), Stri
 fn main() {
     #[cfg(target_os = "linux")]
     {
+        if std::env::var("GDK_BACKEND").is_err() {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
+        if std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
         if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
             let dominated_by_nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
             if !dominated_by_nvidia {
