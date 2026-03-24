@@ -17,6 +17,7 @@
   <url type="bugtracker">https://github.com/BurntToasters/S3-Sidekick/issues</url>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.7.0" date="2026-03-24"/>
     <release version="0.6.3" date="2026-03-24"/>
     <release version="0.6.2" date="2026-03-23"/>
     <release version="0.6.1" date="2026-03-22"/>

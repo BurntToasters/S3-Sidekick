@@ -1,6 +1,6 @@
 {
   "name": "s3-sidekick",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "private": true,
   "description": "A Cross-Platform Desktop client for S3-compatible Object Storage.",
   "type": "module",
@@ -21,7 +21,7 @@
     "start": "npm run tauri:dev",
     "tauri": "tauri",
     "licenses": "npx npm-license-crawler --production --json public/licenses.json",
-    "tauri:dev": "npm run sync-version && npm run licenses && tauri dev",
+    "tauri:dev": "npm run sync-version && npm run licenses && tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:build": "npm run sync-version && npm run licenses && tauri build",
     "sync-version": "node scripts/sync-version.js",
     "icons:normalize": "node scripts/normalize-iconsets.js",
