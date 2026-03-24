@@ -111,6 +111,27 @@ vi.mock("@tauri-apps/api/app", () => ({
   getVersion: mockGetVersion,
 }));
 
+type DragDropPayload =
+  | { type: "enter"; paths: string[]; position: { x: number; y: number } }
+  | { type: "over"; position: { x: number; y: number } }
+  | { type: "drop"; paths: string[]; position: { x: number; y: number } }
+  | { type: "leave" };
+
+let capturedDragDropHandler:
+  | ((event: { payload: DragDropPayload }) => void)
+  | null = null;
+
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: (
+      handler: (event: { payload: DragDropPayload }) => void,
+    ) => {
+      capturedDragDropHandler = handler;
+      return Promise.resolve(() => {});
+    },
+  }),
+}));
+
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: mockOpen,
   save: mockSave,
@@ -298,6 +319,7 @@ describe("main integration", () => {
     vi.restoreAllMocks();
     mountIndexFixture();
     setupMatchMedia(false);
+    capturedDragDropHandler = null;
 
     mockInvoke.mockReset();
     mockGetVersion.mockReset();
@@ -1102,54 +1124,62 @@ describe("main integration", () => {
     const overlay = document.getElementById(
       "drop-zone-overlay",
     ) as HTMLDivElement;
-    objectPanel.dispatchEvent(new Event("dragenter", { bubbles: true }));
+    expect(capturedDragDropHandler).toBeTruthy();
+    capturedDragDropHandler!({
+      payload: {
+        type: "enter",
+        paths: ["/tmp/overlay.txt"],
+        position: { x: 0, y: 0 },
+      },
+    });
     expect(overlay.hidden).toBe(false);
-    const overlayDroppedFile = new File(["overlay"], "overlay.txt");
-    const overlayDrop = new Event("drop", {
-      bubbles: true,
-      cancelable: true,
+
+    capturedDragDropHandler!({
+      payload: {
+        type: "drop",
+        paths: ["/tmp/overlay.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
-    Object.defineProperty(overlayDrop, "dataTransfer", {
-      value: { files: [overlayDroppedFile] },
-      configurable: true,
-    });
-    overlay.dispatchEvent(overlayDrop);
     await flushMicrotasks();
-    expect(mockEnqueueFiles).toHaveBeenCalledWith(
-      [overlayDroppedFile],
-      "docs/",
-    );
+    expect(mockEnqueueFolderEntries).toHaveBeenCalled();
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Dropped 1 file(s). Queued for upload.");
-    objectPanel.dispatchEvent(new Event("dragleave", { bubbles: true }));
+    ).toContain("Dropped 1 item(s). Queued 1 file(s) for upload.");
+    expect(overlay.hidden).toBe(true);
+
+    capturedDragDropHandler!({
+      payload: {
+        type: "enter",
+        paths: ["/tmp/a.txt"],
+        position: { x: 0, y: 0 },
+      },
+    });
+    capturedDragDropHandler!({ payload: { type: "leave" } });
     expect(overlay.hidden).toBe(true);
 
     state.connected = false;
     state.currentBucket = "";
-    objectPanel.dispatchEvent(
-      new Event("drop", { bubbles: true, cancelable: true }),
-    );
+    capturedDragDropHandler!({
+      payload: {
+        type: "drop",
+        paths: ["/tmp/a.txt"],
+        position: { x: 0, y: 0 },
+      },
+    });
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Connect to a bucket first.");
 
     state.connected = true;
     state.currentBucket = "bucket-a";
-    const fileWithPath = new File(["abc"], "a.txt");
-    Object.defineProperty(fileWithPath, "path", {
-      value: "C:\\tmp\\a.txt",
-      configurable: true,
+    capturedDragDropHandler!({
+      payload: {
+        type: "drop",
+        paths: ["C:\\tmp\\a.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
-    const dropWithPath = new Event("drop", {
-      bubbles: true,
-      cancelable: true,
-    });
-    Object.defineProperty(dropWithPath, "dataTransfer", {
-      value: { files: [fileWithPath] },
-      configurable: true,
-    });
-    objectPanel.dispatchEvent(dropWithPath);
     await flushMicrotasks();
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
     expect(
@@ -1162,15 +1192,13 @@ describe("main integration", () => {
       }
       return undefined;
     });
-    const dropFallback = new Event("drop", {
-      bubbles: true,
-      cancelable: true,
+    capturedDragDropHandler!({
+      payload: {
+        type: "drop",
+        paths: ["C:\\tmp\\a.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
-    Object.defineProperty(dropFallback, "dataTransfer", {
-      value: { files: [fileWithPath] },
-      configurable: true,
-    });
-    objectPanel.dispatchEvent(dropFallback);
     await flushMicrotasks();
     expect(mockEnqueuePaths).toHaveBeenCalledWith(["C:\\tmp\\a.txt"], "docs/");
     expect(
@@ -1310,7 +1338,7 @@ describe("main integration", () => {
     expect(layout.classList.contains("main-layout--sidebar-open")).toBe(false);
   });
 
-  it("enqueues dropped files without native paths and refreshes after upload completion", async () => {
+  it("queues dropped paths via Tauri events and refreshes after upload completion", async () => {
     const { state } = await import("../state.ts");
     await import("../main.ts");
     await flushMicrotasks();
@@ -1319,24 +1347,18 @@ describe("main integration", () => {
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
-    const objectPanel = document.getElementById(
-      "object-panel",
-    ) as HTMLDivElement;
-    const droppedFile = new File(["hello"], "local.txt");
-    const dropNoPath = new Event("drop", {
-      bubbles: true,
-      cancelable: true,
+    capturedDragDropHandler!({
+      payload: {
+        type: "drop",
+        paths: ["/home/user/local.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
-    Object.defineProperty(dropNoPath, "dataTransfer", {
-      value: { files: [droppedFile] },
-      configurable: true,
-    });
-    objectPanel.dispatchEvent(dropNoPath);
     await flushMicrotasks();
-    expect(mockEnqueueFiles).toHaveBeenCalledWith([droppedFile], "docs/");
+    expect(mockEnqueueFolderEntries).toHaveBeenCalled();
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Dropped 1 file(s). Queued for upload.");
+    ).toContain("Dropped 1 item(s). Queued 1 file(s) for upload.");
 
     const transferHandler = mockSetTransferCompleteHandler.mock
       .calls[0]?.[0] as
@@ -2479,20 +2501,14 @@ describe("main integration", () => {
     state.connected = true;
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
-    const objectPanel = document.getElementById(
-      "object-panel",
-    ) as HTMLDivElement;
 
-    const emptyDrop = new Event("drop", {
-      bubbles: true,
-      cancelable: true,
-    }) as Event & { dataTransfer?: { files: unknown[] } };
-    Object.defineProperty(emptyDrop, "dataTransfer", {
-      value: { files: [{ path: "   " }] },
-      configurable: true,
+    capturedDragDropHandler!({
+      payload: { type: "drop", paths: [], position: { x: 0, y: 0 } },
     });
-    objectPanel.dispatchEvent(emptyDrop);
     await flushMicrotasks();
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("No dropped files detected.");
 
     const baseInvoke = mockInvoke.getMockImplementation();
     mockInvoke.mockImplementation(async (cmd, payload) => {
@@ -2500,60 +2516,29 @@ describe("main integration", () => {
       if (baseInvoke) return baseInvoke(cmd, payload);
       return undefined;
     });
-    const pathDrop = new Event("drop", {
-      bubbles: true,
-      cancelable: true,
-    }) as Event & { dataTransfer?: { files: unknown[] } };
-    Object.defineProperty(pathDrop, "dataTransfer", {
-      value: { files: [{ path: "C:\\tmp\\dropped.txt" }] },
-      configurable: true,
+    capturedDragDropHandler!({
+      payload: {
+        type: "drop",
+        paths: ["C:\\tmp\\dropped.txt"],
+        position: { x: 0, y: 0 },
+      },
     });
-    objectPanel.dispatchEvent(pathDrop);
     await flushMicrotasks(6);
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
       ["C:\\tmp\\dropped.txt"],
       "docs/",
     );
 
-    const uriDrop = new Event("drop", {
-      bubbles: true,
-      cancelable: true,
-    }) as Event & {
-      dataTransfer?: { files: unknown[]; getData: (format: string) => string };
-    };
-    Object.defineProperty(uriDrop, "dataTransfer", {
-      value: {
-        files: [],
-        getData: (format: string) =>
-          format === "text/uri-list" ? "file:///C:/tmp/from-uri.txt" : "",
+    capturedDragDropHandler!({
+      payload: {
+        type: "drop",
+        paths: ["/home/user/from-tauri.txt"],
+        position: { x: 0, y: 0 },
       },
-      configurable: true,
     });
-    objectPanel.dispatchEvent(uriDrop);
     await flushMicrotasks(6);
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
-      ["C:\\tmp\\from-uri.txt"],
-      "docs/",
-    );
-
-    const uncUriDrop = new Event("drop", {
-      bubbles: true,
-      cancelable: true,
-    }) as Event & {
-      dataTransfer?: { files: unknown[]; getData: (format: string) => string };
-    };
-    Object.defineProperty(uncUriDrop, "dataTransfer", {
-      value: {
-        files: [],
-        getData: (format: string) =>
-          format === "text/uri-list" ? "file://server/share/unc.txt" : "",
-      },
-      configurable: true,
-    });
-    objectPanel.dispatchEvent(uncUriDrop);
-    await flushMicrotasks(6);
-    expect(mockEnqueuePaths).toHaveBeenCalledWith(
-      ["\\\\server\\share\\unc.txt"],
+      ["/home/user/from-tauri.txt"],
       "docs/",
     );
 
