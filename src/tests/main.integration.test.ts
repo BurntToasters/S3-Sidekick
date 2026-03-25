@@ -7,7 +7,7 @@ const mockGetVersion = vi.fn<() => Promise<string>>();
 const mockOpen = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockSave = vi.fn<(...args: unknown[]) => Promise<string | null>>();
 
-const mockLoadSettings = vi.fn<() => Promise<void>>();
+const mockLoadSettings = vi.fn<() => Promise<boolean>>();
 const mockOpenSettingsModal = vi.fn();
 const mockCloseSettingsModal = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockResetSettings = vi.fn();
@@ -97,6 +97,7 @@ const mockHandleBiometricToggle =
 
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockShowPrompt = vi.fn<(...args: unknown[]) => Promise<string | null>>();
+const mockShowAlert = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockIsDialogActive = vi.fn();
 
 const mockInitPalette = vi.fn();
@@ -135,6 +136,10 @@ vi.mock("@tauri-apps/api/webview", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: mockOpen,
   save: mockSave,
+}));
+
+vi.mock("@tauri-apps/plugin-process", () => ({
+  relaunch: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
 }));
 
 vi.mock("../settings.ts", () => ({
@@ -192,6 +197,7 @@ vi.mock("../bookmarks.ts", () => ({
   loadBookmarks: mockLoadBookmarks,
   setBookmarkChangeHandler: mockSetBookmarkChangeHandler,
   isEndpointBookmarked: vi.fn().mockReturnValue(false),
+  clearBookmarks: vi.fn(),
 }));
 
 vi.mock("../licenses.ts", () => ({
@@ -256,6 +262,7 @@ vi.mock("../security.ts", () => ({
 vi.mock("../dialogs.ts", () => ({
   showConfirm: mockShowConfirm,
   showPrompt: mockShowPrompt,
+  showAlert: mockShowAlert,
   isDialogActive: mockIsDialogActive,
 }));
 
@@ -411,6 +418,7 @@ describe("main integration", () => {
     mockHandleBiometricToggle.mockReset();
     mockShowConfirm.mockReset();
     mockShowPrompt.mockReset();
+    mockShowAlert.mockReset();
     mockIsDialogActive.mockReset();
     mockInitPalette.mockReset();
     mockRegisterCommands.mockReset();
@@ -447,7 +455,7 @@ describe("main integration", () => {
       return ["C:\\tmp\\upload-a.txt", "C:\\tmp\\upload-b.txt"];
     });
     mockSave.mockResolvedValue("C:\\tmp\\download.txt");
-    mockLoadSettings.mockResolvedValue(undefined);
+    mockLoadSettings.mockResolvedValue(true);
     mockCloseSettingsModal.mockResolvedValue(undefined);
     mockIncrementLaunchCount.mockResolvedValue(1);
     mockMarkSupportPromptDismissed.mockResolvedValue(undefined);
@@ -483,7 +491,7 @@ describe("main integration", () => {
     mockEnsureSecurityReady.mockResolvedValue(true);
     mockHandleSecurityChangePassword.mockResolvedValue(undefined);
     mockHandleSecurityToggle.mockResolvedValue(undefined);
-    mockHandleLockNow.mockResolvedValue(undefined);
+    mockHandleLockNow.mockResolvedValue(true);
     mockHandleLockTimeoutChange.mockResolvedValue(undefined);
     mockHandleBiometricToggle.mockResolvedValue(undefined);
     mockShowConfirm.mockResolvedValue(true);
@@ -2508,7 +2516,7 @@ describe("main integration", () => {
     vi.resetModules();
     mountIndexFixture();
     setupMatchMedia(false);
-    mockLoadSettings.mockResolvedValue(undefined);
+    mockLoadSettings.mockResolvedValue(true);
     mockLoadBookmarks.mockRejectedValueOnce(new Error("bookmark fail"));
     mockLoadConnection.mockRejectedValueOnce(new Error("connection fail"));
     await import("../main.ts");

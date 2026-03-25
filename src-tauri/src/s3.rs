@@ -16,6 +16,30 @@ const MULTIPART_THRESHOLD: u64 = 50 * 1024 * 1024;
 const PART_SIZE: usize = 10 * 1024 * 1024;
 const MULTIPART_COPY_PART_SIZE: u64 = 500 * 1024 * 1024;
 const MULTIPART_COPY_THRESHOLD: i64 = 5_368_709_120;
+const MAX_KEY_LEN: usize = 1024;
+
+fn validate_key(key: &str, label: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err(format!("{} must not be empty", label));
+    }
+    if key.len() > MAX_KEY_LEN {
+        return Err(format!("{} is too long (max {} characters)", label, MAX_KEY_LEN));
+    }
+    if key.as_bytes().iter().any(|&b| b == 0) {
+        return Err(format!("{} contains invalid characters", label));
+    }
+    if key.split('/').any(|seg| seg == "..") {
+        return Err(format!("{} must not contain '..' path segments", label));
+    }
+    Ok(())
+}
+
+fn validate_prefix(prefix: &str, label: &str) -> Result<(), String> {
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    validate_key(prefix, label)
+}
 
 static CANCELLED_TRANSFERS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 
@@ -522,6 +546,7 @@ pub(crate) async fn head_object(
     bucket: String,
     key: String,
 ) -> Result<HeadObjectResponse, String> {
+    validate_key(&key, "Object key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -571,6 +596,7 @@ pub(crate) async fn update_metadata(
     content_type: String,
     metadata: HashMap<String, String>,
 ) -> Result<(), String> {
+    validate_key(&key, "Object key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -674,6 +700,7 @@ pub(crate) async fn upload_object(
     content_type: String,
     transfer_id: u32,
 ) -> Result<(), String> {
+    validate_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
 
     let client = {
@@ -886,6 +913,7 @@ pub(crate) async fn upload_object_bytes(
     content_type: String,
     transfer_id: u32,
 ) -> Result<(), String> {
+    validate_key(&key, "Object key")?;
     if bytes.len() > MAX_UPLOAD_OBJECT_BYTES {
         return Err(format!(
             "Browser upload fallback is limited to {} MB.",
@@ -940,6 +968,7 @@ pub(crate) async fn get_object_acl(
     bucket: String,
     key: String,
 ) -> Result<AclResponse, String> {
+    validate_key(&key, "Object key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -994,6 +1023,7 @@ pub(crate) async fn set_object_acl(
     key: String,
     visibility: String,
 ) -> Result<(), String> {
+    validate_key(&key, "Object key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1028,6 +1058,7 @@ pub(crate) async fn download_object(
 ) -> Result<u64, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    validate_key(&key, "Object key")?;
     let destination_path = validate_destination_path(&destination)?;
     let temp_path = make_temp_path(&destination_path, "download");
 
@@ -1148,15 +1179,7 @@ pub(crate) async fn create_folder(
         s3.client.clone().ok_or("Not connected")?
     };
 
-    if key.as_bytes().iter().any(|&b| b == 0) {
-        return Err("Object key contains invalid characters".to_string());
-    }
-    if key.len() > 1024 {
-        return Err("Object key is too long (max 1024 characters)".to_string());
-    }
-    if key.split('/').any(|seg| seg == "..") {
-        return Err("Object key must not contain '..' path segments".to_string());
-    }
+    validate_key(&key, "Object key")?;
     if key.contains("//") {
         return Err("Object key must not contain consecutive slashes".to_string());
     }
@@ -1283,6 +1306,8 @@ pub(crate) async fn rename_object(
     old_key: String,
     new_key: String,
 ) -> Result<(), String> {
+    validate_key(&old_key, "Source key")?;
+    validate_key(&new_key, "Destination key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1369,6 +1394,7 @@ pub(crate) async fn delete_prefix(
     bucket: String,
     prefix: String,
 ) -> Result<u32, String> {
+    validate_prefix(&prefix, "Prefix")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1438,6 +1464,8 @@ pub(crate) async fn rename_prefix(
     old_prefix: String,
     new_prefix: String,
 ) -> Result<u32, String> {
+    validate_prefix(&old_prefix, "Source prefix")?;
+    validate_prefix(&new_prefix, "Destination prefix")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1506,6 +1534,8 @@ pub(crate) async fn copy_object_to(
     dst_bucket: String,
     dst_key: String,
 ) -> Result<(), String> {
+    validate_key(&src_key, "Source key")?;
+    validate_key(&dst_key, "Destination key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1548,6 +1578,8 @@ pub(crate) async fn copy_prefix_to(
     dst_bucket: String,
     dst_prefix: String,
 ) -> Result<u32, String> {
+    validate_prefix(&src_prefix, "Source prefix")?;
+    validate_prefix(&dst_prefix, "Destination prefix")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1602,6 +1634,10 @@ pub(crate) async fn generate_presigned_url(
     key: String,
     expires_in_secs: u64,
 ) -> Result<String, String> {
+    validate_key(&key, "Object key")?;
+    if expires_in_secs < 60 || expires_in_secs > 604800 {
+        return Err("Expiration must be between 60 and 604800 seconds".to_string());
+    }
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1628,6 +1664,7 @@ pub(crate) async fn preview_object(
     bucket: String,
     key: String,
 ) -> Result<PreviewResponse, String> {
+    validate_key(&key, "Object key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?

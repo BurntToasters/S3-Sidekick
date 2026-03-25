@@ -36,7 +36,7 @@ export function applyTheme(theme: UserSettings["theme"]): void {
   }
 }
 
-export async function loadSettings(): Promise<void> {
+export async function loadSettings(): Promise<boolean> {
   const json = await invoke<string>("load_settings");
   const result = parseSettingsRaw(json);
   state.currentSettings = result.settings;
@@ -44,6 +44,7 @@ export async function loadSettings(): Promise<void> {
   state.settingsExtras = result.extras;
   applyTheme(state.currentSettings.theme);
   setUpdateChannel(state.currentSettings.updateChannel);
+  return !result.malformed;
 }
 
 export async function saveSettings(): Promise<void> {
@@ -225,24 +226,25 @@ export async function resetSettings(): Promise<void> {
     { okLabel: "Factory Reset", cancelLabel: "Keep Bookmarks", okDanger: true },
   );
 
-  const currentBookmarks = state.settingsExtras._bookmarks;
   const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
   await invoke("save_settings", { json: defaults });
   await invoke("save_connection", { json: "" });
 
   if (fullReset) {
-    await invoke("save_bookmarks_backup", { json: "[]" });
+    try {
+      await invoke("save_bookmarks", { json: "[]" });
+    } catch {
+      /* vault may be locked; backup handles it */
+    }
+    try {
+      await invoke("save_bookmarks_backup", { json: "[]" });
+    } catch {
+      /* best effort */
+    }
     try {
       await invoke("reset_security");
     } catch {
       // security may not be initialized
-    }
-  } else {
-    if (currentBookmarks !== undefined) {
-      const restored = mergeSettingsPayload(SETTING_DEFAULTS, {
-        _bookmarks: currentBookmarks,
-      });
-      await invoke("save_settings", { json: restored });
     }
   }
 
