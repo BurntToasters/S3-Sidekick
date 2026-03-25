@@ -1479,7 +1479,9 @@ pub(crate) async fn rename_prefix(
 
     // Copy all objects to new prefix
     for key in &keys {
-        let suffix = &key[old_prefix.len()..];
+        let suffix = key.strip_prefix(old_prefix.as_str()).ok_or_else(|| {
+            format!("Key '{}' does not start with prefix '{}'", key, old_prefix)
+        })?;
         let new_key = format!("{}{}", new_prefix, suffix);
         let source = encode_copy_source(&bucket, key);
         client
@@ -1591,7 +1593,9 @@ pub(crate) async fn copy_prefix_to(
     }
 
     for key in &keys {
-        let suffix = &key[src_prefix.len()..];
+        let suffix = key.strip_prefix(src_prefix.as_str()).ok_or_else(|| {
+            format!("Key '{}' does not start with prefix '{}'", key, src_prefix)
+        })?;
         let new_key = format!("{}{}", dst_prefix, suffix);
         let source = encode_copy_source(&src_bucket, key);
         client

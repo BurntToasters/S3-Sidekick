@@ -245,11 +245,13 @@ pub(crate) fn read_protected_file(
     default_value: &str,
     security: &SecurityConfig,
 ) -> Result<String, String> {
-    if !path.exists() {
-        return Ok(default_value.to_string());
-    }
-
-    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let raw = match std::fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(default_value.to_string());
+        }
+        Err(e) => return Err(e.to_string()),
+    };
     if !security.encryption_enabled {
         return Ok(raw);
     }
@@ -422,18 +424,21 @@ pub(crate) async fn initialize_security(
         return Ok(security_status(&config));
     }
 
-    let pw = password
+    let mut pw = password
         .filter(|p| !p.is_empty())
         .ok_or_else(|| "Password is required to enable encryption".to_string())?;
     if pw.len() < 8 {
+        pw.zeroize();
         return Err("Password must be at least 8 characters".to_string());
     }
     if pw.len() > 256 {
+        pw.zeroize();
         return Err("Password must be at most 256 characters".to_string());
     }
     let mut salt = [0u8; SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut salt);
     let mut key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
+    pw.zeroize();
     let mut verifier = key_verifier(&key);
 
     let plans = build_migration_plans(&app, true, &key)?;
@@ -465,10 +470,11 @@ pub(crate) async fn initialize_security(
 }
 
 #[tauri::command]
-pub(crate) async fn unlock_security(app: tauri::AppHandle, password: String) -> Result<SecurityStatus, String> {
+pub(crate) async fn unlock_security(app: tauri::AppHandle, mut password: String) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.initialized || !config.encryption_enabled {
+        password.zeroize();
         set_unlocked_key(None, 0)?;
         return Ok(security_status(&config));
     }
@@ -494,6 +500,7 @@ pub(crate) async fn unlock_security(app: tauri::AppHandle, password: String) -> 
     if !constant_time_eq(verifier.as_slice(), expected_verifier.as_slice()) {
         key.zeroize();
         verifier.zeroize();
+        password.zeroize();
         return Err("Invalid password".to_string());
     }
     verifier.zeroize();
@@ -533,6 +540,7 @@ pub(crate) async fn unlock_security(app: tauri::AppHandle, password: String) -> 
         new_key.zeroize();
     }
     key.zeroize();
+    password.zeroize();
 
     Ok(security_status(&config))
 }
@@ -541,8 +549,8 @@ pub(crate) async fn unlock_security(app: tauri::AppHandle, password: String) -> 
 pub(crate) async fn set_security_encryption(
     app: tauri::AppHandle,
     enable_encryption: bool,
-    current_password: Option<String>,
-    new_password: Option<String>,
+    mut current_password: Option<String>,
+    mut new_password: Option<String>,
 ) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
@@ -554,18 +562,22 @@ pub(crate) async fn set_security_encryption(
     }
 
     if enable_encryption {
-        let pw = new_password
+        let mut pw = new_password
+            .take()
             .filter(|p| !p.is_empty())
             .ok_or_else(|| "New password is required".to_string())?;
         if pw.len() < 8 {
+            pw.zeroize();
             return Err("Password must be at least 8 characters".to_string());
         }
         if pw.len() > 256 {
+            pw.zeroize();
             return Err("Password must be at most 256 characters".to_string());
         }
         let mut salt = [0u8; SALT_LEN];
         rand::rngs::OsRng.fill_bytes(&mut salt);
         let mut key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
+        pw.zeroize();
         let mut verifier = key_verifier(&key);
 
         let plans = build_migration_plans(&app, true, &key)?;
@@ -590,13 +602,15 @@ pub(crate) async fn set_security_encryption(
         return Ok(security_status(&config));
     }
 
-    let current_password = current_password
+    let mut current_password = current_password
+        .take()
         .filter(|p| !p.is_empty())
         .ok_or_else(|| "Current password is required".to_string())?;
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid security salt: {}", e))?;
     let mut key = derive_key(&current_password, &salt, config.pbkdf2_iterations);
+    current_password.zeroize();
     let mut verifier = key_verifier(&key);
     let expected_verifier = B64
         .decode(&config.verifier)
@@ -637,8 +651,8 @@ pub(crate) async fn set_security_encryption(
 #[tauri::command]
 pub(crate) async fn change_security_password(
     app: tauri::AppHandle,
-    current_password: String,
-    new_password: String,
+    mut current_password: String,
+    mut new_password: String,
 ) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
@@ -659,6 +673,7 @@ pub(crate) async fn change_security_password(
         .decode(&config.salt)
         .map_err(|e| format!("Invalid security salt: {}", e))?;
     let mut old_key = derive_key(&current_password, &old_salt, config.pbkdf2_iterations);
+    current_password.zeroize();
     let mut old_verifier = key_verifier(&old_key);
     let expected_verifier = B64
         .decode(&config.verifier)
@@ -666,6 +681,7 @@ pub(crate) async fn change_security_password(
     if !constant_time_eq(old_verifier.as_slice(), expected_verifier.as_slice()) {
         old_key.zeroize();
         old_verifier.zeroize();
+        new_password.zeroize();
         return Err("Invalid password".to_string());
     }
     old_verifier.zeroize();
@@ -673,6 +689,7 @@ pub(crate) async fn change_security_password(
     let mut new_salt = [0u8; SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut new_salt);
     let mut new_key = derive_key(&new_password, &new_salt, PBKDF2_ITERATIONS);
+    new_password.zeroize();
     let mut new_verifier = key_verifier(&new_key);
 
     let plans = build_rekey_plans(&app, &old_key, &new_key)?;

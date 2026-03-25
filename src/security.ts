@@ -250,7 +250,7 @@ export async function ensureSecurityReady(): Promise<boolean> {
       biometricErrorCode = extractErrorCode(err);
       biometricCanceled = isCancellationError(err);
       biometricCredentialRemoved = isCredentialRemovedError(err);
-      console.error("Biometric unlock failed:", err);
+      console.error("Biometric unlock failed");
     }
   }
 
