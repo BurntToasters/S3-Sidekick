@@ -2351,17 +2351,30 @@ async function init(): Promise<void> {
       logActivity(`Failed to load settings: ${String(err)}`, "error");
     }
 
+    const wizardSecurityReady = await ensureSecurityReady();
+    if (!wizardSecurityReady) {
+      setStatus(
+        "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
+      );
+      logActivity(
+        "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
+        "warning",
+      );
+    }
+
     updateShortcutChips();
     const version = await getVersion();
     dom.versionLabel.textContent = `v${version}`;
 
-    try {
-      await loadBookmarks();
-      setBookmarkChangeHandler(refreshBookmarkBar);
-      refreshBookmarkBar();
-    } catch (err) {
-      console.warn("Failed to load bookmarks:", err);
-      logActivity("Failed to load bookmarks.", "warning");
+    if (wizardSecurityReady) {
+      try {
+        await loadBookmarks();
+        setBookmarkChangeHandler(refreshBookmarkBar);
+        refreshBookmarkBar();
+      } catch (err) {
+        console.warn("Failed to load bookmarks:", err);
+        logActivity("Failed to load bookmarks.", "warning");
+      }
     }
 
     try {
