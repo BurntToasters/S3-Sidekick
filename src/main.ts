@@ -53,6 +53,7 @@ import {
   renderBookmarkBar,
   loadBookmarks,
   setBookmarkChangeHandler,
+  isEndpointBookmarked,
 } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
@@ -105,6 +106,11 @@ import {
   registerCommands,
   isPaletteOpen,
 } from "./command-palette.ts";
+import {
+  shouldShowSetupWizard,
+  showSetupWizard,
+  markSetupComplete,
+} from "./setup-wizard.ts";
 
 interface LocalFolderFileEntry {
   file_path: string;
@@ -144,18 +150,62 @@ function setStatus(text: string, autoResetMs?: number): void {
   }
 }
 
+function updateBookmarkBtn(): void {
+  const btn = document.getElementById("bookmark-save-btn");
+  if (!btn) return;
+  const { endpoint } = getConnectionInputs();
+  const active = endpoint ? isEndpointBookmarked(endpoint) : false;
+  btn.classList.toggle("bookmark-save-btn--active", active);
+}
+
 function refreshBookmarkBar(): void {
   const bar = document.getElementById("bookmark-bar");
   if (!bar) return;
-  renderBookmarkBar(bar, (bookmark) => {
-    setConnectionInputs(
-      bookmark.endpoint,
-      bookmark.region,
-      bookmark.access_key,
-      bookmark.secret_key,
-    );
-    setStatus(`Loaded bookmark "${bookmark.name}".`, 5000);
-  });
+  renderBookmarkBar(
+    bar,
+    (bookmark) => {
+      void switchToBookmark(
+        bookmark.name,
+        bookmark.endpoint,
+        bookmark.region,
+        bookmark.access_key,
+        bookmark.secret_key,
+      );
+    },
+    state.connected ? state.endpoint : undefined,
+    () => {
+      void handleNewConnection();
+    },
+  );
+  updateBookmarkBtn();
+}
+
+async function handleNewConnection(): Promise<void> {
+  if (state.connected) {
+    await handleDisconnect();
+  }
+  setConnectionInputs("", "", "", "");
+  (document.getElementById("conn-endpoint") as HTMLInputElement).focus();
+  setStatus("Ready for a new connection.", 5000);
+}
+
+async function switchToBookmark(
+  name: string,
+  endpoint: string,
+  region: string,
+  accessKey: string,
+  secretKey: string,
+): Promise<void> {
+  const wasConnected = state.connected;
+  if (wasConnected) {
+    await handleDisconnect();
+  }
+  setConnectionInputs(endpoint, region, accessKey, secretKey);
+  if (wasConnected) {
+    await handleConnect();
+  } else {
+    setStatus(`Loaded bookmark "${name}".`, 5000);
+  }
 }
 
 function setConnectionUI(connected: boolean): void {
@@ -171,6 +221,7 @@ function setConnectionUI(connected: boolean): void {
     dom.connectBtn.style.display = "";
     dom.disconnectBtn.style.display = "none";
   }
+  refreshBookmarkBar();
 }
 
 function enqueueDownloadTransfers(entries: DownloadQueueEntry[]): boolean {
@@ -462,6 +513,7 @@ function setConnectionInputs(
     accessKey;
   (document.getElementById("conn-secret-key") as HTMLInputElement).value =
     secretKey;
+  updateBookmarkBtn();
 }
 
 async function handleConnect(): Promise<void> {
@@ -564,51 +616,64 @@ async function handleBookmarkSave(): Promise<void> {
   } catch (err) {
     setStatus(`Failed to save bookmark: ${err}`);
   }
+  updateBookmarkBtn();
 }
 
 function getSelectedFileKeys(): string[] {
   return Array.from(state.selectedKeys).filter((k) => !k.startsWith("prefix:"));
 }
 
+function getSelectedPrefixes(): string[] {
+  return Array.from(state.selectedKeys)
+    .filter((k) => k.startsWith("prefix:"))
+    .map((k) => k.slice("prefix:".length));
+}
+
 async function handleDelete(): Promise<void> {
   const keys = getSelectedFileKeys();
-  if (keys.length === 0) {
-    const hasFolders = Array.from(state.selectedKeys).some((k) =>
-      k.startsWith("prefix:"),
-    );
-    if (hasFolders) {
-      setStatus(
-        "Folder deletion is not supported. Select individual files to delete.",
-        5000,
-      );
-    }
-    return;
-  }
+  const prefixes = getSelectedPrefixes();
 
-  const msg =
-    keys.length === 1
-      ? `Delete "${basename(keys[0])}"?`
-      : `Delete ${keys.length} items?`;
+  if (keys.length === 0 && prefixes.length === 0) return;
+
+  const parts: string[] = [];
+  if (keys.length > 0)
+    parts.push(`${keys.length} file${keys.length === 1 ? "" : "s"}`);
+  if (prefixes.length > 0)
+    parts.push(
+      `${prefixes.length} folder${prefixes.length === 1 ? "" : "s"} and all their contents`,
+    );
+  const msg = `Delete ${parts.join(" and ")}?`;
+
   const confirmed = await showConfirm("Delete", msg, {
     okLabel: "Delete",
     okDanger: true,
   });
   if (!confirmed) return;
 
+  let totalDeleted = 0;
   try {
-    setStatus(`Deleting ${keys.length} item(s)...`);
-    const deleted = await invoke<number>("delete_objects", {
-      bucket: state.currentBucket,
-      keys,
-    });
-    setStatus(`Deleted ${deleted} item(s).`, 5000);
-    logActivity(`Deleted ${deleted} object(s).`, "success");
+    if (keys.length > 0) {
+      setStatus(`Deleting ${keys.length} file(s)...`);
+      totalDeleted += await invoke<number>("delete_objects", {
+        bucket: state.currentBucket,
+        keys,
+      });
+    }
+    for (const prefix of prefixes) {
+      setStatus(`Deleting folder "${basename(prefix.replace(/\/$/, ""))}"...`);
+      totalDeleted += await invoke<number>("delete_prefix", {
+        bucket: state.currentBucket,
+        prefix,
+      });
+    }
+    setStatus(`Deleted ${totalDeleted} item(s).`, 5000);
+    logActivity(`Deleted ${totalDeleted} object(s).`, "success");
     clearSelection();
     await refreshObjects(state.currentBucket, state.currentPrefix);
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
-    setStatus(`Delete failed (${keys.length} item(s)): ${friendlyError(err)}`);
+    setStatus(`Delete failed: ${friendlyError(err)}`);
     logActivity(`Delete failed: ${friendlyError(err)}`, "error");
   }
 }
@@ -738,35 +803,299 @@ async function handleCopyPresignedUrl(): Promise<void> {
   }
 }
 
-async function handleRename(): Promise<void> {
-  const keys = getSelectedFileKeys();
-  if (keys.length !== 1) return;
-
-  const oldKey = keys[0];
-  const oldName = basename(oldKey);
-  const newName = await showPrompt("Rename", "Enter new name:", {
-    inputDefault: oldName,
-  });
-  if (!newName || newName === oldName) return;
-
-  const prefix = oldKey.slice(0, oldKey.length - oldName.length);
-  const newKey = prefix + newName;
+async function handleCopyKey(): Promise<void> {
+  const fileKeys = getSelectedFileKeys();
+  const prefixes = getSelectedPrefixes();
+  const allKeys = [...fileKeys, ...prefixes];
+  if (allKeys.length === 0) return;
 
   try {
-    setStatus("Renaming...");
-    await invoke("rename_object", {
-      bucket: state.currentBucket,
-      oldKey,
-      newKey,
-    });
-    setStatus(`Renamed to "${newName}".`, 5000);
-    logActivity(`Renamed ${oldName} to ${newName}.`, "success");
-    clearSelection();
-    await refreshObjects(state.currentBucket, state.currentPrefix);
-    renderObjectTable();
+    await navigator.clipboard.writeText(allKeys.join("\n"));
+    if (allKeys.length === 1) {
+      setStatus("Key copied to clipboard.", 5000);
+      logActivity(`Copied key: ${allKeys[0]}`, "success");
+    } else {
+      setStatus(`Copied ${allKeys.length} keys to clipboard.`, 5000);
+      logActivity(`Copied ${allKeys.length} keys.`, "success");
+    }
   } catch (err) {
-    setStatus(`Rename failed for "${oldName}": ${friendlyError(err)}`);
-    logActivity(`Rename failed for ${oldName}: ${friendlyError(err)}`, "error");
+    setStatus(`Failed to copy key: ${friendlyError(err)}`);
+    logActivity(`Failed to copy key: ${friendlyError(err)}`, "error");
+  }
+}
+
+async function handleCopyArn(): Promise<void> {
+  const fileKeys = getSelectedFileKeys();
+  const prefixes = getSelectedPrefixes();
+  const allKeys = [...fileKeys, ...prefixes];
+  if (allKeys.length === 0) return;
+
+  const bucket = state.currentBucket;
+  const arns = allKeys.map((key) => `arn:aws:s3:::${bucket}/${key}`);
+
+  try {
+    await navigator.clipboard.writeText(arns.join("\n"));
+    if (arns.length === 1) {
+      setStatus("ARN copied to clipboard.", 5000);
+      logActivity(`Copied ARN for ${basename(allKeys[0])}.`, "success");
+    } else {
+      setStatus(`Copied ${arns.length} ARNs to clipboard.`, 5000);
+      logActivity(`Copied ${arns.length} ARNs.`, "success");
+    }
+  } catch (err) {
+    setStatus(`Failed to copy ARN: ${friendlyError(err)}`);
+    logActivity(`Failed to copy ARN: ${friendlyError(err)}`, "error");
+  }
+}
+
+function openCopyMoveDialog(): void {
+  const fileKeys = getSelectedFileKeys();
+  const prefixes = getSelectedPrefixes();
+  if (fileKeys.length === 0 && prefixes.length === 0) return;
+
+  const overlay = document.getElementById("copy-move-overlay")!;
+  const descEl = document.getElementById("copy-move-desc") as HTMLElement;
+  const bucketSelect = document.getElementById(
+    "copy-move-bucket",
+  ) as HTMLSelectElement;
+  const pathInput = document.getElementById(
+    "copy-move-path",
+  ) as HTMLInputElement;
+  const pathLabel = document.querySelector(
+    'label[for="copy-move-path"]',
+  ) as HTMLLabelElement;
+  const copyBtn = document.getElementById(
+    "copy-move-copy-btn",
+  ) as HTMLButtonElement;
+  const moveBtn = document.getElementById(
+    "copy-move-move-btn",
+  ) as HTMLButtonElement;
+  const cancelBtn = document.getElementById(
+    "copy-move-cancel",
+  ) as HTMLButtonElement;
+  const closeBtn = document.getElementById(
+    "copy-move-close",
+  ) as HTMLButtonElement;
+
+  // Populate bucket dropdown from known buckets
+  bucketSelect.innerHTML = "";
+  for (const b of state.buckets) {
+    const opt = document.createElement("option");
+    opt.value = b.name;
+    opt.textContent = b.name;
+    if (b.name === state.currentBucket) opt.selected = true;
+    bucketSelect.appendChild(opt);
+  }
+  // If no buckets in list, add the current one as fallback
+  if (bucketSelect.options.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = state.currentBucket;
+    opt.textContent = state.currentBucket;
+    bucketSelect.appendChild(opt);
+  }
+
+  const isSingleFile = fileKeys.length === 1 && prefixes.length === 0;
+  const isSingleFolder = prefixes.length === 1 && fileKeys.length === 0;
+  const totalItems = fileKeys.length + prefixes.length;
+
+  if (isSingleFile) {
+    descEl.textContent = `File: ${fileKeys[0]}`;
+    pathInput.value = fileKeys[0];
+    pathLabel.textContent = "Destination key";
+  } else if (isSingleFolder) {
+    descEl.textContent = `Folder: ${prefixes[0]}`;
+    pathInput.value = prefixes[0];
+    pathLabel.textContent = "Destination prefix";
+  } else {
+    const parts: string[] = [];
+    if (fileKeys.length > 0)
+      parts.push(`${fileKeys.length} file${fileKeys.length !== 1 ? "s" : ""}`);
+    if (prefixes.length > 0)
+      parts.push(
+        `${prefixes.length} folder${prefixes.length !== 1 ? "s" : ""}`,
+      );
+    descEl.textContent = `${parts.join(" + ")} — items placed under destination prefix`;
+    pathInput.value = state.currentPrefix;
+    pathLabel.textContent = "Destination prefix";
+  }
+
+  const closeFn = () => {
+    overlay.classList.remove("active");
+  };
+
+  const runCopy = async (move: boolean) => {
+    const dstBucket = bucketSelect.value;
+    const dstPath = pathInput.value.trim();
+    if (!dstPath) {
+      setStatus("Destination path is required.", 5000);
+      pathInput.focus();
+      return;
+    }
+    const srcBucket = state.currentBucket;
+    const verb = move ? "Mov" : "Copy";
+
+    try {
+      setStatus(`${verb}ing...`);
+
+      if (isSingleFile) {
+        await invoke("copy_object_to", {
+          srcBucket,
+          srcKey: fileKeys[0],
+          dstBucket,
+          dstKey: dstPath,
+        });
+        if (move) {
+          await invoke("delete_objects", {
+            bucket: srcBucket,
+            keys: [fileKeys[0]],
+          });
+        }
+        setStatus(
+          `${verb}ed "${basename(fileKeys[0])}" to "${dstBucket}/${dstPath}".`,
+          5000,
+        );
+        logActivity(
+          `${verb}ed "${fileKeys[0]}" to "${dstBucket}/${dstPath}".`,
+          "success",
+        );
+      } else {
+        const prefix = dstPath.endsWith("/") ? dstPath : dstPath + "/";
+        for (const key of fileKeys) {
+          await invoke("copy_object_to", {
+            srcBucket,
+            srcKey: key,
+            dstBucket,
+            dstKey: prefix + basename(key),
+          });
+        }
+        if (move && fileKeys.length > 0) {
+          await invoke("delete_objects", { bucket: srcBucket, keys: fileKeys });
+        }
+        for (const srcPrefix of prefixes) {
+          const folderName = basename(srcPrefix.replace(/\/$/, ""));
+          const dstPrefix = isSingleFolder ? prefix : prefix + folderName + "/";
+          await invoke("copy_prefix_to", {
+            srcBucket,
+            srcPrefix,
+            dstBucket,
+            dstPrefix,
+          });
+          if (move) {
+            await invoke("delete_prefix", {
+              bucket: srcBucket,
+              prefix: srcPrefix,
+            });
+          }
+        }
+        const destLabel = isSingleFolder ? dstPath : prefix;
+        setStatus(
+          `${verb}ed ${totalItems} item${totalItems !== 1 ? "s" : ""}.`,
+          5000,
+        );
+        logActivity(
+          `${verb}ed ${totalItems} items to "${dstBucket}/${destLabel}".`,
+          "success",
+        );
+      }
+
+      closeFn();
+      clearSelection();
+      await refreshObjects(state.currentBucket, state.currentPrefix);
+      renderObjectTable();
+    } catch (err) {
+      setStatus(`${move ? "Move" : "Copy"} failed: ${friendlyError(err)}`);
+      logActivity(
+        `${move ? "Move" : "Copy"} failed: ${friendlyError(err)}`,
+        "error",
+      );
+    }
+  };
+
+  copyBtn.onclick = () => void runCopy(false);
+  moveBtn.onclick = () => void runCopy(true);
+  cancelBtn.onclick = closeFn;
+  closeBtn.onclick = closeFn;
+
+  overlay.classList.add("active");
+  pathInput.focus();
+  pathInput.select();
+}
+
+async function handleRename(): Promise<void> {
+  const keys = getSelectedFileKeys();
+  const prefixes = getSelectedPrefixes();
+
+  if (keys.length === 1 && prefixes.length === 0) {
+    // Rename a single file
+    const oldKey = keys[0];
+    const oldName = basename(oldKey);
+    const newName = await showPrompt("Rename", "Enter new name:", {
+      inputDefault: oldName,
+    });
+    if (!newName || newName === oldName) return;
+
+    const keyPrefix = oldKey.slice(0, oldKey.length - oldName.length);
+    const newKey = keyPrefix + newName;
+
+    try {
+      setStatus("Renaming...");
+      await invoke("rename_object", {
+        bucket: state.currentBucket,
+        oldKey,
+        newKey,
+      });
+      setStatus(`Renamed to "${newName}".`, 5000);
+      logActivity(`Renamed "${oldName}" to "${newName}".`, "success");
+      clearSelection();
+      await refreshObjects(state.currentBucket, state.currentPrefix);
+      renderObjectTable();
+    } catch (err) {
+      setStatus(`Rename failed for "${oldName}": ${friendlyError(err)}`);
+      logActivity(
+        `Rename failed for "${oldName}": ${friendlyError(err)}`,
+        "error",
+      );
+    }
+  } else if (prefixes.length === 1 && keys.length === 0) {
+    // Rename a single folder
+    const oldPrefix = prefixes[0]; // e.g. "photos/vacation/"
+    const folderName = basename(oldPrefix.replace(/\/$/, "")); // "vacation"
+    const parentPrefix = oldPrefix.slice(
+      0,
+      oldPrefix.length - folderName.length - 1,
+    ); // "photos/"
+
+    const newName = await showPrompt(
+      "Rename Folder",
+      "Enter new folder name:",
+      {
+        inputDefault: folderName,
+      },
+    );
+    if (!newName || newName === folderName) return;
+    if (newName.includes("/")) {
+      setStatus("Folder name cannot contain slashes.", 5000);
+      return;
+    }
+
+    const newPrefix = parentPrefix + newName + "/";
+
+    try {
+      setStatus(`Renaming folder "${folderName}"...`);
+      await invoke("rename_prefix", {
+        bucket: state.currentBucket,
+        oldPrefix,
+        newPrefix,
+      });
+      setStatus(`Renamed folder to "${newName}".`, 5000);
+      logActivity(`Renamed folder "${folderName}" to "${newName}".`, "success");
+      clearSelection();
+      await refreshObjects(state.currentBucket, state.currentPrefix);
+      renderObjectTable();
+    } catch (err) {
+      setStatus(`Folder rename failed: ${friendlyError(err)}`);
+      logActivity(`Folder rename failed: ${friendlyError(err)}`, "error");
+    }
   }
 }
 
@@ -959,6 +1288,7 @@ function handleBucketContextMenu(e: MouseEvent): void {
     const menuItems: MenuItem[] = [
       { label: "Open Bucket", action: "open-bucket" },
       { label: "Copy Bucket Name", action: "copy-bucket-name" },
+      { label: "Copy Bucket ARN", action: "copy-bucket-arn" },
       { separator: true },
       { label: "Refresh Buckets", action: "refresh-buckets" },
     ];
@@ -981,6 +1311,12 @@ function handleBucketContextMenu(e: MouseEvent): void {
           .writeText(bucket)
           .then(() => setStatus(`Copied bucket name "${bucket}".`, 3000))
           .catch((err) => setStatus(`Failed to copy bucket name: ${err}`));
+      } else if (action === "copy-bucket-arn") {
+        const arn = `arn:aws:s3:::${bucket}`;
+        void navigator.clipboard
+          .writeText(arn)
+          .then(() => setStatus(`Copied bucket ARN.`, 3000))
+          .catch((err) => setStatus(`Failed to copy ARN: ${err}`));
       } else if (action === "refresh-buckets") {
         void handleRefreshBuckets();
       }
@@ -1139,15 +1475,22 @@ function handleContextMenu(e: MouseEvent): void {
   const fileKeys = getSelectedFileKeys();
   const hasFiles = fileKeys.length > 0;
 
+  const folderKeys = Array.from(state.selectedKeys).filter((k) =>
+    k.startsWith("prefix:"),
+  );
+  const hasFolders = folderKeys.length > 0;
   const items: MenuItem[] = [];
 
   if (isFolder && selectedCount === 1) {
     items.push({ label: "Open", action: "open-folder" });
+    items.push({ label: "Copy Path", action: "copy-key" });
+    items.push({ label: "Copy ARN", action: "copy-arn" });
+    items.push({ label: "Rename", action: "rename" });
+    items.push({ label: "Copy / Move to...", action: "copy-move" });
     items.push({ separator: true });
-  }
-
-  if (hasFiles) {
-    if (selectedCount === 1) {
+    items.push({ label: "Delete Folder", action: "delete" });
+  } else if (hasFiles) {
+    if (selectedCount === 1 && !hasFolders) {
       const fileName = basename(fileKeys[0]);
       if (canPreview(fileName)) {
         items.push({ label: "Preview", action: "preview" });
@@ -1159,7 +1502,10 @@ function handleContextMenu(e: MouseEvent): void {
         label: "Copy Pre-Signed URL",
         action: "copy-presigned-url",
       });
+      items.push({ label: "Copy Key", action: "copy-key" });
+      items.push({ label: "Copy ARN", action: "copy-arn" });
       items.push({ label: "Rename", action: "rename" });
+      items.push({ label: "Copy / Move to...", action: "copy-move" });
     } else {
       items.push({
         label: `Properties (${fileKeys.length} items)`,
@@ -1169,12 +1515,18 @@ function handleContextMenu(e: MouseEvent): void {
         label: `Download ${fileKeys.length} items`,
         action: "download",
       });
+      items.push({ label: "Copy Keys", action: "copy-key" });
+      items.push({ label: "Copy URLs", action: "copy-url" });
+      items.push({ label: "Copy ARNs", action: "copy-arn" });
+      items.push({ label: "Copy / Move to...", action: "copy-move" });
     }
     items.push({ separator: true });
-    items.push({
-      label: selectedCount === 1 ? "Delete" : `Delete ${fileKeys.length} items`,
-      action: "delete",
-    });
+    const deleteLabel = hasFolders
+      ? `Delete ${fileKeys.length} file${fileKeys.length === 1 ? "" : "s"} + ${folderKeys.length} folder${folderKeys.length === 1 ? "" : "s"}`
+      : selectedCount === 1
+        ? "Delete"
+        : `Delete ${fileKeys.length} items`;
+    items.push({ label: deleteLabel, action: "delete" });
   }
 
   if (items.length === 0) return;
@@ -1185,7 +1537,10 @@ function handleContextMenu(e: MouseEvent): void {
     else if (action === "download") void handleDownload();
     else if (action === "copy-url") void handleCopyUrl();
     else if (action === "copy-presigned-url") void handleCopyPresignedUrl();
+    else if (action === "copy-key") void handleCopyKey();
+    else if (action === "copy-arn") void handleCopyArn();
     else if (action === "rename") void handleRename();
+    else if (action === "copy-move") openCopyMoveDialog();
     else if (action === "delete") void handleDelete();
     else if (action === "open-folder") void navigateToFolder(prefix);
   });
@@ -1195,20 +1550,17 @@ function wireEvents(): void {
   dom.connectBtn.addEventListener("click", handleConnect);
   dom.disconnectBtn.addEventListener("click", handleDisconnect);
 
-  const secretToggle = document.getElementById("secret-key-toggle");
+  const secretToggle = document.getElementById(
+    "secret-key-toggle",
+  ) as HTMLButtonElement | null;
   const secretInput = document.getElementById(
     "conn-secret-key",
   ) as HTMLInputElement | null;
-  const secretToggleIcon = document.getElementById(
-    "secret-key-toggle-icon",
-  ) as HTMLImageElement | null;
-  if (secretToggle && secretInput && secretToggleIcon) {
+  if (secretToggle && secretInput) {
     secretToggle.addEventListener("click", () => {
       const showing = secretInput.type === "text";
       secretInput.type = showing ? "password" : "text";
-      secretToggleIcon.src = showing
-        ? "/twemoji/1f441.svg"
-        : "/twemoji/1f648.svg";
+      secretToggle.textContent = showing ? "Show" : "Hide";
       secretToggle.setAttribute("aria-pressed", String(!showing));
       secretToggle.setAttribute(
         "aria-label",
@@ -1258,6 +1610,10 @@ function wireEvents(): void {
   document
     .getElementById("bookmark-save-btn")!
     .addEventListener("click", handleBookmarkSave);
+
+  (
+    document.getElementById("conn-endpoint") as HTMLInputElement
+  ).addEventListener("input", updateBookmarkBtn);
 
   document
     .getElementById("settings-btn")!
@@ -1820,13 +2176,13 @@ function wireEvents(): void {
   });
 
   setBookmarkSelectHandler((bookmark) => {
-    setConnectionInputs(
+    void switchToBookmark(
+      bookmark.name,
       bookmark.endpoint,
       bookmark.region,
       bookmark.access_key,
       bookmark.secret_key,
     );
-    setStatus(`Loaded bookmark "${bookmark.name}".`, 5000);
   });
 }
 
@@ -1906,6 +2262,91 @@ async function checkSupportPrompt(): Promise<void> {
 async function init(): Promise<void> {
   wireEvents();
 
+  state.platformName = await invoke<string>("get_platform_info");
+  applyPlatformClass();
+
+  let settingsPreloaded = false;
+  try {
+    await loadSettings();
+    settingsPreloaded = true;
+  } catch {
+    // settings not loadable yet (first launch or locked)
+    // If security is initialized but locked, unlock before checking the wizard
+    // flag — otherwise _setupComplete can't be read and the wizard re-shows.
+    try {
+      const secStatus = await invoke<{
+        initialized: boolean;
+        encryption_enabled: boolean;
+        unlocked: boolean;
+      }>("get_security_status");
+      if (
+        secStatus.initialized &&
+        secStatus.encryption_enabled &&
+        !secStatus.unlocked
+      ) {
+        const unlocked = await ensureSecurityReady();
+        if (unlocked) {
+          try {
+            await loadSettings();
+            settingsPreloaded = true;
+          } catch {
+            // still failed after unlock — fall through to wizard check
+          }
+        }
+      }
+    } catch {
+      // security status unavailable — continue with defaults
+    }
+  }
+
+  if (shouldShowSetupWizard()) {
+    const result = await showSetupWizard();
+    if (result) {
+      state.currentSettings.theme = result.theme;
+      state.currentSettings.autoCheckUpdates = result.autoCheckUpdates;
+      state.currentSettings.updateChannel = result.updateChannel;
+      await markSetupComplete();
+    }
+
+    try {
+      await loadSettings();
+    } catch (err) {
+      setStatus(`Failed to load settings: ${String(err)}`);
+      logActivity(`Failed to load settings: ${String(err)}`, "error");
+    }
+
+    updateShortcutChips();
+    const version = await getVersion();
+    dom.versionLabel.textContent = `v${version}`;
+
+    try {
+      await loadBookmarks();
+      setBookmarkChangeHandler(refreshBookmarkBar);
+      refreshBookmarkBar();
+    } catch (err) {
+      console.warn("Failed to load bookmarks:", err);
+      logActivity("Failed to load bookmarks.", "warning");
+    }
+
+    try {
+      const saved = await loadConnection();
+      if (saved) {
+        setConnectionInputs(
+          saved.endpoint,
+          saved.region,
+          saved.access_key,
+          saved.secret_key,
+        );
+      }
+    } catch {
+      // no saved connection on first launch
+    }
+
+    await initUpdater();
+    void autoCheckUpdates();
+    return;
+  }
+
   const securityReady = await ensureSecurityReady();
   if (!securityReady) {
     setStatus(
@@ -1917,16 +2358,16 @@ async function init(): Promise<void> {
     );
   }
 
-  try {
-    await loadSettings();
-    void checkSupportPrompt();
-  } catch (err) {
-    setStatus(`Failed to load settings: ${String(err)}`);
-    logActivity(`Failed to load settings: ${String(err)}`, "error");
+  if (!settingsPreloaded) {
+    try {
+      await loadSettings();
+    } catch (err) {
+      setStatus(`Failed to load settings: ${String(err)}`);
+      logActivity(`Failed to load settings: ${String(err)}`, "error");
+    }
   }
+  void checkSupportPrompt();
 
-  state.platformName = await invoke<string>("get_platform_info");
-  applyPlatformClass();
   updateShortcutChips();
   const version = await getVersion();
   dom.versionLabel.textContent = `v${version}`;

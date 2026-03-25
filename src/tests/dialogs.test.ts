@@ -15,6 +15,7 @@ describe("dialogs", () => {
           <div class="dialog-input-wrapper">
             <span id="dialog-input-icon"></span>
             <input id="dialog-input" />
+            <button id="dialog-input-reveal" hidden></button>
           </div>
           <div class="dialog-box__actions">
             <button id="dialog-cancel"></button>

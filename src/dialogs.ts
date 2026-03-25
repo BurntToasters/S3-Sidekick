@@ -45,6 +45,7 @@ function els() {
     ) as HTMLElement,
     inputIcon: document.getElementById("dialog-input-icon") as HTMLElement,
     input: document.getElementById("dialog-input") as HTMLInputElement,
+    reveal: document.getElementById("dialog-input-reveal") as HTMLButtonElement,
     cancel: document.getElementById("dialog-cancel") as HTMLButtonElement,
     ok: document.getElementById("dialog-ok") as HTMLButtonElement,
   };
@@ -80,6 +81,11 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
 
     const isPassword = config.inputType === "password";
     el.inputWrapper.classList.toggle("dialog-input-wrapper--icon", isPassword);
+    el.reveal.hidden = !isPassword;
+    if (isPassword) {
+      el.reveal.textContent = "Show";
+      el.reveal.setAttribute("aria-label", "Show password");
+    }
 
     el.cancel.style.display = config.showCancel ? "" : "none";
     el.cancel.textContent = config.cancelLabel;
@@ -96,11 +102,29 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       el.ok.focus();
     }
 
+    function onReveal() {
+      const showing = el.input.type === "text";
+      el.input.type = showing ? "password" : "text";
+      el.reveal.textContent = showing ? "Show" : "Hide";
+      el.reveal.setAttribute(
+        "aria-label",
+        showing ? "Show password" : "Hide password",
+      );
+      el.input.focus();
+    }
+
+    if (isPassword) {
+      el.reveal.addEventListener("click", onReveal);
+    }
+
     function cleanup() {
       el.overlay.classList.remove("active");
       el.cancel.removeEventListener("click", onCancel);
       el.ok.removeEventListener("click", onOk);
       el.input.removeEventListener("keydown", onInputKey);
+      el.reveal.removeEventListener("click", onReveal);
+      el.input.type = "text";
+      el.reveal.hidden = true;
       document.removeEventListener("keydown", onEscape, true);
       active = false;
       if (queue.length > 0) {

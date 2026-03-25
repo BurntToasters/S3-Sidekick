@@ -191,6 +191,7 @@ vi.mock("../bookmarks.ts", () => ({
   renderBookmarkBar: mockRenderBookmarkBar,
   loadBookmarks: mockLoadBookmarks,
   setBookmarkChangeHandler: mockSetBookmarkChangeHandler,
+  isEndpointBookmarked: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("../licenses.ts", () => ({
@@ -262,6 +263,16 @@ vi.mock("../command-palette.ts", () => ({
   initPalette: mockInitPalette,
   registerCommands: mockRegisterCommands,
   isPaletteOpen: mockIsPaletteOpen,
+}));
+
+const mockShouldShowSetupWizard = vi.fn(() => false);
+const mockShowSetupWizard = vi.fn<() => Promise<null>>();
+const mockMarkSetupComplete = vi.fn<() => Promise<void>>();
+
+vi.mock("../setup-wizard.ts", () => ({
+  shouldShowSetupWizard: mockShouldShowSetupWizard,
+  showSetupWizard: mockShowSetupWizard,
+  markSetupComplete: mockMarkSetupComplete,
 }));
 
 const INDEX_HTML = fs.readFileSync(
@@ -512,17 +523,14 @@ describe("main integration", () => {
     const secretToggle = document.getElementById(
       "secret-key-toggle",
     ) as HTMLButtonElement;
-    const secretToggleIcon = document.getElementById(
-      "secret-key-toggle-icon",
-    ) as HTMLImageElement;
     secretToggle.click();
     expect(secretInput.type).toBe("text");
     expect(secretToggle.getAttribute("aria-pressed")).toBe("true");
-    expect(secretToggleIcon.getAttribute("src")).toContain("1f648");
+    expect(secretToggle.textContent).toBe("Hide");
     secretToggle.click();
     expect(secretInput.type).toBe("password");
     expect(secretToggle.getAttribute("aria-pressed")).toBe("false");
-    expect(secretToggleIcon.getAttribute("src")).toContain("1f441");
+    expect(secretToggle.textContent).toBe("Show");
 
     const preset = document.getElementById(
       "conn-provider-preset",
@@ -833,11 +841,14 @@ describe("main integration", () => {
     if (onAction) {
       onAction("copy-url");
       onAction("copy-presigned-url");
+      onAction("copy-key");
+      onAction("copy-arn");
+      onAction("copy-move");
       onAction("rename");
       onAction("download");
       onAction("delete");
       onAction("info");
-      await flushMicrotasks(6);
+      await flushMicrotasks(10);
     }
 
     expect(mockInvoke).toHaveBeenCalledWith("build_object_url", {
@@ -849,6 +860,10 @@ describe("main integration", () => {
       key: "docs/file.txt",
       expiresInSecs: expect.any(Number),
     });
+    expect(clipboardWriteText).toHaveBeenCalledWith("docs/file.txt");
+    expect(clipboardWriteText).toHaveBeenCalledWith(
+      "arn:aws:s3:::bucket-a/docs/file.txt",
+    );
     expect(mockInvoke).toHaveBeenCalledWith("rename_object", {
       bucket: "bucket-a",
       oldKey: "docs/file.txt",
@@ -924,6 +939,150 @@ describe("main integration", () => {
     expect(multiItems.some((item) => item.label === "Download 2 items")).toBe(
       true,
     );
+    expect(multiItems.some((item) => item.label === "Copy Keys")).toBe(true);
+    expect(multiItems.some((item) => item.label === "Copy URLs")).toBe(true);
+    expect(multiItems.some((item) => item.label === "Copy ARNs")).toBe(true);
+  });
+
+  it("opens copy/move dialog and performs copy and move operations", async () => {
+    const { state } = await import("../state.ts");
+    await import("../main.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.buckets = [
+      { name: "bucket-a", creation_date: "" },
+      { name: "bucket-b", creation_date: "" },
+    ];
+
+    const tbody = document.getElementById(
+      "object-tbody",
+    ) as HTMLTableSectionElement;
+    tbody.innerHTML = `
+      <tr class="object-row" data-key="docs/file.txt" tabindex="0">
+        <td class="col-name">file.txt</td>
+      </tr>
+    `;
+    const fileRow = tbody.querySelector(".object-row") as HTMLElement;
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+    mockCanPreview.mockReturnValue(false);
+
+    // Open dialog via context menu action
+    fileRow.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 10,
+        clientY: 20,
+      }),
+    );
+    const onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
+      | ((action: string) => void)
+      | undefined;
+    onAction?.("copy-move");
+    await flushMicrotasks();
+
+    const overlay = document.getElementById(
+      "copy-move-overlay",
+    ) as HTMLDivElement;
+    expect(overlay.classList.contains("active")).toBe(true);
+
+    // Verify path input pre-filled with the file key
+    const pathInput = document.getElementById(
+      "copy-move-path",
+    ) as HTMLInputElement;
+    expect(pathInput.value).toBe("docs/file.txt");
+
+    // Test Copy button
+    pathInput.value = "archive/file.txt";
+    const bucketSelect = document.getElementById(
+      "copy-move-bucket",
+    ) as HTMLSelectElement;
+    bucketSelect.value = "bucket-b";
+
+    const copyBtn = document.getElementById(
+      "copy-move-copy-btn",
+    ) as HTMLButtonElement;
+    copyBtn.click();
+    await flushMicrotasks(6);
+
+    expect(mockInvoke).toHaveBeenCalledWith("copy_object_to", {
+      srcBucket: "bucket-a",
+      srcKey: "docs/file.txt",
+      dstBucket: "bucket-b",
+      dstKey: "archive/file.txt",
+    });
+    // Copy should NOT delete the source
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "delete_objects",
+      expect.objectContaining({ keys: ["docs/file.txt"] }),
+    );
+
+    // Re-open for move test
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+    fileRow.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 10,
+        clientY: 20,
+      }),
+    );
+    const onAction2 = mockShowContextMenu.mock.calls.at(-1)?.[3] as
+      | ((action: string) => void)
+      | undefined;
+    onAction2?.("copy-move");
+    await flushMicrotasks();
+
+    const pathInput2 = document.getElementById(
+      "copy-move-path",
+    ) as HTMLInputElement;
+    pathInput2.value = "moved/file.txt";
+    const bucketSelect2 = document.getElementById(
+      "copy-move-bucket",
+    ) as HTMLSelectElement;
+    bucketSelect2.value = "bucket-a";
+
+    const moveBtn = document.getElementById(
+      "copy-move-move-btn",
+    ) as HTMLButtonElement;
+    moveBtn.click();
+    await flushMicrotasks(6);
+
+    expect(mockInvoke).toHaveBeenCalledWith("copy_object_to", {
+      srcBucket: "bucket-a",
+      srcKey: "docs/file.txt",
+      dstBucket: "bucket-a",
+      dstKey: "moved/file.txt",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("delete_objects", {
+      bucket: "bucket-a",
+      keys: ["docs/file.txt"],
+    });
+
+    // Cancel should close without action
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+    fileRow.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 10,
+        clientY: 20,
+      }),
+    );
+    const onAction3 = mockShowContextMenu.mock.calls.at(-1)?.[3] as
+      | ((action: string) => void)
+      | undefined;
+    onAction3?.("copy-move");
+    await flushMicrotasks();
+    expect(overlay.classList.contains("active")).toBe(true);
+    (document.getElementById("copy-move-cancel") as HTMLButtonElement).click();
+    expect(overlay.classList.contains("active")).toBe(false);
   });
 
   it("covers validation and guard paths for connect/bookmark/upload/create", async () => {
@@ -1020,11 +1179,13 @@ describe("main integration", () => {
     let onBucketAction = ctx?.[3] as ((action: string) => void) | undefined;
     if (onBucketAction) {
       onBucketAction("copy-bucket-name");
+      onBucketAction("copy-bucket-arn");
       onBucketAction("refresh-buckets");
       onBucketAction("open-bucket");
       await flushMicrotasks();
     }
     expect(clipboardWriteText).toHaveBeenCalledWith("bucket-a");
+    expect(clipboardWriteText).toHaveBeenCalledWith("arn:aws:s3:::bucket-a");
     expect(mockRefreshBuckets).toHaveBeenCalled();
     expect(mockSelectBucket).toHaveBeenCalledWith("bucket-a");
 
@@ -1117,9 +1278,15 @@ describe("main integration", () => {
     const onFolderAction = ctx?.[3] as ((action: string) => void) | undefined;
     if (onFolderAction) {
       onFolderAction("open-folder");
+      onFolderAction("copy-key");
+      onFolderAction("copy-arn");
       await flushMicrotasks();
     }
     expect(mockNavigateToFolder).toHaveBeenCalledWith("docs/ctx/");
+    expect(clipboardWriteText).toHaveBeenCalledWith("docs/ctx/");
+    expect(clipboardWriteText).toHaveBeenCalledWith(
+      "arn:aws:s3:::bucket-a/docs/ctx/",
+    );
 
     const overlay = document.getElementById(
       "drop-zone-overlay",
@@ -1916,11 +2083,14 @@ describe("main integration", () => {
 
     state.selectedKeys.clear();
     state.selectedKeys.add("prefix:docs/folder/");
+    mockShowConfirm.mockResolvedValueOnce(false);
     (document.getElementById("batch-delete") as HTMLButtonElement).click();
-    await flushMicrotasks();
-    expect(
-      (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Folder deletion is not supported");
+    await flushMicrotasks(4);
+    expect(mockShowConfirm).toHaveBeenCalledWith(
+      "Delete",
+      expect.stringContaining("folder"),
+      expect.objectContaining({ okDanger: true }),
+    );
 
     state.selectedKeys.clear();
     state.selectedKeys.add("docs/file.txt");
@@ -2326,13 +2496,14 @@ describe("main integration", () => {
     vi.resetModules();
     mountIndexFixture();
     setupMatchMedia(false);
-    mockLoadSettings.mockRejectedValueOnce(new Error("settings failed"));
+    mockLoadSettings.mockRejectedValue(new Error("settings failed"));
     mockEnsureSecurityReady.mockResolvedValue(true);
     await import("../main.ts");
     await flushMicrotasks();
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Failed to load settings");
+    mockLoadSettings.mockReset();
 
     vi.resetModules();
     mountIndexFixture();
