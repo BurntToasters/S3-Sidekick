@@ -238,10 +238,14 @@ export async function ensureSecurityReady(): Promise<boolean> {
       await waitForWindowFocus(WINDOWS_STARTUP_FOCUS_WAIT_MS);
       await delay(WINDOWS_STARTUP_BIOMETRIC_DELAY_MS);
     }
+    const biometricOverlay = document.getElementById("biometric-overlay");
+    if (biometricOverlay) biometricOverlay.hidden = false;
     try {
       status = await unlockBiometric();
+      if (biometricOverlay) biometricOverlay.hidden = true;
       if (status.unlocked) return true;
     } catch (err) {
+      if (biometricOverlay) biometricOverlay.hidden = true;
       biometricAttempted = true;
       biometricErrorCode = extractErrorCode(err);
       biometricCanceled = isCancellationError(err);

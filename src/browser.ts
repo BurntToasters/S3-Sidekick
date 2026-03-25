@@ -98,8 +98,21 @@ export function updateSelectionUI(): void {
     const selectedFileCount = Array.from(state.selectedKeys).filter(
       (key) => !key.startsWith("prefix:"),
     ).length;
-    if (selectedFileCount >= 2) {
-      batchCount.textContent = `${selectedFileCount} file${selectedFileCount === 1 ? "" : "s"} selected`;
+    const selectedFolderCount = Array.from(state.selectedKeys).filter((key) =>
+      key.startsWith("prefix:"),
+    ).length;
+    const totalSelected = selectedFileCount + selectedFolderCount;
+    if (totalSelected >= 2) {
+      const parts: string[] = [];
+      if (selectedFileCount > 0)
+        parts.push(
+          `${selectedFileCount} file${selectedFileCount === 1 ? "" : "s"}`,
+        );
+      if (selectedFolderCount > 0)
+        parts.push(
+          `${selectedFolderCount} folder${selectedFolderCount === 1 ? "" : "s"}`,
+        );
+      batchCount.textContent = `${parts.join(" + ")} selected`;
       batchToolbar.hidden = false;
     } else {
       batchToolbar.hidden = true;

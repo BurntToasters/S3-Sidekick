@@ -214,14 +214,37 @@ export async function closeSettingsModal(save: boolean): Promise<void> {
 export async function resetSettings(): Promise<void> {
   const confirmed = await showConfirm(
     "Reset Settings",
-    "This will reset all settings to their defaults and restart the app. Bookmarks and saved connections will be removed.",
-    { okLabel: "Reset & Restart", okDanger: true },
+    "This will reset settings to defaults and restart the app.\nChoose how much to reset on the next step.",
+    { okLabel: "Continue", okDanger: true },
   );
   if (!confirmed) return;
 
+  const fullReset = await showConfirm(
+    "Reset Scope",
+    "Keep your bookmarks, or factory reset everything?\n\nFactory reset removes all settings, bookmarks, saved connections, and encryption — a completely clean slate.",
+    { okLabel: "Factory Reset", cancelLabel: "Keep Bookmarks", okDanger: true },
+  );
+
+  const currentBookmarks = state.settingsExtras._bookmarks;
   const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
   await invoke("save_settings", { json: defaults });
   await invoke("save_connection", { json: "" });
+
+  if (fullReset) {
+    await invoke("save_bookmarks_backup", { json: "[]" });
+    try {
+      await invoke("reset_security");
+    } catch {
+      // security may not be initialized
+    }
+  } else {
+    if (currentBookmarks !== undefined) {
+      const restored = mergeSettingsPayload(SETTING_DEFAULTS, {
+        _bookmarks: currentBookmarks,
+      });
+      await invoke("save_settings", { json: restored });
+    }
+  }
 
   try {
     await relaunch();

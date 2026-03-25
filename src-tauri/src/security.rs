@@ -725,6 +725,19 @@ pub(crate) async fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Res
     Ok(security_status(&config))
 }
 
+#[tauri::command]
+pub(crate) async fn reset_security(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+    let _storage_guard = lock_storage_ops()?;
+    let config = load_security_config(&app)?;
+    if config.biometric_enrolled {
+        crate::biometric::clear_stored_key();
+    }
+    set_unlocked_key(None, 0)?;
+    let default = default_security_config();
+    save_security_config(&app, &default)?;
+    Ok(security_status(&default))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
