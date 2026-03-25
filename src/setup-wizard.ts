@@ -55,12 +55,13 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     let currentStep = 0;
     let securityAlreadyInitialized = false;
 
-    try {
-      const secStatus = await invoke<SecurityStatus>("get_security_status");
-      securityAlreadyInitialized = secStatus.initialized;
-    } catch {
-      /* assume not initialized */
-    }
+    invoke<SecurityStatus>("get_security_status")
+      .then((secStatus) => {
+        securityAlreadyInitialized = secStatus.initialized;
+      })
+      .catch(() => {
+        /* assume not initialized */
+      });
 
     showStep(0);
 
