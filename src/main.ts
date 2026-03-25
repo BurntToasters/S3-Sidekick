@@ -102,7 +102,12 @@ import {
   handleLockTimeoutChange,
   handleBiometricToggle,
 } from "./security.ts";
-import { showConfirm, showPrompt, showAlert, isDialogActive } from "./dialogs.ts";
+import {
+  showConfirm,
+  showPrompt,
+  showAlert,
+  isDialogActive,
+} from "./dialogs.ts";
 import {
   initPalette,
   registerCommands,
@@ -2319,7 +2324,9 @@ async function init(): Promise<void> {
     );
     try {
       await invoke("save_settings", { json: "{}" });
-    } catch { /* best effort */ }
+    } catch {
+      /* best effort */
+    }
     try {
       await relaunch();
     } catch {
