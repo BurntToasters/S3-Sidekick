@@ -90,7 +90,7 @@ const mockEnsureSecurityReady = vi.fn<() => Promise<boolean>>();
 const mockHandleSecurityChangePassword =
   vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockHandleSecurityToggle = vi.fn<(...args: unknown[]) => Promise<void>>();
-const mockHandleLockNow = vi.fn<(...args: unknown[]) => Promise<void>>();
+const mockHandleLockNow = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockHandleLockTimeoutChange = vi.fn<() => Promise<void>>();
 const mockHandleBiometricToggle =
   vi.fn<(...args: unknown[]) => Promise<void>>();
