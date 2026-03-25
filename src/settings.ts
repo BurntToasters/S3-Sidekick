@@ -226,9 +226,18 @@ export async function resetSettings(): Promise<void> {
     { okLabel: "Factory Reset", cancelLabel: "Keep Bookmarks", okDanger: true },
   );
 
-  const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
-  await invoke("save_settings", { json: defaults });
-  await invoke("save_connection", { json: "" });
+  const extras = fullReset ? {} : { _setupComplete: true };
+  const defaults = mergeSettingsPayload(SETTING_DEFAULTS, extras);
+  try {
+    await invoke("save_settings", { json: defaults });
+  } catch {
+    /* best effort */
+  }
+  try {
+    await invoke("save_connection", { json: "" });
+  } catch {
+    /* best effort */
+  }
 
   if (fullReset) {
     try {
@@ -244,7 +253,7 @@ export async function resetSettings(): Promise<void> {
     try {
       await invoke("reset_security");
     } catch {
-      // security may not be initialized
+      /* best effort */
     }
   }
 

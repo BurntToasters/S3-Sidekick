@@ -450,7 +450,10 @@ function renderQueue(): void {
         statusClass = "transfer-status--error";
       }
 
-      const progressPct = Math.max(0, Math.min(100, Math.round(t.progress)));
+      const progressPct = Math.max(
+        0,
+        Math.min(100, Math.round(t.progress) || 0),
+      );
       const progressBar =
         t.totalBytes > 0 &&
         (t.status === "uploading" || (t.status === "error" && t.progress > 0))

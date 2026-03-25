@@ -53,6 +53,14 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
     let selectedTheme: ThemePreference = "system";
     let currentStep = 0;
+    let securityAlreadyInitialized = false;
+
+    try {
+      const secStatus = await invoke<SecurityStatus>("get_security_status");
+      securityAlreadyInitialized = secStatus.initialized;
+    } catch {
+      /* assume not initialized */
+    }
 
     showStep(0);
 
@@ -167,6 +175,10 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     }
 
     function onThemeNext(): void {
+      if (securityAlreadyInitialized) {
+        goTo(3);
+        return;
+      }
       goTo(2);
     }
 
@@ -226,7 +238,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     }
 
     function onUpdatesBack(): void {
-      goTo(2);
+      goTo(securityAlreadyInitialized ? 1 : 2);
     }
 
     function onUpdatesNext(): void {

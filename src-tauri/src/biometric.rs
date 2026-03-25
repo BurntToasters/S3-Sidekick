@@ -72,7 +72,7 @@ pub(crate) async fn unlock_biometric(
                         .to_string(),
                 );
             }
-            return Err(err);
+            return Err("Biometric authentication failed. Please try again or unlock with your password.".to_string());
         }
     };
 
