@@ -21,6 +21,10 @@ export function getBookmarks(): Bookmark[] {
   return bookmarks;
 }
 
+export function clearBookmarks(): void {
+  bookmarks = [];
+}
+
 export function isEndpointBookmarked(endpoint: string): boolean {
   return bookmarks.some((b) => b.endpoint === endpoint);
 }
