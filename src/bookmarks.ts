@@ -21,6 +21,10 @@ export function getBookmarks(): Bookmark[] {
   return bookmarks;
 }
 
+export function isEndpointBookmarked(endpoint: string): boolean {
+  return bookmarks.some((b) => b.endpoint === endpoint);
+}
+
 function isBookmark(value: unknown): value is Bookmark {
   if (typeof value !== "object" || value === null) return false;
   const row = value as Bookmark;

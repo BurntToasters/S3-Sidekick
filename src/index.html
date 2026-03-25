@@ -81,19 +81,12 @@
           <button
             id="secret-key-toggle"
             type="button"
-            class="btn btn--icon field-toggle-btn"
+            class="field-toggle-btn field-toggle-btn--text"
             title="Show/hide secret key"
             aria-label="Show secret key"
             aria-pressed="false"
           >
-            <img
-              id="secret-key-toggle-icon"
-              class="twemoji-icon"
-              src="/twemoji/1f441.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            Show
           </button>
         </div>
         <button
@@ -103,8 +96,9 @@
           aria-label="Bookmark this connection"
         >
           <img
+            id="bookmark-save-icon"
             class="twemoji-icon"
-            src="/twemoji/2b50.svg"
+            src="/twemoji/1f516.svg"
             alt=""
             aria-hidden="true"
             draggable="false"
@@ -883,6 +877,16 @@
             class="field dialog-box__input"
             type="text"
           />
+          <button
+            id="dialog-input-reveal"
+            class="dialog-input-reveal"
+            type="button"
+            tabindex="-1"
+            aria-label="Show password"
+            hidden
+          >
+            Show
+          </button>
         </div>
         <div class="dialog-box__actions">
           <button id="dialog-cancel" class="btn btn--ghost">Cancel</button>
@@ -890,6 +894,56 @@
         </div>
       </div>
     </div>
+
+    <div
+      id="copy-move-overlay"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="copy-move-heading"
+    >
+      <div class="modal">
+        <div class="modal__header">
+          <h2 id="copy-move-heading">Copy / Move</h2>
+          <button id="copy-move-close" class="btn btn--icon" aria-label="Close">
+            <img
+              class="twemoji-icon"
+              src="/twemoji/274c.svg"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+          </button>
+        </div>
+        <div class="modal__body">
+          <p id="copy-move-desc" class="copy-move-desc"></p>
+          <div class="setting-item setting-item--stacked">
+            <label for="copy-move-bucket">Destination bucket</label>
+            <select
+              id="copy-move-bucket"
+              class="field copy-move-field"
+            ></select>
+          </div>
+          <div class="setting-item setting-item--stacked">
+            <label for="copy-move-path">Destination path</label>
+            <input
+              id="copy-move-path"
+              class="field copy-move-field"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+        </div>
+        <div class="modal__footer">
+          <button id="copy-move-cancel" class="btn btn--ghost">Cancel</button>
+          <button id="copy-move-copy-btn" class="btn btn--primary">Copy</button>
+          <button id="copy-move-move-btn" class="btn btn--danger">Move</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="biometric-overlay" class="biometric-overlay" hidden></div>
 
     <div
       id="licenses-overlay"
@@ -1211,20 +1265,54 @@
             Protect saved credentials and bookmarks with AES-256 encryption.
           </p>
           <div class="setup-wizard-encryption-form" id="setup-encryption-form">
-            <input
-              id="setup-enc-password"
-              class="field setup-wizard-field"
-              type="password"
-              placeholder="Password (8+ characters)"
-              autocomplete="new-password"
-            />
-            <input
-              id="setup-enc-confirm"
-              class="field setup-wizard-field"
-              type="password"
-              placeholder="Confirm password"
-              autocomplete="new-password"
-            />
+            <div class="field-with-toggle setup-wizard-field">
+              <input
+                id="setup-enc-password"
+                class="field"
+                type="password"
+                placeholder="Password (8+ characters)"
+                autocomplete="new-password"
+              />
+              <button
+                id="setup-enc-password-reveal"
+                type="button"
+                class="btn btn--icon field-toggle-btn"
+                aria-label="Show password"
+                title="Show/hide password"
+              >
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/1f441.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+              </button>
+            </div>
+            <div class="field-with-toggle setup-wizard-field">
+              <input
+                id="setup-enc-confirm"
+                class="field"
+                type="password"
+                placeholder="Confirm password"
+                autocomplete="new-password"
+              />
+              <button
+                id="setup-enc-confirm-reveal"
+                type="button"
+                class="btn btn--icon field-toggle-btn"
+                aria-label="Show password"
+                title="Show/hide password"
+              >
+                <img
+                  class="twemoji-icon"
+                  src="/twemoji/1f441.svg"
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                />
+              </button>
+            </div>
             <p id="setup-enc-error" class="setup-wizard-enc-error" hidden></p>
             <label
               id="setup-biometric-label"
