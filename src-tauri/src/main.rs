@@ -57,6 +57,12 @@ fn connection_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String>
     Ok(dir.join("connection.json"))
 }
 
+fn bookmarks_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("bookmarks.json"))
+}
+
 fn bookmarks_backup_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -154,14 +160,31 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), Str
 fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
     let _storage_guard = lock_storage_ops()?;
     let path = settings_path(&app)?;
-    let security = load_security_config(&app)?;
-    read_protected_file(&path, "{}", &security)
+    if !path.exists() {
+        return Ok("{}".to_string());
+    }
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, json: String) -> Result<(), String> {
     let _storage_guard = lock_storage_ops()?;
     let path = settings_path(&app)?;
+    atomic_write(&path, &json)
+}
+
+#[tauri::command]
+fn load_bookmarks(app: tauri::AppHandle) -> Result<String, String> {
+    let _storage_guard = lock_storage_ops()?;
+    let path = bookmarks_path(&app)?;
+    let security = load_security_config(&app)?;
+    read_protected_file(&path, "[]", &security)
+}
+
+#[tauri::command]
+fn save_bookmarks(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let _storage_guard = lock_storage_ops()?;
+    let path = bookmarks_path(&app)?;
     let security = load_security_config(&app)?;
     write_protected_file(&path, &json, &security)
 }
@@ -258,6 +281,8 @@ fn main() {
             files::list_local_files_recursive,
             load_settings,
             save_settings,
+            load_bookmarks,
+            save_bookmarks,
             load_connection,
             save_connection,
             load_bookmarks_backup,
