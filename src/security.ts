@@ -499,13 +499,15 @@ export async function handleSecurityChangePassword(
   }
 }
 
-export async function handleLockNow(setStatus: StatusSetter): Promise<void> {
+export async function handleLockNow(setStatus: StatusSetter): Promise<boolean> {
   try {
     await lockSecurity();
     setStatus("Encrypted storage locked.");
     await refreshSecuritySettingsUI();
+    return true;
   } catch (err) {
     await showAlert("Error", `Failed to lock: ${err}`);
+    return false;
   }
 }
 

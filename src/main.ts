@@ -54,6 +54,7 @@ import {
   loadBookmarks,
   setBookmarkChangeHandler,
   isEndpointBookmarked,
+  clearBookmarks,
 } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
@@ -1768,7 +1769,28 @@ function wireEvents(): void {
   });
 
   document.getElementById("security-toggle")!.addEventListener("click", () => {
-    void handleSecurityToggle(setStatus);
+    void (async () => {
+      await handleSecurityToggle(setStatus);
+      try {
+        await loadBookmarks();
+        refreshBookmarkBar();
+      } catch {
+        /* bookmarks unavailable */
+      }
+      try {
+        const saved = await loadConnection();
+        if (saved) {
+          setConnectionInputs(
+            saved.endpoint,
+            saved.region,
+            saved.access_key,
+            saved.secret_key,
+          );
+        }
+      } catch {
+        /* connection unavailable */
+      }
+    })();
   });
   document
     .getElementById("security-change-password")!
@@ -1778,7 +1800,16 @@ function wireEvents(): void {
   document
     .getElementById("security-lock-btn")!
     .addEventListener("click", () => {
-      void handleLockNow(setStatus);
+      void (async () => {
+        const locked = await handleLockNow(setStatus);
+        if (locked) {
+          if (state.connected) await handleDisconnect();
+          setConnectionInputs("", "", "", "");
+          clearBookmarks();
+          refreshBookmarkBar();
+          await closeSettingsModal(false);
+        }
+      })();
     });
   document
     .getElementById("security-lock-timeout")!
@@ -2266,19 +2297,18 @@ async function init(): Promise<void> {
   applyPlatformClass();
 
   let settingsPreloaded = false;
+  let securityInitialized = false;
   try {
     await loadSettings();
     settingsPreloaded = true;
   } catch {
-    // settings not loadable yet (first launch or locked)
-    // If security is initialized but locked, unlock before checking the wizard
-    // flag — otherwise _setupComplete can't be read and the wizard re-shows.
     try {
       const secStatus = await invoke<{
         initialized: boolean;
         encryption_enabled: boolean;
         unlocked: boolean;
       }>("get_security_status");
+      securityInitialized = secStatus.initialized;
       if (
         secStatus.initialized &&
         secStatus.encryption_enabled &&
@@ -2290,7 +2320,7 @@ async function init(): Promise<void> {
             await loadSettings();
             settingsPreloaded = true;
           } catch {
-            // still failed after unlock — fall through to wizard check
+            // still failed after unlock — fall through
           }
         }
       }
@@ -2299,7 +2329,7 @@ async function init(): Promise<void> {
     }
   }
 
-  if (shouldShowSetupWizard()) {
+  if (!securityInitialized && shouldShowSetupWizard()) {
     const result = await showSetupWizard();
     if (result) {
       state.currentSettings.theme = result.theme;
