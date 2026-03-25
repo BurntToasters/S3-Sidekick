@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::lock_storage_ops;
 use crate::security::{
@@ -30,9 +30,8 @@ pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecuritySt
     if !is_available() {
         return Err("Biometric authentication is not available on this device".to_string());
     }
-    let mut key = require_unlocked_key()?;
+    let key = Zeroizing::new(require_unlocked_key()?);
     let result = platform::store_key(&key);
-    key.zeroize();
     result?;
     config.biometric_enrolled = true;
     save_security_config(&app, &config)?;
@@ -60,7 +59,7 @@ pub(crate) async fn unlock_biometric(
         return Err("Biometric unlock is not configured".to_string());
     }
 
-    let mut key = match platform::retrieve_key(Some(&window)) {
+    let key = Zeroizing::new(match platform::retrieve_key(Some(&window)) {
         Ok(k) => k,
         Err(err) => {
             let is_not_found = err.contains("0x80070490")
@@ -77,13 +76,12 @@ pub(crate) async fn unlock_biometric(
             }
             return Err("Biometric authentication failed. Please try again or unlock with your password.".to_string());
         }
-    };
+    });
 
     let expected = B64
         .decode(&config.verifier)
         .map_err(|e| format!("Invalid verifier: {}", e))?;
     if expected.len() != KEY_LEN {
-        key.zeroize();
         config.biometric_enrolled = false;
         let _ = save_security_config(&app, &config);
         return Err("Invalid security configuration".to_string());
@@ -91,7 +89,6 @@ pub(crate) async fn unlock_biometric(
 
     let computed = key_verifier(&key);
     if !constant_time_eq(&computed, &expected) {
-        key.zeroize();
         config.biometric_enrolled = false;
         let _ = save_security_config(&app, &config);
         platform::remove_key();
@@ -102,8 +99,7 @@ pub(crate) async fn unlock_biometric(
     }
 
     let timeout = config.lock_timeout_minutes as u64 * 60;
-    set_unlocked_key(Some(key), timeout)?;
-    key.zeroize();
+    set_unlocked_key(Some(*key), timeout)?;
     Ok(security_status(&config))
 }
 
