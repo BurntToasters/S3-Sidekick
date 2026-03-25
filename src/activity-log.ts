@@ -23,7 +23,8 @@ export function logActivity(
   message: string,
   type: ActivityType = "info",
 ): void {
-  entries.push({ time: new Date(), message, type });
+  const capped = message.length > 5000 ? message.slice(0, 5000) + "…" : message;
+  entries.push({ time: new Date(), message: capped, type });
   if (entries.length > MAX_ENTRIES) {
     entries = entries.slice(entries.length - MAX_ENTRIES);
   }

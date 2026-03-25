@@ -121,6 +121,12 @@ pub(crate) fn validate_destination_path(raw: &str) -> Result<PathBuf, String> {
             parent.display()
         ));
     }
+    if parent.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return Err(format!(
+            "Destination parent is a symbolic link: {}",
+            parent.display()
+        ));
+    }
     Ok(destination)
 }
 
@@ -241,11 +247,28 @@ fn main() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_notification::init());
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            if let Ok(dir) = app.path().app_data_dir() {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        if entry.path().extension().and_then(|e| e.to_str()) == Some("tmp") {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+            Ok(())
+        });
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder
-        .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build());
 
     if let Err(err) = builder

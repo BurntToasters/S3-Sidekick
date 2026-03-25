@@ -53,6 +53,15 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
     let selectedTheme: ThemePreference = "system";
     let currentStep = 0;
+    let securityAlreadyInitialized = false;
+
+    const securityCheckDone = invoke<SecurityStatus>("get_security_status")
+      .then((secStatus) => {
+        securityAlreadyInitialized = secStatus.initialized;
+      })
+      .catch(() => {
+        /* assume not initialized */
+      });
 
     showStep(0);
 
@@ -65,11 +74,11 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       overlay.hidden = true;
       welcomeNext.removeEventListener("click", onWelcomeNext);
       themeBack.removeEventListener("click", onThemeBack);
-      themeNext.removeEventListener("click", onThemeNext);
+      themeNext.removeEventListener("click", wrappedThemeNext);
       encBack.removeEventListener("click", onEncBack);
-      encSkip.removeEventListener("click", onEncSkip);
-      encNext.removeEventListener("click", onEncNext);
-      updatesBack.removeEventListener("click", onUpdatesBack);
+      encSkip.removeEventListener("click", wrappedEncSkip);
+      encNext.removeEventListener("click", wrappedEncNext);
+      updatesBack.removeEventListener("click", wrappedUpdatesBack);
       updatesNext.removeEventListener("click", onUpdatesNext);
       doneBtn.removeEventListener("click", onDone);
       for (const btn of themeBtns) {
@@ -166,7 +175,12 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       goTo(0);
     }
 
-    function onThemeNext(): void {
+    async function onThemeNext(): Promise<void> {
+      await securityCheckDone;
+      if (securityAlreadyInitialized) {
+        goTo(3);
+        return;
+      }
       goTo(2);
     }
 
@@ -225,8 +239,9 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       }
     }
 
-    function onUpdatesBack(): void {
-      goTo(2);
+    async function onUpdatesBack(): Promise<void> {
+      await securityCheckDone;
+      goTo(securityAlreadyInitialized ? 1 : 2);
     }
 
     function onUpdatesNext(): void {
@@ -245,13 +260,18 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       resolve(result);
     }
 
+    const wrappedThemeNext = () => void onThemeNext();
+    const wrappedEncSkip = () => void onEncSkip();
+    const wrappedEncNext = () => void onEncNext();
+    const wrappedUpdatesBack = () => void onUpdatesBack();
+
     welcomeNext.addEventListener("click", onWelcomeNext);
     themeBack.addEventListener("click", onThemeBack);
-    themeNext.addEventListener("click", onThemeNext);
+    themeNext.addEventListener("click", wrappedThemeNext);
     encBack.addEventListener("click", onEncBack);
-    encSkip.addEventListener("click", () => void onEncSkip());
-    encNext.addEventListener("click", () => void onEncNext());
-    updatesBack.addEventListener("click", onUpdatesBack);
+    encSkip.addEventListener("click", wrappedEncSkip);
+    encNext.addEventListener("click", wrappedEncNext);
+    updatesBack.addEventListener("click", wrappedUpdatesBack);
     updatesNext.addEventListener("click", onUpdatesNext);
     doneBtn.addEventListener("click", onDone);
     for (const btn of themeBtns) {
