@@ -35,10 +35,10 @@ beforeEach(() => {
 });
 
 describe("bookmarks fallback and backup sync", () => {
-  it("loads valid bookmarks from settings and refreshes backup", async () => {
+  it("loads valid bookmarks from primary and refreshes backup", async () => {
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_settings") {
-        return JSON.stringify({ _bookmarks: [alphaBookmark] });
+      if (command === "load_bookmarks") {
+        return JSON.stringify([alphaBookmark]);
       }
       if (command === "save_bookmarks_backup") return undefined;
       throw new Error(`Unexpected invoke command: ${String(command)}`);
@@ -53,13 +53,12 @@ describe("bookmarks fallback and backup sync", () => {
     });
   });
 
-  it("falls back to backup when settings JSON is malformed", async () => {
+  it("falls back to backup when primary returns invalid JSON", async () => {
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_settings") return "{broken";
+      if (command === "load_bookmarks") return "{broken";
       if (command === "load_bookmarks_backup") {
         return JSON.stringify([betaBookmark]);
       }
-      if (command === "save_bookmarks_backup") return undefined;
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
 
@@ -67,16 +66,15 @@ describe("bookmarks fallback and backup sync", () => {
     await bookmarks.loadBookmarks();
 
     expect(bookmarks.getBookmarks()).toEqual([betaBookmark]);
-    expect(commandCalls("save_settings")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
   });
 
-  it("falls back to backup when settings read fails", async () => {
+  it("falls back to backup when primary throws (vault locked)", async () => {
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_settings") throw new Error("settings unavailable");
+      if (command === "load_bookmarks") throw new Error("vault locked");
       if (command === "load_bookmarks_backup") {
         return JSON.stringify([alphaBookmark]);
       }
-      if (command === "save_bookmarks_backup") return undefined;
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
 
@@ -84,41 +82,28 @@ describe("bookmarks fallback and backup sync", () => {
     await bookmarks.loadBookmarks();
 
     expect(bookmarks.getBookmarks()).toEqual([alphaBookmark]);
-    expect(commandCalls("save_settings")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
   });
 
-  it("repairs primary settings from backup when _bookmarks is corrupted", async () => {
-    mockInvoke.mockImplementation(async (command, args) => {
-      if (command === "load_settings") {
-        return JSON.stringify({ theme: "dark", _bookmarks: "invalid" });
-      }
-      if (command === "load_bookmarks_backup") {
-        return JSON.stringify([alphaBookmark, betaBookmark]);
-      }
-      if (command === "save_settings") {
-        const payload = args as { json: string };
-        const repaired = JSON.parse(payload.json) as Record<string, unknown>;
-        expect(repaired.theme).toBe("dark");
-        expect(repaired._bookmarks).toEqual([alphaBookmark, betaBookmark]);
-        return undefined;
-      }
-      if (command === "save_bookmarks_backup") return undefined;
+  it("falls back to empty when both primary and backup fail", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "load_bookmarks") throw new Error("vault locked");
+      if (command === "load_bookmarks_backup") return '{"not":"array"}';
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
 
     const bookmarks = await loadBookmarksModule();
     await bookmarks.loadBookmarks();
 
-    expect(bookmarks.getBookmarks()).toEqual([alphaBookmark, betaBookmark]);
-    expect(commandCalls("save_settings")).toHaveLength(1);
+    expect(bookmarks.getBookmarks()).toEqual([]);
   });
 
-  it("persists bookmark changes to settings and backup", async () => {
-    let settingsPayload: Record<string, unknown> = {};
+  it("persists bookmark changes to primary and backup", async () => {
+    let primaryPayload: unknown[] = [];
     mockInvoke.mockImplementation(async (command, args) => {
-      if (command === "load_settings") return JSON.stringify(settingsPayload);
-      if (command === "save_settings") {
-        settingsPayload = JSON.parse((args as { json: string }).json);
+      if (command === "load_bookmarks") return JSON.stringify(primaryPayload);
+      if (command === "save_bookmarks") {
+        primaryPayload = JSON.parse((args as { json: string }).json);
         return undefined;
       }
       if (command === "save_bookmarks_backup") return undefined;
@@ -130,7 +115,7 @@ describe("bookmarks fallback and backup sync", () => {
     await bookmarks.addBookmark(alphaBookmark);
     await bookmarks.removeBookmark(0);
 
-    expect(settingsPayload._bookmarks).toEqual([]);
+    expect(primaryPayload).toEqual([]);
     const backupSaves = commandCalls("save_bookmarks_backup");
     expect(backupSaves.length).toBeGreaterThan(0);
     const lastBackupJson = (
@@ -141,11 +126,11 @@ describe("bookmarks fallback and backup sync", () => {
 });
 
 function standardMock(initial: unknown[] = []) {
-  let settingsPayload: Record<string, unknown> = { _bookmarks: initial };
+  let primaryPayload: unknown[] = initial;
   mockInvoke.mockImplementation(async (command, args) => {
-    if (command === "load_settings") return JSON.stringify(settingsPayload);
-    if (command === "save_settings") {
-      settingsPayload = JSON.parse((args as { json: string }).json);
+    if (command === "load_bookmarks") return JSON.stringify(primaryPayload);
+    if (command === "save_bookmarks") {
+      primaryPayload = JSON.parse((args as { json: string }).json);
       return undefined;
     }
     if (command === "save_bookmarks_backup") return undefined;
@@ -334,13 +319,13 @@ describe("bookmark import/export/list rendering", () => {
     await bookmarks.removeBookmark(-1);
     await bookmarks.removeBookmark(5);
 
-    expect(commandCalls("save_settings")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
     expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
   });
 
   it("handles invalid primary and backup bookmark payloads", async () => {
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_settings") return "[]";
+      if (command === "load_bookmarks") return "[]";
       if (command === "load_bookmarks_backup") return '{"not":"array"}';
       if (command === "save_bookmarks_backup") return undefined;
       throw new Error(`Unexpected invoke command: ${String(command)}`);
@@ -352,9 +337,8 @@ describe("bookmark import/export/list rendering", () => {
 
     mockInvoke.mockReset();
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_settings") throw new Error("settings unavailable");
+      if (command === "load_bookmarks") throw new Error("vault locked");
       if (command === "load_bookmarks_backup") return '{"not":"array"}';
-      if (command === "save_bookmarks_backup") return undefined;
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
     await bookmarks.loadBookmarks();
@@ -369,7 +353,7 @@ describe("bookmark import/export/list rendering", () => {
     await expect(bookmarks.addBookmark(alphaBookmark)).resolves.toBe(true);
     mockInvoke.mockClear();
     await expect(bookmarks.addBookmark(alphaBookmark)).resolves.toBe(false);
-    expect(commandCalls("save_settings")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
     expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
 
     await expect(
@@ -378,7 +362,7 @@ describe("bookmark import/export/list rendering", () => {
       imported: 0,
       skipped: 1,
     });
-    expect(commandCalls("save_settings")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
     expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
   });
 

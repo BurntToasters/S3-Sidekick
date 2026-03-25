@@ -41,47 +41,8 @@ function isBookmark(value: unknown): value is Bookmark {
   );
 }
 
-function parseJsonObject(raw: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(raw);
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
-      return null;
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-function readBookmarksField(data: Record<string, unknown>): {
-  values: Bookmark[];
-  corrupted: boolean;
-} {
-  if (!Object.hasOwn(data, "_bookmarks")) {
-    return { values: [], corrupted: false };
-  }
-  const raw = data._bookmarks;
-  if (!Array.isArray(raw)) {
-    return { values: [], corrupted: true };
-  }
-  if (!raw.every(isBookmark)) {
-    return { values: [], corrupted: true };
-  }
-  return { values: [...raw], corrupted: false };
-}
-
-async function loadBackupBookmarks(): Promise<Bookmark[] | null> {
-  let raw = "[]";
-  try {
-    raw = await invoke<string>("load_bookmarks_backup");
-  } catch {
-    return null;
-  }
-  let parsed: unknown = [];
+function parseBookmarksArray(raw: string): Bookmark[] | null {
+  let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
@@ -91,6 +52,15 @@ async function loadBackupBookmarks(): Promise<Bookmark[] | null> {
     return null;
   }
   return [...parsed];
+}
+
+async function loadBackupBookmarks(): Promise<Bookmark[] | null> {
+  try {
+    const raw = await invoke<string>("load_bookmarks_backup");
+    return parseBookmarksArray(raw);
+  } catch {
+    return null;
+  }
 }
 
 async function saveBookmarksBackupSafe(next: Bookmark[]): Promise<void> {
@@ -103,51 +73,24 @@ async function saveBookmarksBackupSafe(next: Bookmark[]): Promise<void> {
   }
 }
 
-async function repairSettingsBookmarks(
-  parsed: Record<string, unknown>,
-  next: Bookmark[],
-): Promise<void> {
-  parsed._bookmarks = next;
-  await invoke("save_settings", { json: JSON.stringify(parsed, null, 2) });
-}
-
 export async function loadBookmarks(): Promise<void> {
-  let raw = "{}";
   try {
-    raw = await invoke<string>("load_settings");
-  } catch {
-    const backup = await loadBackupBookmarks();
-    bookmarks = backup ?? [];
-    return;
-  }
-  const parsed = parseJsonObject(raw);
-  if (parsed) {
-    const primary = readBookmarksField(parsed);
-    if (!primary.corrupted) {
-      bookmarks = primary.values;
+    const raw = await invoke<string>("load_bookmarks");
+    const primary = parseBookmarksArray(raw);
+    if (primary !== null) {
+      bookmarks = primary;
       await saveBookmarksBackupSafe(bookmarks);
       return;
     }
+  } catch {
+    // primary unavailable (vault locked or IO error) — fall through to backup
   }
-  const backup = await loadBackupBookmarks();
-  if (backup) {
-    bookmarks = backup;
-    if (parsed) {
-      try {
-        await repairSettingsBookmarks(parsed, bookmarks);
-      } catch {}
-    }
-    return;
-  }
-  bookmarks = [];
+  bookmarks = (await loadBackupBookmarks()) ?? [];
 }
 
 async function persistBookmarks(): Promise<void> {
-  persistPromise = persistPromise.then(async () => {
-    const raw = await invoke<string>("load_settings");
-    const parsed = parseJsonObject(raw) ?? {};
-    parsed._bookmarks = bookmarks;
-    await invoke("save_settings", { json: JSON.stringify(parsed, null, 2) });
+  persistPromise = persistPromise.catch(() => {}).then(async () => {
+    await invoke("save_bookmarks", { json: JSON.stringify(bookmarks, null, 2) });
     await saveBookmarksBackupSafe(bookmarks);
   });
   await persistPromise;

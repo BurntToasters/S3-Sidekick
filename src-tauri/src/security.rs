@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-use crate::{atomic_write, bookmarks_backup_path, connection_path, lock_storage_ops, settings_path, security_path};
+use crate::{atomic_write, bookmarks_path, bookmarks_backup_path, connection_path, lock_storage_ops, security_path};
 
 pub(crate) const PBKDF2_ITERATIONS: u32 = 210_000;
 const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
@@ -282,11 +282,11 @@ struct MigrationPlan {
 fn managed_data_files(
     app: &tauri::AppHandle,
 ) -> Result<Vec<(std::path::PathBuf, &'static str)>, String> {
-    let settings = settings_path(app)?;
+    let bookmarks = bookmarks_path(app)?;
     let connection = connection_path(app)?;
     let bookmarks_backup = bookmarks_backup_path(app)?;
     Ok(vec![
-        (settings, "{}"),
+        (bookmarks, "[]"),
         (connection, ""),
         (bookmarks_backup, "[]"),
     ])
@@ -612,14 +612,11 @@ pub(crate) async fn set_security_encryption(
     apply_migration(&plans)?;
     key.zeroize();
 
-    if config.biometric_enrolled {
-        crate::biometric::clear_stored_key();
-        config.biometric_enrolled = false;
-    }
-
+    let had_biometric = config.biometric_enrolled;
     config.encryption_enabled = false;
     config.salt.clear();
     config.verifier.clear();
+    config.biometric_enrolled = false;
     if let Err(err) = save_security_config(&app, &config) {
         if let Err(rb_err) = rollback_migration(&plans, plans.len()) {
             return Err(format!(
@@ -628,6 +625,10 @@ pub(crate) async fn set_security_encryption(
             ));
         }
         return Err(err);
+    }
+
+    if had_biometric {
+        crate::biometric::clear_stored_key();
     }
     set_unlocked_key(None, 0)?;
     Ok(security_status(&config))
