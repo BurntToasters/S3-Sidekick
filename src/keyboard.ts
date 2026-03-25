@@ -78,6 +78,12 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
         return;
       }
 
+      const copyMoveOverlay = document.getElementById("copy-move-overlay");
+      if (copyMoveOverlay?.classList.contains("active")) {
+        copyMoveOverlay.classList.remove("active");
+        return;
+      }
+
       const licensesOverlay = document.getElementById("licenses-overlay");
       if (licensesOverlay?.classList.contains("active")) {
         closeLicensesModal();

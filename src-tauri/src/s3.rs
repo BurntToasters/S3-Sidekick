@@ -1181,14 +1181,15 @@ pub(crate) async fn create_folder(
 
 async fn copy_object_multipart(
     client: &Client,
-    bucket: &str,
+    src_bucket: &str,
+    dst_bucket: &str,
     source_key: &str,
     dest_key: &str,
     total_size: i64,
 ) -> Result<(), String> {
     let create_output = client
         .create_multipart_upload()
-        .bucket(bucket)
+        .bucket(dst_bucket)
         .key(dest_key)
         .send()
         .await
@@ -1199,7 +1200,7 @@ async fn copy_object_multipart(
         .ok_or("No upload ID returned for multipart copy")?
         .to_string();
 
-    let copy_source = encode_copy_source(bucket, source_key);
+    let copy_source = encode_copy_source(src_bucket, source_key);
     let mut completed_parts = Vec::new();
     let mut part_number = 1i32;
     let mut offset = 0u64;
@@ -1211,7 +1212,7 @@ async fn copy_object_multipart(
 
         let part_result = client
             .upload_part_copy()
-            .bucket(bucket)
+            .bucket(dst_bucket)
             .key(dest_key)
             .upload_id(&upload_id)
             .copy_source(&copy_source)
@@ -1239,7 +1240,7 @@ async fn copy_object_multipart(
             Err(e) => {
                 let _ = client
                     .abort_multipart_upload()
-                    .bucket(bucket)
+                    .bucket(dst_bucket)
                     .key(dest_key)
                     .upload_id(&upload_id)
                     .send()
@@ -1255,7 +1256,7 @@ async fn copy_object_multipart(
 
     if let Err(e) = client
         .complete_multipart_upload()
-        .bucket(bucket)
+        .bucket(dst_bucket)
         .key(dest_key)
         .upload_id(&upload_id)
         .multipart_upload(completed_upload)
@@ -1264,7 +1265,7 @@ async fn copy_object_multipart(
     {
         let _ = client
             .abort_multipart_upload()
-            .bucket(bucket)
+            .bucket(dst_bucket)
             .key(dest_key)
             .upload_id(&upload_id)
             .send()
@@ -1298,7 +1299,7 @@ pub(crate) async fn rename_object(
     let size = head.content_length().unwrap_or(0);
 
     if size >= MULTIPART_COPY_THRESHOLD {
-        copy_object_multipart(&client, &bucket, &old_key, &new_key, size).await?;
+        copy_object_multipart(&client, &bucket, &bucket, &old_key, &new_key, size).await?;
     } else {
         let source = encode_copy_source(&bucket, &old_key);
         client
@@ -1325,6 +1326,253 @@ pub(crate) async fn rename_object(
     }
 
     Ok(())
+}
+
+/// List every key under a prefix (no delimiter, fully recursive, paginated).
+async fn list_all_keys_under_prefix(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    prefix: &str,
+) -> Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+    let mut continuation_token: Option<String> = None;
+
+    loop {
+        let mut req = client.list_objects_v2().bucket(bucket).prefix(prefix);
+        if let Some(ref token) = continuation_token {
+            req = req.continuation_token(token);
+        }
+        let output = req
+            .send()
+            .await
+            .map_err(|e| format!("Failed to list objects: {}", e))?;
+
+        for obj in output.contents() {
+            if let Some(k) = obj.key() {
+                keys.push(k.to_string());
+            }
+        }
+
+        if output.is_truncated().unwrap_or(false) {
+            continuation_token = output.next_continuation_token().map(|s| s.to_string());
+        } else {
+            break;
+        }
+    }
+
+    Ok(keys)
+}
+
+#[tauri::command]
+pub(crate) async fn delete_prefix(
+    state: tauri::State<'_, AppState>,
+    bucket: String,
+    prefix: String,
+) -> Result<u32, String> {
+    let client = {
+        let s3 = lock_s3_state(&state)?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    let keys = list_all_keys_under_prefix(&client, &bucket, &prefix).await?;
+    if keys.is_empty() {
+        return Ok(0);
+    }
+
+    let mut deleted = 0u32;
+    for chunk in keys.chunks(1000) {
+        let objects: Vec<ObjectIdentifier> = chunk
+            .iter()
+            .map(|k| {
+                ObjectIdentifier::builder()
+                    .key(k)
+                    .build()
+                    .map_err(|e| format!("Invalid key: {}", e))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let delete = Delete::builder()
+            .set_objects(Some(objects))
+            .quiet(true)
+            .build()
+            .map_err(|e| format!("Delete build error: {}", e))?;
+
+        let output = client
+            .delete_objects()
+            .bucket(&bucket)
+            .delete(delete)
+            .send()
+            .await
+            .map_err(|e| format!("Batch delete failed: {}", e))?;
+
+        let errors = output.errors();
+        if !errors.is_empty() {
+            let sample: Vec<String> = errors
+                .iter()
+                .take(3)
+                .map(|err| {
+                    format!(
+                        "{}: {}",
+                        err.key().unwrap_or("?"),
+                        err.message().unwrap_or("unknown error")
+                    )
+                })
+                .collect();
+            return Err(format!(
+                "Failed to delete {} object(s) under prefix. {}",
+                errors.len(),
+                sample.join("; ")
+            ));
+        }
+
+        deleted += chunk.len() as u32;
+    }
+
+    Ok(deleted)
+}
+
+#[tauri::command]
+pub(crate) async fn rename_prefix(
+    state: tauri::State<'_, AppState>,
+    bucket: String,
+    old_prefix: String,
+    new_prefix: String,
+) -> Result<u32, String> {
+    let client = {
+        let s3 = lock_s3_state(&state)?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    let keys = list_all_keys_under_prefix(&client, &bucket, &old_prefix).await?;
+    if keys.is_empty() {
+        // Nothing under prefix — just means it was an empty folder marker; nothing to move
+        return Ok(0);
+    }
+
+    // Copy all objects to new prefix
+    for key in &keys {
+        let suffix = &key[old_prefix.len()..];
+        let new_key = format!("{}{}", new_prefix, suffix);
+        let source = encode_copy_source(&bucket, key);
+        client
+            .copy_object()
+            .bucket(&bucket)
+            .key(&new_key)
+            .copy_source(&source)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to copy '{}': {}", key, e))?;
+    }
+
+    // Delete originals in batches
+    let mut moved = 0u32;
+    for chunk in keys.chunks(1000) {
+        let objects: Vec<ObjectIdentifier> = chunk
+            .iter()
+            .map(|k| {
+                ObjectIdentifier::builder()
+                    .key(k)
+                    .build()
+                    .map_err(|e| format!("Invalid key: {}", e))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let delete = Delete::builder()
+            .set_objects(Some(objects))
+            .quiet(true)
+            .build()
+            .map_err(|e| format!("Delete build error: {}", e))?;
+
+        client
+            .delete_objects()
+            .bucket(&bucket)
+            .delete(delete)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to delete originals: {}", e))?;
+
+        moved += chunk.len() as u32;
+    }
+
+    Ok(moved)
+}
+
+/// Copy a single object to a (possibly different) bucket/key without deleting the source.
+#[tauri::command]
+pub(crate) async fn copy_object_to(
+    state: tauri::State<'_, AppState>,
+    src_bucket: String,
+    src_key: String,
+    dst_bucket: String,
+    dst_key: String,
+) -> Result<(), String> {
+    let client = {
+        let s3 = lock_s3_state(&state)?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    let head = client
+        .head_object()
+        .bucket(&src_bucket)
+        .key(&src_key)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get object info: {}", e))?;
+
+    let size = head.content_length().unwrap_or(0);
+
+    if size >= MULTIPART_COPY_THRESHOLD {
+        copy_object_multipart(&client, &src_bucket, &dst_bucket, &src_key, &dst_key, size).await?;
+    } else {
+        let source = encode_copy_source(&src_bucket, &src_key);
+        client
+            .copy_object()
+            .bucket(&dst_bucket)
+            .key(&dst_key)
+            .copy_source(&source)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to copy: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Copy all objects under a prefix to a new prefix (possibly in a different bucket)
+/// without deleting the originals.
+#[tauri::command]
+pub(crate) async fn copy_prefix_to(
+    state: tauri::State<'_, AppState>,
+    src_bucket: String,
+    src_prefix: String,
+    dst_bucket: String,
+    dst_prefix: String,
+) -> Result<u32, String> {
+    let client = {
+        let s3 = lock_s3_state(&state)?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    let keys = list_all_keys_under_prefix(&client, &src_bucket, &src_prefix).await?;
+    if keys.is_empty() {
+        return Ok(0);
+    }
+
+    for key in &keys {
+        let suffix = &key[src_prefix.len()..];
+        let new_key = format!("{}{}", dst_prefix, suffix);
+        let source = encode_copy_source(&src_bucket, key);
+        client
+            .copy_object()
+            .bucket(&dst_bucket)
+            .key(&new_key)
+            .copy_source(&source)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to copy '{}': {}", key, e))?;
+    }
+
+    Ok(keys.len() as u32)
 }
 
 #[tauri::command]

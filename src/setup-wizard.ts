@@ -84,7 +84,11 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     const encSkip = $("setup-enc-skip") as HTMLButtonElement;
     const encNext = $("setup-enc-next") as HTMLButtonElement;
     const encPassword = $("setup-enc-password") as HTMLInputElement;
+    const encPasswordReveal = $(
+      "setup-enc-password-reveal",
+    ) as HTMLButtonElement;
     const encConfirm = $("setup-enc-confirm") as HTMLInputElement;
+    const encConfirmReveal = $("setup-enc-confirm-reveal") as HTMLButtonElement;
     const encError = $("setup-enc-error") as HTMLElement;
     const encBiometric = $("setup-enc-biometric") as HTMLInputElement;
     const biometricLabel = $("setup-biometric-label") as HTMLElement;
@@ -97,6 +101,23 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     const themeBtns = document.querySelectorAll<HTMLButtonElement>(
       ".setup-wizard-theme-btn",
     );
+
+    function wireRevealToggle(
+      input: HTMLInputElement,
+      btn: HTMLButtonElement,
+    ): void {
+      btn.addEventListener("click", () => {
+        const showing = input.type === "text";
+        input.type = showing ? "password" : "text";
+        btn.setAttribute(
+          "aria-label",
+          showing ? "Show password" : "Hide password",
+        );
+        input.focus();
+      });
+    }
+    wireRevealToggle(encPassword, encPasswordReveal);
+    wireRevealToggle(encConfirm, encConfirmReveal);
 
     void initBiometricUI();
 
