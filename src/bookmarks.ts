@@ -89,10 +89,14 @@ export async function loadBookmarks(): Promise<void> {
 }
 
 async function persistBookmarks(): Promise<void> {
-  persistPromise = persistPromise.catch(() => {}).then(async () => {
-    await invoke("save_bookmarks", { json: JSON.stringify(bookmarks, null, 2) });
-    await saveBookmarksBackupSafe(bookmarks);
-  });
+  persistPromise = persistPromise
+    .catch(() => {})
+    .then(async () => {
+      await invoke("save_bookmarks", {
+        json: JSON.stringify(bookmarks, null, 2),
+      });
+      await saveBookmarksBackupSafe(bookmarks);
+    });
   await persistPromise;
 }
 

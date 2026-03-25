@@ -233,10 +233,14 @@ export async function resetSettings(): Promise<void> {
   if (fullReset) {
     try {
       await invoke("save_bookmarks", { json: "[]" });
-    } catch { /* vault may be locked; backup handles it */ }
+    } catch {
+      /* vault may be locked; backup handles it */
+    }
     try {
       await invoke("save_bookmarks_backup", { json: "[]" });
-    } catch { /* best effort */ }
+    } catch {
+      /* best effort */
+    }
     try {
       await invoke("reset_security");
     } catch {
