@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { state, dom } from "./state.ts";
 import {
@@ -101,7 +102,12 @@ import {
   handleLockTimeoutChange,
   handleBiometricToggle,
 } from "./security.ts";
-import { showConfirm, showPrompt, isDialogActive } from "./dialogs.ts";
+import {
+  showConfirm,
+  showPrompt,
+  showAlert,
+  isDialogActive,
+} from "./dialogs.ts";
 import {
   initPalette,
   registerCommands,
@@ -518,6 +524,7 @@ function setConnectionInputs(
 }
 
 async function handleConnect(): Promise<void> {
+  if (state.connecting) return;
   const { endpoint, region, accessKey, secretKey } = getConnectionInputs();
   if (!endpoint || !accessKey || !secretKey) {
     setStatus("Endpoint, access key, and secret key are required.");
@@ -924,6 +931,9 @@ function openCopyMoveDialog(): void {
     overlay.classList.remove("active");
   };
 
+  const srcBucket = state.currentBucket;
+  const srcPrefix = state.currentPrefix;
+
   const runCopy = async (move: boolean) => {
     const dstBucket = bucketSelect.value;
     const dstPath = pathInput.value.trim();
@@ -932,7 +942,6 @@ function openCopyMoveDialog(): void {
       pathInput.focus();
       return;
     }
-    const srcBucket = state.currentBucket;
     const verb = move ? "Mov" : "Copy";
 
     try {
@@ -1001,8 +1010,13 @@ function openCopyMoveDialog(): void {
 
       closeFn();
       clearSelection();
-      await refreshObjects(state.currentBucket, state.currentPrefix);
-      renderObjectTable();
+      if (
+        state.currentBucket === srcBucket &&
+        state.currentPrefix === srcPrefix
+      ) {
+        await refreshObjects(state.currentBucket, state.currentPrefix);
+        renderObjectTable();
+      }
     } catch (err) {
       setStatus(`${move ? "Move" : "Copy"} failed: ${friendlyError(err)}`);
       logActivity(
@@ -2296,40 +2310,32 @@ async function init(): Promise<void> {
   state.platformName = await invoke<string>("get_platform_info");
   applyPlatformClass();
 
-  let settingsPreloaded = false;
-  let securityInitialized = false;
+  let settingsValid = true;
   try {
-    await loadSettings();
-    settingsPreloaded = true;
-  } catch {
-    try {
-      const secStatus = await invoke<{
-        initialized: boolean;
-        encryption_enabled: boolean;
-        unlocked: boolean;
-      }>("get_security_status");
-      securityInitialized = secStatus.initialized;
-      if (
-        secStatus.initialized &&
-        secStatus.encryption_enabled &&
-        !secStatus.unlocked
-      ) {
-        const unlocked = await ensureSecurityReady();
-        if (unlocked) {
-          try {
-            await loadSettings();
-            settingsPreloaded = true;
-          } catch {
-            // still failed after unlock — fall through
-          }
-        }
-      }
-    } catch {
-      // security status unavailable — continue with defaults
-    }
+    settingsValid = await loadSettings();
+  } catch (err) {
+    setStatus(`Failed to load settings: ${String(err)}`);
   }
 
-  if (!securityInitialized && shouldShowSetupWizard()) {
+  if (!settingsValid) {
+    await showAlert(
+      "Settings Corrupted",
+      "The settings file could not be read (it may be from an incompatible version). Settings will be reset to defaults. Your bookmarks and saved connections are unaffected.",
+    );
+    try {
+      await invoke("save_settings", { json: "{}" });
+    } catch {
+      /* best effort */
+    }
+    try {
+      await relaunch();
+    } catch {
+      window.location.assign(window.location.href);
+    }
+    return;
+  }
+
+  if (shouldShowSetupWizard()) {
     const result = await showSetupWizard();
     if (result) {
       state.currentSettings.theme = result.theme;
@@ -2380,22 +2386,14 @@ async function init(): Promise<void> {
   const securityReady = await ensureSecurityReady();
   if (!securityReady) {
     setStatus(
-      "Secure storage is locked. Saved settings and credentials are unavailable.",
+      "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
     );
     logActivity(
-      "Secure storage is locked. Saved settings and credentials are unavailable.",
+      "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
       "warning",
     );
   }
 
-  if (!settingsPreloaded) {
-    try {
-      await loadSettings();
-    } catch (err) {
-      setStatus(`Failed to load settings: ${String(err)}`);
-      logActivity(`Failed to load settings: ${String(err)}`, "error");
-    }
-  }
   void checkSupportPrompt();
 
   updateShortcutChips();
