@@ -721,6 +721,9 @@ pub(crate) async fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatu
 
 #[tauri::command]
 pub(crate) async fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Result<SecurityStatus, String> {
+    if minutes == 0 || minutes > 1440 {
+        return Err("Lock timeout must be between 1 and 1440 minutes".to_string());
+    }
     let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     config.lock_timeout_minutes = minutes;

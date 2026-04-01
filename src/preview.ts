@@ -62,6 +62,7 @@ const PREVIEWABLE_IMAGE_EXTS = new Set([
 ]);
 
 let activePreviewObjectUrl: string | null = null;
+let previewSeq = 0;
 
 function canPreview(name: string): boolean {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
@@ -81,6 +82,7 @@ export async function openPreview(key: string): Promise<void> {
   const overlay = $("preview-overlay");
   const title = $("preview-title");
   const body = $("preview-body");
+  const seq = ++previewSeq;
 
   clearActivePreviewObjectUrl();
   title.textContent = basename(key);
@@ -92,6 +94,8 @@ export async function openPreview(key: string): Promise<void> {
       bucket: state.currentBucket,
       key,
     });
+
+    if (seq !== previewSeq) return;
 
     let html = "";
 
