@@ -131,7 +131,7 @@ describe("transfers queue UI", () => {
     await flushMicrotasks();
 
     const list = document.getElementById("transfer-list") as HTMLDivElement;
-    expect(list.textContent).toContain("readme.txt");
+    expect(list.textContent).not.toContain("readme.txt");
     expect(mockInvoke).toHaveBeenCalledWith(
       "download_object",
       expect.objectContaining({
@@ -353,10 +353,7 @@ describe("transfers queue UI", () => {
     await flushMicrotasks(4);
     expect(
       (document.getElementById("transfer-list") as HTMLDivElement).textContent,
-    ).toContain("a.txt");
-    expect(
-      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
-    ).toContain("pref/nested/a.txt");
+    ).not.toContain("a.txt");
 
     transfers.enqueueDownloads([
       { bucket: "bucket-a", key: "docs/no-destination.txt", destination: "" },

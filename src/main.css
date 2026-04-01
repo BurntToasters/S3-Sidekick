@@ -25,7 +25,10 @@
     -apple-system, sans-serif;
   --mono: "Cascadia Code", "Consolas", "SF Mono", monospace;
   --radius: 6px;
+  --radius-sm: 4px;
   --radius-lg: 10px;
+  --text-muted: #9ca3af;
+  --text-primary: #1a1a1a;
   --sidebar-width: 220px;
   --sidebar-min: 180px;
   --sidebar-max: 420px;
@@ -68,6 +71,8 @@
     --badge-on-bg: #14532d;
     --badge-on-text: #86efac;
     --warning: #fbbf24;
+    --text-muted: #6b7280;
+    --text-primary: #e5e5e5;
     --twemoji-filter: saturate(0.3) brightness(0.88) contrast(0.94);
     --twemoji-opacity: 0.86;
     --glass-bg: rgba(30, 30, 30, 0.72);
@@ -88,6 +93,8 @@
   --border: #404040;
   --text: #e5e5e5;
   --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  --text-primary: #e5e5e5;
   --accent: #60cdff;
   --accent-hover: #4db8e8;
   --accent-text: #1a1a1a;
@@ -1316,6 +1323,97 @@ body.modal-open .dialog-overlay.active {
 
 .copy-move-field {
   width: 100%;
+}
+
+.copy-move-browse-toggle {
+  font-size: 13px;
+  padding: 4px 0;
+  text-align: left;
+}
+
+.copy-move-browser {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.copy-move-browser-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.copy-move-browser-crumbs button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 1px 3px;
+  border-radius: var(--radius);
+}
+
+.copy-move-browser-crumbs button:hover {
+  background: var(--bg-hover);
+}
+
+.copy-move-browser-crumbs .crumb-sep {
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.copy-move-browser-crumbs .crumb-current {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.copy-move-browser-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.copy-move-folder-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.copy-move-folder-item:hover {
+  background: var(--bg-hover);
+}
+
+.copy-move-folder-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.copy-move-browser-empty {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.copy-move-browser-loading {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
 }
 
 .licenses-list {
