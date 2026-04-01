@@ -18,6 +18,7 @@ interface ActivityEntry {
 const MAX_ENTRIES = 200;
 let entries: ActivityEntry[] = [];
 let renderScheduled = false;
+let unseenCount = 0;
 
 export function logActivity(
   message: string,
@@ -28,6 +29,7 @@ export function logActivity(
   if (entries.length > MAX_ENTRIES) {
     entries = entries.slice(entries.length - MAX_ENTRIES);
   }
+  unseenCount++;
   updateBadge();
   if (!renderScheduled) {
     renderScheduled = true;
@@ -54,9 +56,15 @@ export function showActivityLog(): void {
 
 export function clearActivityLog(): void {
   entries = [];
+  unseenCount = 0;
   renderScheduled = false;
   updateBadge();
   renderActivityLog();
+}
+
+export function markActivitySeen(): void {
+  unseenCount = 0;
+  updateBadge();
 }
 
 function renderActivityLog(): void {
@@ -93,13 +101,13 @@ function renderActivityLog(): void {
 function updateBadge(): void {
   const badge = document.getElementById("activity-badge");
   if (badge) {
-    badge.textContent = entries.length > 0 ? String(entries.length) : "";
-    badge.style.display = entries.length > 0 ? "" : "none";
+    badge.textContent = unseenCount > 0 ? String(unseenCount) : "";
+    badge.style.display = unseenCount > 0 ? "" : "none";
   }
   const drawerBadge = document.getElementById("drawer-activity-badge");
   if (drawerBadge) {
-    drawerBadge.textContent = entries.length > 0 ? String(entries.length) : "";
-    drawerBadge.style.display = entries.length > 0 ? "" : "none";
+    drawerBadge.textContent = unseenCount > 0 ? String(unseenCount) : "";
+    drawerBadge.style.display = unseenCount > 0 ? "" : "none";
   }
 }
 

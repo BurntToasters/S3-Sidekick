@@ -152,8 +152,8 @@ describe("activity log with drawer", () => {
     const drawerBadge = document.getElementById(
       "drawer-activity-badge",
     ) as HTMLSpanElement;
-    expect(statusbarBadge.textContent).toBe("200");
-    expect(drawerBadge.textContent).toBe("200");
+    expect(statusbarBadge.textContent).toBe("207");
+    expect(drawerBadge.textContent).toBe("207");
   });
 
   it("tolerates missing activity list element when logging", async () => {

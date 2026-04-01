@@ -193,7 +193,7 @@ mod platform {
     }
 
     extern "C" {
-        static _NSConcreteStackBlock: c_void;
+        static _NSConcreteGlobalBlock: c_void;
     }
 
     static LA_REPLY_DESC: LAReplyBlockDesc = LAReplyBlockDesc {
@@ -231,8 +231,8 @@ mod platform {
             let reason = CFString::new("Unlock S3 Sidekick encrypted storage");
 
             let block = LAReplyBlock {
-                isa: &_NSConcreteStackBlock as *const c_void,
-                flags: 0,
+                isa: &_NSConcreteGlobalBlock as *const c_void,
+                flags: (1 << 28),  // BLOCK_IS_GLOBAL
                 reserved: 0,
                 invoke: la_reply_invoke,
                 descriptor: &LA_REPLY_DESC,
