@@ -29,8 +29,8 @@ fn validate_key(key: &str, label: &str) -> Result<(), String> {
     if key.as_bytes().iter().any(|&b| b == 0) {
         return Err(format!("{} contains invalid characters", label));
     }
-    if key.split('/').any(|seg| seg == "..") {
-        return Err(format!("{} must not contain '..' path segments", label));
+    if key.split('/').any(|seg| seg == ".." || seg == ".") {
+        return Err(format!("{} must not contain '..' or '.' path segments", label));
     }
     Ok(())
 }
@@ -711,8 +711,8 @@ pub(crate) async fn upload_object(
 
     let file_size = tokio::fs::metadata(&upload_path)
         .await
-        .map(|m| m.len())
-        .unwrap_or(0);
+        .map_err(|e| format!("File no longer accessible: {}", e))?
+        .len();
 
     let _ = app.emit(
         "upload-progress",
@@ -1433,58 +1433,82 @@ pub(crate) async fn delete_prefix(
         s3.client.clone().ok_or("Not connected")?
     };
 
-    let keys = list_all_keys_under_prefix(&client, &bucket, &prefix).await?;
-    if keys.is_empty() {
-        return Ok(0);
-    }
-
     let mut deleted = 0u32;
-    for chunk in keys.chunks(1000) {
-        let objects: Vec<ObjectIdentifier> = chunk
-            .iter()
-            .map(|k| {
-                ObjectIdentifier::builder()
-                    .key(k)
-                    .build()
-                    .map_err(|e| format!("Invalid key: {}", e))
-            })
-            .collect::<Result<_, _>>()?;
+    let mut continuation_token: Option<String> = None;
 
-        let delete = Delete::builder()
-            .set_objects(Some(objects))
-            .quiet(true)
-            .build()
-            .map_err(|e| format!("Delete build error: {}", e))?;
-
-        let output = client
-            .delete_objects()
-            .bucket(&bucket)
-            .delete(delete)
+    loop {
+        let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
+        if let Some(ref token) = continuation_token {
+            req = req.continuation_token(token);
+        }
+        let output = req
             .send()
             .await
-            .map_err(|e| format!("Batch delete failed: {}", e))?;
+            .map_err(|e| format!("Failed to list objects: {}", e))?;
 
-        let errors = output.errors();
-        if !errors.is_empty() {
-            let sample: Vec<String> = errors
-                .iter()
-                .take(3)
-                .map(|err| {
-                    format!(
-                        "{}: {}",
-                        err.key().unwrap_or("?"),
-                        err.message().unwrap_or("unknown error")
-                    )
-                })
-                .collect();
-            return Err(format!(
-                "Failed to delete {} object(s) under prefix. {}",
-                errors.len(),
-                sample.join("; ")
-            ));
+        let keys: Vec<String> = output
+            .contents()
+            .iter()
+            .filter_map(|obj| obj.key().map(|k| k.to_string()))
+            .collect();
+
+        if keys.is_empty() && deleted == 0 {
+            return Ok(0);
         }
 
-        deleted += chunk.len() as u32;
+        for chunk in keys.chunks(1000) {
+            let objects: Vec<ObjectIdentifier> = chunk
+                .iter()
+                .map(|k| {
+                    ObjectIdentifier::builder()
+                        .key(k)
+                        .build()
+                        .map_err(|e| format!("Invalid key: {}", e))
+                })
+                .collect::<Result<_, _>>()?;
+
+            let delete = Delete::builder()
+                .set_objects(Some(objects))
+                .quiet(true)
+                .build()
+                .map_err(|e| format!("Delete build error: {}", e))?;
+
+            let del_output = client
+                .delete_objects()
+                .bucket(&bucket)
+                .delete(delete)
+                .send()
+                .await
+                .map_err(|e| format!("Batch delete failed: {}", e))?;
+
+            let errors = del_output.errors();
+            if !errors.is_empty() {
+                let sample: Vec<String> = errors
+                    .iter()
+                    .take(3)
+                    .map(|err| {
+                        format!(
+                            "{}: {}",
+                            err.key().unwrap_or("?"),
+                            err.message().unwrap_or("unknown error")
+                        )
+                    })
+                    .collect();
+                return Err(format!(
+                    "Failed to delete {} object(s) under prefix. {}",
+                    errors.len(),
+                    sample.join("; ")
+                ));
+            }
+
+            deleted += chunk.len() as u32;
+        }
+
+        if output.is_truncated().unwrap_or(false) {
+            continuation_token = output.next_continuation_token().map(|s| s.to_string());
+        } else {
+            break;
+        }
     }
 
     Ok(deleted)
@@ -1510,21 +1534,35 @@ pub(crate) async fn rename_prefix(
         return Ok(0);
     }
 
-    // Copy all objects to new prefix
+    // Copy all objects to new prefix, tracking what was copied for rollback
+    let mut copied_keys = Vec::new();
     for key in &keys {
         let suffix = key.strip_prefix(old_prefix.as_str()).ok_or_else(|| {
             format!("Key '{}' does not start with prefix '{}'", key, old_prefix)
         })?;
         let new_key = format!("{}{}", new_prefix, suffix);
         let source = encode_copy_source(&bucket, key);
-        client
+        if let Err(e) = client
             .copy_object()
             .bucket(&bucket)
             .key(&new_key)
             .copy_source(&source)
             .send()
             .await
-            .map_err(|e| format!("Failed to copy '{}': {}", key, e))?;
+        {
+            // Roll back: delete any objects already copied to new prefix
+            for rollback_chunk in copied_keys.chunks(1000) {
+                let objects: Vec<ObjectIdentifier> = rollback_chunk
+                    .iter()
+                    .filter_map(|k: &String| ObjectIdentifier::builder().key(k).build().ok())
+                    .collect();
+                if let Ok(del) = Delete::builder().set_objects(Some(objects)).quiet(true).build() {
+                    let _ = client.delete_objects().bucket(&bucket).delete(del).send().await;
+                }
+            }
+            return Err(format!("Failed to copy '{}': {}", key, e));
+        }
+        copied_keys.push(new_key);
     }
 
     // Delete originals in batches
@@ -1625,20 +1663,33 @@ pub(crate) async fn copy_prefix_to(
         return Ok(0);
     }
 
+    let mut copied_keys = Vec::new();
     for key in &keys {
         let suffix = key.strip_prefix(src_prefix.as_str()).ok_or_else(|| {
             format!("Key '{}' does not start with prefix '{}'", key, src_prefix)
         })?;
         let new_key = format!("{}{}", dst_prefix, suffix);
         let source = encode_copy_source(&src_bucket, key);
-        client
+        if let Err(e) = client
             .copy_object()
             .bucket(&dst_bucket)
             .key(&new_key)
             .copy_source(&source)
             .send()
             .await
-            .map_err(|e| format!("Failed to copy '{}': {}", key, e))?;
+        {
+            for rollback_chunk in copied_keys.chunks(1000) {
+                let objects: Vec<ObjectIdentifier> = rollback_chunk
+                    .iter()
+                    .filter_map(|k: &String| ObjectIdentifier::builder().key(k).build().ok())
+                    .collect();
+                if let Ok(del) = Delete::builder().set_objects(Some(objects)).quiet(true).build() {
+                    let _ = client.delete_objects().bucket(&dst_bucket).delete(del).send().await;
+                }
+            }
+            return Err(format!("Failed to copy '{}': {}", key, e));
+        }
+        copied_keys.push(new_key);
     }
 
     Ok(keys.len() as u32)

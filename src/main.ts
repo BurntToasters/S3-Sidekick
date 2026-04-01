@@ -584,7 +584,11 @@ async function handleDisconnect(): Promise<void> {
   ) as HTMLInputElement | null;
   if (filterInput) filterInput.value = "";
 
-  await disconnect();
+  try {
+    await disconnect();
+  } catch (err) {
+    logActivity(`Disconnect error: ${err}`, "error");
+  }
   clearNavHistory();
   clearSelection();
   setConnectionUI(false);
@@ -927,8 +931,126 @@ function openCopyMoveDialog(): void {
     pathLabel.textContent = "Destination prefix";
   }
 
+  const browserPanel = document.getElementById(
+    "copy-move-browser",
+  ) as HTMLElement;
+  const browserToggle = document.getElementById(
+    "copy-move-browse-toggle",
+  ) as HTMLButtonElement;
+  const browserCrumbs = document.getElementById(
+    "copy-move-browser-crumbs",
+  ) as HTMLElement;
+  const browserList = document.getElementById(
+    "copy-move-browser-list",
+  ) as HTMLElement;
+
+  browserPanel.hidden = true;
+  browserToggle.textContent = "Browse folders ▶";
+
+  let loadFolderSeq = 0;
+
+  async function loadFolders(prefix: string): Promise<void> {
+    const seq = ++loadFolderSeq;
+    browserList.innerHTML = "";
+    browserList.insertAdjacentHTML(
+      "beforeend",
+      '<div class="copy-move-browser-loading">Loading…</div>',
+    );
+    renderBrowserCrumbs(prefix);
+
+    try {
+      const bucket = bucketSelect.value;
+      const resp = await invoke<{ prefixes: string[] }>("list_objects", {
+        bucket,
+        prefix,
+        delimiter: "/",
+        continuationToken: "",
+      });
+
+      if (seq !== loadFolderSeq) return;
+
+      browserList.innerHTML = "";
+
+      if (resp.prefixes.length === 0) {
+        browserList.insertAdjacentHTML(
+          "beforeend",
+          '<div class="copy-move-browser-empty">No subfolders</div>',
+        );
+        return;
+      }
+
+      for (const p of resp.prefixes) {
+        const name = p.slice(prefix.length).replace(/\/$/, "");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "copy-move-folder-item";
+        btn.textContent = "\uD83D\uDCC1 " + name;
+        btn.addEventListener("dblclick", () => void loadFolders(p));
+        btn.addEventListener("click", () => {
+          pathInput.value = isSingleFile ? p + basename(fileKeys[0]) : p;
+        });
+        btn.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") void loadFolders(p);
+        });
+        browserList.appendChild(btn);
+      }
+    } catch {
+      browserList.innerHTML =
+        '<div class="copy-move-browser-empty">Failed to load folders</div>';
+    }
+  }
+
+  function renderBrowserCrumbs(prefix: string): void {
+    browserCrumbs.innerHTML = "";
+    const rootBtn = document.createElement("button");
+    rootBtn.type = "button";
+    rootBtn.textContent = "/";
+    rootBtn.addEventListener("click", () => void loadFolders(""));
+    browserCrumbs.appendChild(rootBtn);
+
+    if (prefix) {
+      const parts = prefix.replace(/\/$/, "").split("/");
+      let accumulated = "";
+      for (let i = 0; i < parts.length; i++) {
+        accumulated += parts[i] + "/";
+        const sep = document.createElement("span");
+        sep.className = "crumb-sep";
+        sep.textContent = "/";
+        browserCrumbs.appendChild(sep);
+
+        if (i === parts.length - 1) {
+          const current = document.createElement("span");
+          current.className = "crumb-current";
+          current.textContent = parts[i];
+          browserCrumbs.appendChild(current);
+        } else {
+          const crumbBtn = document.createElement("button");
+          crumbBtn.type = "button";
+          crumbBtn.textContent = parts[i];
+          const target = accumulated;
+          crumbBtn.addEventListener("click", () => void loadFolders(target));
+          browserCrumbs.appendChild(crumbBtn);
+        }
+      }
+    }
+  }
+
+  browserToggle.onclick = () => {
+    const willShow = browserPanel.hidden;
+    browserPanel.hidden = !willShow;
+    browserToggle.textContent = willShow
+      ? "Browse folders ▼"
+      : "Browse folders ▶";
+    if (willShow) void loadFolders(state.currentPrefix);
+  };
+
+  bucketSelect.onchange = () => {
+    if (!browserPanel.hidden) void loadFolders("");
+  };
+
   const closeFn = () => {
     overlay.classList.remove("active");
+    browserPanel.hidden = true;
   };
 
   const srcBucket = state.currentBucket;

@@ -122,6 +122,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
 
     if (e.key === "Delete" && state.selectedKeys.size > 0) {
       if (inInput || modalOpen) return;
+      e.preventDefault();
       void handlers.handleDelete();
     }
 

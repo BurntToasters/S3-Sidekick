@@ -1,4 +1,5 @@
 import { $ } from "./utils.ts";
+import { markActivitySeen } from "./activity-log.ts";
 
 export type DrawerTab = "activity" | "transfers";
 
@@ -98,6 +99,10 @@ function toggleMinimized(): void {
 
 export function switchDrawerTab(tab: DrawerTab): void {
   currentTab = tab;
+
+  if (tab === "activity") {
+    markActivitySeen();
+  }
 
   const activityTab = $("drawer-tab-activity");
   const transfersTab = $("drawer-tab-transfers");

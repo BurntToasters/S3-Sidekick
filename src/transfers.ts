@@ -367,9 +367,11 @@ async function processQueue(): Promise<void> {
         }
 
         item.status = "done";
+        queue = queue.filter((t) => t.id !== item.id);
       } catch (err) {
         item.status = "error";
         item.error = String(err);
+        item.browserFile = undefined;
         const opLabel = item.operation === "download" ? "Download" : "Upload";
         logActivity(
           `${opLabel} failed for ${item.fileName}: ${String(err)}`,

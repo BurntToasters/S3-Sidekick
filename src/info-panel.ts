@@ -717,52 +717,73 @@ async function saveBatchChanges(): Promise<void> {
   let failed = 0;
   let partial = 0;
 
-  for (const key of batchKeys) {
-    saveBtn.textContent = `Saving ${succeeded + failed + 1}/${batchKeys.length}\u2026`;
-    let metadataFailed = false;
-    let aclFailed = false;
+  const BATCH_CONCURRENCY = 6;
+  let processed = 0;
 
-    if (shouldApplyMetadata) {
-      try {
-        const head = await invoke<HeadObjectResponse>("head_object", {
-          bucket: state.currentBucket,
-          key,
-        });
-        const merged: Record<string, string> = { ...head.metadata, ...newMeta };
-        await invoke("update_metadata", {
-          bucket: state.currentBucket,
-          key,
-          contentType: head.content_type,
-          metadata: merged,
-        });
-      } catch {
-        metadataFailed = true;
-      }
-    }
+  for (let i = 0; i < batchKeys.length; i += BATCH_CONCURRENCY) {
+    const chunk = batchKeys.slice(i, i + BATCH_CONCURRENCY);
+    const results = await Promise.allSettled(
+      chunk.map(async (key) => {
+        let metadataFailed = false;
+        let aclFailed = false;
 
-    if (shouldApplyAcl && requestedVisibility) {
-      try {
-        await invoke("set_object_acl", {
-          bucket: state.currentBucket,
-          key,
-          visibility: requestedVisibility,
-        });
-      } catch {
-        aclFailed = true;
-      }
-    }
+        if (shouldApplyMetadata) {
+          try {
+            const head = await invoke<HeadObjectResponse>("head_object", {
+              bucket: state.currentBucket,
+              key,
+            });
+            const merged: Record<string, string> = {
+              ...head.metadata,
+              ...newMeta,
+            };
+            await invoke("update_metadata", {
+              bucket: state.currentBucket,
+              key,
+              contentType: head.content_type,
+              metadata: merged,
+            });
+          } catch {
+            metadataFailed = true;
+          }
+        }
 
-    if (metadataFailed || aclFailed) {
-      failed++;
-      if (
-        shouldApplyMetadata &&
-        shouldApplyAcl &&
-        metadataFailed !== aclFailed
-      ) {
-        partial++;
+        if (shouldApplyAcl && requestedVisibility) {
+          try {
+            await invoke("set_object_acl", {
+              bucket: state.currentBucket,
+              key,
+              visibility: requestedVisibility,
+            });
+          } catch {
+            aclFailed = true;
+          }
+        }
+
+        return { metadataFailed, aclFailed };
+      }),
+    );
+
+    for (const result of results) {
+      processed++;
+      saveBtn.textContent = `Saving ${processed}/${batchKeys.length}\u2026`;
+      if (result.status === "rejected") {
+        failed++;
+      } else {
+        const { metadataFailed, aclFailed } = result.value;
+        if (metadataFailed || aclFailed) {
+          failed++;
+          if (
+            shouldApplyMetadata &&
+            shouldApplyAcl &&
+            metadataFailed !== aclFailed
+          ) {
+            partial++;
+          }
+        } else {
+          succeeded++;
+        }
       }
-    } else {
-      succeeded++;
     }
   }
 
