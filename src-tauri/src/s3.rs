@@ -14,6 +14,7 @@ use crate::{lock_s3_state, make_temp_path, validate_destination_path, validate_e
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 const MULTIPART_THRESHOLD: u64 = 50 * 1024 * 1024;
 const PART_SIZE: usize = 10 * 1024 * 1024;
+const MAX_CONCURRENT_PARTS: usize = 6;
 const MULTIPART_COPY_PART_SIZE: u64 = 500 * 1024 * 1024;
 const MULTIPART_COPY_THRESHOLD: i64 = 5_368_709_120;
 const MAX_KEY_LEN: usize = 1024;
@@ -779,6 +780,7 @@ async fn upload_multipart(
     file_size: u64,
 ) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
+    use tokio::task::JoinSet;
 
     let mut create_req = client.create_multipart_upload().bucket(bucket).key(key);
     if !content_type.is_empty() {
@@ -799,61 +801,95 @@ async fn upload_multipart(
         .await
         .map_err(|e| format!("Failed to open file: {}", e))?;
 
-    let mut completed_parts = Vec::new();
+    let total_parts = ((file_size + PART_SIZE as u64 - 1) / PART_SIZE as u64) as usize;
+    let mut completed_parts: Vec<Option<aws_sdk_s3::types::CompletedPart>> =
+        vec![None; total_parts];
     let mut part_number = 1i32;
     let mut bytes_sent = 0u64;
+    let mut eof = false;
+    let mut join_set: JoinSet<Result<(i32, usize, String), String>> = JoinSet::new();
+
+    let abort = |client: &Client, bucket: &str, key: &str, upload_id: &str| {
+        let client = client.clone();
+        let bucket = bucket.to_string();
+        let key = key.to_string();
+        let upload_id = upload_id.to_string();
+        async move {
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+        }
+    };
 
     loop {
         if is_cancelled(transfer_id) {
             clear_cancelled(transfer_id);
-            let _ = client
-                .abort_multipart_upload()
-                .bucket(bucket)
-                .key(key)
-                .upload_id(&upload_id)
-                .send()
-                .await;
+            join_set.abort_all();
+            abort(client, bucket, key, &upload_id).await;
             return Err("Transfer cancelled".to_string());
         }
 
-        let mut buf = vec![0u8; PART_SIZE];
-        let mut read = 0;
-        while read < PART_SIZE {
-            let n = file
-                .read(&mut buf[read..])
-                .await
-                .map_err(|e| format!("Failed to read file: {}", e))?;
-            if n == 0 {
+        while join_set.len() < MAX_CONCURRENT_PARTS && !eof {
+            let mut buf = vec![0u8; PART_SIZE];
+            let mut read = 0;
+            while read < PART_SIZE {
+                let n = file
+                    .read(&mut buf[read..])
+                    .await
+                    .map_err(|e| format!("Failed to read file: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                read += n;
+            }
+            if read == 0 {
+                eof = true;
                 break;
             }
-            read += n;
+            buf.truncate(read);
+
+            let client = client.clone();
+            let bucket = bucket.to_string();
+            let key = key.to_string();
+            let uid = upload_id.clone();
+            let pn = part_number;
+
+            join_set.spawn(async move {
+                let body = aws_sdk_s3::primitives::ByteStream::from(buf);
+                let output = client
+                    .upload_part()
+                    .bucket(&bucket)
+                    .key(&key)
+                    .upload_id(&uid)
+                    .part_number(pn)
+                    .body(body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Failed to upload part {}: {}", pn, e))?;
+                let etag = output.e_tag().unwrap_or_default().to_string();
+                Ok((pn, read, etag))
+            });
+
+            part_number += 1;
         }
-        if read == 0 {
+
+        if join_set.is_empty() {
             break;
         }
-        buf.truncate(read);
 
-        let body = aws_sdk_s3::primitives::ByteStream::from(buf);
-        let part_output = client
-            .upload_part()
-            .bucket(bucket)
-            .key(key)
-            .upload_id(&upload_id)
-            .part_number(part_number)
-            .body(body)
-            .send()
-            .await;
-
-        match part_output {
-            Ok(output) => {
-                let etag = output.e_tag().unwrap_or_default().to_string();
-                completed_parts.push(
+        match join_set.join_next().await {
+            Some(Ok(Ok((pn, bytes_read, etag)))) => {
+                completed_parts[(pn - 1) as usize] = Some(
                     aws_sdk_s3::types::CompletedPart::builder()
-                        .part_number(part_number)
+                        .part_number(pn)
                         .e_tag(etag)
                         .build(),
                 );
-                bytes_sent += read as u64;
+                bytes_sent += bytes_read as u64;
                 let _ = app.emit(
                     "upload-progress",
                     UploadProgress {
@@ -862,23 +898,26 @@ async fn upload_multipart(
                         total_bytes: file_size,
                     },
                 );
-                part_number += 1;
             }
-            Err(e) => {
-                let _ = client
-                    .abort_multipart_upload()
-                    .bucket(bucket)
-                    .key(key)
-                    .upload_id(&upload_id)
-                    .send()
-                    .await;
-                return Err(format!("Failed to upload part {}: {}", part_number, e));
+            Some(Ok(Err(e))) => {
+                join_set.abort_all();
+                abort(client, bucket, key, &upload_id).await;
+                return Err(e);
             }
+            Some(Err(e)) => {
+                join_set.abort_all();
+                abort(client, bucket, key, &upload_id).await;
+                return Err(format!("Upload task failed: {}", e));
+            }
+            None => break,
         }
     }
 
+    let final_parts: Vec<aws_sdk_s3::types::CompletedPart> =
+        completed_parts.into_iter().flatten().collect();
+
     let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
-        .set_parts(Some(completed_parts))
+        .set_parts(Some(final_parts))
         .build();
 
     if let Err(e) = client
@@ -890,13 +929,7 @@ async fn upload_multipart(
         .send()
         .await
     {
-        let _ = client
-            .abort_multipart_upload()
-            .bucket(bucket)
-            .key(key)
-            .upload_id(&upload_id)
-            .send()
-            .await;
+        abort(client, bucket, key, &upload_id).await;
         return Err(format!("Failed to complete multipart upload: {}", e));
     }
 
