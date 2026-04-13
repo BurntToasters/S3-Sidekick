@@ -41,6 +41,7 @@
     "build:win:x64": "npm run sync-version && npm run licenses && dotenv -e .env -- tauri build --target x86_64-pc-windows-msvc --bundles nsis",
     "build:win:arm64": "npm run sync-version && npm run licenses && dotenv -e .env -- tauri build --target aarch64-pc-windows-msvc --bundles nsis",
     "build:win": "npm run build:win:x64 && npm run build:win:arm64",
+    "build:mac:dev": "npm run sync-version && npm run licenses && npm run icons:normalize && APPLE_SIGNING_IDENTITY=- TAURI_SIGNING_PRIVATE_KEY=REDACTED tauri build --target universal-apple-darwin --bundles app",
     "build:mac:universal": "npm run sync-version && npm run licenses && npm run icons:normalize && dotenv -e .env -- tauri build --target universal-apple-darwin --bundles dmg,app",
     "build:mac:zip": "node scripts/zip-macos.js",
     "mac:ssh:keychain": "bash scripts/mac-keychain-ssh.sh",
