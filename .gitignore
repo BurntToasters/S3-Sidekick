@@ -48,6 +48,7 @@ coverage/
 # Generated files
 licenses.json
 public/licenses.json
+public/licenses-cargo.json
 
 # Reference app
 .temp_Zinnia/
