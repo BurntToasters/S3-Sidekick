@@ -16,14 +16,36 @@ export function closeLicensesModal() {
   $("licenses-overlay").classList.remove("active");
 }
 
+async function loadLicenseFile(
+  path: string,
+  required: boolean,
+): Promise<Record<string, LicenseEntry>> {
+  const response = await fetch(path);
+  if (!response.ok) {
+    if (!required && response.status === 404) {
+      return {};
+    }
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const parsed = (await response.json()) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${path} must contain a JSON object`);
+  }
+
+  return parsed as Record<string, LicenseEntry>;
+}
+
 async function renderLicenses() {
   const container = $("licenses-list");
   container.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
 
   try {
-    const resp = await fetch("/licenses.json");
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = (await resp.json()) as Record<string, LicenseEntry>;
+    const [npmLicenses, cargoLicenses] = await Promise.all([
+      loadLicenseFile("/licenses.json", true),
+      loadLicenseFile("/licenses-cargo.json", false),
+    ]);
+    const data = { ...npmLicenses, ...cargoLicenses };
     container.innerHTML = "";
 
     for (const [key, entry] of Object.entries(data)) {
