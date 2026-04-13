@@ -18,43 +18,42 @@ describe("licenses modal", () => {
   });
 
   it("opens, fetches licenses, and renders cards", async () => {
-    const fetchMock = vi.fn().mockImplementation(async (input: string | URL) => {
-      const url = String(input);
-      if (url.endsWith("/licenses.json")) {
-        return {
-          ok: true,
-          json: async () => ({
-            "pkg-a": {
-              licenses: "MIT",
-              repository: "https://example.com/pkg-a",
-            },
-            "pkg-b": {
-              licenses: "Apache-2.0",
-              repository: "javascript:alert('xss')",
-            },
-            "pkg-c": {
-              licenses: "BSD-3-Clause",
-            },
-          }),
-        };
-      }
-      if (url.endsWith("/licenses-cargo.json")) {
-        return {
-          ok: true,
-          json: async () => ({
-            "cargo:pkg-rs@1.2.3": {
-              licenses: "MIT OR Apache-2.0",
-              repository: "https://github.com/example/pkg-rs",
-            },
-          }),
-        };
-      }
-      return { ok: false, status: 404 };
-    });
-    vi.stubGlobal(
-      "fetch",
-      fetchMock,
-    );
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async (input: string | URL) => {
+        const url = String(input);
+        if (url.endsWith("/licenses.json")) {
+          return {
+            ok: true,
+            json: async () => ({
+              "pkg-a": {
+                licenses: "MIT",
+                repository: "https://example.com/pkg-a",
+              },
+              "pkg-b": {
+                licenses: "Apache-2.0",
+                repository: "javascript:alert('xss')",
+              },
+              "pkg-c": {
+                licenses: "BSD-3-Clause",
+              },
+            }),
+          };
+        }
+        if (url.endsWith("/licenses-cargo.json")) {
+          return {
+            ok: true,
+            json: async () => ({
+              "cargo:pkg-rs@1.2.3": {
+                licenses: "MIT OR Apache-2.0",
+                repository: "https://github.com/example/pkg-rs",
+              },
+            }),
+          };
+        }
+        return { ok: false, status: 404 };
+      });
+    vi.stubGlobal("fetch", fetchMock);
 
     openLicensesModal();
     await flushMicrotasks();
