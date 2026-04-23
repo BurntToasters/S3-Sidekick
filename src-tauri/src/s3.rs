@@ -1554,15 +1554,7 @@ pub(crate) async fn download_object(
     })?;
     drop(file);
 
-    if overwrite && destination_path.exists() {
-        std::fs::remove_file(&destination_path)
-            .map_err(|e| format!("Failed to replace destination: {}", e))?;
-    }
-
-    if let Err(e) = std::fs::rename(&temp_path, &destination_path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(format!("Failed to finalize download: {}", e));
-    }
+    finalize_download_file(&temp_path, &destination_path, overwrite)?;
 
     emit_transfer_progress(
         &app,
@@ -1581,6 +1573,46 @@ pub(crate) async fn download_object(
     clear_cancelled(transfer_id);
 
     Ok(written)
+}
+
+fn finalize_download_file(temp_path: &Path, destination_path: &Path, overwrite: bool) -> Result<(), String> {
+    if !overwrite || !destination_path.exists() {
+        if let Err(e) = std::fs::rename(temp_path, destination_path) {
+            let _ = std::fs::remove_file(temp_path);
+            return Err(format!("Failed to finalize download: {}", e));
+        }
+        return Ok(());
+    }
+
+    let backup_path = make_temp_path(destination_path, "download-backup");
+    if let Err(e) = std::fs::rename(destination_path, &backup_path) {
+        let _ = std::fs::remove_file(temp_path);
+        return Err(format!(
+            "Failed to stage existing destination for replace: {}",
+            e
+        ));
+    }
+
+    match std::fs::rename(temp_path, destination_path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&backup_path);
+            Ok(())
+        }
+        Err(e) => {
+            let restore_err = std::fs::rename(&backup_path, destination_path).err();
+            let _ = std::fs::remove_file(temp_path);
+            match restore_err {
+                Some(restore) => Err(format!(
+                    "Failed to finalize download: {}. Also failed to restore previous destination: {}",
+                    e, restore
+                )),
+                None => Err(format!(
+                    "Failed to finalize download: {}. Previous destination restored.",
+                    e
+                )),
+            }
+        }
+    }
 }
 
 async fn download_parallel_part(
@@ -1659,7 +1691,7 @@ pub(crate) async fn download_object_parallel(
     bandwidth_limit_mbps: Option<u32>,
     checkpoint_id: Option<String>,
     enable_resume: Option<bool>,
-    resume_completed_parts: Option<Vec<u32>>,
+    _resume_completed_parts: Option<Vec<u32>>,
 ) -> Result<u64, String> {
     validate_key(&key, "Object key")?;
     let destination_path = if overwrite {
@@ -1761,11 +1793,6 @@ pub(crate) async fn download_object_parallel(
     }
 
     let mut completed = vec![false; total_parts as usize];
-    if let Some(parts) = resume_completed_parts {
-        for part in normalize_checkpoint_parts(&parts, total_parts) {
-            completed[part as usize] = true;
-        }
-    }
 
     if checkpoint_enabled {
         if let Some(id) = checkpoint_id.as_deref() {
@@ -1943,12 +1970,7 @@ pub(crate) async fn download_object_parallel(
         ));
     }
 
-    if overwrite && destination_path.exists() {
-        std::fs::remove_file(&destination_path)
-            .map_err(|e| format!("Failed to replace destination: {}", e))?;
-    }
-    std::fs::rename(&temp_path, &destination_path)
-        .map_err(|e| format!("Failed to finalize download: {}", e))?;
+    finalize_download_file(&temp_path, &destination_path, overwrite)?;
 
     emit_transfer_progress(
         &app,
@@ -2592,6 +2614,22 @@ pub(crate) async fn preview_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_test_dir(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "s3-sidekick-{}-{}-{}",
+            label,
+            std::process::id(),
+            nonce
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn is_text_content_type_recognizes_text() {
@@ -2690,5 +2728,36 @@ mod tests {
     fn normalize_endpoint_strips_trailing_slash() {
         let (url, _) = normalize_endpoint("https://s3.amazonaws.com/");
         assert_eq!(url, "https://s3.amazonaws.com");
+    }
+
+    #[test]
+    fn finalize_download_file_moves_when_destination_missing() {
+        let dir = make_test_dir("finalize-move");
+        let temp_path = dir.join("download.tmp");
+        let destination_path = dir.join("file.txt");
+        std::fs::write(&temp_path, b"new").unwrap();
+
+        let result = finalize_download_file(&temp_path, &destination_path, false);
+        assert!(result.is_ok(), "finalize should succeed: {:?}", result.err());
+        assert!(!temp_path.exists());
+        assert_eq!(std::fs::read(&destination_path).unwrap(), b"new");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finalize_download_file_overwrite_replaces_existing() {
+        let dir = make_test_dir("finalize-overwrite");
+        let temp_path = dir.join("download.tmp");
+        let destination_path = dir.join("file.txt");
+        std::fs::write(&temp_path, b"new").unwrap();
+        std::fs::write(&destination_path, b"old").unwrap();
+
+        let result = finalize_download_file(&temp_path, &destination_path, true);
+        assert!(result.is_ok(), "finalize should succeed: {:?}", result.err());
+        assert!(!temp_path.exists());
+        assert_eq!(std::fs::read(&destination_path).unwrap(), b"new");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
