@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { state } from "./state.ts";
 import {
+  type TransferPerformancePreset,
   type UserSettings,
   SETTING_DEFAULTS,
   parseSettingsRaw,
@@ -25,6 +26,60 @@ let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
 
 export function setBookmarkSelectHandler(handler: (b: Bookmark) => void): void {
   onBookmarkSelect = handler;
+}
+
+function applyPresetToTransferControls(
+  preset: TransferPerformancePreset,
+): void {
+  const values =
+    preset === "safe"
+      ? {
+          threshold: "256",
+          downloadPartSize: "16",
+          downloadConcurrency: "2",
+          uploadPartSize: "16",
+          uploadConcurrency: "2",
+        }
+      : preset === "max"
+        ? {
+            threshold: "64",
+            downloadPartSize: "64",
+            downloadConcurrency: "10",
+            uploadPartSize: "64",
+            uploadConcurrency: "10",
+          }
+        : {
+            threshold: "128",
+            downloadPartSize: "32",
+            downloadConcurrency: "6",
+            uploadPartSize: "32",
+            uploadConcurrency: "6",
+          };
+
+  const threshold = document.getElementById(
+    "setting-download-parallel-threshold-mb",
+  ) as HTMLSelectElement | null;
+  if (threshold) threshold.value = values.threshold;
+
+  const downloadPartSize = document.getElementById(
+    "setting-download-part-size-mb",
+  ) as HTMLSelectElement | null;
+  if (downloadPartSize) downloadPartSize.value = values.downloadPartSize;
+
+  const downloadConcurrency = document.getElementById(
+    "setting-download-part-concurrency",
+  ) as HTMLSelectElement | null;
+  if (downloadConcurrency) downloadConcurrency.value = values.downloadConcurrency;
+
+  const uploadPartSize = document.getElementById(
+    "setting-upload-part-size-mb",
+  ) as HTMLSelectElement | null;
+  if (uploadPartSize) uploadPartSize.value = values.uploadPartSize;
+
+  const uploadConcurrency = document.getElementById(
+    "setting-upload-part-concurrency",
+  ) as HTMLSelectElement | null;
+  if (uploadConcurrency) uploadConcurrency.value = values.uploadConcurrency;
 }
 
 export function applyTheme(theme: UserSettings["theme"]): void {
@@ -140,6 +195,83 @@ export function populateSettingsModal(): void {
       state.currentSettings.rememberDownloadPath;
   }
 
+  const presetSelect = document.getElementById(
+    "setting-transfer-performance-preset",
+  ) as HTMLSelectElement | null;
+  if (presetSelect) {
+    presetSelect.value = state.currentSettings.transferPerformancePreset;
+    presetSelect.onchange = () => {
+      const value = presetSelect.value as TransferPerformancePreset;
+      if (value === "safe" || value === "balanced" || value === "max") {
+        applyPresetToTransferControls(value);
+      }
+    };
+  }
+
+  const downloadThresholdSelect = document.getElementById(
+    "setting-download-parallel-threshold-mb",
+  ) as HTMLSelectElement | null;
+  if (downloadThresholdSelect) {
+    downloadThresholdSelect.value = String(
+      state.currentSettings.downloadParallelThresholdMb,
+    );
+  }
+
+  const downloadPartSizeSelect = document.getElementById(
+    "setting-download-part-size-mb",
+  ) as HTMLSelectElement | null;
+  if (downloadPartSizeSelect) {
+    downloadPartSizeSelect.value = String(state.currentSettings.downloadPartSizeMb);
+  }
+
+  const downloadPartConcurrencySelect = document.getElementById(
+    "setting-download-part-concurrency",
+  ) as HTMLSelectElement | null;
+  if (downloadPartConcurrencySelect) {
+    downloadPartConcurrencySelect.value = String(
+      state.currentSettings.downloadPartConcurrency,
+    );
+  }
+
+  const uploadPartSizeSelect = document.getElementById(
+    "setting-upload-part-size-mb",
+  ) as HTMLSelectElement | null;
+  if (uploadPartSizeSelect) {
+    uploadPartSizeSelect.value = String(state.currentSettings.uploadPartSizeMb);
+  }
+
+  const uploadPartConcurrencySelect = document.getElementById(
+    "setting-upload-part-concurrency",
+  ) as HTMLSelectElement | null;
+  if (uploadPartConcurrencySelect) {
+    uploadPartConcurrencySelect.value = String(
+      state.currentSettings.uploadPartConcurrency,
+    );
+  }
+
+  const enableResumeCheckbox = document.getElementById(
+    "setting-enable-transfer-resume",
+  ) as HTMLInputElement | null;
+  if (enableResumeCheckbox) {
+    enableResumeCheckbox.checked = state.currentSettings.enableTransferResume;
+  }
+
+  const checkpointTtlSelect = document.getElementById(
+    "setting-transfer-checkpoint-ttl-hours",
+  ) as HTMLSelectElement | null;
+  if (checkpointTtlSelect) {
+    checkpointTtlSelect.value = String(
+      state.currentSettings.transferCheckpointTtlHours,
+    );
+  }
+
+  const bandwidthLimitSelect = document.getElementById(
+    "setting-bandwidth-limit-mbps",
+  ) as HTMLSelectElement | null;
+  if (bandwidthLimitSelect) {
+    bandwidthLimitSelect.value = String(state.currentSettings.bandwidthLimitMbps);
+  }
+
   const supported = isUpdaterEnabled();
   const updaterSection = document.getElementById("updater-section");
   const updaterUnsupported = document.getElementById("updater-unsupported");
@@ -252,6 +384,95 @@ export function readSettingsModal(): void {
   if (rememberDownloadCheckbox) {
     state.currentSettings.rememberDownloadPath =
       rememberDownloadCheckbox.checked;
+  }
+
+  const presetSelect = document.getElementById(
+    "setting-transfer-performance-preset",
+  ) as HTMLSelectElement | null;
+  if (presetSelect) {
+    state.currentSettings.transferPerformancePreset =
+      presetSelect.value === "safe"
+        ? "safe"
+        : presetSelect.value === "max"
+          ? "max"
+          : "balanced";
+  }
+
+  const downloadThresholdSelect = document.getElementById(
+    "setting-download-parallel-threshold-mb",
+  ) as HTMLSelectElement | null;
+  if (downloadThresholdSelect) {
+    const val = parseInt(downloadThresholdSelect.value, 10);
+    if (Number.isInteger(val) && val >= 16 && val <= 10240) {
+      state.currentSettings.downloadParallelThresholdMb = val;
+    }
+  }
+
+  const downloadPartSizeSelect = document.getElementById(
+    "setting-download-part-size-mb",
+  ) as HTMLSelectElement | null;
+  if (downloadPartSizeSelect) {
+    const val = parseInt(downloadPartSizeSelect.value, 10);
+    if (Number.isInteger(val) && val >= 16 && val <= 128) {
+      state.currentSettings.downloadPartSizeMb = val;
+    }
+  }
+
+  const downloadPartConcurrencySelect = document.getElementById(
+    "setting-download-part-concurrency",
+  ) as HTMLSelectElement | null;
+  if (downloadPartConcurrencySelect) {
+    const val = parseInt(downloadPartConcurrencySelect.value, 10);
+    if (Number.isInteger(val) && val >= 1 && val <= 16) {
+      state.currentSettings.downloadPartConcurrency = val;
+    }
+  }
+
+  const uploadPartSizeSelect = document.getElementById(
+    "setting-upload-part-size-mb",
+  ) as HTMLSelectElement | null;
+  if (uploadPartSizeSelect) {
+    const val = parseInt(uploadPartSizeSelect.value, 10);
+    if (Number.isInteger(val) && val >= 16 && val <= 128) {
+      state.currentSettings.uploadPartSizeMb = val;
+    }
+  }
+
+  const uploadPartConcurrencySelect = document.getElementById(
+    "setting-upload-part-concurrency",
+  ) as HTMLSelectElement | null;
+  if (uploadPartConcurrencySelect) {
+    const val = parseInt(uploadPartConcurrencySelect.value, 10);
+    if (Number.isInteger(val) && val >= 1 && val <= 16) {
+      state.currentSettings.uploadPartConcurrency = val;
+    }
+  }
+
+  const enableResumeCheckbox = document.getElementById(
+    "setting-enable-transfer-resume",
+  ) as HTMLInputElement | null;
+  if (enableResumeCheckbox) {
+    state.currentSettings.enableTransferResume = enableResumeCheckbox.checked;
+  }
+
+  const checkpointTtlSelect = document.getElementById(
+    "setting-transfer-checkpoint-ttl-hours",
+  ) as HTMLSelectElement | null;
+  if (checkpointTtlSelect) {
+    const val = parseInt(checkpointTtlSelect.value, 10);
+    if (Number.isInteger(val) && val >= 1 && val <= 720) {
+      state.currentSettings.transferCheckpointTtlHours = val;
+    }
+  }
+
+  const bandwidthLimitSelect = document.getElementById(
+    "setting-bandwidth-limit-mbps",
+  ) as HTMLSelectElement | null;
+  if (bandwidthLimitSelect) {
+    const val = parseInt(bandwidthLimitSelect.value, 10);
+    if (Number.isInteger(val) && val >= 0 && val <= 10000) {
+      state.currentSettings.bandwidthLimitMbps = val;
+    }
   }
 }
 

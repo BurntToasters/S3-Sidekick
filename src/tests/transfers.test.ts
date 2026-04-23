@@ -114,12 +114,14 @@ describe("transfers queue UI", () => {
       expect.objectContaining({ key: "uploads/photo.png" }),
     );
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object",
+      "upload_object_resumable",
       expect.objectContaining({
         key: "uploads/photo.png",
       }),
     );
-    expect(list.textContent).not.toContain("photo.png");
+    await vi.waitFor(() => {
+      expect(list.textContent).not.toContain("photo.png");
+    });
   });
 
   it("hides transfer toggle after completed history is cleared", async () => {
@@ -170,11 +172,12 @@ describe("transfers queue UI", () => {
     await transfers.initTransferQueueUI();
 
     transfers.enqueuePaths(["C:\\tmp\\first.txt"], "uploads/");
-    await flushMicrotasks(10);
-    expect(onComplete).toHaveBeenCalledTimes(1);
-    expect(onComplete).toHaveBeenLastCalledWith({
-      hadUpload: true,
-      hadDownload: false,
+    await vi.waitFor(() => {
+      expect(onComplete.mock.calls.length).toBe(1);
+      expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
+        hadUpload: true,
+        hadDownload: false,
+      });
     });
 
     mockInvoke.mockImplementation(async (cmd) => {
@@ -191,17 +194,18 @@ describe("transfers queue UI", () => {
         destination: "C:\\tmp\\guide.txt",
       },
     ]);
-    await flushMicrotasks(10);
-    expect(onComplete).toHaveBeenCalledTimes(2);
-    expect(onComplete).toHaveBeenLastCalledWith({
-      hadUpload: false,
-      hadDownload: true,
+    await vi.waitFor(() => {
+      expect(onComplete.mock.calls.length).toBe(2);
+      expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
+        hadUpload: false,
+        hadDownload: true,
+      });
     });
 
     mockInvoke.mockRejectedValueOnce(new Error("upload failed"));
     transfers.enqueuePaths(["C:\\tmp\\second.txt"], "uploads/");
-    await flushMicrotasks(10);
-    expect(onComplete).toHaveBeenCalledTimes(2);
+    await flushMicrotasks(20);
+    expect(onComplete.mock.calls.length).toBe(2);
   });
 
   it("uses browser-file upload fallback and surfaces oversize browser upload errors", async () => {
@@ -262,7 +266,7 @@ describe("transfers queue UI", () => {
 
     let resolveUpload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "upload_object") {
+      if (cmd === "upload_object_resumable") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -286,7 +290,12 @@ describe("transfers queue UI", () => {
     );
 
     resolveUpload();
-    await flushMicrotasks(4);
+    await flushMicrotasks(8);
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+      ).not.toContain("slow.txt");
+    });
     transfers.clearCompletedTransfers();
 
     state.currentSettings.maxConcurrentTransfers = 0;
@@ -297,10 +306,11 @@ describe("transfers queue UI", () => {
     ).find((row) => row.textContent?.includes("queued.txt"));
     expect(queuedRow).toBeTruthy();
     (queuedRow?.querySelector(".transfer-cancel") as HTMLButtonElement).click();
-    await flushMicrotasks(2);
-    expect(
-      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
-    ).toContain("Cancelled");
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+      ).toContain("Cancelled");
+    });
   });
 
   it("updates progress via transfer events and cleans up listeners on dispose", async () => {
@@ -323,7 +333,7 @@ describe("transfers queue UI", () => {
     let resolveUpload = () => {};
     let resolveDownload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "upload_object") {
+      if (cmd === "upload_object_resumable") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -429,7 +439,7 @@ describe("transfers queue UI", () => {
     transfers.enqueuePaths(["C:\\tmp\\noext"], "uploads/");
     await flushMicrotasks(4);
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object",
+      "upload_object_resumable",
       expect.objectContaining({
         filePath: "C:\\tmp\\noext",
         contentType: "application/octet-stream",
@@ -496,7 +506,7 @@ describe("transfers queue UI", () => {
 
     let resolveUpload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "upload_object") {
+      if (cmd === "upload_object_resumable") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -548,7 +558,7 @@ describe("transfers queue UI", () => {
     await flushMicrotasks(4);
 
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object",
+      "upload_object_resumable",
       expect.objectContaining({
         filePath: "C:\\tmp\\headless.txt",
       }),
@@ -602,12 +612,18 @@ describe("transfers queue UI", () => {
     transfers.enqueueFiles([pseudoFile], "direct/");
     await flushMicrotasks(12);
 
-    expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object",
-      expect.objectContaining({
-        key: "direct/path-backed.txt",
-        filePath: "C:\\tmp\\path-backed.txt",
-      }),
-    );
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(
+          ([cmd, payload]) =>
+            cmd === "upload_object_resumable" &&
+            typeof payload === "object" &&
+            payload !== null &&
+            (payload as { key?: string }).key === "direct/path-backed.txt" &&
+            (payload as { filePath?: string }).filePath ===
+              "C:\\tmp\\path-backed.txt",
+        ),
+      ).toBe(true);
+    });
   });
 });
