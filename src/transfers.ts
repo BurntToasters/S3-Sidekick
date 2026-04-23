@@ -904,22 +904,12 @@ export function enqueueFiles(
   const bucket = state.currentBucket;
   const allFiles = Array.from(files);
   const maxAttempts = maxAttemptsFromSettings();
-  const effective = getEffectiveTransferSettings();
   for (const file of allFiles) {
     const filePath =
       typeof (file as { path?: unknown }).path === "string"
         ? ((file as { path?: string }).path ?? "")
         : "";
     const key = targetPrefix + file.name;
-    const resumable = effective.enableTransferResume && file.size >= 1024 * 1024;
-    const checkpointId = resumable
-      ? buildCheckpointId({
-          operation: "upload",
-          bucket,
-          key,
-          destination: undefined,
-        })
-      : undefined;
     queue.push({
       id: nextId++,
       operation: "upload",
@@ -940,8 +930,8 @@ export function enqueueFiles(
       speedBps: 0,
       etaSeconds: null,
       paused: false,
-      resumable,
-      checkpointId,
+      resumable: false,
+      checkpointId: undefined,
       completedParts: 0,
       totalParts: 0,
     });
@@ -965,20 +955,11 @@ export function enqueueFiles(
 export function enqueuePaths(paths: string[], targetPrefix: string): void {
   const bucket = state.currentBucket;
   const maxAttempts = maxAttemptsFromSettings();
-  const effective = getEffectiveTransferSettings();
   for (const filePath of paths) {
     const normalizedPath = filePath.trim();
     const parts = normalizedPath.replace(/\\/g, "/").split("/");
     const fileName = parts[parts.length - 1] ?? "";
     const key = targetPrefix + fileName;
-    const checkpointId = effective.enableTransferResume
-      ? buildCheckpointId({
-          operation: "upload",
-          bucket,
-          key,
-          destination: undefined,
-        })
-      : undefined;
     queue.push({
       id: nextId++,
       operation: "upload",
@@ -998,8 +979,8 @@ export function enqueuePaths(paths: string[], targetPrefix: string): void {
       speedBps: 0,
       etaSeconds: null,
       paused: false,
-      resumable: effective.enableTransferResume,
-      checkpointId,
+      resumable: false,
+      checkpointId: undefined,
       completedParts: 0,
       totalParts: 0,
     });
@@ -1026,22 +1007,12 @@ export function enqueueFolderEntries(
 ): void {
   const bucket = state.currentBucket;
   const maxAttempts = maxAttemptsFromSettings();
-  const effective = getEffectiveTransferSettings();
   for (const entry of entries) {
     const rel = entry.relative_path.replace(/\\/g, "/").replace(/^\/+/, "");
     if (!rel) continue;
     const segments = rel.split("/");
     const fileName = segments[segments.length - 1];
     const key = targetPrefix + rel;
-    const resumable = effective.enableTransferResume && entry.size >= 1024 * 1024;
-    const checkpointId = resumable
-      ? buildCheckpointId({
-          operation: "upload",
-          bucket,
-          key,
-          destination: undefined,
-        })
-      : undefined;
     queue.push({
       id: nextId++,
       operation: "upload",
@@ -1061,8 +1032,8 @@ export function enqueueFolderEntries(
       speedBps: 0,
       etaSeconds: null,
       paused: false,
-      resumable,
-      checkpointId,
+      resumable: false,
+      checkpointId: undefined,
       completedParts: 0,
       totalParts: 0,
     });
@@ -1424,10 +1395,6 @@ async function executeTransfer(
           bandwidthLimitMbps: effective.bandwidthLimitMbps,
           checkpointId,
           enableResume: item.resumable && effective.enableTransferResume,
-          resumeCompletedParts:
-            item.completedParts > 0
-              ? Array.from({ length: item.completedParts }, (_, i) => i)
-              : [],
         });
       } catch (err) {
         const text = normalizeError(err).toLowerCase();
@@ -1501,17 +1468,8 @@ async function executeTransfer(
 
   const contentType = guessContentType(item.fileName);
   if (item.filePath) {
-    const checkpointId =
-      item.checkpointId ??
-      (item.resumable
-        ? buildCheckpointId({
-            operation: item.operation,
-            bucket: item.bucket,
-            key: item.key,
-            destination: undefined,
-          })
-        : undefined);
-    item.checkpointId = checkpointId;
+    item.resumable = false;
+    item.checkpointId = undefined;
     await invoke("upload_object_resumable", {
       bucket: item.bucket,
       key: item.key,
@@ -1522,8 +1480,7 @@ async function executeTransfer(
       partSizeMb: effective.uploadPartSizeMb,
       partConcurrency: effective.uploadPartConcurrency,
       bandwidthLimitMbps: effective.bandwidthLimitMbps,
-      checkpointId,
-      resumable: item.resumable && effective.enableTransferResume,
+      resumable: false,
     });
   } else if (item.browserFile) {
     if (item.browserFile.size > BROWSER_UPLOAD_BYTES_LIMIT) {

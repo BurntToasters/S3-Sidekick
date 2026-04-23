@@ -117,8 +117,15 @@ describe("transfers queue UI", () => {
       "upload_object_resumable",
       expect.objectContaining({
         key: "uploads/photo.png",
+        resumable: false,
       }),
     );
+    const uploadCall = mockInvoke.mock.calls.find(
+      ([cmd]) => cmd === "upload_object_resumable",
+    );
+    expect(uploadCall).toBeTruthy();
+    const uploadPayload = uploadCall?.[1] as Record<string, unknown>;
+    expect(uploadPayload).not.toHaveProperty("checkpointId");
     await vi.waitFor(() => {
       expect(list.textContent).not.toContain("photo.png");
     });
@@ -163,6 +170,57 @@ describe("transfers queue UI", () => {
         destination: "C:\\tmp\\readme.txt",
       }),
     );
+  });
+
+  it("uses parallel download without synthetic completed-part indexes", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    state.currentSettings.enableTransferResume = true;
+    state.currentSettings.downloadParallelThresholdMb = 1;
+    state.currentSettings.downloadPartConcurrency = 2;
+    state.currentSettings.downloadPartSizeMb = 16;
+
+    mockInvoke.mockImplementation(async (cmd, payload) => {
+      if (cmd === "path_exists") return false;
+      if (cmd === "head_object") {
+        const key =
+          payload &&
+          typeof payload === "object" &&
+          "key" in (payload as Record<string, unknown>)
+            ? String((payload as Record<string, unknown>).key)
+            : "";
+        if (key === "docs/big.bin") return { content_length: 5 * 1024 * 1024 };
+        return { content_length: 0 };
+      }
+      if (cmd === "download_object_parallel") return 5 * 1024 * 1024;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    transfers.enqueueDownloads([
+      {
+        bucket: "bucket-a",
+        key: "docs/big.bin",
+        destination: "C:\\tmp\\big.bin",
+      },
+    ]);
+    await flushMicrotasks(12);
+
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(
+          ([cmd]) => cmd === "download_object_parallel",
+        ),
+      ).toBe(true);
+    });
+
+    const parallelCall = mockInvoke.mock.calls.find(
+      ([cmd]) => cmd === "download_object_parallel",
+    );
+    expect(parallelCall).toBeTruthy();
+    const payload = parallelCall?.[1] as Record<string, unknown>;
+    expect("resumeCompletedParts" in payload).toBe(false);
   });
 
   it("reports completion summary for successful transfer runs", async () => {
