@@ -172,6 +172,86 @@ describe("transfers queue UI", () => {
     );
   });
 
+  it("passes checksum verification flag to download and upload commands", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    state.currentSettings.enableTransferChecksumVerification = true;
+    await transfers.initTransferQueueUI();
+
+    transfers.enqueueDownloads([
+      {
+        bucket: "bucket-a",
+        key: "docs/readme.txt",
+        destination: "C:\\tmp\\readme.txt",
+      },
+    ]);
+    await flushMicrotasks(8);
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "download_object",
+      expect.objectContaining({
+        key: "docs/readme.txt",
+        checksumVerification: true,
+      }),
+    );
+
+    transfers.clearCompletedTransfers();
+    transfers.enqueuePaths(["C:\\tmp\\checksummed.txt"], "uploads/");
+    await flushMicrotasks(12);
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "upload_object_resumable",
+      expect.objectContaining({
+        key: "uploads/checksummed.txt",
+        checksumVerification: true,
+      }),
+    );
+  });
+
+  it("falls back to legacy manifest persistence when backend manifest load is unavailable", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+
+    let resolveUpload = () => {};
+    mockInvoke.mockImplementation(async (cmd, payload) => {
+      if (cmd === "load_transfer_manifest") {
+        throw new Error("unknown command");
+      }
+      if (cmd === "transfer_checkpoint_gc") return undefined;
+      if (cmd === "object_exists") return false;
+      if (cmd === "head_object") {
+        const key =
+          payload &&
+          typeof payload === "object" &&
+          "key" in (payload as Record<string, unknown>)
+            ? String((payload as Record<string, unknown>).key)
+            : "";
+        if (key.endsWith("persist.txt")) return { content_length: 0 };
+        return { content_length: 0 };
+      }
+      if (cmd === "upload_object_resumable") {
+        return new Promise<void>((resolve) => {
+          resolveUpload = resolve;
+        });
+      }
+      if (cmd === "cancel_transfer") return undefined;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    transfers.enqueuePaths(["C:\\tmp\\persist.txt"], "uploads/");
+    await flushMicrotasks(8);
+
+    const raw = localStorage.getItem("s3-sidekick.transfer-manifest.v1");
+    expect(raw).toBeTruthy();
+    const parsed = JSON.parse(raw ?? "{}") as { items?: unknown[] };
+    expect(Array.isArray(parsed.items)).toBe(true);
+    expect((parsed.items ?? []).length).toBeGreaterThan(0);
+
+    resolveUpload();
+    await flushMicrotasks(8);
+  });
+
   it("uses parallel download without synthetic completed-part indexes", async () => {
     const transfers = await loadTransfersModule();
     const { state } = await import("../state.ts");

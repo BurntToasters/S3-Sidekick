@@ -120,7 +120,8 @@ interface HeadObjectSummary {
 }
 
 const BROWSER_UPLOAD_BYTES_LIMIT = 16 * 1024 * 1024;
-const QUEUE_MANIFEST_KEY = "s3-sidekick.transfer-manifest.v1";
+const LEGACY_QUEUE_MANIFEST_KEY = "s3-sidekick.transfer-manifest.v1";
+const TRANSFER_ERROR_PREFIX = "__S3_SIDEKICK_TRANSFER_ERROR__";
 let nextId = 1;
 let queue: TransferItem[] = [];
 let processing = false;
@@ -134,6 +135,10 @@ let conflictApplyAll: "skip" | "replace" | null = null;
 let conflictPromptQueue: Promise<void> = Promise.resolve();
 let selectedTransferId: number | null = null;
 let queuePaused = false;
+let manifestHydrated = false;
+let manifestWriteQueued = false;
+let manifestWriteInFlight = false;
+let manifestClearRequested = false;
 
 interface EffectiveTransferSettings {
   downloadParallelThresholdMb: number;
@@ -142,6 +147,7 @@ interface EffectiveTransferSettings {
   uploadPartSizeMb: number;
   uploadPartConcurrency: number;
   enableTransferResume: boolean;
+  enableTransferChecksumVerification: boolean;
   transferCheckpointTtlHours: number;
   bandwidthLimitMbps: number;
 }
@@ -156,6 +162,8 @@ function resetConflictApplyAllWhenIdle(): void {
 }
 
 function normalizeError(err: unknown): string {
+  const structured = parseStructuredTransferError(err);
+  if (structured) return structured.message;
   if (typeof err === "string") return err;
   if (
     err &&
@@ -166,6 +174,54 @@ function normalizeError(err: unknown): string {
     return (err as { message: string }).message;
   }
   return String(err);
+}
+
+interface StructuredTransferError {
+  code: string;
+  retryable: boolean;
+  http_status?: number;
+  message: string;
+}
+
+function parseStructuredTransferError(
+  err: unknown,
+): StructuredTransferError | null {
+  const text =
+    typeof err === "string"
+      ? err
+      : err &&
+          typeof err === "object" &&
+          "message" in err &&
+          typeof (err as { message?: unknown }).message === "string"
+        ? (err as { message: string }).message
+        : "";
+  if (!text.startsWith(TRANSFER_ERROR_PREFIX)) return null;
+  const json = text.slice(TRANSFER_ERROR_PREFIX.length);
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const row = parsed as Partial<StructuredTransferError>;
+    if (
+      typeof row.code !== "string" ||
+      typeof row.retryable !== "boolean" ||
+      typeof row.message !== "string"
+    ) {
+      return null;
+    }
+    return {
+      code: row.code,
+      retryable: row.retryable,
+      http_status:
+        typeof row.http_status === "number" &&
+        Number.isInteger(row.http_status)
+          ? row.http_status
+          : undefined,
+      message: row.message,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function buildDownloadTempPath(destination: string): string {
@@ -219,6 +275,8 @@ function getEffectiveTransferSettings(): EffectiveTransferSettings {
       state.currentSettings.uploadPartConcurrency ||
       fromPreset.uploadPartConcurrency,
     enableTransferResume: state.currentSettings.enableTransferResume,
+    enableTransferChecksumVerification:
+      state.currentSettings.enableTransferChecksumVerification,
     transferCheckpointTtlHours: state.currentSettings.transferCheckpointTtlHours,
     bandwidthLimitMbps: state.currentSettings.bandwidthLimitMbps,
   };
@@ -265,6 +323,8 @@ function maxAttemptsFromSettings(): number {
 }
 
 function shouldRetryError(err: unknown): boolean {
+  const structured = parseStructuredTransferError(err);
+  if (structured) return structured.retryable;
   const text = normalizeError(err).toLowerCase();
   if (text.includes("cancelled") || text.includes("canceled")) return false;
   if (text.includes("invalid") || text.includes("forbidden")) return false;
@@ -334,32 +394,85 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
   };
 }
 
-function writeQueueManifest(): void {
+function buildQueueManifestJson(): string | null {
+  const pending = queue.filter(
+    (item) => item.status === "queued" || item.status === "uploading",
+  );
+  if (pending.length === 0) return null;
+  const payload: PersistedTransferManifest = {
+    version: 2,
+    items: pending.map(serializeManifestItem),
+  };
+  return JSON.stringify(payload);
+}
+
+function writeLegacyQueueManifest(forceClear = false): void {
   try {
-    const pending = queue.filter(
-      (item) => item.status === "queued" || item.status === "uploading",
-    );
-    if (pending.length === 0) {
-      localStorage.removeItem(QUEUE_MANIFEST_KEY);
+    if (forceClear) {
+      localStorage.removeItem(LEGACY_QUEUE_MANIFEST_KEY);
       return;
     }
-
-    const payload: PersistedTransferManifest = {
-      version: 2,
-      items: pending.map(serializeManifestItem),
-    };
-    localStorage.setItem(QUEUE_MANIFEST_KEY, JSON.stringify(payload));
+    const json = buildQueueManifestJson();
+    if (json) {
+      localStorage.setItem(LEGACY_QUEUE_MANIFEST_KEY, json);
+    } else {
+      localStorage.removeItem(LEGACY_QUEUE_MANIFEST_KEY);
+    }
   } catch {
     // best effort
   }
 }
 
-function clearQueueManifest(): void {
+async function flushQueueManifestWrite(): Promise<void> {
+  if (
+    !manifestHydrated ||
+    manifestWriteInFlight ||
+    (!manifestWriteQueued && !manifestClearRequested)
+  ) {
+    return;
+  }
+  manifestWriteInFlight = true;
+  const forceClear = manifestClearRequested;
+  manifestClearRequested = false;
+  manifestWriteQueued = false;
   try {
-    localStorage.removeItem(QUEUE_MANIFEST_KEY);
+    if (forceClear) {
+      await invoke("clear_transfer_manifest");
+    } else {
+      const json = buildQueueManifestJson();
+      if (json) {
+        await invoke("save_transfer_manifest", { json });
+      } else {
+        await invoke("clear_transfer_manifest");
+      }
+    }
   } catch {
     // best effort
+  } finally {
+    manifestWriteInFlight = false;
+    if (manifestWriteQueued) {
+      void flushQueueManifestWrite();
+    }
   }
+}
+
+function writeQueueManifest(): void {
+  if (!manifestHydrated) {
+    writeLegacyQueueManifest();
+    return;
+  }
+  manifestWriteQueued = true;
+  void flushQueueManifestWrite();
+}
+
+function clearQueueManifest(): void {
+  if (!manifestHydrated) {
+    writeLegacyQueueManifest(true);
+    return;
+  }
+  manifestClearRequested = true;
+  manifestWriteQueued = true;
+  void flushQueueManifestWrite();
 }
 
 function parseQueueManifest(
@@ -537,7 +650,32 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     ttlHours: effective.transferCheckpointTtlHours,
   }).catch(() => undefined);
 
-  const manifest = parseQueueManifest(localStorage.getItem(QUEUE_MANIFEST_KEY));
+  const manifestRaw = await invoke<unknown>("load_transfer_manifest").catch(
+    () => undefined,
+  );
+  const backendManifestAvailable = typeof manifestRaw === "string";
+  const legacyManifestRaw = localStorage.getItem(LEGACY_QUEUE_MANIFEST_KEY);
+  let manifest = parseQueueManifest(
+    backendManifestAvailable ? manifestRaw : legacyManifestRaw,
+  );
+  let legacyManifestMigrated = false;
+  if (!manifest) {
+    manifest = parseQueueManifest(legacyManifestRaw);
+    if (manifest && backendManifestAvailable) {
+      legacyManifestMigrated = await invoke("save_transfer_manifest", {
+        json: JSON.stringify(manifest),
+      })
+        .then(() => true)
+        .catch(() => false);
+    }
+  }
+  if (backendManifestAvailable) {
+    const backendHasManifest = manifestRaw.trim().length > 0;
+    if (backendHasManifest || legacyManifestMigrated || !legacyManifestRaw) {
+      writeLegacyQueueManifest(true);
+    }
+  }
+  manifestHydrated = backendManifestAvailable;
   if (!manifest || manifest.items.length === 0) {
     clearQueueManifest();
     return;
@@ -1395,6 +1533,7 @@ async function executeTransfer(
           bandwidthLimitMbps: effective.bandwidthLimitMbps,
           checkpointId,
           enableResume: item.resumable && effective.enableTransferResume,
+          checksumVerification: effective.enableTransferChecksumVerification,
         });
       } catch (err) {
         const text = normalizeError(err).toLowerCase();
@@ -1409,6 +1548,7 @@ async function executeTransfer(
           overwrite,
           tempPath: item.tempPath,
           attempt,
+          checksumVerification: effective.enableTransferChecksumVerification,
         });
       }
     } else {
@@ -1420,6 +1560,7 @@ async function executeTransfer(
         overwrite,
         tempPath: item.tempPath,
         attempt,
+        checksumVerification: effective.enableTransferChecksumVerification,
       });
     }
     item.totalBytes = size;
@@ -1481,6 +1622,7 @@ async function executeTransfer(
       partConcurrency: effective.uploadPartConcurrency,
       bandwidthLimitMbps: effective.bandwidthLimitMbps,
       resumable: false,
+      checksumVerification: effective.enableTransferChecksumVerification,
     });
   } else if (item.browserFile) {
     if (item.browserFile.size > BROWSER_UPLOAD_BYTES_LIMIT) {
@@ -1499,6 +1641,7 @@ async function executeTransfer(
       contentType,
       transferId: item.id,
       attempt,
+      checksumVerification: effective.enableTransferChecksumVerification,
     });
     item.browserFile = undefined;
   } else {

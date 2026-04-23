@@ -20,6 +20,7 @@ export interface UserSettings {
   uploadPartSizeMb: number;
   uploadPartConcurrency: number;
   enableTransferResume: boolean;
+  enableTransferChecksumVerification: boolean;
   transferCheckpointTtlHours: number;
   bandwidthLimitMbps: number;
 }
@@ -41,6 +42,7 @@ export const SETTING_DEFAULTS: UserSettings = {
   uploadPartSizeMb: 32,
   uploadPartConcurrency: 6,
   enableTransferResume: true,
+  enableTransferChecksumVerification: false,
   transferCheckpointTtlHours: 168,
   bandwidthLimitMbps: 0,
 };
@@ -168,6 +170,11 @@ export function normalizeUserSettings(
       ? raw.enableTransferResume
       : SETTING_DEFAULTS.enableTransferResume;
 
+  const enableTransferChecksumVerification =
+    typeof raw.enableTransferChecksumVerification === "boolean"
+      ? raw.enableTransferChecksumVerification
+      : SETTING_DEFAULTS.enableTransferChecksumVerification;
+
   const rawTransferCheckpointTtlHours = raw.transferCheckpointTtlHours;
   const transferCheckpointTtlHours =
     typeof rawTransferCheckpointTtlHours === "number" &&
@@ -203,6 +210,7 @@ export function normalizeUserSettings(
     uploadPartSizeMb,
     uploadPartConcurrency,
     enableTransferResume,
+    enableTransferChecksumVerification,
     transferCheckpointTtlHours,
     bandwidthLimitMbps,
   };

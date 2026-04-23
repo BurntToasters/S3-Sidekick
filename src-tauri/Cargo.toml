@@ -27,6 +27,7 @@ subtle = "2"
 urlencoding = "2"
 zeroize = "1"
 fs2 = "0.4"
+bytes = "1"
 
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"

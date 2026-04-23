@@ -256,6 +256,14 @@ export function populateSettingsModal(): void {
     enableResumeCheckbox.checked = state.currentSettings.enableTransferResume;
   }
 
+  const enableChecksumCheckbox = document.getElementById(
+    "setting-enable-transfer-checksum-verification",
+  ) as HTMLInputElement | null;
+  if (enableChecksumCheckbox) {
+    enableChecksumCheckbox.checked =
+      state.currentSettings.enableTransferChecksumVerification;
+  }
+
   const checkpointTtlSelect = document.getElementById(
     "setting-transfer-checkpoint-ttl-hours",
   ) as HTMLSelectElement | null;
@@ -453,6 +461,14 @@ export function readSettingsModal(): void {
   ) as HTMLInputElement | null;
   if (enableResumeCheckbox) {
     state.currentSettings.enableTransferResume = enableResumeCheckbox.checked;
+  }
+
+  const enableChecksumCheckbox = document.getElementById(
+    "setting-enable-transfer-checksum-verification",
+  ) as HTMLInputElement | null;
+  if (enableChecksumCheckbox) {
+    state.currentSettings.enableTransferChecksumVerification =
+      enableChecksumCheckbox.checked;
   }
 
   const checkpointTtlSelect = document.getElementById(
