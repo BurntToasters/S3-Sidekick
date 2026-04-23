@@ -1,5 +1,7 @@
 export type ThemePreference = "system" | "light" | "dark";
 export type UpdateChannel = "release" | "beta";
+export type ConflictPolicy = "ask" | "skip" | "replace";
+export type TransferPerformancePreset = "safe" | "balanced" | "max";
 
 export interface UserSettings {
   theme: ThemePreference;
@@ -7,6 +9,20 @@ export interface UserSettings {
   updateChannel: UpdateChannel;
   presignedUrlExpiration: number;
   maxConcurrentTransfers: number;
+  transferRetryAttempts: number;
+  transferRetryBaseMs: number;
+  conflictPolicy: ConflictPolicy;
+  rememberDownloadPath: boolean;
+  transferPerformancePreset: TransferPerformancePreset;
+  downloadParallelThresholdMb: number;
+  downloadPartSizeMb: number;
+  downloadPartConcurrency: number;
+  uploadPartSizeMb: number;
+  uploadPartConcurrency: number;
+  enableTransferResume: boolean;
+  enableTransferChecksumVerification: boolean;
+  transferCheckpointTtlHours: number;
+  bandwidthLimitMbps: number;
 }
 
 export const SETTING_DEFAULTS: UserSettings = {
@@ -15,6 +31,20 @@ export const SETTING_DEFAULTS: UserSettings = {
   updateChannel: "release",
   presignedUrlExpiration: 3600,
   maxConcurrentTransfers: 3,
+  transferRetryAttempts: 3,
+  transferRetryBaseMs: 400,
+  conflictPolicy: "ask",
+  rememberDownloadPath: true,
+  transferPerformancePreset: "balanced",
+  downloadParallelThresholdMb: 128,
+  downloadPartSizeMb: 32,
+  downloadPartConcurrency: 6,
+  uploadPartSizeMb: 32,
+  uploadPartConcurrency: 6,
+  enableTransferResume: true,
+  enableTransferChecksumVerification: false,
+  transferCheckpointTtlHours: 168,
+  bandwidthLimitMbps: 0,
 };
 
 export function normalizeUserSettings(
@@ -53,12 +83,136 @@ export function normalizeUserSettings(
       ? rawConcurrent
       : SETTING_DEFAULTS.maxConcurrentTransfers;
 
+  const rawRetryAttempts = raw.transferRetryAttempts;
+  const transferRetryAttempts =
+    typeof rawRetryAttempts === "number" &&
+    Number.isInteger(rawRetryAttempts) &&
+    rawRetryAttempts >= 0 &&
+    rawRetryAttempts <= 10
+      ? rawRetryAttempts
+      : SETTING_DEFAULTS.transferRetryAttempts;
+
+  const rawRetryBaseMs = raw.transferRetryBaseMs;
+  const transferRetryBaseMs =
+    typeof rawRetryBaseMs === "number" &&
+    Number.isInteger(rawRetryBaseMs) &&
+    rawRetryBaseMs >= 50 &&
+    rawRetryBaseMs <= 10000
+      ? rawRetryBaseMs
+      : SETTING_DEFAULTS.transferRetryBaseMs;
+
+  const conflictPolicy =
+    raw.conflictPolicy === "ask" ||
+    raw.conflictPolicy === "skip" ||
+    raw.conflictPolicy === "replace"
+      ? raw.conflictPolicy
+      : SETTING_DEFAULTS.conflictPolicy;
+
+  const rememberDownloadPath =
+    typeof raw.rememberDownloadPath === "boolean"
+      ? raw.rememberDownloadPath
+      : SETTING_DEFAULTS.rememberDownloadPath;
+
+  const transferPerformancePreset =
+    raw.transferPerformancePreset === "safe" ||
+    raw.transferPerformancePreset === "balanced" ||
+    raw.transferPerformancePreset === "max"
+      ? raw.transferPerformancePreset
+      : SETTING_DEFAULTS.transferPerformancePreset;
+
+  const rawDownloadParallelThresholdMb = raw.downloadParallelThresholdMb;
+  const downloadParallelThresholdMb =
+    typeof rawDownloadParallelThresholdMb === "number" &&
+    Number.isInteger(rawDownloadParallelThresholdMb) &&
+    rawDownloadParallelThresholdMb >= 16 &&
+    rawDownloadParallelThresholdMb <= 10240
+      ? rawDownloadParallelThresholdMb
+      : SETTING_DEFAULTS.downloadParallelThresholdMb;
+
+  const rawDownloadPartSizeMb = raw.downloadPartSizeMb;
+  const downloadPartSizeMb =
+    typeof rawDownloadPartSizeMb === "number" &&
+    Number.isInteger(rawDownloadPartSizeMb) &&
+    rawDownloadPartSizeMb >= 16 &&
+    rawDownloadPartSizeMb <= 128
+      ? rawDownloadPartSizeMb
+      : SETTING_DEFAULTS.downloadPartSizeMb;
+
+  const rawDownloadPartConcurrency = raw.downloadPartConcurrency;
+  const downloadPartConcurrency =
+    typeof rawDownloadPartConcurrency === "number" &&
+    Number.isInteger(rawDownloadPartConcurrency) &&
+    rawDownloadPartConcurrency >= 1 &&
+    rawDownloadPartConcurrency <= 16
+      ? rawDownloadPartConcurrency
+      : SETTING_DEFAULTS.downloadPartConcurrency;
+
+  const rawUploadPartSizeMb = raw.uploadPartSizeMb;
+  const uploadPartSizeMb =
+    typeof rawUploadPartSizeMb === "number" &&
+    Number.isInteger(rawUploadPartSizeMb) &&
+    rawUploadPartSizeMb >= 16 &&
+    rawUploadPartSizeMb <= 128
+      ? rawUploadPartSizeMb
+      : SETTING_DEFAULTS.uploadPartSizeMb;
+
+  const rawUploadPartConcurrency = raw.uploadPartConcurrency;
+  const uploadPartConcurrency =
+    typeof rawUploadPartConcurrency === "number" &&
+    Number.isInteger(rawUploadPartConcurrency) &&
+    rawUploadPartConcurrency >= 1 &&
+    rawUploadPartConcurrency <= 16
+      ? rawUploadPartConcurrency
+      : SETTING_DEFAULTS.uploadPartConcurrency;
+
+  const enableTransferResume =
+    typeof raw.enableTransferResume === "boolean"
+      ? raw.enableTransferResume
+      : SETTING_DEFAULTS.enableTransferResume;
+
+  const enableTransferChecksumVerification =
+    typeof raw.enableTransferChecksumVerification === "boolean"
+      ? raw.enableTransferChecksumVerification
+      : SETTING_DEFAULTS.enableTransferChecksumVerification;
+
+  const rawTransferCheckpointTtlHours = raw.transferCheckpointTtlHours;
+  const transferCheckpointTtlHours =
+    typeof rawTransferCheckpointTtlHours === "number" &&
+    Number.isInteger(rawTransferCheckpointTtlHours) &&
+    rawTransferCheckpointTtlHours >= 1 &&
+    rawTransferCheckpointTtlHours <= 720
+      ? rawTransferCheckpointTtlHours
+      : SETTING_DEFAULTS.transferCheckpointTtlHours;
+
+  const rawBandwidthLimitMbps = raw.bandwidthLimitMbps;
+  const bandwidthLimitMbps =
+    typeof rawBandwidthLimitMbps === "number" &&
+    Number.isInteger(rawBandwidthLimitMbps) &&
+    rawBandwidthLimitMbps >= 0 &&
+    rawBandwidthLimitMbps <= 10000
+      ? rawBandwidthLimitMbps
+      : SETTING_DEFAULTS.bandwidthLimitMbps;
+
   return {
     theme,
     autoCheckUpdates,
     updateChannel,
     presignedUrlExpiration,
     maxConcurrentTransfers,
+    transferRetryAttempts,
+    transferRetryBaseMs,
+    conflictPolicy,
+    rememberDownloadPath,
+    transferPerformancePreset,
+    downloadParallelThresholdMb,
+    downloadPartSizeMb,
+    downloadPartConcurrency,
+    uploadPartSizeMb,
+    uploadPartConcurrency,
+    enableTransferResume,
+    enableTransferChecksumVerification,
+    transferCheckpointTtlHours,
+    bandwidthLimitMbps,
   };
 }
 

@@ -1,20 +1,38 @@
 use aws_sdk_s3::types::{Delete, MetadataDirective, ObjectCannedAcl, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
 use zeroize::Zeroize;
 
-use crate::{lock_s3_state, make_temp_path, validate_destination_path, validate_existing_path, AppState};
+use crate::{
+    load_transfer_checkpoint_json, lock_s3_state, make_temp_path, remove_transfer_checkpoint,
+    save_transfer_checkpoint_json, validate_destination_path, validate_destination_path_allow_overwrite,
+    validate_existing_path, AppState,
+};
 
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
-const MULTIPART_THRESHOLD: u64 = 50 * 1024 * 1024;
-const PART_SIZE: usize = 10 * 1024 * 1024;
-const MAX_CONCURRENT_PARTS: usize = 6;
+const MULTIPART_THRESHOLD: u64 = 128 * 1024 * 1024;
+const DEFAULT_UPLOAD_PART_SIZE_MB: u32 = 32;
+const DEFAULT_DOWNLOAD_PART_SIZE_MB: u32 = 32;
+const MIN_PART_SIZE_MB: u32 = 16;
+const MAX_PART_SIZE_MB: u32 = 128;
+const DEFAULT_TRANSFER_CONCURRENCY: u32 = 6;
+const MAX_TRANSFER_CONCURRENCY: u32 = 16;
+const UPLOAD_PART_RETRY_ATTEMPTS: u32 = 3;
+const PARALLEL_DOWNLOAD_THRESHOLD_MB: u32 = 128;
+const RANGE_UNSUPPORTED_CODE: &str = "__range_unsupported__";
+const MAX_UPLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_DOWNLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+const TRANSFER_ERROR_PREFIX: &str = "__S3_SIDEKICK_TRANSFER_ERROR__";
+const CHECKSUM_METADATA_KEY: &str = "s3-sidekick-sha256";
 const MULTIPART_COPY_PART_SIZE: u64 = 500 * 1024 * 1024;
 const MULTIPART_COPY_THRESHOLD: i64 = 5_368_709_120;
 const MAX_KEY_LEN: usize = 1024;
@@ -125,6 +143,327 @@ pub(crate) struct UploadProgress {
     transfer_id: u32,
     bytes_sent: u64,
     total_bytes: u64,
+    attempt: u32,
+    phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speed_bps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eta_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_parts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_parts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resumable: Option<bool>,
+}
+
+fn normalize_attempt(attempt: Option<u32>) -> u32 {
+    attempt.unwrap_or(1).max(1)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct TransferCheckpoint {
+    version: u8,
+    mode: String,
+    bucket: String,
+    key: String,
+    destination: Option<String>,
+    temp_path: String,
+    total_bytes: u64,
+    part_size: u64,
+    completed_parts: Vec<u32>,
+    updated_at_ms: i64,
+}
+
+fn clamp_part_size_mb(value: Option<u32>, fallback: u32) -> u32 {
+    value
+        .unwrap_or(fallback)
+        .clamp(MIN_PART_SIZE_MB, MAX_PART_SIZE_MB)
+}
+
+fn clamp_transfer_concurrency(value: Option<u32>) -> usize {
+    value
+        .unwrap_or(DEFAULT_TRANSFER_CONCURRENCY)
+        .clamp(1, MAX_TRANSFER_CONCURRENCY) as usize
+}
+
+fn clamp_concurrency_for_budget(requested: usize, part_size_bytes: usize, budget_bytes: u64) -> usize {
+    if part_size_bytes == 0 {
+        return 1;
+    }
+    let cap = std::cmp::max(1, (budget_bytes / part_size_bytes as u64) as usize);
+    requested.clamp(1, cap)
+}
+
+fn clamp_bandwidth_limit_bps(value: Option<u32>) -> u64 {
+    let mbps = value.unwrap_or(0);
+    if mbps == 0 {
+        return 0;
+    }
+    (mbps as u64) * 1024 * 1024 / 8
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TransferErrorEnvelope {
+    code: String,
+    retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
+    message: String,
+}
+
+fn encode_transfer_error(
+    code: &str,
+    retryable: bool,
+    http_status: Option<u16>,
+    message: String,
+) -> String {
+    let payload = TransferErrorEnvelope {
+        code: code.to_string(),
+        retryable,
+        http_status,
+        message: message.clone(),
+    };
+    match serde_json::to_string(&payload) {
+        Ok(json) => format!("{}{}", TRANSFER_ERROR_PREFIX, json),
+        Err(_) => message,
+    }
+}
+
+fn choose_upload_part_size_bytes(file_size: u64, requested_mb: Option<u32>) -> Result<usize, String> {
+    let part_mb = clamp_part_size_mb(requested_mb, DEFAULT_UPLOAD_PART_SIZE_MB);
+    let part_size = (part_mb as u64) * 1024 * 1024;
+    let parts = (file_size + part_size - 1) / part_size;
+    if parts > 10_000 {
+        return Err(format!(
+            "File requires too many multipart parts ({}) with {}MB part size.",
+            parts, part_mb
+        ));
+    }
+    Ok(part_size as usize)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn compute_speed_eta(bytes_sent: u64, total_bytes: u64, started_at: Instant) -> (Option<u64>, Option<u64>) {
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    if elapsed_ms == 0 || bytes_sent == 0 {
+        return (None, None);
+    }
+    let speed = ((bytes_sent as f64) * 1000.0 / (elapsed_ms as f64)).round() as u64;
+    if speed == 0 {
+        return (Some(0), None);
+    }
+    let remaining = total_bytes.saturating_sub(bytes_sent);
+    let eta = if remaining == 0 {
+        Some(0)
+    } else {
+        Some(((remaining as f64) / (speed as f64)).ceil() as u64)
+    };
+    (Some(speed), eta)
+}
+
+fn emit_transfer_progress(
+    app: &tauri::AppHandle,
+    event: &str,
+    transfer_id: u32,
+    bytes_sent: u64,
+    total_bytes: u64,
+    attempt: u32,
+    phase: &str,
+    started_at: Instant,
+    completed_parts: Option<u32>,
+    total_parts: Option<u32>,
+    checkpoint_id: Option<&str>,
+    resumable: Option<bool>,
+) {
+    let (speed_bps, eta_seconds) = compute_speed_eta(bytes_sent, total_bytes, started_at);
+    let _ = app.emit(
+        event,
+        UploadProgress {
+            transfer_id,
+            bytes_sent,
+            total_bytes,
+            attempt,
+            phase: phase.to_string(),
+            speed_bps,
+            eta_seconds,
+            completed_parts,
+            total_parts,
+            checkpoint_id: checkpoint_id.map(|v| v.to_string()),
+            resumable,
+        },
+    );
+}
+
+fn checkpoint_from_json(json: &str) -> Option<TransferCheckpoint> {
+    serde_json::from_str::<TransferCheckpoint>(json).ok()
+}
+
+fn save_checkpoint_payload(
+    app: &tauri::AppHandle,
+    checkpoint_id: &str,
+    payload: &TransferCheckpoint,
+) -> Result<(), String> {
+    let json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+    save_transfer_checkpoint_json(app, checkpoint_id, &json)
+}
+
+fn normalize_checkpoint_parts(parts: &[u32], total_parts: u32) -> Vec<u32> {
+    let mut set = BTreeSet::new();
+    for part in parts {
+        if *part < total_parts {
+            set.insert(*part);
+        }
+    }
+    set.into_iter().collect()
+}
+
+fn maybe_range_unsupported(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("invalid range")
+        || lower.contains("range")
+            && (lower.contains("not satisfiable")
+                || lower.contains("unsupported")
+                || lower.contains("status code: 416")
+                || lower.contains("http 416"))
+}
+
+enum ExpectedChecksum {
+    Hex(String),
+    Base64(String),
+}
+
+fn digest_to_hex(digest: &[u8]) -> String {
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
+
+fn digest_to_base64(digest: &[u8]) -> String {
+    B64.encode(digest)
+}
+
+fn sha256_hex_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    digest_to_hex(&digest)
+}
+
+async fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncReadExt;
+    let mut hasher = Sha256::new();
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("Failed to open file for checksum: {}", e))?;
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("Failed to read file for checksum: {}", e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hasher.finalize().to_vec())
+}
+
+fn expected_checksum_from_head(head: &aws_sdk_s3::operation::head_object::HeadObjectOutput) -> Option<ExpectedChecksum> {
+    if let Some(value) = head
+        .metadata()
+        .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
+    {
+        let trimmed = value.trim().to_ascii_lowercase();
+        if !trimmed.is_empty() {
+            return Some(ExpectedChecksum::Hex(trimmed));
+        }
+    }
+    if let Some(value) = head.checksum_sha256() {
+        let trimmed = value.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(ExpectedChecksum::Base64(trimmed));
+        }
+    }
+    None
+}
+
+async fn verify_file_checksum(path: &Path, expected: &ExpectedChecksum) -> Result<(), String> {
+    let digest = sha256_file(path).await?;
+    match expected {
+        ExpectedChecksum::Hex(hex) => {
+            let actual = digest_to_hex(&digest);
+            if actual != *hex {
+                return Err(encode_transfer_error(
+                    "checksum_mismatch",
+                    false,
+                    None,
+                    format!(
+                        "Checksum verification failed: expected {}, got {}.",
+                        hex, actual
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        ExpectedChecksum::Base64(b64) => {
+            let actual = digest_to_base64(&digest);
+            if actual != *b64 {
+                return Err(encode_transfer_error(
+                    "checksum_mismatch",
+                    false,
+                    None,
+                    "Checksum verification failed.".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn verify_remote_checksum_metadata(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    expected_hex: &str,
+) -> Result<(), String> {
+    let head = client
+        .head_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .map_err(|e| structured_transfer_sdk_error("Failed checksum head", &e, "checksum_head", false))?;
+    let actual = head
+        .metadata()
+        .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty());
+    if let Some(actual_hex) = actual {
+        if actual_hex != expected_hex {
+            return Err(encode_transfer_error(
+                "checksum_mismatch",
+                false,
+                None,
+                format!(
+                    "Checksum metadata mismatch for uploaded object. Expected {}.",
+                    expected_hex
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -320,6 +659,36 @@ fn format_sdk_error<E: std::fmt::Debug>(prefix: &str, err: &aws_sdk_s3::error::S
             format!("{} (dispatch): {:?}", prefix, err)
         }
         other => format!("{}: {:?}", prefix, other),
+    }
+}
+
+fn structured_transfer_sdk_error<E: std::fmt::Debug>(
+    prefix: &str,
+    err: &aws_sdk_s3::error::SdkError<E>,
+    default_code: &str,
+    default_retryable: bool,
+) -> String {
+    use aws_sdk_s3::error::SdkError;
+    let message = format_sdk_error(prefix, err);
+    match err {
+        SdkError::ServiceError(ctx) => {
+            let status = ctx.raw().status().as_u16();
+            let retryable = status == 408 || status == 425 || status == 429 || status >= 500;
+            let code = if status == 429 {
+                "throttled"
+            } else if status >= 500 {
+                "server"
+            } else if status == 403 {
+                "forbidden"
+            } else {
+                default_code
+            };
+            encode_transfer_error(code, retryable, Some(status), message)
+        }
+        SdkError::DispatchFailure(_) => {
+            encode_transfer_error("network", true, None, message)
+        }
+        _ => encode_transfer_error(default_code, default_retryable, None, message),
     }
 }
 
@@ -590,6 +959,41 @@ pub(crate) async fn head_object(
 }
 
 #[tauri::command]
+pub(crate) async fn object_exists(
+    state: tauri::State<'_, AppState>,
+    bucket: String,
+    key: String,
+) -> Result<bool, String> {
+    validate_key(&key, "Object key")?;
+    let client = {
+        let s3 = lock_s3_state(&state)?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    match client.head_object().bucket(&bucket).key(&key).send().await {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            use aws_sdk_s3::error::SdkError;
+            match err {
+                SdkError::ServiceError(ctx) => {
+                    let status = ctx.raw().status().as_u16();
+                    if status == 404 {
+                        Ok(false)
+                    } else {
+                        Err(format!(
+                            "Failed to check object existence (HTTP {}): {}",
+                            status,
+                            String::from_utf8_lossy(ctx.raw().body().bytes().unwrap_or(&[]))
+                        ))
+                    }
+                }
+                other => Err(format!("Failed to check object existence: {:?}", other)),
+            }
+        }
+    }
+}
+
+#[tauri::command]
 pub(crate) async fn update_metadata(
     state: tauri::State<'_, AppState>,
     bucket: String,
@@ -700,6 +1104,13 @@ pub(crate) async fn upload_object(
     file_path: String,
     content_type: String,
     transfer_id: u32,
+    attempt: Option<u32>,
+    part_size_mb: Option<u32>,
+    part_concurrency: Option<u32>,
+    bandwidth_limit_mbps: Option<u32>,
+    checkpoint_id: Option<String>,
+    resumable: Option<bool>,
+    checksum_verification: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
@@ -714,16 +1125,40 @@ pub(crate) async fn upload_object(
         .map_err(|e| format!("File no longer accessible: {}", e))?
         .len();
 
-    let _ = app.emit(
+    let attempt = normalize_attempt(attempt);
+    let started_at = Instant::now();
+    let resumable_enabled = resumable.unwrap_or(false);
+    let checksum_enabled = checksum_verification.unwrap_or(false);
+    let expected_checksum_hex = if checksum_enabled {
+        let digest = sha256_file(&upload_path).await?;
+        Some(digest_to_hex(&digest))
+    } else {
+        None
+    };
+    emit_transfer_progress(
+        &app,
         "upload-progress",
-        UploadProgress {
-            transfer_id,
-            bytes_sent: 0,
-            total_bytes: file_size,
-        },
+        transfer_id,
+        0,
+        file_size,
+        attempt,
+        "running",
+        started_at,
+        None,
+        None,
+        checkpoint_id.as_deref(),
+        Some(resumable_enabled),
     );
 
     if file_size >= MULTIPART_THRESHOLD {
+        let part_size_bytes = choose_upload_part_size_bytes(file_size, part_size_mb)?;
+        let requested_workers = clamp_transfer_concurrency(part_concurrency);
+        let part_workers = clamp_concurrency_for_budget(
+            requested_workers,
+            part_size_bytes,
+            MAX_UPLOAD_INFLIGHT_BYTES,
+        );
+        let bandwidth_limit_bps = clamp_bandwidth_limit_bps(bandwidth_limit_mbps);
         upload_multipart(
             &app,
             &client,
@@ -732,7 +1167,15 @@ pub(crate) async fn upload_object(
             &upload_path,
             &content_type,
             transfer_id,
+            attempt,
             file_size,
+            part_size_bytes,
+            part_workers,
+            bandwidth_limit_bps,
+            checkpoint_id.as_deref(),
+            resumable_enabled,
+            started_at,
+            expected_checksum_hex.as_deref(),
         )
         .await?;
     } else {
@@ -750,23 +1193,115 @@ pub(crate) async fn upload_object(
         if !content_type.is_empty() {
             req = req.content_type(&content_type);
         }
+        if let Some(checksum_hex) = expected_checksum_hex.as_deref() {
+            req = req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
+        }
 
         req.send()
             .await
-            .map_err(|e| format!("Failed to upload: {}", e))?;
+            .map_err(|e| structured_transfer_sdk_error("Failed to upload", &e, "upload", true))?;
     }
 
-    let _ = app.emit(
+    if let Some(expected_checksum) = expected_checksum_hex.as_deref() {
+        verify_remote_checksum_metadata(&client, &bucket, &key, expected_checksum).await?;
+    }
+
+    emit_transfer_progress(
+        &app,
         "upload-progress",
-        UploadProgress {
-            transfer_id,
-            bytes_sent: file_size,
-            total_bytes: file_size,
-        },
+        transfer_id,
+        file_size,
+        file_size,
+        attempt,
+        "verifying",
+        started_at,
+        None,
+        None,
+        checkpoint_id.as_deref(),
+        Some(resumable_enabled),
     );
     clear_cancelled(transfer_id);
 
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn upload_object_resumable(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    bucket: String,
+    key: String,
+    file_path: String,
+    content_type: String,
+    transfer_id: u32,
+    attempt: Option<u32>,
+    part_size_mb: Option<u32>,
+    part_concurrency: Option<u32>,
+    bandwidth_limit_mbps: Option<u32>,
+    checkpoint_id: Option<String>,
+    resumable: Option<bool>,
+    checksum_verification: Option<bool>,
+) -> Result<(), String> {
+    upload_object(
+        app,
+        state,
+        bucket,
+        key,
+        file_path,
+        content_type,
+        transfer_id,
+        attempt,
+        part_size_mb,
+        part_concurrency,
+        bandwidth_limit_mbps,
+        checkpoint_id,
+        resumable,
+        checksum_verification,
+    )
+    .await
+}
+
+async fn upload_part_with_retry(
+    client: Client,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    part_number: i32,
+    data: bytes::Bytes,
+) -> Result<(i32, usize, String), String> {
+    let bytes = data.len();
+    let mut last_error = String::new();
+    for attempt in 1..=UPLOAD_PART_RETRY_ATTEMPTS {
+        let body = aws_sdk_s3::primitives::ByteStream::from(data.clone());
+        match client
+            .upload_part()
+            .bucket(&bucket)
+            .key(&key)
+            .upload_id(&upload_id)
+            .part_number(part_number)
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(output) => {
+                let etag = output.e_tag().unwrap_or_default().to_string();
+                return Ok((part_number, bytes, etag));
+            }
+            Err(err) => {
+                last_error = structured_transfer_sdk_error(
+                    &format!("Failed to upload part {}", part_number),
+                    &err,
+                    "upload_part",
+                    true,
+                );
+                if attempt < UPLOAD_PART_RETRY_ATTEMPTS {
+                    let delay = Duration::from_millis(250 * (2u64.pow(attempt - 1)));
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+    Err(last_error)
 }
 
 async fn upload_multipart(
@@ -777,7 +1312,15 @@ async fn upload_multipart(
     file_path: &Path,
     content_type: &str,
     transfer_id: u32,
+    attempt: u32,
     file_size: u64,
+    part_size_bytes: usize,
+    max_concurrent_parts: usize,
+    bandwidth_limit_bps: u64,
+    checkpoint_id: Option<&str>,
+    resumable: bool,
+    started_at: Instant,
+    checksum_hex: Option<&str>,
 ) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
     use tokio::task::JoinSet;
@@ -786,11 +1329,14 @@ async fn upload_multipart(
     if !content_type.is_empty() {
         create_req = create_req.content_type(content_type);
     }
+    if let Some(checksum_hex) = checksum_hex {
+        create_req = create_req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
+    }
 
     let create_output = create_req
         .send()
         .await
-        .map_err(|e| format!("Failed to create multipart upload: {}", e))?;
+        .map_err(|e| structured_transfer_sdk_error("Failed to create multipart upload", &e, "upload_init", true))?;
 
     let upload_id = create_output
         .upload_id()
@@ -801,7 +1347,7 @@ async fn upload_multipart(
         .await
         .map_err(|e| format!("Failed to open file: {}", e))?;
 
-    let total_parts = ((file_size + PART_SIZE as u64 - 1) / PART_SIZE as u64) as usize;
+    let total_parts = ((file_size + part_size_bytes as u64 - 1) / part_size_bytes as u64) as usize;
     let mut completed_parts: Vec<Option<aws_sdk_s3::types::CompletedPart>> =
         vec![None; total_parts];
     let mut part_number = 1i32;
@@ -833,10 +1379,10 @@ async fn upload_multipart(
             return Err("Transfer cancelled".to_string());
         }
 
-        while join_set.len() < MAX_CONCURRENT_PARTS && !eof {
-            let mut buf = vec![0u8; PART_SIZE];
+        while join_set.len() < max_concurrent_parts && !eof {
+            let mut buf = vec![0u8; part_size_bytes];
             let mut read = 0;
-            while read < PART_SIZE {
+            while read < part_size_bytes {
                 let n = file
                     .read(&mut buf[read..])
                     .await
@@ -859,19 +1405,8 @@ async fn upload_multipart(
             let pn = part_number;
 
             join_set.spawn(async move {
-                let body = aws_sdk_s3::primitives::ByteStream::from(buf);
-                let output = client
-                    .upload_part()
-                    .bucket(&bucket)
-                    .key(&key)
-                    .upload_id(&uid)
-                    .part_number(pn)
-                    .body(body)
-                    .send()
-                    .await
-                    .map_err(|e| format!("Failed to upload part {}: {}", pn, e))?;
-                let etag = output.e_tag().unwrap_or_default().to_string();
-                Ok((pn, read, etag))
+                let shared = bytes::Bytes::from(buf);
+                upload_part_with_retry(client, bucket, key, uid, pn, shared).await
             });
 
             part_number += 1;
@@ -890,13 +1425,26 @@ async fn upload_multipart(
                         .build(),
                 );
                 bytes_sent += bytes_read as u64;
-                let _ = app.emit(
+                if bandwidth_limit_bps > 0 {
+                    let elapsed = started_at.elapsed().as_secs_f64();
+                    let target = bytes_sent as f64 / bandwidth_limit_bps as f64;
+                    if target > elapsed {
+                        tokio::time::sleep(Duration::from_secs_f64(target - elapsed)).await;
+                    }
+                }
+                emit_transfer_progress(
+                    app,
                     "upload-progress",
-                    UploadProgress {
-                        transfer_id,
-                        bytes_sent,
-                        total_bytes: file_size,
-                    },
+                    transfer_id,
+                    bytes_sent,
+                    file_size,
+                    attempt,
+                    "running",
+                    started_at,
+                    Some((pn as u32).min(total_parts as u32)),
+                    Some(total_parts as u32),
+                    checkpoint_id,
+                    Some(resumable),
                 );
             }
             Some(Ok(Err(e))) => {
@@ -930,7 +1478,12 @@ async fn upload_multipart(
         .await
     {
         abort(client, bucket, key, &upload_id).await;
-        return Err(format!("Failed to complete multipart upload: {}", e));
+        return Err(structured_transfer_sdk_error(
+            "Failed to complete multipart upload",
+            &e,
+            "upload_complete",
+            true,
+        ));
     }
 
     Ok(())
@@ -945,6 +1498,8 @@ pub(crate) async fn upload_object_bytes(
     bytes: Vec<u8>,
     content_type: String,
     transfer_id: u32,
+    attempt: Option<u32>,
+    checksum_verification: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
     if bytes.len() > MAX_UPLOAD_OBJECT_BYTES {
@@ -960,13 +1515,27 @@ pub(crate) async fn upload_object_bytes(
     };
 
     let total = bytes.len() as u64;
-    let _ = app.emit(
+    let attempt = normalize_attempt(attempt);
+    let started_at = Instant::now();
+    let checksum_enabled = checksum_verification.unwrap_or(false);
+    let expected_checksum_hex = if checksum_enabled {
+        Some(sha256_hex_bytes(&bytes))
+    } else {
+        None
+    };
+    emit_transfer_progress(
+        &app,
         "upload-progress",
-        UploadProgress {
-            transfer_id,
-            bytes_sent: 0,
-            total_bytes: total,
-        },
+        transfer_id,
+        0,
+        total,
+        attempt,
+        "running",
+        started_at,
+        None,
+        None,
+        None,
+        Some(false),
     );
 
     let mut req = client
@@ -978,18 +1547,31 @@ pub(crate) async fn upload_object_bytes(
     if !content_type.is_empty() {
         req = req.content_type(&content_type);
     }
+    if let Some(checksum_hex) = expected_checksum_hex.as_deref() {
+        req = req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
+    }
 
     req.send()
         .await
-        .map_err(|e| format!("Failed to upload: {}", e))?;
+        .map_err(|e| structured_transfer_sdk_error("Failed to upload", &e, "upload", true))?;
 
-    let _ = app.emit(
+    if let Some(expected_checksum) = expected_checksum_hex.as_deref() {
+        verify_remote_checksum_metadata(&client, &bucket, &key, expected_checksum).await?;
+    }
+
+    emit_transfer_progress(
+        &app,
         "upload-progress",
-        UploadProgress {
-            transfer_id,
-            bytes_sent: total,
-            total_bytes: total,
-        },
+        transfer_id,
+        total,
+        total,
+        attempt,
+        "verifying",
+        started_at,
+        None,
+        None,
+        None,
+        Some(false),
     );
 
     Ok(())
@@ -1088,12 +1670,35 @@ pub(crate) async fn download_object(
     key: String,
     destination: String,
     transfer_id: u32,
+    overwrite: bool,
+    temp_path: Option<String>,
+    attempt: Option<u32>,
+    checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     validate_key(&key, "Object key")?;
-    let destination_path = validate_destination_path(&destination)?;
-    let temp_path = make_temp_path(&destination_path, "download");
+    let destination_path = if overwrite {
+        validate_destination_path_allow_overwrite(&destination)?
+    } else {
+        validate_destination_path(&destination)?
+    };
+    let temp_path = match temp_path {
+        Some(custom) => {
+            let custom_path = validate_destination_path_allow_overwrite(&custom)?;
+            if custom_path == destination_path {
+                return Err("Temp path must be different from destination".to_string());
+            }
+            custom_path
+        }
+        None => make_temp_path(&destination_path, "download"),
+    };
+    if temp_path.exists() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    let attempt = normalize_attempt(attempt);
+    let started_at = Instant::now();
+    let checksum_enabled = checksum_verification.unwrap_or(false);
 
     let client = {
         let s3 = lock_s3_state(&state)?;
@@ -1105,22 +1710,43 @@ pub(crate) async fn download_object(
         return Err("Transfer cancelled".to_string());
     }
 
+    let expected_checksum = if checksum_enabled {
+        let head = client
+            .head_object()
+            .bucket(&bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| {
+                structured_transfer_sdk_error("Failed to read object metadata", &e, "download_head", true)
+            })?;
+        expected_checksum_from_head(&head)
+    } else {
+        None
+    };
+
     let output = client
         .get_object()
         .bucket(&bucket)
         .key(&key)
         .send()
         .await
-        .map_err(|e| format!("Failed to download: {}", e))?;
+        .map_err(|e| structured_transfer_sdk_error("Failed to download", &e, "download", true))?;
 
     let total_bytes = output.content_length().unwrap_or(0) as u64;
-    let _ = app.emit(
+    emit_transfer_progress(
+        &app,
         "download-progress",
-        UploadProgress {
-            transfer_id,
-            bytes_sent: 0,
-            total_bytes,
-        },
+        transfer_id,
+        0,
+        total_bytes,
+        attempt,
+        "running",
+        started_at,
+        None,
+        None,
+        None,
+        Some(false),
     );
 
     let mut reader = output.body.into_async_read();
@@ -1161,16 +1787,30 @@ pub(crate) async fn download_object(
         written += count as u64;
 
         if written - last_emitted >= PROGRESS_INTERVAL {
-            let _ = app.emit(
+            emit_transfer_progress(
+                &app,
                 "download-progress",
-                UploadProgress {
-                    transfer_id,
-                    bytes_sent: written,
-                    total_bytes,
-                },
+                transfer_id,
+                written,
+                total_bytes,
+                attempt,
+                "running",
+                started_at,
+                None,
+                None,
+                None,
+                Some(false),
             );
             last_emitted = written;
         }
+    }
+
+    if total_bytes > 0 && written != total_bytes {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!(
+            "Downloaded byte count mismatch. Expected {}, wrote {}.",
+            total_bytes, written
+        ));
     }
 
     file.flush().await.map_err(|e| {
@@ -1183,22 +1823,494 @@ pub(crate) async fn download_object(
     })?;
     drop(file);
 
-    if let Err(e) = std::fs::rename(&temp_path, &destination_path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(format!("Failed to finalize download: {}", e));
+    if let Some(expected) = expected_checksum.as_ref() {
+        if let Err(err) = verify_file_checksum(&temp_path, expected).await {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(err);
+        }
     }
 
-    let _ = app.emit(
+    finalize_download_file(&temp_path, &destination_path, overwrite)?;
+
+    emit_transfer_progress(
+        &app,
         "download-progress",
-        UploadProgress {
-            transfer_id,
-            bytes_sent: written,
-            total_bytes: written,
-        },
+        transfer_id,
+        written,
+        written,
+        attempt,
+        "verifying",
+        started_at,
+        None,
+        None,
+        None,
+        Some(false),
     );
     clear_cancelled(transfer_id);
 
     Ok(written)
+}
+
+fn finalize_download_file(temp_path: &Path, destination_path: &Path, overwrite: bool) -> Result<(), String> {
+    if !overwrite || !destination_path.exists() {
+        if let Err(e) = std::fs::rename(temp_path, destination_path) {
+            let _ = std::fs::remove_file(temp_path);
+            return Err(format!("Failed to finalize download: {}", e));
+        }
+        return Ok(());
+    }
+
+    let backup_path = make_temp_path(destination_path, "download-backup");
+    if let Err(e) = std::fs::rename(destination_path, &backup_path) {
+        let _ = std::fs::remove_file(temp_path);
+        return Err(format!(
+            "Failed to stage existing destination for replace: {}",
+            e
+        ));
+    }
+
+    match std::fs::rename(temp_path, destination_path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&backup_path);
+            Ok(())
+        }
+        Err(e) => {
+            let restore_err = std::fs::rename(&backup_path, destination_path).err();
+            let _ = std::fs::remove_file(temp_path);
+            match restore_err {
+                Some(restore) => Err(format!(
+                    "Failed to finalize download: {}. Also failed to restore previous destination: {}",
+                    e, restore
+                )),
+                None => Err(format!(
+                    "Failed to finalize download: {}. Previous destination restored.",
+                    e
+                )),
+            }
+        }
+    }
+}
+
+async fn download_parallel_part(
+    client: Client,
+    bucket: String,
+    key: String,
+    temp_path: PathBuf,
+    start: u64,
+    end: u64,
+    transfer_id: u32,
+) -> Result<u64, String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    if is_cancelled(transfer_id) {
+        return Err("Transfer cancelled".to_string());
+    }
+
+    let output = client
+        .get_object()
+        .bucket(&bucket)
+        .key(&key)
+        .range(format!("bytes={}-{}", start, end))
+        .send()
+        .await
+        .map_err(|e| {
+            structured_transfer_sdk_error(
+                &format!("Failed ranged download {}-{}", start, end),
+                &e,
+                "download_range",
+                true,
+            )
+        })?;
+
+    let mut reader = output.body.into_async_read();
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&temp_path)
+        .await
+        .map_err(|e| format!("Failed to open temp file: {}", e))?;
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|e| format!("Failed to seek temp file: {}", e))?;
+
+    let mut written = 0u64;
+    let mut buf = [0u8; 128 * 1024];
+    loop {
+        if is_cancelled(transfer_id) {
+            return Err("Transfer cancelled".to_string());
+        }
+        let count = reader
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("Failed to read ranged body: {}", e))?;
+        if count == 0 {
+            break;
+        }
+        file.write_all(&buf[..count])
+            .await
+            .map_err(|e| format!("Failed to write ranged temp file: {}", e))?;
+        written += count as u64;
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("Failed to flush ranged temp file: {}", e))?;
+    Ok(written)
+}
+
+#[tauri::command]
+pub(crate) async fn download_object_parallel(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    bucket: String,
+    key: String,
+    destination: String,
+    transfer_id: u32,
+    overwrite: bool,
+    temp_path: Option<String>,
+    attempt: Option<u32>,
+    parallel_threshold_mb: Option<u32>,
+    part_size_mb: Option<u32>,
+    part_concurrency: Option<u32>,
+    bandwidth_limit_mbps: Option<u32>,
+    checkpoint_id: Option<String>,
+    enable_resume: Option<bool>,
+    checksum_verification: Option<bool>,
+    _resume_completed_parts: Option<Vec<u32>>,
+) -> Result<u64, String> {
+    validate_key(&key, "Object key")?;
+    let destination_path = if overwrite {
+        validate_destination_path_allow_overwrite(&destination)?
+    } else {
+        validate_destination_path(&destination)?
+    };
+    let temp_path = match temp_path {
+        Some(custom) => {
+            let custom_path = validate_destination_path_allow_overwrite(&custom)?;
+            if custom_path == destination_path {
+                return Err("Temp path must be different from destination".to_string());
+            }
+            custom_path
+        }
+        None => make_temp_path(&destination_path, "download"),
+    };
+    let attempt = normalize_attempt(attempt);
+    let started_at = Instant::now();
+    let threshold_mb = parallel_threshold_mb.unwrap_or(PARALLEL_DOWNLOAD_THRESHOLD_MB).max(1);
+    let checksum_enabled = checksum_verification.unwrap_or(false);
+
+    let client = {
+        let s3 = lock_s3_state(&state)?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    if is_cancelled(transfer_id) {
+        clear_cancelled(transfer_id);
+        return Err("Transfer cancelled".to_string());
+    }
+
+    let head = client
+        .head_object()
+        .bucket(&bucket)
+        .key(&key)
+        .send()
+        .await
+        .map_err(|e| structured_transfer_sdk_error("Failed to read object metadata", &e, "download_head", true))?;
+    let total_bytes = head.content_length().unwrap_or(0) as u64;
+    let expected_checksum = if checksum_enabled {
+        expected_checksum_from_head(&head)
+    } else {
+        None
+    };
+    let threshold_bytes = (threshold_mb as u64) * 1024 * 1024;
+
+    if total_bytes < threshold_bytes || total_bytes == 0 {
+        return download_object(
+            app,
+            state,
+            bucket,
+            key,
+            destination,
+            transfer_id,
+            overwrite,
+            Some(temp_path.to_string_lossy().to_string()),
+            Some(attempt),
+            Some(checksum_enabled),
+        )
+        .await;
+    }
+
+    let part_size = (clamp_part_size_mb(part_size_mb, DEFAULT_DOWNLOAD_PART_SIZE_MB) as u64) * 1024 * 1024;
+    let total_parts = ((total_bytes + part_size - 1) / part_size) as u32;
+    if total_parts <= 1 {
+        return download_object(
+            app,
+            state,
+            bucket,
+            key,
+            destination,
+            transfer_id,
+            overwrite,
+            Some(temp_path.to_string_lossy().to_string()),
+            Some(attempt),
+            Some(checksum_enabled),
+        )
+        .await;
+    }
+
+    let requested_workers = clamp_transfer_concurrency(part_concurrency);
+    let part_workers = clamp_concurrency_for_budget(
+        requested_workers,
+        part_size as usize,
+        MAX_DOWNLOAD_INFLIGHT_BYTES,
+    );
+    let bandwidth_limit_bps = clamp_bandwidth_limit_bps(bandwidth_limit_mbps);
+    let checkpoint_enabled =
+        enable_resume.unwrap_or(true) && checkpoint_id.as_ref().map(|id| !id.trim().is_empty()).unwrap_or(false);
+
+    match client
+        .get_object()
+        .bucket(&bucket)
+        .key(&key)
+        .range("bytes=0-0")
+        .send()
+        .await
+    {
+        Ok(_) => {}
+        Err(err) => {
+            let text = format!("{}", err);
+            if maybe_range_unsupported(&text) {
+                return Err(format!("{}: {}", RANGE_UNSUPPORTED_CODE, text));
+            }
+            return Err(format!("Ranged download preflight failed: {}", err));
+        }
+    }
+
+    if temp_path.exists() && !checkpoint_enabled {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    let mut completed = vec![false; total_parts as usize];
+
+    if checkpoint_enabled {
+        if let Some(id) = checkpoint_id.as_deref() {
+            if let Ok(Some(json)) = load_transfer_checkpoint_json(&app, id) {
+                if let Some(payload) = checkpoint_from_json(&json) {
+                    if payload.mode == "download_parallel"
+                        && payload.bucket == bucket
+                        && payload.key == key
+                        && payload.temp_path == temp_path.to_string_lossy()
+                        && payload.total_bytes == total_bytes
+                        && payload.part_size == part_size
+                    {
+                        for part in normalize_checkpoint_parts(&payload.completed_parts, total_parts) {
+                            completed[part as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let init_file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&temp_path)
+        .await
+        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+    init_file
+        .set_len(total_bytes)
+        .await
+        .map_err(|e| format!("Failed to set temp file length: {}", e))?;
+    init_file
+        .sync_all()
+        .await
+        .map_err(|e| format!("Failed to sync temp file: {}", e))?;
+    drop(init_file);
+
+    let mut completed_bytes = 0u64;
+    for index in 0..total_parts {
+        if completed[index as usize] {
+            let start = (index as u64) * part_size;
+            let end = std::cmp::min(start + part_size, total_bytes);
+            completed_bytes += end - start;
+        }
+    }
+
+    emit_transfer_progress(
+        &app,
+        "download-progress",
+        transfer_id,
+        completed_bytes,
+        total_bytes,
+        attempt,
+        if completed_bytes > 0 { "resuming" } else { "running" },
+        started_at,
+        Some(completed.iter().filter(|v| **v).count() as u32),
+        Some(total_parts),
+        checkpoint_id.as_deref(),
+        Some(checkpoint_enabled),
+    );
+
+    let bytes_done = Arc::new(AtomicU64::new(completed_bytes));
+    let mut join_set = tokio::task::JoinSet::new();
+    let mut next_part = 0u32;
+    let mut last_checkpoint_saved_at = Instant::now();
+    let mut last_checkpoint_saved_parts = completed.iter().filter(|v| **v).count() as u32;
+
+    while next_part < total_parts || !join_set.is_empty() {
+        if is_cancelled(transfer_id) {
+            clear_cancelled(transfer_id);
+            join_set.abort_all();
+            if !checkpoint_enabled {
+                let _ = std::fs::remove_file(&temp_path);
+            }
+            return Err("Transfer cancelled".to_string());
+        }
+
+        while join_set.len() < part_workers && next_part < total_parts {
+            let index = next_part;
+            next_part += 1;
+            if completed[index as usize] {
+                continue;
+            }
+            let start = (index as u64) * part_size;
+            let end = std::cmp::min(start + part_size, total_bytes) - 1;
+            let bucket_clone = bucket.clone();
+            let key_clone = key.clone();
+            let path_clone = temp_path.clone();
+            let client_clone = client.clone();
+            join_set.spawn(async move {
+                let size =
+                    download_parallel_part(client_clone, bucket_clone, key_clone, path_clone, start, end, transfer_id)
+                        .await?;
+                Ok::<(u32, u64), String>((index, size))
+            });
+        }
+
+        match join_set.join_next().await {
+            Some(Ok(Ok((index, written)))) => {
+                completed[index as usize] = true;
+                let sent = bytes_done.fetch_add(written, Ordering::Relaxed) + written;
+                if bandwidth_limit_bps > 0 {
+                    let elapsed = started_at.elapsed().as_secs_f64();
+                    let target = sent as f64 / bandwidth_limit_bps as f64;
+                    if target > elapsed {
+                        tokio::time::sleep(Duration::from_secs_f64(target - elapsed)).await;
+                    }
+                }
+                let completed_count = completed.iter().filter(|v| **v).count() as u32;
+
+                if checkpoint_enabled {
+                    if let Some(id) = checkpoint_id.as_deref() {
+                        let elapsed_ms = last_checkpoint_saved_at.elapsed().as_millis() as u64;
+                        if completed_count == total_parts
+                            || completed_count.saturating_sub(last_checkpoint_saved_parts) >= 8
+                            || elapsed_ms >= 1500
+                        {
+                            let payload = TransferCheckpoint {
+                                version: 1,
+                                mode: "download_parallel".to_string(),
+                                bucket: bucket.clone(),
+                                key: key.clone(),
+                                destination: Some(destination.clone()),
+                                temp_path: temp_path.to_string_lossy().to_string(),
+                                total_bytes,
+                                part_size,
+                                completed_parts: completed
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, done)| if *done { Some(i as u32) } else { None })
+                                    .collect(),
+                                updated_at_ms: now_ms(),
+                            };
+                            let _ = save_checkpoint_payload(&app, id, &payload);
+                            last_checkpoint_saved_at = Instant::now();
+                            last_checkpoint_saved_parts = completed_count;
+                        }
+                    }
+                }
+
+                emit_transfer_progress(
+                    &app,
+                    "download-progress",
+                    transfer_id,
+                    sent,
+                    total_bytes,
+                    attempt,
+                    "running",
+                    started_at,
+                    Some(completed_count),
+                    Some(total_parts),
+                    checkpoint_id.as_deref(),
+                    Some(checkpoint_enabled),
+                );
+            }
+            Some(Ok(Err(err))) => {
+                join_set.abort_all();
+                if !checkpoint_enabled {
+                    let _ = std::fs::remove_file(&temp_path);
+                }
+                if maybe_range_unsupported(&err) {
+                    return Err(format!("{}: {}", RANGE_UNSUPPORTED_CODE, err));
+                }
+                return Err(err);
+            }
+            Some(Err(err)) => {
+                join_set.abort_all();
+                if !checkpoint_enabled {
+                    let _ = std::fs::remove_file(&temp_path);
+                }
+                return Err(format!("Parallel worker failed: {}", err));
+            }
+            None => break,
+        }
+    }
+
+    let final_bytes = bytes_done.load(Ordering::Relaxed);
+    if final_bytes != total_bytes {
+        if !checkpoint_enabled {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        return Err(format!(
+            "Downloaded byte count mismatch. Expected {}, wrote {}.",
+            total_bytes, final_bytes
+        ));
+    }
+
+    if let Some(expected) = expected_checksum.as_ref() {
+        if let Err(err) = verify_file_checksum(&temp_path, expected).await {
+            if !checkpoint_enabled {
+                let _ = std::fs::remove_file(&temp_path);
+            }
+            return Err(err);
+        }
+    }
+
+    finalize_download_file(&temp_path, &destination_path, overwrite)?;
+
+    emit_transfer_progress(
+        &app,
+        "download-progress",
+        transfer_id,
+        total_bytes,
+        total_bytes,
+        attempt,
+        "finalizing",
+        started_at,
+        Some(total_parts),
+        Some(total_parts),
+        checkpoint_id.as_deref(),
+        Some(checkpoint_enabled),
+    );
+    clear_cancelled(transfer_id);
+
+    if checkpoint_enabled {
+        if let Some(id) = checkpoint_id.as_deref() {
+            let _ = remove_transfer_checkpoint(&app, id);
+        }
+    }
+
+    Ok(total_bytes)
 }
 
 #[tauri::command]
@@ -1818,6 +2930,22 @@ pub(crate) async fn preview_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_test_dir(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "s3-sidekick-{}-{}-{}",
+            label,
+            std::process::id(),
+            nonce
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn is_text_content_type_recognizes_text() {
@@ -1916,5 +3044,36 @@ mod tests {
     fn normalize_endpoint_strips_trailing_slash() {
         let (url, _) = normalize_endpoint("https://s3.amazonaws.com/");
         assert_eq!(url, "https://s3.amazonaws.com");
+    }
+
+    #[test]
+    fn finalize_download_file_moves_when_destination_missing() {
+        let dir = make_test_dir("finalize-move");
+        let temp_path = dir.join("download.tmp");
+        let destination_path = dir.join("file.txt");
+        std::fs::write(&temp_path, b"new").unwrap();
+
+        let result = finalize_download_file(&temp_path, &destination_path, false);
+        assert!(result.is_ok(), "finalize should succeed: {:?}", result.err());
+        assert!(!temp_path.exists());
+        assert_eq!(std::fs::read(&destination_path).unwrap(), b"new");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finalize_download_file_overwrite_replaces_existing() {
+        let dir = make_test_dir("finalize-overwrite");
+        let temp_path = dir.join("download.tmp");
+        let destination_path = dir.join("file.txt");
+        std::fs::write(&temp_path, b"new").unwrap();
+        std::fs::write(&destination_path, b"old").unwrap();
+
+        let result = finalize_download_file(&temp_path, &destination_path, true);
+        assert!(result.is_ok(), "finalize should succeed: {:?}", result.err());
+        assert!(!temp_path.exists());
+        assert_eq!(std::fs::read(&destination_path).unwrap(), b"new");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

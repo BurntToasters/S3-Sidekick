@@ -88,6 +88,66 @@ describe("settings model", () => {
     expect(result.settings.maxConcurrentTransfers).toBe(3);
   });
 
+  it("normalizes transfer retry settings and conflict policy", () => {
+    const result = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        transferRetryAttempts: 4,
+        transferRetryBaseMs: 800,
+        conflictPolicy: "replace",
+        rememberDownloadPath: false,
+      }),
+    );
+    expect(result.settings.transferRetryAttempts).toBe(4);
+    expect(result.settings.transferRetryBaseMs).toBe(800);
+    expect(result.settings.conflictPolicy).toBe("replace");
+    expect(result.settings.rememberDownloadPath).toBe(false);
+  });
+
+  it("falls back for invalid transfer retry and conflict policy values", () => {
+    const result = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        transferRetryAttempts: 99,
+        transferRetryBaseMs: 1,
+        conflictPolicy: "invalid",
+        rememberDownloadPath: "yes",
+      }),
+    );
+    expect(result.settings.transferRetryAttempts).toBe(
+      SETTING_DEFAULTS.transferRetryAttempts,
+    );
+    expect(result.settings.transferRetryBaseMs).toBe(
+      SETTING_DEFAULTS.transferRetryBaseMs,
+    );
+    expect(result.settings.conflictPolicy).toBe(
+      SETTING_DEFAULTS.conflictPolicy,
+    );
+    expect(result.settings.rememberDownloadPath).toBe(
+      SETTING_DEFAULTS.rememberDownloadPath,
+    );
+  });
+
+  it("normalizes checksum verification setting", () => {
+    const enabled = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        enableTransferChecksumVerification: true,
+      }),
+    );
+    expect(enabled.settings.enableTransferChecksumVerification).toBe(true);
+
+    const invalid = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        enableTransferChecksumVerification: "yes",
+      }),
+    );
+    expect(invalid.settings.enableTransferChecksumVerification).toBe(
+      SETTING_DEFAULTS.enableTransferChecksumVerification,
+    );
+  });
+
   it("persists update channel in merged payload", () => {
     const payload = mergeSettingsPayload(
       { ...SETTING_DEFAULTS, updateChannel: "beta" },
@@ -142,6 +202,7 @@ describe("settings model", () => {
         maxConcurrentTransfers: 4,
       }),
     ).toEqual({
+      ...SETTING_DEFAULTS,
       theme: "light",
       autoCheckUpdates: false,
       updateChannel: "beta",

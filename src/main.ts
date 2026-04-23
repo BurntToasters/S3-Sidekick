@@ -78,6 +78,8 @@ import {
   disposeTransferQueueUI,
   enqueueDownloads,
   enqueueFolderEntries,
+  enqueueCopyMoveEntries,
+  type CopyMoveQueueEntry,
 } from "./transfers.ts";
 import {
   basename,
@@ -92,6 +94,7 @@ import {
   logActivity,
   toggleActivityLog,
   clearActivityLog,
+  exportActivityLogText,
 } from "./activity-log.ts";
 import { initDrawer, getActiveTab } from "./bottom-drawer.ts";
 import {
@@ -118,6 +121,7 @@ import {
   showSetupWizard,
   markSetupComplete,
 } from "./setup-wizard.ts";
+import type { ConflictPolicy } from "./settings-model.ts";
 
 interface LocalFolderFileEntry {
   file_path: string;
@@ -129,12 +133,28 @@ interface DownloadQueueEntry {
   bucket: string;
   key: string;
   destination: string;
+  conflictResolution?: Exclude<ConflictPolicy, "ask">;
+}
+
+interface HeadObjectSummary {
+  content_length: number;
+}
+
+interface RecentCopyMoveDestination {
+  bucket: string;
+  path: string;
 }
 
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 420;
 const SIDEBAR_STORAGE_KEY = "s3-sidekick.sidebar.width";
 const FILTER_INPUT_DEBOUNCE_MS = 120;
+const LAST_DOWNLOAD_DIR_STORAGE_KEY = "s3-sidekick.last-download-dir";
+const RECENT_DOWNLOAD_DIRS_STORAGE_KEY = "s3-sidekick.recent-download-dirs.v1";
+const RECENT_COPY_MOVE_DESTS_STORAGE_KEY =
+  "s3-sidekick.recent-copy-move-destinations.v1";
+const RECENT_DESTINATION_LIMIT = 8;
+const DOWNLOAD_DISK_PREFLIGHT_THRESHOLD_BYTES = 128 * 1024 * 1024;
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -460,6 +480,243 @@ function handleTabListArrowKey(
   nextTab.focus();
 }
 
+function parentDirectory(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const idx = normalized.lastIndexOf("/");
+  if (idx <= 0) return "";
+  return normalized.slice(0, idx);
+}
+
+function readRecentDownloadDirs(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_DOWNLOAD_DIRS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .slice(0, RECENT_DESTINATION_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentDownloadDirs(dirs: string[]): void {
+  try {
+    localStorage.setItem(
+      RECENT_DOWNLOAD_DIRS_STORAGE_KEY,
+      JSON.stringify(dirs.slice(0, RECENT_DESTINATION_LIMIT)),
+    );
+  } catch {
+    // best effort
+  }
+}
+
+function rememberDownloadDirectory(dir: string): void {
+  if (!state.currentSettings.rememberDownloadPath) return;
+  const normalized = dir.trim();
+  if (!normalized) return;
+  try {
+    localStorage.setItem(LAST_DOWNLOAD_DIR_STORAGE_KEY, normalized);
+  } catch {
+    // best effort
+  }
+  const updated = readRecentDownloadDirs().filter(
+    (entry) => entry !== normalized,
+  );
+  updated.unshift(normalized);
+  writeRecentDownloadDirs(updated);
+}
+
+function getRememberedDownloadDir(): string {
+  try {
+    const direct = localStorage.getItem(LAST_DOWNLOAD_DIR_STORAGE_KEY);
+    if (direct && direct.trim().length > 0) return direct;
+    return readRecentDownloadDirs()[0] ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveRememberedDownloadDir(path: string): void {
+  if (!state.currentSettings.rememberDownloadPath) return;
+  const dir = parentDirectory(path);
+  if (!dir) return;
+  rememberDownloadDirectory(dir);
+}
+
+function saveRememberedDownloadDirectoryValue(dir: string): void {
+  if (!state.currentSettings.rememberDownloadPath) return;
+  if (!dir) return;
+  rememberDownloadDirectory(dir);
+}
+
+function readRecentCopyMoveDestinations(): RecentCopyMoveDestination[] {
+  try {
+    const raw = localStorage.getItem(RECENT_COPY_MOVE_DESTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    const rows: RecentCopyMoveDestination[] = [];
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== "object") continue;
+      const bucket = String(
+        (entry as { bucket?: unknown }).bucket ?? "",
+      ).trim();
+      const path = String((entry as { path?: unknown }).path ?? "").trim();
+      if (!bucket || !path) continue;
+      const key = `${bucket}\n${path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ bucket, path });
+      if (rows.length >= RECENT_DESTINATION_LIMIT) break;
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentCopyMoveDestinations(
+  entries: RecentCopyMoveDestination[],
+): void {
+  try {
+    localStorage.setItem(
+      RECENT_COPY_MOVE_DESTS_STORAGE_KEY,
+      JSON.stringify(entries.slice(0, RECENT_DESTINATION_LIMIT)),
+    );
+  } catch {
+    // best effort
+  }
+}
+
+function rememberCopyMoveDestination(bucket: string, path: string): void {
+  const normalizedBucket = bucket.trim();
+  const normalizedPath = path.trim().replace(/^\/+/, "");
+  if (!normalizedBucket || !normalizedPath) return;
+  const current = readRecentCopyMoveDestinations().filter(
+    (entry) =>
+      !(entry.bucket === normalizedBucket && entry.path === normalizedPath),
+  );
+  current.unshift({ bucket: normalizedBucket, path: normalizedPath });
+  writeRecentCopyMoveDestinations(current);
+}
+
+interface ConflictPromptSession {
+  applyAll: Exclude<ConflictPolicy, "ask"> | null;
+}
+
+async function resolveConflictChoice(
+  label: string,
+  session: ConflictPromptSession,
+  hasBatchRemainder: boolean,
+): Promise<Exclude<ConflictPolicy, "ask">> {
+  if (session.applyAll) return session.applyAll;
+  const replace = await showConfirm(
+    "Conflict",
+    `${label} already exists. Replace it?`,
+    { okLabel: "Replace", cancelLabel: "Skip", okDanger: true },
+  );
+  const decision: Exclude<ConflictPolicy, "ask"> = replace ? "replace" : "skip";
+  if (hasBatchRemainder) {
+    const applyAll = await showConfirm(
+      "Apply Choice",
+      `Apply "${decision}" to remaining conflicts?`,
+      { okLabel: "Apply to all", cancelLabel: "Only this one" },
+    );
+    if (applyAll) {
+      session.applyAll = decision;
+    }
+  }
+  return decision;
+}
+
+async function resolveDownloadEntriesWithConflicts(
+  entries: DownloadQueueEntry[],
+): Promise<DownloadQueueEntry[]> {
+  const result: DownloadQueueEntry[] = [];
+  const conflictPolicy = state.currentSettings.conflictPolicy;
+  const session: ConflictPromptSession = { applyAll: null };
+  let remainingConflicts = 0;
+
+  const existingResults = await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        return await invoke<boolean>("path_exists", {
+          path: entry.destination,
+        });
+      } catch {
+        return false;
+      }
+    }),
+  );
+  for (const exists of existingResults) {
+    if (exists) remainingConflicts += 1;
+  }
+
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    const exists = existingResults[i];
+    if (!exists) {
+      result.push({ ...entry });
+      continue;
+    }
+
+    if (conflictPolicy === "replace") {
+      result.push({ ...entry, conflictResolution: "replace" });
+      remainingConflicts -= 1;
+      continue;
+    }
+    if (conflictPolicy === "skip") {
+      logActivity(
+        `Skipped download for ${basename(entry.key)}: destination exists.`,
+        "warning",
+      );
+      remainingConflicts -= 1;
+      continue;
+    }
+
+    const decision = await resolveConflictChoice(
+      entry.destination,
+      session,
+      remainingConflicts > 1,
+    );
+    remainingConflicts -= 1;
+    if (decision === "replace") {
+      result.push({ ...entry, conflictResolution: "replace" });
+    } else {
+      logActivity(
+        `Skipped download for ${basename(entry.key)}: destination exists.`,
+        "warning",
+      );
+    }
+  }
+
+  return result;
+}
+
+async function resolveObjectConflict(
+  bucket: string,
+  key: string,
+  session: ConflictPromptSession,
+  hasBatchRemainder: boolean,
+): Promise<Exclude<ConflictPolicy, "ask">> {
+  const conflictPolicy = state.currentSettings.conflictPolicy;
+  let exists = false;
+  try {
+    exists = await invoke<boolean>("object_exists", { bucket, key });
+  } catch {
+    exists = false;
+  }
+  if (!exists) return "replace";
+  if (conflictPolicy === "replace") return "replace";
+  if (conflictPolicy === "skip") return "skip";
+  return resolveConflictChoice(`${bucket}/${key}`, session, hasBatchRemainder);
+}
+
 async function uniqueDownloadEntries(
   keys: string[],
   destinationDir: string,
@@ -489,6 +746,97 @@ async function uniqueDownloadEntries(
   }
 
   return entries;
+}
+
+function estimateKnownObjectSize(entry: DownloadQueueEntry): number | null {
+  if (entry.bucket !== state.currentBucket) return null;
+  const match = state.objects.find((obj) => obj.key === entry.key);
+  if (!match) return null;
+  return Number.isFinite(match.size) && match.size >= 0 ? match.size : null;
+}
+
+async function estimateDownloadEntryBytes(
+  entry: DownloadQueueEntry,
+): Promise<number> {
+  const known = estimateKnownObjectSize(entry);
+  if (known !== null) return known;
+  try {
+    const head = await invoke<HeadObjectSummary>("head_object", {
+      bucket: entry.bucket,
+      key: entry.key,
+    });
+    if (!Number.isFinite(head.content_length) || head.content_length < 0)
+      return 0;
+    return head.content_length;
+  } catch {
+    return 0;
+  }
+}
+
+async function preflightDownloadDiskSpace(
+  entries: DownloadQueueEntry[],
+): Promise<boolean> {
+  if (entries.length === 0) return true;
+
+  const estimatedBytes = await Promise.all(
+    entries.map((entry) => estimateDownloadEntryBytes(entry)),
+  );
+  const totalEstimatedBytes = estimatedBytes.reduce(
+    (sum, bytes) => sum + bytes,
+    0,
+  );
+  if (totalEstimatedBytes < DOWNLOAD_DISK_PREFLIGHT_THRESHOLD_BYTES) {
+    return true;
+  }
+
+  const requiredByDirectory = new Map<string, number>();
+  for (let i = 0; i < entries.length; i += 1) {
+    const dir = parentDirectory(entries[i].destination);
+    if (!dir) continue;
+    const size = estimatedBytes[i];
+    if (!Number.isFinite(size) || size <= 0) continue;
+    requiredByDirectory.set(dir, (requiredByDirectory.get(dir) ?? 0) + size);
+  }
+  if (requiredByDirectory.size === 0) return true;
+
+  const shortages: Array<{ dir: string; required: number; available: number }> =
+    [];
+  for (const [dir, required] of requiredByDirectory) {
+    try {
+      const available = await invoke<number>("get_available_disk_bytes", {
+        path: dir,
+      });
+      if (!Number.isFinite(available) || available < 0) continue;
+      if (available < required) {
+        shortages.push({ dir, required, available });
+      }
+    } catch (err) {
+      logActivity(
+        `Disk preflight warning for ${dir}: ${friendlyError(err)}`,
+        "warning",
+      );
+    }
+  }
+  if (shortages.length === 0) return true;
+
+  const lines = shortages
+    .slice(0, 3)
+    .map(
+      (row) =>
+        `${row.dir} — need ${formatSize(row.required)}, have ${formatSize(row.available)}`,
+    );
+  if (shortages.length > 3) {
+    lines.push(`+${shortages.length - 3} more destination(s)`);
+  }
+  const proceed = await showConfirm(
+    "Low Disk Space",
+    `Destination free space may be insufficient:\n${lines.join("\n")}\n\nQueue downloads anyway?`,
+    { okLabel: "Queue anyway", cancelLabel: "Cancel queue", okDanger: true },
+  );
+  if (!proceed) {
+    setStatus("Download queue cancelled by disk-space preflight.", 5000);
+  }
+  return proceed;
 }
 
 function getConnectionInputs() {
@@ -694,14 +1042,18 @@ async function handleDownload(): Promise<void> {
   const keys = getSelectedFileKeys();
   if (keys.length === 0) return;
   const entries: DownloadQueueEntry[] = [];
+  const rememberedDir = getRememberedDownloadDir();
 
   if (keys.length === 1) {
     const fileName = basename(keys[0]);
     const destination = await save({
-      defaultPath: fileName,
+      defaultPath: rememberedDir
+        ? joinPath(rememberedDir, fileName, state.platformName)
+        : fileName,
       title: `Save ${fileName}`,
     });
     if (!destination) return;
+    saveRememberedDownloadDir(destination);
     entries.push({
       bucket: state.currentBucket,
       key: keys[0],
@@ -712,26 +1064,41 @@ async function handleDownload(): Promise<void> {
       title: "Select destination folder",
       multiple: false,
       directory: true,
+      defaultPath: rememberedDir || undefined,
     });
     if (!selected || Array.isArray(selected)) return;
+    saveRememberedDownloadDirectoryValue(selected);
     entries.push(...(await uniqueDownloadEntries(keys, selected)));
   }
 
   if (entries.length === 0) return;
-
-  if (enqueueDownloadTransfers(entries)) {
-    setStatus(`Queued ${entries.length} download(s).`, 5000);
-    logActivity(`Queued ${entries.length} download(s).`, "info");
+  const resolvedEntries = await resolveDownloadEntriesWithConflicts(entries);
+  if (resolvedEntries.length === 0) {
+    setStatus("No downloads queued (all conflicts were skipped).", 5000);
+    return;
+  }
+  if (!(await preflightDownloadDiskSpace(resolvedEntries))) {
     return;
   }
 
-  for (const entry of entries) {
+  if (enqueueDownloadTransfers(resolvedEntries)) {
+    setStatus(`Queued ${resolvedEntries.length} download(s).`, 5000);
+    logActivity(`Queued ${resolvedEntries.length} download(s).`, "info");
+    return;
+  }
+
+  for (const entry of resolvedEntries) {
     try {
       setStatus(`Downloading ${basename(entry.key)}...`);
       const size = await invoke<number>("download_object", {
         bucket: entry.bucket,
         key: entry.key,
         destination: entry.destination,
+        overwrite: entry.conflictResolution === "replace",
+        tempPath: `${entry.destination}.s3-sidekick.download.tmp`,
+        attempt: 1,
+        checksumVerification:
+          state.currentSettings.enableTransferChecksumVerification,
       });
       setStatus(
         `Downloaded ${basename(entry.key)} (${formatSize(size)}).`,
@@ -888,6 +1255,12 @@ function openCopyMoveDialog(): void {
   const closeBtn = document.getElementById(
     "copy-move-close",
   ) as HTMLButtonElement;
+  const recentWrap = document.getElementById(
+    "copy-move-recent-wrap",
+  ) as HTMLElement | null;
+  const recentList = document.getElementById(
+    "copy-move-recent-list",
+  ) as HTMLElement | null;
 
   // Populate bucket dropdown from known buckets
   bucketSelect.innerHTML = "";
@@ -908,7 +1281,6 @@ function openCopyMoveDialog(): void {
 
   const isSingleFile = fileKeys.length === 1 && prefixes.length === 0;
   const isSingleFolder = prefixes.length === 1 && fileKeys.length === 0;
-  const totalItems = fileKeys.length + prefixes.length;
 
   if (isSingleFile) {
     descEl.textContent = `File: ${fileKeys[0]}`;
@@ -944,8 +1316,44 @@ function openCopyMoveDialog(): void {
     "copy-move-browser-list",
   ) as HTMLElement;
 
+  function renderRecentDestinations(): void {
+    if (!recentWrap || !recentList) return;
+    const recent = readRecentCopyMoveDestinations();
+    if (recent.length === 0) {
+      recentWrap.hidden = true;
+      recentList.innerHTML = "";
+      return;
+    }
+    const preferredBucket = bucketSelect.value || state.currentBucket;
+    const ordered = [
+      ...recent.filter((entry) => entry.bucket === preferredBucket),
+      ...recent.filter((entry) => entry.bucket !== preferredBucket),
+    ].slice(0, RECENT_DESTINATION_LIMIT);
+    if (ordered.length === 0) {
+      recentWrap.hidden = true;
+      recentList.innerHTML = "";
+      return;
+    }
+    recentWrap.hidden = false;
+    recentList.innerHTML = "";
+    for (const entry of ordered) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "copy-move-recent-item";
+      button.textContent = `${entry.bucket}/${entry.path}`;
+      button.title = `${entry.bucket}/${entry.path}`;
+      button.addEventListener("click", () => {
+        bucketSelect.value = entry.bucket;
+        pathInput.value = entry.path;
+        pathInput.focus();
+      });
+      recentList.appendChild(button);
+    }
+  }
+
   browserPanel.hidden = true;
   browserToggle.textContent = "Browse folders ▶";
+  renderRecentDestinations();
 
   let loadFolderSeq = 0;
 
@@ -1045,6 +1453,7 @@ function openCopyMoveDialog(): void {
   };
 
   bucketSelect.onchange = () => {
+    renderRecentDestinations();
     if (!browserPanel.hidden) void loadFolders("");
   };
 
@@ -1054,7 +1463,7 @@ function openCopyMoveDialog(): void {
   };
 
   const srcBucket = state.currentBucket;
-  const srcPrefix = state.currentPrefix;
+  const conflictSession: ConflictPromptSession = { applyAll: null };
 
   const runCopy = async (move: boolean) => {
     const dstBucket = bucketSelect.value;
@@ -1064,81 +1473,146 @@ function openCopyMoveDialog(): void {
       pathInput.focus();
       return;
     }
-    const verb = move ? "Mov" : "Copy";
+    const action = move ? "move" : "copy";
 
     try {
-      setStatus(`${verb}ing...`);
+      setStatus(`Preparing ${action} transfer(s)...`);
+      const queuedEntries: CopyMoveQueueEntry[] = [];
+      let skippedFiles = 0;
+      let skippedFolders = 0;
 
       if (isSingleFile) {
-        await invoke("copy_object_to", {
-          srcBucket,
-          srcKey: fileKeys[0],
+        const decision = await resolveObjectConflict(
           dstBucket,
-          dstKey: dstPath,
-        });
-        if (move) {
-          await invoke("delete_objects", {
-            bucket: srcBucket,
-            keys: [fileKeys[0]],
-          });
+          dstPath,
+          conflictSession,
+          false,
+        );
+        if (decision === "skip") {
+          setStatus(
+            `Skipped "${basename(fileKeys[0])}" (destination exists).`,
+            5000,
+          );
+          return;
         }
-        setStatus(
-          `${verb}ed "${basename(fileKeys[0])}" to "${dstBucket}/${dstPath}".`,
-          5000,
-        );
-        logActivity(
-          `${verb}ed "${fileKeys[0]}" to "${dstBucket}/${dstPath}".`,
-          "success",
-        );
+        queuedEntries.push({
+          operation: move ? "move" : "copy",
+          sourceBucket: srcBucket,
+          fileName: basename(fileKeys[0]),
+          sourceKey: fileKeys[0],
+          destinationBucket: dstBucket,
+          destinationKey: dstPath,
+          conflictResolution: decision,
+        });
       } else {
         const prefix = dstPath.endsWith("/") ? dstPath : dstPath + "/";
         for (const key of fileKeys) {
-          await invoke("copy_object_to", {
-            srcBucket,
-            srcKey: key,
+          const dstKey = prefix + basename(key);
+          const decision = await resolveObjectConflict(
             dstBucket,
-            dstKey: prefix + basename(key),
+            dstKey,
+            conflictSession,
+            true,
+          );
+          if (decision === "skip") {
+            skippedFiles += 1;
+            continue;
+          }
+          queuedEntries.push({
+            operation: move ? "move" : "copy",
+            sourceBucket: srcBucket,
+            fileName: basename(key),
+            sourceKey: key,
+            destinationBucket: dstBucket,
+            destinationKey: dstKey,
+            conflictResolution: decision,
           });
-        }
-        if (move && fileKeys.length > 0) {
-          await invoke("delete_objects", { bucket: srcBucket, keys: fileKeys });
         }
         for (const srcPrefix of prefixes) {
           const folderName = basename(srcPrefix.replace(/\/$/, ""));
           const dstPrefix = isSingleFolder ? prefix : prefix + folderName + "/";
-          await invoke("copy_prefix_to", {
-            srcBucket,
-            srcPrefix,
-            dstBucket,
-            dstPrefix,
-          });
-          if (move) {
-            await invoke("delete_prefix", {
-              bucket: srcBucket,
-              prefix: srcPrefix,
+          let folderHasConflict = false;
+          try {
+            const existing = await invoke<{
+              objects: Array<{ key: string }>;
+              prefixes: string[];
+            }>("list_objects", {
+              bucket: dstBucket,
+              prefix: dstPrefix,
+              delimiter: "",
+              continuationToken: "",
             });
+            folderHasConflict =
+              existing.objects.length > 0 || existing.prefixes.length > 0;
+          } catch {
+            folderHasConflict = false;
           }
+          if (folderHasConflict) {
+            let decision: Exclude<ConflictPolicy, "ask">;
+            if (conflictSession.applyAll) {
+              decision = conflictSession.applyAll;
+            } else if (state.currentSettings.conflictPolicy === "replace") {
+              decision = "replace";
+            } else if (state.currentSettings.conflictPolicy === "skip") {
+              decision = "skip";
+            } else {
+              decision = await resolveConflictChoice(
+                `${dstBucket}/${dstPrefix}`,
+                conflictSession,
+                true,
+              );
+            }
+            if (decision === "skip") {
+              skippedFolders += 1;
+              continue;
+            }
+            queuedEntries.push({
+              operation: move ? "move" : "copy",
+              sourceBucket: srcBucket,
+              fileName: folderName,
+              sourcePrefix: srcPrefix,
+              destinationBucket: dstBucket,
+              destinationPrefix: dstPrefix,
+              conflictResolution: decision,
+            });
+            continue;
+          }
+          queuedEntries.push({
+            operation: move ? "move" : "copy",
+            sourceBucket: srcBucket,
+            fileName: folderName,
+            sourcePrefix: srcPrefix,
+            destinationBucket: dstBucket,
+            destinationPrefix: dstPrefix,
+          });
         }
-        const destLabel = isSingleFolder ? dstPath : prefix;
-        setStatus(
-          `${verb}ed ${totalItems} item${totalItems !== 1 ? "s" : ""}.`,
-          5000,
-        );
-        logActivity(
-          `${verb}ed ${totalItems} items to "${dstBucket}/${destLabel}".`,
-          "success",
-        );
       }
 
+      if (queuedEntries.length === 0) {
+        setStatus(
+          "No copy/move transfers queued (all conflicts skipped).",
+          5000,
+        );
+        return;
+      }
+
+      enqueueCopyMoveEntries(queuedEntries);
+      rememberCopyMoveDestination(dstBucket, dstPath);
+      const skippedTotal = skippedFiles + skippedFolders;
+      const skippedLabel =
+        skippedTotal > 0
+          ? ` Skipped ${skippedTotal} due to destination conflicts.`
+          : "";
+      setStatus(
+        `Queued ${queuedEntries.length} ${action} transfer(s).${skippedLabel}`,
+        5000,
+      );
+      logActivity(
+        `Queued ${queuedEntries.length} ${action} transfer(s) to "${dstBucket}/${dstPath}".${skippedLabel}`,
+        "success",
+      );
       closeFn();
       clearSelection();
-      if (
-        state.currentBucket === srcBucket &&
-        state.currentPrefix === srcPrefix
-      ) {
-        await refreshObjects(state.currentBucket, state.currentPrefix);
-        renderObjectTable();
-      }
     } catch (err) {
       setStatus(`${move ? "Move" : "Copy"} failed: ${friendlyError(err)}`);
       logActivity(
@@ -1301,6 +1775,103 @@ async function handleRefreshBuckets(): Promise<void> {
   } catch (err) {
     setStatus(`Failed to refresh buckets: ${friendlyError(err)}`);
     logActivity(`Failed to refresh buckets: ${friendlyError(err)}`, "error");
+  }
+}
+
+async function handleExportActivityLog(): Promise<void> {
+  const text = exportActivityLogText();
+  if (!text) {
+    setStatus("No activity entries to export.", 5000);
+    return;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const destination = await save({
+    title: "Export Activity Log",
+    defaultPath: `s3-sidekick-activity-${stamp}.txt`,
+  });
+  if (!destination) return;
+
+  let overwrite = false;
+  try {
+    const exists = await invoke<boolean>("path_exists", { path: destination });
+    if (exists) {
+      overwrite = await showConfirm(
+        "Overwrite File",
+        `${destination} already exists. Replace it?`,
+        { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
+      );
+      if (!overwrite) return;
+    }
+    await invoke("write_text_file", { path: destination, text, overwrite });
+    setStatus("Activity log exported.", 5000);
+    logActivity(`Exported activity log to ${destination}.`, "success");
+  } catch (err) {
+    setStatus(`Failed to export activity log: ${friendlyError(err)}`);
+    logActivity(
+      `Failed to export activity log: ${friendlyError(err)}`,
+      "error",
+    );
+  }
+}
+
+async function handleOpenLastDownloadFolder(): Promise<void> {
+  const dir = getRememberedDownloadDir();
+  if (!dir) {
+    setStatus("No remembered download folder.", 5000);
+    return;
+  }
+  try {
+    await invoke("open_local_path", { path: dir });
+    setStatus("Opened last download folder.", 3000);
+  } catch (err) {
+    setStatus(`Failed to open folder: ${friendlyError(err)}`);
+  }
+}
+
+async function handleGoToKeyOrPrefix(): Promise<void> {
+  if (!state.connected || !state.currentBucket) return;
+  const raw = await showPrompt("Go To", "Enter key or prefix:", {
+    inputPlaceholder: "e.g. folder/file.txt or folder/subfolder/",
+  });
+  if (!raw) return;
+
+  const input = raw.trim().replace(/^\/+/, "");
+  if (!input) return;
+
+  try {
+    if (input.endsWith("/")) {
+      await navigateToFolder(input);
+      return;
+    }
+
+    const idx = input.lastIndexOf("/");
+    const parentPrefix = idx >= 0 ? input.slice(0, idx + 1) : "";
+    await navigateToFolder(parentPrefix);
+
+    const targetKey = input;
+    if (state.objects.some((obj) => obj.key === targetKey)) {
+      state.selectedKeys.clear();
+      state.selectedKeys.add(targetKey);
+      updateSelectionUI();
+      return;
+    }
+
+    if (state.prefixes.some((prefix) => prefix === `${input}/`)) {
+      await navigateToFolder(`${input}/`);
+      return;
+    }
+
+    const filterInput = document.getElementById(
+      "filter-input",
+    ) as HTMLInputElement | null;
+    if (filterInput) {
+      filterInput.value = basename(input);
+      state.filterText = filterInput.value;
+      renderObjectTable();
+    }
+    setStatus(`Not found exactly: ${input}. Applied filter.`, 5000);
+  } catch (err) {
+    setStatus(`Go to failed: ${friendlyError(err)}`);
   }
 }
 
@@ -1849,6 +2420,11 @@ function wireEvents(): void {
   document
     .getElementById("transfer-toggle")!
     .addEventListener("click", toggleTransferQueue);
+  document.getElementById("drawer-export")?.addEventListener("click", () => {
+    if (getActiveTab() === "activity") {
+      void handleExportActivityLog();
+    }
+  });
   document.getElementById("drawer-clear")!.addEventListener("click", () => {
     const tab = getActiveTab();
     if (tab === "activity") {
@@ -1989,6 +2565,17 @@ function wireEvents(): void {
       filterInputDebounce = undefined;
     }, FILTER_INPUT_DEBOUNCE_MS);
   });
+
+  const bucketFilterInput = document.getElementById(
+    "bucket-filter-input",
+  ) as HTMLInputElement | null;
+  if (bucketFilterInput) {
+    bucketFilterInput.value = state.bucketFilterText;
+    bucketFilterInput.addEventListener("input", () => {
+      state.bucketFilterText = bucketFilterInput.value;
+      renderBucketList();
+    });
+  }
 
   const loadMoreBtn = document.getElementById(
     "btn-load-more",
@@ -2288,6 +2875,28 @@ function wireEvents(): void {
         if (f) f.focus();
       },
       available: () => state.connected,
+    },
+    {
+      id: "go-to-key-prefix",
+      label: "Go to Key/Prefix",
+      icon: "1f9ed",
+      action: () => void handleGoToKeyOrPrefix(),
+      available: () => state.connected,
+    },
+    {
+      id: "open-last-download-folder",
+      label: "Open Last Download Folder",
+      icon: "1f4c2",
+      action: () => void handleOpenLastDownloadFolder(),
+      available: () =>
+        state.currentSettings.rememberDownloadPath &&
+        getRememberedDownloadDir().length > 0,
+    },
+    {
+      id: "export-activity-log",
+      label: "Export Activity Log",
+      icon: "1f4be",
+      action: () => void handleExportActivityLog(),
     },
     {
       id: "activity",

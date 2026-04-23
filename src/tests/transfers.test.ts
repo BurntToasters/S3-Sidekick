@@ -59,9 +59,25 @@ async function flushMicrotasks(cycles = 2): Promise<void> {
 beforeEach(() => {
   vi.resetModules();
   mockInvoke.mockReset();
-  mockInvoke.mockResolvedValue(undefined);
+  mockInvoke.mockImplementation(async (cmd, payload) => {
+    if (cmd === "object_exists" || cmd === "path_exists") return false;
+    if (cmd === "download_object") return 1234;
+    if (cmd === "head_object") {
+      const key =
+        payload &&
+        typeof payload === "object" &&
+        "key" in (payload as Record<string, unknown>)
+          ? String((payload as Record<string, unknown>).key)
+          : "";
+      if (key.endsWith("small.txt")) return { content_length: 5 };
+      if (key.endsWith("progress-upload.txt")) return { content_length: 100 };
+      return { content_length: 0 };
+    }
+    return undefined;
+  });
   mockListen.mockReset();
   mockListen.mockResolvedValue(() => {});
+  localStorage.clear();
   renderFixture();
 });
 
@@ -92,20 +108,34 @@ describe("transfers queue UI", () => {
 
     expect(toggle.hidden).toBe(false);
     expect(drawer.hidden).toBe(false);
-    expect(list.textContent).toContain("photo.png");
+    await flushMicrotasks(8);
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object",
+      "object_exists",
+      expect.objectContaining({ key: "uploads/photo.png" }),
+    );
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "upload_object_resumable",
       expect.objectContaining({
         key: "uploads/photo.png",
+        resumable: false,
       }),
     );
+    const uploadCall = mockInvoke.mock.calls.find(
+      ([cmd]) => cmd === "upload_object_resumable",
+    );
+    expect(uploadCall).toBeTruthy();
+    const uploadPayload = uploadCall?.[1] as Record<string, unknown>;
+    expect(uploadPayload).not.toHaveProperty("checkpointId");
+    await vi.waitFor(() => {
+      expect(list.textContent).not.toContain("photo.png");
+    });
   });
 
   it("hides transfer toggle after completed history is cleared", async () => {
     const transfers = await loadTransfersModule();
     await transfers.initTransferQueueUI();
     transfers.enqueuePaths(["C:\\tmp\\archive.zip"], "uploads/");
-    await flushMicrotasks();
+    await flushMicrotasks(8);
 
     transfers.clearCompletedTransfers();
 
@@ -119,7 +149,6 @@ describe("transfers queue UI", () => {
   it("queues downloads and calls download_object", async () => {
     const transfers = await loadTransfersModule();
     await transfers.initTransferQueueUI();
-    mockInvoke.mockResolvedValueOnce(1234);
 
     transfers.enqueueDownloads([
       {
@@ -128,10 +157,11 @@ describe("transfers queue UI", () => {
         destination: "C:\\tmp\\readme.txt",
       },
     ]);
-    await flushMicrotasks();
+    await flushMicrotasks(8);
 
-    const list = document.getElementById("transfer-list") as HTMLDivElement;
-    expect(list.textContent).not.toContain("readme.txt");
+    expect(mockInvoke).toHaveBeenCalledWith("path_exists", {
+      path: "C:\\tmp\\readme.txt",
+    });
     expect(mockInvoke).toHaveBeenCalledWith(
       "download_object",
       expect.objectContaining({
@@ -142,22 +172,159 @@ describe("transfers queue UI", () => {
     );
   });
 
+  it("passes checksum verification flag to download and upload commands", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    state.currentSettings.enableTransferChecksumVerification = true;
+    await transfers.initTransferQueueUI();
+
+    transfers.enqueueDownloads([
+      {
+        bucket: "bucket-a",
+        key: "docs/readme.txt",
+        destination: "C:\\tmp\\readme.txt",
+      },
+    ]);
+    await flushMicrotasks(8);
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "download_object",
+      expect.objectContaining({
+        key: "docs/readme.txt",
+        checksumVerification: true,
+      }),
+    );
+
+    transfers.clearCompletedTransfers();
+    transfers.enqueuePaths(["C:\\tmp\\checksummed.txt"], "uploads/");
+    await flushMicrotasks(12);
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "upload_object_resumable",
+      expect.objectContaining({
+        key: "uploads/checksummed.txt",
+        checksumVerification: true,
+      }),
+    );
+  });
+
+  it("falls back to legacy manifest persistence when backend manifest load is unavailable", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+
+    let resolveUpload = () => {};
+    mockInvoke.mockImplementation(async (cmd, payload) => {
+      if (cmd === "load_transfer_manifest") {
+        throw new Error("unknown command");
+      }
+      if (cmd === "transfer_checkpoint_gc") return undefined;
+      if (cmd === "object_exists") return false;
+      if (cmd === "head_object") {
+        const key =
+          payload &&
+          typeof payload === "object" &&
+          "key" in (payload as Record<string, unknown>)
+            ? String((payload as Record<string, unknown>).key)
+            : "";
+        if (key.endsWith("persist.txt")) return { content_length: 0 };
+        return { content_length: 0 };
+      }
+      if (cmd === "upload_object_resumable") {
+        return new Promise<void>((resolve) => {
+          resolveUpload = resolve;
+        });
+      }
+      if (cmd === "cancel_transfer") return undefined;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    transfers.enqueuePaths(["C:\\tmp\\persist.txt"], "uploads/");
+    await flushMicrotasks(8);
+
+    const raw = localStorage.getItem("s3-sidekick.transfer-manifest.v1");
+    expect(raw).toBeTruthy();
+    const parsed = JSON.parse(raw ?? "{}") as { items?: unknown[] };
+    expect(Array.isArray(parsed.items)).toBe(true);
+    expect((parsed.items ?? []).length).toBeGreaterThan(0);
+
+    resolveUpload();
+    await flushMicrotasks(8);
+  });
+
+  it("uses parallel download without synthetic completed-part indexes", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    state.currentSettings.enableTransferResume = true;
+    state.currentSettings.downloadParallelThresholdMb = 1;
+    state.currentSettings.downloadPartConcurrency = 2;
+    state.currentSettings.downloadPartSizeMb = 16;
+
+    mockInvoke.mockImplementation(async (cmd, payload) => {
+      if (cmd === "path_exists") return false;
+      if (cmd === "head_object") {
+        const key =
+          payload &&
+          typeof payload === "object" &&
+          "key" in (payload as Record<string, unknown>)
+            ? String((payload as Record<string, unknown>).key)
+            : "";
+        if (key === "docs/big.bin") return { content_length: 5 * 1024 * 1024 };
+        return { content_length: 0 };
+      }
+      if (cmd === "download_object_parallel") return 5 * 1024 * 1024;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    transfers.enqueueDownloads([
+      {
+        bucket: "bucket-a",
+        key: "docs/big.bin",
+        destination: "C:\\tmp\\big.bin",
+      },
+    ]);
+    await flushMicrotasks(12);
+
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(
+          ([cmd]) => cmd === "download_object_parallel",
+        ),
+      ).toBe(true);
+    });
+
+    const parallelCall = mockInvoke.mock.calls.find(
+      ([cmd]) => cmd === "download_object_parallel",
+    );
+    expect(parallelCall).toBeTruthy();
+    const payload = parallelCall?.[1] as Record<string, unknown>;
+    expect("resumeCompletedParts" in payload).toBe(false);
+  });
+
   it("reports completion summary for successful transfer runs", async () => {
     const transfers = await loadTransfersModule();
     const onComplete = vi.fn();
     transfers.setTransferCompleteHandler(onComplete);
     await transfers.initTransferQueueUI();
 
-    mockInvoke.mockResolvedValueOnce(undefined);
     transfers.enqueuePaths(["C:\\tmp\\first.txt"], "uploads/");
-    await flushMicrotasks();
-    expect(onComplete).toHaveBeenCalledTimes(1);
-    expect(onComplete).toHaveBeenLastCalledWith({
-      hadUpload: true,
-      hadDownload: false,
+    await vi.waitFor(() => {
+      expect(onComplete.mock.calls.length).toBe(1);
+      expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
+        hadUpload: true,
+        hadDownload: false,
+      });
     });
 
-    mockInvoke.mockResolvedValueOnce(250);
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "path_exists") return false;
+      if (cmd === "download_object") return 250;
+      if (cmd === "object_exists") return false;
+      if (cmd === "head_object") return { content_length: 0 };
+      return undefined;
+    });
     transfers.enqueueDownloads([
       {
         bucket: "bucket-a",
@@ -165,17 +332,18 @@ describe("transfers queue UI", () => {
         destination: "C:\\tmp\\guide.txt",
       },
     ]);
-    await flushMicrotasks();
-    expect(onComplete).toHaveBeenCalledTimes(2);
-    expect(onComplete).toHaveBeenLastCalledWith({
-      hadUpload: false,
-      hadDownload: true,
+    await vi.waitFor(() => {
+      expect(onComplete.mock.calls.length).toBe(2);
+      expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
+        hadUpload: false,
+        hadDownload: true,
+      });
     });
 
     mockInvoke.mockRejectedValueOnce(new Error("upload failed"));
     transfers.enqueuePaths(["C:\\tmp\\second.txt"], "uploads/");
-    await flushMicrotasks();
-    expect(onComplete).toHaveBeenCalledTimes(2);
+    await flushMicrotasks(20);
+    expect(onComplete.mock.calls.length).toBe(2);
   });
 
   it("uses browser-file upload fallback and surfaces oversize browser upload errors", async () => {
@@ -185,9 +353,25 @@ describe("transfers queue UI", () => {
     state.currentBucket = "bucket-a";
     await transfers.initTransferQueueUI();
 
+    mockInvoke.mockImplementation(async (cmd, payload) => {
+      if (cmd === "object_exists") return false;
+      if (cmd === "upload_object_bytes") return undefined;
+      if (cmd === "head_object") {
+        const key =
+          payload &&
+          typeof payload === "object" &&
+          "key" in (payload as Record<string, unknown>)
+            ? String((payload as Record<string, unknown>).key)
+            : "";
+        if (key.endsWith("small.txt")) return { content_length: 5 };
+        return { content_length: 0 };
+      }
+      return undefined;
+    });
+
     const small = new File(["hello"], "small.txt", { type: "text/plain" });
     transfers.enqueueFiles([small], "web/");
-    await flushMicrotasks(4);
+    await flushMicrotasks(8);
     expect(mockInvoke).toHaveBeenCalledWith(
       "upload_object_bytes",
       expect.objectContaining({
@@ -203,13 +387,13 @@ describe("transfers queue UI", () => {
       arrayBuffer: async () => new ArrayBuffer(1),
     } as unknown as File;
     transfers.enqueueFiles([tooLarge], "web/");
-    await flushMicrotasks(6);
+    await flushMicrotasks(10);
     await new Promise((resolve) => setTimeout(resolve, 30));
     const hugeRow = Array.from(
       document.querySelectorAll<HTMLDivElement>(".transfer-item"),
     ).find((row) => row.textContent?.includes("huge.bin"));
     expect(hugeRow).toBeTruthy();
-    expect(hugeRow?.textContent).toContain("Error");
+    expect(hugeRow?.textContent).toContain("16MB");
   });
 
   it("supports canceling uploading and queued transfer rows", async () => {
@@ -220,7 +404,7 @@ describe("transfers queue UI", () => {
 
     let resolveUpload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "upload_object") {
+      if (cmd === "upload_object_resumable") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -244,7 +428,13 @@ describe("transfers queue UI", () => {
     );
 
     resolveUpload();
-    await flushMicrotasks(4);
+    await flushMicrotasks(8);
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("transfer-list") as HTMLDivElement)
+          .textContent,
+      ).not.toContain("slow.txt");
+    });
     transfers.clearCompletedTransfers();
 
     state.currentSettings.maxConcurrentTransfers = 0;
@@ -255,10 +445,12 @@ describe("transfers queue UI", () => {
     ).find((row) => row.textContent?.includes("queued.txt"));
     expect(queuedRow).toBeTruthy();
     (queuedRow?.querySelector(".transfer-cancel") as HTMLButtonElement).click();
-    await flushMicrotasks(2);
-    expect(
-      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
-    ).toContain("Cancelled");
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("transfer-list") as HTMLDivElement)
+          .textContent,
+      ).toContain("Cancelled");
+    });
   });
 
   it("updates progress via transfer events and cleans up listeners on dispose", async () => {
@@ -281,7 +473,7 @@ describe("transfers queue UI", () => {
     let resolveUpload = () => {};
     let resolveDownload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "upload_object") {
+      if (cmd === "upload_object_resumable") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -350,21 +542,26 @@ describe("transfers queue UI", () => {
       ],
       "pref/",
     );
-    await flushMicrotasks(4);
+    await flushMicrotasks(8);
     expect(
       (document.getElementById("transfer-list") as HTMLDivElement).textContent,
-    ).not.toContain("a.txt");
+    ).not.toContain("Verification failed");
 
     transfers.enqueueDownloads([
       { bucket: "bucket-a", key: "docs/no-destination.txt", destination: "" },
     ]);
-    await flushMicrotasks(4);
+    await flushMicrotasks(8);
     expect(
       (document.getElementById("transfer-list") as HTMLDivElement).textContent,
-    ).toContain("No destination available");
+    ).toContain("no-destination.txt");
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "download_object",
+      expect.objectContaining({ key: "docs/no-destination.txt" }),
+    );
 
     transfers.enqueuePaths([""], "");
-    await flushMicrotasks(4);
+    await flushMicrotasks(8);
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(
       (document.getElementById("transfer-list") as HTMLDivElement).textContent,
     ).toContain("No upload source available");
@@ -382,7 +579,7 @@ describe("transfers queue UI", () => {
     transfers.enqueuePaths(["C:\\tmp\\noext"], "uploads/");
     await flushMicrotasks(4);
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object",
+      "upload_object_resumable",
       expect.objectContaining({
         filePath: "C:\\tmp\\noext",
         contentType: "application/octet-stream",
@@ -449,7 +646,7 @@ describe("transfers queue UI", () => {
 
     let resolveUpload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "upload_object") {
+      if (cmd === "upload_object_resumable") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -501,7 +698,7 @@ describe("transfers queue UI", () => {
     await flushMicrotasks(4);
 
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object",
+      "upload_object_resumable",
       expect.objectContaining({
         filePath: "C:\\tmp\\headless.txt",
       }),
@@ -553,14 +750,20 @@ describe("transfers queue UI", () => {
       arrayBuffer: async () => new ArrayBuffer(5),
     } as unknown as File;
     transfers.enqueueFiles([pseudoFile], "direct/");
-    await flushMicrotasks(5);
+    await flushMicrotasks(12);
 
-    expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object",
-      expect.objectContaining({
-        key: "direct/path-backed.txt",
-        filePath: "C:\\tmp\\path-backed.txt",
-      }),
-    );
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(
+          ([cmd, payload]) =>
+            cmd === "upload_object_resumable" &&
+            typeof payload === "object" &&
+            payload !== null &&
+            (payload as { key?: string }).key === "direct/path-backed.txt" &&
+            (payload as { filePath?: string }).filePath ===
+              "C:\\tmp\\path-backed.txt",
+        ),
+      ).toBe(true);
+    });
   });
 });
