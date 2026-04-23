@@ -122,7 +122,16 @@
           hidden
         ></button>
         <aside id="bucket-panel" class="sidebar">
-          <div class="sidebar__header">Buckets</div>
+          <div class="sidebar__header sidebar__header--stacked">
+            <span>Buckets</span>
+            <input
+              id="bucket-filter-input"
+              class="field field--sm sidebar__filter"
+              type="text"
+              placeholder="Filter buckets..."
+              aria-label="Filter buckets"
+            />
+          </div>
           <ul id="bucket-list" class="list"></ul>
         </aside>
         <div
@@ -452,6 +461,9 @@
             </button>
           </div>
           <div class="bottom-drawer__actions">
+            <button id="drawer-export" class="btn btn--ghost btn--sm">
+              Export
+            </button>
             <button id="drawer-clear" class="btn btn--ghost btn--sm">
               Clear
             </button>
@@ -712,6 +724,48 @@
                 <option value="8">8</option>
                 <option value="10">10 (maximum)</option>
               </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-transfer-retries">Transfer retries</label>
+              <select id="setting-transfer-retries" class="field field--sm">
+                <option value="0">0 (disabled)</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3 (default)</option>
+                <option value="5">5</option>
+                <option value="8">8</option>
+                <option value="10">10 (maximum)</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-transfer-retry-base-ms"
+                >Retry base delay</label
+              >
+              <select
+                id="setting-transfer-retry-base-ms"
+                class="field field--sm"
+              >
+                <option value="100">100 ms</option>
+                <option value="200">200 ms</option>
+                <option value="400">400 ms (default)</option>
+                <option value="800">800 ms</option>
+                <option value="1200">1200 ms</option>
+                <option value="2000">2000 ms</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-conflict-policy">Conflict policy</label>
+              <select id="setting-conflict-policy" class="field field--sm">
+                <option value="ask">Ask (default)</option>
+                <option value="skip">Skip existing</option>
+                <option value="replace">Replace existing</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label class="toggle-row">
+                <input id="setting-remember-download-path" type="checkbox" />
+                <span>Remember last download folder</span>
+              </label>
             </div>
             <div class="setting-section">Danger Zone</div>
             <div class="setting-item">

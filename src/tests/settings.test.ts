@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { SETTING_DEFAULTS } from "../settings-model.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
@@ -86,11 +87,7 @@ describe("settings module", () => {
     const { state } = await import("../state.ts");
     state.platformName = "windows";
     state.currentSettings = {
-      theme: "system",
-      autoCheckUpdates: true,
-      updateChannel: "release",
-      presignedUrlExpiration: 3600,
-      maxConcurrentTransfers: 3,
+      ...SETTING_DEFAULTS,
     };
     state.lastPersistedSettings = { ...state.currentSettings };
     state.settingsExtras = {};
@@ -187,11 +184,9 @@ describe("settings module", () => {
     const settings = await import("../settings.ts");
     const { state } = await import("../state.ts");
     state.currentSettings = {
-      theme: "system",
+      ...SETTING_DEFAULTS,
       autoCheckUpdates: false,
       updateChannel: "beta",
-      presignedUrlExpiration: 3600,
-      maxConcurrentTransfers: 3,
     };
 
     settings.readSettingsModal();
@@ -251,13 +246,11 @@ describe("settings module", () => {
 
     overlay.classList.add("active");
     state.lastPersistedSettings = {
+      ...SETTING_DEFAULTS,
       theme: "light",
-      autoCheckUpdates: true,
-      updateChannel: "release",
-      presignedUrlExpiration: 3600,
-      maxConcurrentTransfers: 3,
     };
     state.currentSettings = {
+      ...SETTING_DEFAULTS,
       theme: "dark",
       autoCheckUpdates: false,
       updateChannel: "beta",
@@ -384,15 +377,14 @@ describe("settings module", () => {
     const settings = await import("../settings.ts");
     const { state } = await import("../state.ts");
     state.lastPersistedSettings = {
+      ...SETTING_DEFAULTS,
       theme: "dark",
       autoCheckUpdates: false,
-      updateChannel: "release",
-      presignedUrlExpiration: 3600,
       maxConcurrentTransfers: 5,
     };
     state.currentSettings = {
+      ...SETTING_DEFAULTS,
       theme: "light",
-      autoCheckUpdates: true,
       updateChannel: "beta",
       presignedUrlExpiration: 120,
       maxConcurrentTransfers: 2,
@@ -693,10 +685,9 @@ describe("settings module", () => {
     const settings = await import("../settings.ts");
     const { state } = await import("../state.ts");
     state.currentSettings = {
+      ...SETTING_DEFAULTS,
       theme: "dark",
-      autoCheckUpdates: true,
       updateChannel: "beta",
-      presignedUrlExpiration: 3600,
       maxConcurrentTransfers: 4,
     };
 
@@ -720,17 +711,15 @@ describe("settings module", () => {
     const settings = await import("../settings.ts");
     const { state } = await import("../state.ts");
     state.lastPersistedSettings = {
-      theme: "system",
+      ...SETTING_DEFAULTS,
       autoCheckUpdates: false,
-      updateChannel: "release",
       presignedUrlExpiration: 120,
       maxConcurrentTransfers: 2,
     };
     state.currentSettings = {
+      ...SETTING_DEFAULTS,
       theme: "light",
-      autoCheckUpdates: true,
       updateChannel: "beta",
-      presignedUrlExpiration: 3600,
       maxConcurrentTransfers: 5,
     };
 

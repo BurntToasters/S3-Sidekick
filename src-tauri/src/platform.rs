@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::path::PathBuf;
 
 #[derive(serde::Serialize)]
 pub(crate) struct UpdaterSupportInfo {
@@ -100,6 +101,36 @@ pub(crate) fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+pub(crate) fn open_local_path(path: String) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Path is required".to_string());
+    }
+    let parsed = PathBuf::from(trimmed);
+    if !parsed.is_absolute() {
+        return Err(format!("Path must be absolute: {}", trimmed));
+    }
+    if !parsed.exists() {
+        return Err(format!("Path does not exist: {}", parsed.display()));
+    }
+
+    let status = if cfg!(target_os = "windows") {
+        Command::new("explorer").arg(&parsed).status()
+    } else if cfg!(target_os = "macos") {
+        Command::new("open").arg(&parsed).status()
+    } else {
+        Command::new("xdg-open").arg(&parsed).status()
+    }
+    .map_err(|e| format!("Failed to open local path: {}", e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Local path launcher exited with status {}", status))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +160,12 @@ mod tests {
         let result = open_external_url("http://example.com".to_string());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("https://"));
+    }
+
+    #[test]
+    fn open_local_path_rejects_relative() {
+        let result = open_local_path("relative/path".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("absolute"));
     }
 }

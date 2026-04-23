@@ -392,6 +392,20 @@ body.platform-linux {
   border-bottom: 1px solid var(--border);
 }
 
+.sidebar__header--stacked {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar__header--stacked > span {
+  line-height: 1.1;
+}
+
+.sidebar__filter {
+  width: 100%;
+}
+
 .content {
   flex: 1;
   display: flex;
@@ -2166,6 +2180,18 @@ body.modal-open .dialog-overlay.active {
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.transfer-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.transfer-attempt,
+.transfer-phase {
+  font-size: 10px;
+  color: var(--text-secondary);
 }
 
 .transfer-arrow {

@@ -1,5 +1,6 @@
 export type ThemePreference = "system" | "light" | "dark";
 export type UpdateChannel = "release" | "beta";
+export type ConflictPolicy = "ask" | "skip" | "replace";
 
 export interface UserSettings {
   theme: ThemePreference;
@@ -7,6 +8,10 @@ export interface UserSettings {
   updateChannel: UpdateChannel;
   presignedUrlExpiration: number;
   maxConcurrentTransfers: number;
+  transferRetryAttempts: number;
+  transferRetryBaseMs: number;
+  conflictPolicy: ConflictPolicy;
+  rememberDownloadPath: boolean;
 }
 
 export const SETTING_DEFAULTS: UserSettings = {
@@ -15,6 +20,10 @@ export const SETTING_DEFAULTS: UserSettings = {
   updateChannel: "release",
   presignedUrlExpiration: 3600,
   maxConcurrentTransfers: 3,
+  transferRetryAttempts: 3,
+  transferRetryBaseMs: 400,
+  conflictPolicy: "ask",
+  rememberDownloadPath: true,
 };
 
 export function normalizeUserSettings(
@@ -53,12 +62,46 @@ export function normalizeUserSettings(
       ? rawConcurrent
       : SETTING_DEFAULTS.maxConcurrentTransfers;
 
+  const rawRetryAttempts = raw.transferRetryAttempts;
+  const transferRetryAttempts =
+    typeof rawRetryAttempts === "number" &&
+    Number.isInteger(rawRetryAttempts) &&
+    rawRetryAttempts >= 0 &&
+    rawRetryAttempts <= 10
+      ? rawRetryAttempts
+      : SETTING_DEFAULTS.transferRetryAttempts;
+
+  const rawRetryBaseMs = raw.transferRetryBaseMs;
+  const transferRetryBaseMs =
+    typeof rawRetryBaseMs === "number" &&
+    Number.isInteger(rawRetryBaseMs) &&
+    rawRetryBaseMs >= 50 &&
+    rawRetryBaseMs <= 10000
+      ? rawRetryBaseMs
+      : SETTING_DEFAULTS.transferRetryBaseMs;
+
+  const conflictPolicy =
+    raw.conflictPolicy === "ask" ||
+    raw.conflictPolicy === "skip" ||
+    raw.conflictPolicy === "replace"
+      ? raw.conflictPolicy
+      : SETTING_DEFAULTS.conflictPolicy;
+
+  const rememberDownloadPath =
+    typeof raw.rememberDownloadPath === "boolean"
+      ? raw.rememberDownloadPath
+      : SETTING_DEFAULTS.rememberDownloadPath;
+
   return {
     theme,
     autoCheckUpdates,
     updateChannel,
     presignedUrlExpiration,
     maxConcurrentTransfers,
+    transferRetryAttempts,
+    transferRetryBaseMs,
+    conflictPolicy,
+    rememberDownloadPath,
   };
 }
 
