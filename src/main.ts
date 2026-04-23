@@ -92,6 +92,7 @@ import {
   logActivity,
   toggleActivityLog,
   clearActivityLog,
+  exportActivityLogText,
 } from "./activity-log.ts";
 import { initDrawer, getActiveTab } from "./bottom-drawer.ts";
 import {
@@ -118,6 +119,7 @@ import {
   showSetupWizard,
   markSetupComplete,
 } from "./setup-wizard.ts";
+import type { ConflictPolicy } from "./settings-model.ts";
 
 interface LocalFolderFileEntry {
   file_path: string;
@@ -129,12 +131,14 @@ interface DownloadQueueEntry {
   bucket: string;
   key: string;
   destination: string;
+  conflictResolution?: Exclude<ConflictPolicy, "ask">;
 }
 
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 420;
 const SIDEBAR_STORAGE_KEY = "s3-sidekick.sidebar.width";
 const FILTER_INPUT_DEBOUNCE_MS = 120;
+const LAST_DOWNLOAD_DIR_STORAGE_KEY = "s3-sidekick.last-download-dir";
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -460,6 +464,154 @@ function handleTabListArrowKey(
   nextTab.focus();
 }
 
+function parentDirectory(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const idx = normalized.lastIndexOf("/");
+  if (idx <= 0) return "";
+  return normalized.slice(0, idx);
+}
+
+function getRememberedDownloadDir(): string {
+  try {
+    return localStorage.getItem(LAST_DOWNLOAD_DIR_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveRememberedDownloadDir(path: string): void {
+  if (!state.currentSettings.rememberDownloadPath) return;
+  const dir = parentDirectory(path);
+  if (!dir) return;
+  try {
+    localStorage.setItem(LAST_DOWNLOAD_DIR_STORAGE_KEY, dir);
+  } catch {
+    // best effort
+  }
+}
+
+function saveRememberedDownloadDirectoryValue(dir: string): void {
+  if (!state.currentSettings.rememberDownloadPath) return;
+  if (!dir) return;
+  try {
+    localStorage.setItem(LAST_DOWNLOAD_DIR_STORAGE_KEY, dir);
+  } catch {
+    // best effort
+  }
+}
+
+interface ConflictPromptSession {
+  applyAll: Exclude<ConflictPolicy, "ask"> | null;
+}
+
+async function resolveConflictChoice(
+  label: string,
+  session: ConflictPromptSession,
+  hasBatchRemainder: boolean,
+): Promise<Exclude<ConflictPolicy, "ask">> {
+  if (session.applyAll) return session.applyAll;
+  const replace = await showConfirm(
+    "Conflict",
+    `${label} already exists. Replace it?`,
+    { okLabel: "Replace", cancelLabel: "Skip", okDanger: true },
+  );
+  const decision: Exclude<ConflictPolicy, "ask"> = replace ? "replace" : "skip";
+  if (hasBatchRemainder) {
+    const applyAll = await showConfirm(
+      "Apply Choice",
+      `Apply "${decision}" to remaining conflicts?`,
+      { okLabel: "Apply to all", cancelLabel: "Only this one" },
+    );
+    if (applyAll) {
+      session.applyAll = decision;
+    }
+  }
+  return decision;
+}
+
+async function resolveDownloadEntriesWithConflicts(
+  entries: DownloadQueueEntry[],
+): Promise<DownloadQueueEntry[]> {
+  const result: DownloadQueueEntry[] = [];
+  const conflictPolicy = state.currentSettings.conflictPolicy;
+  const session: ConflictPromptSession = { applyAll: null };
+  let remainingConflicts = 0;
+
+  const existingResults = await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        return await invoke<boolean>("path_exists", {
+          path: entry.destination,
+        });
+      } catch {
+        return false;
+      }
+    }),
+  );
+  for (const exists of existingResults) {
+    if (exists) remainingConflicts += 1;
+  }
+
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    const exists = existingResults[i];
+    if (!exists) {
+      result.push({ ...entry });
+      continue;
+    }
+
+    if (conflictPolicy === "replace") {
+      result.push({ ...entry, conflictResolution: "replace" });
+      remainingConflicts -= 1;
+      continue;
+    }
+    if (conflictPolicy === "skip") {
+      logActivity(
+        `Skipped download for ${basename(entry.key)}: destination exists.`,
+        "warning",
+      );
+      remainingConflicts -= 1;
+      continue;
+    }
+
+    const decision = await resolveConflictChoice(
+      entry.destination,
+      session,
+      remainingConflicts > 1,
+    );
+    remainingConflicts -= 1;
+    if (decision === "replace") {
+      result.push({ ...entry, conflictResolution: "replace" });
+    } else {
+      logActivity(
+        `Skipped download for ${basename(entry.key)}: destination exists.`,
+        "warning",
+      );
+    }
+  }
+
+  return result;
+}
+
+async function resolveObjectConflict(
+  bucket: string,
+  key: string,
+  session: ConflictPromptSession,
+  hasBatchRemainder: boolean,
+): Promise<Exclude<ConflictPolicy, "ask">> {
+  const conflictPolicy = state.currentSettings.conflictPolicy;
+  let exists = false;
+  try {
+    exists = await invoke<boolean>("object_exists", { bucket, key });
+  } catch {
+    exists = false;
+  }
+  if (!exists) return "replace";
+  if (conflictPolicy === "replace") return "replace";
+  if (conflictPolicy === "skip") return "skip";
+  return resolveConflictChoice(`${bucket}/${key}`, session, hasBatchRemainder);
+}
+
 async function uniqueDownloadEntries(
   keys: string[],
   destinationDir: string,
@@ -694,14 +846,18 @@ async function handleDownload(): Promise<void> {
   const keys = getSelectedFileKeys();
   if (keys.length === 0) return;
   const entries: DownloadQueueEntry[] = [];
+  const rememberedDir = getRememberedDownloadDir();
 
   if (keys.length === 1) {
     const fileName = basename(keys[0]);
     const destination = await save({
-      defaultPath: fileName,
+      defaultPath: rememberedDir
+        ? joinPath(rememberedDir, fileName, state.platformName)
+        : fileName,
       title: `Save ${fileName}`,
     });
     if (!destination) return;
+    saveRememberedDownloadDir(destination);
     entries.push({
       bucket: state.currentBucket,
       key: keys[0],
@@ -712,26 +868,36 @@ async function handleDownload(): Promise<void> {
       title: "Select destination folder",
       multiple: false,
       directory: true,
+      defaultPath: rememberedDir || undefined,
     });
     if (!selected || Array.isArray(selected)) return;
+    saveRememberedDownloadDirectoryValue(selected);
     entries.push(...(await uniqueDownloadEntries(keys, selected)));
   }
 
   if (entries.length === 0) return;
-
-  if (enqueueDownloadTransfers(entries)) {
-    setStatus(`Queued ${entries.length} download(s).`, 5000);
-    logActivity(`Queued ${entries.length} download(s).`, "info");
+  const resolvedEntries = await resolveDownloadEntriesWithConflicts(entries);
+  if (resolvedEntries.length === 0) {
+    setStatus("No downloads queued (all conflicts were skipped).", 5000);
     return;
   }
 
-  for (const entry of entries) {
+  if (enqueueDownloadTransfers(resolvedEntries)) {
+    setStatus(`Queued ${resolvedEntries.length} download(s).`, 5000);
+    logActivity(`Queued ${resolvedEntries.length} download(s).`, "info");
+    return;
+  }
+
+  for (const entry of resolvedEntries) {
     try {
       setStatus(`Downloading ${basename(entry.key)}...`);
       const size = await invoke<number>("download_object", {
         bucket: entry.bucket,
         key: entry.key,
         destination: entry.destination,
+        overwrite: entry.conflictResolution === "replace",
+        tempPath: `${entry.destination}.s3-sidekick.download.tmp`,
+        attempt: 1,
       });
       setStatus(
         `Downloaded ${basename(entry.key)} (${formatSize(size)}).`,
@@ -1055,6 +1221,7 @@ function openCopyMoveDialog(): void {
 
   const srcBucket = state.currentBucket;
   const srcPrefix = state.currentPrefix;
+  const conflictSession: ConflictPromptSession = { applyAll: null };
 
   const runCopy = async (move: boolean) => {
     const dstBucket = bucketSelect.value;
@@ -1070,6 +1237,19 @@ function openCopyMoveDialog(): void {
       setStatus(`${verb}ing...`);
 
       if (isSingleFile) {
+        const decision = await resolveObjectConflict(
+          dstBucket,
+          dstPath,
+          conflictSession,
+          false,
+        );
+        if (decision === "skip") {
+          setStatus(
+            `Skipped "${basename(fileKeys[0])}" (destination exists).`,
+            5000,
+          );
+          return;
+        }
         await invoke("copy_object_to", {
           srcBucket,
           srcKey: fileKeys[0],
@@ -1092,26 +1272,85 @@ function openCopyMoveDialog(): void {
         );
       } else {
         const prefix = dstPath.endsWith("/") ? dstPath : dstPath + "/";
+        let copiedFiles = 0;
+        let copiedFolders = 0;
+        let skippedFiles = 0;
+        let skippedFolders = 0;
+        const movedFileKeys: string[] = [];
+
         for (const key of fileKeys) {
+          const dstKey = prefix + basename(key);
+          const decision = await resolveObjectConflict(
+            dstBucket,
+            dstKey,
+            conflictSession,
+            true,
+          );
+          if (decision === "skip") {
+            skippedFiles += 1;
+            continue;
+          }
           await invoke("copy_object_to", {
             srcBucket,
             srcKey: key,
             dstBucket,
-            dstKey: prefix + basename(key),
+            dstKey,
           });
+          copiedFiles += 1;
+          movedFileKeys.push(key);
         }
-        if (move && fileKeys.length > 0) {
-          await invoke("delete_objects", { bucket: srcBucket, keys: fileKeys });
+        if (move && movedFileKeys.length > 0) {
+          await invoke("delete_objects", {
+            bucket: srcBucket,
+            keys: movedFileKeys,
+          });
         }
         for (const srcPrefix of prefixes) {
           const folderName = basename(srcPrefix.replace(/\/$/, ""));
           const dstPrefix = isSingleFolder ? prefix : prefix + folderName + "/";
+          let folderHasConflict = false;
+          try {
+            const existing = await invoke<{
+              objects: Array<{ key: string }>;
+              prefixes: string[];
+            }>("list_objects", {
+              bucket: dstBucket,
+              prefix: dstPrefix,
+              delimiter: "",
+              continuationToken: "",
+            });
+            folderHasConflict =
+              existing.objects.length > 0 || existing.prefixes.length > 0;
+          } catch {
+            folderHasConflict = false;
+          }
+          if (folderHasConflict) {
+            let decision: Exclude<ConflictPolicy, "ask">;
+            if (conflictSession.applyAll) {
+              decision = conflictSession.applyAll;
+            } else if (state.currentSettings.conflictPolicy === "replace") {
+              decision = "replace";
+            } else if (state.currentSettings.conflictPolicy === "skip") {
+              decision = "skip";
+            } else {
+              decision = await resolveConflictChoice(
+                `${dstBucket}/${dstPrefix}`,
+                conflictSession,
+                true,
+              );
+            }
+            if (decision === "skip") {
+              skippedFolders += 1;
+              continue;
+            }
+          }
           await invoke("copy_prefix_to", {
             srcBucket,
             srcPrefix,
             dstBucket,
             dstPrefix,
           });
+          copiedFolders += 1;
           if (move) {
             await invoke("delete_prefix", {
               bucket: srcBucket,
@@ -1120,12 +1359,30 @@ function openCopyMoveDialog(): void {
           }
         }
         const destLabel = isSingleFolder ? dstPath : prefix;
-        setStatus(
-          `${verb}ed ${totalItems} item${totalItems !== 1 ? "s" : ""}.`,
-          5000,
-        );
+        const copiedTotal = copiedFiles + copiedFolders;
+        const skippedTotal = skippedFiles + skippedFolders;
+        const copiedParts: string[] = [];
+        if (copiedFiles > 0) {
+          copiedParts.push(
+            `${copiedFiles} file${copiedFiles === 1 ? "" : "s"}`,
+          );
+        }
+        if (copiedFolders > 0) {
+          copiedParts.push(
+            `${copiedFolders} folder${copiedFolders === 1 ? "" : "s"}`,
+          );
+        }
+        const copiedLabel =
+          copiedParts.length > 0
+            ? copiedParts.join(" + ")
+            : `0 item${totalItems === 1 ? "" : "s"}`;
+        const skippedLabel =
+          skippedTotal > 0
+            ? ` Skipped ${skippedTotal} due to destination conflicts.`
+            : "";
+        setStatus(`${verb}ed ${copiedLabel}.${skippedLabel}`, 5000);
         logActivity(
-          `${verb}ed ${totalItems} items to "${dstBucket}/${destLabel}".`,
+          `${verb}ed ${copiedTotal} item(s) to "${dstBucket}/${destLabel}".${skippedLabel}`,
           "success",
         );
       }
@@ -1301,6 +1558,103 @@ async function handleRefreshBuckets(): Promise<void> {
   } catch (err) {
     setStatus(`Failed to refresh buckets: ${friendlyError(err)}`);
     logActivity(`Failed to refresh buckets: ${friendlyError(err)}`, "error");
+  }
+}
+
+async function handleExportActivityLog(): Promise<void> {
+  const text = exportActivityLogText();
+  if (!text) {
+    setStatus("No activity entries to export.", 5000);
+    return;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const destination = await save({
+    title: "Export Activity Log",
+    defaultPath: `s3-sidekick-activity-${stamp}.txt`,
+  });
+  if (!destination) return;
+
+  let overwrite = false;
+  try {
+    const exists = await invoke<boolean>("path_exists", { path: destination });
+    if (exists) {
+      overwrite = await showConfirm(
+        "Overwrite File",
+        `${destination} already exists. Replace it?`,
+        { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
+      );
+      if (!overwrite) return;
+    }
+    await invoke("write_text_file", { path: destination, text, overwrite });
+    setStatus("Activity log exported.", 5000);
+    logActivity(`Exported activity log to ${destination}.`, "success");
+  } catch (err) {
+    setStatus(`Failed to export activity log: ${friendlyError(err)}`);
+    logActivity(
+      `Failed to export activity log: ${friendlyError(err)}`,
+      "error",
+    );
+  }
+}
+
+async function handleOpenLastDownloadFolder(): Promise<void> {
+  const dir = getRememberedDownloadDir();
+  if (!dir) {
+    setStatus("No remembered download folder.", 5000);
+    return;
+  }
+  try {
+    await invoke("open_local_path", { path: dir });
+    setStatus("Opened last download folder.", 3000);
+  } catch (err) {
+    setStatus(`Failed to open folder: ${friendlyError(err)}`);
+  }
+}
+
+async function handleGoToKeyOrPrefix(): Promise<void> {
+  if (!state.connected || !state.currentBucket) return;
+  const raw = await showPrompt("Go To", "Enter key or prefix:", {
+    inputPlaceholder: "e.g. folder/file.txt or folder/subfolder/",
+  });
+  if (!raw) return;
+
+  const input = raw.trim().replace(/^\/+/, "");
+  if (!input) return;
+
+  try {
+    if (input.endsWith("/")) {
+      await navigateToFolder(input);
+      return;
+    }
+
+    const idx = input.lastIndexOf("/");
+    const parentPrefix = idx >= 0 ? input.slice(0, idx + 1) : "";
+    await navigateToFolder(parentPrefix);
+
+    const targetKey = input;
+    if (state.objects.some((obj) => obj.key === targetKey)) {
+      state.selectedKeys.clear();
+      state.selectedKeys.add(targetKey);
+      updateSelectionUI();
+      return;
+    }
+
+    if (state.prefixes.some((prefix) => prefix === `${input}/`)) {
+      await navigateToFolder(`${input}/`);
+      return;
+    }
+
+    const filterInput = document.getElementById(
+      "filter-input",
+    ) as HTMLInputElement | null;
+    if (filterInput) {
+      filterInput.value = basename(input);
+      state.filterText = filterInput.value;
+      renderObjectTable();
+    }
+    setStatus(`Not found exactly: ${input}. Applied filter.`, 5000);
+  } catch (err) {
+    setStatus(`Go to failed: ${friendlyError(err)}`);
   }
 }
 
@@ -1849,6 +2203,11 @@ function wireEvents(): void {
   document
     .getElementById("transfer-toggle")!
     .addEventListener("click", toggleTransferQueue);
+  document.getElementById("drawer-export")?.addEventListener("click", () => {
+    if (getActiveTab() === "activity") {
+      void handleExportActivityLog();
+    }
+  });
   document.getElementById("drawer-clear")!.addEventListener("click", () => {
     const tab = getActiveTab();
     if (tab === "activity") {
@@ -1989,6 +2348,17 @@ function wireEvents(): void {
       filterInputDebounce = undefined;
     }, FILTER_INPUT_DEBOUNCE_MS);
   });
+
+  const bucketFilterInput = document.getElementById(
+    "bucket-filter-input",
+  ) as HTMLInputElement | null;
+  if (bucketFilterInput) {
+    bucketFilterInput.value = state.bucketFilterText;
+    bucketFilterInput.addEventListener("input", () => {
+      state.bucketFilterText = bucketFilterInput.value;
+      renderBucketList();
+    });
+  }
 
   const loadMoreBtn = document.getElementById(
     "btn-load-more",
@@ -2288,6 +2658,28 @@ function wireEvents(): void {
         if (f) f.focus();
       },
       available: () => state.connected,
+    },
+    {
+      id: "go-to-key-prefix",
+      label: "Go to Key/Prefix",
+      icon: "1f9ed",
+      action: () => void handleGoToKeyOrPrefix(),
+      available: () => state.connected,
+    },
+    {
+      id: "open-last-download-folder",
+      label: "Open Last Download Folder",
+      icon: "1f4c2",
+      action: () => void handleOpenLastDownloadFolder(),
+      available: () =>
+        state.currentSettings.rememberDownloadPath &&
+        getRememberedDownloadDir().length > 0,
+    },
+    {
+      id: "export-activity-log",
+      label: "Export Activity Log",
+      icon: "1f4be",
+      action: () => void handleExportActivityLog(),
     },
     {
       id: "activity",

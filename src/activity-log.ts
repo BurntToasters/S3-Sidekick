@@ -67,6 +67,16 @@ export function markActivitySeen(): void {
   updateBadge();
 }
 
+export function exportActivityLogText(): string {
+  if (entries.length === 0) return "";
+  return entries
+    .map((entry) => {
+      const iso = entry.time.toISOString();
+      return `[${iso}] [${entry.type.toUpperCase()}] ${entry.message}`;
+    })
+    .join("\n");
+}
+
 function renderActivityLog(): void {
   const list = document.getElementById("activity-list");
   if (!list) return;

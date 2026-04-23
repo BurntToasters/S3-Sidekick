@@ -97,12 +97,17 @@ pub(crate) fn validate_existing_path(raw: &str, label: &str) -> Result<PathBuf, 
 
 pub(crate) fn validate_destination_path(raw: &str) -> Result<PathBuf, String> {
     let destination = parse_user_path(raw, "Destination")?;
+    validate_destination_parent(&destination)?;
     if destination.exists() {
         return Err(format!(
             "Destination already exists: {}",
             destination.display()
         ));
     }
+    Ok(destination)
+}
+
+fn validate_destination_parent(destination: &Path) -> Result<(), String> {
     let parent = destination.parent().ok_or_else(|| {
         format!(
             "Destination must include a parent directory: {}",
@@ -121,45 +126,59 @@ pub(crate) fn validate_destination_path(raw: &str) -> Result<PathBuf, String> {
             parent.display()
         ));
     }
-    if parent.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+    if parent
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
         return Err(format!(
             "Destination parent is a symbolic link: {}",
             parent.display()
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn validate_destination_path_allow_overwrite(raw: &str) -> Result<PathBuf, String> {
+    let destination = parse_user_path(raw, "Destination")?;
+    validate_destination_parent(&destination)?;
+    if destination.exists() && !destination.is_file() {
+        return Err(format!(
+            "Destination is not a file: {}",
+            destination.display()
+        ));
+    }
     Ok(destination)
 }
 
-pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
-    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let suffix = format!("{}.{}.{}.tmp", purpose, pid, counter);
-    let extension = match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) if !ext.is_empty() => format!("{}.{}", ext, suffix),
-        _ => suffix,
-    };
-    path.with_extension(extension)
+#[tauri::command]
+fn path_exists(path: String) -> Result<bool, String> {
+    let parsed = parse_user_path(&path, "Path")?;
+    Ok(parsed.exists())
 }
 
-pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), String> {
-    let tmp_path = make_temp_path(path, "atomic");
-    let mut options = std::fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
+#[tauri::command]
+fn remove_path_if_exists(path: String) -> Result<(), String> {
+    let parsed = parse_user_path(&path, "Path")?;
+    if !parsed.exists() {
+        return Ok(());
     }
-    let mut tmp_file = options.open(&tmp_path).map_err(|e| e.to_string())?;
-    tmp_file
-        .write_all(data.as_bytes())
-        .map_err(|e| e.to_string())?;
-    tmp_file.sync_all().map_err(|e| e.to_string())?;
-    drop(tmp_file);
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e.to_string());
+    if parsed.is_dir() {
+        return Err(format!(
+            "Refusing to remove directory path: {}",
+            parsed.display()
+        ));
     }
-    Ok(())
+    std::fs::remove_file(&parsed).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn write_text_file(path: String, text: String, overwrite: bool) -> Result<(), String> {
+    let parsed = validate_destination_path_allow_overwrite(&path)?;
+    if parsed.exists() && !overwrite {
+        return Err(format!("Destination already exists: {}", parsed.display()));
+    }
+    atomic_write(&parsed, &text)
 }
 
 #[tauri::command]
@@ -226,6 +245,38 @@ fn save_bookmarks_backup(app: tauri::AppHandle, json: String) -> Result<(), Stri
     let security = load_security_config(&app)?;
     write_protected_file(&path, &json, &security)
 }
+pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
+    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let suffix = format!("{}.{}.{}.tmp", purpose, pid, counter);
+    let extension = match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{}.{}", ext, suffix),
+        _ => suffix,
+    };
+    path.with_extension(extension)
+}
+
+pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), String> {
+    let tmp_path = make_temp_path(path, "atomic");
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut tmp_file = options.open(&tmp_path).map_err(|e| e.to_string())?;
+    tmp_file
+        .write_all(data.as_bytes())
+        .map_err(|e| e.to_string())?;
+    tmp_file.sync_all().map_err(|e| e.to_string())?;
+    drop(tmp_file);
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
 
 fn main() {
     #[cfg(target_os = "linux")]
@@ -298,10 +349,14 @@ fn main() {
             s3::rename_prefix,
             s3::copy_object_to,
             s3::copy_prefix_to,
+            s3::object_exists,
             s3::build_object_url,
             s3::generate_presigned_url,
             s3::preview_object,
             files::list_local_files_recursive,
+            path_exists,
+            remove_path_if_exists,
+            write_text_file,
             load_settings,
             save_settings,
             load_bookmarks,
@@ -326,6 +381,7 @@ fn main() {
             platform::updater_supported,
             platform::updater_support_info,
             platform::open_external_url,
+            platform::open_local_path,
         ])
         .run(tauri::generate_context!())
     {

@@ -109,6 +109,37 @@ export function populateSettingsModal(): void {
     );
   }
 
+  const retryAttemptsSelect = document.getElementById(
+    "setting-transfer-retries",
+  ) as HTMLSelectElement | null;
+  if (retryAttemptsSelect) {
+    retryAttemptsSelect.value = String(
+      state.currentSettings.transferRetryAttempts,
+    );
+  }
+
+  const retryBaseSelect = document.getElementById(
+    "setting-transfer-retry-base-ms",
+  ) as HTMLSelectElement | null;
+  if (retryBaseSelect) {
+    retryBaseSelect.value = String(state.currentSettings.transferRetryBaseMs);
+  }
+
+  const conflictPolicySelect = document.getElementById(
+    "setting-conflict-policy",
+  ) as HTMLSelectElement | null;
+  if (conflictPolicySelect) {
+    conflictPolicySelect.value = state.currentSettings.conflictPolicy;
+  }
+
+  const rememberDownloadCheckbox = document.getElementById(
+    "setting-remember-download-path",
+  ) as HTMLInputElement | null;
+  if (rememberDownloadCheckbox) {
+    rememberDownloadCheckbox.checked =
+      state.currentSettings.rememberDownloadPath;
+  }
+
   const supported = isUpdaterEnabled();
   const updaterSection = document.getElementById("updater-section");
   const updaterUnsupported = document.getElementById("updater-unsupported");
@@ -181,6 +212,46 @@ export function readSettingsModal(): void {
     if (Number.isInteger(val) && val >= 1 && val <= 10) {
       state.currentSettings.maxConcurrentTransfers = val;
     }
+  }
+
+  const retryAttemptsSelect = document.getElementById(
+    "setting-transfer-retries",
+  ) as HTMLSelectElement | null;
+  if (retryAttemptsSelect) {
+    const val = parseInt(retryAttemptsSelect.value, 10);
+    if (Number.isInteger(val) && val >= 0 && val <= 10) {
+      state.currentSettings.transferRetryAttempts = val;
+    }
+  }
+
+  const retryBaseSelect = document.getElementById(
+    "setting-transfer-retry-base-ms",
+  ) as HTMLSelectElement | null;
+  if (retryBaseSelect) {
+    const val = parseInt(retryBaseSelect.value, 10);
+    if (Number.isInteger(val) && val >= 50 && val <= 10000) {
+      state.currentSettings.transferRetryBaseMs = val;
+    }
+  }
+
+  const conflictPolicySelect = document.getElementById(
+    "setting-conflict-policy",
+  ) as HTMLSelectElement | null;
+  if (conflictPolicySelect) {
+    state.currentSettings.conflictPolicy =
+      conflictPolicySelect.value === "replace"
+        ? "replace"
+        : conflictPolicySelect.value === "skip"
+          ? "skip"
+          : "ask";
+  }
+
+  const rememberDownloadCheckbox = document.getElementById(
+    "setting-remember-download-path",
+  ) as HTMLInputElement | null;
+  if (rememberDownloadCheckbox) {
+    state.currentSettings.rememberDownloadPath =
+      rememberDownloadCheckbox.checked;
   }
 }
 

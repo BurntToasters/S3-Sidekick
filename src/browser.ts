@@ -235,7 +235,17 @@ export function renderBucketList(): void {
     el.innerHTML = `<li class="list__empty">No buckets found</li>`;
     return;
   }
-  el.innerHTML = state.buckets
+  const filter = state.bucketFilterText.trim().toLowerCase();
+  const visibleBuckets = filter
+    ? state.buckets.filter((bucket) =>
+        bucket.name.toLowerCase().includes(filter),
+      )
+    : state.buckets;
+  if (visibleBuckets.length === 0) {
+    el.innerHTML = `<li class="list__empty">No buckets match filter</li>`;
+    return;
+  }
+  el.innerHTML = visibleBuckets
     .map(
       (b) =>
         `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}">` +

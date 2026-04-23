@@ -9,7 +9,10 @@ use tauri::Emitter;
 
 use zeroize::Zeroize;
 
-use crate::{lock_s3_state, make_temp_path, validate_destination_path, validate_existing_path, AppState};
+use crate::{
+    lock_s3_state, make_temp_path, validate_destination_path,
+    validate_destination_path_allow_overwrite, validate_existing_path, AppState,
+};
 
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 const MULTIPART_THRESHOLD: u64 = 50 * 1024 * 1024;
@@ -125,6 +128,12 @@ pub(crate) struct UploadProgress {
     transfer_id: u32,
     bytes_sent: u64,
     total_bytes: u64,
+    attempt: u32,
+    phase: String,
+}
+
+fn normalize_attempt(attempt: Option<u32>) -> u32 {
+    attempt.unwrap_or(1).max(1)
 }
 
 #[derive(serde::Serialize)]
@@ -590,6 +599,41 @@ pub(crate) async fn head_object(
 }
 
 #[tauri::command]
+pub(crate) async fn object_exists(
+    state: tauri::State<'_, AppState>,
+    bucket: String,
+    key: String,
+) -> Result<bool, String> {
+    validate_key(&key, "Object key")?;
+    let client = {
+        let s3 = lock_s3_state(&state)?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+
+    match client.head_object().bucket(&bucket).key(&key).send().await {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            use aws_sdk_s3::error::SdkError;
+            match err {
+                SdkError::ServiceError(ctx) => {
+                    let status = ctx.raw().status().as_u16();
+                    if status == 404 {
+                        Ok(false)
+                    } else {
+                        Err(format!(
+                            "Failed to check object existence (HTTP {}): {}",
+                            status,
+                            String::from_utf8_lossy(ctx.raw().body().bytes().unwrap_or(&[]))
+                        ))
+                    }
+                }
+                other => Err(format!("Failed to check object existence: {:?}", other)),
+            }
+        }
+    }
+}
+
+#[tauri::command]
 pub(crate) async fn update_metadata(
     state: tauri::State<'_, AppState>,
     bucket: String,
@@ -700,6 +744,7 @@ pub(crate) async fn upload_object(
     file_path: String,
     content_type: String,
     transfer_id: u32,
+    attempt: Option<u32>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
@@ -714,12 +759,15 @@ pub(crate) async fn upload_object(
         .map_err(|e| format!("File no longer accessible: {}", e))?
         .len();
 
+    let attempt = normalize_attempt(attempt);
     let _ = app.emit(
         "upload-progress",
         UploadProgress {
             transfer_id,
             bytes_sent: 0,
             total_bytes: file_size,
+            attempt,
+            phase: "running".to_string(),
         },
     );
 
@@ -732,6 +780,7 @@ pub(crate) async fn upload_object(
             &upload_path,
             &content_type,
             transfer_id,
+            attempt,
             file_size,
         )
         .await?;
@@ -762,6 +811,8 @@ pub(crate) async fn upload_object(
             transfer_id,
             bytes_sent: file_size,
             total_bytes: file_size,
+            attempt,
+            phase: "verifying".to_string(),
         },
     );
     clear_cancelled(transfer_id);
@@ -777,6 +828,7 @@ async fn upload_multipart(
     file_path: &Path,
     content_type: &str,
     transfer_id: u32,
+    attempt: u32,
     file_size: u64,
 ) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
@@ -896,6 +948,8 @@ async fn upload_multipart(
                         transfer_id,
                         bytes_sent,
                         total_bytes: file_size,
+                        attempt,
+                        phase: "running".to_string(),
                     },
                 );
             }
@@ -945,6 +999,7 @@ pub(crate) async fn upload_object_bytes(
     bytes: Vec<u8>,
     content_type: String,
     transfer_id: u32,
+    attempt: Option<u32>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
     if bytes.len() > MAX_UPLOAD_OBJECT_BYTES {
@@ -960,12 +1015,15 @@ pub(crate) async fn upload_object_bytes(
     };
 
     let total = bytes.len() as u64;
+    let attempt = normalize_attempt(attempt);
     let _ = app.emit(
         "upload-progress",
         UploadProgress {
             transfer_id,
             bytes_sent: 0,
             total_bytes: total,
+            attempt,
+            phase: "running".to_string(),
         },
     );
 
@@ -989,6 +1047,8 @@ pub(crate) async fn upload_object_bytes(
             transfer_id,
             bytes_sent: total,
             total_bytes: total,
+            attempt,
+            phase: "verifying".to_string(),
         },
     );
 
@@ -1088,12 +1148,32 @@ pub(crate) async fn download_object(
     key: String,
     destination: String,
     transfer_id: u32,
+    overwrite: bool,
+    temp_path: Option<String>,
+    attempt: Option<u32>,
 ) -> Result<u64, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     validate_key(&key, "Object key")?;
-    let destination_path = validate_destination_path(&destination)?;
-    let temp_path = make_temp_path(&destination_path, "download");
+    let destination_path = if overwrite {
+        validate_destination_path_allow_overwrite(&destination)?
+    } else {
+        validate_destination_path(&destination)?
+    };
+    let temp_path = match temp_path {
+        Some(custom) => {
+            let custom_path = validate_destination_path_allow_overwrite(&custom)?;
+            if custom_path == destination_path {
+                return Err("Temp path must be different from destination".to_string());
+            }
+            custom_path
+        }
+        None => make_temp_path(&destination_path, "download"),
+    };
+    if temp_path.exists() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    let attempt = normalize_attempt(attempt);
 
     let client = {
         let s3 = lock_s3_state(&state)?;
@@ -1120,6 +1200,8 @@ pub(crate) async fn download_object(
             transfer_id,
             bytes_sent: 0,
             total_bytes,
+            attempt,
+            phase: "running".to_string(),
         },
     );
 
@@ -1167,10 +1249,20 @@ pub(crate) async fn download_object(
                     transfer_id,
                     bytes_sent: written,
                     total_bytes,
+                    attempt,
+                    phase: "running".to_string(),
                 },
             );
             last_emitted = written;
         }
+    }
+
+    if total_bytes > 0 && written != total_bytes {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!(
+            "Downloaded byte count mismatch. Expected {}, wrote {}.",
+            total_bytes, written
+        ));
     }
 
     file.flush().await.map_err(|e| {
@@ -1183,6 +1275,11 @@ pub(crate) async fn download_object(
     })?;
     drop(file);
 
+    if overwrite && destination_path.exists() {
+        std::fs::remove_file(&destination_path)
+            .map_err(|e| format!("Failed to replace destination: {}", e))?;
+    }
+
     if let Err(e) = std::fs::rename(&temp_path, &destination_path) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(format!("Failed to finalize download: {}", e));
@@ -1194,6 +1291,8 @@ pub(crate) async fn download_object(
             transfer_id,
             bytes_sent: written,
             total_bytes: written,
+            attempt,
+            phase: "verifying".to_string(),
         },
     );
     clear_cancelled(transfer_id);

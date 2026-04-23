@@ -32,6 +32,7 @@ export const state = {
   sortColumn: "name" as "name" | "size" | "modified",
   sortAsc: true,
   filterText: "",
+  bucketFilterText: "",
   platformName: "",
   statusTimeout: undefined as ReturnType<typeof setTimeout> | undefined,
 };
