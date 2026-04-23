@@ -523,6 +523,27 @@
             aria-labelledby="drawer-tab-transfers"
             hidden
           >
+            <div class="transfer-toolbar">
+              <button id="transfer-pause-all" class="btn btn--ghost btn--sm">
+                Pause all
+              </button>
+              <button id="transfer-resume-all" class="btn btn--ghost btn--sm">
+                Resume all
+              </button>
+              <button id="transfer-prioritize" class="btn btn--ghost btn--sm">
+                Prioritize selected
+              </button>
+              <button id="transfer-retry-failed" class="btn btn--ghost btn--sm">
+                Retry failed
+              </button>
+              <button id="transfer-retry-skipped" class="btn btn--ghost btn--sm">
+                Retry skipped
+              </button>
+              <button id="transfer-clear-non-active" class="btn btn--ghost btn--sm">
+                Clear non-active
+              </button>
+              <span id="drawer-transfer-throughput" class="statusbar__count"></span>
+            </div>
             <div id="transfer-list" class="transfer-list">
               <div class="transfer-empty">
                 <img
@@ -543,6 +564,7 @@
         <span id="status" role="status" aria-live="polite"></span>
         <div class="statusbar__right">
           <span id="statusbar-count" class="statusbar__count"></span>
+          <span id="statusbar-throughput" class="statusbar__count"></span>
           <button
             id="activity-toggle"
             class="btn btn--icon statusbar__transfer"
@@ -767,6 +789,126 @@
                 <span>Remember last download folder</span>
               </label>
             </div>
+            <div class="setting-item">
+              <label for="setting-transfer-performance-preset"
+                >Transfer performance preset</label
+              >
+              <select
+                id="setting-transfer-performance-preset"
+                class="field field--sm"
+              >
+                <option value="safe">Safe</option>
+                <option value="balanced">Balanced (default)</option>
+                <option value="max">Max</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-download-parallel-threshold-mb"
+                >Parallel download threshold</label
+              >
+              <select
+                id="setting-download-parallel-threshold-mb"
+                class="field field--sm"
+              >
+                <option value="32">32 MB</option>
+                <option value="64">64 MB</option>
+                <option value="128">128 MB (default)</option>
+                <option value="256">256 MB</option>
+                <option value="512">512 MB</option>
+                <option value="1024">1024 MB</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-download-part-size-mb">Download part size</label>
+              <select id="setting-download-part-size-mb" class="field field--sm">
+                <option value="16">16 MB</option>
+                <option value="24">24 MB</option>
+                <option value="32">32 MB (default)</option>
+                <option value="48">48 MB</option>
+                <option value="64">64 MB</option>
+                <option value="96">96 MB</option>
+                <option value="128">128 MB</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-download-part-concurrency"
+                >Download part concurrency</label
+              >
+              <select
+                id="setting-download-part-concurrency"
+                class="field field--sm"
+              >
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="4">4</option>
+                <option value="6">6 (default)</option>
+                <option value="8">8</option>
+                <option value="10">10</option>
+                <option value="12">12</option>
+                <option value="16">16</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-upload-part-size-mb">Upload part size</label>
+              <select id="setting-upload-part-size-mb" class="field field--sm">
+                <option value="16">16 MB</option>
+                <option value="24">24 MB</option>
+                <option value="32">32 MB (default)</option>
+                <option value="48">48 MB</option>
+                <option value="64">64 MB</option>
+                <option value="96">96 MB</option>
+                <option value="128">128 MB</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-upload-part-concurrency"
+                >Upload part concurrency</label
+              >
+              <select id="setting-upload-part-concurrency" class="field field--sm">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="4">4</option>
+                <option value="6">6 (default)</option>
+                <option value="8">8</option>
+                <option value="10">10</option>
+                <option value="12">12</option>
+                <option value="16">16</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label class="toggle-row">
+                <input id="setting-enable-transfer-resume" type="checkbox" />
+                <span>Enable resumable large transfers</span>
+              </label>
+            </div>
+            <div class="setting-item">
+              <label for="setting-transfer-checkpoint-ttl-hours"
+                >Checkpoint retention</label
+              >
+              <select
+                id="setting-transfer-checkpoint-ttl-hours"
+                class="field field--sm"
+              >
+                <option value="24">24 hours</option>
+                <option value="72">72 hours</option>
+                <option value="168">7 days (default)</option>
+                <option value="336">14 days</option>
+                <option value="720">30 days</option>
+              </select>
+            </div>
+            <div class="setting-item">
+              <label for="setting-bandwidth-limit-mbps">Bandwidth cap</label>
+              <select id="setting-bandwidth-limit-mbps" class="field field--sm">
+                <option value="0">Unlimited (default)</option>
+                <option value="10">10 Mbps</option>
+                <option value="25">25 Mbps</option>
+                <option value="50">50 Mbps</option>
+                <option value="100">100 Mbps</option>
+                <option value="250">250 Mbps</option>
+                <option value="500">500 Mbps</option>
+                <option value="1000">1000 Mbps</option>
+              </select>
+            </div>
             <div class="setting-section">Danger Zone</div>
             <div class="setting-item">
               <label>Reset all settings to defaults</label>
@@ -987,6 +1129,14 @@
               autocomplete="off"
               spellcheck="false"
             />
+          </div>
+          <div
+            id="copy-move-recent-wrap"
+            class="setting-item setting-item--stacked copy-move-recents"
+            hidden
+          >
+            <div class="copy-move-recents__label">Recent destinations</div>
+            <div id="copy-move-recent-list" class="copy-move-recent-list"></div>
           </div>
           <div class="setting-item setting-item--stacked">
             <button

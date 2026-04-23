@@ -7,6 +7,7 @@ mod s3;
 mod security;
 
 use aws_sdk_s3::Client;
+use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,6 +74,67 @@ fn security_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("security.json"))
+}
+
+fn transfer_checkpoint_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    let checkpoints = dir.join("transfer-checkpoints");
+    std::fs::create_dir_all(&checkpoints).map_err(|e| e.to_string())?;
+    Ok(checkpoints)
+}
+
+fn checkpoint_file_name(checkpoint_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(checkpoint_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
+
+fn transfer_checkpoint_path(app: &tauri::AppHandle, checkpoint_id: &str) -> Result<PathBuf, String> {
+    if checkpoint_id.trim().is_empty() {
+        return Err("Checkpoint ID is required".to_string());
+    }
+    let dir = transfer_checkpoint_dir(app)?;
+    Ok(dir.join(format!("{}.json", checkpoint_file_name(checkpoint_id))))
+}
+
+pub(crate) fn load_transfer_checkpoint_json(
+    app: &tauri::AppHandle,
+    checkpoint_id: &str,
+) -> Result<Option<String>, String> {
+    let path = transfer_checkpoint_path(app, checkpoint_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    Ok(Some(json))
+}
+
+pub(crate) fn save_transfer_checkpoint_json(
+    app: &tauri::AppHandle,
+    checkpoint_id: &str,
+    json: &str,
+) -> Result<(), String> {
+    let path = transfer_checkpoint_path(app, checkpoint_id)?;
+    atomic_write(&path, json)
+}
+
+pub(crate) fn remove_transfer_checkpoint(app: &tauri::AppHandle, checkpoint_id: &str) -> Result<(), String> {
+    let path = transfer_checkpoint_path(app, checkpoint_id)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct TransferCheckpointEntry {
+    id_hash: String,
+    updated_at_ms: i64,
 }
 
 fn parse_user_path(raw: &str, label: &str) -> Result<PathBuf, String> {
@@ -179,6 +241,131 @@ fn write_text_file(path: String, text: String, overwrite: bool) -> Result<(), St
         return Err(format!("Destination already exists: {}", parsed.display()));
     }
     atomic_write(&parsed, &text)
+}
+
+#[tauri::command]
+fn transfer_checkpoint_save(
+    app: tauri::AppHandle,
+    checkpoint_id: String,
+    json: String,
+) -> Result<(), String> {
+    let _storage_guard = lock_storage_ops()?;
+    save_transfer_checkpoint_json(&app, &checkpoint_id, &json)
+}
+
+#[tauri::command]
+fn transfer_checkpoint_load(
+    app: tauri::AppHandle,
+    checkpoint_id: String,
+) -> Result<Option<String>, String> {
+    let _storage_guard = lock_storage_ops()?;
+    load_transfer_checkpoint_json(&app, &checkpoint_id)
+}
+
+#[tauri::command]
+fn transfer_checkpoint_remove(app: tauri::AppHandle, checkpoint_id: String) -> Result<(), String> {
+    let _storage_guard = lock_storage_ops()?;
+    remove_transfer_checkpoint(&app, &checkpoint_id)
+}
+
+#[tauri::command]
+fn transfer_checkpoint_list(app: tauri::AppHandle) -> Result<Vec<TransferCheckpointEntry>, String> {
+    let _storage_guard = lock_storage_ops()?;
+    let dir = transfer_checkpoint_dir(&app)?;
+    let mut entries: Vec<TransferCheckpointEntry> = Vec::new();
+
+    let iter = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in iter {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let ext = path.extension().and_then(|v| v.to_str()).unwrap_or("");
+        if ext != "json" {
+            continue;
+        }
+        let id_hash = path
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_string();
+        if id_hash.is_empty() {
+            continue;
+        }
+
+        let updated_at_ms = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        entries.push(TransferCheckpointEntry {
+            id_hash,
+            updated_at_ms,
+        });
+    }
+
+    Ok(entries)
+}
+
+#[tauri::command]
+fn transfer_checkpoint_gc(app: tauri::AppHandle, ttl_hours: u32) -> Result<u32, String> {
+    let _storage_guard = lock_storage_ops()?;
+    let dir = transfer_checkpoint_dir(&app)?;
+    let ttl_secs = (ttl_hours.max(1) as u64) * 3600;
+    let now = std::time::SystemTime::now();
+    let mut removed = 0u32;
+
+    let iter = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in iter {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let ext = path.extension().and_then(|v| v.to_str()).unwrap_or("");
+        if ext != "json" {
+            continue;
+        }
+        let modified = match entry.metadata().ok().and_then(|m| m.modified().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let age = now.duration_since(modified).unwrap_or_default().as_secs();
+        if age >= ttl_secs {
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+#[tauri::command]
+fn get_available_disk_bytes(path: String) -> Result<u64, String> {
+    let parsed = parse_user_path(&path, "Path")?;
+    let target = if parsed.exists() {
+        if parsed.is_dir() {
+            parsed
+        } else {
+            parsed
+                .parent()
+                .ok_or_else(|| format!("Path has no parent directory: {}", parsed.display()))?
+                .to_path_buf()
+        }
+    } else {
+        parsed
+            .parent()
+            .ok_or_else(|| format!("Path has no parent directory: {}", parsed.display()))?
+            .to_path_buf()
+    };
+
+    if !target.exists() || !target.is_dir() {
+        return Err(format!(
+            "Directory for disk space check does not exist: {}",
+            target.display()
+        ));
+    }
+
+    fs2::available_space(&target).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -338,10 +525,12 @@ fn main() {
             s3::update_metadata,
             s3::delete_objects,
             s3::upload_object,
+            s3::upload_object_resumable,
             s3::upload_object_bytes,
             s3::get_object_acl,
             s3::set_object_acl,
             s3::download_object,
+            s3::download_object_parallel,
             s3::cancel_transfer,
             s3::create_folder,
             s3::rename_object,
@@ -357,6 +546,12 @@ fn main() {
             path_exists,
             remove_path_if_exists,
             write_text_file,
+            transfer_checkpoint_save,
+            transfer_checkpoint_load,
+            transfer_checkpoint_remove,
+            transfer_checkpoint_list,
+            transfer_checkpoint_gc,
+            get_available_disk_bytes,
             load_settings,
             save_settings,
             load_bookmarks,

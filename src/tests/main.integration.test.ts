@@ -73,6 +73,7 @@ const mockEnqueueFiles = vi.fn();
 const mockDisposeTransferQueueUI = vi.fn<() => Promise<void>>();
 const mockEnqueueDownloads = vi.fn();
 const mockEnqueueFolderEntries = vi.fn();
+const mockEnqueueCopyMoveEntries = vi.fn();
 
 const mockWireKeyboardShortcuts = vi.fn();
 const mockCanPreview = vi.fn();
@@ -227,6 +228,7 @@ vi.mock("../transfers.ts", () => ({
   disposeTransferQueueUI: mockDisposeTransferQueueUI,
   enqueueDownloads: mockEnqueueDownloads,
   enqueueFolderEntries: mockEnqueueFolderEntries,
+  enqueueCopyMoveEntries: mockEnqueueCopyMoveEntries,
 }));
 
 vi.mock("../keyboard.ts", () => ({
@@ -401,6 +403,7 @@ describe("main integration", () => {
     mockDisposeTransferQueueUI.mockReset();
     mockEnqueueDownloads.mockReset();
     mockEnqueueFolderEntries.mockReset();
+    mockEnqueueCopyMoveEntries.mockReset();
     mockWireKeyboardShortcuts.mockReset();
     mockCanPreview.mockReset();
     mockOpenPreview.mockReset();
@@ -1017,13 +1020,21 @@ describe("main integration", () => {
     copyBtn.click();
     await flushMicrotasks(6);
 
-    expect(mockInvoke).toHaveBeenCalledWith("copy_object_to", {
-      srcBucket: "bucket-a",
-      srcKey: "docs/file.txt",
-      dstBucket: "bucket-b",
-      dstKey: "archive/file.txt",
+    expect(mockInvoke).toHaveBeenCalledWith("object_exists", {
+      bucket: "bucket-b",
+      key: "archive/file.txt",
     });
-    // Copy should NOT delete the source
+    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith([
+      {
+        operation: "copy",
+        sourceBucket: "bucket-a",
+        fileName: "file.txt",
+        sourceKey: "docs/file.txt",
+        destinationBucket: "bucket-b",
+        destinationKey: "archive/file.txt",
+        conflictResolution: "replace",
+      },
+    ]);
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "delete_objects",
       expect.objectContaining({ keys: ["docs/file.txt"] }),
@@ -1061,16 +1072,25 @@ describe("main integration", () => {
     moveBtn.click();
     await flushMicrotasks(6);
 
-    expect(mockInvoke).toHaveBeenCalledWith("copy_object_to", {
-      srcBucket: "bucket-a",
-      srcKey: "docs/file.txt",
-      dstBucket: "bucket-a",
-      dstKey: "moved/file.txt",
-    });
-    expect(mockInvoke).toHaveBeenCalledWith("delete_objects", {
+    expect(mockInvoke).toHaveBeenCalledWith("object_exists", {
       bucket: "bucket-a",
-      keys: ["docs/file.txt"],
+      key: "moved/file.txt",
     });
+    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith([
+      {
+        operation: "move",
+        sourceBucket: "bucket-a",
+        fileName: "file.txt",
+        sourceKey: "docs/file.txt",
+        destinationBucket: "bucket-a",
+        destinationKey: "moved/file.txt",
+        conflictResolution: "replace",
+      },
+    ]);
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "copy_object_to",
+      expect.anything(),
+    );
 
     // Cancel should close without action
     state.selectedKeys.clear();
@@ -1649,8 +1669,9 @@ describe("main integration", () => {
     state.selectedKeys.clear();
     state.selectedKeys.add("docs/file-a.txt");
     (document.getElementById("batch-download") as HTMLButtonElement).click();
-    await flushMicrotasks(4);
-    expect(mockEnqueueDownloads).toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(mockEnqueueDownloads).toHaveBeenCalled();
+    });
 
     (document.getElementById("batch-delete") as HTMLButtonElement).click();
     await flushMicrotasks(4);
@@ -1948,7 +1969,11 @@ describe("main integration", () => {
     state.selectedKeys.add("other/file.txt");
     mockOpen.mockImplementationOnce(async () => "C:\\tmp\\downloads");
     (document.getElementById("batch-download") as HTMLButtonElement).click();
-    await flushMicrotasks(8);
+    await vi.waitFor(() => {
+      expect(mockEnqueueDownloads.mock.calls.length).toBeGreaterThan(
+        enqueueBeforeSingleNull,
+      );
+    });
     const uniqueEntries = mockEnqueueDownloads.mock.calls.at(-1)?.[0] as Array<{
       destination: string;
     }>;
