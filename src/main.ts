@@ -523,7 +523,9 @@ function rememberDownloadDirectory(dir: string): void {
   } catch {
     // best effort
   }
-  const updated = readRecentDownloadDirs().filter((entry) => entry !== normalized);
+  const updated = readRecentDownloadDirs().filter(
+    (entry) => entry !== normalized,
+  );
   updated.unshift(normalized);
   writeRecentDownloadDirs(updated);
 }
@@ -561,7 +563,9 @@ function readRecentCopyMoveDestinations(): RecentCopyMoveDestination[] {
     const rows: RecentCopyMoveDestination[] = [];
     for (const entry of parsed) {
       if (!entry || typeof entry !== "object") continue;
-      const bucket = String((entry as { bucket?: unknown }).bucket ?? "").trim();
+      const bucket = String(
+        (entry as { bucket?: unknown }).bucket ?? "",
+      ).trim();
       const path = String((entry as { path?: unknown }).path ?? "").trim();
       if (!bucket || !path) continue;
       const key = `${bucket}\n${path}`;
@@ -761,7 +765,8 @@ async function estimateDownloadEntryBytes(
       bucket: entry.bucket,
       key: entry.key,
     });
-    if (!Number.isFinite(head.content_length) || head.content_length < 0) return 0;
+    if (!Number.isFinite(head.content_length) || head.content_length < 0)
+      return 0;
     return head.content_length;
   } catch {
     return 0;
@@ -776,7 +781,10 @@ async function preflightDownloadDiskSpace(
   const estimatedBytes = await Promise.all(
     entries.map((entry) => estimateDownloadEntryBytes(entry)),
   );
-  const totalEstimatedBytes = estimatedBytes.reduce((sum, bytes) => sum + bytes, 0);
+  const totalEstimatedBytes = estimatedBytes.reduce(
+    (sum, bytes) => sum + bytes,
+    0,
+  );
   if (totalEstimatedBytes < DOWNLOAD_DISK_PREFLIGHT_THRESHOLD_BYTES) {
     return true;
   }
@@ -791,10 +799,13 @@ async function preflightDownloadDiskSpace(
   }
   if (requiredByDirectory.size === 0) return true;
 
-  const shortages: Array<{ dir: string; required: number; available: number }> = [];
+  const shortages: Array<{ dir: string; required: number; available: number }> =
+    [];
   for (const [dir, required] of requiredByDirectory) {
     try {
-      const available = await invoke<number>("get_available_disk_bytes", { path: dir });
+      const available = await invoke<number>("get_available_disk_bytes", {
+        path: dir,
+      });
       if (!Number.isFinite(available) || available < 0) continue;
       if (available < required) {
         shortages.push({ dir, required, available });
@@ -1578,7 +1589,10 @@ function openCopyMoveDialog(): void {
       }
 
       if (queuedEntries.length === 0) {
-        setStatus("No copy/move transfers queued (all conflicts skipped).", 5000);
+        setStatus(
+          "No copy/move transfers queued (all conflicts skipped).",
+          5000,
+        );
         return;
       }
 
