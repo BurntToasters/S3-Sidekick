@@ -213,8 +213,7 @@ function parseStructuredTransferError(
       code: row.code,
       retryable: row.retryable,
       http_status:
-        typeof row.http_status === "number" &&
-        Number.isInteger(row.http_status)
+        typeof row.http_status === "number" && Number.isInteger(row.http_status)
           ? row.http_status
           : undefined,
       message: row.message,
@@ -228,7 +227,9 @@ function buildDownloadTempPath(destination: string): string {
   return `${destination}.s3-sidekick.download.tmp`;
 }
 
-function buildCheckpointId(item: Pick<TransferItem, "operation" | "bucket" | "key" | "destination">): string {
+function buildCheckpointId(
+  item: Pick<TransferItem, "operation" | "bucket" | "key" | "destination">,
+): string {
   const seed = `${item.operation}:${item.bucket}:${item.key}:${item.destination ?? ""}`;
   return btoa(unescape(encodeURIComponent(seed))).replace(/=+$/g, "");
 }
@@ -277,7 +278,8 @@ function getEffectiveTransferSettings(): EffectiveTransferSettings {
     enableTransferResume: state.currentSettings.enableTransferResume,
     enableTransferChecksumVerification:
       state.currentSettings.enableTransferChecksumVerification,
-    transferCheckpointTtlHours: state.currentSettings.transferCheckpointTtlHours,
+    transferCheckpointTtlHours:
+      state.currentSettings.transferCheckpointTtlHours,
     bandwidthLimitMbps: state.currentSettings.bandwidthLimitMbps,
   };
 }
@@ -491,10 +493,10 @@ function parseQueueManifest(
       if (!item || typeof item !== "object") continue;
       const row = item as Partial<PersistedTransferItem>;
       if (
-        row.operation !== "upload" &&
-        row.operation !== "download" &&
-        row.operation !== "copy" &&
-        row.operation !== "move" ||
+        (row.operation !== "upload" &&
+          row.operation !== "download" &&
+          row.operation !== "copy" &&
+          row.operation !== "move") ||
         typeof row.bucket !== "string" ||
         typeof row.fileName !== "string" ||
         typeof row.filePath !== "string" ||
@@ -514,7 +516,8 @@ function parseQueueManifest(
           typeof row.destination === "string" ? row.destination : undefined,
         sourceBucket:
           typeof row.sourceBucket === "string" ? row.sourceBucket : undefined,
-        sourceKey: typeof row.sourceKey === "string" ? row.sourceKey : undefined,
+        sourceKey:
+          typeof row.sourceKey === "string" ? row.sourceKey : undefined,
         sourcePrefix:
           typeof row.sourcePrefix === "string" ? row.sourcePrefix : undefined,
         destinationBucket:
@@ -760,7 +763,9 @@ function applyProgressPayload(payload: TransferProgressPayload): void {
     item.phase = payload.phase;
   }
   item.progress =
-    payload.total_bytes > 0 ? (payload.bytes_sent / payload.total_bytes) * 100 : 0;
+    payload.total_bytes > 0
+      ? (payload.bytes_sent / payload.total_bytes) * 100
+      : 0;
   item.totalBytes = payload.total_bytes;
   if (typeof payload.speed_bps === "number" && payload.speed_bps >= 0) {
     item.speedBps = payload.speed_bps;
@@ -899,7 +904,10 @@ function resumeAllTransfers(): void {
   for (const item of queue) {
     if (!item.paused) continue;
     item.paused = false;
-    if (item.status === "error" && item.error?.toLowerCase().includes("cancel")) {
+    if (
+      item.status === "error" &&
+      item.error?.toLowerCase().includes("cancel")
+    ) {
       item.status = "queued";
       item.error = undefined;
     }
@@ -919,14 +927,20 @@ function togglePauseTransferItem(id: number): void {
   if (!item) return;
   if (item.paused) {
     item.paused = false;
-    if (item.status === "error" && item.error?.toLowerCase().includes("cancel")) {
+    if (
+      item.status === "error" &&
+      item.error?.toLowerCase().includes("cancel")
+    ) {
       item.status = "queued";
       item.error = undefined;
     }
     if (item.status === "queued") {
       item.phase = "resuming";
       void processQueue().catch((err) =>
-        logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
+        logActivity(
+          `Transfer processing error: ${normalizeError(err)}`,
+          "error",
+        ),
       );
     }
   } else {
@@ -981,7 +995,10 @@ export function clearNonActiveTransfers(): void {
   queue = queue.filter(
     (item) => item.status === "queued" || item.status === "uploading",
   );
-  if (selectedTransferId != null && !queue.some((item) => item.id === selectedTransferId)) {
+  if (
+    selectedTransferId != null &&
+    !queue.some((item) => item.id === selectedTransferId)
+  ) {
     selectedTransferId = null;
   }
   queueRender();
@@ -1024,7 +1041,10 @@ export function clearCompletedTransfers(): void {
   queue = queue.filter(
     (item) => item.status === "queued" || item.status === "uploading",
   );
-  if (selectedTransferId != null && !queue.some((item) => item.id === selectedTransferId)) {
+  if (
+    selectedTransferId != null &&
+    !queue.some((item) => item.id === selectedTransferId)
+  ) {
     selectedTransferId = null;
   }
   renderQueue();
@@ -1251,7 +1271,8 @@ export function enqueueCopyMoveEntries(entries: CopyMoveQueueEntry[]): void {
   const maxAttempts = maxAttemptsFromSettings();
   for (const entry of entries) {
     const keyLike = entry.sourceKey ?? entry.sourcePrefix ?? "";
-    const destinationLike = entry.destinationKey ?? entry.destinationPrefix ?? "";
+    const destinationLike =
+      entry.destinationKey ?? entry.destinationPrefix ?? "";
     queue.push({
       id: nextId++,
       operation: entry.operation,
@@ -1366,7 +1387,10 @@ async function processQueue(): Promise<void> {
                 : item.operation === "copy"
                   ? "Copy"
                   : "Move";
-          logActivity(`${opLabel} failed for ${item.fileName}: ${errorText}`, "error");
+          logActivity(
+            `${opLabel} failed for ${item.fileName}: ${errorText}`,
+            "error",
+          );
         }
       }
 
@@ -1502,7 +1526,8 @@ async function executeTransfer(
       key: item.key,
     });
     const shouldUseParallel =
-      head.content_length >= effective.downloadParallelThresholdMb * 1024 * 1024 &&
+      head.content_length >=
+        effective.downloadParallelThresholdMb * 1024 * 1024 &&
       effective.downloadPartConcurrency > 1;
     const checkpointId =
       item.checkpointId ??
@@ -1885,7 +1910,7 @@ function renderQueue(): void {
                       ? "Resuming"
                       : t.phase === "finalizing"
                         ? "Finalizing"
-                  : "Running"
+                        : "Running"
             }</span>`
           : "";
       const speedLabel =

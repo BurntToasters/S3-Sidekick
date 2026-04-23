@@ -69,7 +69,8 @@ function applyPresetToTransferControls(
   const downloadConcurrency = document.getElementById(
     "setting-download-part-concurrency",
   ) as HTMLSelectElement | null;
-  if (downloadConcurrency) downloadConcurrency.value = values.downloadConcurrency;
+  if (downloadConcurrency)
+    downloadConcurrency.value = values.downloadConcurrency;
 
   const uploadPartSize = document.getElementById(
     "setting-upload-part-size-mb",
@@ -221,7 +222,9 @@ export function populateSettingsModal(): void {
     "setting-download-part-size-mb",
   ) as HTMLSelectElement | null;
   if (downloadPartSizeSelect) {
-    downloadPartSizeSelect.value = String(state.currentSettings.downloadPartSizeMb);
+    downloadPartSizeSelect.value = String(
+      state.currentSettings.downloadPartSizeMb,
+    );
   }
 
   const downloadPartConcurrencySelect = document.getElementById(
@@ -277,7 +280,9 @@ export function populateSettingsModal(): void {
     "setting-bandwidth-limit-mbps",
   ) as HTMLSelectElement | null;
   if (bandwidthLimitSelect) {
-    bandwidthLimitSelect.value = String(state.currentSettings.bandwidthLimitMbps);
+    bandwidthLimitSelect.value = String(
+      state.currentSettings.bandwidthLimitMbps,
+    );
   }
 
   const supported = isUpdaterEnabled();

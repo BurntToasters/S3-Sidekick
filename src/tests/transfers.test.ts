@@ -431,7 +431,8 @@ describe("transfers queue UI", () => {
     await flushMicrotasks(8);
     await vi.waitFor(() => {
       expect(
-        (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+        (document.getElementById("transfer-list") as HTMLDivElement)
+          .textContent,
       ).not.toContain("slow.txt");
     });
     transfers.clearCompletedTransfers();
@@ -446,7 +447,8 @@ describe("transfers queue UI", () => {
     (queuedRow?.querySelector(".transfer-cancel") as HTMLButtonElement).click();
     await vi.waitFor(() => {
       expect(
-        (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+        (document.getElementById("transfer-list") as HTMLDivElement)
+          .textContent,
       ).toContain("Cancelled");
     });
   });
