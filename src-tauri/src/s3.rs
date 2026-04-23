@@ -1,6 +1,7 @@
 use aws_sdk_s3::types::{Delete, MetadataDirective, ObjectCannedAcl, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +29,10 @@ const MAX_TRANSFER_CONCURRENCY: u32 = 16;
 const UPLOAD_PART_RETRY_ATTEMPTS: u32 = 3;
 const PARALLEL_DOWNLOAD_THRESHOLD_MB: u32 = 128;
 const RANGE_UNSUPPORTED_CODE: &str = "__range_unsupported__";
+const MAX_UPLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_DOWNLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+const TRANSFER_ERROR_PREFIX: &str = "__S3_SIDEKICK_TRANSFER_ERROR__";
+const CHECKSUM_METADATA_KEY: &str = "s3-sidekick-sha256";
 const MULTIPART_COPY_PART_SIZE: u64 = 500 * 1024 * 1024;
 const MULTIPART_COPY_THRESHOLD: i64 = 5_368_709_120;
 const MAX_KEY_LEN: usize = 1024;
@@ -184,12 +189,47 @@ fn clamp_transfer_concurrency(value: Option<u32>) -> usize {
         .clamp(1, MAX_TRANSFER_CONCURRENCY) as usize
 }
 
+fn clamp_concurrency_for_budget(requested: usize, part_size_bytes: usize, budget_bytes: u64) -> usize {
+    if part_size_bytes == 0 {
+        return 1;
+    }
+    let cap = std::cmp::max(1, (budget_bytes / part_size_bytes as u64) as usize);
+    requested.clamp(1, cap)
+}
+
 fn clamp_bandwidth_limit_bps(value: Option<u32>) -> u64 {
     let mbps = value.unwrap_or(0);
     if mbps == 0 {
         return 0;
     }
     (mbps as u64) * 1024 * 1024 / 8
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TransferErrorEnvelope {
+    code: String,
+    retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
+    message: String,
+}
+
+fn encode_transfer_error(
+    code: &str,
+    retryable: bool,
+    http_status: Option<u16>,
+    message: String,
+) -> String {
+    let payload = TransferErrorEnvelope {
+        code: code.to_string(),
+        retryable,
+        http_status,
+        message: message.clone(),
+    };
+    match serde_json::to_string(&payload) {
+        Ok(json) => format!("{}{}", TRANSFER_ERROR_PREFIX, json),
+        Err(_) => message,
+    }
 }
 
 fn choose_upload_part_size_bytes(file_size: u64, requested_mb: Option<u32>) -> Result<usize, String> {
@@ -294,6 +334,136 @@ fn maybe_range_unsupported(err: &str) -> bool {
                 || lower.contains("unsupported")
                 || lower.contains("status code: 416")
                 || lower.contains("http 416"))
+}
+
+enum ExpectedChecksum {
+    Hex(String),
+    Base64(String),
+}
+
+fn digest_to_hex(digest: &[u8]) -> String {
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
+
+fn digest_to_base64(digest: &[u8]) -> String {
+    B64.encode(digest)
+}
+
+fn sha256_hex_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    digest_to_hex(&digest)
+}
+
+async fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncReadExt;
+    let mut hasher = Sha256::new();
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("Failed to open file for checksum: {}", e))?;
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("Failed to read file for checksum: {}", e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hasher.finalize().to_vec())
+}
+
+fn expected_checksum_from_head(head: &aws_sdk_s3::operation::head_object::HeadObjectOutput) -> Option<ExpectedChecksum> {
+    if let Some(value) = head
+        .metadata()
+        .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
+    {
+        let trimmed = value.trim().to_ascii_lowercase();
+        if !trimmed.is_empty() {
+            return Some(ExpectedChecksum::Hex(trimmed));
+        }
+    }
+    if let Some(value) = head.checksum_sha256() {
+        let trimmed = value.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(ExpectedChecksum::Base64(trimmed));
+        }
+    }
+    None
+}
+
+async fn verify_file_checksum(path: &Path, expected: &ExpectedChecksum) -> Result<(), String> {
+    let digest = sha256_file(path).await?;
+    match expected {
+        ExpectedChecksum::Hex(hex) => {
+            let actual = digest_to_hex(&digest);
+            if actual != *hex {
+                return Err(encode_transfer_error(
+                    "checksum_mismatch",
+                    false,
+                    None,
+                    format!(
+                        "Checksum verification failed: expected {}, got {}.",
+                        hex, actual
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        ExpectedChecksum::Base64(b64) => {
+            let actual = digest_to_base64(&digest);
+            if actual != *b64 {
+                return Err(encode_transfer_error(
+                    "checksum_mismatch",
+                    false,
+                    None,
+                    "Checksum verification failed.".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn verify_remote_checksum_metadata(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    expected_hex: &str,
+) -> Result<(), String> {
+    let head = client
+        .head_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .map_err(|e| structured_transfer_sdk_error("Failed checksum head", &e, "checksum_head", false))?;
+    let actual = head
+        .metadata()
+        .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty());
+    if let Some(actual_hex) = actual {
+        if actual_hex != expected_hex {
+            return Err(encode_transfer_error(
+                "checksum_mismatch",
+                false,
+                None,
+                format!(
+                    "Checksum metadata mismatch for uploaded object. Expected {}.",
+                    expected_hex
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -489,6 +659,36 @@ fn format_sdk_error<E: std::fmt::Debug>(prefix: &str, err: &aws_sdk_s3::error::S
             format!("{} (dispatch): {:?}", prefix, err)
         }
         other => format!("{}: {:?}", prefix, other),
+    }
+}
+
+fn structured_transfer_sdk_error<E: std::fmt::Debug>(
+    prefix: &str,
+    err: &aws_sdk_s3::error::SdkError<E>,
+    default_code: &str,
+    default_retryable: bool,
+) -> String {
+    use aws_sdk_s3::error::SdkError;
+    let message = format_sdk_error(prefix, err);
+    match err {
+        SdkError::ServiceError(ctx) => {
+            let status = ctx.raw().status().as_u16();
+            let retryable = status == 408 || status == 425 || status == 429 || status >= 500;
+            let code = if status == 429 {
+                "throttled"
+            } else if status >= 500 {
+                "server"
+            } else if status == 403 {
+                "forbidden"
+            } else {
+                default_code
+            };
+            encode_transfer_error(code, retryable, Some(status), message)
+        }
+        SdkError::DispatchFailure(_) => {
+            encode_transfer_error("network", true, None, message)
+        }
+        _ => encode_transfer_error(default_code, default_retryable, None, message),
     }
 }
 
@@ -910,6 +1110,7 @@ pub(crate) async fn upload_object(
     bandwidth_limit_mbps: Option<u32>,
     checkpoint_id: Option<String>,
     resumable: Option<bool>,
+    checksum_verification: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
@@ -927,6 +1128,13 @@ pub(crate) async fn upload_object(
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
     let resumable_enabled = resumable.unwrap_or(false);
+    let checksum_enabled = checksum_verification.unwrap_or(false);
+    let expected_checksum_hex = if checksum_enabled {
+        let digest = sha256_file(&upload_path).await?;
+        Some(digest_to_hex(&digest))
+    } else {
+        None
+    };
     emit_transfer_progress(
         &app,
         "upload-progress",
@@ -944,7 +1152,12 @@ pub(crate) async fn upload_object(
 
     if file_size >= MULTIPART_THRESHOLD {
         let part_size_bytes = choose_upload_part_size_bytes(file_size, part_size_mb)?;
-        let part_workers = clamp_transfer_concurrency(part_concurrency);
+        let requested_workers = clamp_transfer_concurrency(part_concurrency);
+        let part_workers = clamp_concurrency_for_budget(
+            requested_workers,
+            part_size_bytes,
+            MAX_UPLOAD_INFLIGHT_BYTES,
+        );
         let bandwidth_limit_bps = clamp_bandwidth_limit_bps(bandwidth_limit_mbps);
         upload_multipart(
             &app,
@@ -962,6 +1175,7 @@ pub(crate) async fn upload_object(
             checkpoint_id.as_deref(),
             resumable_enabled,
             started_at,
+            expected_checksum_hex.as_deref(),
         )
         .await?;
     } else {
@@ -979,10 +1193,17 @@ pub(crate) async fn upload_object(
         if !content_type.is_empty() {
             req = req.content_type(&content_type);
         }
+        if let Some(checksum_hex) = expected_checksum_hex.as_deref() {
+            req = req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
+        }
 
         req.send()
             .await
-            .map_err(|e| format!("Failed to upload: {}", e))?;
+            .map_err(|e| structured_transfer_sdk_error("Failed to upload", &e, "upload", true))?;
+    }
+
+    if let Some(expected_checksum) = expected_checksum_hex.as_deref() {
+        verify_remote_checksum_metadata(&client, &bucket, &key, expected_checksum).await?;
     }
 
     emit_transfer_progress(
@@ -1019,6 +1240,7 @@ pub(crate) async fn upload_object_resumable(
     bandwidth_limit_mbps: Option<u32>,
     checkpoint_id: Option<String>,
     resumable: Option<bool>,
+    checksum_verification: Option<bool>,
 ) -> Result<(), String> {
     upload_object(
         app,
@@ -1034,6 +1256,7 @@ pub(crate) async fn upload_object_resumable(
         bandwidth_limit_mbps,
         checkpoint_id,
         resumable,
+        checksum_verification,
     )
     .await
 }
@@ -1044,7 +1267,7 @@ async fn upload_part_with_retry(
     key: String,
     upload_id: String,
     part_number: i32,
-    data: Vec<u8>,
+    data: bytes::Bytes,
 ) -> Result<(i32, usize, String), String> {
     let bytes = data.len();
     let mut last_error = String::new();
@@ -1065,7 +1288,12 @@ async fn upload_part_with_retry(
                 return Ok((part_number, bytes, etag));
             }
             Err(err) => {
-                last_error = format!("Failed to upload part {}: {}", part_number, err);
+                last_error = structured_transfer_sdk_error(
+                    &format!("Failed to upload part {}", part_number),
+                    &err,
+                    "upload_part",
+                    true,
+                );
                 if attempt < UPLOAD_PART_RETRY_ATTEMPTS {
                     let delay = Duration::from_millis(250 * (2u64.pow(attempt - 1)));
                     tokio::time::sleep(delay).await;
@@ -1092,6 +1320,7 @@ async fn upload_multipart(
     checkpoint_id: Option<&str>,
     resumable: bool,
     started_at: Instant,
+    checksum_hex: Option<&str>,
 ) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
     use tokio::task::JoinSet;
@@ -1100,11 +1329,14 @@ async fn upload_multipart(
     if !content_type.is_empty() {
         create_req = create_req.content_type(content_type);
     }
+    if let Some(checksum_hex) = checksum_hex {
+        create_req = create_req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
+    }
 
     let create_output = create_req
         .send()
         .await
-        .map_err(|e| format!("Failed to create multipart upload: {}", e))?;
+        .map_err(|e| structured_transfer_sdk_error("Failed to create multipart upload", &e, "upload_init", true))?;
 
     let upload_id = create_output
         .upload_id()
@@ -1173,7 +1405,8 @@ async fn upload_multipart(
             let pn = part_number;
 
             join_set.spawn(async move {
-                upload_part_with_retry(client, bucket, key, uid, pn, buf).await
+                let shared = bytes::Bytes::from(buf);
+                upload_part_with_retry(client, bucket, key, uid, pn, shared).await
             });
 
             part_number += 1;
@@ -1245,7 +1478,12 @@ async fn upload_multipart(
         .await
     {
         abort(client, bucket, key, &upload_id).await;
-        return Err(format!("Failed to complete multipart upload: {}", e));
+        return Err(structured_transfer_sdk_error(
+            "Failed to complete multipart upload",
+            &e,
+            "upload_complete",
+            true,
+        ));
     }
 
     Ok(())
@@ -1261,6 +1499,7 @@ pub(crate) async fn upload_object_bytes(
     content_type: String,
     transfer_id: u32,
     attempt: Option<u32>,
+    checksum_verification: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
     if bytes.len() > MAX_UPLOAD_OBJECT_BYTES {
@@ -1278,6 +1517,12 @@ pub(crate) async fn upload_object_bytes(
     let total = bytes.len() as u64;
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
+    let checksum_enabled = checksum_verification.unwrap_or(false);
+    let expected_checksum_hex = if checksum_enabled {
+        Some(sha256_hex_bytes(&bytes))
+    } else {
+        None
+    };
     emit_transfer_progress(
         &app,
         "upload-progress",
@@ -1302,10 +1547,17 @@ pub(crate) async fn upload_object_bytes(
     if !content_type.is_empty() {
         req = req.content_type(&content_type);
     }
+    if let Some(checksum_hex) = expected_checksum_hex.as_deref() {
+        req = req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
+    }
 
     req.send()
         .await
-        .map_err(|e| format!("Failed to upload: {}", e))?;
+        .map_err(|e| structured_transfer_sdk_error("Failed to upload", &e, "upload", true))?;
+
+    if let Some(expected_checksum) = expected_checksum_hex.as_deref() {
+        verify_remote_checksum_metadata(&client, &bucket, &key, expected_checksum).await?;
+    }
 
     emit_transfer_progress(
         &app,
@@ -1421,6 +1673,7 @@ pub(crate) async fn download_object(
     overwrite: bool,
     temp_path: Option<String>,
     attempt: Option<u32>,
+    checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1445,6 +1698,7 @@ pub(crate) async fn download_object(
     }
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
+    let checksum_enabled = checksum_verification.unwrap_or(false);
 
     let client = {
         let s3 = lock_s3_state(&state)?;
@@ -1456,13 +1710,28 @@ pub(crate) async fn download_object(
         return Err("Transfer cancelled".to_string());
     }
 
+    let expected_checksum = if checksum_enabled {
+        let head = client
+            .head_object()
+            .bucket(&bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| {
+                structured_transfer_sdk_error("Failed to read object metadata", &e, "download_head", true)
+            })?;
+        expected_checksum_from_head(&head)
+    } else {
+        None
+    };
+
     let output = client
         .get_object()
         .bucket(&bucket)
         .key(&key)
         .send()
         .await
-        .map_err(|e| format!("Failed to download: {}", e))?;
+        .map_err(|e| structured_transfer_sdk_error("Failed to download", &e, "download", true))?;
 
     let total_bytes = output.content_length().unwrap_or(0) as u64;
     emit_transfer_progress(
@@ -1554,6 +1823,13 @@ pub(crate) async fn download_object(
     })?;
     drop(file);
 
+    if let Some(expected) = expected_checksum.as_ref() {
+        if let Err(err) = verify_file_checksum(&temp_path, expected).await {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(err);
+        }
+    }
+
     finalize_download_file(&temp_path, &destination_path, overwrite)?;
 
     emit_transfer_progress(
@@ -1637,7 +1913,14 @@ async fn download_parallel_part(
         .range(format!("bytes={}-{}", start, end))
         .send()
         .await
-        .map_err(|e| format!("Failed ranged download {}-{}: {}", start, end, e))?;
+        .map_err(|e| {
+            structured_transfer_sdk_error(
+                &format!("Failed ranged download {}-{}", start, end),
+                &e,
+                "download_range",
+                true,
+            )
+        })?;
 
     let mut reader = output.body.into_async_read();
     let mut file = tokio::fs::OpenOptions::new()
@@ -1691,6 +1974,7 @@ pub(crate) async fn download_object_parallel(
     bandwidth_limit_mbps: Option<u32>,
     checkpoint_id: Option<String>,
     enable_resume: Option<bool>,
+    checksum_verification: Option<bool>,
     _resume_completed_parts: Option<Vec<u32>>,
 ) -> Result<u64, String> {
     validate_key(&key, "Object key")?;
@@ -1712,6 +1996,7 @@ pub(crate) async fn download_object_parallel(
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
     let threshold_mb = parallel_threshold_mb.unwrap_or(PARALLEL_DOWNLOAD_THRESHOLD_MB).max(1);
+    let checksum_enabled = checksum_verification.unwrap_or(false);
 
     let client = {
         let s3 = lock_s3_state(&state)?;
@@ -1729,8 +2014,13 @@ pub(crate) async fn download_object_parallel(
         .key(&key)
         .send()
         .await
-        .map_err(|e| format!("Failed to read object metadata: {}", e))?;
+        .map_err(|e| structured_transfer_sdk_error("Failed to read object metadata", &e, "download_head", true))?;
     let total_bytes = head.content_length().unwrap_or(0) as u64;
+    let expected_checksum = if checksum_enabled {
+        expected_checksum_from_head(&head)
+    } else {
+        None
+    };
     let threshold_bytes = (threshold_mb as u64) * 1024 * 1024;
 
     if total_bytes < threshold_bytes || total_bytes == 0 {
@@ -1744,6 +2034,7 @@ pub(crate) async fn download_object_parallel(
             overwrite,
             Some(temp_path.to_string_lossy().to_string()),
             Some(attempt),
+            Some(checksum_enabled),
         )
         .await;
     }
@@ -1761,11 +2052,17 @@ pub(crate) async fn download_object_parallel(
             overwrite,
             Some(temp_path.to_string_lossy().to_string()),
             Some(attempt),
+            Some(checksum_enabled),
         )
         .await;
     }
 
-    let part_workers = clamp_transfer_concurrency(part_concurrency);
+    let requested_workers = clamp_transfer_concurrency(part_concurrency);
+    let part_workers = clamp_concurrency_for_budget(
+        requested_workers,
+        part_size as usize,
+        MAX_DOWNLOAD_INFLIGHT_BYTES,
+    );
     let bandwidth_limit_bps = clamp_bandwidth_limit_bps(bandwidth_limit_mbps);
     let checkpoint_enabled =
         enable_resume.unwrap_or(true) && checkpoint_id.as_ref().map(|id| !id.trim().is_empty()).unwrap_or(false);
@@ -1857,6 +2154,8 @@ pub(crate) async fn download_object_parallel(
     let bytes_done = Arc::new(AtomicU64::new(completed_bytes));
     let mut join_set = tokio::task::JoinSet::new();
     let mut next_part = 0u32;
+    let mut last_checkpoint_saved_at = Instant::now();
+    let mut last_checkpoint_saved_parts = completed.iter().filter(|v| **v).count() as u32;
 
     while next_part < total_parts || !join_set.is_empty() {
         if is_cancelled(transfer_id) {
@@ -1903,23 +2202,31 @@ pub(crate) async fn download_object_parallel(
 
                 if checkpoint_enabled {
                     if let Some(id) = checkpoint_id.as_deref() {
-                        let payload = TransferCheckpoint {
-                            version: 1,
-                            mode: "download_parallel".to_string(),
-                            bucket: bucket.clone(),
-                            key: key.clone(),
-                            destination: Some(destination.clone()),
-                            temp_path: temp_path.to_string_lossy().to_string(),
-                            total_bytes,
-                            part_size,
-                            completed_parts: completed
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(i, done)| if *done { Some(i as u32) } else { None })
-                                .collect(),
-                            updated_at_ms: now_ms(),
-                        };
-                        let _ = save_checkpoint_payload(&app, id, &payload);
+                        let elapsed_ms = last_checkpoint_saved_at.elapsed().as_millis() as u64;
+                        if completed_count == total_parts
+                            || completed_count.saturating_sub(last_checkpoint_saved_parts) >= 8
+                            || elapsed_ms >= 1500
+                        {
+                            let payload = TransferCheckpoint {
+                                version: 1,
+                                mode: "download_parallel".to_string(),
+                                bucket: bucket.clone(),
+                                key: key.clone(),
+                                destination: Some(destination.clone()),
+                                temp_path: temp_path.to_string_lossy().to_string(),
+                                total_bytes,
+                                part_size,
+                                completed_parts: completed
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, done)| if *done { Some(i as u32) } else { None })
+                                    .collect(),
+                                updated_at_ms: now_ms(),
+                            };
+                            let _ = save_checkpoint_payload(&app, id, &payload);
+                            last_checkpoint_saved_at = Instant::now();
+                            last_checkpoint_saved_parts = completed_count;
+                        }
                     }
                 }
 
@@ -1968,6 +2275,15 @@ pub(crate) async fn download_object_parallel(
             "Downloaded byte count mismatch. Expected {}, wrote {}.",
             total_bytes, final_bytes
         ));
+    }
+
+    if let Some(expected) = expected_checksum.as_ref() {
+        if let Err(err) = verify_file_checksum(&temp_path, expected).await {
+            if !checkpoint_enabled {
+                let _ = std::fs::remove_file(&temp_path);
+            }
+            return Err(err);
+        }
     }
 
     finalize_download_file(&temp_path, &destination_path, overwrite)?;

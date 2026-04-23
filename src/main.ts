@@ -1086,6 +1086,8 @@ async function handleDownload(): Promise<void> {
         overwrite: entry.conflictResolution === "replace",
         tempPath: `${entry.destination}.s3-sidekick.download.tmp`,
         attempt: 1,
+        checksumVerification:
+          state.currentSettings.enableTransferChecksumVerification,
       });
       setStatus(
         `Downloaded ${basename(entry.key)} (${formatSize(size)}).`,

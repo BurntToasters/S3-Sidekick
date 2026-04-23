@@ -128,6 +128,26 @@ describe("settings model", () => {
     );
   });
 
+  it("normalizes checksum verification setting", () => {
+    const enabled = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        enableTransferChecksumVerification: true,
+      }),
+    );
+    expect(enabled.settings.enableTransferChecksumVerification).toBe(true);
+
+    const invalid = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        enableTransferChecksumVerification: "yes",
+      }),
+    );
+    expect(invalid.settings.enableTransferChecksumVerification).toBe(
+      SETTING_DEFAULTS.enableTransferChecksumVerification,
+    );
+  });
+
   it("persists update channel in merged payload", () => {
     const payload = mergeSettingsPayload(
       { ...SETTING_DEFAULTS, updateChannel: "beta" },

@@ -76,6 +76,12 @@ fn security_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("security.json"))
 }
 
+fn transfer_manifest_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("transfer-manifest.json"))
+}
+
 fn transfer_checkpoint_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
     let checkpoints = dir.join("transfer-checkpoints");
@@ -432,6 +438,32 @@ fn save_bookmarks_backup(app: tauri::AppHandle, json: String) -> Result<(), Stri
     let security = load_security_config(&app)?;
     write_protected_file(&path, &json, &security)
 }
+
+#[tauri::command]
+fn load_transfer_manifest(app: tauri::AppHandle) -> Result<String, String> {
+    let _storage_guard = lock_storage_ops()?;
+    let path = transfer_manifest_path(&app)?;
+    let security = load_security_config(&app)?;
+    read_protected_file(&path, "", &security)
+}
+
+#[tauri::command]
+fn save_transfer_manifest(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let _storage_guard = lock_storage_ops()?;
+    let path = transfer_manifest_path(&app)?;
+    let security = load_security_config(&app)?;
+    write_protected_file(&path, &json, &security)
+}
+
+#[tauri::command]
+fn clear_transfer_manifest(app: tauri::AppHandle) -> Result<(), String> {
+    let _storage_guard = lock_storage_ops()?;
+    let path = transfer_manifest_path(&app)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
     let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
@@ -560,6 +592,9 @@ fn main() {
             save_connection,
             load_bookmarks_backup,
             save_bookmarks_backup,
+            load_transfer_manifest,
+            save_transfer_manifest,
+            clear_transfer_manifest,
             security::get_security_status,
             security::initialize_security,
             security::unlock_security,

@@ -4362,6 +4362,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "base64 0.22.1",
+ "bytes",
  "core-foundation 0.9.4",
  "fs2",
  "objc2",
