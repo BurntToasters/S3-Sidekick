@@ -65,7 +65,7 @@
       "endpoints": [
         "https://github.com/BurntToasters/S3-Sidekick/releases/latest/download/latest-{{target}}-{{arch}}.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE0NzYyNzkzRUJDRTgwNDIKUldSQ2dNN3JreWQyRkxPZG1haUJ1WlJjT3JFTGJnNktuOWxETU1Ia1BkTjIwNDc1Vk90aEN0QWIK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEzMDM0ODVCRjcxRjhBQjQKUldTMGloLzNXMGdERTEzUmc2Y3BkVEJFMlRIMGpzaE9Ud1oxcUNpRitnS3Z5MkVRa0thdi9PNUwK"
     }
   }
 }
