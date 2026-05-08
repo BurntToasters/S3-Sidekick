@@ -1,6 +1,6 @@
 {
   "name": "s3-sidekick",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "private": true,
   "description": "A Cross-Platform Desktop client for S3-compatible Object Storage.",
   "type": "module",
@@ -35,7 +35,7 @@
     "vi": "node scripts/vi.js",
     "b": "git fetch && git switch beta && npm run vi",
     "r": "git switch main && npm run vi && npm run gitprune:force",
-    "u": "npm update && npm run release:prepare && npm run format && npm run test:all",
+    "u": "npm update && cd ./src-tauri && cargo update && cd .. && npm run release:prepare && npm run format && npm run test:all",
     "win-compiler:x64": "powershell -NoProfile -ExecutionPolicy Bypass -NoExit -Command \"& 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Launch-VsDevShell.ps1' -SkipAutomaticLocation",
     "win-compiler:arm64": "powershell -NoProfile -ExecutionPolicy Bypass -NoExit -Command \"& 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Launch-VsDevShell.ps1' -SkipAutomaticLocation -Arch arm64 -HostArch amd64\"",
     "build:win:x64": "npm run sync-version && npm run licenses && dotenv -e .env -- tauri build --target x86_64-pc-windows-msvc --bundles nsis",
