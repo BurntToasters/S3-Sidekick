@@ -120,11 +120,13 @@ export async function openPreview(key: string): Promise<void> {
 
     body.innerHTML = html;
   } catch (err) {
+    if (seq !== previewSeq) return;
     body.innerHTML = `<div class="metadata-loading">Failed to load preview: ${escapeHtml(String(err))}</div>`;
   }
 }
 
 export function closePreview(): void {
+  previewSeq++;
   clearActivePreviewObjectUrl();
   $("preview-overlay").classList.remove("active");
 }

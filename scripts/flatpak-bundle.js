@@ -79,6 +79,11 @@ function main() {
   ]);
 
   const arch = detectArch();
+  if (arch !== "x64") {
+    throw new Error(
+      `Flatpak bundling is currently x64-only (detected ${arch}).`,
+    );
+  }
   const distDir = path.join(root, "dist");
   fs.mkdirSync(distDir, { recursive: true });
   const bundlePath = path.join(distDir, `S3-Sidekick-Linux-${arch}.flatpak`);

@@ -33,6 +33,17 @@ impl Drop for KeyState {
 
 static KEY_STATE: OnceLock<Mutex<KeyState>> = OnceLock::new();
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+pub(crate) struct BiometricV2 {
+    pub wrapped_vault_key: String,
+    pub opaque: String,
+    pub platform: String,
+}
+
+pub(crate) const BIOMETRIC_SCHEMA_NONE: u8 = 0;
+pub(crate) const BIOMETRIC_SCHEMA_V1: u8 = 1;
+pub(crate) const BIOMETRIC_SCHEMA_V2: u8 = 2;
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub(crate) struct SecurityConfig {
     pub initialized: bool,
@@ -45,10 +56,24 @@ pub(crate) struct SecurityConfig {
     pub pbkdf2_iterations: u32,
     #[serde(default)]
     pub biometric_enrolled: bool,
+    #[serde(default)]
+    pub biometric_schema: u8,
+    #[serde(default)]
+    pub biometric_v2: Option<BiometricV2>,
 }
 
 fn default_pbkdf2_iterations() -> u32 {
     PBKDF2_ITERATIONS
+}
+
+pub(crate) fn effective_biometric_schema(config: &SecurityConfig) -> u8 {
+    if !config.biometric_enrolled {
+        return BIOMETRIC_SCHEMA_NONE;
+    }
+    if config.biometric_schema == BIOMETRIC_SCHEMA_V2 && config.biometric_v2.is_some() {
+        return BIOMETRIC_SCHEMA_V2;
+    }
+    BIOMETRIC_SCHEMA_V1
 }
 
 #[derive(serde::Serialize)]
@@ -59,6 +84,7 @@ pub(crate) struct SecurityStatus {
     lock_timeout_minutes: u16,
     biometric_available: bool,
     biometric_enrolled: bool,
+    biometric_schema: u8,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -152,7 +178,61 @@ fn default_security_config() -> SecurityConfig {
         lock_timeout_minutes: 0,
         pbkdf2_iterations: PBKDF2_ITERATIONS,
         biometric_enrolled: false,
+        biometric_schema: BIOMETRIC_SCHEMA_NONE,
+        biometric_v2: None,
     }
+}
+
+pub(crate) fn wrap_vault_key_with_kek(
+    vault_key: &[u8; KEY_LEN],
+    kek: &[u8; KEY_LEN],
+) -> Result<String, String> {
+    let cipher = Aes256Gcm::new_from_slice(kek).map_err(|e| e.to_string())?;
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, vault_key.as_slice())
+        .map_err(|e| format!("KEK wrap failed: {}", e))?;
+    let payload = EncryptedPayload {
+        v: 1,
+        nonce: B64.encode(nonce_bytes),
+        ciphertext: B64.encode(ciphertext),
+    };
+    serde_json::to_string(&payload).map_err(|e| e.to_string())
+}
+
+pub(crate) fn unwrap_vault_key_with_kek(
+    wrapped: &str,
+    kek: &[u8; KEY_LEN],
+) -> Result<[u8; KEY_LEN], String> {
+    let payload: EncryptedPayload =
+        serde_json::from_str(wrapped).map_err(|e| format!("Invalid wrapped key payload: {}", e))?;
+    if payload.v != 1 {
+        return Err("Unsupported wrapped key version".to_string());
+    }
+    let nonce_bytes = B64
+        .decode(payload.nonce)
+        .map_err(|e| format!("Invalid wrapped nonce: {}", e))?;
+    if nonce_bytes.len() != NONCE_LEN {
+        return Err("Invalid wrapped nonce length".to_string());
+    }
+    let ciphertext = B64
+        .decode(payload.ciphertext)
+        .map_err(|e| format!("Invalid wrapped ciphertext: {}", e))?;
+    let cipher = Aes256Gcm::new_from_slice(kek).map_err(|e| e.to_string())?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let mut plain = cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .map_err(|_| "Biometric key unwrap failed".to_string())?;
+    if plain.len() != KEY_LEN {
+        plain.zeroize();
+        return Err("Unwrapped key has wrong length".to_string());
+    }
+    let mut out = [0u8; KEY_LEN];
+    out.copy_from_slice(&plain);
+    plain.zeroize();
+    Ok(out)
 }
 
 pub(crate) fn load_security_config(app: &tauri::AppHandle) -> Result<SecurityConfig, String> {
@@ -387,6 +467,7 @@ pub(crate) fn security_status(config: &SecurityConfig) -> SecurityStatus {
         lock_timeout_minutes: config.lock_timeout_minutes,
         biometric_available: crate::biometric::is_available(),
         biometric_enrolled: config.biometric_enrolled,
+        biometric_schema: effective_biometric_schema(config),
     }
 }
 
@@ -418,6 +499,8 @@ pub(crate) async fn initialize_security(
             lock_timeout_minutes: 0,
             pbkdf2_iterations: 0,
             biometric_enrolled: false,
+            biometric_schema: BIOMETRIC_SCHEMA_NONE,
+            biometric_v2: None,
         };
         set_unlocked_key(None, 0)?;
         save_security_config(&app, &config)?;
@@ -452,6 +535,8 @@ pub(crate) async fn initialize_security(
         lock_timeout_minutes: 0,
         pbkdf2_iterations: PBKDF2_ITERATIONS,
         biometric_enrolled: false,
+        biometric_schema: BIOMETRIC_SCHEMA_NONE,
+        biometric_v2: None,
     };
     verifier.zeroize();
     if let Err(err) = save_security_config(&app, &config) {
@@ -517,6 +602,8 @@ pub(crate) async fn unlock_security(app: tauri::AppHandle, mut password: String)
         if config.biometric_enrolled {
             crate::biometric::clear_stored_key();
             config.biometric_enrolled = false;
+            config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+            config.biometric_v2 = None;
         }
 
         config.salt = B64.encode(new_salt);
@@ -622,6 +709,8 @@ pub(crate) async fn set_security_encryption(
     config.salt.clear();
     config.verifier.clear();
     config.biometric_enrolled = false;
+    config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+    config.biometric_v2 = None;
     if let Err(err) = save_security_config(&app, &config) {
         if let Err(rb_err) = rollback_migration(&plans, plans.len()) {
             return Err(format!(
@@ -689,6 +778,8 @@ pub(crate) async fn change_security_password(
     if config.biometric_enrolled {
         crate::biometric::clear_stored_key();
         config.biometric_enrolled = false;
+        config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+        config.biometric_v2 = None;
     }
 
     config.salt = B64.encode(new_salt);
@@ -823,5 +914,93 @@ mod tests {
         assert!(!config.initialized);
         assert!(!config.encryption_enabled);
         assert_eq!(config.pbkdf2_iterations, PBKDF2_ITERATIONS);
+        assert_eq!(config.biometric_schema, BIOMETRIC_SCHEMA_NONE);
+        assert!(config.biometric_v2.is_none());
+    }
+
+    #[test]
+    fn wrap_unwrap_vault_key_roundtrip() {
+        let kek = derive_key("kek-pw", b"kek-salt12345678", 1000);
+        let mut vault_key = [0u8; KEY_LEN];
+        for (i, b) in vault_key.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let wrapped = wrap_vault_key_with_kek(&vault_key, &kek).unwrap();
+        let restored = unwrap_vault_key_with_kek(&wrapped, &kek).unwrap();
+        assert_eq!(restored, vault_key);
+    }
+
+    #[test]
+    fn unwrap_with_wrong_kek_fails() {
+        let kek1 = derive_key("kek-one", b"kek-salt12345678", 1000);
+        let kek2 = derive_key("kek-two", b"kek-salt12345678", 1000);
+        let vault_key = [42u8; KEY_LEN];
+        let wrapped = wrap_vault_key_with_kek(&vault_key, &kek1).unwrap();
+        assert!(unwrap_vault_key_with_kek(&wrapped, &kek2).is_err());
+    }
+
+    #[test]
+    fn wrap_produces_distinct_ciphertexts() {
+        let kek = derive_key("kek", b"kek-salt12345678", 1000);
+        let vault_key = [7u8; KEY_LEN];
+        let w1 = wrap_vault_key_with_kek(&vault_key, &kek).unwrap();
+        let w2 = wrap_vault_key_with_kek(&vault_key, &kek).unwrap();
+        assert_ne!(w1, w2, "fresh nonce should give different ciphertext");
+    }
+
+    #[test]
+    fn effective_schema_legacy_when_no_field() {
+        let mut config = default_security_config();
+        config.initialized = true;
+        config.encryption_enabled = true;
+        config.biometric_enrolled = true;
+        assert_eq!(effective_biometric_schema(&config), BIOMETRIC_SCHEMA_V1);
+    }
+
+    #[test]
+    fn effective_schema_v2_requires_payload() {
+        let mut config = default_security_config();
+        config.biometric_enrolled = true;
+        config.biometric_schema = BIOMETRIC_SCHEMA_V2;
+        config.biometric_v2 = None;
+        assert_eq!(effective_biometric_schema(&config), BIOMETRIC_SCHEMA_V1);
+
+        config.biometric_v2 = Some(BiometricV2 {
+            wrapped_vault_key: "x".into(),
+            opaque: "y".into(),
+            platform: "macos".into(),
+        });
+        assert_eq!(effective_biometric_schema(&config), BIOMETRIC_SCHEMA_V2);
+    }
+
+    #[test]
+    fn effective_schema_none_when_not_enrolled() {
+        let mut config = default_security_config();
+        config.biometric_enrolled = false;
+        config.biometric_schema = BIOMETRIC_SCHEMA_V2;
+        config.biometric_v2 = Some(BiometricV2 {
+            wrapped_vault_key: "x".into(),
+            opaque: "y".into(),
+            platform: "macos".into(),
+        });
+        assert_eq!(effective_biometric_schema(&config), BIOMETRIC_SCHEMA_NONE);
+    }
+
+    #[test]
+    fn legacy_config_deserializes_without_new_fields() {
+        let legacy = r#"{
+            "initialized": true,
+            "encryption_enabled": true,
+            "salt": "AAAA",
+            "verifier": "BBBB",
+            "lock_timeout_minutes": 5,
+            "pbkdf2_iterations": 210000,
+            "biometric_enrolled": true
+        }"#;
+        let cfg: SecurityConfig = serde_json::from_str(legacy).expect("legacy parses");
+        assert!(cfg.biometric_enrolled);
+        assert_eq!(cfg.biometric_schema, 0);
+        assert!(cfg.biometric_v2.is_none());
+        assert_eq!(effective_biometric_schema(&cfg), BIOMETRIC_SCHEMA_V1);
     }
 }

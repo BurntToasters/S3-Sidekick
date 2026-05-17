@@ -36,6 +36,7 @@ export interface TransferItem {
   maxAttempts: number;
   verified: boolean;
   conflictResolution: "ask" | "skip" | "replace";
+  overwrite: boolean;
   phase:
     | "running"
     | "retry_wait"
@@ -77,11 +78,13 @@ export interface CopyMoveQueueEntry {
   destinationKey?: string;
   destinationPrefix?: string;
   conflictResolution?: "ask" | "skip" | "replace";
+  overwrite?: boolean;
 }
 
 export interface TransferRunSummary {
   hadUpload: boolean;
   hadDownload: boolean;
+  hadRemoteMutation: boolean;
 }
 
 interface PersistedTransferManifest {
@@ -107,6 +110,7 @@ interface PersistedTransferItem {
   attempt: number;
   maxAttempts: number;
   conflictResolution: "ask" | "skip" | "replace";
+  overwrite?: boolean;
   tempPath?: string;
   paused?: boolean;
   resumable?: boolean;
@@ -125,7 +129,8 @@ const TRANSFER_ERROR_PREFIX = "__S3_SIDEKICK_TRANSFER_ERROR__";
 let nextId = 1;
 let queue: TransferItem[] = [];
 let processing = false;
-let onComplete: ((summary: TransferRunSummary) => void) | null = null;
+let onComplete: ((summary: TransferRunSummary) => void | Promise<void>) | null =
+  null;
 let progressUnlisten: UnlistenFn | null = null;
 let downloadProgressUnlisten: UnlistenFn | null = null;
 let renderQueued = false;
@@ -387,6 +392,7 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
     attempt: item.attempt,
     maxAttempts: item.maxAttempts,
     conflictResolution: item.conflictResolution,
+    overwrite: item.overwrite,
     tempPath: item.tempPath,
     paused: item.paused,
     resumable: item.resumable,
@@ -549,6 +555,7 @@ function parseQueueManifest(
             : row.conflictResolution === "skip"
               ? "skip"
               : "ask",
+        overwrite: row.overwrite === true,
         tempPath: typeof row.tempPath === "string" ? row.tempPath : undefined,
         paused: row.paused === true,
         resumable: row.resumable === true,
@@ -626,6 +633,7 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
     maxAttempts: Math.max(maxAttemptsFromSettings(), item.maxAttempts),
     verified: false,
     conflictResolution: item.conflictResolution,
+    overwrite: item.overwrite === true,
     phase: item.paused ? "paused" : "running",
     tempPath: item.tempPath,
     speedBps: 0,
@@ -1016,7 +1024,7 @@ export function prioritizeSelectedTransfer(): void {
 }
 
 export function setTransferCompleteHandler(
-  handler: (summary: TransferRunSummary) => void,
+  handler: (summary: TransferRunSummary) => void | Promise<void>,
 ): void {
   onComplete = handler;
 }
@@ -1084,6 +1092,7 @@ export function enqueueFiles(
       maxAttempts,
       verified: false,
       conflictResolution: state.currentSettings.conflictPolicy,
+      overwrite: false,
       phase: "running",
       speedBps: 0,
       etaSeconds: null,
@@ -1133,6 +1142,7 @@ export function enqueuePaths(paths: string[], targetPrefix: string): void {
       maxAttempts,
       verified: false,
       conflictResolution: state.currentSettings.conflictPolicy,
+      overwrite: false,
       phase: "running",
       speedBps: 0,
       etaSeconds: null,
@@ -1186,6 +1196,7 @@ export function enqueueFolderEntries(
       maxAttempts,
       verified: false,
       conflictResolution: state.currentSettings.conflictPolicy,
+      overwrite: false,
       phase: "running",
       speedBps: 0,
       etaSeconds: null,
@@ -1243,6 +1254,7 @@ export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
       verified: false,
       conflictResolution:
         entry.conflictResolution ?? state.currentSettings.conflictPolicy,
+      overwrite: false,
       phase: "running",
       tempPath: entry.tempPath ?? buildDownloadTempPath(entry.destination),
       speedBps: 0,
@@ -1296,6 +1308,7 @@ export function enqueueCopyMoveEntries(entries: CopyMoveQueueEntry[]): void {
       verified: false,
       conflictResolution:
         entry.conflictResolution ?? state.currentSettings.conflictPolicy,
+      overwrite: entry.overwrite === true,
       phase: "running",
       speedBps: 0,
       etaSeconds: null,
@@ -1329,6 +1342,7 @@ async function processQueue(): Promise<void> {
   processing = true;
   let completedUploadThisRun = false;
   let completedDownloadThisRun = false;
+  let completedRemoteMutationThisRun = false;
 
   const workers: Promise<void>[] = [];
   for (let i = 0; i < maxConcurrent; i += 1) {
@@ -1361,6 +1375,14 @@ async function processQueue(): Promise<void> {
         }
         if (completed && item.operation === "upload") {
           completedUploadThisRun = true;
+        }
+        if (
+          completed &&
+          (item.operation === "upload" ||
+            item.operation === "copy" ||
+            item.operation === "move")
+        ) {
+          completedRemoteMutationThisRun = true;
         }
 
         if (completed) {
@@ -1403,11 +1425,24 @@ async function processQueue(): Promise<void> {
   processing = false;
   resetConflictApplyAllWhenIdle();
 
-  if (onComplete && (completedUploadThisRun || completedDownloadThisRun)) {
-    onComplete({
-      hadUpload: completedUploadThisRun,
-      hadDownload: completedDownloadThisRun,
-    });
+  if (
+    onComplete &&
+    (completedUploadThisRun ||
+      completedDownloadThisRun ||
+      completedRemoteMutationThisRun)
+  ) {
+    try {
+      await onComplete({
+        hadUpload: completedUploadThisRun,
+        hadDownload: completedDownloadThisRun,
+        hadRemoteMutation: completedRemoteMutationThisRun,
+      });
+    } catch (err) {
+      logActivity(
+        `Transfer completion refresh failed: ${normalizeError(err)}`,
+        "error",
+      );
+    }
   }
 }
 
@@ -1452,7 +1487,7 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
         return false;
       }
 
-      await executeTransfer(item, attempt, conflictDecision === "replace");
+      await executeTransfer(item, attempt, item.overwrite);
       item.phase = "verifying";
       queueRender();
 
@@ -1603,6 +1638,7 @@ async function executeTransfer(
         srcKey: item.sourceKey,
         dstBucket,
         dstKey: item.destinationKey,
+        overwrite: item.overwrite,
       });
       if (item.operation === "move") {
         await invoke("delete_objects", {
@@ -1619,6 +1655,7 @@ async function executeTransfer(
         srcPrefix: item.sourcePrefix,
         dstBucket,
         dstPrefix: item.destinationPrefix,
+        overwrite: item.overwrite,
       });
       if (item.operation === "move") {
         await invoke("delete_prefix", {
@@ -1648,6 +1685,7 @@ async function executeTransfer(
       bandwidthLimitMbps: effective.bandwidthLimitMbps,
       resumable: false,
       checksumVerification: effective.enableTransferChecksumVerification,
+      overwrite,
     });
   } else if (item.browserFile) {
     if (item.browserFile.size > BROWSER_UPLOAD_BYTES_LIMIT) {
@@ -1667,6 +1705,7 @@ async function executeTransfer(
       transferId: item.id,
       attempt,
       checksumVerification: effective.enableTransferChecksumVerification,
+      overwrite,
     });
     item.browserFile = undefined;
   } else {
@@ -1702,15 +1741,24 @@ async function resolveConflict(
   item: TransferItem,
 ): Promise<"ask" | "skip" | "replace"> {
   const conflictExists = await checkConflictExists(item);
-  if (!conflictExists) return "replace";
+  if (!conflictExists) {
+    item.overwrite = false;
+    return "replace";
+  }
 
   const effectivePolicy =
     item.conflictResolution === "replace" || item.conflictResolution === "skip"
       ? item.conflictResolution
       : state.currentSettings.conflictPolicy;
 
-  if (effectivePolicy === "replace") return "replace";
-  if (effectivePolicy === "skip") return "skip";
+  if (effectivePolicy === "replace") {
+    item.overwrite = true;
+    return "replace";
+  }
+  if (effectivePolicy === "skip") {
+    item.overwrite = false;
+    return "skip";
+  }
 
   if (conflictApplyAll) {
     return conflictApplyAll;
@@ -1740,6 +1788,7 @@ async function resolveConflict(
     );
 
     const decision: "skip" | "replace" = replace ? "replace" : "skip";
+    item.overwrite = decision === "replace";
 
     const remaining = queue.filter(
       (entry) => entry.status === "queued" || entry.status === "uploading",
@@ -1790,7 +1839,7 @@ async function checkConflictExists(item: TransferItem): Promise<boolean> {
       key: item.key,
     });
   } catch {
-    return false;
+    throw new Error("Unable to verify destination conflict state.");
   }
 }
 

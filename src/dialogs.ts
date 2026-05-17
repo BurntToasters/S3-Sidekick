@@ -141,8 +141,14 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     async function onOk() {
       if (config.validate) {
         el.ok.disabled = true;
-        const ok = await config.validate(el.input.value);
-        el.ok.disabled = false;
+        let ok = false;
+        try {
+          ok = await config.validate(el.input.value);
+        } catch {
+          ok = false;
+        } finally {
+          el.ok.disabled = false;
+        }
         if (!ok) {
           shakeDialogBox(el.box);
           el.input.value = "";

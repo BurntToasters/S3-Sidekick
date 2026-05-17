@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { showConfirm, showPrompt, showAlert } from "./dialogs.ts";
 
 export interface SecurityStatus {
@@ -8,7 +9,10 @@ export interface SecurityStatus {
   lock_timeout_minutes: number;
   biometric_available: boolean;
   biometric_enrolled: boolean;
+  biometric_schema: number;
 }
+
+const BIOMETRIC_SCHEMA_V1 = 1;
 
 type StatusSetter = (text: string) => void;
 const WINDOWS_STARTUP_BIOMETRIC_DELAY_MS = 800;
@@ -74,10 +78,73 @@ async function unlockBiometric(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>("unlock_biometric");
 }
 
+async function migrateBiometricToV2(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>("migrate_biometric_to_v2");
+}
+
 function biometricLabel(platform: string): string {
   if (platform === "macos") return "Touch ID";
   if (platform === "windows") return "Windows Hello";
   return "Biometric";
+}
+
+async function enforceV1Migration(
+  status: SecurityStatus,
+  label: string,
+): Promise<SecurityStatus> {
+  if (!status.unlocked) return status;
+  if (status.biometric_schema !== BIOMETRIC_SCHEMA_V1) return status;
+
+  if (!status.biometric_available) {
+    try {
+      const ns = await disableBiometric();
+      await showAlert(
+        "Biometric Disabled",
+        `${label} is no longer available on this device. Biometric unlock has been disabled. Use your password to unlock.`,
+      );
+      return ns;
+    } catch {
+      return status;
+    }
+  }
+
+  const isWindows = label === "Windows Hello";
+  await showAlert(
+    "Security Upgrade Required",
+    `${label} unlock will be re-enrolled with stronger OS-bound protection.${
+      isWindows
+        ? `\n\nYou will see the ${label} prompt twice during upgrade.`
+        : ""
+    }\n\nThe app will restart after upgrade completes.`,
+    { okLabel: "Continue" },
+  );
+
+  while (true) {
+    try {
+      const updated = await migrateBiometricToV2();
+      await showAlert(
+        "Restart Required",
+        "Security upgrade complete. The app will now restart.",
+        { okLabel: "Restart Now" },
+      );
+      try {
+        await relaunch();
+      } catch {
+        await exit(0);
+      }
+      return updated;
+    } catch (err) {
+      const retry = await showConfirm(
+        "Upgrade Failed",
+        `${err}\n\nThe upgrade is required to continue using ${label} unlock. Retry now or quit the app?`,
+        { okLabel: "Retry", cancelLabel: "Quit" },
+      );
+      if (!retry) {
+        await exit(0);
+        return status;
+      }
+    }
+  }
 }
 
 function errorText(err: unknown): string {
@@ -243,7 +310,10 @@ export async function ensureSecurityReady(): Promise<boolean> {
     try {
       status = await unlockBiometric();
       if (biometricOverlay) biometricOverlay.hidden = true;
-      if (status.unlocked) return true;
+      if (status.unlocked) {
+        status = await enforceV1Migration(status, biometricLabel(platform));
+        return status.unlocked;
+      }
     } catch (err) {
       if (biometricOverlay) biometricOverlay.hidden = true;
       biometricAttempted = true;
@@ -277,7 +347,11 @@ export async function ensureSecurityReady(): Promise<boolean> {
       }
     },
   });
-  return password !== null && status.unlocked;
+  if (password !== null && status.unlocked) {
+    status = await enforceV1Migration(status, label);
+    return status.unlocked;
+  }
+  return false;
 }
 
 export async function refreshSecuritySettingsUI(): Promise<void> {
@@ -404,9 +478,15 @@ export async function handleSecurityToggle(
     }
 
     if (status.encryption_enabled && !status.unlocked) {
+      const platform = await invoke<string>("get_platform_info").catch(
+        () => "unknown",
+      );
+      const label = biometricLabel(platform);
+
       if (status.biometric_available && status.biometric_enrolled) {
         try {
-          await unlockBiometric();
+          let bioStatus = await unlockBiometric();
+          bioStatus = await enforceV1Migration(bioStatus, label);
           setStatus("Credentials unlocked.");
           await refreshSecuritySettingsUI();
           return;
@@ -415,6 +495,7 @@ export async function handleSecurityToggle(
         }
       }
 
+      let unlockedStatus: SecurityStatus | null = null;
       const password = await showPrompt(
         "Unlock",
         "Enter your password to unlock encrypted credentials:",
@@ -424,7 +505,7 @@ export async function handleSecurityToggle(
           validate: async (value) => {
             if (!value) return false;
             try {
-              await unlockSecurity(value);
+              unlockedStatus = await unlockSecurity(value);
               return true;
             } catch {
               return false;
@@ -433,6 +514,9 @@ export async function handleSecurityToggle(
         },
       );
       if (password === null) return;
+      if (unlockedStatus) {
+        await enforceV1Migration(unlockedStatus, label);
+      }
       setStatus("Credentials unlocked.");
     } else if (status.encryption_enabled) {
       const shouldDisable = await showConfirm(

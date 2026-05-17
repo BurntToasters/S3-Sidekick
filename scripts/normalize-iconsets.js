@@ -92,7 +92,9 @@ function main() {
     totalRenamed += renamed;
 
     if (renamed > 0) {
-      console.log(`Normalized ${renamed} file(s) in ${path.relative(process.cwd(), iconsetDir)}.`);
+      console.log(
+        `Normalized ${renamed} file(s) in ${path.relative(process.cwd(), iconsetDir)}.`,
+      );
     }
   }
 

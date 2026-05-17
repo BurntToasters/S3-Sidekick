@@ -155,6 +155,13 @@ fn parse_user_path(raw: &str, label: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn is_sidekick_temp_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|v| v.to_str())
+        .map(|name| name.ends_with(".s3-sidekick.download.tmp"))
+        .unwrap_or(false)
+}
+
 pub(crate) fn validate_existing_path(raw: &str, label: &str) -> Result<PathBuf, String> {
     let path = parse_user_path(raw, label)?;
     if !path.exists() {
@@ -228,6 +235,9 @@ fn path_exists(path: String) -> Result<bool, String> {
 #[tauri::command]
 fn remove_path_if_exists(path: String) -> Result<(), String> {
     let parsed = parse_user_path(&path, "Path")?;
+    if !is_sidekick_temp_path(&parsed) {
+        return Err("Refusing to remove non-S3 Sidekick temp file".to_string());
+    }
     if !parsed.exists() {
         return Ok(());
     }
@@ -243,6 +253,15 @@ fn remove_path_if_exists(path: String) -> Result<(), String> {
 #[tauri::command]
 fn write_text_file(path: String, text: String, overwrite: bool) -> Result<(), String> {
     let parsed = validate_destination_path_allow_overwrite(&path)?;
+    let file_name = parsed
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default();
+    if !file_name.starts_with("s3-sidekick-activity-")
+        || parsed.extension().and_then(|v| v.to_str()) != Some("txt")
+    {
+        return Err("Activity log exports must use a s3-sidekick-activity-*.txt file name".to_string());
+    }
     if parsed.exists() && !overwrite {
         return Err(format!("Destination already exists: {}", parsed.display()));
     }
@@ -500,9 +519,6 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), Str
 fn main() {
     #[cfg(target_os = "linux")]
     {
-        if std::env::var("GDK_BACKEND").is_err() {
-            std::env::set_var("GDK_BACKEND", "x11");
-        }
         if std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         }
@@ -607,6 +623,7 @@ fn main() {
             biometric::enable_biometric,
             biometric::disable_biometric,
             biometric::unlock_biometric,
+            biometric::migrate_biometric_to_v2,
             platform::get_platform_info,
             platform::updater_supported,
             platform::updater_support_info,

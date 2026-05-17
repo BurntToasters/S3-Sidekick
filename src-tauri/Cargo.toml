@@ -1,6 +1,6 @@
 [package]
 name = "s3-sidekick"
-version = "0.9.3"
+version = "0.9.4-beta.1"
 description = "Desktop client for Digital Ocean Spaces."
 authors = ["BurntToasters <code@rosie.run>"]
 edition = "2021"
@@ -20,6 +20,7 @@ aws-sdk-s3 = "1"
 tokio = { version = "1", features = ["full"] }
 aes-gcm = "0.10"
 base64 = "0.22"
+hkdf = "0.12"
 pbkdf2 = "0.12"
 rand = "0.8"
 sha2 = "0.10"
@@ -39,7 +40,10 @@ security-framework-sys = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
+    "Security_Credentials",
     "Security_Credentials_UI",
+    "Security_Cryptography",
+    "Storage_Streams",
     "Foundation",
     "Win32_Security_Credentials",
     "Win32_Foundation",

@@ -315,6 +315,7 @@ describe("transfers queue UI", () => {
       expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
         hadUpload: true,
         hadDownload: false,
+        hadRemoteMutation: true,
       });
     });
 
@@ -337,6 +338,7 @@ describe("transfers queue UI", () => {
       expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
         hadUpload: false,
         hadDownload: true,
+        hadRemoteMutation: false,
       });
     });
 

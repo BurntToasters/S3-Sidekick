@@ -44,6 +44,7 @@ function makeStatus(overrides: Record<string, unknown> = {}) {
     lock_timeout_minutes: 15,
     biometric_available: false,
     biometric_enrolled: false,
+    biometric_schema: 0,
     ...overrides,
   };
 }

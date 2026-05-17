@@ -5,7 +5,9 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const version = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8")).version;
+const version = JSON.parse(
+  fs.readFileSync(path.join(root, "package.json"), "utf-8"),
+).version;
 
 const tauriConf = path.join(root, "src-tauri", "tauri.conf.json");
 const conf = JSON.parse(fs.readFileSync(tauriConf, "utf-8"));
