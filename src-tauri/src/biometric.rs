@@ -1,10 +1,13 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use rand::RngCore;
 use zeroize::Zeroizing;
 
 use crate::lock_storage_ops;
 use crate::security::{
-    constant_time_eq, key_verifier, load_security_config, require_unlocked_key,
-    save_security_config, security_status, set_unlocked_key, SecurityStatus, KEY_LEN,
+    constant_time_eq, effective_biometric_schema, key_verifier, load_security_config,
+    require_unlocked_key, save_security_config, security_status, set_unlocked_key,
+    unwrap_vault_key_with_kek, wrap_vault_key_with_kek, BiometricV2, SecurityStatus,
+    BIOMETRIC_SCHEMA_NONE, BIOMETRIC_SCHEMA_V1, BIOMETRIC_SCHEMA_V2, KEY_LEN,
 };
 
 pub fn is_available() -> bool {
@@ -13,6 +16,24 @@ pub fn is_available() -> bool {
 
 pub fn clear_stored_key() {
     platform::remove_key();
+    platform::remove_v2_kek();
+}
+
+fn platform_tag() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unsupported"
+    }
+}
+
+fn is_not_found_error(err: &str) -> bool {
+    err.contains("0x80070490")
+        || err.contains("Element not found")
+        || err.contains("OSStatus -34018")
+        || err.starts_with("NotFound:")
 }
 
 #[tauri::command]
@@ -21,7 +42,10 @@ pub(crate) fn biometric_available() -> bool {
 }
 
 #[tauri::command]
-pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+pub(crate) async fn enable_biometric(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+) -> Result<SecurityStatus, String> {
     let _guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.encryption_enabled {
@@ -30,11 +54,29 @@ pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecuritySt
     if !is_available() {
         return Err("Biometric authentication is not available on this device".to_string());
     }
-    let key = Zeroizing::new(require_unlocked_key()?);
-    let result = platform::store_key(&key);
-    result?;
+    let vault_key = Zeroizing::new(require_unlocked_key()?);
+
+    let (kek, opaque) = platform::enroll_v2(Some(&window))?;
+    let wrapped = match wrap_vault_key_with_kek(&vault_key, &kek) {
+        Ok(w) => w,
+        Err(e) => {
+            platform::remove_v2_kek();
+            return Err(e);
+        }
+    };
+
     config.biometric_enrolled = true;
-    save_security_config(&app, &config)?;
+    config.biometric_schema = BIOMETRIC_SCHEMA_V2;
+    config.biometric_v2 = Some(BiometricV2 {
+        wrapped_vault_key: wrapped,
+        opaque: B64.encode(&opaque),
+        platform: platform_tag().to_string(),
+    });
+    if let Err(e) = save_security_config(&app, &config) {
+        platform::remove_v2_kek();
+        return Err(e);
+    }
+    platform::remove_key();
     Ok(security_status(&config))
 }
 
@@ -43,8 +85,52 @@ pub(crate) async fn disable_biometric(app: tauri::AppHandle) -> Result<SecurityS
     let _guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     platform::remove_key();
+    platform::remove_v2_kek();
     config.biometric_enrolled = false;
+    config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+    config.biometric_v2 = None;
     save_security_config(&app, &config)?;
+    Ok(security_status(&config))
+}
+
+#[tauri::command]
+pub(crate) async fn migrate_biometric_to_v2(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+) -> Result<SecurityStatus, String> {
+    let _guard = lock_storage_ops()?;
+    let mut config = load_security_config(&app)?;
+    if !config.encryption_enabled {
+        return Err("Encryption is not enabled".to_string());
+    }
+    if effective_biometric_schema(&config) != BIOMETRIC_SCHEMA_V1 {
+        return Err("No legacy biometric enrollment to migrate".to_string());
+    }
+    if !is_available() {
+        return Err("Biometric authentication is not available on this device".to_string());
+    }
+    let vault_key = Zeroizing::new(require_unlocked_key()?);
+
+    let (kek, opaque) = platform::enroll_v2(Some(&window))?;
+    let wrapped = match wrap_vault_key_with_kek(&vault_key, &kek) {
+        Ok(w) => w,
+        Err(e) => {
+            platform::remove_v2_kek();
+            return Err(e);
+        }
+    };
+
+    config.biometric_schema = BIOMETRIC_SCHEMA_V2;
+    config.biometric_v2 = Some(BiometricV2 {
+        wrapped_vault_key: wrapped,
+        opaque: B64.encode(&opaque),
+        platform: platform_tag().to_string(),
+    });
+    if let Err(e) = save_security_config(&app, &config) {
+        platform::remove_v2_kek();
+        return Err(e);
+    }
+    platform::remove_key();
     Ok(security_status(&config))
 }
 
@@ -59,19 +145,33 @@ pub(crate) async fn unlock_biometric(
         return Err("Biometric unlock is not configured".to_string());
     }
 
-    let key = Zeroizing::new(match platform::retrieve_key(Some(&window)) {
+    let schema = effective_biometric_schema(&config);
+    let key = match schema {
+        BIOMETRIC_SCHEMA_V2 => unlock_v2(&app, &mut config, &window)?,
+        _ => unlock_v1(&app, &mut config, &window)?,
+    };
+
+    let timeout = config.lock_timeout_minutes as u64 * 60;
+    set_unlocked_key(Some(*key), timeout)?;
+    Ok(security_status(&config))
+}
+
+fn unlock_v1(
+    app: &tauri::AppHandle,
+    config: &mut crate::security::SecurityConfig,
+    window: &tauri::Window,
+) -> Result<Zeroizing<[u8; KEY_LEN]>, String> {
+    let key = Zeroizing::new(match platform::retrieve_key(Some(window)) {
         Ok(k) => k,
         Err(err) => {
-            let is_not_found = err.contains("0x80070490")
-                || err.contains("Element not found")
-                || err.contains("OSStatus -34018");
-            if is_not_found {
+            if is_not_found_error(&err) {
                 config.biometric_enrolled = false;
-                let _ = save_security_config(&app, &config);
+                config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+                config.biometric_v2 = None;
+                let _ = save_security_config(app, config);
                 platform::remove_key();
                 return Err(
-                    "Biometric credential was removed from the system. Please unlock with your password and re-enable biometric unlock."
-                        .to_string(),
+                    "Biometric credential was removed from the system. Please unlock with your password and re-enable biometric unlock.".to_string(),
                 );
             }
             return Err("Biometric authentication failed. Please try again or unlock with your password.".to_string());
@@ -83,24 +183,98 @@ pub(crate) async fn unlock_biometric(
         .map_err(|e| format!("Invalid verifier: {}", e))?;
     if expected.len() != KEY_LEN {
         config.biometric_enrolled = false;
-        let _ = save_security_config(&app, &config);
+        config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+        config.biometric_v2 = None;
+        let _ = save_security_config(app, config);
         return Err("Invalid security configuration".to_string());
     }
 
     let computed = key_verifier(&key);
     if !constant_time_eq(&computed, &expected) {
         config.biometric_enrolled = false;
-        let _ = save_security_config(&app, &config);
+        config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+        config.biometric_v2 = None;
+        let _ = save_security_config(app, config);
         platform::remove_key();
         return Err(
-            "Stored biometric key is no longer valid. Please unlock with your password and re-enable biometric unlock."
-                .to_string(),
+            "Stored biometric key is no longer valid. Please unlock with your password and re-enable biometric unlock.".to_string(),
         );
     }
+    Ok(key)
+}
 
-    let timeout = config.lock_timeout_minutes as u64 * 60;
-    set_unlocked_key(Some(*key), timeout)?;
-    Ok(security_status(&config))
+fn unlock_v2(
+    app: &tauri::AppHandle,
+    config: &mut crate::security::SecurityConfig,
+    window: &tauri::Window,
+) -> Result<Zeroizing<[u8; KEY_LEN]>, String> {
+    let v2 = config
+        .biometric_v2
+        .clone()
+        .ok_or_else(|| "Biometric v2 configuration missing".to_string())?;
+    let opaque = B64
+        .decode(&v2.opaque)
+        .map_err(|e| format!("Invalid biometric opaque: {}", e))?;
+
+    let kek = Zeroizing::new(match platform::retrieve_v2_kek(&opaque, Some(window)) {
+        Ok(k) => k,
+        Err(err) => {
+            if is_not_found_error(&err) {
+                config.biometric_enrolled = false;
+                config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+                config.biometric_v2 = None;
+                let _ = save_security_config(app, config);
+                platform::remove_v2_kek();
+                return Err(
+                    "Biometric credential was removed from the system. Please unlock with your password and re-enable biometric unlock.".to_string(),
+                );
+            }
+            return Err(format!("Biometric authentication failed: {}", err));
+        }
+    });
+
+    let mut vault_key = match unwrap_vault_key_with_kek(&v2.wrapped_vault_key, &kek) {
+        Ok(k) => k,
+        Err(_) => {
+            config.biometric_enrolled = false;
+            config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+            config.biometric_v2 = None;
+            let _ = save_security_config(app, config);
+            platform::remove_v2_kek();
+            return Err(
+                "Stored biometric key is no longer valid. Please unlock with your password and re-enable biometric unlock.".to_string(),
+            );
+        }
+    };
+
+    let expected = B64
+        .decode(&config.verifier)
+        .map_err(|e| format!("Invalid verifier: {}", e))?;
+    if expected.len() != KEY_LEN {
+        return Err("Invalid security configuration".to_string());
+    }
+    let computed = key_verifier(&vault_key);
+    if !constant_time_eq(&computed, &expected) {
+        for b in vault_key.iter_mut() {
+            *b = 0;
+        }
+        config.biometric_enrolled = false;
+        config.biometric_schema = BIOMETRIC_SCHEMA_NONE;
+        config.biometric_v2 = None;
+        let _ = save_security_config(app, config);
+        platform::remove_v2_kek();
+        return Err(
+            "Stored biometric key is no longer valid. Please unlock with your password and re-enable biometric unlock.".to_string(),
+        );
+    }
+    Ok(Zeroizing::new(vault_key))
+}
+
+#[allow(dead_code)]
+fn random_kek() -> Zeroizing<[u8; KEY_LEN]> {
+    let mut kek = Zeroizing::new([0u8; KEY_LEN]);
+    rand::rngs::OsRng.fill_bytes(&mut *kek);
+    kek
 }
 
 // ---------------------------------------------------------------------------
@@ -130,11 +304,21 @@ mod platform {
         static kSecMatchLimitOne: *const c_void;
         static kSecAttrAccessible: *const c_void;
         static kSecAttrAccessibleWhenUnlockedThisDeviceOnly: *const c_void;
+        static kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly: *const c_void;
+        static kSecAttrAccessControl: *const c_void;
+        static kSecUseAuthenticationContext: *const c_void;
         static kCFBooleanTrue: *const c_void;
 
         fn SecItemAdd(attributes: *const c_void, result: *mut *const c_void) -> i32;
         fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
         fn SecItemDelete(query: *const c_void) -> i32;
+
+        fn SecAccessControlCreateWithFlags(
+            allocator: *const c_void,
+            protection: *const c_void,
+            flags: u32,
+            error: *mut *const c_void,
+        ) -> *const c_void;
 
         fn CFDictionaryCreateMutable(
             allocator: *const c_void,
@@ -154,9 +338,12 @@ mod platform {
     }
 
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+    const SEC_ACCESS_CONTROL_BIOMETRY_CURRENT_SET: u32 = 1 << 3;
 
     const SERVICE: &str = "run.rosie.s3-sidekick";
     const ACCOUNT: &str = "biometric-encryption-key";
+    const ACCOUNT_V2: &str = "biometric-kek-v2";
+    const V2_PROMPT: &str = "Unlock S3 Sidekick encrypted storage";
 
     // -----------------------------------------------------------------------
     // Touch ID via LAContext (avoids keychain-access-groups entitlement)
@@ -298,6 +485,15 @@ mod platform {
         CFDictionarySetValue(dict, kSecAttrAccount, account.as_concrete_TypeRef() as _);
     }
 
+    unsafe fn set_base_attrs_v2(dict: *mut c_void) {
+        let service = CFString::new(SERVICE);
+        let account = CFString::new(ACCOUNT_V2);
+        CFDictionarySetValue(dict, kSecClass, kSecClassGenericPassword);
+        CFDictionarySetValue(dict, kSecAttrService, service.as_concrete_TypeRef() as _);
+        CFDictionarySetValue(dict, kSecAttrAccount, account.as_concrete_TypeRef() as _);
+    }
+
+    #[allow(dead_code)]
     pub fn store_key(key: &[u8; KEY_LEN]) -> Result<(), String> {
         remove_key();
 
@@ -349,6 +545,9 @@ mod platform {
                 let msg = match status {
                     -128 => "Authentication was canceled".to_string(),
                     -25293 => "Authentication failed".to_string(),
+                    ERR_SEC_ITEM_NOT_FOUND => {
+                        "NotFound: keychain item missing".to_string()
+                    }
                     _ => format!("Biometric authentication failed (OSStatus {})", status),
                 };
                 return Err(msg);
@@ -374,6 +573,114 @@ mod platform {
             CFRelease(dict);
         }
     }
+
+    pub fn enroll_v2(_window: Option<&tauri::Window>) -> Result<(super::Zeroizing<[u8; KEY_LEN]>, Vec<u8>), String> {
+        let kek = super::random_kek();
+        remove_v2_kek();
+
+        unsafe {
+            let mut err: *const c_void = std::ptr::null();
+            let access = SecAccessControlCreateWithFlags(
+                kCFAllocatorDefault as *const c_void,
+                kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+                SEC_ACCESS_CONTROL_BIOMETRY_CURRENT_SET,
+                &mut err,
+            );
+            if access.is_null() {
+                if !err.is_null() {
+                    CFRelease(err);
+                }
+                return Err(
+                    "Failed to create biometric access control. Touch ID may not be enrolled."
+                        .to_string(),
+                );
+            }
+
+            let dict = new_dict();
+            set_base_attrs_v2(dict);
+            let data = CFData::from_buffer(&*kek);
+            CFDictionarySetValue(dict, kSecValueData, data.as_concrete_TypeRef() as _);
+            CFDictionarySetValue(dict, kSecAttrAccessControl, access);
+
+            let status = SecItemAdd(dict, std::ptr::null_mut());
+            CFRelease(dict);
+            CFRelease(access);
+
+            if status != errSecSuccess {
+                return Err(format!(
+                    "Failed to store biometric KEK in Keychain (OSStatus {})",
+                    status
+                ));
+            }
+        }
+
+        Ok((kek, Vec::new()))
+    }
+
+    pub fn retrieve_v2_kek(
+        _opaque: &[u8],
+        _window: Option<&tauri::Window>,
+    ) -> Result<[u8; KEY_LEN], String> {
+        unsafe {
+            let la_cls = objc2::runtime::AnyClass::get(c"LAContext")
+                .ok_or_else(|| "LAContext unavailable".to_string())?;
+            let la_ctx: objc2::rc::Retained<objc2::runtime::AnyObject> =
+                objc2::msg_send![la_cls, new];
+            let reason = CFString::new(V2_PROMPT);
+            let _: () = objc2::msg_send![
+                &*la_ctx,
+                setLocalizedReason: reason.as_concrete_TypeRef() as *const c_void
+            ];
+
+            let dict = new_dict();
+            set_base_attrs_v2(dict);
+            CFDictionarySetValue(dict, kSecReturnData, kCFBooleanTrue);
+            CFDictionarySetValue(dict, kSecMatchLimit, kSecMatchLimitOne);
+            CFDictionarySetValue(
+                dict,
+                kSecUseAuthenticationContext,
+                objc2::rc::Retained::as_ptr(&la_ctx) as *const c_void,
+            );
+
+            let mut result: *const c_void = ptr::null();
+            let status = SecItemCopyMatching(dict, &mut result);
+            CFRelease(dict);
+            drop(la_ctx);
+
+            if status != errSecSuccess || result.is_null() {
+                if !result.is_null() {
+                    CFRelease(result);
+                }
+                let msg = match status {
+                    -128 => "Authentication was canceled".to_string(),
+                    -25293 => "Authentication failed".to_string(),
+                    ERR_SEC_ITEM_NOT_FOUND => {
+                        "NotFound: keychain item missing".to_string()
+                    }
+                    _ => format!("Biometric authentication failed (OSStatus {})", status),
+                };
+                return Err(msg);
+            }
+
+            let cf_data = CFData::wrap_under_create_rule(result as _);
+            let bytes = cf_data.bytes();
+            if bytes.len() != KEY_LEN {
+                return Err("Invalid biometric KEK length".to_string());
+            }
+            let mut kek = [0u8; KEY_LEN];
+            kek.copy_from_slice(bytes);
+            Ok(kek)
+        }
+    }
+
+    pub fn remove_v2_kek() {
+        unsafe {
+            let dict = new_dict();
+            set_base_attrs_v2(dict);
+            let _ = SecItemDelete(dict);
+            CFRelease(dict);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,11 +693,18 @@ mod platform {
     use std::thread;
     use std::time::Duration;
 
+    use hkdf::Hkdf;
+    use rand::RngCore;
+    use sha2::Sha256;
     use windows::core::{factory, Error, HSTRING, PCWSTR, PWSTR};
     use windows::Foundation::IAsyncOperation;
+    use windows::Security::Credentials::{
+        KeyCredentialCreationOption, KeyCredentialManager, KeyCredentialStatus,
+    };
     use windows::Security::Credentials::UI::{
         UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
     };
+    use windows::Security::Cryptography::CryptographicBuffer;
     use windows::Win32::Foundation::{FILETIME, HWND};
     use windows::Win32::Security::Credentials::{
         CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST,
@@ -399,6 +713,9 @@ mod platform {
     use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
 
     const TARGET: &str = "run.rosie.s3-sidekick/biometric-key";
+    const V2_CRED_NAME: &str = "run.rosie.s3-sidekick.v2";
+    const V2_HKDF_INFO: &[u8] = b"s3sk-biometric-kek-v1";
+    const V2_CHALLENGE_LEN: usize = 32;
     const WINDOWS_HELLO_RETRY_HRESULT: i32 = 0x80098044u32 as i32;
     const WINDOWS_HELLO_NOT_FOUND_HRESULT: i32 = 0x80070490u32 as i32;
     const WINDOWS_CREDREAD_RETRY_DELAY_MS: u64 = 500;
@@ -479,11 +796,13 @@ mod platform {
         Err("Windows Hello authentication failed after retries".to_string())
     }
 
+    #[allow(dead_code)]
     pub fn store_key(key: &[u8; KEY_LEN]) -> Result<(), String> {
         remove_key();
         write_credential(key, CRED_PERSIST_ENTERPRISE)
     }
 
+    #[allow(dead_code)]
     fn write_credential(key: &[u8; KEY_LEN], persist: CRED_PERSIST) -> Result<(), String> {
         let mut target_name = to_wide(TARGET);
         let mut user_name = to_wide("s3-sidekick");
@@ -576,6 +895,164 @@ mod platform {
             let _ = CredDeleteW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_GENERIC, 0);
         }
     }
+
+    fn derive_kek(signature: &[u8]) -> [u8; KEY_LEN] {
+        let hk = Hkdf::<Sha256>::new(None, signature);
+        let mut okm = [0u8; KEY_LEN];
+        hk.expand(V2_HKDF_INFO, &mut okm)
+            .expect("HKDF expand for KEK_LEN bytes must succeed");
+        okm
+    }
+
+    fn ibuffer_to_vec(buf: &windows::Storage::Streams::IBuffer) -> Result<Vec<u8>, String> {
+        let mut out = windows::core::Array::<u8>::new();
+        CryptographicBuffer::CopyToByteArray(buf, &mut out)
+            .map_err(|e| format!("Failed to read buffer: {}", e))?;
+        Ok(out.as_slice().to_vec())
+    }
+
+    pub fn enroll_v2(
+        _window: Option<&tauri::Window>,
+    ) -> Result<(super::Zeroizing<[u8; KEY_LEN]>, Vec<u8>), String> {
+        let supported = KeyCredentialManager::IsSupportedAsync()
+            .and_then(|op| op.get())
+            .unwrap_or(false);
+        if !supported {
+            return Err(
+                "Windows Hello key credentials are not supported on this device (TPM required for hardware-bound biometric unlock)."
+                    .to_string(),
+            );
+        }
+
+        let mut challenge = vec![0u8; V2_CHALLENGE_LEN];
+        rand::rngs::OsRng.fill_bytes(&mut challenge);
+
+        let name = HSTRING::from(V2_CRED_NAME);
+        let create_op = KeyCredentialManager::RequestCreateAsync(
+            &name,
+            KeyCredentialCreationOption::ReplaceExisting,
+        )
+        .map_err(|e| format!("KeyCredentialManager create failed: {}", e))?;
+        let create_result = create_op
+            .get()
+            .map_err(|e| format!("KeyCredentialManager create await failed: {}", e))?;
+        let status = create_result
+            .Status()
+            .map_err(|e| format!("KeyCredential status read failed: {}", e))?;
+        if status != KeyCredentialStatus::Success {
+            return Err(format!(
+                "KeyCredential creation rejected by Windows Hello (status {:?})",
+                status
+            ));
+        }
+        let credential = create_result
+            .Credential()
+            .map_err(|e| format!("KeyCredential read failed: {}", e))?;
+
+        let challenge_buf = CryptographicBuffer::CreateFromByteArray(&challenge)
+            .map_err(|e| {
+                remove_v2_kek();
+                format!("Challenge buffer create failed: {}", e)
+            })?;
+        let sign_op = credential.RequestSignAsync(&challenge_buf).map_err(|e| {
+            remove_v2_kek();
+            format!("RequestSignAsync failed: {}", e)
+        })?;
+        let sign_result = sign_op.get().map_err(|e| {
+            remove_v2_kek();
+            format!("Sign await failed: {}", e)
+        })?;
+        let sign_status = sign_result.Status().map_err(|e| {
+            remove_v2_kek();
+            format!("Sign status read failed: {}", e)
+        })?;
+        if sign_status != KeyCredentialStatus::Success {
+            remove_v2_kek();
+            return Err(format!(
+                "KeyCredential sign rejected (status {:?})",
+                sign_status
+            ));
+        }
+        let sig_buf = sign_result.Result().map_err(|e| {
+            remove_v2_kek();
+            format!("Sign result read failed: {}", e)
+        })?;
+        let signature = ibuffer_to_vec(&sig_buf).map_err(|e| {
+            remove_v2_kek();
+            e
+        })?;
+
+        let kek_bytes = derive_kek(&signature);
+        let mut kek = super::Zeroizing::new([0u8; KEY_LEN]);
+        kek.copy_from_slice(&kek_bytes);
+        Ok((kek, challenge))
+    }
+
+    pub fn retrieve_v2_kek(
+        opaque: &[u8],
+        _window: Option<&tauri::Window>,
+    ) -> Result<[u8; KEY_LEN], String> {
+        if opaque.len() != V2_CHALLENGE_LEN {
+            return Err("Invalid biometric challenge length".to_string());
+        }
+        let name = HSTRING::from(V2_CRED_NAME);
+        let open_op = KeyCredentialManager::OpenAsync(&name)
+            .map_err(|e| format!("KeyCredentialManager open failed: {}", e))?;
+        let open_result = open_op
+            .get()
+            .map_err(|e| format!("KeyCredentialManager open await failed: {}", e))?;
+        let open_status = open_result
+            .Status()
+            .map_err(|e| format!("KeyCredential open status read failed: {}", e))?;
+        if open_status != KeyCredentialStatus::Success {
+            if open_status == KeyCredentialStatus::NotFound {
+                return Err("NotFound: biometric credential missing".to_string());
+            }
+            return Err(format!(
+                "KeyCredential open rejected (status {:?})",
+                open_status
+            ));
+        }
+        let credential = open_result
+            .Credential()
+            .map_err(|e| format!("KeyCredential read failed: {}", e))?;
+
+        let challenge_buf = CryptographicBuffer::CreateFromByteArray(opaque)
+            .map_err(|e| format!("Challenge buffer create failed: {}", e))?;
+        let sign_op = credential
+            .RequestSignAsync(&challenge_buf)
+            .map_err(|e| format!("RequestSignAsync failed: {}", e))?;
+        let sign_result = sign_op
+            .get()
+            .map_err(|e| format!("Sign await failed: {}", e))?;
+        let sign_status = sign_result
+            .Status()
+            .map_err(|e| format!("Sign status read failed: {}", e))?;
+        if sign_status != KeyCredentialStatus::Success {
+            if sign_status == KeyCredentialStatus::UserCanceled {
+                return Err("Authentication was canceled".to_string());
+            }
+            if sign_status == KeyCredentialStatus::NotFound {
+                return Err("NotFound: biometric credential vanished during sign".to_string());
+            }
+            return Err(format!(
+                "KeyCredential sign rejected (status {:?})",
+                sign_status
+            ));
+        }
+        let sig_buf = sign_result
+            .Result()
+            .map_err(|e| format!("Sign result read failed: {}", e))?;
+        let signature = ibuffer_to_vec(&sig_buf)?;
+        Ok(derive_kek(&signature))
+    }
+
+    pub fn remove_v2_kek() {
+        let name = HSTRING::from(V2_CRED_NAME);
+        if let Ok(op) = KeyCredentialManager::DeleteAsync(&name) {
+            let _ = op.get();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -589,6 +1066,7 @@ mod platform {
         false
     }
 
+    #[allow(dead_code)]
     pub fn store_key(_: &[u8; KEY_LEN]) -> Result<(), String> {
         Err("Biometric authentication is not supported on this platform".to_string())
     }
@@ -598,6 +1076,21 @@ mod platform {
     }
 
     pub fn remove_key() {}
+
+    pub fn enroll_v2(
+        _window: Option<&tauri::Window>,
+    ) -> Result<(super::Zeroizing<[u8; KEY_LEN]>, Vec<u8>), String> {
+        Err("Biometric authentication is not supported on this platform".to_string())
+    }
+
+    pub fn retrieve_v2_kek(
+        _opaque: &[u8],
+        _window: Option<&tauri::Window>,
+    ) -> Result<[u8; KEY_LEN], String> {
+        Err("Biometric authentication is not supported on this platform".to_string())
+    }
+
+    pub fn remove_v2_kek() {}
 }
 
 #[cfg(test)]

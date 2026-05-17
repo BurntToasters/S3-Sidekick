@@ -623,6 +623,7 @@ fn main() {
             biometric::enable_biometric,
             biometric::disable_biometric,
             biometric::unlock_biometric,
+            biometric::migrate_biometric_to_v2,
             platform::get_platform_info,
             platform::updater_supported,
             platform::updater_support_info,
