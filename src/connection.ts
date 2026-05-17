@@ -98,16 +98,14 @@ export async function refreshObjects(
   bucket: string,
   prefix: string,
 ): Promise<void> {
-  state.currentBucket = bucket;
-  state.currentPrefix = prefix;
-  state.continuationToken = "";
-  state.hasMore = false;
   const response = await invoke<ListObjectsResponse>("list_objects", {
     bucket,
     prefix,
     delimiter: "/",
     continuationToken: "",
   });
+  state.currentBucket = bucket;
+  state.currentPrefix = prefix;
   state.objects = response.objects;
   state.prefixes = response.prefixes;
   state.continuationToken = response.next_continuation_token;

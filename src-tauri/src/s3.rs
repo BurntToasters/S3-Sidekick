@@ -47,9 +47,6 @@ fn validate_key(key: &str, label: &str) -> Result<(), String> {
     if key.as_bytes().iter().any(|&b| b == 0) {
         return Err(format!("{} contains invalid characters", label));
     }
-    if key.split('/').any(|seg| seg == ".." || seg == ".") {
-        return Err(format!("{} must not contain '..' or '.' path segments", label));
-    }
     Ok(())
 }
 
@@ -58,6 +55,35 @@ fn validate_prefix(prefix: &str, label: &str) -> Result<(), String> {
         return Ok(());
     }
     validate_key(prefix, label)
+}
+
+fn validate_nonempty_prefix(prefix: &str, label: &str) -> Result<(), String> {
+    if prefix.is_empty() {
+        return Err(format!("{} must not be empty for this operation", label));
+    }
+    validate_prefix(prefix, label)
+}
+
+fn validate_download_temp_path(temp_path: &Path, destination_path: &Path) -> Result<(), String> {
+    if temp_path == destination_path {
+        return Err("Temp path must be different from destination".to_string());
+    }
+    if temp_path.parent() != destination_path.parent() {
+        return Err("Temp path must be in the destination directory".to_string());
+    }
+    let dest_name = destination_path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .ok_or_else(|| "Destination must include a file name".to_string())?;
+    let temp_name = temp_path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .ok_or_else(|| "Temp path must include a file name".to_string())?;
+    let expected = format!("{}.s3-sidekick.download.tmp", dest_name);
+    if temp_name != expected {
+        return Err("Temp path is not an S3 Sidekick download temp file".to_string());
+    }
+    Ok(())
 }
 
 static CANCELLED_TRANSFERS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
@@ -466,6 +492,31 @@ async fn verify_remote_checksum_metadata(
     Ok(())
 }
 
+async fn object_exists_for_client(client: &Client, bucket: &str, key: &str) -> Result<bool, String> {
+    match client.head_object().bucket(bucket).key(key).send().await {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            use aws_sdk_s3::error::SdkError;
+            match err {
+                SdkError::ServiceError(ctx) if ctx.raw().status().as_u16() == 404 => Ok(false),
+                other => Err(format!("Failed to check destination object: {:?}", other)),
+            }
+        }
+    }
+}
+
+async fn prefix_has_objects(client: &Client, bucket: &str, prefix: &str) -> Result<bool, String> {
+    let output = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix(prefix)
+        .max_keys(1)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to check destination prefix: {}", e))?;
+    Ok(!output.contents().is_empty() || !output.common_prefixes().is_empty())
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct PreviewResponse {
     content_type: String,
@@ -646,6 +697,14 @@ fn normalize_endpoint(raw: &str) -> (String, Option<String>) {
     (url, bucket_hint)
 }
 
+fn is_loopback_http_endpoint(endpoint: &str) -> bool {
+    if !endpoint.starts_with("http://") {
+        return true;
+    }
+    let host = parse_endpoint_host(endpoint).unwrap_or_default();
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
 fn format_sdk_error<E: std::fmt::Debug>(prefix: &str, err: &aws_sdk_s3::error::SdkError<E>) -> String {
     use aws_sdk_s3::error::SdkError;
     match err {
@@ -743,6 +802,9 @@ pub(crate) async fn connect(
     }
     let resolved_region = resolve_region(&endpoint, &region)?;
     let (normalized, bucket_hint) = normalize_endpoint(&endpoint);
+    if !is_loopback_http_endpoint(&normalized) {
+        return Err("Plain http:// endpoints are only allowed for localhost. Use https:// for remote S3 endpoints.".to_string());
+    }
 
     let creds =
         aws_sdk_s3::config::Credentials::new(&access_key, &secret_key, None, None, "s3-sidekick");
@@ -1007,8 +1069,29 @@ pub(crate) async fn update_metadata(
         s3.client.clone().ok_or("Not connected")?
     };
 
-    let source = encode_copy_source(&bucket, &key);
+    let head = client
+        .head_object()
+        .bucket(&bucket)
+        .key(&key)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get object info: {}", e))?;
+    let size = head.content_length().unwrap_or(0);
     let preserved_acl = infer_canned_acl_for_object(&client, &bucket, &key).await;
+    if size >= MULTIPART_COPY_THRESHOLD {
+        return rewrite_metadata_multipart(
+            &client,
+            &bucket,
+            &key,
+            &content_type,
+            &metadata,
+            preserved_acl,
+            size,
+        )
+        .await;
+    }
+
+    let source = encode_copy_source(&bucket, &key);
     let mut req = client
         .copy_object()
         .bucket(&bucket)
@@ -1038,6 +1121,9 @@ pub(crate) async fn delete_objects(
     bucket: String,
     keys: Vec<String>,
 ) -> Result<u32, String> {
+    for key in &keys {
+        validate_key(key, "Object key")?;
+    }
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1111,6 +1197,7 @@ pub(crate) async fn upload_object(
     checkpoint_id: Option<String>,
     resumable: Option<bool>,
     checksum_verification: Option<bool>,
+    overwrite: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
@@ -1119,6 +1206,9 @@ pub(crate) async fn upload_object(
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    if !overwrite.unwrap_or(false) && object_exists_for_client(&client, &bucket, &key).await? {
+        return Err(format!("Destination already exists: {}", key));
+    }
 
     let file_size = tokio::fs::metadata(&upload_path)
         .await
@@ -1197,6 +1287,11 @@ pub(crate) async fn upload_object(
             req = req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
         }
 
+        if is_cancelled(transfer_id) {
+            clear_cancelled(transfer_id);
+            return Err("Transfer cancelled".to_string());
+        }
+
         req.send()
             .await
             .map_err(|e| structured_transfer_sdk_error("Failed to upload", &e, "upload", true))?;
@@ -1204,6 +1299,11 @@ pub(crate) async fn upload_object(
 
     if let Some(expected_checksum) = expected_checksum_hex.as_deref() {
         verify_remote_checksum_metadata(&client, &bucket, &key, expected_checksum).await?;
+    }
+
+    if is_cancelled(transfer_id) {
+        clear_cancelled(transfer_id);
+        return Err("Transfer cancelled".to_string());
     }
 
     emit_transfer_progress(
@@ -1241,6 +1341,7 @@ pub(crate) async fn upload_object_resumable(
     checkpoint_id: Option<String>,
     resumable: Option<bool>,
     checksum_verification: Option<bool>,
+    overwrite: Option<bool>,
 ) -> Result<(), String> {
     upload_object(
         app,
@@ -1257,6 +1358,7 @@ pub(crate) async fn upload_object_resumable(
         checkpoint_id,
         resumable,
         checksum_verification,
+        overwrite,
     )
     .await
 }
@@ -1325,6 +1427,10 @@ async fn upload_multipart(
     use tokio::io::AsyncReadExt;
     use tokio::task::JoinSet;
 
+    let mut file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+
     let mut create_req = client.create_multipart_upload().bucket(bucket).key(key);
     if !content_type.is_empty() {
         create_req = create_req.content_type(content_type);
@@ -1342,10 +1448,6 @@ async fn upload_multipart(
         .upload_id()
         .ok_or("No upload ID returned")?
         .to_string();
-
-    let mut file = tokio::fs::File::open(file_path)
-        .await
-        .map_err(|e| format!("Failed to open file: {}", e))?;
 
     let total_parts = ((file_size + part_size_bytes as u64 - 1) / part_size_bytes as u64) as usize;
     let mut completed_parts: Vec<Option<aws_sdk_s3::types::CompletedPart>> =
@@ -1383,10 +1485,14 @@ async fn upload_multipart(
             let mut buf = vec![0u8; part_size_bytes];
             let mut read = 0;
             while read < part_size_bytes {
-                let n = file
-                    .read(&mut buf[read..])
-                    .await
-                    .map_err(|e| format!("Failed to read file: {}", e))?;
+                let n = match file.read(&mut buf[read..]).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        join_set.abort_all();
+                        abort(client, bucket, key, &upload_id).await;
+                        return Err(format!("Failed to read file: {}", e));
+                    }
+                };
                 if n == 0 {
                     break;
                 }
@@ -1464,6 +1570,12 @@ async fn upload_multipart(
     let final_parts: Vec<aws_sdk_s3::types::CompletedPart> =
         completed_parts.into_iter().flatten().collect();
 
+    if is_cancelled(transfer_id) {
+        clear_cancelled(transfer_id);
+        abort(client, bucket, key, &upload_id).await;
+        return Err("Transfer cancelled".to_string());
+    }
+
     let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
         .set_parts(Some(final_parts))
         .build();
@@ -1500,6 +1612,7 @@ pub(crate) async fn upload_object_bytes(
     transfer_id: u32,
     attempt: Option<u32>,
     checksum_verification: Option<bool>,
+    overwrite: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
     if bytes.len() > MAX_UPLOAD_OBJECT_BYTES {
@@ -1513,6 +1626,9 @@ pub(crate) async fn upload_object_bytes(
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    if !overwrite.unwrap_or(false) && object_exists_for_client(&client, &bucket, &key).await? {
+        return Err(format!("Destination already exists: {}", key));
+    }
 
     let total = bytes.len() as u64;
     let attempt = normalize_attempt(attempt);
@@ -1551,12 +1667,22 @@ pub(crate) async fn upload_object_bytes(
         req = req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
     }
 
+    if is_cancelled(transfer_id) {
+        clear_cancelled(transfer_id);
+        return Err("Transfer cancelled".to_string());
+    }
+
     req.send()
         .await
         .map_err(|e| structured_transfer_sdk_error("Failed to upload", &e, "upload", true))?;
 
     if let Some(expected_checksum) = expected_checksum_hex.as_deref() {
         verify_remote_checksum_metadata(&client, &bucket, &key, expected_checksum).await?;
+    }
+
+    if is_cancelled(transfer_id) {
+        clear_cancelled(transfer_id);
+        return Err("Transfer cancelled".to_string());
     }
 
     emit_transfer_progress(
@@ -1686,9 +1812,7 @@ pub(crate) async fn download_object(
     let temp_path = match temp_path {
         Some(custom) => {
             let custom_path = validate_destination_path_allow_overwrite(&custom)?;
-            if custom_path == destination_path {
-                return Err("Temp path must be different from destination".to_string());
-            }
+            validate_download_temp_path(&custom_path, &destination_path)?;
             custom_path
         }
         None => make_temp_path(&destination_path, "download"),
@@ -1828,6 +1952,12 @@ pub(crate) async fn download_object(
             let _ = std::fs::remove_file(&temp_path);
             return Err(err);
         }
+    }
+
+    if is_cancelled(transfer_id) {
+        clear_cancelled(transfer_id);
+        let _ = std::fs::remove_file(&temp_path);
+        return Err("Transfer cancelled".to_string());
     }
 
     finalize_download_file(&temp_path, &destination_path, overwrite)?;
@@ -1986,9 +2116,7 @@ pub(crate) async fn download_object_parallel(
     let temp_path = match temp_path {
         Some(custom) => {
             let custom_path = validate_destination_path_allow_overwrite(&custom)?;
-            if custom_path == destination_path {
-                return Err("Temp path must be different from destination".to_string());
-            }
+            validate_download_temp_path(&custom_path, &destination_path)?;
             custom_path
         }
         None => make_temp_path(&destination_path, "download"),
@@ -2108,6 +2236,15 @@ pub(crate) async fn download_object_parallel(
                     }
                 }
             }
+        }
+    }
+
+    if completed.iter().any(|v| *v) {
+        let valid_temp = std::fs::metadata(&temp_path)
+            .map(|m| m.is_file() && m.len() == total_bytes)
+            .unwrap_or(false);
+        if !valid_temp || expected_checksum.is_none() {
+            completed.fill(false);
         }
     }
 
@@ -2286,6 +2423,14 @@ pub(crate) async fn download_object_parallel(
         }
     }
 
+    if is_cancelled(transfer_id) {
+        clear_cancelled(transfer_id);
+        if !checkpoint_enabled {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        return Err("Transfer cancelled".to_string());
+    }
+
     finalize_download_file(&temp_path, &destination_path, overwrite)?;
 
     emit_transfer_progress(
@@ -2355,10 +2500,37 @@ async fn copy_object_multipart(
     dest_key: &str,
     total_size: i64,
 ) -> Result<(), String> {
-    let create_output = client
+    let head = client
+        .head_object()
+        .bucket(src_bucket)
+        .key(source_key)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to read source metadata: {}", e))?;
+
+    let mut create_req = client
         .create_multipart_upload()
         .bucket(dst_bucket)
-        .key(dest_key)
+        .key(dest_key);
+    if let Some(content_type) = head.content_type() {
+        create_req = create_req.content_type(content_type);
+    }
+    if let Some(cache_control) = head.cache_control() {
+        create_req = create_req.cache_control(cache_control);
+    }
+    if let Some(content_disposition) = head.content_disposition() {
+        create_req = create_req.content_disposition(content_disposition);
+    }
+    if let Some(content_encoding) = head.content_encoding() {
+        create_req = create_req.content_encoding(content_encoding);
+    }
+    if let Some(metadata) = head.metadata() {
+        for (key, value) in metadata {
+            create_req = create_req.metadata(key, value);
+        }
+    }
+
+    let create_output = create_req
         .send()
         .await
         .map_err(|e| format!("Failed to create multipart copy: {}", e))?;
@@ -2444,12 +2616,146 @@ async fn copy_object_multipart(
     Ok(())
 }
 
+async fn rewrite_metadata_multipart(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    content_type: &str,
+    metadata: &HashMap<String, String>,
+    preserved_acl: Option<ObjectCannedAcl>,
+    total_size: i64,
+) -> Result<(), String> {
+    let mut create_req = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .content_type(content_type);
+    if let Some(acl) = preserved_acl {
+        create_req = create_req.acl(acl);
+    }
+    for (k, v) in metadata {
+        create_req = create_req.metadata(k, v);
+    }
+
+    let create_output = create_req
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create multipart metadata update: {}", e))?;
+    let upload_id = create_output
+        .upload_id()
+        .ok_or("No upload ID returned for multipart metadata update")?
+        .to_string();
+    let copy_source = encode_copy_source(bucket, key);
+    let mut completed_parts = Vec::new();
+    let mut part_number = 1i32;
+    let mut offset = 0u64;
+    let size = total_size as u64;
+
+    while offset < size {
+        let end = std::cmp::min(offset + MULTIPART_COPY_PART_SIZE, size) - 1;
+        let range = format!("bytes={}-{}", offset, end);
+        match client
+            .upload_part_copy()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .copy_source(&copy_source)
+            .copy_source_range(&range)
+            .part_number(part_number)
+            .send()
+            .await
+        {
+            Ok(output) => {
+                let etag = output
+                    .copy_part_result()
+                    .and_then(|r| r.e_tag())
+                    .unwrap_or_default()
+                    .to_string();
+                completed_parts.push(
+                    aws_sdk_s3::types::CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(etag)
+                        .build(),
+                );
+                offset = end + 1;
+                part_number += 1;
+            }
+            Err(e) => {
+                let _ = client
+                    .abort_multipart_upload()
+                    .bucket(bucket)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .send()
+                    .await;
+                return Err(format!("Failed to copy metadata part {}: {}", part_number, e));
+            }
+        }
+    }
+
+    let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+        .set_parts(Some(completed_parts))
+        .build();
+    if let Err(e) = client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(&upload_id)
+        .multipart_upload(completed_upload)
+        .send()
+        .await
+    {
+        let _ = client
+            .abort_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .send()
+            .await;
+        return Err(format!("Failed to complete multipart metadata update: {}", e));
+    }
+
+    Ok(())
+}
+
+async fn copy_object_select_size(
+    client: &Client,
+    src_bucket: &str,
+    src_key: &str,
+    dst_bucket: &str,
+    dst_key: &str,
+) -> Result<(), String> {
+    let head = client
+        .head_object()
+        .bucket(src_bucket)
+        .key(src_key)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get object info: {}", e))?;
+    let size = head.content_length().unwrap_or(0);
+    if size >= MULTIPART_COPY_THRESHOLD {
+        copy_object_multipart(client, src_bucket, dst_bucket, src_key, dst_key, size).await
+    } else {
+        let source = encode_copy_source(src_bucket, src_key);
+        client
+            .copy_object()
+            .bucket(dst_bucket)
+            .key(dst_key)
+            .copy_source(&source)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to copy: {}", e))?;
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn rename_object(
     state: tauri::State<'_, AppState>,
     bucket: String,
     old_key: String,
     new_key: String,
+    overwrite: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&old_key, "Source key")?;
     validate_key(&new_key, "Destination key")?;
@@ -2457,6 +2763,10 @@ pub(crate) async fn rename_object(
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    let overwrite = overwrite.unwrap_or(false);
+    if !overwrite && object_exists_for_client(&client, &bucket, &new_key).await? {
+        return Err(format!("Destination already exists: {}", new_key));
+    }
 
     let head = client
         .head_object()
@@ -2539,7 +2849,7 @@ pub(crate) async fn delete_prefix(
     bucket: String,
     prefix: String,
 ) -> Result<u32, String> {
-    validate_prefix(&prefix, "Prefix")?;
+    validate_nonempty_prefix(&prefix, "Prefix")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -2632,13 +2942,21 @@ pub(crate) async fn rename_prefix(
     bucket: String,
     old_prefix: String,
     new_prefix: String,
+    overwrite: Option<bool>,
 ) -> Result<u32, String> {
-    validate_prefix(&old_prefix, "Source prefix")?;
-    validate_prefix(&new_prefix, "Destination prefix")?;
+    validate_nonempty_prefix(&old_prefix, "Source prefix")?;
+    validate_nonempty_prefix(&new_prefix, "Destination prefix")?;
+    if new_prefix == old_prefix || new_prefix.starts_with(&old_prefix) {
+        return Err("Destination prefix must not be the source prefix or inside it".to_string());
+    }
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    let overwrite = overwrite.unwrap_or(false);
+    if !overwrite && prefix_has_objects(&client, &bucket, &new_prefix).await? {
+        return Err(format!("Destination prefix already exists: {}", new_prefix));
+    }
 
     let keys = list_all_keys_under_prefix(&client, &bucket, &old_prefix).await?;
     if keys.is_empty() {
@@ -2653,15 +2971,8 @@ pub(crate) async fn rename_prefix(
             format!("Key '{}' does not start with prefix '{}'", key, old_prefix)
         })?;
         let new_key = format!("{}{}", new_prefix, suffix);
-        let source = encode_copy_source(&bucket, key);
-        if let Err(e) = client
-            .copy_object()
-            .bucket(&bucket)
-            .key(&new_key)
-            .copy_source(&source)
-            .send()
-            .await
-        {
+        let copy_result = copy_object_select_size(&client, &bucket, key, &bucket, &new_key).await;
+        if let Err(e) = copy_result {
             // Roll back: delete any objects already copied to new prefix
             for rollback_chunk in copied_keys.chunks(1000) {
                 let objects: Vec<ObjectIdentifier> = rollback_chunk
@@ -2718,6 +3029,7 @@ pub(crate) async fn copy_object_to(
     src_key: String,
     dst_bucket: String,
     dst_key: String,
+    overwrite: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&src_key, "Source key")?;
     validate_key(&dst_key, "Destination key")?;
@@ -2725,6 +3037,10 @@ pub(crate) async fn copy_object_to(
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    let overwrite = overwrite.unwrap_or(false);
+    if !overwrite && object_exists_for_client(&client, &dst_bucket, &dst_key).await? {
+        return Err(format!("Destination already exists: {}/{}", dst_bucket, dst_key));
+    }
 
     let head = client
         .head_object()
@@ -2762,13 +3078,21 @@ pub(crate) async fn copy_prefix_to(
     src_prefix: String,
     dst_bucket: String,
     dst_prefix: String,
+    overwrite: Option<bool>,
 ) -> Result<u32, String> {
-    validate_prefix(&src_prefix, "Source prefix")?;
-    validate_prefix(&dst_prefix, "Destination prefix")?;
+    validate_nonempty_prefix(&src_prefix, "Source prefix")?;
+    validate_nonempty_prefix(&dst_prefix, "Destination prefix")?;
+    if src_bucket == dst_bucket && (dst_prefix == src_prefix || dst_prefix.starts_with(&src_prefix)) {
+        return Err("Destination prefix must not be the source prefix or inside it".to_string());
+    }
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    let overwrite = overwrite.unwrap_or(false);
+    if !overwrite && prefix_has_objects(&client, &dst_bucket, &dst_prefix).await? {
+        return Err(format!("Destination prefix already exists: {}/{}", dst_bucket, dst_prefix));
+    }
 
     let keys = list_all_keys_under_prefix(&client, &src_bucket, &src_prefix).await?;
     if keys.is_empty() {
@@ -2781,15 +3105,8 @@ pub(crate) async fn copy_prefix_to(
             format!("Key '{}' does not start with prefix '{}'", key, src_prefix)
         })?;
         let new_key = format!("{}{}", dst_prefix, suffix);
-        let source = encode_copy_source(&src_bucket, key);
-        if let Err(e) = client
-            .copy_object()
-            .bucket(&dst_bucket)
-            .key(&new_key)
-            .copy_source(&source)
-            .send()
-            .await
-        {
+        let copy_result = copy_object_select_size(&client, &src_bucket, key, &dst_bucket, &new_key).await;
+        if let Err(e) = copy_result {
             for rollback_chunk in copied_keys.chunks(1000) {
                 let objects: Vec<ObjectIdentifier> = rollback_chunk
                     .iter()

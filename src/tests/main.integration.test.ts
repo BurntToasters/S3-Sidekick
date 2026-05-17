@@ -879,6 +879,7 @@ describe("main integration", () => {
       bucket: "bucket-a",
       oldKey: "docs/file.txt",
       newKey: "docs/renamed.txt",
+      overwrite: false,
     });
     expect(mockInvoke).toHaveBeenCalledWith("delete_objects", {
       bucket: "bucket-a",
@@ -1033,6 +1034,7 @@ describe("main integration", () => {
         destinationBucket: "bucket-b",
         destinationKey: "archive/file.txt",
         conflictResolution: "replace",
+        overwrite: false,
       },
     ]);
     expect(mockInvoke).not.toHaveBeenCalledWith(
@@ -1085,6 +1087,7 @@ describe("main integration", () => {
         destinationBucket: "bucket-a",
         destinationKey: "moved/file.txt",
         conflictResolution: "replace",
+        overwrite: false,
       },
     ]);
     expect(mockInvoke).not.toHaveBeenCalledWith(

@@ -9,11 +9,25 @@ const __dirname = path.dirname(__filename);
 
 const RELEASE_DIR = path.join(__dirname, "..", "release");
 
-const BUILD_ONLY_DIRECTORIES = ["app", "appimage", "deb", "dmg", "macos", "msi", "nsis", "rpm"];
+const BUILD_ONLY_DIRECTORIES = [
+  "app",
+  "appimage",
+  "deb",
+  "dmg",
+  "macos",
+  "msi",
+  "nsis",
+  "rpm",
+];
 const BUILD_ONLY_FILES = ["builder-debug.yml", "builder-effective-config.yaml"];
 
 function removePath(targetPath) {
-  fs.rmSync(targetPath, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
+  fs.rmSync(targetPath, {
+    recursive: true,
+    force: true,
+    maxRetries: 8,
+    retryDelay: 100,
+  });
 }
 
 function cleanReleaseArtifacts(releaseDir = RELEASE_DIR) {
@@ -60,7 +74,11 @@ function copyReleaseAssets(releaseDir = RELEASE_DIR, destination) {
   for (const entry of entries) {
     const sourcePath = path.join(releaseDir, entry);
     const destinationPath = path.join(resolvedDestination, entry);
-    fs.cpSync(sourcePath, destinationPath, { recursive: true, force: true, errorOnExist: false });
+    fs.cpSync(sourcePath, destinationPath, {
+      recursive: true,
+      force: true,
+      errorOnExist: false,
+    });
   }
 }
 
@@ -82,11 +100,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
     if (result.mirrored) {
       console.log(`Mirrored cleaned release assets to: ${result.destination}`);
     } else {
-      console.log("Cleaned release assets; AFTER_PACK_LOC not set, mirror skipped.");
+      console.log(
+        "Cleaned release assets; AFTER_PACK_LOC not set, mirror skipped.",
+      );
     }
   } catch (error) {
     const message =
-      error && typeof error === "object" && "message" in error ? String(error.message) : String(error);
+      error && typeof error === "object" && "message" in error
+        ? String(error.message)
+        : String(error);
     console.error(`Failed to finalize release assets: ${message}`);
     process.exit(1);
   }

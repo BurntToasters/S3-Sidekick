@@ -703,18 +703,26 @@ async function resolveObjectConflict(
   key: string,
   session: ConflictPromptSession,
   hasBatchRemainder: boolean,
-): Promise<Exclude<ConflictPolicy, "ask">> {
+): Promise<{ decision: Exclude<ConflictPolicy, "ask">; overwrite: boolean }> {
   const conflictPolicy = state.currentSettings.conflictPolicy;
   let exists = false;
   try {
     exists = await invoke<boolean>("object_exists", { bucket, key });
-  } catch {
-    exists = false;
+  } catch (err) {
+    throw new Error(
+      `Unable to check destination conflict: ${friendlyError(err)}`,
+    );
   }
-  if (!exists) return "replace";
-  if (conflictPolicy === "replace") return "replace";
-  if (conflictPolicy === "skip") return "skip";
-  return resolveConflictChoice(`${bucket}/${key}`, session, hasBatchRemainder);
+  if (!exists) return { decision: "replace", overwrite: false };
+  if (conflictPolicy === "replace")
+    return { decision: "replace", overwrite: true };
+  if (conflictPolicy === "skip") return { decision: "skip", overwrite: false };
+  const decision = await resolveConflictChoice(
+    `${bucket}/${key}`,
+    session,
+    hasBatchRemainder,
+  );
+  return { decision, overwrite: decision === "replace" };
 }
 
 async function uniqueDownloadEntries(
@@ -1482,13 +1490,17 @@ function openCopyMoveDialog(): void {
       let skippedFolders = 0;
 
       if (isSingleFile) {
-        const decision = await resolveObjectConflict(
+        if (move && dstBucket === srcBucket && dstPath === fileKeys[0]) {
+          setStatus("Move destination must be different from source.", 5000);
+          return;
+        }
+        const conflict = await resolveObjectConflict(
           dstBucket,
           dstPath,
           conflictSession,
           false,
         );
-        if (decision === "skip") {
+        if (conflict.decision === "skip") {
           setStatus(
             `Skipped "${basename(fileKeys[0])}" (destination exists).`,
             5000,
@@ -1502,19 +1514,24 @@ function openCopyMoveDialog(): void {
           sourceKey: fileKeys[0],
           destinationBucket: dstBucket,
           destinationKey: dstPath,
-          conflictResolution: decision,
+          conflictResolution: conflict.decision,
+          overwrite: conflict.overwrite,
         });
       } else {
         const prefix = dstPath.endsWith("/") ? dstPath : dstPath + "/";
         for (const key of fileKeys) {
           const dstKey = prefix + basename(key);
-          const decision = await resolveObjectConflict(
+          if (move && dstBucket === srcBucket && dstKey === key) {
+            skippedFiles += 1;
+            continue;
+          }
+          const conflict = await resolveObjectConflict(
             dstBucket,
             dstKey,
             conflictSession,
             true,
           );
-          if (decision === "skip") {
+          if (conflict.decision === "skip") {
             skippedFiles += 1;
             continue;
           }
@@ -1525,12 +1542,22 @@ function openCopyMoveDialog(): void {
             sourceKey: key,
             destinationBucket: dstBucket,
             destinationKey: dstKey,
-            conflictResolution: decision,
+            conflictResolution: conflict.decision,
+            overwrite: conflict.overwrite,
           });
         }
         for (const srcPrefix of prefixes) {
           const folderName = basename(srcPrefix.replace(/\/$/, ""));
           const dstPrefix = isSingleFolder ? prefix : prefix + folderName + "/";
+          if (
+            move &&
+            dstBucket === srcBucket &&
+            (dstPrefix === srcPrefix || dstPrefix.startsWith(srcPrefix))
+          ) {
+            throw new Error(
+              `Move destination "${dstPrefix}" must not be the source folder or inside it.`,
+            );
+          }
           let folderHasConflict = false;
           try {
             const existing = await invoke<{
@@ -1544,8 +1571,10 @@ function openCopyMoveDialog(): void {
             });
             folderHasConflict =
               existing.objects.length > 0 || existing.prefixes.length > 0;
-          } catch {
-            folderHasConflict = false;
+          } catch (err) {
+            throw new Error(
+              `Unable to check destination folder conflict: ${friendlyError(err)}`,
+            );
           }
           if (folderHasConflict) {
             let decision: Exclude<ConflictPolicy, "ask">;
@@ -1574,6 +1603,7 @@ function openCopyMoveDialog(): void {
               destinationBucket: dstBucket,
               destinationPrefix: dstPrefix,
               conflictResolution: decision,
+              overwrite: decision === "replace",
             });
             continue;
           }
@@ -1584,6 +1614,7 @@ function openCopyMoveDialog(): void {
             sourcePrefix: srcPrefix,
             destinationBucket: dstBucket,
             destinationPrefix: dstPrefix,
+            overwrite: false,
           });
         }
       }
@@ -1654,6 +1685,7 @@ async function handleRename(): Promise<void> {
         bucket: state.currentBucket,
         oldKey,
         newKey,
+        overwrite: false,
       });
       setStatus(`Renamed to "${newName}".`, 5000);
       logActivity(`Renamed "${oldName}" to "${newName}".`, "success");
@@ -1697,6 +1729,7 @@ async function handleRename(): Promise<void> {
         bucket: state.currentBucket,
         oldPrefix,
         newPrefix,
+        overwrite: false,
       });
       setStatus(`Renamed folder to "${newName}".`, 5000);
       logActivity(`Renamed folder "${folderName}" to "${newName}".`, "success");
@@ -2785,7 +2818,11 @@ function wireEvents(): void {
   });
 
   setTransferCompleteHandler(async (summary) => {
-    if (summary.hadUpload && state.connected && state.currentBucket) {
+    if (
+      (summary.hadUpload || summary.hadDownload || summary.hadRemoteMutation) &&
+      state.connected &&
+      state.currentBucket
+    ) {
       await refreshObjects(state.currentBucket, state.currentPrefix);
       pruneStaleSelection();
       renderObjectTable();

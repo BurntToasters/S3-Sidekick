@@ -1,18 +1,18 @@
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const SCRIPT_VERSION = '1.0.0';
+const SCRIPT_VERSION = "1.0.0";
 
 function runGit(args) {
-  const result = spawnSync('git', args, {
-    encoding: 'utf8',
-    stdio: 'pipe',
+  const result = spawnSync("git", args, {
+    encoding: "utf8",
+    stdio: "pipe",
     shell: false,
     windowsHide: true,
   });
 
-  const stdout = result.stdout || '';
-  const stderr = result.stderr || '';
+  const stdout = result.stdout || "";
+  const stderr = result.stderr || "";
   const ok = !result.error && result.status === 0;
 
   return { ok, stdout, stderr, status: result.status, error: result.error };
@@ -21,7 +21,7 @@ function runGit(args) {
 export function parseArgs(argv) {
   const args = argv.slice(2);
   const options = {
-    remote: 'origin',
+    remote: "origin",
     dryRun: false,
     force: false,
   };
@@ -30,16 +30,16 @@ export function parseArgs(argv) {
     const arg = args[i];
     const next = args[i + 1];
 
-    if ((arg === '--remote' || arg === '-r') && next) {
+    if ((arg === "--remote" || arg === "-r") && next) {
       options.remote = next;
       i++;
       continue;
     }
-    if (arg === '--dry-run' || arg === '-n') {
+    if (arg === "--dry-run" || arg === "-n") {
       options.dryRun = true;
       continue;
     }
-    if (arg === '--force' || arg === '-f') {
+    if (arg === "--force" || arg === "-f") {
       options.force = true;
       continue;
     }
@@ -50,7 +50,7 @@ export function parseArgs(argv) {
 
 function parseLines(value) {
   return value
-    .split('\n')
+    .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
 }
@@ -59,19 +59,25 @@ export function stripRemotePrefix(ref, remote) {
   const prefix = `${remote}/`;
   if (!ref.startsWith(prefix)) return null;
   const name = ref.slice(prefix.length);
-  if (!name || name === 'HEAD') return null;
+  if (!name || name === "HEAD") return null;
   return name;
 }
 
-export function selectBranchesToDelete(localBranches, remoteBranches, currentBranch) {
+export function selectBranchesToDelete(
+  localBranches,
+  remoteBranches,
+  currentBranch,
+) {
   const remoteSet = new Set(remoteBranches);
-  return localBranches.filter((branch) => branch !== currentBranch && !remoteSet.has(branch));
+  return localBranches.filter(
+    (branch) => branch !== currentBranch && !remoteSet.has(branch),
+  );
 }
 
 function ensureRemoteExists(remote) {
-  const remotes = runGit(['remote']);
+  const remotes = runGit(["remote"]);
   if (!remotes.ok) {
-    throw new Error(remotes.stderr.trim() || 'Failed to list git remotes');
+    throw new Error(remotes.stderr.trim() || "Failed to list git remotes");
   }
   const remoteList = parseLines(remotes.stdout);
   if (!remoteList.includes(remote)) {
@@ -80,42 +86,57 @@ function ensureRemoteExists(remote) {
 }
 
 function getCurrentBranch() {
-  const result = runGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const result = runGit(["rev-parse", "--abbrev-ref", "HEAD"]);
   if (!result.ok) {
-    throw new Error(result.stderr.trim() || 'Failed to detect current branch');
+    throw new Error(result.stderr.trim() || "Failed to detect current branch");
   }
   return result.stdout.trim();
 }
 
 function getLocalBranches() {
-  const result = runGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  const result = runGit([
+    "for-each-ref",
+    "--format=%(refname:short)",
+    "refs/heads",
+  ]);
   if (!result.ok) {
-    throw new Error(result.stderr.trim() || 'Failed to list local branches');
+    throw new Error(result.stderr.trim() || "Failed to list local branches");
   }
   return parseLines(result.stdout);
 }
 
 function getRemoteBranches(remote) {
-  const result = runGit(['for-each-ref', '--format=%(refname:short)', `refs/remotes/${remote}`]);
+  const result = runGit([
+    "for-each-ref",
+    "--format=%(refname:short)",
+    `refs/remotes/${remote}`,
+  ]);
   if (!result.ok) {
-    throw new Error(result.stderr.trim() || `Failed to list remote branches for ${remote}`);
+    throw new Error(
+      result.stderr.trim() || `Failed to list remote branches for ${remote}`,
+    );
   }
   return parseLines(result.stdout)
     .map((ref) => stripRemotePrefix(ref, remote))
-    .filter((name) => typeof name === 'string');
+    .filter((name) => typeof name === "string");
 }
 
 function fetchPruned(remote) {
-  const result = runGit(['fetch', remote, '--prune']);
+  const result = runGit(["fetch", remote, "--prune"]);
   if (!result.ok) {
-    throw new Error(result.stderr.trim() || `Failed to fetch/prune remote ${remote}`);
+    throw new Error(
+      result.stderr.trim() || `Failed to fetch/prune remote ${remote}`,
+    );
   }
 }
 
-export function deleteBranches(branches, { force = false, dryRun = false } = {}) {
+export function deleteBranches(
+  branches,
+  { force = false, dryRun = false } = {},
+) {
   const deleted = [];
   const skipped = [];
-  const flag = force ? '-D' : '-d';
+  const flag = force ? "-D" : "-d";
 
   for (const branch of branches) {
     if (dryRun) {
@@ -123,7 +144,7 @@ export function deleteBranches(branches, { force = false, dryRun = false } = {})
       continue;
     }
 
-    const result = runGit(['branch', flag, branch]);
+    const result = runGit(["branch", flag, branch]);
     if (result.ok) {
       deleted.push(branch);
       continue;
@@ -131,7 +152,8 @@ export function deleteBranches(branches, { force = false, dryRun = false } = {})
 
     skipped.push({
       branch,
-      reason: result.stderr.trim() || result.error?.message || 'Unknown git error',
+      reason:
+        result.stderr.trim() || result.error?.message || "Unknown git error",
     });
   }
 
@@ -156,29 +178,31 @@ function printSummary({
   console.log(`Local branches: ${localBranches.length}`);
   console.log(`Remote branches (${remote}): ${remoteBranches.length}`);
   console.log(`Target branches: ${targetBranches.length}`);
-  console.log(`Mode: ${dryRun ? 'dry-run' : force ? 'force delete (-D)' : 'safe delete (-d)'}`);
-  console.log('');
+  console.log(
+    `Mode: ${dryRun ? "dry-run" : force ? "force delete (-D)" : "safe delete (-d)"}`,
+  );
+  console.log("");
 
   if (targetBranches.length === 0) {
-    console.log('No local-only branches found.');
+    console.log("No local-only branches found.");
     return;
   }
 
   if (deleted.length > 0) {
-    const label = dryRun ? 'Would delete:' : 'Deleted:';
+    const label = dryRun ? "Would delete:" : "Deleted:";
     console.log(label);
     for (const branch of deleted) {
       console.log(`- ${branch}`);
     }
-    console.log('');
+    console.log("");
   }
 
   if (skipped.length > 0) {
-    console.log('Skipped:');
+    console.log("Skipped:");
     for (const item of skipped) {
       console.log(`- ${item.branch}: ${item.reason}`);
     }
-    console.log('');
+    console.log("");
   }
 }
 
@@ -191,7 +215,11 @@ export function main(argv = process.argv) {
   const currentBranch = getCurrentBranch();
   const localBranches = getLocalBranches();
   const remoteBranches = getRemoteBranches(options.remote);
-  const targetBranches = selectBranchesToDelete(localBranches, remoteBranches, currentBranch);
+  const targetBranches = selectBranchesToDelete(
+    localBranches,
+    remoteBranches,
+    currentBranch,
+  );
 
   const { deleted, skipped } = deleteBranches(targetBranches, {
     force: options.force,
@@ -217,7 +245,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     process.exit(main());
   } catch (error) {
-    console.error(`gitprune failed: ${error && error.message ? error.message : error}`);
+    console.error(
+      `gitprune failed: ${error && error.message ? error.message : error}`,
+    );
     process.exit(1);
   }
 }

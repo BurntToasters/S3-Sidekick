@@ -36,6 +36,7 @@ type ObjectVisibility = "private" | "public-read";
 type VisibilitySelection = "unchanged" | ObjectVisibility;
 
 let currentKey = "";
+let currentBucket = "";
 let batchKeys: string[] = [];
 let headData: HeadObjectResponse | null = null;
 let aclData: AclResponse | null = null;
@@ -141,6 +142,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   if (keys.length > 1) {
     panelRequestToken += 1;
     currentKey = "";
+    currentBucket = state.currentBucket;
     batchKeys = keys.filter((k) => !k.startsWith("prefix:"));
     metadataRows = [{ key: "", value: "" }];
     headData = null;
@@ -173,7 +175,9 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
 
   const requestToken = ++panelRequestToken;
   currentKey = keys[0];
+  currentBucket = state.currentBucket;
   const selectedKey = currentKey;
+  const selectedBucket = currentBucket;
   title.textContent = basename(currentKey);
   overlay.classList.add("active");
   saveBtn.style.display = "";
@@ -192,7 +196,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
 
   try {
     const nextHeadData = await invoke<HeadObjectResponse>("head_object", {
-      bucket: state.currentBucket,
+      bucket: selectedBucket,
       key: selectedKey,
     });
     if (requestToken !== panelRequestToken || currentKey !== selectedKey) {
@@ -617,7 +621,8 @@ export async function saveInfoPanel(): Promise<void> {
 
 async function saveSingleChanges(): Promise<void> {
   const selectedKey = currentKey;
-  if (!selectedKey) return;
+  const selectedBucket = currentBucket;
+  if (!selectedKey || !selectedBucket) return;
 
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl =
@@ -642,7 +647,7 @@ async function saveSingleChanges(): Promise<void> {
     try {
       const payload = collectSingleMetadata();
       await invoke("update_metadata", {
-        bucket: state.currentBucket,
+        bucket: selectedBucket,
         key: selectedKey,
         contentType: payload.contentType,
         metadata: payload.metadata,
@@ -655,7 +660,7 @@ async function saveSingleChanges(): Promise<void> {
   if (shouldApplyAcl && requestedVisibility) {
     try {
       await invoke("set_object_acl", {
-        bucket: state.currentBucket,
+        bucket: selectedBucket,
         key: selectedKey,
         visibility: requestedVisibility,
       });
@@ -696,6 +701,8 @@ async function saveSingleChanges(): Promise<void> {
 
 async function saveBatchChanges(): Promise<void> {
   const requestedVisibility = normalizeVisibility(selectedVisibility);
+  const selectedBucket = currentBucket;
+  if (!selectedBucket) return;
   const shouldApplyAcl = aclDirty && requestedVisibility !== null;
 
   const newMeta = collectBatchMetadata();
@@ -730,7 +737,7 @@ async function saveBatchChanges(): Promise<void> {
         if (shouldApplyMetadata) {
           try {
             const head = await invoke<HeadObjectResponse>("head_object", {
-              bucket: state.currentBucket,
+              bucket: selectedBucket,
               key,
             });
             const merged: Record<string, string> = {
@@ -738,7 +745,7 @@ async function saveBatchChanges(): Promise<void> {
               ...newMeta,
             };
             await invoke("update_metadata", {
-              bucket: state.currentBucket,
+              bucket: selectedBucket,
               key,
               contentType: head.content_type,
               metadata: merged,
@@ -751,7 +758,7 @@ async function saveBatchChanges(): Promise<void> {
         if (shouldApplyAcl && requestedVisibility) {
           try {
             await invoke("set_object_acl", {
-              bucket: state.currentBucket,
+              bucket: selectedBucket,
               key,
               visibility: requestedVisibility,
             });
