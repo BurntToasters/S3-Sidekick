@@ -32,8 +32,8 @@ The `.asc` files are my normal GPG signatures which you can verify using my GPG 
 
 ## Changes in `v0.9.0:`
 * **Large file uploads:** Fixed an issue where larger files experienced slower uploads.
-* **Activity:** Activity bages now clear when a user clicks on the activity tab.
-* **Transfer Queue:** Sucessful transfers now move to the activity feed instead of staying in the transfer queue.
+* **Activity:** Activity badges now clear when a user clicks on the activity tab.
+* **Transfer Queue:** Successful transfers now move to the activity feed instead of staying in the transfer queue.
 * **Misc:** Multiple security fixes.
 * **PKG:** Updated packages.
 
