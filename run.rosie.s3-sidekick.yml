@@ -24,7 +24,7 @@ modules:
     build-options:
       build-args:
         - --share=network
-        append-path: /usr/lib/sdk/node22/bin:/usr/lib/sdk/rust-stable/bin
+      append-path: /usr/lib/sdk/node22/bin:/usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/s3-sidekick/cargo
         npm_config_cache: /run/build/s3-sidekick/npm-cache
