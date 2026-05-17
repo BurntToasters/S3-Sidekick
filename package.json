@@ -1,6 +1,6 @@
 {
   "name": "s3-sidekick",
-  "version": "0.9.3",
+  "version": "0.9.4-beta.1",
   "private": true,
   "description": "A Cross-Platform Desktop client for S3-compatible Object Storage.",
   "type": "module",
