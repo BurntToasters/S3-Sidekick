@@ -517,6 +517,21 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), Str
 
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    {
+        // KeyCredentialManager (Windows Hello key credentials) buckets stored
+        // credentials by the calling process's AppUserModelID. Unpackaged
+        // Win32 / Tauri apps have no AUMID by default, which makes
+        // RequestCreateAsync fail with HRESULT 0x80098044 ("Class not registered").
+        // Set it to the bundle identifier early — before any WinRT call.
+        unsafe {
+            use windows::core::HSTRING;
+            use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+            let aumid = HSTRING::from("run.rosie.s3-sidekick");
+            let _ = SetCurrentProcessExplicitAppUserModelID(&aumid);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     {
         if std::env::var("GDK_BACKEND").is_err() {

@@ -902,6 +902,12 @@ mod platform {
         let challenge_for_main = challenge.clone();
         let signature: Vec<u8> = run_on_main_thread_blocking(window, move || -> Result<Vec<u8>, String> {
             let name = HSTRING::from(V2_CRED_NAME);
+            // Clear any zombie credential from a previously failed enrollment
+            // attempt. ReplaceExisting on RequestCreateAsync has known edge
+            // cases where it can't overwrite a half-created credential.
+            if let Ok(del_op) = KeyCredentialManager::DeleteAsync(&name) {
+                let _ = del_op.get();
+            }
             let create_op = KeyCredentialManager::RequestCreateAsync(
                 &name,
                 KeyCredentialCreationOption::ReplaceExisting,
