@@ -304,21 +304,11 @@ mod platform {
         static kSecMatchLimitOne: *const c_void;
         static kSecAttrAccessible: *const c_void;
         static kSecAttrAccessibleWhenUnlockedThisDeviceOnly: *const c_void;
-        static kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly: *const c_void;
-        static kSecAttrAccessControl: *const c_void;
-        static kSecUseAuthenticationContext: *const c_void;
         static kCFBooleanTrue: *const c_void;
 
         fn SecItemAdd(attributes: *const c_void, result: *mut *const c_void) -> i32;
         fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
         fn SecItemDelete(query: *const c_void) -> i32;
-
-        fn SecAccessControlCreateWithFlags(
-            allocator: *const c_void,
-            protection: *const c_void,
-            flags: u32,
-            error: *mut *const c_void,
-        ) -> *const c_void;
 
         fn CFDictionaryCreateMutable(
             allocator: *const c_void,
@@ -338,12 +328,10 @@ mod platform {
     }
 
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
-    const SEC_ACCESS_CONTROL_BIOMETRY_CURRENT_SET: u32 = 1 << 3;
 
     const SERVICE: &str = "run.rosie.s3-sidekick";
     const ACCOUNT: &str = "biometric-encryption-key";
     const ACCOUNT_V2: &str = "biometric-kek-v2";
-    const V2_PROMPT: &str = "Unlock S3 Sidekick encrypted storage";
 
     // -----------------------------------------------------------------------
     // Touch ID via LAContext (avoids keychain-access-groups entitlement)
@@ -575,36 +563,28 @@ mod platform {
     }
 
     pub fn enroll_v2(_window: Option<&tauri::Window>) -> Result<(super::Zeroizing<[u8; KEY_LEN]>, Vec<u8>), String> {
+        // Note: We intentionally do NOT use SecAccessControl with biometry flags here.
+        // Biometric-bound SecAccessControl requires Apple Developer ID signing +
+        // keychain-access-groups entitlement (errSecMissingEntitlement -34018 otherwise).
+        // Instead we gate access with LAContext (Touch ID) at read time and store the
+        // KEK with kSecAttrAccessibleWhenUnlockedThisDeviceOnly, matching the v1 pattern.
+        // v2 still provides defense-in-depth over v1 by wrapping the vault key with the KEK.
         let kek = super::random_kek();
         remove_v2_kek();
 
         unsafe {
-            let mut err: *const c_void = std::ptr::null();
-            let access = SecAccessControlCreateWithFlags(
-                kCFAllocatorDefault as *const c_void,
-                kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
-                SEC_ACCESS_CONTROL_BIOMETRY_CURRENT_SET,
-                &mut err,
-            );
-            if access.is_null() {
-                if !err.is_null() {
-                    CFRelease(err);
-                }
-                return Err(
-                    "Failed to create biometric access control. Touch ID may not be enrolled."
-                        .to_string(),
-                );
-            }
-
             let dict = new_dict();
             set_base_attrs_v2(dict);
             let data = CFData::from_buffer(&*kek);
             CFDictionarySetValue(dict, kSecValueData, data.as_concrete_TypeRef() as _);
-            CFDictionarySetValue(dict, kSecAttrAccessControl, access);
+            CFDictionarySetValue(
+                dict,
+                kSecAttrAccessible,
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            );
 
             let status = SecItemAdd(dict, std::ptr::null_mut());
             CFRelease(dict);
-            CFRelease(access);
 
             if status != errSecSuccess {
                 return Err(format!(
@@ -621,31 +601,19 @@ mod platform {
         _opaque: &[u8],
         _window: Option<&tauri::Window>,
     ) -> Result<[u8; KEY_LEN], String> {
-        unsafe {
-            let la_cls = objc2::runtime::AnyClass::get(c"LAContext")
-                .ok_or_else(|| "LAContext unavailable".to_string())?;
-            let la_ctx: objc2::rc::Retained<objc2::runtime::AnyObject> =
-                objc2::msg_send![la_cls, new];
-            let reason = CFString::new(V2_PROMPT);
-            let _: () = objc2::msg_send![
-                &*la_ctx,
-                setLocalizedReason: reason.as_concrete_TypeRef() as *const c_void
-            ];
+        // Gate the keychain read with Touch ID. The stored item is not
+        // SecAccessControl-bound, so we authenticate explicitly here (mirrors v1).
+        authenticate_touch_id()?;
 
+        unsafe {
             let dict = new_dict();
             set_base_attrs_v2(dict);
             CFDictionarySetValue(dict, kSecReturnData, kCFBooleanTrue);
             CFDictionarySetValue(dict, kSecMatchLimit, kSecMatchLimitOne);
-            CFDictionarySetValue(
-                dict,
-                kSecUseAuthenticationContext,
-                objc2::rc::Retained::as_ptr(&la_ctx) as *const c_void,
-            );
 
             let mut result: *const c_void = ptr::null();
             let status = SecItemCopyMatching(dict, &mut result);
             CFRelease(dict);
-            drop(la_ctx);
 
             if status != errSecSuccess || result.is_null() {
                 if !result.is_null() {
