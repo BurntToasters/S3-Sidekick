@@ -1,7 +1,7 @@
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { message, ask } from "@tauri-apps/plugin-dialog";
-import { getVersion } from "@tauri-apps/api/app";
+import { getBundleType, getVersion } from "@tauri-apps/api/app";
 import {
   isPermissionGranted,
   requestPermission,
@@ -97,11 +97,27 @@ function updaterTargetBase(): string {
   return "linux";
 }
 
-function updaterCheckTargetForChannel(
+async function updaterCheckTargetForChannel(
   channel: UpdateChannel,
-): string | undefined {
+): Promise<string | undefined> {
   if (channel !== "beta") return undefined;
-  return `${updaterTargetBase()}-beta`;
+  const base = updaterTargetBase();
+  if (base !== "linux") return `${base}-beta`;
+
+  try {
+    const bundleType = await getBundleType();
+    if (
+      bundleType === "appimage" ||
+      bundleType === "deb" ||
+      bundleType === "rpm"
+    ) {
+      return `linux-beta-${bundleType}`;
+    }
+  } catch {
+    // ignore and fall back to generic linux beta target
+  }
+
+  return "linux-beta";
 }
 
 function parseReleaseVersion(value: unknown): string {
@@ -307,7 +323,7 @@ async function checkFlatpakUpdates(channel: UpdateChannel): Promise<void> {
 }
 
 async function checkNativeUpdate(channel: UpdateChannel) {
-  const target = updaterCheckTargetForChannel(channel);
+  const target = await updaterCheckTargetForChannel(channel);
   if (target) {
     return check({ target });
   }
