@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { showConfirm, showPrompt, showAlert } from "./dialogs.ts";
 
@@ -312,6 +313,18 @@ export async function ensureSecurityReady(): Promise<boolean> {
       await waitForDocumentReady();
       await waitForWindowFocus(WINDOWS_STARTUP_FOCUS_WAIT_MS);
       await delay(WINDOWS_STARTUP_BIOMETRIC_DELAY_MS);
+      // Windows Hello (KeyCredentialManager.RequestSignAsync) needs the
+      // calling window to have foreground focus to attach its prompt.
+      // At launch the window may still be settling — force show/focus
+      // before invoking biometric unlock.
+      try {
+        const win = getCurrentWindow();
+        await win.show();
+        await win.unminimize();
+        await win.setFocus();
+      } catch {
+        // best-effort — proceed even if window APIs fail
+      }
     }
     const biometricOverlay = document.getElementById("biometric-overlay");
     if (biometricOverlay) biometricOverlay.hidden = false;
