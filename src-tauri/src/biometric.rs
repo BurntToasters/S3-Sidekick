@@ -968,12 +968,10 @@ mod platform {
 
             let challenge_buf = CryptographicBuffer::CreateFromByteArray(&challenge_for_main)
                 .map_err(|e| format!("Challenge buffer create failed: {}", e))?;
-            let sign_op = credential
-                .RequestSignAsync(&challenge_buf)
-                .map_err(|e| format!("RequestSignAsync failed: {}", e))?;
-            let sign_result = sign_op
-                .get()
-                .map_err(|e| format!("Sign await failed: {}", e))?;
+            let sign_result = run_keycredential_async_with_retry(
+                || credential.RequestSignAsync(&challenge_buf),
+                "KeyCredential enrollment sign",
+            )?;
             let sign_status = sign_result
                 .Status()
                 .map_err(|e| format!("Sign status read failed: {}", e))?;
@@ -1032,12 +1030,10 @@ mod platform {
 
             let challenge_buf = CryptographicBuffer::CreateFromByteArray(&opaque_owned)
                 .map_err(|e| format!("Challenge buffer create failed: {}", e))?;
-            let sign_op = credential
-                .RequestSignAsync(&challenge_buf)
-                .map_err(|e| format!("RequestSignAsync failed: {}", e))?;
-            let sign_result = sign_op
-                .get()
-                .map_err(|e| format!("Sign await failed: {}", e))?;
+            let sign_result = run_keycredential_async_with_retry(
+                || credential.RequestSignAsync(&challenge_buf),
+                "KeyCredential unlock sign",
+            )?;
             let sign_status = sign_result
                 .Status()
                 .map_err(|e| format!("Sign status read failed: {}", e))?;

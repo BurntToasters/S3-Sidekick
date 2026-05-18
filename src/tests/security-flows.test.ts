@@ -585,7 +585,7 @@ describe("security flows", () => {
 
     const security = await import("../security.ts");
     const promise = security.ensureSecurityReady();
-    await vi.advanceTimersByTimeAsync(4000);
+    await vi.advanceTimersByTimeAsync(5000);
     await expect(promise).resolves.toBe(true);
     vi.useRealTimers();
   });
@@ -966,7 +966,7 @@ describe("security flows", () => {
       return status;
     });
     const immediatePromise = security.ensureSecurityReady();
-    await vi.advanceTimersByTimeAsync(900);
+    await vi.advanceTimersByTimeAsync(2100);
     await expect(immediatePromise).resolves.toBe(true);
 
     focused = false;
@@ -980,7 +980,7 @@ describe("security flows", () => {
     const focusPromise = security.ensureSecurityReady();
     focused = true;
     window.dispatchEvent(new Event("focus"));
-    await vi.advanceTimersByTimeAsync(900);
+    await vi.advanceTimersByTimeAsync(2100);
     await expect(focusPromise).resolves.toBe(true);
 
     focused = false;
@@ -994,7 +994,7 @@ describe("security flows", () => {
     const visibilityPromise = security.ensureSecurityReady();
     focused = true;
     document.dispatchEvent(new Event("visibilitychange"));
-    await vi.advanceTimersByTimeAsync(900);
+    await vi.advanceTimersByTimeAsync(2100);
     await expect(visibilityPromise).resolves.toBe(true);
 
     vi.useRealTimers();

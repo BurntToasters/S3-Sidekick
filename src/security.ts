@@ -15,7 +15,7 @@ export interface SecurityStatus {
 const BIOMETRIC_SCHEMA_V1 = 1;
 
 type StatusSetter = (text: string) => void;
-const WINDOWS_STARTUP_BIOMETRIC_DELAY_MS = 800;
+const WINDOWS_STARTUP_BIOMETRIC_DELAY_MS = 2000;
 const WINDOWS_STARTUP_FOCUS_WAIT_MS = 2500;
 
 async function getSecurityStatus(): Promise<SecurityStatus> {
@@ -181,6 +181,13 @@ async function delay(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForDocumentReady(): Promise<void> {
+  if (document.readyState !== "loading" || document.body) return;
+  await new Promise<void>((resolve) => {
+    window.addEventListener("load", () => resolve(), { once: true });
+  });
+}
+
 async function waitForWindowFocus(timeoutMs: number): Promise<void> {
   if (document.visibilityState === "visible" && document.hasFocus()) return;
   await new Promise<void>((resolve) => {
@@ -302,6 +309,7 @@ export async function ensureSecurityReady(): Promise<boolean> {
   );
   if (status.biometric_available && status.biometric_enrolled) {
     if (platform === "windows") {
+      await waitForDocumentReady();
       await waitForWindowFocus(WINDOWS_STARTUP_FOCUS_WAIT_MS);
       await delay(WINDOWS_STARTUP_BIOMETRIC_DELAY_MS);
     }
