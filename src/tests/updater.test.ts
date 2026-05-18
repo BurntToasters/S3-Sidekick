@@ -5,6 +5,7 @@ const mockRelaunch = vi.fn<() => Promise<void>>();
 const mockMessage = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockAsk = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
+const mockGetBundleType = vi.fn<() => Promise<string>>();
 const mockIsPermissionGranted = vi.fn<() => Promise<boolean>>();
 const mockRequestPermission =
   vi.fn<() => Promise<"default" | "denied" | "granted">>();
@@ -26,6 +27,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: mockGetVersion,
+  getBundleType: mockGetBundleType,
 }));
 
 vi.mock("@tauri-apps/plugin-notification", () => ({
@@ -48,12 +50,14 @@ describe("updater", () => {
     mockMessage.mockReset();
     mockAsk.mockReset();
     mockGetVersion.mockReset();
+    mockGetBundleType.mockReset();
     mockIsPermissionGranted.mockReset();
     mockRequestPermission.mockReset();
     mockSendNotification.mockReset();
     mockInvoke.mockReset();
 
     mockGetVersion.mockResolvedValue("0.6.0");
+    mockGetBundleType.mockResolvedValue("appimage");
     mockAsk.mockResolvedValue(false);
     mockMessage.mockResolvedValue(undefined);
     mockIsPermissionGranted.mockResolvedValue(true);
@@ -449,7 +453,42 @@ describe("updater", () => {
 
     state.platformName = "linux";
     mockCheck.mockResolvedValueOnce(null);
+    mockGetBundleType.mockResolvedValueOnce("deb");
     await updater.checkUpdates();
+    expect(mockCheck).toHaveBeenCalledWith({ target: "linux-beta-deb" });
+  });
+
+  it("falls back to generic linux beta target when bundle type lookup fails", async () => {
+    mockInvoke.mockResolvedValueOnce({
+      mode: "native",
+      release_url:
+        "https://github.com/BurntToasters/S3-Sidekick/releases/latest",
+    });
+    const { state } = await import("../state.ts");
+    state.platformName = "linux";
+    mockGetVersion.mockResolvedValue("0.6.0-beta.1");
+    mockGetBundleType.mockRejectedValueOnce(new Error("bundle lookup failed"));
+    mockCheck.mockResolvedValueOnce(null);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          {
+            draft: false,
+            tag_name: "v0.6.0-beta.1",
+            html_url:
+              "https://github.com/BurntToasters/S3-Sidekick/releases/tag/v0.6.0-beta.1",
+          },
+        ],
+      }),
+    );
+
+    const updater = await import("../updater.ts");
+    await updater.initUpdater();
+    updater.setUpdateChannel("beta");
+    await updater.checkUpdates();
+
     expect(mockCheck).toHaveBeenCalledWith({ target: "linux-beta" });
   });
 

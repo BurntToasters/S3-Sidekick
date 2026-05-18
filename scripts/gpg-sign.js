@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 
+/*
+Hello this is BurntToasters,
+This script is used to sign release artifacts via GPG and generate the updater manifests.
+This is a very sensitive script and any changes here MUST be verified with the upmost care.
+Any regressions to the script WILL break end-users' update experience.
+*/
+
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -418,6 +425,11 @@ function generateUpdaterManifests(files) {
         requiredTargetKeys.add(
           `${target.os}${channel.targetSuffix}-${target.arch}`,
         );
+        if (channel.targetSuffix === "-beta" && target.os === "linux") {
+          requiredTargetKeys.add(
+            `${target.os}${channel.targetSuffix}-${target.installer}-${target.arch}`,
+          );
+        }
       }
     }
 
@@ -462,6 +474,38 @@ function generateUpdaterManifests(files) {
           manifest.platforms[fallbackKey] = { url, signature };
           manifest.fallbackPriority = priority;
         }
+
+        // Beta channel updater checks use a custom target like `windows-beta`.
+        // Mirror the resolved fallback entry onto that key so custom target lookup
+        // can succeed against per-arch manifest files.
+        if (
+          channel.targetSuffix === "-beta" &&
+          canPopulateFallbackTarget(target) &&
+          manifest.platforms[fallbackKey]
+        ) {
+          manifest.platforms[targetName] = {
+            ...manifest.platforms[fallbackKey],
+          };
+        }
+
+        // Linux beta channel needs installer-specific custom targets so the
+        // updater can stay on the same package family (appimage/deb/rpm).
+        if (channel.targetSuffix === "-beta" && target.os === "linux") {
+          const installerTargetName = `${targetName}-${target.installer}`;
+          const installerManifestName = `latest-${installerTargetName}-${target.arch}.json`;
+          if (!manifests.has(installerManifestName)) {
+            manifests.set(installerManifestName, {
+              version: VERSION,
+              notes: RELEASE_NOTES,
+              pub_date: RELEASE_PUB_DATE,
+              platforms: {},
+              fallbackPriority: -1,
+            });
+          }
+          const installerManifest = manifests.get(installerManifestName);
+          installerManifest.platforms[installerTargetName] = { url, signature };
+          installerManifest.platforms[installerKey] = { url, signature };
+        }
       }
     }
   }
@@ -474,6 +518,38 @@ function generateUpdaterManifests(files) {
       `Missing updater signature file(s): ${sorted.join(", ")}. ` +
         "Every updater-target artifact must include a matching .sig file.",
     );
+  }
+
+  if (IS_PRERELEASE) {
+    const missingCustomTargetAliases = [];
+    for (const [manifestName, manifest] of manifests.entries()) {
+      const parsed = parseManifestTargetKey(manifestName);
+      if (!parsed) continue;
+      const archIndex = parsed.lastIndexOf("-");
+      if (archIndex <= 0) continue;
+      const targetName = parsed.slice(0, archIndex);
+      if (
+        !targetName.endsWith("-beta") &&
+        !/^linux-beta-(appimage|deb|rpm)$/i.test(targetName)
+      ) {
+        continue;
+      }
+      if (
+        targetName.endsWith("-beta") &&
+        !/^(windows|darwin)-beta$/i.test(targetName)
+      ) {
+        continue;
+      }
+      if (!manifest.platforms[targetName]) {
+        missingCustomTargetAliases.push(`${manifestName} -> ${targetName}`);
+      }
+    }
+
+    if (missingCustomTargetAliases.length > 0) {
+      throw new Error(
+        `Missing beta updater target alias key(s): ${missingCustomTargetAliases.join(", ")}.`,
+      );
+    }
   }
 
   const generated = [];
@@ -893,7 +969,7 @@ async function uploadAssetWithReplace(release, filePath) {
 }
 
 function isBetaManifestName(name) {
-  return /^latest-[a-z0-9]+-beta-[a-z0-9_]+\.json$/i.test(name);
+  return /^latest-[a-z0-9-]+-beta-[a-z0-9_-]+\.json$/i.test(name);
 }
 
 async function syncBetaManifestsToLatestStable(

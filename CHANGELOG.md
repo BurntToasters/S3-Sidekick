@@ -12,6 +12,9 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
+## Changes  in `v0.9.4-beta.2:`
+* **Updater:** Fixed a regression where customizing the Tauri Updater resulted in incorrect schemas causing the updater to fail.
+
 ## Changes  in `v0.9.4-beta.1:`
 *Releases before v0.9.2 require a manual update.*
 * **Biometric Unlock:** Biometric unlock has been re-done to increase the security of the S3 Sidekick app by fully integrating into the windows credential manager and macOS keychain. This requires a schema update to a user's current bookmarks. After launching S3 Sidekick, the migration process will automatically take please and require a restart.
