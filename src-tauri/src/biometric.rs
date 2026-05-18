@@ -350,32 +350,6 @@ mod platform {
         })
     }
 
-    /// Raw Objective-C block layout for the LAContext reply handler.
-    /// No captured variables — result is communicated via the global AUTH_STATE.
-    #[repr(C)]
-    struct LAReplyBlock {
-        isa: *const c_void,
-        flags: i32,
-        reserved: i32,
-        invoke: unsafe extern "C" fn(*mut LAReplyBlock, i8, *const c_void),
-        descriptor: *const LAReplyBlockDesc,
-    }
-
-    #[repr(C)]
-    struct LAReplyBlockDesc {
-        reserved: usize,
-        size: usize,
-    }
-
-    extern "C" {
-        static _NSConcreteGlobalBlock: c_void;
-    }
-
-    static LA_REPLY_DESC: LAReplyBlockDesc = LAReplyBlockDesc {
-        reserved: 0,
-        size: std::mem::size_of::<LAReplyBlock>(),
-    };
-
     /// Recover the Mutex guard whether the Mutex is poisoned or not.
     fn lock_auth_result(
         m: &std::sync::Mutex<Option<bool>>,
@@ -383,17 +357,9 @@ mod platform {
         m.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    unsafe extern "C" fn la_reply_invoke(
-        _block: *mut LAReplyBlock,
-        success: i8,
-        _error: *const c_void,
-    ) {
-        let state = auth_state();
-        *lock_auth_result(&state.result) = Some(success != 0);
-        state.condvar.notify_one();
-    }
-
     fn authenticate_touch_id() -> Result<(), String> {
+        use block2::RcBlock;
+
         let state = auth_state();
         *lock_auth_result(&state.result) = None;
 
@@ -405,23 +371,25 @@ mod platform {
 
             let reason = CFString::new("Unlock S3 Sidekick encrypted storage");
 
-            let block = LAReplyBlock {
-                isa: &_NSConcreteGlobalBlock as *const c_void,
-                flags: (1 << 28),  // BLOCK_IS_GLOBAL
-                reserved: 0,
-                invoke: la_reply_invoke,
-                descriptor: &LA_REPLY_DESC,
-            };
+            // Heap-allocated, refcounted Obj-C block. block2::RcBlock generates a
+            // proper descriptor with copy/dispose helpers; the framework calls
+            // Block_copy on it, so its lifetime is decoupled from our stack frame.
+            let block = RcBlock::new(
+                move |success: objc2::runtime::Bool,
+                      _error: *mut objc2::runtime::AnyObject| {
+                    let state = auth_state();
+                    *lock_auth_result(&state.result) = Some(success.as_bool());
+                    state.condvar.notify_one();
+                },
+            );
 
             let _: () = objc2::msg_send![
                 &*ctx,
                 evaluatePolicy: 1_isize,
                 localizedReason: reason.as_concrete_TypeRef() as *const c_void,
-                reply: &block as *const LAReplyBlock as *const c_void
+                reply: &*block
             ];
 
-            // Block stays alive on the stack while we wait for the async callback.
-            // Use a timeout to prevent indefinite blocking if the callback never fires.
             let timeout = std::time::Duration::from_secs(120);
             let mut guard = lock_auth_result(&state.result);
             while guard.is_none() {
@@ -431,11 +399,26 @@ mod platform {
                     .unwrap_or_else(|e| e.into_inner());
                 guard = new_guard;
                 if wait_result.timed_out() && guard.is_none() {
+                    // Leak ctx and block so the framework's deferred cleanup
+                    // on a background dispatch queue doesn't UAF.
+                    let _ = objc2::rc::Retained::into_raw(ctx);
+                    std::mem::forget(block);
                     return Err("Touch ID authentication timed out".to_string());
                 }
             }
+            let success = guard.unwrap();
+            drop(guard);
 
-            if guard.unwrap() {
+            // LAContext schedules internal cleanup blocks on a background queue
+            // that may fire AFTER the reply callback completes. Releasing
+            // LAContext (or our reply block) too early causes a UAF crash in
+            // libobjc during deferred dispose. Leak both for the lifetime of
+            // the unlock attempt — cost is ~1KB per auth, negligible.
+            let _ = objc2::rc::Retained::into_raw(ctx);
+            std::mem::forget(block);
+            drop(reason);
+
+            if success {
                 Ok(())
             } else {
                 Err("Touch ID authentication failed or was canceled".to_string())
