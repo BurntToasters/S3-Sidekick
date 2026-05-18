@@ -696,6 +696,7 @@ mod platform {
     use hkdf::Hkdf;
     use rand::RngCore;
     use sha2::Sha256;
+    use tauri::Manager;
     use windows::core::{factory, Error, HSTRING, PCWSTR, PWSTR};
     use windows::Foundation::IAsyncOperation;
     use windows::Security::Credentials::{
@@ -911,8 +912,28 @@ mod platform {
         Ok(out.as_slice().to_vec())
     }
 
+    fn run_on_main_thread_blocking<F, R>(
+        window: Option<&tauri::Window>,
+        f: F,
+    ) -> Result<R, String>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let win = window
+            .ok_or_else(|| "Window handle required for Windows Hello operation".to_string())?;
+        let app = win.app_handle().clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(f());
+        })
+        .map_err(|e| format!("Failed to schedule on main thread: {}", e))?;
+        rx.recv()
+            .map_err(|e| format!("Main thread channel closed: {}", e))
+    }
+
     pub fn enroll_v2(
-        _window: Option<&tauri::Window>,
+        window: Option<&tauri::Window>,
     ) -> Result<(super::Zeroizing<[u8; KEY_LEN]>, Vec<u8>), String> {
         let supported = KeyCredentialManager::IsSupportedAsync()
             .and_then(|op| op.get())
@@ -927,57 +948,53 @@ mod platform {
         let mut challenge = vec![0u8; V2_CHALLENGE_LEN];
         rand::rngs::OsRng.fill_bytes(&mut challenge);
 
-        let name = HSTRING::from(V2_CRED_NAME);
-        let create_op = KeyCredentialManager::RequestCreateAsync(
-            &name,
-            KeyCredentialCreationOption::ReplaceExisting,
-        )
-        .map_err(|e| format!("KeyCredentialManager create failed: {}", e))?;
-        let create_result = create_op
-            .get()
-            .map_err(|e| format!("KeyCredentialManager create await failed: {}", e))?;
-        let status = create_result
-            .Status()
-            .map_err(|e| format!("KeyCredential status read failed: {}", e))?;
-        if status != KeyCredentialStatus::Success {
-            return Err(format!(
-                "KeyCredential creation rejected by Windows Hello (status {:?})",
-                status
-            ));
-        }
-        let credential = create_result
-            .Credential()
-            .map_err(|e| format!("KeyCredential read failed: {}", e))?;
+        let challenge_for_main = challenge.clone();
+        let signature: Vec<u8> = run_on_main_thread_blocking(window, move || -> Result<Vec<u8>, String> {
+            let name = HSTRING::from(V2_CRED_NAME);
+            let create_op = KeyCredentialManager::RequestCreateAsync(
+                &name,
+                KeyCredentialCreationOption::ReplaceExisting,
+            )
+            .map_err(|e| format!("KeyCredentialManager create failed: {}", e))?;
+            let create_result = create_op
+                .get()
+                .map_err(|e| format!("KeyCredentialManager create await failed: {}", e))?;
+            let status = create_result
+                .Status()
+                .map_err(|e| format!("KeyCredential status read failed: {}", e))?;
+            if status != KeyCredentialStatus::Success {
+                return Err(format!(
+                    "KeyCredential creation rejected by Windows Hello (status {:?})",
+                    status
+                ));
+            }
+            let credential = create_result
+                .Credential()
+                .map_err(|e| format!("KeyCredential read failed: {}", e))?;
 
-        let challenge_buf = CryptographicBuffer::CreateFromByteArray(&challenge)
-            .map_err(|e| {
-                remove_v2_kek();
-                format!("Challenge buffer create failed: {}", e)
-            })?;
-        let sign_op = credential.RequestSignAsync(&challenge_buf).map_err(|e| {
-            remove_v2_kek();
-            format!("RequestSignAsync failed: {}", e)
-        })?;
-        let sign_result = sign_op.get().map_err(|e| {
-            remove_v2_kek();
-            format!("Sign await failed: {}", e)
-        })?;
-        let sign_status = sign_result.Status().map_err(|e| {
-            remove_v2_kek();
-            format!("Sign status read failed: {}", e)
-        })?;
-        if sign_status != KeyCredentialStatus::Success {
-            remove_v2_kek();
-            return Err(format!(
-                "KeyCredential sign rejected (status {:?})",
-                sign_status
-            ));
-        }
-        let sig_buf = sign_result.Result().map_err(|e| {
-            remove_v2_kek();
-            format!("Sign result read failed: {}", e)
-        })?;
-        let signature = ibuffer_to_vec(&sig_buf).map_err(|e| {
+            let challenge_buf = CryptographicBuffer::CreateFromByteArray(&challenge_for_main)
+                .map_err(|e| format!("Challenge buffer create failed: {}", e))?;
+            let sign_op = credential
+                .RequestSignAsync(&challenge_buf)
+                .map_err(|e| format!("RequestSignAsync failed: {}", e))?;
+            let sign_result = sign_op
+                .get()
+                .map_err(|e| format!("Sign await failed: {}", e))?;
+            let sign_status = sign_result
+                .Status()
+                .map_err(|e| format!("Sign status read failed: {}", e))?;
+            if sign_status != KeyCredentialStatus::Success {
+                return Err(format!(
+                    "KeyCredential sign rejected (status {:?})",
+                    sign_status
+                ));
+            }
+            let sig_buf = sign_result
+                .Result()
+                .map_err(|e| format!("Sign result read failed: {}", e))?;
+            ibuffer_to_vec(&sig_buf)
+        })?
+        .map_err(|e| {
             remove_v2_kek();
             e
         })?;
@@ -990,60 +1007,65 @@ mod platform {
 
     pub fn retrieve_v2_kek(
         opaque: &[u8],
-        _window: Option<&tauri::Window>,
+        window: Option<&tauri::Window>,
     ) -> Result<[u8; KEY_LEN], String> {
         if opaque.len() != V2_CHALLENGE_LEN {
             return Err("Invalid biometric challenge length".to_string());
         }
-        let name = HSTRING::from(V2_CRED_NAME);
-        let open_op = KeyCredentialManager::OpenAsync(&name)
-            .map_err(|e| format!("KeyCredentialManager open failed: {}", e))?;
-        let open_result = open_op
-            .get()
-            .map_err(|e| format!("KeyCredentialManager open await failed: {}", e))?;
-        let open_status = open_result
-            .Status()
-            .map_err(|e| format!("KeyCredential open status read failed: {}", e))?;
-        if open_status != KeyCredentialStatus::Success {
-            if open_status == KeyCredentialStatus::NotFound {
-                return Err("NotFound: biometric credential missing".to_string());
-            }
-            return Err(format!(
-                "KeyCredential open rejected (status {:?})",
-                open_status
-            ));
-        }
-        let credential = open_result
-            .Credential()
-            .map_err(|e| format!("KeyCredential read failed: {}", e))?;
 
-        let challenge_buf = CryptographicBuffer::CreateFromByteArray(opaque)
-            .map_err(|e| format!("Challenge buffer create failed: {}", e))?;
-        let sign_op = credential
-            .RequestSignAsync(&challenge_buf)
-            .map_err(|e| format!("RequestSignAsync failed: {}", e))?;
-        let sign_result = sign_op
-            .get()
-            .map_err(|e| format!("Sign await failed: {}", e))?;
-        let sign_status = sign_result
-            .Status()
-            .map_err(|e| format!("Sign status read failed: {}", e))?;
-        if sign_status != KeyCredentialStatus::Success {
-            if sign_status == KeyCredentialStatus::UserCanceled {
-                return Err("Authentication was canceled".to_string());
+        let opaque_owned = opaque.to_vec();
+        let signature: Vec<u8> = run_on_main_thread_blocking(window, move || -> Result<Vec<u8>, String> {
+            let name = HSTRING::from(V2_CRED_NAME);
+            let open_op = KeyCredentialManager::OpenAsync(&name)
+                .map_err(|e| format!("KeyCredentialManager open failed: {}", e))?;
+            let open_result = open_op
+                .get()
+                .map_err(|e| format!("KeyCredentialManager open await failed: {}", e))?;
+            let open_status = open_result
+                .Status()
+                .map_err(|e| format!("KeyCredential open status read failed: {}", e))?;
+            if open_status != KeyCredentialStatus::Success {
+                if open_status == KeyCredentialStatus::NotFound {
+                    return Err("NotFound: biometric credential missing".to_string());
+                }
+                return Err(format!(
+                    "KeyCredential open rejected (status {:?})",
+                    open_status
+                ));
             }
-            if sign_status == KeyCredentialStatus::NotFound {
-                return Err("NotFound: biometric credential vanished during sign".to_string());
+            let credential = open_result
+                .Credential()
+                .map_err(|e| format!("KeyCredential read failed: {}", e))?;
+
+            let challenge_buf = CryptographicBuffer::CreateFromByteArray(&opaque_owned)
+                .map_err(|e| format!("Challenge buffer create failed: {}", e))?;
+            let sign_op = credential
+                .RequestSignAsync(&challenge_buf)
+                .map_err(|e| format!("RequestSignAsync failed: {}", e))?;
+            let sign_result = sign_op
+                .get()
+                .map_err(|e| format!("Sign await failed: {}", e))?;
+            let sign_status = sign_result
+                .Status()
+                .map_err(|e| format!("Sign status read failed: {}", e))?;
+            if sign_status != KeyCredentialStatus::Success {
+                if sign_status == KeyCredentialStatus::UserCanceled {
+                    return Err("Authentication was canceled".to_string());
+                }
+                if sign_status == KeyCredentialStatus::NotFound {
+                    return Err("NotFound: biometric credential vanished during sign".to_string());
+                }
+                return Err(format!(
+                    "KeyCredential sign rejected (status {:?})",
+                    sign_status
+                ));
             }
-            return Err(format!(
-                "KeyCredential sign rejected (status {:?})",
-                sign_status
-            ));
-        }
-        let sig_buf = sign_result
-            .Result()
-            .map_err(|e| format!("Sign result read failed: {}", e))?;
-        let signature = ibuffer_to_vec(&sig_buf)?;
+            let sig_buf = sign_result
+                .Result()
+                .map_err(|e| format!("Sign result read failed: {}", e))?;
+            ibuffer_to_vec(&sig_buf)
+        })??;
+
         Ok(derive_kek(&signature))
     }
 
