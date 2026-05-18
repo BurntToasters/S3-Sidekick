@@ -527,8 +527,17 @@ fn main() {
         unsafe {
             use windows::core::HSTRING;
             use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
-            let aumid = HSTRING::from("run.rosie.s3-sidekick");
-            let _ = SetCurrentProcessExplicitAppUserModelID(&aumid);
+            let mut set_ok = false;
+            for id in ["run.rosie.s3-sidekick", "run.rosie.s3sidekick"] {
+                let aumid = HSTRING::from(id);
+                if SetCurrentProcessExplicitAppUserModelID(&aumid).is_ok() {
+                    set_ok = true;
+                    break;
+                }
+            }
+            if !set_ok {
+                eprintln!("Warning: failed to set explicit AppUserModelID for Windows Hello operations");
+            }
         }
     }
 

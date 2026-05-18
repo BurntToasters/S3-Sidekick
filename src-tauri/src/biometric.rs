@@ -648,7 +648,7 @@ mod platform {
     use rand::RngCore;
     use sha2::Sha256;
     use tauri::Manager;
-    use windows::core::{factory, Error, HSTRING, PCWSTR, PWSTR};
+    use windows::core::{factory, Error, HSTRING, PCWSTR, PWSTR, RuntimeType};
     use windows::Foundation::IAsyncOperation;
     use windows::Security::Credentials::{
         KeyCredentialCreationOption, KeyCredentialManager, KeyCredentialStatus,
@@ -687,6 +687,42 @@ mod platform {
     fn is_retryable_error(err: &Error) -> bool {
         let code = err.code().0;
         code == WINDOWS_HELLO_RETRY_HRESULT || code == WINDOWS_HELLO_NOT_FOUND_HRESULT
+    }
+
+    fn run_keycredential_async_with_retry<T, F>(
+        mut start: F,
+        action_label: &str,
+    ) -> Result<T, String>
+    where
+        T: RuntimeType + 'static,
+        F: FnMut() -> windows::core::Result<IAsyncOperation<T>>,
+    {
+        let mut last_retryable: Option<Error> = None;
+        for attempt in 0..WINDOWS_HELLO_VERIFY_MAX_RETRIES {
+            let op = match start() {
+                Ok(op) => op,
+                Err(e) => {
+                    if attempt + 1 < WINDOWS_HELLO_VERIFY_MAX_RETRIES && is_retryable_error(&e) {
+                        last_retryable = Some(e);
+                        thread::sleep(Duration::from_millis(WINDOWS_HELLO_VERIFY_RETRY_DELAY_MS));
+                        continue;
+                    }
+                    return Err(format!("{} failed: {}", action_label, e));
+                }
+            };
+            match op.get() {
+                Ok(result) => return Ok(result),
+                Err(e) if attempt + 1 < WINDOWS_HELLO_VERIFY_MAX_RETRIES && is_retryable_error(&e) => {
+                    last_retryable = Some(e);
+                    thread::sleep(Duration::from_millis(WINDOWS_HELLO_VERIFY_RETRY_DELAY_MS));
+                }
+                Err(e) => return Err(format!("{} await failed: {}", action_label, e)),
+            }
+        }
+        if let Some(e) = last_retryable {
+            return Err(format!("{} await failed after retries: {}", action_label, e));
+        }
+        Err(format!("{} await failed after retries", action_label))
     }
 
     enum VerifyError {
@@ -908,14 +944,15 @@ mod platform {
             if let Ok(del_op) = KeyCredentialManager::DeleteAsync(&name) {
                 let _ = del_op.get();
             }
-            let create_op = KeyCredentialManager::RequestCreateAsync(
-                &name,
-                KeyCredentialCreationOption::ReplaceExisting,
-            )
-            .map_err(|e| format!("KeyCredentialManager create failed: {}", e))?;
-            let create_result = create_op
-                .get()
-                .map_err(|e| format!("KeyCredentialManager create await failed: {}", e))?;
+            let create_result = run_keycredential_async_with_retry(
+                || {
+                    KeyCredentialManager::RequestCreateAsync(
+                        &name,
+                        KeyCredentialCreationOption::FailIfExists,
+                    )
+                },
+                "KeyCredentialManager create",
+            )?;
             let status = create_result
                 .Status()
                 .map_err(|e| format!("KeyCredential status read failed: {}", e))?;
@@ -973,11 +1010,10 @@ mod platform {
         let opaque_owned = opaque.to_vec();
         let signature: Vec<u8> = run_on_main_thread_blocking(window, move || -> Result<Vec<u8>, String> {
             let name = HSTRING::from(V2_CRED_NAME);
-            let open_op = KeyCredentialManager::OpenAsync(&name)
-                .map_err(|e| format!("KeyCredentialManager open failed: {}", e))?;
-            let open_result = open_op
-                .get()
-                .map_err(|e| format!("KeyCredentialManager open await failed: {}", e))?;
+            let open_result = run_keycredential_async_with_retry(
+                || KeyCredentialManager::OpenAsync(&name),
+                "KeyCredentialManager open",
+            )?;
             let open_status = open_result
                 .Status()
                 .map_err(|e| format!("KeyCredential open status read failed: {}", e))?;
