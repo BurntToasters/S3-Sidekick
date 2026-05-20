@@ -1589,7 +1589,7 @@ describe("main integration", () => {
     expect(mockSwitchSettingsTab).toHaveBeenCalledWith("bookmarks");
 
     const settingsGeneral = document.querySelector(
-      '[data-settings-tab="general"]',
+      '[data-settings-tab="appearance"]',
     ) as HTMLButtonElement;
     settingsGeneral.dispatchEvent(
       new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),

@@ -122,17 +122,207 @@ export function switchSettingsTab(tab: string): void {
   }
   const panels = document.querySelectorAll<HTMLElement>(".settings-panel");
   for (const p of panels) {
+    if (p.dataset.settingsPanel === "__search") {
+      p.hidden = true;
+      p.style.display = "none";
+      continue;
+    }
     const isActive = p.dataset.settingsPanel === tab;
     p.hidden = !isActive;
     p.style.display = isActive ? "" : "none";
   }
 }
 
+const searchOriginalParents = new Map<
+  HTMLElement,
+  { parent: HTMLElement; next: HTMLElement | null }
+>();
+let preSearchActiveTab: string | null = null;
+
+function getActiveSettingsTab(): string | null {
+  const active = document.querySelector<HTMLElement>(".settings-tab--active");
+  return active?.dataset.settingsTab ?? null;
+}
+
+function restoreSearchItems(): void {
+  for (const [item, { parent, next }] of searchOriginalParents) {
+    if (next && next.parentElement === parent) {
+      parent.insertBefore(item, next);
+    } else {
+      parent.appendChild(item);
+    }
+  }
+  searchOriginalParents.clear();
+}
+
+export function updateSettingsSearch(query: string): void {
+  const searchPanel = document.querySelector<HTMLElement>(
+    '[data-settings-panel="__search"]',
+  );
+  if (!searchPanel) return;
+
+  restoreSearchItems();
+  for (const g of Array.from(
+    searchPanel.querySelectorAll<HTMLElement>(".settings-search-group"),
+  )) {
+    g.remove();
+  }
+
+  const trimmed = query.trim().toLowerCase();
+  const empty = searchPanel.querySelector<HTMLElement>(
+    ".settings-search-empty",
+  );
+
+  if (!trimmed) {
+    if (empty) empty.hidden = true;
+    if (preSearchActiveTab) {
+      switchSettingsTab(preSearchActiveTab);
+      preSearchActiveTab = null;
+    }
+    return;
+  }
+
+  if (!preSearchActiveTab) {
+    preSearchActiveTab = getActiveSettingsTab() ?? "appearance";
+  }
+
+  const allPanels = Array.from(
+    document.querySelectorAll<HTMLElement>(".settings-panel"),
+  ).filter((p) => p.dataset.settingsPanel !== "__search");
+
+  let anyMatch = false;
+
+  for (const panel of allPanels) {
+    const tabName = panel.dataset.settingsPanel ?? "";
+    const tabBtn = document.querySelector<HTMLElement>(
+      `[data-settings-tab="${tabName}"]`,
+    );
+    const tabLabel = tabBtn?.textContent?.trim() || tabName;
+
+    const items = Array.from(
+      panel.querySelectorAll<HTMLElement>(".setting-item"),
+    );
+    const matched: HTMLElement[] = [];
+    for (const item of items) {
+      const labelText = (item.textContent ?? "").toLowerCase();
+      const tips = Array.from(
+        item.querySelectorAll<HTMLElement>("[data-tooltip]"),
+      )
+        .map((b) => b.getAttribute("data-tooltip") ?? "")
+        .join(" ")
+        .toLowerCase();
+      if (labelText.includes(trimmed) || tips.includes(trimmed)) {
+        matched.push(item);
+      }
+    }
+    if (matched.length === 0) continue;
+    anyMatch = true;
+
+    const group = document.createElement("div");
+    group.className = "settings-search-group";
+    const title = document.createElement("div");
+    title.className = "settings-search-group-title";
+    title.textContent = tabLabel;
+    group.appendChild(title);
+
+    for (const item of matched) {
+      if (!searchOriginalParents.has(item) && item.parentElement) {
+        searchOriginalParents.set(item, {
+          parent: item.parentElement,
+          next: item.nextElementSibling as HTMLElement | null,
+        });
+      }
+      group.appendChild(item);
+    }
+    searchPanel.appendChild(group);
+  }
+
+  for (const panel of allPanels) {
+    panel.hidden = true;
+    panel.style.display = "none";
+  }
+  searchPanel.hidden = false;
+  searchPanel.style.display = "";
+
+  for (const t of Array.from(
+    document.querySelectorAll<HTMLElement>(".settings-tab"),
+  )) {
+    t.classList.remove("settings-tab--active");
+    t.setAttribute("aria-selected", "false");
+  }
+
+  if (empty) empty.hidden = anyMatch;
+}
+
+function initSettingsSearch(): void {
+  const input = document.getElementById(
+    "settings-search",
+  ) as HTMLInputElement | null;
+  if (!input || input.dataset.wired === "true") return;
+  input.dataset.wired = "true";
+  input.addEventListener("input", () => updateSettingsSearch(input.value));
+}
+
+function initAdvancedTransferToggle(): void {
+  const toggle = document.getElementById(
+    "transfers-advanced-toggle",
+  ) as HTMLElement | null;
+  const group = document.getElementById(
+    "transfers-advanced",
+  ) as HTMLElement | null;
+  if (!toggle || !group || toggle.dataset.wired === "true") return;
+  toggle.dataset.wired = "true";
+  toggle.addEventListener("click", () => {
+    const expanded = toggle.getAttribute("aria-expanded") === "true";
+    const next = !expanded;
+    toggle.setAttribute("aria-expanded", String(next));
+    group.hidden = !next;
+  });
+}
+
+function syncThemeCards(theme: UserSettings["theme"]): void {
+  const cards = document.querySelectorAll<HTMLElement>(".theme-card");
+  for (const card of cards) {
+    card.classList.toggle(
+      "theme-card--active",
+      card.dataset.themeCard === theme,
+    );
+  }
+  const radio = document.querySelector<HTMLInputElement>(
+    `input[name="theme"][value="${theme}"]`,
+  );
+  if (radio) radio.checked = true;
+}
+
+function initThemePicker(): void {
+  const radios = document.querySelectorAll<HTMLInputElement>(
+    'input[name="theme"]',
+  );
+  for (const r of radios) {
+    if (r.dataset.wired === "true") continue;
+    r.dataset.wired = "true";
+    r.addEventListener("change", () => {
+      if (!r.checked) return;
+      const value = r.value;
+      if (value !== "system" && value !== "light" && value !== "dark") return;
+      const hidden = document.getElementById(
+        "setting-theme",
+      ) as HTMLInputElement | null;
+      if (hidden) hidden.value = value;
+      syncThemeCards(value);
+      applyTheme(value);
+    });
+  }
+}
+
 export function populateSettingsModal(): void {
-  const themeSelect = document.getElementById(
-    "setting-theme",
-  ) as HTMLSelectElement | null;
+  initThemePicker();
+  const themeSelect = document.getElementById("setting-theme") as
+    | HTMLInputElement
+    | HTMLSelectElement
+    | null;
   if (themeSelect) themeSelect.value = state.currentSettings.theme;
+  syncThemeCards(state.currentSettings.theme);
 
   const updatesCheckbox = document.getElementById(
     "setting-updates",
@@ -312,15 +502,44 @@ export function populateSettingsModal(): void {
       displayNames[state.platformName] ?? (state.platformName || "Unknown");
   }
 
-  switchSettingsTab("general");
+  initSettingsSearch();
+  initAdvancedTransferToggle();
+
+  const searchInput = document.getElementById(
+    "settings-search",
+  ) as HTMLInputElement | null;
+  if (searchInput) searchInput.value = "";
+  updateSettingsSearch("");
+
+  const advancedGroup = document.getElementById(
+    "transfers-advanced",
+  ) as HTMLElement | null;
+  const advancedToggle = document.getElementById("transfers-advanced-toggle");
+  if (advancedGroup) advancedGroup.hidden = true;
+  if (advancedToggle) advancedToggle.setAttribute("aria-expanded", "false");
+
+  switchSettingsTab("appearance");
 }
 
 export function readSettingsModal(): void {
-  const themeSelect = document.getElementById(
-    "setting-theme",
-  ) as HTMLSelectElement | null;
-  if (themeSelect) {
-    state.currentSettings.theme = themeSelect.value as UserSettings["theme"];
+  const themeRadio = document.querySelector<HTMLInputElement>(
+    'input[name="theme"]:checked',
+  );
+  if (
+    themeRadio &&
+    (themeRadio.value === "system" ||
+      themeRadio.value === "light" ||
+      themeRadio.value === "dark")
+  ) {
+    state.currentSettings.theme = themeRadio.value;
+  } else {
+    const themeSelect = document.getElementById("setting-theme") as
+      | HTMLInputElement
+      | HTMLSelectElement
+      | null;
+    if (themeSelect) {
+      state.currentSettings.theme = themeSelect.value as UserSettings["theme"];
+    }
   }
 
   const updatesCheckbox = document.getElementById(
