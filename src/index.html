@@ -627,7 +627,7 @@
       aria-modal="true"
       aria-labelledby="settings-heading"
     >
-      <div class="modal">
+      <div class="modal modal--settings">
         <div class="modal__header">
           <h2 id="settings-heading">Settings</h2>
           <button id="settings-close" class="btn btn--icon" aria-label="Close">
@@ -640,431 +640,754 @@
             />
           </button>
         </div>
-        <div class="settings-tabs" role="tablist">
-          <button
-            class="settings-tab settings-tab--active"
-            id="settings-tab-general"
-            data-settings-tab="general"
-            role="tab"
-            aria-selected="true"
-            aria-controls="settings-panel-general"
-            tabindex="0"
-          >
-            General
-          </button>
-          <button
-            class="settings-tab"
-            id="settings-tab-bookmarks"
-            data-settings-tab="bookmarks"
-            role="tab"
-            aria-selected="false"
-            aria-controls="settings-panel-bookmarks"
-            tabindex="-1"
-          >
-            Bookmarks
-          </button>
-          <button
-            class="settings-tab"
-            id="settings-tab-security"
-            data-settings-tab="security"
-            role="tab"
-            aria-selected="false"
-            aria-controls="settings-panel-security"
-            tabindex="-1"
-          >
-            Security
-          </button>
-          <button
-            class="settings-tab"
-            id="settings-tab-about"
-            data-settings-tab="about"
-            role="tab"
-            aria-selected="false"
-            aria-controls="settings-panel-about"
-            tabindex="-1"
-          >
-            About
-          </button>
-        </div>
-        <div class="modal__body">
-          <div
-            class="settings-panel"
-            id="settings-panel-general"
-            data-settings-panel="general"
-            role="tabpanel"
-            aria-labelledby="settings-tab-general"
-          >
-            <div class="setting-item">
-              <label for="setting-theme">Theme</label>
-              <select id="setting-theme" class="field">
-                <option value="system">System</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </select>
-            </div>
-            <div id="updater-section">
-              <div class="setting-item">
-                <label class="toggle-row">
-                  <input id="setting-updates" type="checkbox" />
-                  <span>Check for updates automatically</span>
-                </label>
-              </div>
-              <div class="setting-item">
-                <label for="setting-update-channel">Update channel</label>
-                <select id="setting-update-channel" class="field field--sm">
-                  <option value="release">Release</option>
-                  <option value="beta">Beta</option>
-                </select>
-              </div>
-              <div class="setting-item">
-                <label>Check for updates now</label>
-                <button id="settings-check-updates" class="btn">
-                  Check now
-                </button>
-              </div>
-            </div>
-            <div id="updater-unsupported" style="display: none">
-              <div class="setting-item">
-                <span class="text-secondary" style="font-size: 12px"
-                  >Auto-updates are not available for this package format.
-                  Update through your package manager.</span
-                >
-              </div>
-            </div>
-            <div class="setting-item">
-              <label for="setting-presigned-expiration"
-                >Pre-signed URL expiration</label
-              >
-              <select id="setting-presigned-expiration" class="field field--sm">
-                <option value="300">5 minutes</option>
-                <option value="900">15 minutes</option>
-                <option value="3600">1 hour</option>
-                <option value="21600">6 hours</option>
-                <option value="43200">12 hours</option>
-                <option value="86400">24 hours</option>
-                <option value="604800">7 days</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-max-concurrent">Concurrent transfers</label>
-              <select id="setting-max-concurrent" class="field field--sm">
-                <option value="1">1 (sequential)</option>
-                <option value="2">2</option>
-                <option value="3">3 (default)</option>
-                <option value="5">5</option>
-                <option value="8">8</option>
-                <option value="10">10 (maximum)</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-transfer-retries">Transfer retries</label>
-              <select id="setting-transfer-retries" class="field field--sm">
-                <option value="0">0 (disabled)</option>
-                <option value="1">1</option>
-                <option value="2">2</option>
-                <option value="3">3 (default)</option>
-                <option value="5">5</option>
-                <option value="8">8</option>
-                <option value="10">10 (maximum)</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-transfer-retry-base-ms"
-                >Retry base delay</label
-              >
-              <select
-                id="setting-transfer-retry-base-ms"
-                class="field field--sm"
-              >
-                <option value="100">100 ms</option>
-                <option value="200">200 ms</option>
-                <option value="400">400 ms (default)</option>
-                <option value="800">800 ms</option>
-                <option value="1200">1200 ms</option>
-                <option value="2000">2000 ms</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-conflict-policy">Conflict policy</label>
-              <select id="setting-conflict-policy" class="field field--sm">
-                <option value="ask">Ask (default)</option>
-                <option value="skip">Skip existing</option>
-                <option value="replace">Replace existing</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label class="toggle-row">
-                <input id="setting-remember-download-path" type="checkbox" />
-                <span>Remember last download folder</span>
-              </label>
-            </div>
-            <div class="setting-item">
-              <label for="setting-transfer-performance-preset"
-                >Transfer performance preset</label
-              >
-              <select
-                id="setting-transfer-performance-preset"
-                class="field field--sm"
-              >
-                <option value="safe">Safe</option>
-                <option value="balanced">Balanced (default)</option>
-                <option value="max">Max</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-download-parallel-threshold-mb"
-                >Parallel download threshold</label
-              >
-              <select
-                id="setting-download-parallel-threshold-mb"
-                class="field field--sm"
-              >
-                <option value="32">32 MB</option>
-                <option value="64">64 MB</option>
-                <option value="128">128 MB (default)</option>
-                <option value="256">256 MB</option>
-                <option value="512">512 MB</option>
-                <option value="1024">1024 MB</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-download-part-size-mb"
-                >Download part size</label
-              >
-              <select
-                id="setting-download-part-size-mb"
-                class="field field--sm"
-              >
-                <option value="16">16 MB</option>
-                <option value="24">24 MB</option>
-                <option value="32">32 MB (default)</option>
-                <option value="48">48 MB</option>
-                <option value="64">64 MB</option>
-                <option value="96">96 MB</option>
-                <option value="128">128 MB</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-download-part-concurrency"
-                >Download part concurrency</label
-              >
-              <select
-                id="setting-download-part-concurrency"
-                class="field field--sm"
-              >
-                <option value="1">1</option>
-                <option value="2">2</option>
-                <option value="4">4</option>
-                <option value="6">6 (default)</option>
-                <option value="8">8</option>
-                <option value="10">10</option>
-                <option value="12">12</option>
-                <option value="16">16</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-upload-part-size-mb">Upload part size</label>
-              <select id="setting-upload-part-size-mb" class="field field--sm">
-                <option value="16">16 MB</option>
-                <option value="24">24 MB</option>
-                <option value="32">32 MB (default)</option>
-                <option value="48">48 MB</option>
-                <option value="64">64 MB</option>
-                <option value="96">96 MB</option>
-                <option value="128">128 MB</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-upload-part-concurrency"
-                >Upload part concurrency</label
-              >
-              <select
-                id="setting-upload-part-concurrency"
-                class="field field--sm"
-              >
-                <option value="1">1</option>
-                <option value="2">2</option>
-                <option value="4">4</option>
-                <option value="6">6 (default)</option>
-                <option value="8">8</option>
-                <option value="10">10</option>
-                <option value="12">12</option>
-                <option value="16">16</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label class="toggle-row">
-                <input id="setting-enable-transfer-resume" type="checkbox" />
-                <span>Enable resumable large downloads</span>
-              </label>
-            </div>
-            <div class="setting-item">
-              <label class="toggle-row">
-                <input
-                  id="setting-enable-transfer-checksum-verification"
-                  type="checkbox"
-                />
-                <span>Verify transfer checksums when available</span>
-              </label>
-            </div>
-            <div class="setting-item">
-              <label for="setting-transfer-checkpoint-ttl-hours"
-                >Checkpoint retention</label
-              >
-              <select
-                id="setting-transfer-checkpoint-ttl-hours"
-                class="field field--sm"
-              >
-                <option value="24">24 hours</option>
-                <option value="72">72 hours</option>
-                <option value="168">7 days (default)</option>
-                <option value="336">14 days</option>
-                <option value="720">30 days</option>
-              </select>
-            </div>
-            <div class="setting-item">
-              <label for="setting-bandwidth-limit-mbps">Bandwidth cap</label>
-              <select id="setting-bandwidth-limit-mbps" class="field field--sm">
-                <option value="0">Unlimited (default)</option>
-                <option value="10">10 Mbps</option>
-                <option value="25">25 Mbps</option>
-                <option value="50">50 Mbps</option>
-                <option value="100">100 Mbps</option>
-                <option value="250">250 Mbps</option>
-                <option value="500">500 Mbps</option>
-                <option value="1000">1000 Mbps</option>
-              </select>
-            </div>
-            <div class="setting-section">Danger Zone</div>
-            <div class="setting-item">
-              <label>Reset all settings to defaults</label>
-              <button id="settings-reset" class="btn btn--danger">Reset</button>
-            </div>
-          </div>
-
-          <div
-            class="settings-panel"
-            id="settings-panel-bookmarks"
-            data-settings-panel="bookmarks"
-            role="tabpanel"
-            aria-labelledby="settings-tab-bookmarks"
-            hidden
-          >
-            <div class="bookmark-list-toolbar">
-              <button id="bookmarks-export-btn" class="btn btn--ghost btn--sm">
-                Export
-              </button>
-              <button id="bookmarks-import-btn" class="btn btn--ghost btn--sm">
-                Import
-              </button>
+        <div class="modal__body settings-layout">
+          <aside class="settings-sidebar">
+            <div class="settings-search-wrap">
               <input
-                id="bookmarks-import-input"
-                type="file"
-                accept=".json,application/json"
-                style="display: none"
+                id="settings-search"
+                class="settings-search"
+                type="search"
+                placeholder="Search settings..."
+                aria-label="Search settings"
+                autocomplete="off"
+              />
+            </div>
+            <div
+              class="settings-tabs"
+              role="tablist"
+              aria-orientation="vertical"
+            >
+              <button
+                class="settings-tab settings-tab--active"
+                id="settings-tab-appearance"
+                data-settings-tab="appearance"
+                role="tab"
+                aria-selected="true"
+                aria-controls="settings-panel-appearance"
+                tabindex="0"
+              >
+                Appearance
+              </button>
+              <button
+                class="settings-tab"
+                id="settings-tab-updates"
+                data-settings-tab="updates"
+                role="tab"
+                aria-selected="false"
+                aria-controls="settings-panel-updates"
+                tabindex="-1"
+              >
+                Updates
+              </button>
+              <button
+                class="settings-tab"
+                id="settings-tab-transfers"
+                data-settings-tab="transfers"
+                role="tab"
+                aria-selected="false"
+                aria-controls="settings-panel-transfers"
+                tabindex="-1"
+              >
+                Transfers
+              </button>
+              <button
+                class="settings-tab"
+                id="settings-tab-sharing"
+                data-settings-tab="sharing"
+                role="tab"
+                aria-selected="false"
+                aria-controls="settings-panel-sharing"
+                tabindex="-1"
+              >
+                Sharing
+              </button>
+              <button
+                class="settings-tab"
+                id="settings-tab-bookmarks"
+                data-settings-tab="bookmarks"
+                role="tab"
+                aria-selected="false"
+                aria-controls="settings-panel-bookmarks"
+                tabindex="-1"
+              >
+                Bookmarks
+              </button>
+              <button
+                class="settings-tab"
+                id="settings-tab-security"
+                data-settings-tab="security"
+                role="tab"
+                aria-selected="false"
+                aria-controls="settings-panel-security"
+                tabindex="-1"
+              >
+                Security
+              </button>
+              <button
+                class="settings-tab"
+                id="settings-tab-about"
+                data-settings-tab="about"
+                role="tab"
+                aria-selected="false"
+                aria-controls="settings-panel-about"
+                tabindex="-1"
+              >
+                About
+              </button>
+            </div>
+          </aside>
+          <div class="settings-content">
+            <div
+              class="settings-panel"
+              id="settings-panel-appearance"
+              data-settings-panel="appearance"
+              role="tabpanel"
+              aria-labelledby="settings-tab-appearance"
+            >
+              <div class="setting-item setting-item--stacked">
+                <label>Theme</label>
+                <div class="theme-picker" role="radiogroup" aria-label="Theme">
+                  <label class="theme-card" data-theme-card="system">
+                    <input
+                      type="radio"
+                      name="theme"
+                      value="system"
+                      id="setting-theme-system"
+                    />
+                    <span
+                      class="theme-card-preview theme-card-preview--system"
+                      aria-hidden="true"
+                    >
+                      <span class="theme-card-preview__row"></span>
+                      <span
+                        class="theme-card-preview__row theme-card-preview__row--short"
+                      ></span>
+                    </span>
+                    <span class="theme-card-label">System</span>
+                  </label>
+                  <label class="theme-card" data-theme-card="light">
+                    <input
+                      type="radio"
+                      name="theme"
+                      value="light"
+                      id="setting-theme-light"
+                    />
+                    <span
+                      class="theme-card-preview theme-card-preview--light"
+                      aria-hidden="true"
+                    >
+                      <span class="theme-card-preview__row"></span>
+                      <span
+                        class="theme-card-preview__row theme-card-preview__row--short"
+                      ></span>
+                    </span>
+                    <span class="theme-card-label">Light</span>
+                  </label>
+                  <label class="theme-card" data-theme-card="dark">
+                    <input
+                      type="radio"
+                      name="theme"
+                      value="dark"
+                      id="setting-theme-dark"
+                    />
+                    <span
+                      class="theme-card-preview theme-card-preview--dark"
+                      aria-hidden="true"
+                    >
+                      <span class="theme-card-preview__row"></span>
+                      <span
+                        class="theme-card-preview__row theme-card-preview__row--short"
+                      ></span>
+                    </span>
+                    <span class="theme-card-label">Dark</span>
+                  </label>
+                </div>
+              </div>
+              <input
+                type="hidden"
+                id="setting-theme"
+                value="system"
                 aria-hidden="true"
               />
             </div>
-            <ul id="bookmark-list" class="bookmark-list"></ul>
-          </div>
 
-          <div
-            class="settings-panel"
-            id="settings-panel-security"
-            data-settings-panel="security"
-            role="tabpanel"
-            aria-labelledby="settings-tab-security"
-            hidden
-          >
-            <div class="setting-item setting-item--stacked">
-              <label>Credential Encryption</label>
-              <div class="security-controls">
-                <span id="security-status-text" class="text-secondary"
-                  ><span class="spinner"></span> Loading...</span
-                >
-                <div class="security-controls__actions">
-                  <button id="security-toggle" class="btn">
-                    Enable Encryption
-                  </button>
-                  <button
-                    id="security-change-password"
-                    class="btn btn--ghost"
-                    style="display: none"
-                  >
-                    Change Password
+            <div
+              class="settings-panel"
+              id="settings-panel-updates"
+              data-settings-panel="updates"
+              role="tabpanel"
+              aria-labelledby="settings-tab-updates"
+              hidden
+            >
+              <div id="updater-section">
+                <div class="setting-item">
+                  <label class="toggle-row">
+                    <input id="setting-updates" type="checkbox" />
+                    <span>Check for updates automatically</span>
+                  </label>
+                </div>
+                <div class="setting-item">
+                  <span class="setting-label">
+                    <label for="setting-update-channel">Update channel</label>
+                    <button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help"
+                      data-tooltip="Release: stable builds. Beta: pre-release builds with newer features and possible bugs."
+                    >
+                      ?
+                    </button>
+                  </span>
+                  <select id="setting-update-channel" class="field field--sm">
+                    <option value="release">Release</option>
+                    <option value="beta">Beta</option>
+                  </select>
+                </div>
+                <div class="setting-item">
+                  <label>Check for updates now</label>
+                  <button id="settings-check-updates" class="btn">
+                    Check now
                   </button>
                 </div>
               </div>
-              <div
-                id="security-warning"
-                class="security-warning"
-                style="display: none"
-              >
-                Warning: saved credentials are stored unencrypted on this
-                device.
+              <div id="updater-unsupported" style="display: none">
+                <div class="setting-item">
+                  <span class="text-secondary" style="font-size: 12px"
+                    >Auto-updates are not available for this package format.
+                    Update through your package manager.</span
+                  >
+                </div>
               </div>
             </div>
-            <div
-              id="security-lock-settings"
-              class="setting-item"
-              style="display: none"
-            >
-              <label for="security-lock-timeout"
-                >Auto-lock after inactivity</label
-              >
-              <select id="security-lock-timeout" class="field field--sm">
-                <option value="0">Never</option>
-                <option value="5">5 minutes</option>
-                <option value="15">15 minutes</option>
-                <option value="30">30 minutes</option>
-                <option value="60">1 hour</option>
-              </select>
-            </div>
-            <div
-              id="security-lock-action"
-              class="setting-item"
-              style="display: none"
-            >
-              <label>Lock encrypted storage now</label>
-              <button id="security-lock-btn" class="btn btn--ghost">
-                Lock Now
-              </button>
-            </div>
-            <div
-              id="security-biometric-settings"
-              class="setting-item"
-              style="display: none"
-            >
-              <label for="biometric-toggle">Biometric Unlock</label>
-              <button
-                id="biometric-toggle"
-                class="btn"
-                aria-label="Toggle biometric unlock"
-              >
-                Enable
-              </button>
-            </div>
-          </div>
 
-          <div
-            class="settings-panel"
-            id="settings-panel-about"
-            data-settings-panel="about"
-            role="tabpanel"
-            aria-labelledby="settings-tab-about"
-            hidden
-          >
-            <div class="setting-item">
-              <label>Version</label>
-              <span id="settings-version" class="text-secondary"></span>
+            <div
+              class="settings-panel"
+              id="settings-panel-transfers"
+              data-settings-panel="transfers"
+              role="tabpanel"
+              aria-labelledby="settings-tab-transfers"
+              hidden
+            >
+              <div class="setting-item">
+                <span class="setting-label">
+                  <label for="setting-transfer-performance-preset"
+                    >Performance preset</label
+                  >
+                  <button
+                    type="button"
+                    class="setting-help"
+                    aria-label="Help"
+                    data-tooltip="Safe: low memory, slower. Balanced: default. Max: highest throughput, more memory and CPU."
+                  >
+                    ?
+                  </button>
+                </span>
+                <select
+                  id="setting-transfer-performance-preset"
+                  class="field field--sm"
+                >
+                  <option value="safe">Safe</option>
+                  <option value="balanced">Balanced (default)</option>
+                  <option value="max">Max</option>
+                </select>
+              </div>
+              <div class="setting-item">
+                <label for="setting-max-concurrent">Concurrent transfers</label>
+                <select id="setting-max-concurrent" class="field field--sm">
+                  <option value="1">1 (sequential)</option>
+                  <option value="2">2</option>
+                  <option value="3">3 (default)</option>
+                  <option value="5">5</option>
+                  <option value="8">8</option>
+                  <option value="10">10 (maximum)</option>
+                </select>
+              </div>
+              <div class="setting-item">
+                <label for="setting-conflict-policy">Conflict policy</label>
+                <select id="setting-conflict-policy" class="field field--sm">
+                  <option value="ask">Ask (default)</option>
+                  <option value="skip">Skip existing</option>
+                  <option value="replace">Replace existing</option>
+                </select>
+              </div>
+              <div class="setting-item">
+                <span class="setting-label">
+                  <label for="setting-bandwidth-limit-mbps"
+                    >Bandwidth cap</label
+                  >
+                  <button
+                    type="button"
+                    class="setting-help"
+                    aria-label="Help"
+                    data-tooltip="Maximum total network speed used for transfers. Unlimited uses all available bandwidth."
+                  >
+                    ?
+                  </button>
+                </span>
+                <select
+                  id="setting-bandwidth-limit-mbps"
+                  class="field field--sm"
+                >
+                  <option value="0">Unlimited (default)</option>
+                  <option value="10">10 Mbps</option>
+                  <option value="25">25 Mbps</option>
+                  <option value="50">50 Mbps</option>
+                  <option value="100">100 Mbps</option>
+                  <option value="250">250 Mbps</option>
+                  <option value="500">500 Mbps</option>
+                  <option value="1000">1000 Mbps</option>
+                </select>
+              </div>
+              <div class="setting-item">
+                <label for="setting-transfer-retries">Transfer retries</label>
+                <select id="setting-transfer-retries" class="field field--sm">
+                  <option value="0">0 (disabled)</option>
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3 (default)</option>
+                  <option value="5">5</option>
+                  <option value="8">8</option>
+                  <option value="10">10 (maximum)</option>
+                </select>
+              </div>
+              <div class="setting-item">
+                <span class="setting-label">
+                  <label for="setting-transfer-retry-base-ms"
+                    >Retry base delay</label
+                  >
+                  <button
+                    type="button"
+                    class="setting-help"
+                    aria-label="Help"
+                    data-tooltip="Initial wait before the first retry. Each subsequent retry waits longer using exponential backoff."
+                  >
+                    ?
+                  </button>
+                </span>
+                <select
+                  id="setting-transfer-retry-base-ms"
+                  class="field field--sm"
+                >
+                  <option value="100">100 ms</option>
+                  <option value="200">200 ms</option>
+                  <option value="400">400 ms (default)</option>
+                  <option value="800">800 ms</option>
+                  <option value="1200">1200 ms</option>
+                  <option value="2000">2000 ms</option>
+                </select>
+              </div>
+
+              <button
+                type="button"
+                class="advanced-toggle"
+                id="transfers-advanced-toggle"
+                aria-expanded="false"
+                aria-controls="transfers-advanced"
+              >
+                <span class="advanced-toggle__caret" aria-hidden="true"
+                  >&#x25B8;</span
+                >
+                Advanced
+              </button>
+              <div class="advanced-group" id="transfers-advanced" hidden>
+                <div class="setting-item">
+                  <label class="toggle-row">
+                    <input
+                      id="setting-remember-download-path"
+                      type="checkbox"
+                    />
+                    <span>Remember last download folder</span>
+                  </label>
+                </div>
+                <div class="setting-item">
+                  <span class="setting-label">
+                    <label for="setting-download-parallel-threshold-mb"
+                      >Parallel download threshold</label
+                    >
+                    <button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help"
+                      data-tooltip="Files larger than this use parallel range-GET downloads. Smaller files use a single request."
+                    >
+                      ?
+                    </button>
+                  </span>
+                  <select
+                    id="setting-download-parallel-threshold-mb"
+                    class="field field--sm"
+                  >
+                    <option value="32">32 MB</option>
+                    <option value="64">64 MB</option>
+                    <option value="128">128 MB (default)</option>
+                    <option value="256">256 MB</option>
+                    <option value="512">512 MB</option>
+                    <option value="1024">1024 MB</option>
+                  </select>
+                </div>
+                <div class="setting-item">
+                  <span class="setting-label">
+                    <label for="setting-download-part-size-mb"
+                      >Download part size</label
+                    >
+                    <button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help"
+                      data-tooltip="Size of each range-GET chunk for parallel downloads. Larger = fewer requests, more memory per part."
+                    >
+                      ?
+                    </button>
+                  </span>
+                  <select
+                    id="setting-download-part-size-mb"
+                    class="field field--sm"
+                  >
+                    <option value="16">16 MB</option>
+                    <option value="24">24 MB</option>
+                    <option value="32">32 MB (default)</option>
+                    <option value="48">48 MB</option>
+                    <option value="64">64 MB</option>
+                    <option value="96">96 MB</option>
+                    <option value="128">128 MB</option>
+                  </select>
+                </div>
+                <div class="setting-item">
+                  <span class="setting-label">
+                    <label for="setting-download-part-concurrency"
+                      >Download part concurrency</label
+                    >
+                    <button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help"
+                      data-tooltip="How many parts of a single file are downloaded in parallel."
+                    >
+                      ?
+                    </button>
+                  </span>
+                  <select
+                    id="setting-download-part-concurrency"
+                    class="field field--sm"
+                  >
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                    <option value="6">6 (default)</option>
+                    <option value="8">8</option>
+                    <option value="10">10</option>
+                    <option value="12">12</option>
+                    <option value="16">16</option>
+                  </select>
+                </div>
+                <div class="setting-item">
+                  <span class="setting-label">
+                    <label for="setting-upload-part-size-mb"
+                      >Upload part size</label
+                    >
+                    <button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help"
+                      data-tooltip="Size of each multipart upload chunk. Larger = fewer requests, more memory per part."
+                    >
+                      ?
+                    </button>
+                  </span>
+                  <select
+                    id="setting-upload-part-size-mb"
+                    class="field field--sm"
+                  >
+                    <option value="16">16 MB</option>
+                    <option value="24">24 MB</option>
+                    <option value="32">32 MB (default)</option>
+                    <option value="48">48 MB</option>
+                    <option value="64">64 MB</option>
+                    <option value="96">96 MB</option>
+                    <option value="128">128 MB</option>
+                  </select>
+                </div>
+                <div class="setting-item">
+                  <span class="setting-label">
+                    <label for="setting-upload-part-concurrency"
+                      >Upload part concurrency</label
+                    >
+                    <button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help"
+                      data-tooltip="How many parts of a single file are uploaded in parallel."
+                    >
+                      ?
+                    </button>
+                  </span>
+                  <select
+                    id="setting-upload-part-concurrency"
+                    class="field field--sm"
+                  >
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                    <option value="6">6 (default)</option>
+                    <option value="8">8</option>
+                    <option value="10">10</option>
+                    <option value="12">12</option>
+                    <option value="16">16</option>
+                  </select>
+                </div>
+                <div class="setting-item">
+                  <span class="setting-label">
+                    <label class="toggle-row">
+                      <input
+                        id="setting-enable-transfer-resume"
+                        type="checkbox"
+                      />
+                      <span>Enable resumable large downloads</span>
+                    </label>
+                    <button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help"
+                      data-tooltip="Save progress for large multipart downloads so an interrupted transfer can resume from where it stopped."
+                    >
+                      ?
+                    </button>
+                  </span>
+                </div>
+                <div class="setting-item">
+                  <span class="setting-label">
+                    <label class="toggle-row">
+                      <input
+                        id="setting-enable-transfer-checksum-verification"
+                        type="checkbox"
+                      />
+                      <span>Verify transfer checksums when available</span>
+                    </label>
+                    <button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help"
+                      data-tooltip="Compare an integrity checksum after each transfer when the server provides one. Adds slight CPU cost."
+                    >
+                      ?
+                    </button>
+                  </span>
+                </div>
+                <div class="setting-item">
+                  <span class="setting-label">
+                    <label for="setting-transfer-checkpoint-ttl-hours"
+                      >Checkpoint retention</label
+                    >
+                    <button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help"
+                      data-tooltip="How long to keep resume checkpoints on disk before discarding them."
+                    >
+                      ?
+                    </button>
+                  </span>
+                  <select
+                    id="setting-transfer-checkpoint-ttl-hours"
+                    class="field field--sm"
+                  >
+                    <option value="24">24 hours</option>
+                    <option value="72">72 hours</option>
+                    <option value="168">7 days (default)</option>
+                    <option value="336">14 days</option>
+                    <option value="720">30 days</option>
+                  </select>
+                </div>
+              </div>
             </div>
-            <div class="setting-item">
-              <label>Platform</label>
-              <span id="settings-platform" class="text-secondary"></span>
+
+            <div
+              class="settings-panel"
+              id="settings-panel-sharing"
+              data-settings-panel="sharing"
+              role="tabpanel"
+              aria-labelledby="settings-tab-sharing"
+              hidden
+            >
+              <div class="setting-item">
+                <span class="setting-label">
+                  <label for="setting-presigned-expiration"
+                    >Pre-signed URL expiration</label
+                  >
+                  <button
+                    type="button"
+                    class="setting-help"
+                    aria-label="Help"
+                    data-tooltip="How long generated share links stay valid before expiring."
+                  >
+                    ?
+                  </button>
+                </span>
+                <select
+                  id="setting-presigned-expiration"
+                  class="field field--sm"
+                >
+                  <option value="300">5 minutes</option>
+                  <option value="900">15 minutes</option>
+                  <option value="3600">1 hour</option>
+                  <option value="21600">6 hours</option>
+                  <option value="43200">12 hours</option>
+                  <option value="86400">24 hours</option>
+                  <option value="604800">7 days</option>
+                </select>
+              </div>
             </div>
-            <div class="setting-item">
-              <label>Open-source licenses</label>
-              <button id="show-licenses" class="btn">View</button>
+
+            <div
+              class="settings-panel"
+              id="settings-panel-bookmarks"
+              data-settings-panel="bookmarks"
+              role="tabpanel"
+              aria-labelledby="settings-tab-bookmarks"
+              hidden
+            >
+              <div class="bookmark-list-toolbar">
+                <button
+                  id="bookmarks-export-btn"
+                  class="btn btn--ghost btn--sm"
+                >
+                  Export
+                </button>
+                <button
+                  id="bookmarks-import-btn"
+                  class="btn btn--ghost btn--sm"
+                >
+                  Import
+                </button>
+                <input
+                  id="bookmarks-import-input"
+                  type="file"
+                  accept=".json,application/json"
+                  style="display: none"
+                  aria-hidden="true"
+                />
+              </div>
+              <ul id="bookmark-list" class="bookmark-list"></ul>
+            </div>
+
+            <div
+              class="settings-panel"
+              id="settings-panel-security"
+              data-settings-panel="security"
+              role="tabpanel"
+              aria-labelledby="settings-tab-security"
+              hidden
+            >
+              <div class="setting-item setting-item--stacked">
+                <label>Credential Encryption</label>
+                <div class="security-controls">
+                  <span id="security-status-text" class="text-secondary"
+                    ><span class="spinner"></span> Loading...</span
+                  >
+                  <div class="security-controls__actions">
+                    <button id="security-toggle" class="btn">
+                      Enable Encryption
+                    </button>
+                    <button
+                      id="security-change-password"
+                      class="btn btn--ghost"
+                      style="display: none"
+                    >
+                      Change Password
+                    </button>
+                  </div>
+                </div>
+                <div
+                  id="security-warning"
+                  class="security-warning"
+                  style="display: none"
+                >
+                  Warning: saved credentials are stored unencrypted on this
+                  device.
+                </div>
+              </div>
+              <div
+                id="security-lock-settings"
+                class="setting-item"
+                style="display: none"
+              >
+                <label for="security-lock-timeout"
+                  >Auto-lock after inactivity</label
+                >
+                <select id="security-lock-timeout" class="field field--sm">
+                  <option value="0">Never</option>
+                  <option value="5">5 minutes</option>
+                  <option value="15">15 minutes</option>
+                  <option value="30">30 minutes</option>
+                  <option value="60">1 hour</option>
+                </select>
+              </div>
+              <div
+                id="security-lock-action"
+                class="setting-item"
+                style="display: none"
+              >
+                <label>Lock encrypted storage now</label>
+                <button id="security-lock-btn" class="btn btn--ghost">
+                  Lock Now
+                </button>
+              </div>
+              <div
+                id="security-biometric-settings"
+                class="setting-item"
+                style="display: none"
+              >
+                <label for="biometric-toggle">Biometric Unlock</label>
+                <button
+                  id="biometric-toggle"
+                  class="btn"
+                  aria-label="Toggle biometric unlock"
+                >
+                  Enable
+                </button>
+              </div>
+            </div>
+
+            <div
+              class="settings-panel"
+              id="settings-panel-about"
+              data-settings-panel="about"
+              role="tabpanel"
+              aria-labelledby="settings-tab-about"
+              hidden
+            >
+              <div class="setting-item">
+                <label>Version</label>
+                <span id="settings-version" class="text-secondary"></span>
+              </div>
+              <div class="setting-item">
+                <label>Platform</label>
+                <span id="settings-platform" class="text-secondary"></span>
+              </div>
+              <div class="setting-item">
+                <label>Open-source licenses</label>
+                <button id="show-licenses" class="btn">View</button>
+              </div>
+              <div class="setting-section">Danger Zone</div>
+              <div class="setting-item">
+                <label>Reset all settings to defaults</label>
+                <button id="settings-reset" class="btn btn--danger">
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            <div
+              class="settings-panel settings-panel--search"
+              id="settings-panel-search-results"
+              data-settings-panel="__search"
+              role="tabpanel"
+              aria-label="Search results"
+              hidden
+            >
+              <div class="settings-search-empty" hidden>
+                No settings match your search.
+              </div>
             </div>
           </div>
         </div>
