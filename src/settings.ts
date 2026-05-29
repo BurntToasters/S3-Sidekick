@@ -146,7 +146,7 @@ function getActiveSettingsTab(): string | null {
 
 function restoreSearchItems(): void {
   for (const [item, { parent, next }] of searchOriginalParents) {
-    if (next && next.parentElement === parent) {
+    if (next?.parentElement === parent) {
       parent.insertBefore(item, next);
     } else {
       parent.appendChild(item);
@@ -182,9 +182,7 @@ export function updateSettingsSearch(query: string): void {
     return;
   }
 
-  if (!preSearchActiveTab) {
-    preSearchActiveTab = getActiveSettingsTab() ?? "appearance";
-  }
+  preSearchActiveTab ??= getActiveSettingsTab() ?? "appearance";
 
   const allPanels = Array.from(
     document.querySelectorAll<HTMLElement>(".settings-panel"),
@@ -197,6 +195,9 @@ export function updateSettingsSearch(query: string): void {
     const tabBtn = document.querySelector<HTMLElement>(
       `[data-settings-tab="${tabName}"]`,
     );
+    // Intentional ||: fall back to tabName when the label is empty (""), not
+    // just null/undefined, so ?? would be incorrect here.
+    // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
     const tabLabel = tabBtn?.textContent?.trim() || tabName;
 
     const items = Array.from(

@@ -335,10 +335,8 @@ fn transfer_checkpoint_gc(app: tauri::AppHandle, ttl_hours: u32) -> Result<u32, 
             None => continue,
         };
         let age = now.duration_since(modified).unwrap_or_default().as_secs();
-        if age >= ttl_secs {
-            if std::fs::remove_file(&path).is_ok() {
-                removed += 1;
-            }
+        if age >= ttl_secs && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
         }
     }
 

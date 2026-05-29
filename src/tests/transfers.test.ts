@@ -212,23 +212,56 @@ describe("transfers queue UI", () => {
     const { state } = await import("../state.ts");
     state.currentSettings.maxConcurrentTransfers = 1;
 
+    let resolveDownload: (value: number) => void = () => {};
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        throw new Error("unknown command");
+      }
+      if (cmd === "transfer_checkpoint_gc") return undefined;
+      if (cmd === "path_exists") return false;
+      if (cmd === "head_object") return { content_length: 0 };
+      if (cmd === "download_object" || cmd === "download_object_parallel") {
+        return new Promise<number>((resolve) => {
+          resolveDownload = resolve;
+        });
+      }
+      if (cmd === "cancel_transfer") return undefined;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    transfers.enqueueDownloads([
+      {
+        bucket: "bucket-a",
+        key: "docs/persist.txt",
+        destination: "C:\\tmp\\persist.txt",
+      },
+    ]);
+    await flushMicrotasks(8);
+
+    const raw = localStorage.getItem("s3-sidekick.transfer-manifest.v1");
+    expect(raw).toBeTruthy();
+    const parsed = JSON.parse(raw ?? "{}") as { items?: unknown[] };
+    expect(Array.isArray(parsed.items)).toBe(true);
+    expect((parsed.items ?? []).length).toBeGreaterThan(0);
+
+    resolveDownload(0);
+    await flushMicrotasks(8);
+  });
+
+  it("does not persist in-flight uploads (they cannot resume part-way)", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+
     let resolveUpload = () => {};
-    mockInvoke.mockImplementation(async (cmd, payload) => {
+    mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "load_transfer_manifest") {
         throw new Error("unknown command");
       }
       if (cmd === "transfer_checkpoint_gc") return undefined;
       if (cmd === "object_exists") return false;
-      if (cmd === "head_object") {
-        const key =
-          payload &&
-          typeof payload === "object" &&
-          "key" in (payload as Record<string, unknown>)
-            ? String((payload as Record<string, unknown>).key)
-            : "";
-        if (key.endsWith("persist.txt")) return { content_length: 0 };
-        return { content_length: 0 };
-      }
+      if (cmd === "head_object") return { content_length: 0 };
       if (cmd === "upload_object_resumable") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
@@ -242,11 +275,10 @@ describe("transfers queue UI", () => {
     transfers.enqueuePaths(["C:\\tmp\\persist.txt"], "uploads/");
     await flushMicrotasks(8);
 
+    // The upload is now in-flight ("uploading"); it must be excluded from the
+    // persisted manifest so an app kill does not offer a misleading resume.
     const raw = localStorage.getItem("s3-sidekick.transfer-manifest.v1");
-    expect(raw).toBeTruthy();
-    const parsed = JSON.parse(raw ?? "{}") as { items?: unknown[] };
-    expect(Array.isArray(parsed.items)).toBe(true);
-    expect((parsed.items ?? []).length).toBeGreaterThan(0);
+    expect(raw).toBeFalsy();
 
     resolveUpload();
     await flushMicrotasks(8);

@@ -231,7 +231,12 @@ function buildCheckpointId(
   item: Pick<TransferItem, "operation" | "bucket" | "key" | "destination">,
 ): string {
   const seed = `${item.operation}:${item.bucket}:${item.key}:${item.destination ?? ""}`;
-  return btoa(unescape(encodeURIComponent(seed))).replace(/=+$/g, "");
+  // Base64-encode UTF-8 bytes without the deprecated unescape(): map each byte
+  // of the encoded string through String.fromCharCode for btoa's latin1 input.
+  const utf8 = new TextEncoder().encode(seed);
+  let binary = "";
+  for (const byte of utf8) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/=+$/g, "");
 }
 
 function getEffectiveTransferSettings(): EffectiveTransferSettings {
@@ -397,8 +402,14 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
 }
 
 function buildQueueManifestJson(): string | null {
+  // Uploads cannot resume part-way (multipart upload resume is not implemented),
+  // so an in-flight upload that survives an app kill would restart from byte 0.
+  // Rather than offer a misleading "resume", we drop active uploads from the
+  // manifest: queued uploads that never started are still safe to persist.
   const pending = queue.filter(
-    (item) => item.status === "queued" || item.status === "uploading",
+    (item) =>
+      (item.status === "queued" || item.status === "uploading") &&
+      !(item.operation === "upload" && item.status === "uploading"),
   );
   if (pending.length === 0) return null;
   const payload: PersistedTransferManifest = {
@@ -885,14 +896,17 @@ export function disposeTransferQueueUI(): void {
 function pauseAllTransfers(): void {
   queuePaused = true;
   for (const item of queue) {
-    if (item.status === "queued" || item.status === "uploading") {
-      item.paused = true;
-      item.phase = "paused";
-      if (item.status === "uploading") {
-        void invoke("cancel_transfer", { transferId: item.id }).catch(
-          () => undefined,
-        );
-      }
+    if (item.status !== "queued" && item.status !== "uploading") continue;
+    // In-flight uploads cannot pause without restarting from zero, so let them
+    // run to completion. Downloads resume cleanly, so cancelling them to pause
+    // is safe; queued items simply stay queued.
+    if (item.operation === "upload" && item.status === "uploading") continue;
+    item.paused = true;
+    item.phase = "paused";
+    if (item.status === "uploading") {
+      void invoke("cancel_transfer", { transferId: item.id }).catch(
+        () => undefined,
+      );
     }
   }
   queueRender();
@@ -1929,14 +1943,18 @@ function renderQueue(): void {
         selectedTransferId === t.id
           ? "transfer-item transfer-item--selected"
           : "transfer-item";
-      const pauseButton =
-        t.status === "queued" || t.status === "uploading" || t.paused
-          ? `<button class="transfer-pause btn--ghost" title="${
-              t.paused ? "Resume" : "Pause"
-            }" aria-label="${t.paused ? "Resume" : "Pause"} transfer">${
-              t.paused ? "▶" : "Ⅱ"
-            }</button>`
-          : "";
+      // In-flight uploads cannot pause without restarting from zero (no upload
+      // resume), so only expose pause for downloads or transfers not yet running.
+      const canPause =
+        !(t.operation === "upload" && t.status === "uploading" && !t.paused) &&
+        (t.status === "queued" || t.status === "uploading" || t.paused);
+      const pauseButton = canPause
+        ? `<button class="transfer-pause btn--ghost" title="${
+            t.paused ? "Resume" : "Pause"
+          }" aria-label="${t.paused ? "Resume" : "Pause"} transfer">${
+            t.paused ? "▶" : "Ⅱ"
+          }</button>`
+        : "";
 
       return (
         `<div class="${rowClass}" data-id="${t.id}">` +
