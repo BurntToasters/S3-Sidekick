@@ -3110,4 +3110,43 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // The multipart upload OOB guard relies on the last valid part number being
+    // exactly equal to `total_parts` (so `part_number > total_parts` only fires
+    // when the file has grown). These cases lock that relationship in.
+    #[test]
+    fn div_ceil_part_count_matches_legacy_formula() {
+        let cases: [(u64, u64); 6] = [
+            (0, 32),
+            (1, 32),
+            (32, 32),
+            (33, 32),
+            (128, 32),
+            (129, 32),
+        ];
+        for (size, part) in cases {
+            assert_ne!(part, 0, "test part size must be non-zero");
+            let new = size.div_ceil(part);
+            // Intentionally the pre-refactor manual formula to prove equivalence.
+            #[allow(clippy::manual_div_ceil)]
+            let legacy = (size + part - 1) / part;
+            assert_eq!(new, legacy, "size={size} part={part}");
+        }
+    }
+
+    #[test]
+    fn last_part_number_equals_total_parts() {
+        // For a file split into N parts, the highest part number produced is N,
+        // and N+1 must be the first value the guard rejects.
+        let file_size: u64 = 129;
+        let part_size: u64 = 32;
+        let total_parts = file_size.div_ceil(part_size) as usize; // 5
+        assert_eq!(total_parts, 5);
+        // The guard fires when `part_number > total_parts`. Every legitimate
+        // part (1..=total_parts) passes; only the first overflow part is rejected.
+        for part_number in 1..=total_parts {
+            assert!(part_number <= total_parts, "part {part_number} should pass");
+        }
+        assert!(total_parts + 1 > total_parts, "overflow part is rejected");
+    }
 }

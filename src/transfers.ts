@@ -958,6 +958,12 @@ function togglePauseTransferItem(id: number): void {
       );
     }
   } else {
+    // In-flight uploads cannot pause without restarting from zero (no upload
+    // resume), so leave a running upload alone. The pause control is already
+    // hidden for these in the queue UI; this guards other entry points too.
+    if (item.operation === "upload" && item.status === "uploading") {
+      return;
+    }
     item.paused = true;
     item.phase = "paused";
     if (item.status === "uploading") {

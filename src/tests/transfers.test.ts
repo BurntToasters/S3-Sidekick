@@ -284,6 +284,60 @@ describe("transfers queue UI", () => {
     await flushMicrotasks(8);
   });
 
+  it("hides the pause control for in-flight uploads but shows it for downloads", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 2;
+
+    let resolveUpload = () => {};
+    let resolveDownload: (value: number) => void = () => {};
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") throw new Error("unknown command");
+      if (cmd === "transfer_checkpoint_gc") return undefined;
+      if (cmd === "object_exists") return false;
+      if (cmd === "path_exists") return false;
+      if (cmd === "head_object") return { content_length: 0 };
+      if (cmd === "upload_object_resumable") {
+        return new Promise<void>((resolve) => {
+          resolveUpload = resolve;
+        });
+      }
+      if (cmd === "download_object" || cmd === "download_object_parallel") {
+        return new Promise<number>((resolve) => {
+          resolveDownload = resolve;
+        });
+      }
+      if (cmd === "cancel_transfer") return undefined;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    transfers.enqueuePaths(["C:\\tmp\\up.txt"], "uploads/");
+    transfers.enqueueDownloads([
+      { bucket: "b", key: "down.txt", destination: "C:\\tmp\\down.txt" },
+    ]);
+    await flushMicrotasks(8);
+
+    const list = document.getElementById("transfer-list")!;
+    const rows = Array.from(list.querySelectorAll(".transfer-item"));
+    expect(rows.length).toBe(2);
+
+    const uploadRow = rows.find((r) =>
+      r.textContent?.includes("up.txt"),
+    ) as HTMLElement;
+    const downloadRow = rows.find((r) =>
+      r.textContent?.includes("down.txt"),
+    ) as HTMLElement;
+
+    // In-flight upload: no pause control. In-flight download: pause available.
+    expect(uploadRow.querySelector(".transfer-pause")).toBeNull();
+    expect(downloadRow.querySelector(".transfer-pause")).not.toBeNull();
+
+    resolveUpload();
+    resolveDownload(0);
+    await flushMicrotasks(8);
+  });
+
   it("uses parallel download without synthetic completed-part indexes", async () => {
     const transfers = await loadTransfersModule();
     const { state } = await import("../state.ts");

@@ -108,9 +108,10 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     }
 
     function focusableInDialog(): HTMLElement[] {
+      // The reveal button is intentionally tabindex="-1" (not in the tab order),
+      // so it is deliberately excluded here to match native Tab behavior.
       const candidates: (HTMLElement | null)[] = [
         config.showInput ? el.input : null,
-        isPassword && !el.reveal.hidden ? el.reveal : null,
         config.showCancel ? el.cancel : null,
         el.ok,
       ];
