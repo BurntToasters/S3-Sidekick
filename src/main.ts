@@ -3118,8 +3118,9 @@ async function init(): Promise<void> {
           saved.secret_key,
         );
       }
-    } catch {
-      // no saved connection on first launch
+    } catch (err) {
+      setStatus(`Failed to load saved connection: ${String(err)}`);
+      logActivity(`Failed to load saved connection: ${String(err)}`, "error");
     }
 
     await initUpdater();
