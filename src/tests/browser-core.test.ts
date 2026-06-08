@@ -335,7 +335,7 @@ describe("browser core rendering and selection", () => {
     browser.renderObjectTable();
     expect(
       (document.getElementById("object-tbody") as HTMLElement).textContent,
-    ).toContain("No objects");
+    ).toContain("This folder is empty");
 
     browser.showEmptyState();
     expect(

@@ -1,0 +1,215 @@
+/* App shell header, bookmark bar, connection bar */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--glass-bg-heavy);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-bottom: 1px solid var(--glass-border);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.header__brand {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.bookmark-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 0 12px;
+  -webkit-app-region: no-drag;
+  scrollbar-width: none;
+}
+
+.bookmark-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.bookmark-bar:empty {
+  padding: 0;
+}
+
+.bookmark-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--transition-smooth),
+    border-color var(--transition-smooth),
+    transform var(--transition-smooth),
+    box-shadow var(--transition-smooth);
+  flex-shrink: 0;
+}
+
+.bookmark-chip:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px var(--glow-accent);
+}
+
+.bookmark-chip:active {
+  transform: translateY(0);
+}
+
+.bookmark-chip:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+.bookmark-chip--active {
+  background: var(--bg-active);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 2px 8px var(--glow-accent);
+}
+
+.bookmark-chip--active:hover {
+  background: var(--bg-active);
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 4px 12px var(--glow-accent);
+}
+
+.bookmark-chip--new {
+  padding: 2px 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-style: dashed;
+}
+
+.bookmark-chip--new:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+.bookmark-chip__region {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.header__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.connection-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.connection-badge--off {
+  background: var(--badge-off-bg);
+  color: var(--badge-off-text);
+}
+
+.connection-badge--on {
+  background: var(--badge-on-bg);
+  color: var(--badge-on-text);
+}
+
+.connection-badge--on::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-right: 6px;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.connection-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--glass-bg-heavy);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-bottom: 1px solid var(--glass-border);
+  flex-wrap: wrap;
+}
+
+.field-with-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+}
+
+.field-with-toggle .field {
+  flex: 1;
+  padding-right: 36px;
+}
+
+.field-toggle-btn {
+  position: absolute;
+  right: 4px;
+  padding: 2px;
+  opacity: 0.5;
+  background: transparent;
+  border: none;
+}
+
+.field-toggle-btn:hover {
+  opacity: 1;
+}
+
+.field-toggle-btn--text {
+  padding: 2px 6px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+.field-toggle-btn--text:hover {
+  color: var(--text-primary);
+  background: var(--glass-bg);
+}

@@ -1,0 +1,106 @@
+/* Main layout, sidebar, content area, sidebar resizer */
+
+.main-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.sidebar {
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-min);
+  max-width: var(--sidebar-max);
+  border-right: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.sidebar__header {
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar__header--stacked {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar__header--stacked > span {
+  line-height: 1.1;
+}
+
+.sidebar__filter {
+  width: 100%;
+}
+
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.sidebar-resizer {
+  width: 8px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  position: relative;
+  background: linear-gradient(
+    to right,
+    transparent 2px,
+    rgba(127, 127, 127, 0.2) 2px,
+    rgba(127, 127, 127, 0.2) 6px,
+    transparent 6px
+  );
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+  opacity: 0.9;
+  transition:
+    background 0.12s ease,
+    opacity 0.12s ease,
+    width 0.12s ease,
+    left 0.12s ease;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer.sidebar-resizer--active::after {
+  background: var(--accent);
+  opacity: 1;
+  width: 3px;
+  left: 2px;
+}
+
+.sidebar-resizer:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
+}
+
+.sidebar-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 40;
+  display: none;
+}

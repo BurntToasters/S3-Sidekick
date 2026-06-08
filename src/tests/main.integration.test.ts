@@ -167,6 +167,8 @@ vi.mock("../connection.ts", () => ({
 
 vi.mock("../browser.ts", () => ({
   renderBucketList: mockRenderBucketList,
+  renderBucketListSkeleton: vi.fn(),
+  renderObjectTableSkeleton: vi.fn(),
   renderObjectTable: mockRenderObjectTable,
   renderBreadcrumb: mockRenderBreadcrumb,
   navigateToFolder: mockNavigateToFolder,

@@ -1,0 +1,28 @@
+/* Reduced-motion and backdrop-filter fallbacks */
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  :root {
+    --glass-bg: rgba(255, 255, 255, 0.97);
+    --glass-bg-heavy: rgba(255, 255, 255, 0.99);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --glass-bg: rgba(30, 30, 30, 0.97);
+      --glass-bg-heavy: rgba(30, 30, 30, 0.99);
+    }
+  }
+
+  [data-theme="dark"] {
+    --glass-bg: rgba(30, 30, 30, 0.97);
+    --glass-bg-heavy: rgba(30, 30, 30, 0.99);
+  }
+}

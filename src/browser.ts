@@ -231,6 +231,7 @@ function updateSortIndicators(): void {
 
 export function renderBucketList(): void {
   const el = dom.bucketList;
+  el.setAttribute("aria-busy", "false");
   if (state.buckets.length === 0) {
     el.innerHTML = `<li class="list__empty">No buckets found</li>`;
     return;
@@ -255,6 +256,44 @@ export function renderBucketList(): void {
         `</li>`,
     )
     .join("");
+}
+
+export function renderBucketListSkeleton(rowCount = 6): void {
+  const item =
+    `<li class="list__item list__item--skeleton" aria-hidden="true">` +
+    `<span class="skeleton skeleton--text"></span>` +
+    `</li>`;
+  dom.bucketList.innerHTML = item.repeat(rowCount);
+  dom.bucketList.setAttribute("aria-busy", "true");
+}
+
+export function renderObjectTableSkeleton(rowCount = 8): void {
+  const row =
+    `<tr class="object-row object-row--skeleton" aria-hidden="true">` +
+    `<td class="col-check"><span class="skeleton skeleton--check"></span></td>` +
+    `<td class="object-name"><span class="skeleton skeleton--icon"></span><span class="skeleton skeleton--text"></span></td>` +
+    `<td class="object-size"><span class="skeleton skeleton--text skeleton--sm"></span></td>` +
+    `<td class="object-modified"><span class="skeleton skeleton--text skeleton--md"></span></td>` +
+    `</tr>`;
+  dom.objectTbody.innerHTML = row.repeat(rowCount);
+  dom.objectPanel.style.display = "";
+  dom.objectPanel.setAttribute("aria-busy", "true");
+  dom.emptyState.style.display = "none";
+  const loadMore = document.getElementById("load-more-row");
+  if (loadMore) loadMore.style.display = "none";
+}
+
+function emptyFolderRowHtml(): string {
+  return (
+    `<tr><td colspan="4" class="table-empty">` +
+    `<div class="table-empty__content">` +
+    `${twemojiIcon("1f4c2", { className: "twemoji-icon empty-state__icon", decorative: true })}` +
+    `<p class="table-empty__text">This folder is empty</p>` +
+    `<div class="table-empty__actions">` +
+    `<button type="button" class="btn btn--sm btn--primary" data-empty-action="upload">Upload files</button>` +
+    `<button type="button" class="btn btn--sm" data-empty-action="new-folder">New folder</button>` +
+    `</div></div></td></tr>`
+  );
 }
 
 export function renderObjectTable(): void {
@@ -299,12 +338,16 @@ export function renderObjectTable(): void {
   }
 
   if (rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4" class="table-empty">No objects</td></tr>`;
+    tbody.innerHTML =
+      filter.length > 0
+        ? `<tr><td colspan="4" class="table-empty">No objects match filter</td></tr>`
+        : emptyFolderRowHtml();
   } else {
     tbody.innerHTML = rows.join("");
   }
 
   dom.objectPanel.style.display = "";
+  dom.objectPanel.setAttribute("aria-busy", "false");
   dom.emptyState.style.display = "none";
 
   updateSelectionUI();
@@ -434,6 +477,7 @@ export async function navigateBack(): Promise<void> {
   navSuppressPush = true;
   clearFilter();
   resetSelectionForListingChange();
+  renderObjectTableSkeleton();
 
   try {
     if (entry.bucket !== state.currentBucket) {
@@ -466,6 +510,7 @@ export async function navigateForward(): Promise<void> {
   navSuppressPush = true;
   clearFilter();
   resetSelectionForListingChange();
+  renderObjectTableSkeleton();
 
   try {
     if (entry.bucket !== state.currentBucket) {
@@ -492,10 +537,16 @@ export async function navigateForward(): Promise<void> {
 export async function navigateToFolder(prefix: string): Promise<void> {
   clearFilter();
   resetSelectionForListingChange();
-  await refreshObjects(state.currentBucket, prefix);
-  pushNav(state.currentBucket, prefix);
-  renderObjectTable();
-  renderBreadcrumb();
+  renderObjectTableSkeleton();
+  try {
+    await refreshObjects(state.currentBucket, prefix);
+    pushNav(state.currentBucket, prefix);
+    renderObjectTable();
+    renderBreadcrumb();
+  } catch (err) {
+    renderObjectTable();
+    throw err;
+  }
 }
 
 export async function navigateUp(): Promise<void> {
@@ -510,11 +561,17 @@ export async function selectBucket(name: string): Promise<void> {
   clearFilter();
   resetSelectionForListingChange();
   state.currentPrefix = "";
-  await refreshObjects(name, "");
-  pushNav(name, "");
-  renderBucketList();
-  renderObjectTable();
-  renderBreadcrumb();
+  renderObjectTableSkeleton();
+  try {
+    await refreshObjects(name, "");
+    pushNav(name, "");
+    renderBucketList();
+    renderObjectTable();
+    renderBreadcrumb();
+  } catch (err) {
+    renderObjectTable();
+    throw err;
+  }
 }
 
 export function showEmptyState(): void {

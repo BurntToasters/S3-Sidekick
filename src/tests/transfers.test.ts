@@ -400,6 +400,9 @@ describe("transfers queue UI", () => {
       expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
         hadUpload: true,
         hadDownload: false,
+        uploadCount: 1,
+        downloadCount: 0,
+        errorCount: 0,
       });
     });
 
@@ -422,6 +425,9 @@ describe("transfers queue UI", () => {
       expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
         hadUpload: false,
         hadDownload: true,
+        uploadCount: 0,
+        downloadCount: 1,
+        errorCount: 0,
       });
     });
 

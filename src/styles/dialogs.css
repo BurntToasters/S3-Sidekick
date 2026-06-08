@@ -1,0 +1,134 @@
+/* Confirm/prompt dialogs, biometric overlay */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 320;
+}
+
+body.modal-open {
+  overflow: hidden;
+}
+
+body.modal-open .app,
+body.modal-open .bottom-drawer,
+body.modal-open .context-menu {
+  pointer-events: none;
+}
+
+body.modal-open .modal-overlay.active,
+body.modal-open .dialog-overlay.active {
+  pointer-events: auto;
+}
+
+.dialog-overlay.active {
+  display: flex;
+}
+
+.dialog-box {
+  background: var(--glass-bg-heavy);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  width: min(360px, 92vw);
+  box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
+  animation: modal-in 0.15s ease;
+}
+
+.dialog-box__title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.dialog-box__message {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
+.dialog-input-wrapper {
+  position: relative;
+  margin-bottom: 20px;
+}
+
+.dialog-input-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  display: none;
+}
+
+.dialog-input-wrapper--icon .dialog-input-icon {
+  display: block;
+}
+
+.dialog-box__input {
+  width: 100%;
+  margin-bottom: 0;
+}
+
+.dialog-input-wrapper--icon .dialog-box__input {
+  padding-left: 34px;
+}
+
+.dialog-input-reveal {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+.dialog-input-reveal:hover {
+  color: var(--text-primary);
+  background: var(--glass-bg);
+}
+
+.dialog-input-wrapper--icon .dialog-box__input {
+  padding-right: 48px;
+}
+
+.biometric-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 259;
+}
+
+.biometric-overlay[hidden] {
+  display: none;
+}
+
+.dialog-box__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal--wide {
+  width: min(560px, 94vw);
+}

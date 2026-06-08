@@ -1,0 +1,91 @@
+/* Skeleton loaders and rich empty-state actions */
+
+.skeleton {
+  display: inline-block;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--bg-hover) 25%,
+    var(--border) 37%,
+    var(--bg-hover) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+
+.skeleton--text {
+  height: 10px;
+  width: 60%;
+}
+
+.skeleton--sm {
+  width: 40px;
+}
+
+.skeleton--md {
+  width: 90px;
+}
+
+.skeleton--check {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+}
+
+.skeleton--icon {
+  width: 14px;
+  height: 14px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.list__item--skeleton {
+  pointer-events: none;
+}
+
+.list__item--skeleton .skeleton--text {
+  width: 70%;
+}
+
+.object-row--skeleton {
+  pointer-events: none;
+}
+
+.object-row--skeleton:hover {
+  background: transparent;
+  box-shadow: none;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+.table-empty__content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.table-empty__text {
+  color: var(--text-secondary);
+}
+
+.table-empty__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.empty-state__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: center;
+}

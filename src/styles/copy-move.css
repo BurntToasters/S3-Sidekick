@@ -1,0 +1,145 @@
+/* Copy/Move dialog and folder browser */
+
+.copy-move-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.copy-move-field {
+  width: 100%;
+}
+
+.copy-move-browse-toggle {
+  font-size: 13px;
+  padding: 4px 0;
+  text-align: left;
+}
+
+.copy-move-recents {
+  gap: 6px;
+}
+
+.copy-move-recents__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.copy-move-recent-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.copy-move-recent-item {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-move-recent-item:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.copy-move-recent-item:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+.copy-move-browser {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.copy-move-browser-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.copy-move-browser-crumbs button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 1px 3px;
+  border-radius: var(--radius);
+}
+
+.copy-move-browser-crumbs button:hover {
+  background: var(--bg-hover);
+}
+
+.copy-move-browser-crumbs .crumb-sep {
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.copy-move-browser-crumbs .crumb-current {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.copy-move-browser-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.copy-move-folder-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.copy-move-folder-item:hover {
+  background: var(--bg-hover);
+}
+
+.copy-move-folder-item:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
+}
+
+.copy-move-browser-empty {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.copy-move-browser-loading {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}

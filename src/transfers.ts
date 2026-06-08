@@ -82,6 +82,9 @@ export interface CopyMoveQueueEntry {
 export interface TransferRunSummary {
   hadUpload: boolean;
   hadDownload: boolean;
+  uploadCount: number;
+  downloadCount: number;
+  errorCount: number;
 }
 
 interface PersistedTransferManifest {
@@ -1348,6 +1351,9 @@ async function processQueue(): Promise<void> {
   processing = true;
   let completedUploadThisRun = false;
   let completedDownloadThisRun = false;
+  let uploadCount = 0;
+  let downloadCount = 0;
+  let errorCount = 0;
 
   const workers: Promise<void>[] = [];
   for (let i = 0; i < maxConcurrent; i += 1) {
@@ -1377,9 +1383,11 @@ async function processQueue(): Promise<void> {
         const completed = await runItemWithRetry(item);
         if (completed && item.operation === "download") {
           completedDownloadThisRun = true;
+          downloadCount += 1;
         }
         if (completed && item.operation === "upload") {
           completedUploadThisRun = true;
+          uploadCount += 1;
         }
 
         if (completed) {
@@ -1398,6 +1406,7 @@ async function processQueue(): Promise<void> {
           item.status = "error";
           item.error = errorText;
           item.browserFile = undefined;
+          errorCount += 1;
           const opLabel =
             item.operation === "download"
               ? "Download"
@@ -1426,6 +1435,9 @@ async function processQueue(): Promise<void> {
     onComplete({
       hadUpload: completedUploadThisRun,
       hadDownload: completedDownloadThisRun,
+      uploadCount,
+      downloadCount,
+      errorCount,
     });
   }
 }
