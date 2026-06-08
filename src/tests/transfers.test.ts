@@ -114,14 +114,13 @@ describe("transfers queue UI", () => {
       expect.objectContaining({ key: "uploads/photo.png" }),
     );
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object_resumable",
+      "upload_object",
       expect.objectContaining({
         key: "uploads/photo.png",
-        resumable: false,
       }),
     );
     const uploadCall = mockInvoke.mock.calls.find(
-      ([cmd]) => cmd === "upload_object_resumable",
+      ([cmd]) => cmd === "upload_object",
     );
     expect(uploadCall).toBeTruthy();
     const uploadPayload = uploadCall?.[1] as Record<string, unknown>;
@@ -199,7 +198,7 @@ describe("transfers queue UI", () => {
     transfers.enqueuePaths(["C:\\tmp\\checksummed.txt"], "uploads/");
     await flushMicrotasks(12);
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object_resumable",
+      "upload_object",
       expect.objectContaining({
         key: "uploads/checksummed.txt",
         checksumVerification: true,
@@ -262,7 +261,7 @@ describe("transfers queue UI", () => {
       if (cmd === "transfer_checkpoint_gc") return undefined;
       if (cmd === "object_exists") return false;
       if (cmd === "head_object") return { content_length: 0 };
-      if (cmd === "upload_object_resumable") {
+      if (cmd === "upload_object") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -297,7 +296,7 @@ describe("transfers queue UI", () => {
       if (cmd === "object_exists") return false;
       if (cmd === "path_exists") return false;
       if (cmd === "head_object") return { content_length: 0 };
-      if (cmd === "upload_object_resumable") {
+      if (cmd === "upload_object") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -490,7 +489,7 @@ describe("transfers queue UI", () => {
 
     let resolveUpload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "upload_object_resumable") {
+      if (cmd === "upload_object") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -559,7 +558,7 @@ describe("transfers queue UI", () => {
     let resolveUpload = () => {};
     let resolveDownload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "upload_object_resumable") {
+      if (cmd === "upload_object") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -665,7 +664,7 @@ describe("transfers queue UI", () => {
     transfers.enqueuePaths(["C:\\tmp\\noext"], "uploads/");
     await flushMicrotasks(4);
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object_resumable",
+      "upload_object",
       expect.objectContaining({
         filePath: "C:\\tmp\\noext",
         contentType: "application/octet-stream",
@@ -732,7 +731,7 @@ describe("transfers queue UI", () => {
 
     let resolveUpload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "upload_object_resumable") {
+      if (cmd === "upload_object") {
         return new Promise<void>((resolve) => {
           resolveUpload = resolve;
         });
@@ -784,7 +783,7 @@ describe("transfers queue UI", () => {
     await flushMicrotasks(4);
 
     expect(mockInvoke).toHaveBeenCalledWith(
-      "upload_object_resumable",
+      "upload_object",
       expect.objectContaining({
         filePath: "C:\\tmp\\headless.txt",
       }),
@@ -842,7 +841,7 @@ describe("transfers queue UI", () => {
       expect(
         mockInvoke.mock.calls.some(
           ([cmd, payload]) =>
-            cmd === "upload_object_resumable" &&
+            cmd === "upload_object" &&
             typeof payload === "object" &&
             payload !== null &&
             (payload as { key?: string }).key === "direct/path-backed.txt" &&

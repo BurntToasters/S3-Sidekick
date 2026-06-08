@@ -402,10 +402,9 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
 }
 
 function buildQueueManifestJson(): string | null {
-  // Uploads cannot resume part-way (multipart upload resume is not implemented),
-  // so an in-flight upload that survives an app kill would restart from byte 0.
-  // Rather than offer a misleading "resume", we drop active uploads from the
-  // manifest: queued uploads that never started are still safe to persist.
+  // Uploads are not resumable, so an in-flight upload that survives an app kill
+  // would restart from byte 0. We drop active uploads from the manifest; queued
+  // uploads that never started are still safe to persist.
   const pending = queue.filter(
     (item) =>
       (item.status === "queued" || item.status === "uploading") &&
@@ -897,9 +896,9 @@ function pauseAllTransfers(): void {
   queuePaused = true;
   for (const item of queue) {
     if (item.status !== "queued" && item.status !== "uploading") continue;
-    // In-flight uploads cannot pause without restarting from zero, so let them
-    // run to completion. Downloads resume cleanly, so cancelling them to pause
-    // is safe; queued items simply stay queued.
+    // In-flight uploads would have to restart from zero if interrupted, so let
+    // them run to completion. Downloads resume cleanly, so cancelling them to
+    // pause is safe; queued items simply stay queued.
     if (item.operation === "upload" && item.status === "uploading") continue;
     item.paused = true;
     item.phase = "paused";
@@ -958,9 +957,9 @@ function togglePauseTransferItem(id: number): void {
       );
     }
   } else {
-    // In-flight uploads cannot pause without restarting from zero (no upload
-    // resume), so leave a running upload alone. The pause control is already
-    // hidden for these in the queue UI; this guards other entry points too.
+    // In-flight uploads would have to restart from zero if interrupted, so
+    // leave a running upload alone. The pause control is already hidden for
+    // these in the queue UI; this guards other entry points too.
     if (item.operation === "upload" && item.status === "uploading") {
       return;
     }
@@ -1656,7 +1655,7 @@ async function executeTransfer(
   if (item.filePath) {
     item.resumable = false;
     item.checkpointId = undefined;
-    await invoke("upload_object_resumable", {
+    await invoke("upload_object", {
       bucket: item.bucket,
       key: item.key,
       filePath: item.filePath,
@@ -1666,7 +1665,6 @@ async function executeTransfer(
       partSizeMb: effective.uploadPartSizeMb,
       partConcurrency: effective.uploadPartConcurrency,
       bandwidthLimitMbps: effective.bandwidthLimitMbps,
-      resumable: false,
       checksumVerification: effective.enableTransferChecksumVerification,
     });
   } else if (item.browserFile) {
@@ -1949,8 +1947,8 @@ function renderQueue(): void {
         selectedTransferId === t.id
           ? "transfer-item transfer-item--selected"
           : "transfer-item";
-      // In-flight uploads cannot pause without restarting from zero (no upload
-      // resume), so only expose pause for downloads or transfers not yet running.
+      // In-flight uploads would have to restart from zero if interrupted, so
+      // only expose pause for downloads or transfers not yet running.
       const canPause =
         !(t.operation === "upload" && t.status === "uploading" && !t.paused) &&
         (t.status === "queued" || t.status === "uploading" || t.paused);

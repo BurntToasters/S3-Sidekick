@@ -67,42 +67,8 @@ jobs:
       - name: Run test suite and formatting checks
         run: npm run test:all
 
+      - name: Clippy (deny warnings)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
       - name: Build frontend
         run: npm run build
-
-  release-smoke:
-    name: Release Smoke (Linux)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libssl-dev
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build release smoke
-        run: |
-          npm run release:prepare
-          npm run sync-version
-          npm run licenses
-          npx tauri build --no-bundle

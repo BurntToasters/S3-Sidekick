@@ -23,7 +23,7 @@
 
 v0.9.6 is a stabilization release — tightening transfer behavior, hardening edge cases, and cleaning up the codebase before 1.0.
 
-- **Transfers:** App-kill mid-upload no longer offers a misleading "resume" — in-flight uploads are excluded from the recovery manifest and restart cleanly from scratch on next launch.
+- **Transfers:** In-flight uploads are excluded from the session recovery manifest and restart from scratch on next launch (uploads are not resumable).
 - **Transfers:** Pausing the queue no longer cancels in-flight uploads (they'd restart from byte 0 anyway); running uploads now complete before the pause takes effect.
 - **Downloads:** Parallel download resume now verifies the object ETag before restoring a checkpoint, preventing stale bytes from being mixed in if the object changed server-side between sessions.
 - **Security:** Fixed a potential panic in multipart upload if the source file grew larger between the initial size measurement and the upload completing.

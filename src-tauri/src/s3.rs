@@ -1120,8 +1120,6 @@ pub(crate) async fn upload_object(
     part_size_mb: Option<u32>,
     part_concurrency: Option<u32>,
     bandwidth_limit_mbps: Option<u32>,
-    checkpoint_id: Option<String>,
-    resumable: Option<bool>,
     checksum_verification: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
@@ -1139,7 +1137,6 @@ pub(crate) async fn upload_object(
 
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
-    let resumable_enabled = resumable.unwrap_or(false);
     let checksum_enabled = checksum_verification.unwrap_or(false);
     let expected_checksum_hex = if checksum_enabled {
         let digest = sha256_file(&upload_path).await?;
@@ -1158,8 +1155,8 @@ pub(crate) async fn upload_object(
         started_at,
         None,
         None,
-        checkpoint_id.as_deref(),
-        Some(resumable_enabled),
+        None,
+        None,
     );
 
     if file_size >= MULTIPART_THRESHOLD {
@@ -1184,8 +1181,6 @@ pub(crate) async fn upload_object(
             part_size_bytes,
             part_workers,
             bandwidth_limit_bps,
-            checkpoint_id.as_deref(),
-            resumable_enabled,
             started_at,
             expected_checksum_hex.as_deref(),
         )
@@ -1229,48 +1224,12 @@ pub(crate) async fn upload_object(
         started_at,
         None,
         None,
-        checkpoint_id.as_deref(),
-        Some(resumable_enabled),
+        None,
+        None,
     );
     clear_cancelled(transfer_id);
 
     Ok(())
-}
-
-#[tauri::command]
-pub(crate) async fn upload_object_resumable(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    bucket: String,
-    key: String,
-    file_path: String,
-    content_type: String,
-    transfer_id: u32,
-    attempt: Option<u32>,
-    part_size_mb: Option<u32>,
-    part_concurrency: Option<u32>,
-    bandwidth_limit_mbps: Option<u32>,
-    checkpoint_id: Option<String>,
-    resumable: Option<bool>,
-    checksum_verification: Option<bool>,
-) -> Result<(), String> {
-    upload_object(
-        app,
-        state,
-        bucket,
-        key,
-        file_path,
-        content_type,
-        transfer_id,
-        attempt,
-        part_size_mb,
-        part_concurrency,
-        bandwidth_limit_mbps,
-        checkpoint_id,
-        resumable,
-        checksum_verification,
-    )
-    .await
 }
 
 async fn upload_part_with_retry(
@@ -1329,8 +1288,6 @@ async fn upload_multipart(
     part_size_bytes: usize,
     max_concurrent_parts: usize,
     bandwidth_limit_bps: u64,
-    checkpoint_id: Option<&str>,
-    resumable: bool,
     started_at: Instant,
     checksum_hex: Option<&str>,
 ) -> Result<(), String> {
@@ -1466,8 +1423,8 @@ async fn upload_multipart(
                     started_at,
                     Some((pn as u32).min(total_parts as u32)),
                     Some(total_parts as u32),
-                    checkpoint_id,
-                    Some(resumable),
+                    None,
+                    None,
                 );
             }
             Some(Ok(Err(e))) => {

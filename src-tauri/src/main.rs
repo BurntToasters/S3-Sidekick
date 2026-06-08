@@ -555,7 +555,6 @@ fn main() {
             s3::update_metadata,
             s3::delete_objects,
             s3::upload_object,
-            s3::upload_object_resumable,
             s3::upload_object_bytes,
             s3::get_object_acl,
             s3::set_object_acl,
