@@ -23,6 +23,8 @@ export interface UserSettings {
   enableTransferChecksumVerification: boolean;
   transferCheckpointTtlHours: number;
   bandwidthLimitMbps: number;
+  windowWidth: number;
+  windowHeight: number;
 }
 
 export const SETTING_DEFAULTS: UserSettings = {
@@ -45,6 +47,8 @@ export const SETTING_DEFAULTS: UserSettings = {
   enableTransferChecksumVerification: false,
   transferCheckpointTtlHours: 168,
   bandwidthLimitMbps: 0,
+  windowWidth: 1100,
+  windowHeight: 720,
 };
 
 export function normalizeUserSettings(
@@ -193,6 +197,24 @@ export function normalizeUserSettings(
       ? rawBandwidthLimitMbps
       : SETTING_DEFAULTS.bandwidthLimitMbps;
 
+  const rawWidth = raw.windowWidth;
+  const windowWidth =
+    typeof rawWidth === "number" &&
+    Number.isInteger(rawWidth) &&
+    rawWidth >= 400 &&
+    rawWidth <= 10000
+      ? rawWidth
+      : SETTING_DEFAULTS.windowWidth;
+
+  const rawHeight = raw.windowHeight;
+  const windowHeight =
+    typeof rawHeight === "number" &&
+    Number.isInteger(rawHeight) &&
+    rawHeight >= 300 &&
+    rawHeight <= 10000
+      ? rawHeight
+      : SETTING_DEFAULTS.windowHeight;
+
   return {
     theme,
     autoCheckUpdates,
@@ -213,6 +235,8 @@ export function normalizeUserSettings(
     enableTransferChecksumVerification,
     transferCheckpointTtlHours,
     bandwidthLimitMbps,
+    windowWidth,
+    windowHeight,
   };
 }
 

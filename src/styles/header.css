@@ -120,21 +120,25 @@
 .header__actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   -webkit-app-region: no-drag;
 }
 
 .connection-badge {
-  display: inline-block;
-  padding: 2px 10px;
-  border-radius: 12px;
-  font-size: 12px;
-  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .connection-badge--off {
   background: var(--badge-off-bg);
   color: var(--badge-off-text);
+  border: 1px solid var(--border);
 }
 
 .connection-badge--on {

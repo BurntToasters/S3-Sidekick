@@ -1,34 +1,40 @@
 /* Design tokens, theme variables, reset and base elements */
 
 :root {
-  --bg: #f5f5f5;
+  --bg: #f4f4f5;
   --bg-surface: #ffffff;
-  --bg-hover: #e8e8e8;
+  --bg-hover: #e4e4e7;
   --bg-active: #dbeafe;
-  --border: #d1d5db;
-  --text: #1a1a1a;
-  --text-secondary: #6b7280;
-  --accent: #0078d4;
-  --accent-hover: #006abc;
+  --border: #e4e4e7;
+  --border-focus: #4f46e5;
+  --text: #09090b;
+  --text-secondary: #71717a;
+  --text-muted: #a1a1aa;
+
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
   --accent-text: #ffffff;
-  --danger: #dc2626;
-  --disconnect-bg: rgba(220, 38, 38, 0.08);
-  --disconnect-border: rgba(220, 38, 38, 0.3);
-  --disconnect-text: #b91c1c;
-  --disconnect-bg-hover: rgba(220, 38, 38, 0.18);
-  --disconnect-border-hover: rgba(220, 38, 38, 0.55);
-  --disconnect-text-hover: #991b1b;
-  --badge-off-bg: #e5e7eb;
-  --badge-off-text: #6b7280;
+
+  --danger: #ef4444;
+  --disconnect-bg: rgba(239, 68, 68, 0.08);
+  --disconnect-border: rgba(239, 68, 68, 0.25);
+  --disconnect-text: #dc2626;
+  --disconnect-bg-hover: rgba(239, 68, 68, 0.15);
+  --disconnect-border-hover: rgba(239, 68, 68, 0.45);
+  --disconnect-text-hover: #b91c1c;
+
+  --badge-off-bg: #e4e4e7;
+  --badge-off-text: #71717a;
   --badge-on-bg: #dcfce7;
-  --badge-on-text: #166534;
+  --badge-on-text: #15803d;
+
   --font:
     "Segoe UI Variable", "Segoe UI", "Ubuntu", "Noto Sans", system-ui,
     -apple-system, sans-serif;
   --mono: "Cascadia Code", "Consolas", "SF Mono", monospace;
-  --radius: 6px;
-  --radius-sm: 4px;
-  --radius-lg: 10px;
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-lg: 12px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -36,97 +42,115 @@
   --space-5: 20px;
   --focus-ring-width: 2px;
   --focus-ring-color: var(--accent);
-  --text-muted: #6b7280;
-  --text-primary: #1a1a1a;
-  --sidebar-width: 220px;
-  --sidebar-min: 180px;
+  --text-primary: var(--text);
+  --sidebar-width: 240px;
+  --sidebar-min: 200px;
   --sidebar-max: 420px;
   --warning: #f59e0b;
   --twemoji-filter: saturate(0.38) brightness(0.95) contrast(0.96);
   --twemoji-opacity: 0.9;
-  --glass-bg: rgba(255, 255, 255, 0.72);
-  --glass-bg-heavy: rgba(255, 255, 255, 0.85);
-  --glass-border: rgba(255, 255, 255, 0.35);
-  --glass-blur: 20px;
-  --glass-blur-light: 12px;
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
-  --glass-shadow-elevated: 0 16px 48px rgba(0, 0, 0, 0.12);
-  --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.5);
-  --glow-accent: rgba(0, 120, 212, 0.15);
+
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-bg-heavy: rgba(255, 255, 255, 0.88);
+  --glass-border: rgba(0, 0, 0, 0.06);
+  --glass-blur: 16px;
+  --glass-blur-light: 10px;
+  --glass-shadow:
+    0 4px 20px -2px rgba(0, 0, 0, 0.05), 0 2px 8px -1px rgba(0, 0, 0, 0.03);
+  --glass-shadow-elevated:
+    0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --glow-accent: rgba(79, 70, 229, 0.12);
   --transition-smooth: 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
   --transition-bounce: 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #1a1a1a;
-    --bg-surface: #2a2a2a;
-    --bg-hover: #333333;
-    --bg-active: #1e3a5f;
-    --border: #404040;
-    --text: #e5e5e5;
-    --text-secondary: #9ca3af;
-    --accent: #60cdff;
-    --accent-hover: #4db8e8;
-    --accent-text: #1a1a1a;
-    --disconnect-bg: rgba(220, 38, 38, 0.15);
-    --disconnect-border: rgba(220, 38, 38, 0.35);
+    --bg: #09090b;
+    --bg-surface: #18181b;
+    --bg-hover: #27272a;
+    --bg-active: #1e1b4b;
+    --border: #27272a;
+    --border-focus: #6366f1;
+    --text: #fafafa;
+    --text-secondary: #a1a1aa;
+    --text-muted: #52525b;
+
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --accent-text: #09090b;
+
+    --disconnect-bg: rgba(248, 113, 113, 0.12);
+    --disconnect-border: rgba(248, 113, 113, 0.3);
     --disconnect-text: #fca5a5;
-    --disconnect-bg-hover: rgba(220, 38, 38, 0.28);
-    --disconnect-border-hover: rgba(220, 38, 38, 0.6);
+    --disconnect-bg-hover: rgba(248, 113, 113, 0.22);
+    --disconnect-border-hover: rgba(248, 113, 113, 0.5);
     --disconnect-text-hover: #fecaca;
-    --badge-off-bg: #374151;
-    --badge-off-text: #9ca3af;
-    --badge-on-bg: #14532d;
-    --badge-on-text: #86efac;
+
+    --badge-off-bg: #27272a;
+    --badge-off-text: #a1a1aa;
+    --badge-on-bg: #064e3b;
+    --badge-on-text: #a7f3d0;
+
     --warning: #fbbf24;
-    --text-muted: #9ca3af;
-    --text-primary: #e5e5e5;
+    --text-primary: var(--text);
     --twemoji-filter: saturate(0.3) brightness(0.88) contrast(0.94);
     --twemoji-opacity: 0.86;
-    --glass-bg: rgba(30, 30, 30, 0.72);
-    --glass-bg-heavy: rgba(40, 40, 40, 0.85);
+
+    --glass-bg: rgba(24, 24, 27, 0.72);
+    --glass-bg-heavy: rgba(24, 24, 27, 0.88);
     --glass-border: rgba(255, 255, 255, 0.08);
-    --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
-    --glass-shadow-elevated: 0 16px 48px rgba(0, 0, 0, 0.35);
-    --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-    --glow-accent: rgba(96, 205, 255, 0.12);
+    --glass-shadow:
+      0 4px 20px -2px rgba(0, 0, 0, 0.35), 0 2px 8px -1px rgba(0, 0, 0, 0.25);
+    --glass-shadow-elevated:
+      0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4);
+    --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    --glow-accent: rgba(99, 102, 241, 0.1);
   }
 }
 
 [data-theme="dark"] {
-  --bg: #1a1a1a;
-  --bg-surface: #2a2a2a;
-  --bg-hover: #333333;
-  --bg-active: #1e3a5f;
-  --border: #404040;
-  --text: #e5e5e5;
-  --text-secondary: #9ca3af;
-  --text-muted: #9ca3af;
-  --text-primary: #e5e5e5;
-  --accent: #60cdff;
-  --accent-hover: #4db8e8;
-  --accent-text: #1a1a1a;
-  --disconnect-bg: rgba(220, 38, 38, 0.15);
-  --disconnect-border: rgba(220, 38, 38, 0.35);
+  --bg: #09090b;
+  --bg-surface: #18181b;
+  --bg-hover: #27272a;
+  --bg-active: #1e1b4b;
+  --border: #27272a;
+  --border-focus: #6366f1;
+  --text: #fafafa;
+  --text-secondary: #a1a1aa;
+  --text-muted: #52525b;
+
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --accent-text: #09090b;
+
+  --disconnect-bg: rgba(248, 113, 113, 0.12);
+  --disconnect-border: rgba(248, 113, 113, 0.3);
   --disconnect-text: #fca5a5;
-  --disconnect-bg-hover: rgba(220, 38, 38, 0.28);
-  --disconnect-border-hover: rgba(220, 38, 38, 0.6);
+  --disconnect-bg-hover: rgba(248, 113, 113, 0.22);
+  --disconnect-border-hover: rgba(248, 113, 113, 0.5);
   --disconnect-text-hover: #fecaca;
-  --badge-off-bg: #374151;
-  --badge-off-text: #9ca3af;
-  --badge-on-bg: #14532d;
-  --badge-on-text: #86efac;
+
+  --badge-off-bg: #27272a;
+  --badge-off-text: #a1a1aa;
+  --badge-on-bg: #064e3b;
+  --badge-on-text: #a7f3d0;
+
   --warning: #fbbf24;
+  --text-primary: var(--text);
   --twemoji-filter: saturate(0.3) brightness(0.88) contrast(0.94);
   --twemoji-opacity: 0.86;
-  --glass-bg: rgba(30, 30, 30, 0.72);
-  --glass-bg-heavy: rgba(40, 40, 40, 0.85);
+
+  --glass-bg: rgba(24, 24, 27, 0.72);
+  --glass-bg-heavy: rgba(24, 24, 27, 0.88);
   --glass-border: rgba(255, 255, 255, 0.08);
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
-  --glass-shadow-elevated: 0 16px 48px rgba(0, 0, 0, 0.35);
-  --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  --glow-accent: rgba(96, 205, 255, 0.12);
+  --glass-shadow:
+    0 4px 20px -2px rgba(0, 0, 0, 0.35), 0 2px 8px -1px rgba(0, 0, 0, 0.25);
+  --glass-shadow-elevated:
+    0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4);
+  --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --glow-accent: rgba(99, 102, 241, 0.1);
 }
 
 *,

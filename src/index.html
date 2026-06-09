@@ -18,6 +18,13 @@
             >Disconnected</span
           >
           <button
+            id="disconnect-btn"
+            class="btn btn--disconnect btn--sm"
+            style="display: none"
+          >
+            Disconnect
+          </button>
+          <button
             id="settings-btn"
             class="btn btn--icon"
             title="Settings"
@@ -34,84 +41,136 @@
         </div>
       </header>
 
-      <div class="connection-bar">
-        <select
-          id="conn-provider-preset"
-          class="field field--sm"
-          aria-label="Provider preset"
-          title="Choose a storage provider to prefill endpoint"
-        >
-          <option value="">Provider…</option>
-          <option value="aws">AWS S3</option>
-          <option value="do">DigitalOcean Spaces</option>
-          <option value="backblaze">Backblaze B2</option>
-          <option value="cloudflare">Cloudflare R2</option>
-          <option value="minio">MinIO (local)</option>
-          <option value="wasabi">Wasabi</option>
-        </select>
-        <input
-          id="conn-endpoint"
-          class="field"
-          type="text"
-          placeholder="Endpoint (e.g. https://nyc3.digitaloceanspaces.com)"
-          aria-label="Endpoint URL"
-        />
-        <input
-          id="conn-region"
-          class="field field--sm"
-          type="text"
-          placeholder="Region (optional, e.g. nyc3)"
-          aria-label="Region"
-        />
-        <input
-          id="conn-access-key"
-          class="field"
-          type="text"
-          placeholder="Access Key"
-          aria-label="Access key"
-        />
-        <div class="field-with-toggle">
-          <input
-            id="conn-secret-key"
-            class="field"
-            type="password"
-            placeholder="Secret Key"
-            aria-label="Secret key"
-          />
-          <button
-            id="secret-key-toggle"
-            type="button"
-            class="field-toggle-btn field-toggle-btn--text"
-            title="Show/hide secret key"
-            aria-label="Show secret key"
-            aria-pressed="false"
-          >
-            Show
-          </button>
+      <div id="connection-screen" class="connection-screen">
+        <div class="connection-screen__sidebar">
+          <div class="connection-screen__sidebar-header">
+            <span>Saved Connections</span>
+            <button
+              id="conn-new-btn"
+              class="btn btn--icon"
+              title="Create new connection"
+              aria-label="New connection"
+            >
+              +
+            </button>
+          </div>
+          <ul id="conn-saved-list" class="conn-saved-list"></ul>
         </div>
-        <button
-          id="bookmark-save-btn"
-          class="btn btn--icon"
-          title="Bookmark this connection"
-          aria-label="Bookmark this connection"
-        >
-          <img
-            id="bookmark-save-icon"
-            class="twemoji-icon"
-            src="/twemoji/1f516.svg"
-            alt=""
-            aria-hidden="true"
-            draggable="false"
-          />
-        </button>
-        <button id="connect-btn" class="btn btn--primary">Connect</button>
-        <button
-          id="disconnect-btn"
-          class="btn btn--disconnect"
-          style="display: none"
-        >
-          Disconnect
-        </button>
+        <div class="connection-screen__main">
+          <div class="connection-screen__form-card">
+            <h1 class="connection-screen__title">Connect to S3 Storage</h1>
+            <p class="connection-screen__subtitle">
+              Enter your credentials or select a saved connection from the left.
+            </p>
+
+            <div class="connection-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="conn-provider-preset"
+                    >Provider Preset (Optional)</label
+                  >
+                  <select
+                    id="conn-provider-preset"
+                    class="field field--full"
+                    aria-label="Provider preset"
+                    title="Choose a storage provider to prefill endpoint"
+                  >
+                    <option value="">Choose provider (optional)...</option>
+                    <option value="aws">AWS S3</option>
+                    <option value="do">DigitalOcean Spaces</option>
+                    <option value="backblaze">Backblaze B2</option>
+                    <option value="cloudflare">Cloudflare R2</option>
+                    <option value="minio">MinIO (local)</option>
+                    <option value="wasabi">Wasabi</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group form-group--wide">
+                  <label for="conn-endpoint">Endpoint URL</label>
+                  <input
+                    id="conn-endpoint"
+                    class="field field--full"
+                    type="text"
+                    placeholder="https://nyc3.digitaloceanspaces.com"
+                    aria-label="Endpoint URL"
+                  />
+                </div>
+                <div class="form-group form-group--narrow">
+                  <label for="conn-region">Region</label>
+                  <input
+                    id="conn-region"
+                    class="field field--full"
+                    type="text"
+                    placeholder="us-east-1"
+                    aria-label="Region"
+                  />
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="conn-access-key">Access Key</label>
+                  <input
+                    id="conn-access-key"
+                    class="field field--full"
+                    type="text"
+                    placeholder="Access Key"
+                    aria-label="Access key"
+                  />
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="conn-secret-key">Secret Key</label>
+                  <div class="field-with-toggle field-with-toggle--full">
+                    <input
+                      id="conn-secret-key"
+                      class="field field--full"
+                      type="password"
+                      placeholder="Secret Key"
+                      aria-label="Secret key"
+                    />
+                    <button
+                      id="secret-key-toggle"
+                      type="button"
+                      class="field-toggle-btn field-toggle-btn--text"
+                      title="Show/hide secret key"
+                      aria-label="Show secret key"
+                      aria-pressed="false"
+                    >
+                      Show
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="form-actions">
+                <button
+                  id="bookmark-save-btn"
+                  class="btn"
+                  title="Bookmark this connection"
+                  aria-label="Bookmark this connection"
+                >
+                  <img
+                    id="bookmark-save-icon"
+                    class="twemoji-icon"
+                    src="/twemoji/1f516.svg"
+                    alt=""
+                    aria-hidden="true"
+                    draggable="false"
+                  />
+                  Save Bookmark
+                </button>
+                <button id="connect-btn" class="btn btn--primary">
+                  Connect
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div id="main-layout" class="main-layout">

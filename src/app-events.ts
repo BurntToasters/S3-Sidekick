@@ -6,6 +6,7 @@ import {
   resetSettings,
   setBookmarkSelectHandler,
   switchSettingsTab,
+  saveSettings,
 } from "./settings.ts";
 import {
   loadConnection,
@@ -81,6 +82,7 @@ import {
   setConnectionInputs,
   refreshBookmarkBar,
   updateBookmarkBtn,
+  handleNewConnection,
 } from "./app-connection.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
 import {
@@ -171,6 +173,10 @@ export function wireEvents(): void {
   document
     .getElementById("bookmark-save-btn")!
     .addEventListener("click", handleBookmarkSave);
+
+  document.getElementById("conn-new-btn")!.addEventListener("click", () => {
+    void handleNewConnection();
+  });
 
   (
     document.getElementById("conn-endpoint") as HTMLInputElement
@@ -823,5 +829,21 @@ export function wireEvents(): void {
       bookmark.access_key,
       bookmark.secret_key,
     );
+  });
+
+  let resizeTimeout: number | undefined;
+  window.addEventListener("resize", () => {
+    if (resizeTimeout) {
+      window.clearTimeout(resizeTimeout);
+    }
+    resizeTimeout = window.setTimeout(async () => {
+      state.currentSettings.windowWidth = window.innerWidth;
+      state.currentSettings.windowHeight = window.innerHeight;
+      try {
+        await saveSettings();
+      } catch (err) {
+        console.warn("Failed to save window size settings:", err);
+      }
+    }, 500);
   });
 }

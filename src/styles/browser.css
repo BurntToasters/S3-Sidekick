@@ -247,45 +247,61 @@
 
 .list {
   list-style: none;
-  padding: 4px 0;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .list__item {
-  padding: 6px 14px;
-  font-size: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.list__item:hover {
-  background: var(--bg-hover);
-}
-
-.list__item--active {
-  background: var(--bg-active);
-  font-weight: 600;
+  display: block;
+  width: 100%;
 }
 
 .list__item-btn {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 500;
+  text-align: left;
   cursor: pointer;
-  padding: 0;
+  border-radius: var(--radius-sm);
+  transition:
+    background var(--transition-smooth),
+    color var(--transition-smooth);
+}
+
+.list__item-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.list__item--active .list__item-btn {
+  background: var(--bg-active);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.bucket-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .list__item-btn:focus-visible,
 .sort-trigger:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring-color);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 .list__empty {
-  padding: 12px 14px;
+  padding: 16px 12px;
   color: var(--text-secondary);
   font-size: 13px;
   font-style: italic;

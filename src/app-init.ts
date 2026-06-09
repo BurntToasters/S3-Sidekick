@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { LogicalSize } from "@tauri-apps/api/dpi";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { state, dom } from "./state.ts";
 import {
   loadSettings,
@@ -26,7 +28,11 @@ import {
   updateShortcutChips,
   getActiveModalOverlay,
 } from "./app-layout.ts";
-import { setConnectionInputs, refreshBookmarkBar } from "./app-connection.ts";
+import {
+  setConnectionInputs,
+  refreshBookmarkBar,
+  setConnectionUI,
+} from "./app-connection.ts";
 import { wireEvents } from "./app-events.ts";
 
 async function checkSupportPrompt(): Promise<void> {
@@ -102,8 +108,21 @@ async function checkSupportPrompt(): Promise<void> {
   }
 }
 
+async function restoreWindowSize(): Promise<void> {
+  try {
+    const { windowWidth, windowHeight } = state.currentSettings;
+    if (windowWidth && windowHeight) {
+      const win = getCurrentWindow();
+      await win.setSize(new LogicalSize(windowWidth, windowHeight));
+    }
+  } catch (err) {
+    console.warn("Failed to restore window size:", err);
+  }
+}
+
 export async function init(): Promise<void> {
   wireEvents();
+  setConnectionUI(false);
 
   state.platformName = await invoke<string>("get_platform_info");
   applyPlatformClass();
@@ -111,6 +130,9 @@ export async function init(): Promise<void> {
   let settingsValid = true;
   try {
     settingsValid = await loadSettings();
+    if (settingsValid) {
+      void restoreWindowSize();
+    }
   } catch (err) {
     setStatus(`Failed to load settings: ${String(err)}`);
   }
@@ -144,6 +166,7 @@ export async function init(): Promise<void> {
 
     try {
       await loadSettings();
+      void restoreWindowSize();
     } catch (err) {
       setStatus(`Failed to load settings: ${String(err)}`);
       logActivity(`Failed to load settings: ${String(err)}`, "error");

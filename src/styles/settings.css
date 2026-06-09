@@ -74,8 +74,9 @@
   color: var(--text-secondary);
   font-size: 13px;
   font-family: inherit;
+  font-weight: 500;
   cursor: pointer;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   transition:
     color var(--transition-smooth),
     background var(--transition-smooth);
@@ -83,12 +84,13 @@
 
 .settings-tab:hover {
   color: var(--text);
-  background: var(--glass-bg-subtle, rgba(255, 255, 255, 0.04));
+  background: var(--bg-hover);
 }
 
 .settings-tab--active {
   color: var(--accent);
-  background: var(--glass-bg-strong, rgba(255, 255, 255, 0.08));
+  background: var(--bg-active);
+  font-weight: 600;
 }
 
 .settings-tab:focus-visible {

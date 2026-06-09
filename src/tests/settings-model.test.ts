@@ -210,4 +210,40 @@ describe("settings model", () => {
       maxConcurrentTransfers: 4,
     });
   });
+
+  it("preserves valid windowWidth and windowHeight settings", () => {
+    const result = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        windowWidth: 800,
+        windowHeight: 600,
+      }),
+    );
+    expect(result.settings.windowWidth).toBe(800);
+    expect(result.settings.windowHeight).toBe(600);
+  });
+
+  it("clamps invalid windowWidth and windowHeight to defaults", () => {
+    const result = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        windowWidth: 100,
+        windowHeight: 200,
+      }),
+    );
+    expect(result.settings.windowWidth).toBe(SETTING_DEFAULTS.windowWidth);
+    expect(result.settings.windowHeight).toBe(SETTING_DEFAULTS.windowHeight);
+  });
+
+  it("rejects non-integer or non-number values for window size", () => {
+    const result = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        windowWidth: 800.5,
+        windowHeight: "large",
+      }),
+    );
+    expect(result.settings.windowWidth).toBe(SETTING_DEFAULTS.windowWidth);
+    expect(result.settings.windowHeight).toBe(SETTING_DEFAULTS.windowHeight);
+  });
 });

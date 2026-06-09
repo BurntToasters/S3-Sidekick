@@ -246,12 +246,17 @@ export function renderBucketList(): void {
     el.innerHTML = `<li class="list__empty">No buckets match filter</li>`;
     return;
   }
+  const bucketIcon = twemojiIcon("1f5c4", {
+    className: "twemoji-icon bucket-icon",
+    decorative: true,
+  });
   el.innerHTML = visibleBuckets
     .map(
       (b) =>
         `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}">` +
         `<button type="button" class="list__item-btn" data-bucket="${escapeHtml(b.name)}" title="${escapeHtml(b.name)}" aria-label="Open bucket ${escapeHtml(b.name)}"${b.name === state.currentBucket ? ' aria-current="true"' : ""}>` +
-        `${escapeHtml(b.name)}` +
+        bucketIcon +
+        `<span>${escapeHtml(b.name)}</span>` +
         `</button>` +
         `</li>`,
     )

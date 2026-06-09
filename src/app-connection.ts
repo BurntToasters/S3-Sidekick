@@ -17,6 +17,8 @@ import {
   addBookmark,
   renderBookmarkBar,
   isEndpointBookmarked,
+  renderBookmarkList,
+  removeBookmark,
 } from "./bookmarks.ts";
 import { friendlyError } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
@@ -63,11 +65,11 @@ export function updateBookmarkBtn(): void {
   btn.classList.toggle("bookmark-save-btn--active", active);
 }
 
-export function refreshBookmarkBar(): void {
-  const bar = document.getElementById("bookmark-bar");
-  if (!bar) return;
-  renderBookmarkBar(
-    bar,
+export function refreshSavedConnectionsList(): void {
+  const savedList = document.getElementById("conn-saved-list");
+  if (!savedList) return;
+  renderBookmarkList(
+    savedList,
     (bookmark) => {
       void switchToBookmark(
         bookmark.name,
@@ -77,11 +79,33 @@ export function refreshBookmarkBar(): void {
         bookmark.secret_key,
       );
     },
-    state.connected ? state.endpoint : undefined,
-    () => {
-      void handleNewConnection();
+    (index) => {
+      void removeBookmark(index);
     },
   );
+}
+
+export function refreshBookmarkBar(): void {
+  const bar = document.getElementById("bookmark-bar");
+  if (bar) {
+    renderBookmarkBar(
+      bar,
+      (bookmark) => {
+        void switchToBookmark(
+          bookmark.name,
+          bookmark.endpoint,
+          bookmark.region,
+          bookmark.access_key,
+          bookmark.secret_key,
+        );
+      },
+      state.connected ? state.endpoint : undefined,
+      () => {
+        void handleNewConnection();
+      },
+    );
+  }
+  refreshSavedConnectionsList();
   updateBookmarkBtn();
 }
 
@@ -115,16 +139,23 @@ export async function switchToBookmark(
 
 export function setConnectionUI(connected: boolean): void {
   const badge = dom.connectionStatus;
+  const mainLayout = document.getElementById("main-layout");
+  const connScreen = document.getElementById("connection-screen");
+
   if (connected) {
     badge.textContent = "Connected";
     badge.className = "connection-badge connection-badge--on";
     dom.connectBtn.style.display = "none";
     dom.disconnectBtn.style.display = "";
+    if (mainLayout) mainLayout.style.display = "flex";
+    if (connScreen) connScreen.style.display = "none";
   } else {
     badge.textContent = "Disconnected";
     badge.className = "connection-badge connection-badge--off";
     dom.connectBtn.style.display = "";
     dom.disconnectBtn.style.display = "none";
+    if (mainLayout) mainLayout.style.display = "none";
+    if (connScreen) connScreen.style.display = "flex";
   }
   refreshBookmarkBar();
 }
