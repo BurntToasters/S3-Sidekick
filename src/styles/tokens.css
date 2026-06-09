@@ -47,8 +47,6 @@
   --sidebar-min: 200px;
   --sidebar-max: 420px;
   --warning: #f59e0b;
-  --twemoji-filter: saturate(0.38) brightness(0.95) contrast(0.96);
-  --twemoji-opacity: 0.9;
 
   --glass-bg: rgba(255, 255, 255, 0.7);
   --glass-bg-heavy: rgba(255, 255, 255, 0.88);
@@ -95,8 +93,6 @@
 
     --warning: #fbbf24;
     --text-primary: var(--text);
-    --twemoji-filter: saturate(0.3) brightness(0.88) contrast(0.94);
-    --twemoji-opacity: 0.86;
 
     --glass-bg: rgba(24, 24, 27, 0.72);
     --glass-bg-heavy: rgba(24, 24, 27, 0.88);
@@ -139,8 +135,6 @@
 
   --warning: #fbbf24;
   --text-primary: var(--text);
-  --twemoji-filter: saturate(0.3) brightness(0.88) contrast(0.94);
-  --twemoji-opacity: 0.86;
 
   --glass-bg: rgba(24, 24, 27, 0.72);
   --glass-bg-heavy: rgba(24, 24, 27, 0.88);
