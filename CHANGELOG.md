@@ -21,8 +21,17 @@
 
 ## Changes in `v0.10.0-beta.1:`
 
-v0.9.6 is a stabilization release — tightening transfer behavior, hardening edge cases, and cleaning up the codebase before 1.0.
+v0.10.0 introduces a comprehensive UI/UX modernization, window size memory on relaunch, and stabilization fixes.
 
+- **UI Modernization:**
+  - Transitioned the entire color palette to a refined, professional HSL Slate and Indigo theme.
+  - Replaced the persistent top connection inputs with a dedicated welcome dashboard/connection screen (`#connection-screen`), organizing saved connection bookmarks in a sidebar and S3 credentials forms in a card layout.
+  - Relocated the disconnect button to the main header actions list.
+  - Upgraded the bucket list in the sidebar into modern rounded selector pills utilizing standard Twemoji folder cabinet icons.
+  - Upgraded settings layout, inputs alignment, and increased modal overlays backdrop blur to `8px` for premium visual depth.
+- **Window Size Memory:**
+  - Added window dimensions memory to settings. When resized, width and height are saved to `settings.json` (debounced by 500ms to protect disk health).
+  - Automatically restores the last window size on relaunch, and resets it to default `1100x720` if settings are reset.
 - **Transfers:** In-flight uploads are excluded from the session recovery manifest and restart from scratch on next launch (uploads are not resumable).
 - **Transfers:** Pausing the queue no longer cancels in-flight uploads (they'd restart from byte 0 anyway); running uploads now complete before the pause takes effect.
 - **Downloads:** Parallel download resume now verifies the object ETag before restoring a checkpoint, preventing stale bytes from being mixed in if the object changed server-side between sessions.

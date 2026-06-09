@@ -1,6 +1,6 @@
 [package]
 name = "s3-sidekick"
-version = "0.9.6-beta.1"
+version = "0.10.0-beta.1"
 description = "Cross-platform desktop client for S3-compatible object storage."
 authors = ["BurntToasters <code@rosie.run>"]
 edition = "2021"
