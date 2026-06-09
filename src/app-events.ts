@@ -687,7 +687,7 @@ export function wireEvents(): void {
     {
       id: "upload-files",
       label: "Upload Files",
-      icon: "1f4e4",
+      icon: "upload",
       shortcut: `${accelLabel}U`,
       action: () => void handleUploadButton(),
       available: () => state.connected,
@@ -695,7 +695,7 @@ export function wireEvents(): void {
     {
       id: "upload-folder",
       label: "Upload Folder",
-      icon: "1f4c1",
+      icon: "folder-up",
       shortcut: `${accelLabel}⇧U`,
       action: () => void handleUploadFolderButton(),
       available: () => state.connected,
@@ -703,7 +703,7 @@ export function wireEvents(): void {
     {
       id: "create-folder",
       label: "Create Folder",
-      icon: "1f4c2",
+      icon: "folder-plus",
       shortcut: `${accelLabel}N`,
       action: () => void handleCreateFolder(),
       available: () => state.connected,
@@ -711,7 +711,7 @@ export function wireEvents(): void {
     {
       id: "refresh",
       label: "Refresh",
-      icon: "1f504",
+      icon: "refresh-cw",
       shortcut: "F5",
       action: () => void handleRefresh(),
       available: () => state.connected,
@@ -719,21 +719,21 @@ export function wireEvents(): void {
     {
       id: "download",
       label: "Download Selected",
-      icon: "1f4e5",
+      icon: "download",
       action: () => void handleDownload(),
       available: () => state.connected && getSelectedFileKeys().length > 0,
     },
     {
       id: "delete",
       label: "Delete Selected",
-      icon: "1f5d1",
+      icon: "trash-2",
       action: () => void handleDelete(),
       available: () => state.connected && getSelectedFileKeys().length > 0,
     },
     {
       id: "select-all",
       label: "Select All",
-      icon: "2705",
+      icon: "check-square",
       shortcut: `${accelLabel}A`,
       action: () => {
         const keys = getSelectableKeys();
@@ -745,14 +745,14 @@ export function wireEvents(): void {
     {
       id: "deselect-all",
       label: "Deselect All",
-      icon: "274c",
+      icon: "x-square",
       action: () => clearSelection(),
       available: () => state.selectedKeys.size > 0,
     },
     {
       id: "filter",
       label: "Filter Objects",
-      icon: "1f50d",
+      icon: "search",
       shortcut: `${accelLabel}F`,
       action: () => {
         const f = document.getElementById(
@@ -765,14 +765,14 @@ export function wireEvents(): void {
     {
       id: "go-to-key-prefix",
       label: "Go to Key/Prefix",
-      icon: "1f9ed",
+      icon: "compass",
       action: () => void handleGoToKeyOrPrefix(),
       available: () => state.connected,
     },
     {
       id: "open-last-download-folder",
       label: "Open Last Download Folder",
-      icon: "1f4c2",
+      icon: "folder",
       action: () => void handleOpenLastDownloadFolder(),
       available: () =>
         state.currentSettings.rememberDownloadPath &&
@@ -781,19 +781,19 @@ export function wireEvents(): void {
     {
       id: "export-activity-log",
       label: "Export Activity Log",
-      icon: "1f4be",
+      icon: "save",
       action: () => void handleExportActivityLog(),
     },
     {
       id: "activity",
       label: "Toggle Activity Log",
-      icon: "1f4cb",
+      icon: "clipboard-list",
       action: () => toggleActivityLog(),
     },
     {
       id: "settings",
       label: "Open Settings",
-      icon: "2699",
+      icon: "settings",
       action: () => {
         document.getElementById("settings-btn")?.click();
       },
@@ -801,7 +801,7 @@ export function wireEvents(): void {
     {
       id: "go-up",
       label: "Go Up (Parent Folder)",
-      icon: "2b06",
+      icon: "arrow-up",
       action: () => {
         void navigateUp();
       },

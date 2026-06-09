@@ -30,13 +30,7 @@
             title="Settings"
             aria-label="Settings"
           >
-            <img
-              class="twemoji-icon"
-              src="/twemoji/2699.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span class="lucide-icon" data-icon="settings"></span>
           </button>
         </div>
       </header>
@@ -154,14 +148,11 @@
                   title="Bookmark this connection"
                   aria-label="Bookmark this connection"
                 >
-                  <img
+                  <span
                     id="bookmark-save-icon"
-                    class="twemoji-icon"
-                    src="/twemoji/1f516.svg"
-                    alt=""
-                    aria-hidden="true"
-                    draggable="false"
-                  />
+                    class="lucide-icon"
+                    data-icon="bookmark"
+                  ></span>
                   Save Bookmark
                 </button>
                 <button id="connect-btn" class="btn btn--primary">
@@ -216,13 +207,7 @@
                 title="Toggle buckets"
                 aria-label="Toggle buckets"
               >
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/1f5c2.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="database"></span>
               </button>
               <button
                 id="nav-back"
@@ -231,13 +216,7 @@
                 aria-label="Navigate back"
                 disabled
               >
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/2b05.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="arrow-left"></span>
               </button>
               <button
                 id="nav-forward"
@@ -246,13 +225,7 @@
                 aria-label="Navigate forward"
                 disabled
               >
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/27a1.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="arrow-right"></span>
               </button>
               <nav
                 id="breadcrumb"
@@ -274,13 +247,7 @@
                 title="Refresh (F5)"
                 aria-label="Refresh"
               >
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/1f504.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="refresh-cw"></span>
                 <span class="shortcut-chip">F5</span>
               </button>
               <button
@@ -289,13 +256,7 @@
                 title="New Folder (Ctrl+N)"
                 aria-label="New folder"
               >
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/1f4c1.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="folder-plus"></span>
                 <span class="shortcut-chip">⌃N</span>
               </button>
               <button
@@ -304,13 +265,7 @@
                 title="Upload Files (Ctrl+U)"
                 aria-label="Upload files"
               >
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/2b06.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="upload"></span>
                 <span class="shortcut-chip">⌃U</span>
               </button>
               <button
@@ -319,13 +274,7 @@
                 title="Upload Folder (Ctrl+Shift+U)"
                 aria-label="Upload folder"
               >
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/1f4e4.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="folder-up"></span>
                 <span class="shortcut-chip">⌃⇧U</span>
               </button>
             </div>
@@ -335,33 +284,15 @@
             <span id="batch-count" class="batch-toolbar__count"></span>
             <div class="batch-toolbar__actions">
               <button id="batch-properties" class="btn btn--sm btn--ghost">
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/2139.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="info"></span>
                 Properties
               </button>
               <button id="batch-download" class="btn btn--sm">
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/1f4e5.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="download"></span>
                 Download
               </button>
               <button id="batch-delete" class="btn btn--sm btn--danger">
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/1f5d1.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="trash-2"></span>
                 Delete
               </button>
               <button id="batch-copy-urls" class="btn btn--sm btn--ghost">
@@ -374,13 +305,10 @@
           </div>
 
           <div id="empty-state" class="empty-state">
-            <img
-              class="twemoji-icon empty-state__icon"
-              src="/twemoji/1f325.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span
+              class="lucide-icon empty-state__icon"
+              data-icon="cloud"
+            ></span>
             <p class="empty-state__text">
               Connect to an S3-compatible endpoint to browse objects.
             </p>
@@ -397,13 +325,10 @@
 
           <div id="drop-zone-overlay" class="drop-zone-overlay" hidden>
             <div class="drop-zone-overlay__content">
-              <img
-                class="twemoji-icon drop-zone-overlay__icon"
-                src="/twemoji/1f4e4.svg"
-                alt=""
-                aria-hidden="true"
-                draggable="false"
-              />
+              <span
+                class="lucide-icon drop-zone-overlay__icon"
+                data-icon="upload"
+              ></span>
               <p class="drop-zone-overlay__text">Drop files to upload</p>
               <p id="drop-zone-path" class="drop-zone-overlay__path"></p>
             </div>
@@ -437,13 +362,11 @@
                     >
                       Name
                       <span class="sort-indicator" id="sort-name"
-                        ><img
-                          class="twemoji-icon twemoji-icon--sort"
-                          src="/twemoji/2b06.svg"
-                          alt=""
-                          aria-hidden="true"
-                          draggable="false"
-                      /></span>
+                        ><span
+                          class="lucide-icon lucide-icon--sort"
+                          data-icon="arrow-up"
+                        ></span
+                      ></span>
                     </button>
                   </th>
                   <th class="col-sortable" data-sort="size" aria-sort="none">
@@ -501,13 +424,7 @@
               aria-controls="drawer-panel-activity"
               tabindex="0"
             >
-              <img
-                class="twemoji-icon"
-                src="/twemoji/1f4cb.svg"
-                alt=""
-                aria-hidden="true"
-                draggable="false"
-              />
+              <span class="lucide-icon" data-icon="clipboard-list"></span>
               Activity
               <span
                 id="drawer-activity-badge"
@@ -523,13 +440,7 @@
               aria-controls="drawer-panel-transfers"
               tabindex="-1"
             >
-              <img
-                class="twemoji-icon"
-                src="/twemoji/1f4e5.svg"
-                alt=""
-                aria-hidden="true"
-                draggable="false"
-              />
+              <span class="lucide-icon" data-icon="download"></span>
               Transfers
               <span
                 id="drawer-transfer-badge"
@@ -551,26 +462,14 @@
               title="Minimize"
               aria-label="Minimize panel"
             >
-              <img
-                class="twemoji-icon"
-                src="/twemoji/2b07.svg"
-                alt=""
-                aria-hidden="true"
-                draggable="false"
-              />
+              <span class="lucide-icon" data-icon="chevron-down"></span>
             </button>
             <button
               id="drawer-close"
               class="btn btn--icon"
               aria-label="Close panel"
             >
-              <img
-                class="twemoji-icon"
-                src="/twemoji/274c.svg"
-                alt=""
-                aria-hidden="true"
-                draggable="false"
-              />
+              <span class="lucide-icon" data-icon="x"></span>
             </button>
           </div>
         </div>
@@ -589,13 +488,10 @@
               aria-label="Activity log"
             >
               <div class="activity-empty">
-                <img
-                  class="twemoji-icon empty-state__icon"
-                  src="/twemoji/1f4cb.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span
+                  class="lucide-icon empty-state__icon"
+                  data-icon="clipboard-list"
+                ></span>
                 <span>No activity yet</span>
               </div>
             </div>
@@ -643,13 +539,10 @@
               aria-label="Transfers"
             >
               <div class="transfer-empty">
-                <img
-                  class="twemoji-icon empty-state__icon"
-                  src="/twemoji/1f4e5.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span
+                  class="lucide-icon empty-state__icon"
+                  data-icon="download"
+                ></span>
                 <span>No transfers</span>
               </div>
             </div>
@@ -670,13 +563,8 @@
             aria-controls="bottom-drawer"
             aria-expanded="false"
           >
-            <img
-              class="twemoji-icon"
-              src="/twemoji/1f4cb.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            /><span
+            <span class="lucide-icon" data-icon="clipboard-list"></span
+            ><span
               id="activity-badge"
               class="transfer-badge activity-badge"
               style="display: none"
@@ -691,13 +579,8 @@
             aria-expanded="false"
             hidden
           >
-            <img
-              class="twemoji-icon"
-              src="/twemoji/1f4e5.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            /><span
+            <span class="lucide-icon" data-icon="download"></span
+            ><span
               id="transfer-badge"
               class="transfer-badge"
               style="display: none"
@@ -719,13 +602,7 @@
         <div class="modal__header">
           <h2 id="settings-heading">Settings</h2>
           <button id="settings-close" class="btn btn--icon" aria-label="Close">
-            <img
-              class="twemoji-icon"
-              src="/twemoji/274c.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
         <div class="modal__body settings-layout">
@@ -1497,14 +1374,11 @@
         <div id="dialog-title" class="dialog-box__title"></div>
         <div id="dialog-message" class="dialog-box__message"></div>
         <div class="dialog-input-wrapper">
-          <img
+          <span
             id="dialog-input-icon"
-            class="dialog-input-icon"
-            src="/twemoji/1f512.svg"
-            alt=""
-            aria-hidden="true"
-            draggable="false"
-          />
+            class="dialog-input-icon lucide-icon"
+            data-icon="lock"
+          ></span>
           <input
             id="dialog-input"
             class="field dialog-box__input"
@@ -1539,13 +1413,7 @@
         <div class="modal__header">
           <h2 id="copy-move-heading">Copy / Move</h2>
           <button id="copy-move-close" class="btn btn--icon" aria-label="Close">
-            <img
-              class="twemoji-icon"
-              src="/twemoji/274c.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
         <div class="modal__body">
@@ -1616,30 +1484,24 @@
         <div class="modal__header">
           <h2 id="licenses-heading">Open-Source Licenses</h2>
           <button id="close-licenses" class="btn btn--icon" aria-label="Close">
-            <img
-              class="twemoji-icon"
-              src="/twemoji/274c.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
         <div class="modal__body">
           <div class="licenses-attribution text-secondary">
-            Emoji graphics by
+            Icons by
             <a
-              href="https://github.com/jdecked/twemoji"
+              href="https://github.com/lucide-icons/lucide"
               target="_blank"
               rel="noopener"
-              >Twemoji</a
+              >Lucide</a
             >
-            are licensed under
+            are licensed under the
             <a
-              href="https://creativecommons.org/licenses/by/4.0/"
+              href="https://github.com/lucide-icons/lucide/blob/main/LICENSE"
               target="_blank"
               rel="noopener"
-              >CC-BY 4.0</a
+              >MIT License</a
             >.
           </div>
           <div id="licenses-list" class="licenses-list">
@@ -1662,13 +1524,7 @@
         <div class="modal__header">
           <h2 id="info-title">File Info</h2>
           <button id="info-close" class="btn btn--icon" aria-label="Close">
-            <img
-              class="twemoji-icon"
-              src="/twemoji/274c.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
         <div class="info-tabs" role="tablist">
@@ -1740,13 +1596,7 @@
         <div class="modal__header">
           <h2 id="preview-title">Preview</h2>
           <button id="preview-close" class="btn btn--icon" aria-label="Close">
-            <img
-              class="twemoji-icon"
-              src="/twemoji/274c.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
         <div id="preview-body" class="modal__body preview-body"></div>
@@ -1756,13 +1606,10 @@
     <div id="palette-overlay" class="palette-overlay" hidden>
       <div class="palette">
         <div class="palette__input-wrap">
-          <img
-            class="twemoji-icon palette__search-icon"
-            src="/twemoji/1f50d.svg"
-            alt=""
-            aria-hidden="true"
-            draggable="false"
-          />
+          <span
+            class="lucide-icon palette__search-icon"
+            data-icon="search"
+          ></span>
           <input
             id="palette-input"
             class="palette__input"
@@ -1787,13 +1634,10 @@
     >
       <div class="support-card">
         <div class="support-card__icon">
-          <img
-            class="twemoji-icon support-card__twemoji"
-            src="/twemoji/1f9e1.svg"
-            alt=""
-            aria-hidden="true"
-            draggable="false"
-          />
+          <span
+            class="lucide-icon support-card__twemoji"
+            data-icon="heart"
+          ></span>
         </div>
         <h2 id="support-title" class="support-card__title">
           Enjoying S3 Sidekick?
@@ -1805,12 +1649,7 @@
         <div class="support-card__actions">
           <button id="support-no" class="btn btn--ghost">No Thanks</button>
           <button id="support-yes" class="btn btn--primary">
-            <img
-              class="twemoji-icon"
-              src="/twemoji/2764.svg"
-              alt="❤️"
-              draggable="false"
-            />
+            <span class="lucide-icon" data-icon="heart"></span>
             Yes, I'd love to!
           </button>
         </div>
@@ -1835,13 +1674,10 @@
 
         <div class="setup-wizard-step" id="setup-step-welcome" data-step="0">
           <div class="setup-wizard-step__icon">
-            <img
-              class="twemoji-icon setup-wizard-step__twemoji"
-              src="/twemoji/1f44b.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span
+              class="lucide-icon setup-wizard-step__twemoji"
+              data-icon="hand"
+            ></span>
           </div>
           <h2 id="setup-wizard-title" class="setup-wizard-step__title">
             Welcome to S3 Sidekick
@@ -1866,13 +1702,10 @@
           hidden
         >
           <div class="setup-wizard-step__icon">
-            <img
-              class="twemoji-icon setup-wizard-step__twemoji"
-              src="/twemoji/1f3a8.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span
+              class="lucide-icon setup-wizard-step__twemoji"
+              data-icon="palette"
+            ></span>
           </div>
           <h2 class="setup-wizard-step__title">Choose Your Theme</h2>
           <p class="setup-wizard-step__desc">Pick how S3 Sidekick looks.</p>
@@ -1912,13 +1745,10 @@
           hidden
         >
           <div class="setup-wizard-step__icon">
-            <img
-              class="twemoji-icon setup-wizard-step__twemoji"
-              src="/twemoji/1f512.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span
+              class="lucide-icon setup-wizard-step__twemoji"
+              data-icon="lock"
+            ></span>
           </div>
           <h2 class="setup-wizard-step__title">
             Encrypt Your Credentials On-Disk
@@ -1942,13 +1772,7 @@
                 aria-label="Show password"
                 title="Show/hide password"
               >
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/1f441.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="eye"></span>
               </button>
             </div>
             <div class="field-with-toggle setup-wizard-field">
@@ -1966,13 +1790,7 @@
                 aria-label="Show password"
                 title="Show/hide password"
               >
-                <img
-                  class="twemoji-icon"
-                  src="/twemoji/1f441.svg"
-                  alt=""
-                  aria-hidden="true"
-                  draggable="false"
-                />
+                <span class="lucide-icon" data-icon="eye"></span>
               </button>
             </div>
             <p id="setup-enc-error" class="setup-wizard-enc-error" hidden></p>
@@ -2006,13 +1824,10 @@
           hidden
         >
           <div class="setup-wizard-step__icon">
-            <img
-              class="twemoji-icon setup-wizard-step__twemoji"
-              src="/twemoji/1f504.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span
+              class="lucide-icon setup-wizard-step__twemoji"
+              data-icon="refresh-cw"
+            ></span>
           </div>
           <h2 class="setup-wizard-step__title">Updates</h2>
           <p class="setup-wizard-step__desc">
@@ -2053,13 +1868,10 @@
           hidden
         >
           <div class="setup-wizard-step__icon">
-            <img
-              class="twemoji-icon setup-wizard-step__twemoji"
-              src="/twemoji/1f680.svg"
-              alt=""
-              aria-hidden="true"
-              draggable="false"
-            />
+            <span
+              class="lucide-icon setup-wizard-step__twemoji"
+              data-icon="rocket"
+            ></span>
           </div>
           <h2 class="setup-wizard-step__title">You're All Set!</h2>
           <p class="setup-wizard-step__desc">

@@ -3,19 +3,19 @@
 
 # ⬇️ Downloads
 
-| <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux |
-| :--- | :--- | :--- |
+| <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows                                                                                                                                | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS          | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux                                                                                                                                                      |
+| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-arm64.deb) --> |
-| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-arm64.rpm) --> |
-| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-arm64.flatpak) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> -->                                          | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-arm64.deb) -->                |
+|                                                                                                                                                                                                                                                  |                                                                                                                          | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-arm64.rpm) -->                |
+|                                                                                                                                                                                                                                                  |                                                                                                                          | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.0-beta.1/S3-Sidekick-Linux-arm64.flatpak) -->    |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
 >
 > The `.asc` files are my normal GPG signatures which you can verify using my GPG Public Key: https://tuxedo.rosie.run/GPG/BurntToasters_0xF2FBC20F_public.asc.
 >
-> ⚠️ Arm64 Linux Binaries are *NOT* available at the moment. It's something I may get around to in the future but it's not a priority. I do have the logic set up in the repo in case people would like to build their own :)
+> ⚠️ Arm64 Linux Binaries are _NOT_ available at the moment. It's something I may get around to in the future but it's not a priority. I do have the logic set up in the repo in case people would like to build their own :)
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
@@ -27,8 +27,9 @@ v0.10.0 introduces a comprehensive UI/UX modernization, window size memory on re
   - Transitioned the entire color palette to a refined, professional HSL Slate and Indigo theme.
   - Replaced the persistent top connection inputs with a dedicated welcome dashboard/connection screen (`#connection-screen`), organizing saved connection bookmarks in a sidebar and S3 credentials forms in a card layout.
   - Relocated the disconnect button to the main header actions list.
-  - Upgraded the bucket list in the sidebar into modern rounded selector pills utilizing standard Twemoji folder cabinet icons.
+  - Upgraded the bucket list in the sidebar into modern rounded selector pills.
   - Upgraded settings layout, inputs alignment, and increased modal overlays backdrop blur to `8px` for premium visual depth.
+- **Vector Iconography:** Replaced all cartoon-style Twemoji image assets across S3 Sidekick with clean, high-definition, vector-based Lucide Icons (MIT licensed). These render completely offline in modern outline vector designs and dynamically adapt to active light/dark themes natively using CSS.
 - **Window Size Memory:**
   - Added window dimensions memory to settings. When resized, width and height are saved to `settings.json` (debounced by 500ms to protect disk health).
   - Automatically restores the last window size on relaunch, and resets it to default `1100x720` if settings are reset.
@@ -53,7 +54,7 @@ v0.10.0 introduces a comprehensive UI/UX modernization, window size memory on re
 
 ## Changes in `v0.9.3:`
 
-*Releases before v0.9.2 require a manual update.*
+_Releases before v0.9.2 require a manual update._
 
 - **Security:** Updated Tauri V2 updater signer key.
   - I accidentally leaked the (still encrypted) private key via a package.json entry. Rookie mistake — I am very sorry, I know how annoying this is. You will have to manually download and install `v0.9.2 (or later)` from this release to update the pubkey.

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { escapeHtml, twemojiIcon } from "./utils.ts";
+import { escapeHtml, getIconHtml } from "./utils.ts";
 import { state } from "./state.ts";
 import { logActivity } from "./activity-log.ts";
 import {
@@ -1845,7 +1845,7 @@ function renderQueue(): void {
   if (queue.length === 0) {
     list.innerHTML =
       `<div class="transfer-empty">` +
-      `<img class="twemoji-icon empty-state__icon" src="/twemoji/1f4e5.svg" alt="" aria-hidden="true" draggable="false" />` +
+      `${getIconHtml("download", { className: "lucide-icon empty-state__icon", decorative: true })}` +
       `<span>No transfers</span>` +
       `</div>`;
     updateBadge();
@@ -1860,32 +1860,32 @@ function renderQueue(): void {
       let statusIcon = "";
       let statusClass = "";
       if (t.status === "queued") {
-        statusIcon = twemojiIcon("23f3", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("clock", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--queued";
       } else if (t.status === "uploading") {
-        statusIcon = twemojiIcon("1f504", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("refresh-cw", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--active";
       } else if (t.status === "done") {
-        statusIcon = twemojiIcon("2705", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("check-circle", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--done";
       } else if (t.status === "skipped") {
-        statusIcon = twemojiIcon("23ed", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("skip-forward", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--queued";
       } else {
-        statusIcon = twemojiIcon("274c", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("alert-circle", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--error";
@@ -1913,12 +1913,12 @@ function renderQueue(): void {
             : t.key;
       const arrow =
         t.operation === "download"
-          ? twemojiIcon("2b05", {
-              className: "twemoji-icon twemoji-icon--transfer-arrow",
+          ? getIconHtml("arrow-left", {
+              className: "lucide-icon transfer-arrow-svg",
               decorative: true,
             })
-          : twemojiIcon("27a1", {
-              className: "twemoji-icon twemoji-icon--transfer-arrow",
+          : getIconHtml("arrow-right", {
+              className: "lucide-icon transfer-arrow-svg",
               decorative: true,
             });
 

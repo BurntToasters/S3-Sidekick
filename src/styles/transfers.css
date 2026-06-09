@@ -49,7 +49,7 @@
   justify-content: center;
 }
 
-.twemoji-icon--transfer-status {
+.transfer-icon-svg {
   width: 13px;
   height: 13px;
 }
@@ -107,7 +107,7 @@
   flex-shrink: 0;
 }
 
-.twemoji-icon--transfer-arrow {
+.transfer-arrow-svg {
   width: 12px;
   height: 12px;
   vertical-align: middle;

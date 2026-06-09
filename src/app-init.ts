@@ -34,6 +34,7 @@ import {
   setConnectionUI,
 } from "./app-connection.ts";
 import { wireEvents } from "./app-events.ts";
+import { initializeIcons } from "./icons.ts";
 
 async function checkSupportPrompt(): Promise<void> {
   try {
@@ -121,6 +122,7 @@ async function restoreWindowSize(): Promise<void> {
 }
 
 export async function init(): Promise<void> {
+  initializeIcons();
   wireEvents();
   setConnectionUI(false);
 

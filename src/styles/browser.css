@@ -53,35 +53,38 @@
   line-height: 1.2;
 }
 
-.twemoji-icon {
+.lucide-icon {
   width: 1em;
   height: 1em;
   display: inline-block;
   vertical-align: -0.14em;
   flex-shrink: 0;
-  filter: var(--twemoji-filter);
-  opacity: var(--twemoji-opacity);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   pointer-events: none;
   user-select: none;
 }
 
-.btn--icon .twemoji-icon {
+.btn--icon .lucide-icon {
   width: 18px;
   height: 18px;
   vertical-align: middle;
 }
 
 #bookmark-save-icon {
-  filter: grayscale(1);
   opacity: 0.45;
+  fill: none;
   transition:
-    filter 0.15s ease,
-    opacity 0.15s ease;
+    opacity 0.15s ease,
+    fill 0.15s ease;
 }
 
 .bookmark-save-btn--active #bookmark-save-icon {
-  filter: var(--twemoji-filter);
-  opacity: var(--twemoji-opacity);
+  opacity: 1;
+  fill: currentColor;
 }
 
 .breadcrumb {
@@ -239,7 +242,7 @@
   align-items: center;
 }
 
-.twemoji-icon--inline {
+.lucide-icon--inline {
   width: 14px;
   height: 14px;
   vertical-align: middle;

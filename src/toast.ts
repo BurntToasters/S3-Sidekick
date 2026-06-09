@@ -1,4 +1,4 @@
-import { escapeHtml, twemojiIcon } from "./utils.ts";
+import { escapeHtml, getIconHtml } from "./utils.ts";
 
 export type ToastType = "info" | "success" | "warning" | "error";
 
@@ -19,10 +19,10 @@ const DEFAULT_DURATION: Record<ToastType, number> = {
 };
 
 const TYPE_ICON: Record<ToastType, string> = {
-  info: "2139",
-  success: "2705",
-  warning: "26a0",
-  error: "274c",
+  info: "info",
+  success: "check-circle",
+  warning: "alert-triangle",
+  error: "alert-circle",
 };
 
 const MAX_VISIBLE = 4;
@@ -127,7 +127,7 @@ export function showToast(message: string, options: ToastOptions = {}): void {
       : "";
 
   el.innerHTML =
-    `<span class="toast__icon" aria-hidden="true">${twemojiIcon(TYPE_ICON[type], { className: "twemoji-icon toast__twemoji", decorative: true })}</span>` +
+    `<span class="toast__icon" aria-hidden="true">${getIconHtml(TYPE_ICON[type], { className: "lucide-icon toast__icon-svg", decorative: true })}</span>` +
     `<span class="toast__msg">${escapeHtml(message)}<span class="toast__count" hidden></span></span>` +
     action +
     `<button type="button" class="toast__close" aria-label="Dismiss notification">\u00d7</button>`;

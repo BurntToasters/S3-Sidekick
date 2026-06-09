@@ -4,7 +4,7 @@ import {
   formatSize,
   formatDate,
   basename,
-  twemojiIcon,
+  getIconHtml,
   friendlyError,
 } from "./utils.ts";
 import { refreshObjects } from "./connection.ts";
@@ -203,12 +203,12 @@ function updateSortIndicators(): void {
     if (el) {
       if (state.sortColumn === col) {
         el.innerHTML = state.sortAsc
-          ? twemojiIcon("2b06", {
-              className: "twemoji-icon twemoji-icon--sort",
+          ? getIconHtml("arrow-up", {
+              className: "lucide-icon lucide-icon--sort",
               decorative: true,
             })
-          : twemojiIcon("2b07", {
-              className: "twemoji-icon twemoji-icon--sort",
+          : getIconHtml("arrow-down", {
+              className: "lucide-icon lucide-icon--sort",
               decorative: true,
             });
       } else {
@@ -246,8 +246,8 @@ export function renderBucketList(): void {
     el.innerHTML = `<li class="list__empty">No buckets match filter</li>`;
     return;
   }
-  const bucketIcon = twemojiIcon("1f5c4", {
-    className: "twemoji-icon bucket-icon",
+  const bucketIcon = getIconHtml("database", {
+    className: "lucide-icon bucket-icon",
     decorative: true,
   });
   el.innerHTML = visibleBuckets
@@ -292,7 +292,7 @@ function emptyFolderRowHtml(): string {
   return (
     `<tr><td colspan="4" class="table-empty">` +
     `<div class="table-empty__content">` +
-    `${twemojiIcon("1f4c2", { className: "twemoji-icon empty-state__icon", decorative: true })}` +
+    `${getIconHtml("folder", { className: "lucide-icon empty-state__icon", decorative: true })}` +
     `<p class="table-empty__text">This folder is empty</p>` +
     `<div class="table-empty__actions">` +
     `<button type="button" class="btn btn--sm btn--primary" data-empty-action="upload">Upload files</button>` +
@@ -316,7 +316,7 @@ export function renderObjectTable(): void {
     rows.push(
       `<tr class="object-row object-row--folder" data-prefix="${escapeHtml(prefix)}" tabindex="0">
         <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select folder ${escapeHtml(name)}" /></td>
-        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-folder">${twemojiIcon("1f4c1", { className: "twemoji-icon twemoji-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
+        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-folder">${getIconHtml("folder", { className: "lucide-icon lucide-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">&mdash;</td>
         <td class="object-modified">&mdash;</td>
       </tr>`,
@@ -335,7 +335,7 @@ export function renderObjectTable(): void {
     rows.push(
       `<tr class="object-row object-row--file" data-key="${escapeHtml(obj.key)}" tabindex="0">
         <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select file ${escapeHtml(name)}" /></td>
-        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-file">${twemojiIcon("1f4c4", { className: "twemoji-icon twemoji-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
+        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-file">${getIconHtml("file", { className: "lucide-icon lucide-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size"${barStyle}>${formatSize(obj.size)}</td>
         <td class="object-modified">${formatDate(obj.last_modified)}</td>
       </tr>`,
