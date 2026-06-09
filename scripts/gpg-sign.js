@@ -21,11 +21,11 @@ const GPG_PASSPHRASE = process.env.GPG_PASSPHRASE;
 const GH_TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
 const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
+const TAG_DOWNLOAD_BASE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${encodeURIComponent(TAG)}`;
 const RELEASE_DOWNLOAD_BASE_URL = (
   process.env.RELEASE_DOWNLOAD_BASE_URL ||
-  `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download`
+  TAG_DOWNLOAD_BASE_URL
 ).replace(/\/+$/, "");
-const TAG_DOWNLOAD_BASE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${encodeURIComponent(TAG)}`;
 const RELEASE_NOTES = process.env.RELEASE_NOTES || "";
 const RELEASE_PUB_DATE = process.env.RELEASE_PUB_DATE || new Date().toISOString();
 const REQUIRED_LINUX_TARGETS = (process.env.REQUIRED_LINUX_TARGETS || "").trim();
@@ -39,7 +39,7 @@ const ENFORCE_LINUX_X64_PACKAGE_SET = !/^(0|false|no|off)$/i.test(
 const ext = (e) => (n) => n.toLowerCase().endsWith(e);
 const rx = (r) => (n) => r.test(n);
 const isPerTargetManifest = rx(/^latest-[a-z0-9-]+-[a-z0-9_]+\.json$/i);
-const isChecksumTextName = rx(/^SHA256SUMS(?:-[a-z0-9_]+(?:-[a-z0-9_]+)?)?\.txt$/i);
+const isChecksumTextName = rx(/^SHA256SUMS(?:-[a-z0-9_-]+)?\.txt$/i);
 
 const ARTIFACT_RULES = [
   rx(/-setup\.exe$/i),
