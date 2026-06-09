@@ -1,0 +1,126 @@
+/* Activity log entries, attribution, empty states */
+
+.activity-badge {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.statusbar__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.btn--sm {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.activity-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.activity-entry {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: start;
+  gap: 8px;
+  padding: 6px 14px;
+  margin: 1px 6px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  transition: background var(--transition-smooth);
+}
+
+.activity-entry:hover {
+  background: var(--bg-hover);
+}
+
+.activity-time {
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.activity-icon {
+  width: 14px;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.activity-icon-svg {
+  width: 13px;
+  height: 13px;
+}
+
+.activity-icon--info {
+  color: var(--text-secondary);
+}
+
+.activity-icon--success {
+  color: var(--badge-on-text);
+}
+
+.activity-icon--error {
+  color: var(--danger);
+}
+
+.activity-icon--warning {
+  color: var(--warning);
+}
+
+.activity-msg {
+  min-width: 0;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.licenses-attribution {
+  margin-bottom: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.licenses-attribution a {
+  color: var(--accent);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.licenses-attribution a:visited {
+  color: var(--accent);
+}
+
+.licenses-attribution a:hover {
+  color: var(--accent-hover);
+}
+
+.licenses-attribution a:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.activity-empty {
+  padding: 20px 14px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.empty-state__icon {
+  width: 48px !important;
+  height: 48px !important;
+  opacity: 0.55;
+}

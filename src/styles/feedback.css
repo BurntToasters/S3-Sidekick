@@ -1,0 +1,123 @@
+/* Spinner and metadata editor/loading rows */
+
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  vertical-align: middle;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.metadata-loading {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.metadata-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.metadata-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+  min-width: 100px;
+}
+
+.metadata-value-mono {
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.metadata-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.metadata-entry__key {
+  flex: 1;
+  min-width: 0;
+}
+
+.metadata-entry__value {
+  flex: 2;
+  min-width: 0;
+}
+
+.metadata-entry__delete {
+  font-size: 12px;
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+
+.metadata-add-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.metadata-batch-info {
+  font-size: 13px;
+}
+
+.metadata-batch-info p {
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+}
+
+.metadata-batch-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.metadata-batch-list li {
+  padding: 3px 8px;
+  background: var(--bg);
+  border-radius: 3px;
+}
+
+.metadata-batch-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 4px 0 12px;
+}
+
+.metadata-permissions-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.metadata-permissions-editor .metadata-label {
+  min-width: 0;
+}
+
+.metadata-visibility-select {
+  width: min(260px, 100%);
+}

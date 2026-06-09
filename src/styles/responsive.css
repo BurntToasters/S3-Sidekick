@@ -1,0 +1,143 @@
+/* Responsive breakpoints and custom scrollbars */
+
+@media (max-width: 1180px) {
+  .connection-bar .field {
+    flex: 1;
+    min-width: 170px;
+  }
+
+  .content-toolbar {
+    gap: 8px;
+  }
+
+  .filter-input {
+    width: 120px;
+  }
+}
+
+@media (max-width: 900px) {
+  .main-layout {
+    isolation: isolate;
+  }
+
+  .sidebar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: min(78vw, 320px);
+    min-width: 0;
+    max-width: none;
+    transform: translateX(-104%);
+    transition: transform 0.18s ease;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+    z-index: 60;
+  }
+
+  .main-layout.main-layout--sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .main-layout.main-layout--sidebar-open .sidebar-backdrop {
+    display: block;
+  }
+
+  .sidebar-resizer {
+    display: none;
+  }
+
+  .sidebar-toggle {
+    display: inline-flex;
+  }
+
+  .breadcrumb {
+    padding-left: 8px;
+  }
+
+  .content-toolbar {
+    flex-wrap: wrap;
+    padding-bottom: 4px;
+  }
+
+  .content-toolbar__actions {
+    width: 100%;
+    justify-content: flex-end;
+    padding-right: 8px;
+  }
+
+  .filter-input {
+    margin-left: auto;
+    margin-right: 8px;
+  }
+
+  .batch-toolbar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .batch-toolbar__count {
+    width: 100%;
+  }
+
+  .statusbar {
+    padding: 4px 8px;
+  }
+}
+
+@media (max-width: 700px) {
+  .connection-bar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .connection-bar .field {
+    min-width: 0;
+    width: 100%;
+  }
+
+  #conn-endpoint,
+  #conn-access-key,
+  #conn-secret-key {
+    grid-column: 1 / span 2;
+  }
+
+  .field-with-toggle {
+    grid-column: 1 / span 2;
+  }
+
+  #bookmark-save-btn,
+  #connect-btn,
+  #disconnect-btn {
+    justify-self: stretch;
+  }
+
+  .shortcut-chip {
+    display: none;
+  }
+
+  .statusbar__right {
+    gap: 4px;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(127, 127, 127, 0.3);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(127, 127, 127, 0.5);
+  background-clip: padding-box;
+}

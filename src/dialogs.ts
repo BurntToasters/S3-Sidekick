@@ -95,11 +95,48 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.overlay.classList.add("active");
     active = true;
 
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+
     if (config.showInput) {
       el.input.focus();
       el.input.select();
     } else {
       el.ok.focus();
+    }
+
+    function focusableInDialog(): HTMLElement[] {
+      // The reveal button is intentionally tabindex="-1" (not in the tab order),
+      // so it is deliberately excluded here to match native Tab behavior.
+      const candidates: (HTMLElement | null)[] = [
+        config.showInput ? el.input : null,
+        config.showCancel ? el.cancel : null,
+        el.ok,
+      ];
+      return candidates.filter(
+        (node): node is HTMLElement =>
+          node !== null && node.offsetParent !== null,
+      );
+    }
+
+    function onTrapFocus(e: KeyboardEvent) {
+      if (e.key !== "Tab") return;
+      const focusable = focusableInDialog();
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const current = document.activeElement;
+      if (e.shiftKey) {
+        if (current === first || !el.box.contains(current)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (current === last || !el.box.contains(current)) {
+        e.preventDefault();
+        first.focus();
+      }
     }
 
     function onReveal() {
@@ -126,10 +163,15 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       el.input.type = "text";
       el.reveal.hidden = true;
       document.removeEventListener("keydown", onEscape, true);
+      document.removeEventListener("keydown", onTrapFocus, true);
       active = false;
+      // Restore focus to whatever was focused before the dialog opened, unless
+      // another dialog is about to take over from the queue.
       if (queue.length > 0) {
         const next = queue.shift();
         if (next) setTimeout(next, 0);
+      } else if (previouslyFocused?.isConnected) {
+        previouslyFocused.focus();
       }
     }
 
@@ -179,6 +221,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       el.input.addEventListener("keydown", onInputKey);
     }
     document.addEventListener("keydown", onEscape, true);
+    document.addEventListener("keydown", onTrapFocus, true);
   });
 }
 

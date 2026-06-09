@@ -1,4 +1,4 @@
-import { escapeHtml, twemojiIcon } from "./utils.ts";
+import { escapeHtml, getIconHtml } from "./utils.ts";
 import {
   toggleDrawer,
   openDrawer,
@@ -84,7 +84,7 @@ function renderActivityLog(): void {
   if (entries.length === 0) {
     list.innerHTML =
       `<div class="activity-empty">` +
-      `<img class="twemoji-icon empty-state__icon" src="/twemoji/1f4cb.svg" alt="" aria-hidden="true" draggable="false" />` +
+      `${getIconHtml("clipboard-list", { className: "lucide-icon empty-state__icon", decorative: true })}` +
       `<span>No activity yet</span>` +
       `</div>`;
     return;
@@ -131,23 +131,23 @@ function formatTime(d: Date): string {
 function typeIcon(type: ActivityType): string {
   switch (type) {
     case "success":
-      return twemojiIcon("2705", {
-        className: "twemoji-icon twemoji-icon--activity-status",
+      return getIconHtml("check-circle", {
+        className: "lucide-icon activity-icon-svg",
         decorative: true,
       });
     case "error":
-      return twemojiIcon("274c", {
-        className: "twemoji-icon twemoji-icon--activity-status",
+      return getIconHtml("alert-circle", {
+        className: "lucide-icon activity-icon-svg",
         decorative: true,
       });
     case "warning":
-      return twemojiIcon("26a0", {
-        className: "twemoji-icon twemoji-icon--activity-status",
+      return getIconHtml("alert-triangle", {
+        className: "lucide-icon activity-icon-svg",
         decorative: true,
       });
     default:
-      return twemojiIcon("2139", {
-        className: "twemoji-icon twemoji-icon--activity-status",
+      return getIconHtml("info", {
+        className: "lucide-icon activity-icon-svg",
         decorative: true,
       });
   }

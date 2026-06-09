@@ -1,0 +1,55 @@
+/* Sort triggers, load-more row, object counts */
+
+.col-sortable {
+  user-select: none;
+}
+
+.sort-trigger {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.sort-trigger:hover,
+.col-sortable:hover {
+  color: var(--text);
+}
+
+.sort-indicator {
+  font-size: 9px;
+  margin-left: 2px;
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+}
+
+.lucide-icon--sort {
+  width: 12px;
+  height: 12px;
+  vertical-align: middle;
+}
+
+.load-more-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.object-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.statusbar__count {
+  font-size: 11px;
+  color: var(--text-secondary);
+}

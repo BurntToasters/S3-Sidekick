@@ -1,4 +1,4 @@
-import { escapeHtml, twemojiIcon } from "./utils.ts";
+import { escapeHtml, getIconHtml } from "./utils.ts";
 
 export interface PaletteCommand {
   id: string;
@@ -135,8 +135,8 @@ function renderResults(): void {
     hint +
     filtered
       .map((cmd, i) => {
-        const icon = twemojiIcon(cmd.icon, {
-          className: "twemoji-icon",
+        const icon = getIconHtml(cmd.icon, {
+          className: "lucide-icon",
           decorative: true,
         });
         const activeClass = i === activeIndex ? " palette__item--active" : "";

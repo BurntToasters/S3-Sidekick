@@ -335,10 +335,8 @@ fn transfer_checkpoint_gc(app: tauri::AppHandle, ttl_hours: u32) -> Result<u32, 
             None => continue,
         };
         let age = now.duration_since(modified).unwrap_or_default().as_secs();
-        if age >= ttl_secs {
-            if std::fs::remove_file(&path).is_ok() {
-                removed += 1;
-            }
+        if age >= ttl_secs && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
         }
     }
 
@@ -557,7 +555,6 @@ fn main() {
             s3::update_metadata,
             s3::delete_objects,
             s3::upload_object,
-            s3::upload_object_resumable,
             s3::upload_object_bytes,
             s3::get_object_acl,
             s3::set_object_acl,

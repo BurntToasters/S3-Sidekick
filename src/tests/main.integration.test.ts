@@ -11,6 +11,7 @@ const mockLoadSettings = vi.fn<() => Promise<boolean>>();
 const mockOpenSettingsModal = vi.fn();
 const mockCloseSettingsModal = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockResetSettings = vi.fn();
+const mockSaveSettings = vi.fn<() => Promise<void>>();
 const mockSetBookmarkSelectHandler = vi.fn();
 const mockSwitchSettingsTab = vi.fn();
 const mockIncrementLaunchCount = vi.fn<() => Promise<number>>();
@@ -105,6 +106,24 @@ const mockInitPalette = vi.fn();
 const mockRegisterCommands = vi.fn();
 const mockIsPaletteOpen = vi.fn();
 
+const mockSetSize = vi.fn<(...args: unknown[]) => Promise<void>>();
+const mockGetCurrentWindow = vi.fn();
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: mockGetCurrentWindow,
+}));
+
+vi.mock("@tauri-apps/api/dpi", () => ({
+  LogicalSize: class {
+    width: number;
+    height: number;
+    constructor(width: number, height: number) {
+      this.width = width;
+      this.height = height;
+    }
+  },
+}));
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: mockInvoke,
 }));
@@ -148,6 +167,7 @@ vi.mock("../settings.ts", () => ({
   openSettingsModal: mockOpenSettingsModal,
   closeSettingsModal: mockCloseSettingsModal,
   resetSettings: mockResetSettings,
+  saveSettings: mockSaveSettings,
   setBookmarkSelectHandler: mockSetBookmarkSelectHandler,
   switchSettingsTab: mockSwitchSettingsTab,
   incrementLaunchCount: mockIncrementLaunchCount,
@@ -167,6 +187,8 @@ vi.mock("../connection.ts", () => ({
 
 vi.mock("../browser.ts", () => ({
   renderBucketList: mockRenderBucketList,
+  renderBucketListSkeleton: vi.fn(),
+  renderObjectTableSkeleton: vi.fn(),
   renderObjectTable: mockRenderObjectTable,
   renderBreadcrumb: mockRenderBreadcrumb,
   navigateToFolder: mockNavigateToFolder,
@@ -199,6 +221,8 @@ vi.mock("../bookmarks.ts", () => ({
   setBookmarkChangeHandler: mockSetBookmarkChangeHandler,
   isEndpointBookmarked: vi.fn().mockReturnValue(false),
   clearBookmarks: vi.fn(),
+  renderBookmarkList: vi.fn(),
+  removeBookmark: vi.fn(),
 }));
 
 vi.mock("../licenses.ts", () => ({
@@ -343,12 +367,22 @@ describe("main integration", () => {
 
     mockInvoke.mockReset();
     mockGetVersion.mockReset();
+    mockSetSize.mockReset();
+    mockGetCurrentWindow.mockReset();
+
+    mockSetSize.mockResolvedValue(undefined);
+    mockGetCurrentWindow.mockReturnValue({
+      setSize: mockSetSize,
+    });
+
     mockOpen.mockReset();
     mockSave.mockReset();
     mockLoadSettings.mockReset();
     mockOpenSettingsModal.mockReset();
     mockCloseSettingsModal.mockReset();
     mockResetSettings.mockReset();
+    mockSaveSettings.mockReset();
+    mockSaveSettings.mockResolvedValue(undefined);
     mockSetBookmarkSelectHandler.mockReset();
     mockSwitchSettingsTab.mockReset();
     mockIncrementLaunchCount.mockReset();
@@ -2825,5 +2859,40 @@ describe("main integration", () => {
       document.querySelectorAll<HTMLElement>(".shortcut-chip"),
     ).map((chip) => chip.textContent ?? "");
     expect(chips.some((text) => text.startsWith("⌘"))).toBe(true);
+  });
+
+  it("restores window size on startup and listens to debounced resize events", async () => {
+    const { state } = await import("../state.ts");
+    state.currentSettings.windowWidth = 900;
+    state.currentSettings.windowHeight = 650;
+
+    await import("../main.ts");
+    await flushMicrotasks();
+
+    expect(mockGetCurrentWindow).toHaveBeenCalled();
+    expect(mockSetSize).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 900, height: 650 }),
+    );
+
+    vi.useFakeTimers();
+    Object.defineProperty(window, "innerWidth", {
+      value: 950,
+      configurable: true,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      value: 700,
+      configurable: true,
+    });
+
+    window.dispatchEvent(new Event("resize"));
+    vi.advanceTimersByTime(200);
+    expect(mockSaveSettings).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(350);
+    expect(state.currentSettings.windowWidth).toBe(950);
+    expect(state.currentSettings.windowHeight).toBe(700);
+    expect(mockSaveSettings).toHaveBeenCalled();
+
+    vi.useRealTimers();
   });
 });

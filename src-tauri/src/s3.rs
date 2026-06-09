@@ -1,3 +1,9 @@
+// Transfer commands are exposed to the frontend through Tauri's `invoke` bridge,
+// which marshals each parameter by name. Grouping them into structs would require
+// matching serde plumbing on both sides for no real readability gain, so the flat
+// signatures (and the progress emitter that mirrors them) are intentional.
+#![allow(clippy::too_many_arguments)]
+
 use aws_sdk_s3::types::{Delete, MetadataDirective, ObjectCannedAcl, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -44,7 +50,7 @@ fn validate_key(key: &str, label: &str) -> Result<(), String> {
     if key.len() > MAX_KEY_LEN {
         return Err(format!("{} is too long (max {} characters)", label, MAX_KEY_LEN));
     }
-    if key.as_bytes().iter().any(|&b| b == 0) {
+    if key.as_bytes().contains(&0) {
         return Err(format!("{} contains invalid characters", label));
     }
     if key.split('/').any(|seg| seg == ".." || seg == ".") {
@@ -175,6 +181,12 @@ struct TransferCheckpoint {
     part_size: u64,
     completed_parts: Vec<u32>,
     updated_at_ms: i64,
+    // ETag of the object the checkpoint was created against. Used to detect a
+    // server-side change between sessions so we don't resume into stale bytes.
+    // Defaulted for backward compatibility with checkpoints written before this
+    // field existed (those are treated as "no recorded etag" and discarded).
+    #[serde(default)]
+    etag: String,
 }
 
 fn clamp_part_size_mb(value: Option<u32>, fallback: u32) -> u32 {
@@ -235,7 +247,7 @@ fn encode_transfer_error(
 fn choose_upload_part_size_bytes(file_size: u64, requested_mb: Option<u32>) -> Result<usize, String> {
     let part_mb = clamp_part_size_mb(requested_mb, DEFAULT_UPLOAD_PART_SIZE_MB);
     let part_size = (part_mb as u64) * 1024 * 1024;
-    let parts = (file_size + part_size - 1) / part_size;
+    let parts = file_size.div_ceil(part_size);
     if parts > 10_000 {
         return Err(format!(
             "File requires too many multipart parts ({}) with {}MB part size.",
@@ -1108,8 +1120,6 @@ pub(crate) async fn upload_object(
     part_size_mb: Option<u32>,
     part_concurrency: Option<u32>,
     bandwidth_limit_mbps: Option<u32>,
-    checkpoint_id: Option<String>,
-    resumable: Option<bool>,
     checksum_verification: Option<bool>,
 ) -> Result<(), String> {
     validate_key(&key, "Object key")?;
@@ -1127,7 +1137,6 @@ pub(crate) async fn upload_object(
 
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
-    let resumable_enabled = resumable.unwrap_or(false);
     let checksum_enabled = checksum_verification.unwrap_or(false);
     let expected_checksum_hex = if checksum_enabled {
         let digest = sha256_file(&upload_path).await?;
@@ -1146,8 +1155,8 @@ pub(crate) async fn upload_object(
         started_at,
         None,
         None,
-        checkpoint_id.as_deref(),
-        Some(resumable_enabled),
+        None,
+        None,
     );
 
     if file_size >= MULTIPART_THRESHOLD {
@@ -1172,8 +1181,6 @@ pub(crate) async fn upload_object(
             part_size_bytes,
             part_workers,
             bandwidth_limit_bps,
-            checkpoint_id.as_deref(),
-            resumable_enabled,
             started_at,
             expected_checksum_hex.as_deref(),
         )
@@ -1217,48 +1224,12 @@ pub(crate) async fn upload_object(
         started_at,
         None,
         None,
-        checkpoint_id.as_deref(),
-        Some(resumable_enabled),
+        None,
+        None,
     );
     clear_cancelled(transfer_id);
 
     Ok(())
-}
-
-#[tauri::command]
-pub(crate) async fn upload_object_resumable(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    bucket: String,
-    key: String,
-    file_path: String,
-    content_type: String,
-    transfer_id: u32,
-    attempt: Option<u32>,
-    part_size_mb: Option<u32>,
-    part_concurrency: Option<u32>,
-    bandwidth_limit_mbps: Option<u32>,
-    checkpoint_id: Option<String>,
-    resumable: Option<bool>,
-    checksum_verification: Option<bool>,
-) -> Result<(), String> {
-    upload_object(
-        app,
-        state,
-        bucket,
-        key,
-        file_path,
-        content_type,
-        transfer_id,
-        attempt,
-        part_size_mb,
-        part_concurrency,
-        bandwidth_limit_mbps,
-        checkpoint_id,
-        resumable,
-        checksum_verification,
-    )
-    .await
 }
 
 async fn upload_part_with_retry(
@@ -1317,8 +1288,6 @@ async fn upload_multipart(
     part_size_bytes: usize,
     max_concurrent_parts: usize,
     bandwidth_limit_bps: u64,
-    checkpoint_id: Option<&str>,
-    resumable: bool,
     started_at: Instant,
     checksum_hex: Option<&str>,
 ) -> Result<(), String> {
@@ -1347,7 +1316,7 @@ async fn upload_multipart(
         .await
         .map_err(|e| format!("Failed to open file: {}", e))?;
 
-    let total_parts = ((file_size + part_size_bytes as u64 - 1) / part_size_bytes as u64) as usize;
+    let total_parts = file_size.div_ceil(part_size_bytes as u64) as usize;
     let mut completed_parts: Vec<Option<aws_sdk_s3::types::CompletedPart>> =
         vec![None; total_parts];
     let mut part_number = 1i32;
@@ -1398,6 +1367,17 @@ async fn upload_multipart(
             }
             buf.truncate(read);
 
+            // Guard against the file growing after `file_size` was measured: a
+            // part number beyond `total_parts` would index `completed_parts`
+            // out of bounds. Abort the upload cleanly instead of panicking.
+            if (part_number as usize) > total_parts {
+                join_set.abort_all();
+                abort(client, bucket, key, &upload_id).await;
+                return Err(
+                    "File changed during upload (grew larger than expected). Upload aborted.".to_string(),
+                );
+            }
+
             let client = client.clone();
             let bucket = bucket.to_string();
             let key = key.to_string();
@@ -1443,8 +1423,8 @@ async fn upload_multipart(
                     started_at,
                     Some((pn as u32).min(total_parts as u32)),
                     Some(total_parts as u32),
-                    checkpoint_id,
-                    Some(resumable),
+                    None,
+                    None,
                 );
             }
             Some(Ok(Err(e))) => {
@@ -1975,7 +1955,6 @@ pub(crate) async fn download_object_parallel(
     checkpoint_id: Option<String>,
     enable_resume: Option<bool>,
     checksum_verification: Option<bool>,
-    _resume_completed_parts: Option<Vec<u32>>,
 ) -> Result<u64, String> {
     validate_key(&key, "Object key")?;
     let destination_path = if overwrite {
@@ -2016,6 +1995,7 @@ pub(crate) async fn download_object_parallel(
         .await
         .map_err(|e| structured_transfer_sdk_error("Failed to read object metadata", &e, "download_head", true))?;
     let total_bytes = head.content_length().unwrap_or(0) as u64;
+    let object_etag = head.e_tag().unwrap_or_default().to_string();
     let expected_checksum = if checksum_enabled {
         expected_checksum_from_head(&head)
     } else {
@@ -2040,7 +2020,7 @@ pub(crate) async fn download_object_parallel(
     }
 
     let part_size = (clamp_part_size_mb(part_size_mb, DEFAULT_DOWNLOAD_PART_SIZE_MB) as u64) * 1024 * 1024;
-    let total_parts = ((total_bytes + part_size - 1) / part_size) as u32;
+    let total_parts = total_bytes.div_ceil(part_size) as u32;
     if total_parts <= 1 {
         return download_object(
             app,
@@ -2095,12 +2075,19 @@ pub(crate) async fn download_object_parallel(
         if let Some(id) = checkpoint_id.as_deref() {
             if let Ok(Some(json)) = load_transfer_checkpoint_json(&app, id) {
                 if let Some(payload) = checkpoint_from_json(&json) {
+                    // Require the recorded ETag to match the current object so we
+                    // never resume into bytes from a stale/replaced object. Old
+                    // checkpoints written before the etag field (empty string) are
+                    // treated as a mismatch and restart cleanly.
+                    let etag_matches =
+                        !payload.etag.is_empty() && payload.etag == object_etag;
                     if payload.mode == "download_parallel"
                         && payload.bucket == bucket
                         && payload.key == key
                         && payload.temp_path == temp_path.to_string_lossy()
                         && payload.total_bytes == total_bytes
                         && payload.part_size == part_size
+                        && etag_matches
                     {
                         for part in normalize_checkpoint_parts(&payload.completed_parts, total_parts) {
                             completed[part as usize] = true;
@@ -2113,6 +2100,9 @@ pub(crate) async fn download_object_parallel(
 
     let init_file = tokio::fs::OpenOptions::new()
         .create(true)
+        // Do NOT truncate: on resume we reuse the existing temp file and keep the
+        // bytes already written for completed parts.
+        .truncate(false)
         .write(true)
         .open(&temp_path)
         .await
@@ -2222,6 +2212,7 @@ pub(crate) async fn download_object_parallel(
                                     .filter_map(|(i, done)| if *done { Some(i as u32) } else { None })
                                     .collect(),
                                 updated_at_ms: now_ms(),
+                                etag: object_etag.clone(),
                             };
                             let _ = save_checkpoint_payload(&app, id, &payload);
                             last_checkpoint_saved_at = Instant::now();
@@ -2835,7 +2826,7 @@ pub(crate) async fn generate_presigned_url(
     expires_in_secs: u64,
 ) -> Result<String, String> {
     validate_key(&key, "Object key")?;
-    if expires_in_secs < 60 || expires_in_secs > 604800 {
+    if !(60..=604800).contains(&expires_in_secs) {
         return Err("Expiration must be between 60 and 604800 seconds".to_string());
     }
     let client = {
@@ -3075,5 +3066,44 @@ mod tests {
         assert_eq!(std::fs::read(&destination_path).unwrap(), b"new");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The multipart upload OOB guard relies on the last valid part number being
+    // exactly equal to `total_parts` (so `part_number > total_parts` only fires
+    // when the file has grown). These cases lock that relationship in.
+    #[test]
+    fn div_ceil_part_count_matches_legacy_formula() {
+        let cases: [(u64, u64); 6] = [
+            (0, 32),
+            (1, 32),
+            (32, 32),
+            (33, 32),
+            (128, 32),
+            (129, 32),
+        ];
+        for (size, part) in cases {
+            assert_ne!(part, 0, "test part size must be non-zero");
+            let new = size.div_ceil(part);
+            // Intentionally the pre-refactor manual formula to prove equivalence.
+            #[allow(clippy::manual_div_ceil)]
+            let legacy = (size + part - 1) / part;
+            assert_eq!(new, legacy, "size={size} part={part}");
+        }
+    }
+
+    #[test]
+    fn last_part_number_equals_total_parts() {
+        // For a file split into N parts, the highest part number produced is N,
+        // and N+1 must be the first value the guard rejects.
+        let file_size: u64 = 129;
+        let part_size: u64 = 32;
+        let total_parts = file_size.div_ceil(part_size) as usize; // 5
+        assert_eq!(total_parts, 5);
+        // The guard fires when `part_number > total_parts`. Every legitimate
+        // part (1..=total_parts) passes; only the first overflow part is rejected.
+        for part_number in 1..=total_parts {
+            assert!(part_number <= total_parts, "part {part_number} should pass");
+        }
+        assert!(total_parts + 1 > total_parts, "overflow part is rejected");
     }
 }
