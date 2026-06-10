@@ -191,6 +191,16 @@ const FALLBACK_INSTALLER_PRIORITY = {
   darwin: { app: 3 },
 };
 
+// The beta channel checks updates with a custom, arch-less target (e.g. "darwin-beta").
+// Tauri's updater looks that exact string up in `platforms` with no arch/installer suffix
+// appended, so each beta manifest must expose a bare `{os}-beta` key pointing at the
+// self-updatable installer for that platform.
+const BETA_BARE_TARGET_INSTALLER = {
+  darwin: "app",
+  windows: "nsis",
+  linux: "appimage",
+};
+
 function inferArchFromName(name) {
   if (/(?:^|[-_.])(aarch64|arm64)(?:[-_.]|$)/i.test(name)) return "aarch64";
   if (/(?:^|[-_.])(x86_64|amd64|x64)(?:[-_.]|$)/i.test(name)) return "x86_64";
@@ -418,6 +428,13 @@ function generateUpdaterManifests(files) {
         manifest.platforms[installerKey] = { url, signature };
         if (target.os === "linux" && target.installer === "appimage") {
           generatedLinuxAppImageTargets.add(fallbackKey);
+        }
+
+        if (
+          channel.targetSuffix === "-beta" &&
+          BETA_BARE_TARGET_INSTALLER[target.os] === target.installer
+        ) {
+          manifest.platforms[targetName] = { url, signature };
         }
 
         const priority = FALLBACK_INSTALLER_PRIORITY[target.os]?.[target.installer] ?? 0;
