@@ -19,13 +19,7 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
-## Changes in `v0.10.0-beta.3:`
-* **Updater:** Fixed an issue with the Tauri V2 updater for beta channel users.
-
-## Changes in `v0.10.0-beta.2:`
-* **Updater:** Addressed an issue with the Tauri V2 updater for beta channel users.
-
-## Changes in `v0.10.0-beta.1:`
+## Changes in `v0.10.0:`
 
 v0.10.0 introduces a comprehensive UI/UX modernization, window size memory on relaunch, and stabilization fixes.
 
