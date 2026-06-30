@@ -35,7 +35,11 @@ pub(crate) fn detect_update_mode() -> &'static str {
         }
         return "manual";
     }
-    "native"
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        "native"
+    }
 }
 
 #[cfg(target_os = "linux")]
