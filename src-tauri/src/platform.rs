@@ -28,12 +28,12 @@ pub(crate) fn detect_update_mode() -> &'static str {
     #[cfg(target_os = "linux")]
     {
         if std::env::var("FLATPAK_ID").is_ok() || std::path::Path::new("/.flatpak-info").exists() {
-            return "flatpak";
+            "flatpak"
+        } else if linux_native_updater_supported() {
+            "native"
+        } else {
+            "manual"
         }
-        if linux_native_updater_supported() {
-            return "native";
-        }
-        return "manual";
     }
 
     #[cfg(not(target_os = "linux"))]
