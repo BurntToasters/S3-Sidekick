@@ -4,7 +4,7 @@ import {
   formatSize,
   formatDate,
   basename,
-  twemojiIcon,
+  getIconHtml,
   friendlyError,
 } from "./utils.ts";
 import { refreshObjects } from "./connection.ts";
@@ -203,12 +203,12 @@ function updateSortIndicators(): void {
     if (el) {
       if (state.sortColumn === col) {
         el.innerHTML = state.sortAsc
-          ? twemojiIcon("2b06", {
-              className: "twemoji-icon twemoji-icon--sort",
+          ? getIconHtml("arrow-up", {
+              className: "lucide-icon lucide-icon--sort",
               decorative: true,
             })
-          : twemojiIcon("2b07", {
-              className: "twemoji-icon twemoji-icon--sort",
+          : getIconHtml("arrow-down", {
+              className: "lucide-icon lucide-icon--sort",
               decorative: true,
             });
       } else {
@@ -231,6 +231,7 @@ function updateSortIndicators(): void {
 
 export function renderBucketList(): void {
   const el = dom.bucketList;
+  el.setAttribute("aria-busy", "false");
   if (state.buckets.length === 0) {
     el.innerHTML = `<li class="list__empty">No buckets found</li>`;
     return;
@@ -245,16 +246,59 @@ export function renderBucketList(): void {
     el.innerHTML = `<li class="list__empty">No buckets match filter</li>`;
     return;
   }
+  const bucketIcon = getIconHtml("database", {
+    className: "lucide-icon bucket-icon",
+    decorative: true,
+  });
   el.innerHTML = visibleBuckets
     .map(
       (b) =>
         `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}">` +
         `<button type="button" class="list__item-btn" data-bucket="${escapeHtml(b.name)}" title="${escapeHtml(b.name)}" aria-label="Open bucket ${escapeHtml(b.name)}"${b.name === state.currentBucket ? ' aria-current="true"' : ""}>` +
-        `${escapeHtml(b.name)}` +
+        bucketIcon +
+        `<span>${escapeHtml(b.name)}</span>` +
         `</button>` +
         `</li>`,
     )
     .join("");
+}
+
+export function renderBucketListSkeleton(rowCount = 6): void {
+  const item =
+    `<li class="list__item list__item--skeleton" aria-hidden="true">` +
+    `<span class="skeleton skeleton--text"></span>` +
+    `</li>`;
+  dom.bucketList.innerHTML = item.repeat(rowCount);
+  dom.bucketList.setAttribute("aria-busy", "true");
+}
+
+export function renderObjectTableSkeleton(rowCount = 8): void {
+  const row =
+    `<tr class="object-row object-row--skeleton" aria-hidden="true">` +
+    `<td class="col-check"><span class="skeleton skeleton--check"></span></td>` +
+    `<td class="object-name"><span class="skeleton skeleton--icon"></span><span class="skeleton skeleton--text"></span></td>` +
+    `<td class="object-size"><span class="skeleton skeleton--text skeleton--sm"></span></td>` +
+    `<td class="object-modified"><span class="skeleton skeleton--text skeleton--md"></span></td>` +
+    `</tr>`;
+  dom.objectTbody.innerHTML = row.repeat(rowCount);
+  dom.objectPanel.style.display = "";
+  dom.objectPanel.setAttribute("aria-busy", "true");
+  dom.emptyState.style.display = "none";
+  const loadMore = document.getElementById("load-more-row");
+  if (loadMore) loadMore.style.display = "none";
+}
+
+function emptyFolderRowHtml(): string {
+  return (
+    `<tr><td colspan="4" class="table-empty">` +
+    `<div class="table-empty__content">` +
+    `${getIconHtml("folder", { className: "lucide-icon empty-state__icon", decorative: true })}` +
+    `<p class="table-empty__text">This folder is empty</p>` +
+    `<div class="table-empty__actions">` +
+    `<button type="button" class="btn btn--sm btn--primary" data-empty-action="upload">Upload files</button>` +
+    `<button type="button" class="btn btn--sm" data-empty-action="new-folder">New folder</button>` +
+    `</div></div></td></tr>`
+  );
 }
 
 export function renderObjectTable(): void {
@@ -272,7 +316,7 @@ export function renderObjectTable(): void {
     rows.push(
       `<tr class="object-row object-row--folder" data-prefix="${escapeHtml(prefix)}" tabindex="0">
         <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select folder ${escapeHtml(name)}" /></td>
-        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-folder">${twemojiIcon("1f4c1", { className: "twemoji-icon twemoji-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
+        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-folder">${getIconHtml("folder", { className: "lucide-icon lucide-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size">&mdash;</td>
         <td class="object-modified">&mdash;</td>
       </tr>`,
@@ -291,7 +335,7 @@ export function renderObjectTable(): void {
     rows.push(
       `<tr class="object-row object-row--file" data-key="${escapeHtml(obj.key)}" tabindex="0">
         <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select file ${escapeHtml(name)}" /></td>
-        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-file">${twemojiIcon("1f4c4", { className: "twemoji-icon twemoji-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
+        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-file">${getIconHtml("file", { className: "lucide-icon lucide-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
         <td class="object-size"${barStyle}>${formatSize(obj.size)}</td>
         <td class="object-modified">${formatDate(obj.last_modified)}</td>
       </tr>`,
@@ -299,12 +343,16 @@ export function renderObjectTable(): void {
   }
 
   if (rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4" class="table-empty">No objects</td></tr>`;
+    tbody.innerHTML =
+      filter.length > 0
+        ? `<tr><td colspan="4" class="table-empty">No objects match filter</td></tr>`
+        : emptyFolderRowHtml();
   } else {
     tbody.innerHTML = rows.join("");
   }
 
   dom.objectPanel.style.display = "";
+  dom.objectPanel.setAttribute("aria-busy", "false");
   dom.emptyState.style.display = "none";
 
   updateSelectionUI();
@@ -434,6 +482,7 @@ export async function navigateBack(): Promise<void> {
   navSuppressPush = true;
   clearFilter();
   resetSelectionForListingChange();
+  renderObjectTableSkeleton();
 
   try {
     if (entry.bucket !== state.currentBucket) {
@@ -466,6 +515,7 @@ export async function navigateForward(): Promise<void> {
   navSuppressPush = true;
   clearFilter();
   resetSelectionForListingChange();
+  renderObjectTableSkeleton();
 
   try {
     if (entry.bucket !== state.currentBucket) {
@@ -492,10 +542,16 @@ export async function navigateForward(): Promise<void> {
 export async function navigateToFolder(prefix: string): Promise<void> {
   clearFilter();
   resetSelectionForListingChange();
-  await refreshObjects(state.currentBucket, prefix);
-  pushNav(state.currentBucket, prefix);
-  renderObjectTable();
-  renderBreadcrumb();
+  renderObjectTableSkeleton();
+  try {
+    await refreshObjects(state.currentBucket, prefix);
+    pushNav(state.currentBucket, prefix);
+    renderObjectTable();
+    renderBreadcrumb();
+  } catch (err) {
+    renderObjectTable();
+    throw err;
+  }
 }
 
 export async function navigateUp(): Promise<void> {
@@ -510,11 +566,17 @@ export async function selectBucket(name: string): Promise<void> {
   clearFilter();
   resetSelectionForListingChange();
   state.currentPrefix = "";
-  await refreshObjects(name, "");
-  pushNav(name, "");
-  renderBucketList();
-  renderObjectTable();
-  renderBreadcrumb();
+  renderObjectTableSkeleton();
+  try {
+    await refreshObjects(name, "");
+    pushNav(name, "");
+    renderBucketList();
+    renderObjectTable();
+    renderBreadcrumb();
+  } catch (err) {
+    renderObjectTable();
+    throw err;
+  }
 }
 
 export function showEmptyState(): void {

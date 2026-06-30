@@ -5,7 +5,7 @@ import {
   formatSize,
   formatDate,
   basename,
-  twemojiIcon,
+  getIconHtml,
 } from "./utils.ts";
 import { state } from "./state.ts";
 
@@ -535,7 +535,10 @@ function renderEntryRows(): void {
     if (isBatch || i > 0) {
       const delBtn = document.createElement("button");
       delBtn.className = "btn btn--icon metadata-entry__delete";
-      delBtn.innerHTML = twemojiIcon("274c", { decorative: true });
+      delBtn.innerHTML = getIconHtml("x", {
+        className: "lucide-icon",
+        decorative: true,
+      });
       delBtn.title = "Remove";
       delBtn.setAttribute("aria-label", "Remove metadata row");
       delBtn.addEventListener("click", () => {

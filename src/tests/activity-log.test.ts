@@ -143,8 +143,8 @@ describe("activity log with drawer", () => {
     expect(renderedEntries.length).toBe(200);
     expect(list.innerHTML).toContain("warn message");
     expect(list.innerHTML).toContain("error message");
-    expect(list.innerHTML).toContain("/twemoji/26a0.svg");
-    expect(list.innerHTML).toContain("/twemoji/274c.svg");
+    expect(list.innerHTML).toContain('data-icon="alert-triangle"');
+    expect(list.innerHTML).toContain('data-icon="alert-circle"');
 
     const statusbarBadge = document.getElementById(
       "activity-badge",

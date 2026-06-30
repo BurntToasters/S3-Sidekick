@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { escapeHtml, twemojiIcon } from "./utils.ts";
+import { escapeHtml, getIconHtml } from "./utils.ts";
 import { state } from "./state.ts";
 import { logActivity } from "./activity-log.ts";
 import {
@@ -82,6 +82,9 @@ export interface CopyMoveQueueEntry {
 export interface TransferRunSummary {
   hadUpload: boolean;
   hadDownload: boolean;
+  uploadCount: number;
+  downloadCount: number;
+  errorCount: number;
 }
 
 interface PersistedTransferManifest {
@@ -231,7 +234,12 @@ function buildCheckpointId(
   item: Pick<TransferItem, "operation" | "bucket" | "key" | "destination">,
 ): string {
   const seed = `${item.operation}:${item.bucket}:${item.key}:${item.destination ?? ""}`;
-  return btoa(unescape(encodeURIComponent(seed))).replace(/=+$/g, "");
+  // Base64-encode UTF-8 bytes without the deprecated unescape(): map each byte
+  // of the encoded string through String.fromCharCode for btoa's latin1 input.
+  const utf8 = new TextEncoder().encode(seed);
+  let binary = "";
+  for (const byte of utf8) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/=+$/g, "");
 }
 
 function getEffectiveTransferSettings(): EffectiveTransferSettings {
@@ -397,8 +405,13 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
 }
 
 function buildQueueManifestJson(): string | null {
+  // Uploads are not resumable, so an in-flight upload that survives an app kill
+  // would restart from byte 0. We drop active uploads from the manifest; queued
+  // uploads that never started are still safe to persist.
   const pending = queue.filter(
-    (item) => item.status === "queued" || item.status === "uploading",
+    (item) =>
+      (item.status === "queued" || item.status === "uploading") &&
+      !(item.operation === "upload" && item.status === "uploading"),
   );
   if (pending.length === 0) return null;
   const payload: PersistedTransferManifest = {
@@ -885,14 +898,17 @@ export function disposeTransferQueueUI(): void {
 function pauseAllTransfers(): void {
   queuePaused = true;
   for (const item of queue) {
-    if (item.status === "queued" || item.status === "uploading") {
-      item.paused = true;
-      item.phase = "paused";
-      if (item.status === "uploading") {
-        void invoke("cancel_transfer", { transferId: item.id }).catch(
-          () => undefined,
-        );
-      }
+    if (item.status !== "queued" && item.status !== "uploading") continue;
+    // In-flight uploads would have to restart from zero if interrupted, so let
+    // them run to completion. Downloads resume cleanly, so cancelling them to
+    // pause is safe; queued items simply stay queued.
+    if (item.operation === "upload" && item.status === "uploading") continue;
+    item.paused = true;
+    item.phase = "paused";
+    if (item.status === "uploading") {
+      void invoke("cancel_transfer", { transferId: item.id }).catch(
+        () => undefined,
+      );
     }
   }
   queueRender();
@@ -944,6 +960,12 @@ function togglePauseTransferItem(id: number): void {
       );
     }
   } else {
+    // In-flight uploads would have to restart from zero if interrupted, so
+    // leave a running upload alone. The pause control is already hidden for
+    // these in the queue UI; this guards other entry points too.
+    if (item.operation === "upload" && item.status === "uploading") {
+      return;
+    }
     item.paused = true;
     item.phase = "paused";
     if (item.status === "uploading") {
@@ -1329,6 +1351,9 @@ async function processQueue(): Promise<void> {
   processing = true;
   let completedUploadThisRun = false;
   let completedDownloadThisRun = false;
+  let uploadCount = 0;
+  let downloadCount = 0;
+  let errorCount = 0;
 
   const workers: Promise<void>[] = [];
   for (let i = 0; i < maxConcurrent; i += 1) {
@@ -1358,9 +1383,11 @@ async function processQueue(): Promise<void> {
         const completed = await runItemWithRetry(item);
         if (completed && item.operation === "download") {
           completedDownloadThisRun = true;
+          downloadCount += 1;
         }
         if (completed && item.operation === "upload") {
           completedUploadThisRun = true;
+          uploadCount += 1;
         }
 
         if (completed) {
@@ -1379,6 +1406,7 @@ async function processQueue(): Promise<void> {
           item.status = "error";
           item.error = errorText;
           item.browserFile = undefined;
+          errorCount += 1;
           const opLabel =
             item.operation === "download"
               ? "Download"
@@ -1407,6 +1435,9 @@ async function processQueue(): Promise<void> {
     onComplete({
       hadUpload: completedUploadThisRun,
       hadDownload: completedDownloadThisRun,
+      uploadCount,
+      downloadCount,
+      errorCount,
     });
   }
 }
@@ -1636,7 +1667,7 @@ async function executeTransfer(
   if (item.filePath) {
     item.resumable = false;
     item.checkpointId = undefined;
-    await invoke("upload_object_resumable", {
+    await invoke("upload_object", {
       bucket: item.bucket,
       key: item.key,
       filePath: item.filePath,
@@ -1646,7 +1677,6 @@ async function executeTransfer(
       partSizeMb: effective.uploadPartSizeMb,
       partConcurrency: effective.uploadPartConcurrency,
       bandwidthLimitMbps: effective.bandwidthLimitMbps,
-      resumable: false,
       checksumVerification: effective.enableTransferChecksumVerification,
     });
   } else if (item.browserFile) {
@@ -1815,7 +1845,7 @@ function renderQueue(): void {
   if (queue.length === 0) {
     list.innerHTML =
       `<div class="transfer-empty">` +
-      `<img class="twemoji-icon empty-state__icon" src="/twemoji/1f4e5.svg" alt="" aria-hidden="true" draggable="false" />` +
+      `${getIconHtml("download", { className: "lucide-icon empty-state__icon", decorative: true })}` +
       `<span>No transfers</span>` +
       `</div>`;
     updateBadge();
@@ -1830,32 +1860,32 @@ function renderQueue(): void {
       let statusIcon = "";
       let statusClass = "";
       if (t.status === "queued") {
-        statusIcon = twemojiIcon("23f3", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("clock", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--queued";
       } else if (t.status === "uploading") {
-        statusIcon = twemojiIcon("1f504", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("refresh-cw", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--active";
       } else if (t.status === "done") {
-        statusIcon = twemojiIcon("2705", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("check-circle", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--done";
       } else if (t.status === "skipped") {
-        statusIcon = twemojiIcon("23ed", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("skip-forward", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--queued";
       } else {
-        statusIcon = twemojiIcon("274c", {
-          className: "twemoji-icon twemoji-icon--transfer-status",
+        statusIcon = getIconHtml("alert-circle", {
+          className: "lucide-icon transfer-icon-svg",
           decorative: true,
         });
         statusClass = "transfer-status--error";
@@ -1883,12 +1913,12 @@ function renderQueue(): void {
             : t.key;
       const arrow =
         t.operation === "download"
-          ? twemojiIcon("2b05", {
-              className: "twemoji-icon twemoji-icon--transfer-arrow",
+          ? getIconHtml("arrow-left", {
+              className: "lucide-icon transfer-arrow-svg",
               decorative: true,
             })
-          : twemojiIcon("27a1", {
-              className: "twemoji-icon twemoji-icon--transfer-arrow",
+          : getIconHtml("arrow-right", {
+              className: "lucide-icon transfer-arrow-svg",
               decorative: true,
             });
 
@@ -1929,14 +1959,18 @@ function renderQueue(): void {
         selectedTransferId === t.id
           ? "transfer-item transfer-item--selected"
           : "transfer-item";
-      const pauseButton =
-        t.status === "queued" || t.status === "uploading" || t.paused
-          ? `<button class="transfer-pause btn--ghost" title="${
-              t.paused ? "Resume" : "Pause"
-            }" aria-label="${t.paused ? "Resume" : "Pause"} transfer">${
-              t.paused ? "▶" : "Ⅱ"
-            }</button>`
-          : "";
+      // In-flight uploads would have to restart from zero if interrupted, so
+      // only expose pause for downloads or transfers not yet running.
+      const canPause =
+        !(t.operation === "upload" && t.status === "uploading" && !t.paused) &&
+        (t.status === "queued" || t.status === "uploading" || t.paused);
+      const pauseButton = canPause
+        ? `<button class="transfer-pause btn--ghost" title="${
+            t.paused ? "Resume" : "Pause"
+          }" aria-label="${t.paused ? "Resume" : "Pause"} transfer">${
+            t.paused ? "▶" : "Ⅱ"
+          }</button>`
+        : "";
 
       return (
         `<div class="${rowClass}" data-id="${t.id}">` +

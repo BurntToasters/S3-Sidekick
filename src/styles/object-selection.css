@@ -1,0 +1,73 @@
+/* Object selection, drag-over state, batch toolbar */
+
+.col-check {
+  width: 32px;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.object-table th.col-check,
+.object-table td.col-check {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.col-check input[type="checkbox"] {
+  display: block;
+  margin: 0 auto;
+}
+
+.object-row--selected {
+  background: var(--bg-active);
+}
+
+.object-row--selected:hover {
+  background: var(--bg-active);
+}
+
+.object-row:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
+}
+
+.object-panel--dragover {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+
+.batch-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 14px;
+  background: var(--bg-active);
+  border-bottom: 1px solid var(--glass-border);
+  font-size: 12px;
+  font-weight: 500;
+  animation: batch-slide-in 0.15s ease;
+}
+.batch-toolbar[hidden] {
+  display: none;
+}
+
+@keyframes batch-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.batch-toolbar__count {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.batch-toolbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}

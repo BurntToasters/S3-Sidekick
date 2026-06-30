@@ -239,7 +239,11 @@ export async function ensureSecurityReady(): Promise<boolean> {
       await delay(WINDOWS_STARTUP_BIOMETRIC_DELAY_MS);
     }
     const biometricOverlay = document.getElementById("biometric-overlay");
-    if (biometricOverlay) biometricOverlay.hidden = false;
+    if (biometricOverlay) {
+      biometricOverlay.hidden = false;
+      void biometricOverlay.offsetWidth;
+    }
+    await delay(150);
     try {
       status = await unlockBiometric();
       if (biometricOverlay) biometricOverlay.hidden = true;

@@ -9,8 +9,7 @@ import {
   formatDate,
   basename,
   isEditableElement,
-  twemojiAsset,
-  twemojiIcon,
+  getIconHtml,
   splitNameExt,
   joinPath,
   pathSeparator,
@@ -109,21 +108,19 @@ describe("DOM helpers", () => {
     expect(isEditableElement(null)).toBe(false);
   });
 
-  it("builds twemoji assets/icons with escaped attributes", () => {
-    expect(twemojiAsset("1f680")).toBe("/twemoji/1f680.svg");
-    const decorative = twemojiIcon("1f680", {
+  it("builds icons with escaped attributes", () => {
+    const decorative = getIconHtml("rocket", {
       className: `icon"bad`,
       alt: "",
     });
-    expect(decorative).toContain('src="/twemoji/1f680.svg"');
     expect(decorative).toContain('aria-hidden="true"');
     expect(decorative).toContain('class="icon&quot;bad"');
 
-    const labeled = twemojiIcon("1f680", {
+    const labeled = getIconHtml("rocket", {
       alt: "Rocket",
       decorative: false,
     });
-    expect(labeled).toContain('alt="Rocket"');
+    expect(labeled).toContain('role="img" aria-label="Rocket"');
     expect(labeled).not.toContain('aria-hidden="true"');
   });
 });

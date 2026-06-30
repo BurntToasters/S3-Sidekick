@@ -153,8 +153,6 @@ mod platform {
         static kCFTypeDictionaryValueCallBacks: c_void;
     }
 
-    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
-
     const SERVICE: &str = "run.rosie.s3-sidekick";
     const ACCOUNT: &str = "biometric-encryption-key";
 
@@ -283,7 +281,7 @@ mod platform {
 
     unsafe fn new_dict() -> *mut c_void {
         CFDictionaryCreateMutable(
-            kCFAllocatorDefault as *const c_void,
+            kCFAllocatorDefault,
             0,
             &kCFTypeDictionaryKeyCallBacks as *const c_void,
             &kCFTypeDictionaryValueCallBacks as *const c_void,

@@ -1,0 +1,180 @@
+/* Design tokens, theme variables, reset and base elements */
+
+:root {
+  --bg: #f4f4f5;
+  --bg-surface: #ffffff;
+  --bg-hover: #e4e4e7;
+  --bg-active: #dbeafe;
+  --border: #e4e4e7;
+  --border-focus: #4f46e5;
+  --text: #09090b;
+  --text-secondary: #71717a;
+  --text-muted: #a1a1aa;
+
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-text: #ffffff;
+
+  --danger: #ef4444;
+  --disconnect-bg: rgba(239, 68, 68, 0.08);
+  --disconnect-border: rgba(239, 68, 68, 0.25);
+  --disconnect-text: #dc2626;
+  --disconnect-bg-hover: rgba(239, 68, 68, 0.15);
+  --disconnect-border-hover: rgba(239, 68, 68, 0.45);
+  --disconnect-text-hover: #b91c1c;
+
+  --badge-off-bg: #e4e4e7;
+  --badge-off-text: #71717a;
+  --badge-on-bg: #dcfce7;
+  --badge-on-text: #15803d;
+
+  --font:
+    "Segoe UI Variable", "Segoe UI", "Ubuntu", "Noto Sans", system-ui,
+    -apple-system, sans-serif;
+  --mono: "Cascadia Code", "Consolas", "SF Mono", monospace;
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-lg: 12px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --focus-ring-width: 2px;
+  --focus-ring-color: var(--accent);
+  --text-primary: var(--text);
+  --sidebar-width: 240px;
+  --sidebar-min: 200px;
+  --sidebar-max: 420px;
+  --warning: #f59e0b;
+
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-bg-heavy: rgba(255, 255, 255, 0.88);
+  --glass-border: rgba(0, 0, 0, 0.06);
+  --glass-blur: 16px;
+  --glass-blur-light: 10px;
+  --glass-shadow:
+    0 4px 20px -2px rgba(0, 0, 0, 0.05), 0 2px 8px -1px rgba(0, 0, 0, 0.03);
+  --glass-shadow-elevated:
+    0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --glow-accent: rgba(79, 70, 229, 0.12);
+  --transition-smooth: 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --transition-bounce: 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #09090b;
+    --bg-surface: #18181b;
+    --bg-hover: #27272a;
+    --bg-active: #1e1b4b;
+    --border: #27272a;
+    --border-focus: #6366f1;
+    --text: #fafafa;
+    --text-secondary: #a1a1aa;
+    --text-muted: #52525b;
+
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --accent-text: #09090b;
+
+    --disconnect-bg: rgba(248, 113, 113, 0.12);
+    --disconnect-border: rgba(248, 113, 113, 0.3);
+    --disconnect-text: #fca5a5;
+    --disconnect-bg-hover: rgba(248, 113, 113, 0.22);
+    --disconnect-border-hover: rgba(248, 113, 113, 0.5);
+    --disconnect-text-hover: #fecaca;
+
+    --badge-off-bg: #27272a;
+    --badge-off-text: #a1a1aa;
+    --badge-on-bg: #064e3b;
+    --badge-on-text: #a7f3d0;
+
+    --warning: #fbbf24;
+    --text-primary: var(--text);
+
+    --glass-bg: rgba(24, 24, 27, 0.72);
+    --glass-bg-heavy: rgba(24, 24, 27, 0.88);
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-shadow:
+      0 4px 20px -2px rgba(0, 0, 0, 0.35), 0 2px 8px -1px rgba(0, 0, 0, 0.25);
+    --glass-shadow-elevated:
+      0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4);
+    --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    --glow-accent: rgba(99, 102, 241, 0.1);
+  }
+}
+
+[data-theme="dark"] {
+  --bg: #09090b;
+  --bg-surface: #18181b;
+  --bg-hover: #27272a;
+  --bg-active: #1e1b4b;
+  --border: #27272a;
+  --border-focus: #6366f1;
+  --text: #fafafa;
+  --text-secondary: #a1a1aa;
+  --text-muted: #52525b;
+
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --accent-text: #09090b;
+
+  --disconnect-bg: rgba(248, 113, 113, 0.12);
+  --disconnect-border: rgba(248, 113, 113, 0.3);
+  --disconnect-text: #fca5a5;
+  --disconnect-bg-hover: rgba(248, 113, 113, 0.22);
+  --disconnect-border-hover: rgba(248, 113, 113, 0.5);
+  --disconnect-text-hover: #fecaca;
+
+  --badge-off-bg: #27272a;
+  --badge-off-text: #a1a1aa;
+  --badge-on-bg: #064e3b;
+  --badge-on-text: #a7f3d0;
+
+  --warning: #fbbf24;
+  --text-primary: var(--text);
+
+  --glass-bg: rgba(24, 24, 27, 0.72);
+  --glass-bg-heavy: rgba(24, 24, 27, 0.88);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-shadow:
+    0 4px 20px -2px rgba(0, 0, 0, 0.35), 0 2px 8px -1px rgba(0, 0, 0, 0.25);
+  --glass-shadow-elevated:
+    0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4);
+  --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --glow-accent: rgba(99, 102, 241, 0.1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font);
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+body.platform-windows {
+  --font: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+}
+
+body.platform-macos {
+  --font:
+    "SF Pro Text", "SF Pro Display", -apple-system, "Helvetica Neue", sans-serif;
+}
+
+body.platform-linux {
+  --font: "Noto Sans", "Ubuntu", "Cantarell", sans-serif;
+}

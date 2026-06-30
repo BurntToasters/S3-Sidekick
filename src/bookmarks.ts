@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { escapeHtml, twemojiIcon } from "./utils.ts";
+import { escapeHtml, getIconHtml } from "./utils.ts";
 
 export interface Bookmark {
   name: string;
@@ -220,7 +220,7 @@ export function renderBookmarkList(
             <div class="bookmark__name">${escapeHtml(b.name)}</div>
             <div class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</div>
           </div>
-          <button class="bookmark__delete" data-delete="${i}" title="Remove bookmark">${twemojiIcon("274c", { className: "twemoji-icon twemoji-icon--bookmark-delete", decorative: true })}</button>
+          <button class="bookmark__delete" data-delete="${i}" title="Remove bookmark">${getIconHtml("x", { className: "lucide-icon bookmark__delete-icon", decorative: true })}</button>
         </li>`;
     })
     .join("");
