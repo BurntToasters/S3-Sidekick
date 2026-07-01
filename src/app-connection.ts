@@ -172,6 +172,26 @@ export async function handleConnect(): Promise<void> {
     return;
   }
 
+  // Warn about cleartext HTTP for non-local endpoints (credentials sent unencrypted)
+  if (/^http:\/\//i.test(endpoint)) {
+    try {
+      const host = new URL(endpoint).hostname;
+      const isLocal =
+        host === "localhost" ||
+        host === "127.0.0.1" ||
+        host === "::1" ||
+        host.endsWith(".local");
+      if (!isLocal) {
+        logActivity(
+          `Warning: connecting over plain HTTP to ${host}. Credentials will be sent in cleartext.`,
+          "warning",
+        );
+      }
+    } catch {
+      // URL parse failure handled by the regex check above
+    }
+  }
+
   dom.connectBtn.disabled = true;
   setStatus("Connecting...");
 

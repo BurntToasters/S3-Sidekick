@@ -11,7 +11,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{atomic_write, bookmarks_path, bookmarks_backup_path, connection_path, lock_storage_ops, security_path};
 
-pub(crate) const PBKDF2_ITERATIONS: u32 = 210_000;
+pub(crate) const PBKDF2_ITERATIONS: u32 = 600_000;
 const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
 pub(crate) const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;

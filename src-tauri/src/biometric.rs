@@ -7,6 +7,34 @@ use crate::security::{
     save_security_config, security_status, set_unlocked_key, SecurityStatus, KEY_LEN,
 };
 
+// ─── Security limitation ───────────────────────────────────────────────────────
+// The biometric unlock flow uses a two-step approach:
+//   1. The AES key is stored in an OS credential store (macOS Keychain /
+//      Windows Credential Manager).
+//   2. A separate biometric prompt (LAContext on macOS, UserConsentVerifier on
+//      Windows) gates the UI before the key is read.
+//
+// However, the stored key is NOT cryptographically bound to the biometric.
+// On macOS, the Keychain item uses kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+// but does NOT use SecAccessControl with .biometryCurrentSet, so any process
+// running as the same user can read it without passing Touch ID.
+// On Windows, the key is a plain GenericCredential (CRED_PERSIST_ENTERPRISE);
+// UserConsentVerifier is a UI-only gate, not a TPM/NGC-bound operation.
+//
+// Mitigation paths (future work):
+//   macOS: Create the Keychain item with SecAccessControlCreateWithFlags(
+//          ..., .biometryCurrentSet | .privateKeyUsage, ...) and pass
+//          kSecUseAuthenticationContext so the key never leaves the Secure Enclave
+//          without a live biometric check.
+//   Windows: Wrap the key using KeyCredentialManager (NGC/TPM-backed) or
+//          DPAPI-NG with a Windows Hello credential, instead of a plain
+//          GenericCredential.
+//
+// Until then, the biometric gate provides defence-in-depth (requires physical
+// presence at the machine) but should not be considered equivalent to hardware-
+// bound key protection.
+// ────────────────────────────────────────────────────────────────────────────────
+
 pub fn is_available() -> bool {
     platform::is_available()
 }

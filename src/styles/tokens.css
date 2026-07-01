@@ -8,8 +8,8 @@
   --border: #e4e4e7;
   --border-focus: #4f46e5;
   --text: #09090b;
-  --text-secondary: #71717a;
-  --text-muted: #a1a1aa;
+  --text-secondary: #5c5c64;
+  --text-muted: #6e6e77;
 
   --accent: #4f46e5;
   --accent-hover: #4338ca;
@@ -24,7 +24,7 @@
   --disconnect-text-hover: #b91c1c;
 
   --badge-off-bg: #e4e4e7;
-  --badge-off-text: #71717a;
+  --badge-off-text: #5c5c64;
   --badge-on-bg: #dcfce7;
   --badge-on-text: #15803d;
 
@@ -63,6 +63,8 @@
   --transition-bounce: 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
+/* Dark theme: activated by OS preference (when user hasn't forced light)
+   or by explicit data-theme="dark" attribute. Single source of truth. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #09090b;
@@ -73,7 +75,7 @@
     --border-focus: #6366f1;
     --text: #fafafa;
     --text-secondary: #a1a1aa;
-    --text-muted: #52525b;
+    --text-muted: #85858d;
 
     --accent: #6366f1;
     --accent-hover: #818cf8;
@@ -106,6 +108,7 @@
   }
 }
 
+/* Explicit dark override (user forced via settings toggle) */
 [data-theme="dark"] {
   --bg: #09090b;
   --bg-surface: #18181b;
@@ -115,7 +118,7 @@
   --border-focus: #6366f1;
   --text: #fafafa;
   --text-secondary: #a1a1aa;
-  --text-muted: #52525b;
+  --text-muted: #85858d;
 
   --accent: #6366f1;
   --accent-hover: #818cf8;

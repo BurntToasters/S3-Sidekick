@@ -1603,7 +1603,7 @@
       </div>
     </div>
 
-    <div id="palette-overlay" class="palette-overlay" hidden>
+    <div id="palette-overlay" class="palette-overlay" role="dialog" aria-modal="true" aria-label="Command palette" hidden>
       <div class="palette">
         <div class="palette__input-wrap">
           <span
@@ -1617,9 +1617,15 @@
             placeholder="Type a command..."
             autocomplete="off"
             spellcheck="false"
+            role="combobox"
+            aria-label="Search commands"
+            aria-expanded="false"
+            aria-controls="palette-results"
+            aria-autocomplete="list"
+            aria-activedescendant=""
           />
         </div>
-        <div id="palette-results" class="palette__results"></div>
+        <div id="palette-results" class="palette__results" role="listbox" aria-label="Commands"></div>
       </div>
     </div>
 
