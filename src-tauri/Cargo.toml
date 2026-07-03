@@ -46,6 +46,9 @@ windows = { version = "0.58", features = [
     "Win32_System_WinRT",
 ] }
 
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

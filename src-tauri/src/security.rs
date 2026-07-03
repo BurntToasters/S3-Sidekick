@@ -165,7 +165,9 @@ fn default_security_config() -> SecurityConfig {
     }
 }
 
-pub(crate) fn load_security_config(app: &tauri::AppHandle) -> Result<SecurityConfig, String> {
+pub(crate) fn load_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<SecurityConfig, String> {
     let path = security_path(app)?;
     if !path.exists() {
         return Ok(default_security_config());
@@ -186,8 +188,8 @@ pub(crate) fn load_security_config(app: &tauri::AppHandle) -> Result<SecurityCon
     }
 }
 
-pub(crate) fn save_security_config(
-    app: &tauri::AppHandle,
+pub(crate) fn save_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
     config: &SecurityConfig,
 ) -> Result<(), String> {
     let path = security_path(app)?;
@@ -294,8 +296,8 @@ struct MigrationPlan {
     transformed: String,
 }
 
-fn managed_data_files(
-    app: &tauri::AppHandle,
+fn managed_data_files<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
 ) -> Result<Vec<(std::path::PathBuf, &'static str)>, String> {
     let bookmarks = bookmarks_path(app)?;
     let connection = connection_path(app)?;
@@ -307,8 +309,8 @@ fn managed_data_files(
     ])
 }
 
-fn build_migration_plans(
-    app: &tauri::AppHandle,
+fn build_migration_plans<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
     enable_encryption: bool,
     key: &[u8; KEY_LEN],
 ) -> Result<Vec<MigrationPlan>, String> {
@@ -340,8 +342,8 @@ fn build_migration_plans(
     Ok(plans)
 }
 
-fn build_rekey_plans(
-    app: &tauri::AppHandle,
+fn build_rekey_plans<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
     old_key: &[u8; KEY_LEN],
     new_key: &[u8; KEY_LEN],
 ) -> Result<Vec<MigrationPlan>, String> {
@@ -483,6 +485,13 @@ pub(crate) async fn initialize_security(
 #[tauri::command]
 pub(crate) async fn unlock_security(
     app: tauri::AppHandle,
+    password: String,
+) -> Result<SecurityStatus, String> {
+    unlock_security_inner(app, password).await
+}
+
+async fn unlock_security_inner<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     mut password: String,
 ) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
@@ -771,6 +780,109 @@ pub(crate) async fn reset_security(app: tauri::AppHandle) -> Result<SecurityStat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn unique_test_suffix(label: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{label}-{}-{nanos}", std::process::id())
+    }
+
+    fn test_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn restore_env_var(key: &str, value: &Option<OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    struct TestEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        root: std::path::PathBuf,
+        home: Option<OsString>,
+        appdata: Option<OsString>,
+        localappdata: Option<OsString>,
+        xdg_data_home: Option<OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn new(label: &str) -> Self {
+            let lock = test_env_lock().lock().unwrap();
+            let root = std::env::temp_dir().join(format!(
+                "s3-sidekick-security-test-{}",
+                unique_test_suffix(label)
+            ));
+            let home = root.join("home");
+            let appdata = root.join("appdata");
+            let localappdata = root.join("localappdata");
+            let xdg_data_home = root.join("xdg-data-home");
+
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::create_dir_all(&appdata).unwrap();
+            std::fs::create_dir_all(&localappdata).unwrap();
+            std::fs::create_dir_all(&xdg_data_home).unwrap();
+
+            let prior_home = std::env::var_os("HOME");
+            let prior_appdata = std::env::var_os("APPDATA");
+            let prior_localappdata = std::env::var_os("LOCALAPPDATA");
+            let prior_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+
+            std::env::set_var("HOME", &home);
+            std::env::set_var("APPDATA", &appdata);
+            std::env::set_var("LOCALAPPDATA", &localappdata);
+            std::env::set_var("XDG_DATA_HOME", &xdg_data_home);
+
+            Self {
+                _lock: lock,
+                root,
+                home: prior_home,
+                appdata: prior_appdata,
+                localappdata: prior_localappdata,
+                xdg_data_home: prior_xdg_data_home,
+            }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            restore_env_var("HOME", &self.home);
+            restore_env_var("APPDATA", &self.appdata);
+            restore_env_var("LOCALAPPDATA", &self.localappdata);
+            restore_env_var("XDG_DATA_HOME", &self.xdg_data_home);
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn make_test_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_app()
+    }
+
+    struct TestAppDataGuard {
+        path: std::path::PathBuf,
+    }
+
+    impl TestAppDataGuard {
+        fn new<R: tauri::Runtime, M: tauri::Manager<R>>(app: &M) -> Self {
+            let path = app.path().app_data_dir().unwrap();
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TestAppDataGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn constant_time_eq_equal_slices() {
@@ -844,5 +956,89 @@ mod tests {
         assert!(!config.initialized);
         assert!(!config.encryption_enabled);
         assert_eq!(config.pbkdf2_iterations, PBKDF2_ITERATIONS);
+    }
+
+    #[tokio::test]
+    async fn unlock_security_migrates_legacy_pbkdf2_vault() {
+        let _env = TestEnvGuard::new("pbkdf2-migration");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let app_handle = app.handle().clone();
+
+        set_unlocked_key(None, 0).unwrap();
+
+        let legacy_password = "correct horse battery staple";
+        let legacy_iterations = 210_000;
+        let legacy_salt = *b"legacy-salt-1234";
+        let legacy_key = derive_key(legacy_password, &legacy_salt, legacy_iterations);
+        let legacy_verifier = key_verifier(&legacy_key);
+
+        let connection_plain =
+            "{\"endpoint\":\"https://example.com\",\"region\":\"us-east-1\",\"access_key\":\"abc\",\"secret_key\":\"def\"}";
+        let bookmarks_plain =
+            "[{\"name\":\"prod\",\"endpoint\":\"https://example.com\",\"region\":\"us-east-1\",\"access_key\":\"abc\",\"secret_key\":\"def\"}]";
+        let bookmarks_backup_plain = bookmarks_plain;
+
+        let connection_path = crate::connection_path(&app_handle).unwrap();
+        let bookmarks_path = crate::bookmarks_path(&app_handle).unwrap();
+        let bookmarks_backup_path = crate::bookmarks_backup_path(&app_handle).unwrap();
+        let security_path = crate::security_path(&app_handle).unwrap();
+
+        let legacy_connection_cipher = encrypt_text(connection_plain, &legacy_key).unwrap();
+        let legacy_bookmarks_cipher = encrypt_text(bookmarks_plain, &legacy_key).unwrap();
+        let legacy_bookmarks_backup_cipher =
+            encrypt_text(bookmarks_backup_plain, &legacy_key).unwrap();
+
+        std::fs::write(&connection_path, &legacy_connection_cipher).unwrap();
+        std::fs::write(&bookmarks_path, &legacy_bookmarks_cipher).unwrap();
+        std::fs::write(&bookmarks_backup_path, &legacy_bookmarks_backup_cipher).unwrap();
+
+        let legacy_config = SecurityConfig {
+            initialized: true,
+            encryption_enabled: true,
+            salt: B64.encode(legacy_salt),
+            verifier: B64.encode(legacy_verifier),
+            lock_timeout_minutes: 15,
+            pbkdf2_iterations: legacy_iterations,
+            biometric_enrolled: false,
+        };
+        save_security_config(&app_handle, &legacy_config).unwrap();
+
+        let status = unlock_security_inner(app_handle.clone(), legacy_password.to_string())
+            .await
+            .unwrap();
+        assert!(status.unlocked);
+        assert_eq!(status.lock_timeout_minutes, 15);
+
+        let migrated_config = load_security_config(&app_handle).unwrap();
+        assert_eq!(migrated_config.pbkdf2_iterations, PBKDF2_ITERATIONS);
+        assert_ne!(migrated_config.salt, legacy_config.salt);
+        assert_ne!(migrated_config.verifier, legacy_config.verifier);
+
+        let migrated_connection_cipher = std::fs::read_to_string(&connection_path).unwrap();
+        let migrated_bookmarks_cipher = std::fs::read_to_string(&bookmarks_path).unwrap();
+        let migrated_bookmarks_backup_cipher =
+            std::fs::read_to_string(&bookmarks_backup_path).unwrap();
+        assert_ne!(migrated_connection_cipher, legacy_connection_cipher);
+        assert_ne!(migrated_bookmarks_cipher, legacy_bookmarks_cipher);
+        assert_ne!(
+            migrated_bookmarks_backup_cipher,
+            legacy_bookmarks_backup_cipher
+        );
+
+        let connection_roundtrip =
+            read_protected_file(&connection_path, "", &migrated_config).unwrap();
+        let bookmarks_roundtrip =
+            read_protected_file(&bookmarks_path, "[]", &migrated_config).unwrap();
+        let bookmarks_backup_roundtrip =
+            read_protected_file(&bookmarks_backup_path, "[]", &migrated_config).unwrap();
+        assert_eq!(connection_roundtrip, connection_plain);
+        assert_eq!(bookmarks_roundtrip, bookmarks_plain);
+        assert_eq!(bookmarks_backup_roundtrip, bookmarks_backup_plain);
+
+        let security_json = std::fs::read_to_string(security_path).unwrap();
+        assert!(security_json.contains("\"pbkdf2_iterations\": 600000"));
+
+        set_unlocked_key(None, 0).unwrap();
     }
 }

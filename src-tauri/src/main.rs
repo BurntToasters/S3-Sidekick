@@ -46,7 +46,9 @@ pub(crate) fn lock_storage_ops() -> Result<std::sync::MutexGuard<'static, ()>, S
         .map_err(|err| err.to_string())
 }
 
-fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+fn settings_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -55,7 +57,9 @@ fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("settings.json"))
 }
 
-fn connection_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+fn connection_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -64,7 +68,9 @@ fn connection_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String>
     Ok(dir.join("connection.json"))
 }
 
-fn bookmarks_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+fn bookmarks_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -73,7 +79,9 @@ fn bookmarks_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> 
     Ok(dir.join("bookmarks.json"))
 }
 
-fn bookmarks_backup_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+fn bookmarks_backup_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -82,7 +90,9 @@ fn bookmarks_backup_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, S
     Ok(dir.join("bookmarks.json.bak"))
 }
 
-fn security_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+fn security_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -91,7 +101,9 @@ fn security_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("security.json"))
 }
 
-fn transfer_manifest_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+fn transfer_manifest_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -100,7 +112,9 @@ fn transfer_manifest_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, 
     Ok(dir.join("transfer-manifest.json"))
 }
 
-fn transfer_checkpoint_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn transfer_checkpoint_dir<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -121,8 +135,8 @@ fn checkpoint_file_name(checkpoint_id: &str) -> String {
     out
 }
 
-fn transfer_checkpoint_path(
-    app: &tauri::AppHandle,
+fn transfer_checkpoint_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
     checkpoint_id: &str,
 ) -> Result<PathBuf, String> {
     if checkpoint_id.trim().is_empty() {
