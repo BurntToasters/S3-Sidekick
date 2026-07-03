@@ -5,6 +5,7 @@ use crate::lock_storage_ops;
 use crate::security::{
     constant_time_eq, key_verifier, load_security_config, require_unlocked_key,
     save_security_config, security_status, set_unlocked_key, SecurityStatus, KEY_LEN,
+    PBKDF2_ITERATIONS,
 };
 
 // ─── Security limitation ───────────────────────────────────────────────────────
@@ -85,6 +86,12 @@ pub(crate) async fn unlock_biometric(
     let mut config = load_security_config(&app)?;
     if !config.encryption_enabled || !config.biometric_enrolled {
         return Err("Biometric unlock is not configured".to_string());
+    }
+    if config.pbkdf2_iterations < PBKDF2_ITERATIONS {
+        return Err(
+            "A one-time password unlock is required to upgrade encrypted storage after updating S3 Sidekick."
+                .to_string(),
+        );
     }
 
     let key = Zeroizing::new(match platform::retrieve_key(Some(&window)) {

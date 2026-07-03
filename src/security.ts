@@ -105,6 +105,14 @@ export function isCredentialRemovedError(err: unknown): boolean {
   );
 }
 
+export function isSecurityUpgradeRequiredError(err: unknown): boolean {
+  const text = errorText(err).toLowerCase();
+  return (
+    text.includes("one-time password unlock is required") ||
+    text.includes("upgrade encrypted storage")
+  );
+}
+
 function extractErrorCode(err: unknown): string | null {
   const match = errorText(err).match(/0x[0-9a-fA-F]+/);
   return match ? match[0] : null;
@@ -230,6 +238,7 @@ export async function ensureSecurityReady(): Promise<boolean> {
   let biometricErrorCode: string | null = null;
   let biometricCanceled = false;
   let biometricCredentialRemoved = false;
+  let biometricUpgradeRequired = false;
   const platform = await invoke<string>("get_platform_info").catch(
     () => "unknown",
   );
@@ -254,19 +263,22 @@ export async function ensureSecurityReady(): Promise<boolean> {
       biometricErrorCode = extractErrorCode(err);
       biometricCanceled = isCancellationError(err);
       biometricCredentialRemoved = isCredentialRemovedError(err);
+      biometricUpgradeRequired = isSecurityUpgradeRequiredError(err);
       console.error("Biometric unlock failed");
     }
   }
 
   const label = biometricLabel(platform);
   const unlockMessage = biometricAttempted
-    ? biometricCredentialRemoved
-      ? `${label} credential was removed from the system.\nPlease unlock with your password, then re-enable ${label} in Settings.`
-      : biometricCanceled
-        ? "Biometric authentication was canceled.\nEnter your password to unlock encrypted credentials:"
-        : biometricErrorCode
-          ? `Biometric authentication was not completed (${biometricErrorCode}).\nEnter your password to unlock encrypted credentials:`
-          : "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
+    ? biometricUpgradeRequired
+      ? "A one-time password unlock is required to upgrade encrypted credentials after updating S3 Sidekick."
+      : biometricCredentialRemoved
+        ? `${label} credential was removed from the system.\nPlease unlock with your password, then re-enable ${label} in Settings.`
+        : biometricCanceled
+          ? "Biometric authentication was canceled.\nEnter your password to unlock encrypted credentials:"
+          : biometricErrorCode
+            ? `Biometric authentication was not completed (${biometricErrorCode}).\nEnter your password to unlock encrypted credentials:`
+            : "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
     : "Enter your password to unlock encrypted credentials:";
   const password = await showPrompt("Unlock", unlockMessage, {
     inputType: "password",

@@ -1104,5 +1104,19 @@ describe("security flows", () => {
     });
     await expect(security.ensureSecurityReady()).resolves.toBe(false);
     expect(promptMessage).toContain("0x8010000A");
+
+    promptMessage = "";
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "get_security_status") return status;
+      if (cmd === "get_platform_info") return "linux";
+      if (cmd === "unlock_biometric") {
+        throw new Error(
+          "A one-time password unlock is required to upgrade encrypted storage after updating S3 Sidekick.",
+        );
+      }
+      return status;
+    });
+    await expect(security.ensureSecurityReady()).resolves.toBe(false);
+    expect(promptMessage).toContain("one-time password unlock");
   });
 });
