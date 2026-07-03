@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{atomic_write, bookmarks_path, bookmarks_backup_path, connection_path, lock_storage_ops, security_path};
+use crate::{
+    atomic_write, bookmarks_backup_path, bookmarks_path, connection_path, lock_storage_ops,
+    security_path,
+};
 
 pub(crate) const PBKDF2_ITERATIONS: u32 = 600_000;
 const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
@@ -108,8 +111,13 @@ fn is_unlocked() -> bool {
     true
 }
 
-pub(crate) fn set_unlocked_key(key: Option<[u8; KEY_LEN]>, lock_timeout_secs: u64) -> Result<(), String> {
-    let mut guard = key_state().lock().map_err(|_| "Internal key state error".to_string())?;
+pub(crate) fn set_unlocked_key(
+    key: Option<[u8; KEY_LEN]>,
+    lock_timeout_secs: u64,
+) -> Result<(), String> {
+    let mut guard = key_state()
+        .lock()
+        .map_err(|_| "Internal key state error".to_string())?;
     if let Some(ref mut old_key) = guard.key {
         old_key.zeroize();
     }
@@ -124,7 +132,9 @@ pub(crate) fn set_unlocked_key(key: Option<[u8; KEY_LEN]>, lock_timeout_secs: u6
 }
 
 pub(crate) fn require_unlocked_key() -> Result<[u8; KEY_LEN], String> {
-    let mut guard = key_state().lock().map_err(|_| "Internal key state error".to_string())?;
+    let mut guard = key_state()
+        .lock()
+        .map_err(|_| "Internal key state error".to_string())?;
     if guard.lock_timeout_secs > 0 {
         if let Some(last) = guard.last_activity {
             if last.elapsed() >= Duration::from_secs(guard.lock_timeout_secs) {
@@ -176,7 +186,10 @@ pub(crate) fn load_security_config(app: &tauri::AppHandle) -> Result<SecurityCon
     }
 }
 
-pub(crate) fn save_security_config(app: &tauri::AppHandle, config: &SecurityConfig) -> Result<(), String> {
+pub(crate) fn save_security_config(
+    app: &tauri::AppHandle,
+    config: &SecurityConfig,
+) -> Result<(), String> {
     let path = security_path(app)?;
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)
@@ -468,7 +481,10 @@ pub(crate) async fn initialize_security(
 }
 
 #[tauri::command]
-pub(crate) async fn unlock_security(app: tauri::AppHandle, mut password: String) -> Result<SecurityStatus, String> {
+pub(crate) async fn unlock_security(
+    app: tauri::AppHandle,
+    mut password: String,
+) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     let mut config = load_security_config(&app)?;
     if !config.initialized || !config.encryption_enabled {
@@ -720,7 +736,10 @@ pub(crate) async fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatu
 }
 
 #[tauri::command]
-pub(crate) async fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Result<SecurityStatus, String> {
+pub(crate) async fn set_lock_timeout(
+    app: tauri::AppHandle,
+    minutes: u16,
+) -> Result<SecurityStatus, String> {
     if minutes == 0 || minutes > 1440 {
         return Err("Lock timeout must be between 1 and 1440 minutes".to_string());
     }
@@ -728,7 +747,9 @@ pub(crate) async fn set_lock_timeout(app: tauri::AppHandle, minutes: u16) -> Res
     let mut config = load_security_config(&app)?;
     config.lock_timeout_minutes = minutes;
     save_security_config(&app, &config)?;
-    let mut guard = key_state().lock().map_err(|_| "Internal key state error".to_string())?;
+    let mut guard = key_state()
+        .lock()
+        .map_err(|_| "Internal key state error".to_string())?;
     guard.lock_timeout_secs = minutes as u64 * 60;
     drop(guard);
     Ok(security_status(&config))

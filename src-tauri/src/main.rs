@@ -9,11 +9,11 @@ mod security;
 use aws_sdk_s3::Client;
 use sha2::{Digest, Sha256};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use tauri::Manager;
 
 use security::{load_security_config, read_protected_file, write_protected_file};
@@ -47,43 +47,64 @@ pub(crate) fn lock_storage_ops() -> Result<std::sync::MutexGuard<'static, ()>, S
 }
 
 fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e: tauri::Error| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("settings.json"))
 }
 
 fn connection_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e: tauri::Error| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("connection.json"))
 }
 
 fn bookmarks_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e: tauri::Error| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("bookmarks.json"))
 }
 
 fn bookmarks_backup_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e: tauri::Error| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("bookmarks.json.bak"))
 }
 
 fn security_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e: tauri::Error| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("security.json"))
 }
 
 fn transfer_manifest_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e: tauri::Error| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("transfer-manifest.json"))
 }
 
 fn transfer_checkpoint_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e: tauri::Error| e.to_string())?;
     let checkpoints = dir.join("transfer-checkpoints");
     std::fs::create_dir_all(&checkpoints).map_err(|e| e.to_string())?;
     Ok(checkpoints)
@@ -100,7 +121,10 @@ fn checkpoint_file_name(checkpoint_id: &str) -> String {
     out
 }
 
-fn transfer_checkpoint_path(app: &tauri::AppHandle, checkpoint_id: &str) -> Result<PathBuf, String> {
+fn transfer_checkpoint_path(
+    app: &tauri::AppHandle,
+    checkpoint_id: &str,
+) -> Result<PathBuf, String> {
     if checkpoint_id.trim().is_empty() {
         return Err("Checkpoint ID is required".to_string());
     }
@@ -129,7 +153,10 @@ pub(crate) fn save_transfer_checkpoint_json(
     atomic_write(&path, json)
 }
 
-pub(crate) fn remove_transfer_checkpoint(app: &tauri::AppHandle, checkpoint_id: &str) -> Result<(), String> {
+pub(crate) fn remove_transfer_checkpoint(
+    app: &tauri::AppHandle,
+    checkpoint_id: &str,
+) -> Result<(), String> {
     let path = transfer_checkpoint_path(app, checkpoint_id)?;
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
@@ -494,7 +521,6 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), Str
     Ok(())
 }
 
-
 fn main() {
     #[cfg(target_os = "linux")]
     {
@@ -512,7 +538,17 @@ fn main() {
         }
     }
 
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+    }));
+
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
@@ -530,14 +566,7 @@ fn main() {
         });
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
-        }))
-        .plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     if let Err(err) = builder
         .manage(AppState(Mutex::new(S3State {
@@ -627,8 +656,16 @@ mod tests {
         let base = Path::new("/tmp/test.json");
         let temp = make_temp_path(base, "download");
         let name = temp.file_name().unwrap().to_str().unwrap();
-        assert!(name.contains("download"), "temp path should contain purpose: {}", name);
-        assert!(name.ends_with(".tmp"), "temp path should end in .tmp: {}", name);
+        assert!(
+            name.contains("download"),
+            "temp path should contain purpose: {}",
+            name
+        );
+        assert!(
+            name.ends_with(".tmp"),
+            "temp path should end in .tmp: {}",
+            name
+        );
     }
 
     #[test]
