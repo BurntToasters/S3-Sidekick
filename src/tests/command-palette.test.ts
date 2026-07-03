@@ -15,12 +15,12 @@ describe("command palette", () => {
       );
     }
     document.body.innerHTML = `
-      <div id="palette-overlay" hidden>
+      <div id="palette-overlay" role="dialog" aria-modal="true" aria-label="Command palette" hidden>
         <div class="palette">
           <div class="palette__input-wrap">
-            <input id="palette-input" type="text" />
+            <input id="palette-input" type="text" role="combobox" aria-label="Search commands" aria-expanded="false" aria-controls="palette-results" aria-autocomplete="list" aria-activedescendant="" />
           </div>
-          <div id="palette-results"></div>
+          <div id="palette-results" role="listbox" aria-label="Commands"></div>
         </div>
       </div>
     `;

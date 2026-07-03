@@ -20,8 +20,8 @@ use zeroize::Zeroize;
 
 use crate::{
     load_transfer_checkpoint_json, lock_s3_state, make_temp_path, remove_transfer_checkpoint,
-    save_transfer_checkpoint_json, validate_destination_path, validate_destination_path_allow_overwrite,
-    validate_existing_path, AppState,
+    save_transfer_checkpoint_json, validate_destination_path,
+    validate_destination_path_allow_overwrite, validate_existing_path, AppState,
 };
 
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
@@ -48,13 +48,19 @@ fn validate_key(key: &str, label: &str) -> Result<(), String> {
         return Err(format!("{} must not be empty", label));
     }
     if key.len() > MAX_KEY_LEN {
-        return Err(format!("{} is too long (max {} characters)", label, MAX_KEY_LEN));
+        return Err(format!(
+            "{} is too long (max {} characters)",
+            label, MAX_KEY_LEN
+        ));
     }
     if key.as_bytes().contains(&0) {
         return Err(format!("{} contains invalid characters", label));
     }
     if key.split('/').any(|seg| seg == ".." || seg == ".") {
-        return Err(format!("{} must not contain '..' or '.' path segments", label));
+        return Err(format!(
+            "{} must not contain '..' or '.' path segments",
+            label
+        ));
     }
     Ok(())
 }
@@ -201,7 +207,11 @@ fn clamp_transfer_concurrency(value: Option<u32>) -> usize {
         .clamp(1, MAX_TRANSFER_CONCURRENCY) as usize
 }
 
-fn clamp_concurrency_for_budget(requested: usize, part_size_bytes: usize, budget_bytes: u64) -> usize {
+fn clamp_concurrency_for_budget(
+    requested: usize,
+    part_size_bytes: usize,
+    budget_bytes: u64,
+) -> usize {
     if part_size_bytes == 0 {
         return 1;
     }
@@ -244,7 +254,10 @@ fn encode_transfer_error(
     }
 }
 
-fn choose_upload_part_size_bytes(file_size: u64, requested_mb: Option<u32>) -> Result<usize, String> {
+fn choose_upload_part_size_bytes(
+    file_size: u64,
+    requested_mb: Option<u32>,
+) -> Result<usize, String> {
     let part_mb = clamp_part_size_mb(requested_mb, DEFAULT_UPLOAD_PART_SIZE_MB);
     let part_size = (part_mb as u64) * 1024 * 1024;
     let parts = file_size.div_ceil(part_size);
@@ -264,7 +277,11 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn compute_speed_eta(bytes_sent: u64, total_bytes: u64, started_at: Instant) -> (Option<u64>, Option<u64>) {
+fn compute_speed_eta(
+    bytes_sent: u64,
+    total_bytes: u64,
+    started_at: Instant,
+) -> (Option<u64>, Option<u64>) {
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     if elapsed_ms == 0 || bytes_sent == 0 {
         return (None, None);
@@ -392,7 +409,9 @@ async fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
     Ok(hasher.finalize().to_vec())
 }
 
-fn expected_checksum_from_head(head: &aws_sdk_s3::operation::head_object::HeadObjectOutput) -> Option<ExpectedChecksum> {
+fn expected_checksum_from_head(
+    head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
+) -> Option<ExpectedChecksum> {
     if let Some(value) = head
         .metadata()
         .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
@@ -456,7 +475,9 @@ async fn verify_remote_checksum_metadata(
         .key(key)
         .send()
         .await
-        .map_err(|e| structured_transfer_sdk_error("Failed checksum head", &e, "checksum_head", false))?;
+        .map_err(|e| {
+            structured_transfer_sdk_error("Failed checksum head", &e, "checksum_head", false)
+        })?;
     let actual = head
         .metadata()
         .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
@@ -555,9 +576,11 @@ fn is_region_like_label(label: &str) -> bool {
     {
         return false;
     }
-    parts[1..parts.len() - 1]
-        .iter()
-        .all(|segment| segment.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+    parts[1..parts.len() - 1].iter().all(|segment| {
+        segment
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    })
 }
 
 fn infer_region_from_host(host: &str) -> Option<String> {
@@ -658,7 +681,10 @@ fn normalize_endpoint(raw: &str) -> (String, Option<String>) {
     (url, bucket_hint)
 }
 
-fn format_sdk_error<E: std::fmt::Debug>(prefix: &str, err: &aws_sdk_s3::error::SdkError<E>) -> String {
+fn format_sdk_error<E: std::fmt::Debug>(
+    prefix: &str,
+    err: &aws_sdk_s3::error::SdkError<E>,
+) -> String {
     use aws_sdk_s3::error::SdkError;
     match err {
         SdkError::ServiceError(ctx) => {
@@ -697,9 +723,7 @@ fn structured_transfer_sdk_error<E: std::fmt::Debug>(
             };
             encode_transfer_error(code, retryable, Some(status), message)
         }
-        SdkError::DispatchFailure(_) => {
-            encode_transfer_error("network", true, None, message)
-        }
+        SdkError::DispatchFailure(_) => encode_transfer_error("network", true, None, message),
         _ => encode_transfer_error(default_code, default_retryable, None, message),
     }
 }
@@ -821,10 +845,15 @@ pub(crate) fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String
 }
 
 #[tauri::command]
-pub(crate) async fn list_buckets(state: tauri::State<'_, AppState>) -> Result<Vec<BucketInfo>, String> {
+pub(crate) async fn list_buckets(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<BucketInfo>, String> {
     let (client, bucket_hint) = {
         let s3 = lock_s3_state(&state)?;
-        (s3.client.clone().ok_or("Not connected")?, s3.bucket_hint.clone())
+        (
+            s3.client.clone().ok_or("Not connected")?,
+            s3.bucket_hint.clone(),
+        )
     };
 
     match client.list_buckets().send().await {
@@ -1302,10 +1331,9 @@ async fn upload_multipart(
         create_req = create_req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
     }
 
-    let create_output = create_req
-        .send()
-        .await
-        .map_err(|e| structured_transfer_sdk_error("Failed to create multipart upload", &e, "upload_init", true))?;
+    let create_output = create_req.send().await.map_err(|e| {
+        structured_transfer_sdk_error("Failed to create multipart upload", &e, "upload_init", true)
+    })?;
 
     let upload_id = create_output
         .upload_id()
@@ -1374,7 +1402,8 @@ async fn upload_multipart(
                 join_set.abort_all();
                 abort(client, bucket, key, &upload_id).await;
                 return Err(
-                    "File changed during upload (grew larger than expected). Upload aborted.".to_string(),
+                    "File changed during upload (grew larger than expected). Upload aborted."
+                        .to_string(),
                 );
             }
 
@@ -1698,7 +1727,12 @@ pub(crate) async fn download_object(
             .send()
             .await
             .map_err(|e| {
-                structured_transfer_sdk_error("Failed to read object metadata", &e, "download_head", true)
+                structured_transfer_sdk_error(
+                    "Failed to read object metadata",
+                    &e,
+                    "download_head",
+                    true,
+                )
             })?;
         expected_checksum_from_head(&head)
     } else {
@@ -1749,13 +1783,10 @@ pub(crate) async fn download_object(
             return Err("Transfer cancelled".to_string());
         }
 
-        let count = reader
-            .read(&mut buf)
-            .await
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&temp_path);
-                format!("Failed to read body: {}", e)
-            })?;
+        let count = reader.read(&mut buf).await.map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!("Failed to read body: {}", e)
+        })?;
         if count == 0 {
             break;
         }
@@ -1831,7 +1862,11 @@ pub(crate) async fn download_object(
     Ok(written)
 }
 
-fn finalize_download_file(temp_path: &Path, destination_path: &Path, overwrite: bool) -> Result<(), String> {
+fn finalize_download_file(
+    temp_path: &Path,
+    destination_path: &Path,
+    overwrite: bool,
+) -> Result<(), String> {
     if !overwrite || !destination_path.exists() {
         if let Err(e) = std::fs::rename(temp_path, destination_path) {
             let _ = std::fs::remove_file(temp_path);
@@ -1974,7 +2009,9 @@ pub(crate) async fn download_object_parallel(
     };
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
-    let threshold_mb = parallel_threshold_mb.unwrap_or(PARALLEL_DOWNLOAD_THRESHOLD_MB).max(1);
+    let threshold_mb = parallel_threshold_mb
+        .unwrap_or(PARALLEL_DOWNLOAD_THRESHOLD_MB)
+        .max(1);
     let checksum_enabled = checksum_verification.unwrap_or(false);
 
     let client = {
@@ -1993,7 +2030,14 @@ pub(crate) async fn download_object_parallel(
         .key(&key)
         .send()
         .await
-        .map_err(|e| structured_transfer_sdk_error("Failed to read object metadata", &e, "download_head", true))?;
+        .map_err(|e| {
+            structured_transfer_sdk_error(
+                "Failed to read object metadata",
+                &e,
+                "download_head",
+                true,
+            )
+        })?;
     let total_bytes = head.content_length().unwrap_or(0) as u64;
     let object_etag = head.e_tag().unwrap_or_default().to_string();
     let expected_checksum = if checksum_enabled {
@@ -2019,7 +2063,8 @@ pub(crate) async fn download_object_parallel(
         .await;
     }
 
-    let part_size = (clamp_part_size_mb(part_size_mb, DEFAULT_DOWNLOAD_PART_SIZE_MB) as u64) * 1024 * 1024;
+    let part_size =
+        (clamp_part_size_mb(part_size_mb, DEFAULT_DOWNLOAD_PART_SIZE_MB) as u64) * 1024 * 1024;
     let total_parts = total_bytes.div_ceil(part_size) as u32;
     if total_parts <= 1 {
         return download_object(
@@ -2044,8 +2089,11 @@ pub(crate) async fn download_object_parallel(
         MAX_DOWNLOAD_INFLIGHT_BYTES,
     );
     let bandwidth_limit_bps = clamp_bandwidth_limit_bps(bandwidth_limit_mbps);
-    let checkpoint_enabled =
-        enable_resume.unwrap_or(true) && checkpoint_id.as_ref().map(|id| !id.trim().is_empty()).unwrap_or(false);
+    let checkpoint_enabled = enable_resume.unwrap_or(true)
+        && checkpoint_id
+            .as_ref()
+            .map(|id| !id.trim().is_empty())
+            .unwrap_or(false);
 
     match client
         .get_object()
@@ -2079,8 +2127,7 @@ pub(crate) async fn download_object_parallel(
                     // never resume into bytes from a stale/replaced object. Old
                     // checkpoints written before the etag field (empty string) are
                     // treated as a mismatch and restart cleanly.
-                    let etag_matches =
-                        !payload.etag.is_empty() && payload.etag == object_etag;
+                    let etag_matches = !payload.etag.is_empty() && payload.etag == object_etag;
                     if payload.mode == "download_parallel"
                         && payload.bucket == bucket
                         && payload.key == key
@@ -2089,7 +2136,9 @@ pub(crate) async fn download_object_parallel(
                         && payload.part_size == part_size
                         && etag_matches
                     {
-                        for part in normalize_checkpoint_parts(&payload.completed_parts, total_parts) {
+                        for part in
+                            normalize_checkpoint_parts(&payload.completed_parts, total_parts)
+                        {
                             completed[part as usize] = true;
                         }
                     }
@@ -2133,7 +2182,11 @@ pub(crate) async fn download_object_parallel(
         completed_bytes,
         total_bytes,
         attempt,
-        if completed_bytes > 0 { "resuming" } else { "running" },
+        if completed_bytes > 0 {
+            "resuming"
+        } else {
+            "running"
+        },
         started_at,
         Some(completed.iter().filter(|v| **v).count() as u32),
         Some(total_parts),
@@ -2170,9 +2223,16 @@ pub(crate) async fn download_object_parallel(
             let path_clone = temp_path.clone();
             let client_clone = client.clone();
             join_set.spawn(async move {
-                let size =
-                    download_parallel_part(client_clone, bucket_clone, key_clone, path_clone, start, end, transfer_id)
-                        .await?;
+                let size = download_parallel_part(
+                    client_clone,
+                    bucket_clone,
+                    key_clone,
+                    path_clone,
+                    start,
+                    end,
+                    transfer_id,
+                )
+                .await?;
                 Ok::<(u32, u64), String>((index, size))
             });
         }
@@ -2209,7 +2269,9 @@ pub(crate) async fn download_object_parallel(
                                 completed_parts: completed
                                     .iter()
                                     .enumerate()
-                                    .filter_map(|(i, done)| if *done { Some(i as u32) } else { None })
+                                    .filter_map(
+                                        |(i, done)| if *done { Some(i as u32) } else { None },
+                                    )
                                     .collect(),
                                 updated_at_ms: now_ms(),
                                 etag: object_etag.clone(),
@@ -2640,9 +2702,9 @@ pub(crate) async fn rename_prefix(
     // Copy all objects to new prefix, tracking what was copied for rollback
     let mut copied_keys = Vec::new();
     for key in &keys {
-        let suffix = key.strip_prefix(old_prefix.as_str()).ok_or_else(|| {
-            format!("Key '{}' does not start with prefix '{}'", key, old_prefix)
-        })?;
+        let suffix = key
+            .strip_prefix(old_prefix.as_str())
+            .ok_or_else(|| format!("Key '{}' does not start with prefix '{}'", key, old_prefix))?;
         let new_key = format!("{}{}", new_prefix, suffix);
         let source = encode_copy_source(&bucket, key);
         if let Err(e) = client
@@ -2659,8 +2721,17 @@ pub(crate) async fn rename_prefix(
                     .iter()
                     .filter_map(|k: &String| ObjectIdentifier::builder().key(k).build().ok())
                     .collect();
-                if let Ok(del) = Delete::builder().set_objects(Some(objects)).quiet(true).build() {
-                    let _ = client.delete_objects().bucket(&bucket).delete(del).send().await;
+                if let Ok(del) = Delete::builder()
+                    .set_objects(Some(objects))
+                    .quiet(true)
+                    .build()
+                {
+                    let _ = client
+                        .delete_objects()
+                        .bucket(&bucket)
+                        .delete(del)
+                        .send()
+                        .await;
                 }
             }
             return Err(format!("Failed to copy '{}': {}", key, e));
@@ -2768,9 +2839,9 @@ pub(crate) async fn copy_prefix_to(
 
     let mut copied_keys = Vec::new();
     for key in &keys {
-        let suffix = key.strip_prefix(src_prefix.as_str()).ok_or_else(|| {
-            format!("Key '{}' does not start with prefix '{}'", key, src_prefix)
-        })?;
+        let suffix = key
+            .strip_prefix(src_prefix.as_str())
+            .ok_or_else(|| format!("Key '{}' does not start with prefix '{}'", key, src_prefix))?;
         let new_key = format!("{}{}", dst_prefix, suffix);
         let source = encode_copy_source(&src_bucket, key);
         if let Err(e) = client
@@ -2786,8 +2857,17 @@ pub(crate) async fn copy_prefix_to(
                     .iter()
                     .filter_map(|k: &String| ObjectIdentifier::builder().key(k).build().ok())
                     .collect();
-                if let Ok(del) = Delete::builder().set_objects(Some(objects)).quiet(true).build() {
-                    let _ = client.delete_objects().bucket(&dst_bucket).delete(del).send().await;
+                if let Ok(del) = Delete::builder()
+                    .set_objects(Some(objects))
+                    .quiet(true)
+                    .build()
+                {
+                    let _ = client
+                        .delete_objects()
+                        .bucket(&dst_bucket)
+                        .delete(del)
+                        .send()
+                        .await;
                 }
             }
             return Err(format!("Failed to copy '{}': {}", key, e));
@@ -3045,7 +3125,11 @@ mod tests {
         std::fs::write(&temp_path, b"new").unwrap();
 
         let result = finalize_download_file(&temp_path, &destination_path, false);
-        assert!(result.is_ok(), "finalize should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "finalize should succeed: {:?}",
+            result.err()
+        );
         assert!(!temp_path.exists());
         assert_eq!(std::fs::read(&destination_path).unwrap(), b"new");
 
@@ -3061,7 +3145,11 @@ mod tests {
         std::fs::write(&destination_path, b"old").unwrap();
 
         let result = finalize_download_file(&temp_path, &destination_path, true);
-        assert!(result.is_ok(), "finalize should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "finalize should succeed: {:?}",
+            result.err()
+        );
         assert!(!temp_path.exists());
         assert_eq!(std::fs::read(&destination_path).unwrap(), b"new");
 
@@ -3073,14 +3161,7 @@ mod tests {
     // when the file has grown). These cases lock that relationship in.
     #[test]
     fn div_ceil_part_count_matches_legacy_formula() {
-        let cases: [(u64, u64); 6] = [
-            (0, 32),
-            (1, 32),
-            (32, 32),
-            (33, 32),
-            (128, 32),
-            (129, 32),
-        ];
+        let cases: [(u64, u64); 6] = [(0, 32), (1, 32), (32, 32), (33, 32), (128, 32), (129, 32)];
         for (size, part) in cases {
             assert_ne!(part, 0, "test part size must be non-zero");
             let new = size.div_ceil(part);

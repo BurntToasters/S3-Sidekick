@@ -319,9 +319,7 @@ function initThemePicker(): void {
 export function populateSettingsModal(): void {
   initThemePicker();
   const themeSelect = document.getElementById("setting-theme") as
-    | HTMLInputElement
-    | HTMLSelectElement
-    | null;
+    HTMLInputElement | HTMLSelectElement | null;
   if (themeSelect) themeSelect.value = state.currentSettings.theme;
   syncThemeCards(state.currentSettings.theme);
 
@@ -535,9 +533,7 @@ export function readSettingsModal(): void {
     state.currentSettings.theme = themeRadio.value;
   } else {
     const themeSelect = document.getElementById("setting-theme") as
-      | HTMLInputElement
-      | HTMLSelectElement
-      | null;
+      HTMLInputElement | HTMLSelectElement | null;
     if (themeSelect) {
       state.currentSettings.theme = themeSelect.value as UserSettings["theme"];
     }

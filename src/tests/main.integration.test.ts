@@ -139,8 +139,7 @@ type DragDropPayload =
   | { type: "leave" };
 
 let capturedDragDropHandler:
-  | ((event: { payload: DragDropPayload }) => void)
-  | null = null;
+  ((event: { payload: DragDropPayload }) => void) | null = null;
 
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({
@@ -1025,8 +1024,7 @@ describe("main integration", () => {
       }),
     );
     const onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onAction?.("copy-move");
     await flushMicrotasks();
 
@@ -1086,8 +1084,7 @@ describe("main integration", () => {
       }),
     );
     const onAction2 = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onAction2?.("copy-move");
     await flushMicrotasks();
 
@@ -1138,8 +1135,7 @@ describe("main integration", () => {
       }),
     );
     const onAction3 = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onAction3?.("copy-move");
     await flushMicrotasks();
     expect(overlay.classList.contains("active")).toBe(true);
@@ -1304,8 +1300,7 @@ describe("main integration", () => {
     );
     ctx = mockShowContextMenu.mock.calls.at(-1);
     const onObjectPanelAction = ctx?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     if (onObjectPanelAction) {
       mockShowPrompt.mockResolvedValueOnce("from-context");
       onObjectPanelAction("new-folder");
@@ -1591,8 +1586,7 @@ describe("main integration", () => {
 
     const transferHandler = mockSetTransferCompleteHandler.mock
       .calls[0]?.[0] as
-      | ((summary: { hadUpload: boolean }) => Promise<void>)
-      | undefined;
+      ((summary: { hadUpload: boolean }) => Promise<void>) | undefined;
     expect(transferHandler).toBeTruthy();
 
     await transferHandler?.({ hadUpload: false });
@@ -2038,8 +2032,7 @@ describe("main integration", () => {
       }),
     );
     let onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onAction?.("copy-presigned-url");
     await flushMicrotasks(3);
 
@@ -2062,8 +2055,7 @@ describe("main integration", () => {
       }),
     );
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onAction?.("copy-presigned-url");
     await flushMicrotasks(4);
     expect(
@@ -2080,8 +2072,7 @@ describe("main integration", () => {
       }),
     );
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onAction?.("copy-presigned-url");
     await flushMicrotasks(4);
     expect(
@@ -2098,8 +2089,7 @@ describe("main integration", () => {
       }),
     );
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onAction?.("copy-presigned-url");
     await flushMicrotasks(4);
     expect(
@@ -2120,8 +2110,7 @@ describe("main integration", () => {
       }),
     );
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onAction?.("rename");
     await flushMicrotasks(4);
     expect(
@@ -2139,8 +2128,7 @@ describe("main integration", () => {
       }),
     );
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onAction?.("rename");
     await flushMicrotasks(4);
     expect(
@@ -2266,8 +2254,7 @@ describe("main integration", () => {
       }),
     );
     let onBucketAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onBucketAction?.("open-bucket");
     await flushMicrotasks(6);
     expect(
@@ -2347,8 +2334,7 @@ describe("main integration", () => {
       }),
     );
     const onObjectAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     onObjectAction?.("preview");
     await flushMicrotasks();
     expect(mockOpenPreview).toHaveBeenCalledWith("docs/preview.txt");
@@ -2728,8 +2714,7 @@ describe("main integration", () => {
       }),
     );
     const onBucketAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
-      | ((action: string) => void)
-      | undefined;
+      ((action: string) => void) | undefined;
     const refreshBucketsBefore = mockRefreshBuckets.mock.calls.length;
     state.connected = false;
     onBucketAction?.("refresh-buckets");

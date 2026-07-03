@@ -1,6 +1,6 @@
 [package]
 name = "s3-sidekick"
-version = "0.10.0"
+version = "0.10.1-beta.1"
 description = "Cross-platform desktop client for S3-compatible object storage."
 authors = ["BurntToasters <code@rosie.run>"]
 edition = "2021"
@@ -45,6 +45,9 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_WinRT",
 ] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 
 [profile.release]
 panic = "abort"

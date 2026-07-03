@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::validate_existing_path;
+use std::collections::HashMap;
 
 const MAX_LOCAL_SCAN_FILES: usize = 20_000;
 const MAX_LOCAL_SCAN_DEPTH: usize = 64;
@@ -178,7 +178,9 @@ fn collect_local_files_from_root(
 }
 
 #[tauri::command]
-pub(crate) fn list_local_files_recursive(roots: Vec<String>) -> Result<Vec<LocalFileEntry>, String> {
+pub(crate) fn list_local_files_recursive(
+    roots: Vec<String>,
+) -> Result<Vec<LocalFileEntry>, String> {
     let mut normalized_roots = Vec::new();
     for root in roots {
         let trimmed = root.trim();
@@ -222,7 +224,12 @@ pub(crate) fn list_local_files_recursive(roots: Vec<String>) -> Result<Vec<Local
     });
 
     if !warnings.is_empty() {
-        let sample = warnings.iter().take(3).cloned().collect::<Vec<_>>().join(" | ");
+        let sample = warnings
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | ");
         eprintln!(
             "list_local_files_recursive skipped {} path(s). Sample: {}",
             warnings.len(),
