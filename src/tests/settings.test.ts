@@ -598,8 +598,8 @@ describe("settings module", () => {
     class MockFileReader {
       result: string | ArrayBuffer | null = null;
       onload:
-        | ((this: FileReader, ev: ProgressEvent<FileReader>) => void)
-        | null = null;
+        ((this: FileReader, ev: ProgressEvent<FileReader>) => void) | null =
+        null;
 
       readAsText(): void {
         this.result = '[{"name":"imported"}]';
