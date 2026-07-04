@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(serde::Serialize)]
 pub(crate) struct UpdaterSupportInfo {

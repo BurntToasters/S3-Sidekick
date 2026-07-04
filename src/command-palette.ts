@@ -28,6 +28,7 @@ export function openPalette(): void {
 
   overlay.hidden = false;
   input.value = "";
+  input.setAttribute("aria-expanded", "true");
   activeIndex = 0;
   filterAndRender("");
   input.focus();
@@ -37,7 +38,14 @@ export function closePalette(): void {
   const overlay = document.getElementById(
     "palette-overlay",
   ) as HTMLDivElement | null;
+  const input = document.getElementById(
+    "palette-input",
+  ) as HTMLInputElement | null;
   if (overlay) overlay.hidden = true;
+  if (input) {
+    input.setAttribute("aria-expanded", "false");
+    input.setAttribute("aria-activedescendant", "");
+  }
 }
 
 export function isPaletteOpen(): boolean {
@@ -63,6 +71,15 @@ export function initPalette(): void {
     if (e.target === overlay) closePalette();
   });
 
+  // Focus trap: keep focus inside the palette while open
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "Tab") {
+      // Only the input is focusable inside the palette, so prevent Tab escape
+      e.preventDefault();
+      input.focus();
+    }
+  });
+
   input.addEventListener("input", () => {
     activeIndex = 0;
     filterAndRender(input.value);
@@ -79,6 +96,7 @@ export function initPalette(): void {
       activeIndex = Math.min(activeIndex + 1, filtered.length - 1);
       renderResults();
       scrollActiveIntoView();
+      updateActiveDescendant();
       return;
     }
     if (e.key === "ArrowUp") {
@@ -86,6 +104,7 @@ export function initPalette(): void {
       activeIndex = Math.max(activeIndex - 1, 0);
       renderResults();
       scrollActiveIntoView();
+      updateActiveDescendant();
       return;
     }
     if (e.key === "Enter") {
@@ -109,6 +128,15 @@ export function initPalette(): void {
   });
 }
 
+function updateActiveDescendant(): void {
+  const input = document.getElementById(
+    "palette-input",
+  ) as HTMLInputElement | null;
+  if (!input) return;
+  const id = filtered[activeIndex] ? `palette-option-${activeIndex}` : "";
+  input.setAttribute("aria-activedescendant", id);
+}
+
 function filterAndRender(query: string): void {
   const q = query.toLowerCase().trim();
   filtered = commands.filter((cmd) => {
@@ -119,6 +147,7 @@ function filterAndRender(query: string): void {
     );
   });
   renderResults();
+  updateActiveDescendant();
 }
 
 function renderResults(): void {
@@ -140,11 +169,12 @@ function renderResults(): void {
           decorative: true,
         });
         const activeClass = i === activeIndex ? " palette__item--active" : "";
+        const ariaSelected = i === activeIndex ? "true" : "false";
         const shortcut = cmd.shortcut
           ? `<span class="palette__item-shortcut">${escapeHtml(cmd.shortcut)}</span>`
           : "";
         return (
-          `<div class="palette__item${activeClass}" data-index="${i}">` +
+          `<div class="palette__item${activeClass}" id="palette-option-${i}" role="option" aria-selected="${ariaSelected}" data-index="${i}">` +
           `<span class="palette__item-icon">${icon}</span>` +
           `<span class="palette__item-label">${escapeHtml(cmd.label)}</span>` +
           shortcut +

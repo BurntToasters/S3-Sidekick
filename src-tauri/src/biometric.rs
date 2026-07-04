@@ -5,7 +5,36 @@ use crate::lock_storage_ops;
 use crate::security::{
     constant_time_eq, key_verifier, load_security_config, require_unlocked_key,
     save_security_config, security_status, set_unlocked_key, SecurityStatus, KEY_LEN,
+    PBKDF2_ITERATIONS,
 };
+
+// ─── Security limitation ───────────────────────────────────────────────────────
+// The biometric unlock flow uses a two-step approach:
+//   1. The AES key is stored in an OS credential store (macOS Keychain /
+//      Windows Credential Manager).
+//   2. A separate biometric prompt (LAContext on macOS, UserConsentVerifier on
+//      Windows) gates the UI before the key is read.
+//
+// However, the stored key is NOT cryptographically bound to the biometric.
+// On macOS, the Keychain item uses kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+// but does NOT use SecAccessControl with .biometryCurrentSet, so any process
+// running as the same user can read it without passing Touch ID.
+// On Windows, the key is a plain GenericCredential (CRED_PERSIST_ENTERPRISE);
+// UserConsentVerifier is a UI-only gate, not a TPM/NGC-bound operation.
+//
+// Mitigation paths (future work):
+//   macOS: Create the Keychain item with SecAccessControlCreateWithFlags(
+//          ..., .biometryCurrentSet | .privateKeyUsage, ...) and pass
+//          kSecUseAuthenticationContext so the key never leaves the Secure Enclave
+//          without a live biometric check.
+//   Windows: Wrap the key using KeyCredentialManager (NGC/TPM-backed) or
+//          DPAPI-NG with a Windows Hello credential, instead of a plain
+//          GenericCredential.
+//
+// Until then, the biometric gate provides defence-in-depth (requires physical
+// presence at the machine) but should not be considered equivalent to hardware-
+// bound key protection.
+// ────────────────────────────────────────────────────────────────────────────────
 
 pub fn is_available() -> bool {
     platform::is_available()
@@ -58,6 +87,12 @@ pub(crate) async fn unlock_biometric(
     if !config.encryption_enabled || !config.biometric_enrolled {
         return Err("Biometric unlock is not configured".to_string());
     }
+    if config.pbkdf2_iterations < PBKDF2_ITERATIONS {
+        return Err(
+            "A one-time password unlock is required to upgrade encrypted storage after updating S3 Sidekick."
+                .to_string(),
+        );
+    }
 
     let key = Zeroizing::new(match platform::retrieve_key(Some(&window)) {
         Ok(k) => k,
@@ -74,7 +109,10 @@ pub(crate) async fn unlock_biometric(
                         .to_string(),
                 );
             }
-            return Err("Biometric authentication failed. Please try again or unlock with your password.".to_string());
+            return Err(
+                "Biometric authentication failed. Please try again or unlock with your password."
+                    .to_string(),
+            );
         }
     });
 
@@ -143,11 +181,7 @@ mod platform {
             value_callbacks: *const c_void,
         ) -> *mut c_void;
 
-        fn CFDictionarySetValue(
-            dict: *mut c_void,
-            key: *const c_void,
-            value: *const c_void,
-        );
+        fn CFDictionarySetValue(dict: *mut c_void, key: *const c_void, value: *const c_void);
 
         static kCFTypeDictionaryKeyCallBacks: c_void;
         static kCFTypeDictionaryValueCallBacks: c_void;
@@ -223,14 +257,13 @@ mod platform {
         unsafe {
             let cls = objc2::runtime::AnyClass::get(c"LAContext")
                 .ok_or_else(|| "Touch ID not available".to_string())?;
-            let ctx: objc2::rc::Retained<objc2::runtime::AnyObject> =
-                objc2::msg_send![cls, new];
+            let ctx: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![cls, new];
 
             let reason = CFString::new("Unlock S3 Sidekick encrypted storage");
 
             let block = LAReplyBlock {
                 isa: &_NSConcreteGlobalBlock as *const c_void,
-                flags: (1 << 28),  // BLOCK_IS_GLOBAL
+                flags: (1 << 28), // BLOCK_IS_GLOBAL
                 reserved: 0,
                 invoke: la_reply_invoke,
                 descriptor: &LA_REPLY_DESC,
@@ -270,8 +303,7 @@ mod platform {
         unsafe {
             let cls = objc2::runtime::AnyClass::get(c"LAContext");
             let Some(cls) = cls else { return false };
-            let ctx: objc2::rc::Retained<objc2::runtime::AnyObject> =
-                objc2::msg_send![cls, new];
+            let ctx: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![cls, new];
             let mut err: *mut objc2::runtime::AnyObject = ptr::null_mut();
             let can: objc2::runtime::Bool =
                 objc2::msg_send![&*ctx, canEvaluatePolicy: 1_isize, error: &mut err];
@@ -408,8 +440,7 @@ mod platform {
     }
 
     pub fn is_available() -> bool {
-        let result = UserConsentVerifier::CheckAvailabilityAsync()
-            .and_then(|op| op.get());
+        let result = UserConsentVerifier::CheckAvailabilityAsync().and_then(|op| op.get());
         matches!(result, Ok(UserConsentVerifierAvailability::Available))
     }
 
@@ -431,8 +462,9 @@ mod platform {
                 .map_err(|e| VerifyError::Other(format!("Failed to get window handle: {}", e)))?;
             let hwnd = HWND(raw_hwnd.0 as *mut _);
             let interop: IUserConsentVerifierInterop =
-                factory::<UserConsentVerifier, IUserConsentVerifierInterop>()
-                    .map_err(|e| VerifyError::Other(format!("Windows Hello interop factory error: {}", e)))?;
+                factory::<UserConsentVerifier, IUserConsentVerifierInterop>().map_err(|e| {
+                    VerifyError::Other(format!("Windows Hello interop factory error: {}", e))
+                })?;
             unsafe {
                 interop
                     .RequestVerificationForWindowAsync::<
@@ -452,10 +484,12 @@ mod platform {
 
         match result {
             UserConsentVerificationResult::Verified => Ok(()),
-            UserConsentVerificationResult::Canceled => {
-                Err(VerifyError::Other("Authentication was canceled".to_string()))
-            }
-            _ => Err(VerifyError::Other("Windows Hello authentication failed".to_string())),
+            UserConsentVerificationResult::Canceled => Err(VerifyError::Other(
+                "Authentication was canceled".to_string(),
+            )),
+            _ => Err(VerifyError::Other(
+                "Windows Hello authentication failed".to_string(),
+            )),
         }
     }
 
@@ -463,14 +497,18 @@ mod platform {
         for attempt in 0..WINDOWS_HELLO_VERIFY_MAX_RETRIES {
             match verify_user_once(window) {
                 Ok(()) => return Ok(()),
-                Err(VerifyError::WindowsHello(e)) if attempt + 1 < WINDOWS_HELLO_VERIFY_MAX_RETRIES => {
+                Err(VerifyError::WindowsHello(e))
+                    if attempt + 1 < WINDOWS_HELLO_VERIFY_MAX_RETRIES =>
+                {
                     if is_retryable_error(&e) {
                         thread::sleep(Duration::from_millis(WINDOWS_HELLO_VERIFY_RETRY_DELAY_MS));
                         continue;
                     }
                     return Err(format!("Windows Hello error: {}", e));
                 }
-                Err(VerifyError::WindowsHello(e)) => return Err(format!("Windows Hello error: {}", e)),
+                Err(VerifyError::WindowsHello(e)) => {
+                    return Err(format!("Windows Hello error: {}", e))
+                }
                 Err(VerifyError::Other(msg)) => return Err(msg),
             }
         }
@@ -503,9 +541,7 @@ mod platform {
             UserName: PWSTR(user_name.as_mut_ptr()),
         };
 
-        unsafe {
-            CredWriteW(&cred, 0).map_err(|e| format!("Failed to store credential: {}", e))
-        }
+        unsafe { CredWriteW(&cred, 0).map_err(|e| format!("Failed to store credential: {}", e)) }
     }
 
     pub fn retrieve_key(window: Option<&tauri::Window>) -> Result<[u8; KEY_LEN], String> {
@@ -550,10 +586,8 @@ mod platform {
             }
 
             let cred = &*pcred;
-            let blob = std::slice::from_raw_parts(
-                cred.CredentialBlob,
-                cred.CredentialBlobSize as usize,
-            );
+            let blob =
+                std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize);
 
             if blob.len() != KEY_LEN {
                 CredFree(pcred as *const std::ffi::c_void);

@@ -167,18 +167,6 @@
   }
 }
 
-.connection-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  background: var(--glass-bg-heavy);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  border-bottom: 1px solid var(--glass-border);
-  flex-wrap: wrap;
-}
-
 .field-with-toggle {
   position: relative;
   display: flex;

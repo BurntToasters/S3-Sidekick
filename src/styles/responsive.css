@@ -1,11 +1,6 @@
 /* Responsive breakpoints and custom scrollbars */
 
 @media (max-width: 1180px) {
-  .connection-bar .field {
-    flex: 1;
-    min-width: 170px;
-  }
-
   .content-toolbar {
     gap: 8px;
   }
@@ -85,15 +80,23 @@
 }
 
 @media (max-width: 700px) {
-  .connection-bar {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
+  .connection-screen {
+    flex-direction: column;
   }
 
-  .connection-bar .field {
-    min-width: 0;
+  .connection-screen__sidebar {
     width: 100%;
+    max-height: 160px;
+    border-right: none;
+    border-bottom: 1px solid var(--glass-border);
+  }
+
+  .connection-screen__main {
+    padding: 24px 16px;
+  }
+
+  .connection-screen__form-card {
+    padding: 20px;
   }
 
   #conn-endpoint,
