@@ -5,6 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($env:SKIP_WIN_CODESIGN -eq '1') { Write-Host 'SKIP_WIN_CODESIGN=1; skipping Authenticode verification.'; exit 0 }
 if ($env:OS -ne 'Windows_NT') { throw 'Authenticode verification must run on Windows.' }
+if ([string]::IsNullOrWhiteSpace($env:AZURE_ARTIFACT_SIGNING_PUBLISHER)) { throw 'AZURE_ARTIFACT_SIGNING_PUBLISHER is required for Authenticode verification.' }
 . (Join-Path $PSScriptRoot 'artifact-signing-tools.ps1')
 Import-BundledPowerShellSecurityModule
 $releaseDir = (Resolve-Path -LiteralPath $TargetReleaseDir).Path
@@ -23,3 +24,4 @@ foreach ($file in $files) {
   if (-not $signature.TimeStamperCertificate) { throw "Missing RFC3161 timestamp: $($file.FullName)" }
   Write-Host "Verified: $($file.FullName)"
 }
+Write-Host "Verified $($files.Count) timestamped Windows artifact(s) from '$expected'."
