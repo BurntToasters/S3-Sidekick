@@ -47,7 +47,13 @@ const targetReleaseDir = path.join(
   target,
   "release",
 );
-execFileSync("npx.cmd", ["tauri", "build", ...args], {
+// Windows command shims (.cmd) cannot be launched directly by spawnSync on
+// current Node releases. Invoke Tauri's installed Node entrypoint instead, so
+// the build is independent of cmd.exe and of whichever npx is on PATH.
+const tauriCli = fileURLToPath(
+  new URL("../node_modules/@tauri-apps/cli/tauri.js", import.meta.url),
+);
+execFileSync(process.execPath, [tauriCli, "build", ...args], {
   stdio: "inherit",
   env: process.env,
 });
