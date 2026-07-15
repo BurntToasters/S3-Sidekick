@@ -9,6 +9,7 @@ import folderPlus from "lucide-static/icons/folder-plus.svg?raw";
 import folderUp from "lucide-static/icons/folder-up.svg?raw";
 import info from "lucide-static/icons/info.svg?raw";
 import download from "lucide-static/icons/download.svg?raw";
+import upload from "lucide-static/icons/upload.svg?raw";
 import trash2 from "lucide-static/icons/trash-2.svg?raw";
 import cloud from "lucide-static/icons/cloud.svg?raw";
 import clipboardList from "lucide-static/icons/clipboard-list.svg?raw";
@@ -50,6 +51,7 @@ const registry: Record<string, string> = {
   "folder-up": folderUp,
   info,
   download,
+  upload,
   "trash-2": trash2,
   cloud,
   "clipboard-list": clipboardList,

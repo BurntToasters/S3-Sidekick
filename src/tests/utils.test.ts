@@ -109,6 +109,8 @@ describe("DOM helpers", () => {
   });
 
   it("builds icons with escaped attributes", () => {
+    expect(getIconHtml("upload")).toContain('data-icon="upload"');
+
     const decorative = getIconHtml("rocket", {
       className: `icon"bad`,
       alt: "",
