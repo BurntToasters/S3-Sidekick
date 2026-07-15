@@ -21,7 +21,7 @@
     "start": "npm run tauri:dev",
     "tauri": "tauri",
     "licenses": "npm run licenses:npm && npm run licenses:cargo",
-    "licenses:npm": "npx license-checker --production --json public/licenses.json",
+    "licenses:npm": "npx license-checker --production --json --out public/licenses.json",
     "licenses:cargo": "node scripts/generate-cargo-licenses.js",
     "tauri:dev": "npm run sync-version && npm run licenses && tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:build": "npm run sync-version && npm run licenses && tauri build",
