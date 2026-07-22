@@ -2,6 +2,7 @@
 
 import fs from "fs";
 import path from "path";
+import { verifyQualityGate } from "./release-session.js";
 
 const FLATPAK_BUILD_DIR_PREFIX = "flatpak-build";
 const TAURI_TARGET_DIR = path.join("src-tauri", "target");
@@ -67,6 +68,7 @@ function getCleanTargets(mode, cwd) {
   }
 
   if (mode === "clean-release-artifacts") {
+    verifyQualityGate(cwd);
     return Array.from(new Set([...baseTargets, ...listTauriBundleDirs(cwd)]));
   }
 
