@@ -192,6 +192,9 @@ function main() {
       console.log(
         "Release quality-gate proof not recorded because the working tree is dirty.",
       );
+      console.log(
+        "Commit or stash changes (only version/metainfo lockfile drift from bootstrap is allowed).",
+      );
     }
   }
   return exitCode;
