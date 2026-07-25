@@ -16,7 +16,7 @@ function renderFixture(): void {
   document.body.innerHTML = `
     <input id="filter-input" />
     <ul id="bucket-list"></ul>
-    <nav id="breadcrumb"></nav>
+    <nav id="location-omnibar-browse" class="breadcrumb"></nav>
     <div id="object-panel" style="display:none"></div>
     <div id="empty-state"></div>
     <table>
@@ -36,6 +36,9 @@ function renderFixture(): void {
     <span id="object-count"></span>
     <button id="nav-back"></button>
     <button id="nav-forward"></button>
+    <button id="nav-up"></button>
+    <input id="location-omnibar-edit" type="text" hidden />
+    <button id="btn-download" disabled></button>
     <span id="status"></span>
   `;
 }
@@ -108,13 +111,29 @@ describe("browser core rendering and selection", () => {
 
     const rows = document.querySelectorAll("#object-tbody .object-row");
     expect(rows).toHaveLength(3);
+    const folderSize = rows[0].querySelector(".object-size");
+    expect(folderSize?.textContent).toBe("Folder");
+    expect(folderSize?.classList.contains("object-size--folder")).toBe(true);
+    expect(rows[0].querySelector(".object-modified")?.textContent).toBe("—");
     expect(
       (document.getElementById("statusbar-count") as HTMLSpanElement)
         .textContent,
     ).toContain("1 folder, 2 files");
     expect(
-      (document.getElementById("breadcrumb") as HTMLElement).textContent,
+      (document.getElementById("location-omnibar-browse") as HTMLElement)
+        .textContent,
     ).toContain("bucket-a");
+    expect(
+      (document.getElementById("location-omnibar-edit") as HTMLInputElement)
+        .value,
+    ).toBe("bucket-a/docs/");
+    expect(
+      (document.getElementById("location-omnibar-browse") as HTMLElement)
+        .textContent,
+    ).toContain("bucket-a");
+    expect(
+      (document.getElementById("nav-up") as HTMLButtonElement).disabled,
+    ).toBe(false);
 
     state.selectedKeys.add("docs/file-a.txt");
     state.selectedKeys.add("docs/file-b.txt");
@@ -125,6 +144,31 @@ describe("browser core rendering and selection", () => {
     expect(
       (document.getElementById("batch-count") as HTMLSpanElement).textContent,
     ).toContain("2 files selected");
+    expect(
+      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+    ).toBe(false);
+
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file-a.txt");
+    browser.updateSelectionUI();
+    expect(
+      (document.getElementById("batch-toolbar") as HTMLDivElement).hidden,
+    ).toBe(false);
+    expect(
+      (document.getElementById("batch-count") as HTMLSpanElement).textContent,
+    ).toBe("1 file selected");
+    expect(
+      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+    ).toBe(false);
+
+    state.selectedKeys.clear();
+    browser.updateSelectionUI();
+    expect(
+      (document.getElementById("batch-toolbar") as HTMLDivElement).hidden,
+    ).toBe(true);
+    expect(
+      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("supports row click multi-selection and select-all", async () => {

@@ -7,10 +7,23 @@
     <link rel="stylesheet" href="main.css" />
   </head>
   <body>
+    <a href="#main-content" class="skip-link">Skip to main content</a>
     <div id="app" class="app">
-      <header class="header">
+      <header class="header" data-tauri-drag-region>
+        <div
+          class="titlebar-drag-handle"
+          data-tauri-drag-region
+          aria-hidden="true"
+        ></div>
         <div class="header__brand">S3 Sidekick</div>
-        <div id="bookmark-bar" class="bookmark-bar"></div>
+        <div class="titlebar__main" data-tauri-drag-region>
+          <div
+            class="titlebar__traffic-spacer"
+            data-tauri-drag-region
+            aria-hidden="true"
+          ></div>
+          <div id="bookmark-bar" class="bookmark-bar"></div>
+        </div>
         <div class="header__actions">
           <span
             id="connection-status"
@@ -32,563 +45,785 @@
           >
             <span class="lucide-icon" data-icon="settings"></span>
           </button>
-        </div>
-      </header>
-
-      <div id="connection-screen" class="connection-screen">
-        <div class="connection-screen__sidebar">
-          <div class="connection-screen__sidebar-header">
-            <span>Saved Connections</span>
+          <div id="titlebar-win-controls" class="titlebar-win-controls" hidden>
             <button
-              id="conn-new-btn"
-              class="btn btn--icon"
-              title="Create new connection"
-              aria-label="New connection"
-            >
-              +
-            </button>
-          </div>
-          <ul id="conn-saved-list" class="conn-saved-list"></ul>
-        </div>
-        <div class="connection-screen__main">
-          <div class="connection-screen__form-card">
-            <h1 class="connection-screen__title">Connect to S3 Storage</h1>
-            <p class="connection-screen__subtitle">
-              Enter your credentials or select a saved connection from the left.
-            </p>
-
-            <div class="connection-form">
-              <div class="form-row">
-                <div class="form-group">
-                  <label for="conn-provider-preset"
-                    >Provider Preset (Optional)</label
-                  >
-                  <select
-                    id="conn-provider-preset"
-                    class="field field--full"
-                    aria-label="Provider preset"
-                    title="Choose a storage provider to prefill endpoint"
-                  >
-                    <option value="">Choose provider (optional)...</option>
-                    <option value="aws">AWS S3</option>
-                    <option value="do">DigitalOcean Spaces</option>
-                    <option value="backblaze">Backblaze B2</option>
-                    <option value="cloudflare">Cloudflare R2</option>
-                    <option value="minio">MinIO (local)</option>
-                    <option value="wasabi">Wasabi</option>
-                  </select>
-                </div>
-              </div>
-
-              <div class="form-row">
-                <div class="form-group form-group--wide">
-                  <label for="conn-endpoint">Endpoint URL</label>
-                  <input
-                    id="conn-endpoint"
-                    class="field field--full"
-                    type="text"
-                    placeholder="https://nyc3.digitaloceanspaces.com"
-                    aria-label="Endpoint URL"
-                  />
-                </div>
-                <div class="form-group form-group--narrow">
-                  <label for="conn-region">Region</label>
-                  <input
-                    id="conn-region"
-                    class="field field--full"
-                    type="text"
-                    placeholder="us-east-1"
-                    aria-label="Region"
-                  />
-                </div>
-              </div>
-
-              <div class="form-row">
-                <div class="form-group">
-                  <label for="conn-access-key">Access Key</label>
-                  <input
-                    id="conn-access-key"
-                    class="field field--full"
-                    type="text"
-                    placeholder="Access Key"
-                    aria-label="Access key"
-                  />
-                </div>
-              </div>
-
-              <div class="form-row">
-                <div class="form-group">
-                  <label for="conn-secret-key">Secret Key</label>
-                  <div class="field-with-toggle field-with-toggle--full">
-                    <input
-                      id="conn-secret-key"
-                      class="field field--full"
-                      type="password"
-                      placeholder="Secret Key"
-                      aria-label="Secret key"
-                    />
-                    <button
-                      id="secret-key-toggle"
-                      type="button"
-                      class="field-toggle-btn field-toggle-btn--text"
-                      title="Show/hide secret key"
-                      aria-label="Show secret key"
-                      aria-pressed="false"
-                    >
-                      Show
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div class="form-actions">
-                <button
-                  id="bookmark-save-btn"
-                  class="btn"
-                  title="Bookmark this connection"
-                  aria-label="Bookmark this connection"
-                >
-                  <span
-                    id="bookmark-save-icon"
-                    class="lucide-icon"
-                    data-icon="bookmark"
-                  ></span>
-                  Save Bookmark
-                </button>
-                <button id="connect-btn" class="btn btn--primary">
-                  Connect
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div id="main-layout" class="main-layout" style="display: none">
-        <button
-          id="sidebar-backdrop"
-          class="sidebar-backdrop"
-          aria-label="Close bucket sidebar"
-          hidden
-        ></button>
-        <aside id="bucket-panel" class="sidebar">
-          <div class="sidebar__header sidebar__header--stacked">
-            <span>Buckets</span>
-            <input
-              id="bucket-filter-input"
-              class="field field--sm sidebar__filter"
-              type="text"
-              placeholder="Filter buckets..."
-              aria-label="Filter buckets"
-            />
-          </div>
-          <ul
-            id="bucket-list"
-            class="list"
-            aria-label="Buckets"
-            aria-busy="false"
-          ></ul>
-        </aside>
-        <div
-          id="sidebar-resizer"
-          class="sidebar-resizer"
-          role="separator"
-          tabindex="0"
-          aria-label="Resize bucket sidebar"
-          aria-orientation="vertical"
-        ></div>
-
-        <section class="content">
-          <div class="content-toolbar">
-            <div class="content-toolbar__left">
-              <button
-                id="sidebar-toggle"
-                class="btn btn--icon sidebar-toggle"
-                title="Toggle buckets"
-                aria-label="Toggle buckets"
-              >
-                <span class="lucide-icon" data-icon="database"></span>
-              </button>
-              <button
-                id="nav-back"
-                class="btn btn--icon"
-                title="Back (Alt+Left)"
-                aria-label="Navigate back"
-                disabled
-              >
-                <span class="lucide-icon" data-icon="arrow-left"></span>
-              </button>
-              <button
-                id="nav-forward"
-                class="btn btn--icon"
-                title="Forward (Alt+Right)"
-                aria-label="Navigate forward"
-                disabled
-              >
-                <span class="lucide-icon" data-icon="arrow-right"></span>
-              </button>
-              <nav
-                id="breadcrumb"
-                class="breadcrumb"
-                aria-label="Breadcrumb"
-              ></nav>
-            </div>
-            <input
-              id="filter-input"
-              class="field filter-input"
-              type="text"
-              placeholder="Filter..."
-              aria-label="Filter objects"
-            />
-            <div class="content-toolbar__actions">
-              <button
-                id="btn-refresh"
-                class="btn btn--icon"
-                title="Refresh (F5)"
-                aria-label="Refresh"
-              >
-                <span class="lucide-icon" data-icon="refresh-cw"></span>
-                <span class="shortcut-chip">F5</span>
-              </button>
-              <button
-                id="btn-new-folder"
-                class="btn btn--icon"
-                title="New Folder (Ctrl+N)"
-                aria-label="New folder"
-              >
-                <span class="lucide-icon" data-icon="folder-plus"></span>
-                <span class="shortcut-chip">⌃N</span>
-              </button>
-              <button
-                id="btn-upload"
-                class="btn btn--icon"
-                title="Upload Files (Ctrl+U)"
-                aria-label="Upload files"
-              >
-                <span class="lucide-icon" data-icon="upload"></span>
-                <span class="shortcut-chip">⌃U</span>
-              </button>
-              <button
-                id="btn-upload-folder"
-                class="btn btn--icon"
-                title="Upload Folder (Ctrl+Shift+U)"
-                aria-label="Upload folder"
-              >
-                <span class="lucide-icon" data-icon="folder-up"></span>
-                <span class="shortcut-chip">⌃⇧U</span>
-              </button>
-            </div>
-          </div>
-
-          <div id="batch-toolbar" class="batch-toolbar" hidden>
-            <span id="batch-count" class="batch-toolbar__count"></span>
-            <div class="batch-toolbar__actions">
-              <button id="batch-properties" class="btn btn--sm btn--ghost">
-                <span class="lucide-icon" data-icon="info"></span>
-                Properties
-              </button>
-              <button id="batch-download" class="btn btn--sm">
-                <span class="lucide-icon" data-icon="download"></span>
-                Download
-              </button>
-              <button id="batch-delete" class="btn btn--sm btn--danger">
-                <span class="lucide-icon" data-icon="trash-2"></span>
-                Delete
-              </button>
-              <button id="batch-copy-urls" class="btn btn--sm btn--ghost">
-                Copy URLs
-              </button>
-              <button id="batch-deselect" class="btn btn--sm btn--ghost">
-                Deselect All
-              </button>
-            </div>
-          </div>
-
-          <div id="empty-state" class="empty-state">
-            <span
-              class="lucide-icon empty-state__icon"
-              data-icon="cloud"
-            ></span>
-            <p class="empty-state__text">
-              Connect to an S3-compatible endpoint to browse objects.
-            </p>
-            <div class="empty-state__actions">
-              <button
-                type="button"
-                id="empty-connect-btn"
-                class="btn btn--primary"
-              >
-                Enter connection details
-              </button>
-            </div>
-          </div>
-
-          <div id="drop-zone-overlay" class="drop-zone-overlay" hidden>
-            <div class="drop-zone-overlay__content">
-              <span
-                class="lucide-icon drop-zone-overlay__icon"
-                data-icon="upload"
-              ></span>
-              <p class="drop-zone-overlay__text">Drop files to upload</p>
-              <p id="drop-zone-path" class="drop-zone-overlay__path"></p>
-            </div>
-          </div>
-          <div
-            id="object-panel"
-            class="object-panel"
-            style="display: none"
-            aria-busy="false"
-          >
-            <table class="object-table" aria-label="Objects">
-              <thead>
-                <tr>
-                  <th class="col-check">
-                    <input
-                      id="select-all"
-                      type="checkbox"
-                      title="Select all"
-                      aria-label="Select all"
-                    />
-                  </th>
-                  <th
-                    class="col-sortable"
-                    data-sort="name"
-                    aria-sort="ascending"
-                  >
-                    <button
-                      type="button"
-                      class="sort-trigger"
-                      aria-label="Sort by name"
-                    >
-                      Name
-                      <span class="sort-indicator" id="sort-name"
-                        ><span
-                          class="lucide-icon lucide-icon--sort"
-                          data-icon="arrow-up"
-                        ></span
-                      ></span>
-                    </button>
-                  </th>
-                  <th class="col-sortable" data-sort="size" aria-sort="none">
-                    <button
-                      type="button"
-                      class="sort-trigger"
-                      aria-label="Sort by size"
-                    >
-                      Size <span class="sort-indicator" id="sort-size"></span>
-                    </button>
-                  </th>
-                  <th
-                    class="col-sortable"
-                    data-sort="modified"
-                    aria-sort="none"
-                  >
-                    <button
-                      type="button"
-                      class="sort-trigger"
-                      aria-label="Sort by last modified"
-                    >
-                      Last Modified
-                      <span class="sort-indicator" id="sort-modified"></span>
-                    </button>
-                  </th>
-                </tr>
-              </thead>
-              <tbody id="object-tbody"></tbody>
-            </table>
-            <div id="load-more-row" class="load-more-row" style="display: none">
-              <button id="btn-load-more" class="btn btn--ghost">
-                Load more...
-              </button>
-              <span id="object-count" class="object-count"></span>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <div id="bottom-drawer" class="bottom-drawer" hidden>
-        <div
-          class="bottom-drawer__resize-handle"
-          role="separator"
-          aria-label="Resize bottom panel"
-          aria-orientation="horizontal"
-          tabindex="0"
-        ></div>
-        <div class="bottom-drawer__header">
-          <div class="bottom-drawer__tabs" role="tablist">
-            <button
-              class="bottom-drawer__tab bottom-drawer__tab--active"
-              id="drawer-tab-activity"
-              role="tab"
-              aria-selected="true"
-              aria-controls="drawer-panel-activity"
-              tabindex="0"
-            >
-              <span class="lucide-icon" data-icon="clipboard-list"></span>
-              Activity
-              <span
-                id="drawer-activity-badge"
-                class="drawer-badge"
-                style="display: none"
-              ></span>
-            </button>
-            <button
-              class="bottom-drawer__tab"
-              id="drawer-tab-transfers"
-              role="tab"
-              aria-selected="false"
-              aria-controls="drawer-panel-transfers"
-              tabindex="-1"
-            >
-              <span class="lucide-icon" data-icon="download"></span>
-              Transfers
-              <span
-                id="drawer-transfer-badge"
-                class="drawer-badge"
-                style="display: none"
-              ></span>
-            </button>
-          </div>
-          <div class="bottom-drawer__actions">
-            <button id="drawer-export" class="btn btn--ghost btn--sm">
-              Export
-            </button>
-            <button id="drawer-clear" class="btn btn--ghost btn--sm">
-              Clear
-            </button>
-            <button
-              id="drawer-minimize"
-              class="btn btn--icon"
+              type="button"
+              id="titlebar-minimize"
+              class="titlebar-win-btn"
               title="Minimize"
-              aria-label="Minimize panel"
+              aria-label="Minimize"
             >
-              <span class="lucide-icon" data-icon="chevron-down"></span>
+              <span class="lucide-icon" data-icon="minus"></span>
             </button>
             <button
-              id="drawer-close"
-              class="btn btn--icon"
-              aria-label="Close panel"
+              type="button"
+              id="titlebar-maximize"
+              class="titlebar-win-btn"
+              title="Maximize"
+              aria-label="Maximize"
+            >
+              <span class="lucide-icon" data-icon="square"></span>
+            </button>
+            <button
+              type="button"
+              id="titlebar-close"
+              class="titlebar-win-btn titlebar-win-btn--close"
+              title="Close"
+              aria-label="Close"
             >
               <span class="lucide-icon" data-icon="x"></span>
             </button>
           </div>
         </div>
-        <div class="bottom-drawer__body">
-          <div
-            id="drawer-panel-activity"
-            class="bottom-drawer__panel"
-            role="tabpanel"
-            aria-labelledby="drawer-tab-activity"
-          >
-            <div
-              id="activity-list"
-              class="activity-list"
-              role="log"
-              aria-live="polite"
-              aria-label="Activity log"
-            >
-              <div class="activity-empty">
-                <span
-                  class="lucide-icon empty-state__icon"
-                  data-icon="clipboard-list"
-                ></span>
-                <span>No activity yet</span>
-              </div>
-            </div>
-          </div>
-          <div
-            id="drawer-panel-transfers"
-            class="bottom-drawer__panel"
-            role="tabpanel"
-            aria-labelledby="drawer-tab-transfers"
-            hidden
-          >
-            <div class="transfer-toolbar">
-              <button id="transfer-pause-all" class="btn btn--ghost btn--sm">
-                Pause all
-              </button>
-              <button id="transfer-resume-all" class="btn btn--ghost btn--sm">
-                Resume all
-              </button>
-              <button id="transfer-prioritize" class="btn btn--ghost btn--sm">
-                Prioritize selected
-              </button>
-              <button id="transfer-retry-failed" class="btn btn--ghost btn--sm">
-                Retry failed
-              </button>
-              <button
-                id="transfer-retry-skipped"
-                class="btn btn--ghost btn--sm"
-              >
-                Retry skipped
-              </button>
-              <button
-                id="transfer-clear-non-active"
-                class="btn btn--ghost btn--sm"
-              >
-                Clear non-active
-              </button>
-              <span
-                id="drawer-transfer-throughput"
-                class="statusbar__count"
-              ></span>
-            </div>
-            <div
-              id="transfer-list"
-              class="transfer-list"
-              aria-label="Transfers"
-            >
-              <div class="transfer-empty">
-                <span
-                  class="lucide-icon empty-state__icon"
-                  data-icon="download"
-                ></span>
-                <span>No transfers</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      </header>
 
-      <footer class="statusbar">
-        <span id="status" role="status" aria-live="polite"></span>
-        <div class="statusbar__right">
-          <span id="statusbar-count" class="statusbar__count"></span>
-          <span id="statusbar-throughput" class="statusbar__count"></span>
-          <button
-            id="activity-toggle"
-            class="btn btn--icon statusbar__transfer"
-            title="Activity log"
-            aria-label="Activity log"
-            aria-controls="bottom-drawer"
-            aria-expanded="false"
-          >
-            <span class="lucide-icon" data-icon="clipboard-list"></span
-            ><span
-              id="activity-badge"
-              class="transfer-badge activity-badge"
-              style="display: none"
-            ></span>
-          </button>
-          <button
-            id="transfer-toggle"
-            class="btn btn--icon statusbar__transfer"
-            title="Transfers"
-            aria-label="Transfers"
-            aria-controls="bottom-drawer"
-            aria-expanded="false"
-            hidden
-          >
-            <span class="lucide-icon" data-icon="download"></span
-            ><span
-              id="transfer-badge"
-              class="transfer-badge"
-              style="display: none"
-            ></span>
-          </button>
-          <span id="version-label"></span>
+      <main id="main-content" class="app-main">
+        <div id="connection-screen" class="connection-screen">
+          <div class="connection-screen__sidebar">
+            <div class="connection-screen__sidebar-header">
+              <span>Saved Connections</span>
+              <button
+                id="conn-new-btn"
+                class="btn btn--icon"
+                title="Create new connection"
+                aria-label="New connection"
+              >
+                +
+              </button>
+            </div>
+            <ul id="conn-saved-list" class="conn-saved-list"></ul>
+          </div>
+          <div class="connection-screen__main">
+            <div class="connection-screen__form-card">
+              <h1 class="connection-screen__title">Connect to S3 Storage</h1>
+              <p class="connection-screen__subtitle">
+                Enter credentials, or choose a saved connection to connect
+                instantly. After you connect, the same entries appear as
+                bookmark chips in the title bar.
+              </p>
+
+              <div class="connection-form">
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="conn-provider-preset"
+                      >Provider Preset (Optional)</label
+                    >
+                    <select
+                      id="conn-provider-preset"
+                      class="field field--full"
+                      aria-label="Provider preset"
+                      title="Choose a storage provider to prefill endpoint"
+                    >
+                      <option value="">Choose provider (optional)...</option>
+                      <option value="aws">AWS S3</option>
+                      <option value="do">DigitalOcean Spaces</option>
+                      <option value="backblaze">Backblaze B2</option>
+                      <option value="cloudflare">Cloudflare R2</option>
+                      <option value="minio">MinIO (local)</option>
+                      <option value="wasabi">Wasabi</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group form-group--wide">
+                    <label for="conn-endpoint">Endpoint URL</label>
+                    <input
+                      id="conn-endpoint"
+                      class="field field--full"
+                      type="text"
+                      placeholder="https://nyc3.digitaloceanspaces.com"
+                      aria-label="Endpoint URL"
+                    />
+                  </div>
+                  <div class="form-group form-group--narrow">
+                    <label for="conn-region">Region</label>
+                    <input
+                      id="conn-region"
+                      class="field field--full"
+                      type="text"
+                      placeholder="us-east-1"
+                      aria-label="Region"
+                    />
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="conn-access-key">Access Key</label>
+                    <input
+                      id="conn-access-key"
+                      class="field field--full"
+                      type="text"
+                      placeholder="Access Key"
+                      aria-label="Access key"
+                    />
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="conn-secret-key">Secret Key</label>
+                    <div class="field-with-toggle field-with-toggle--full">
+                      <input
+                        id="conn-secret-key"
+                        class="field field--full"
+                        type="password"
+                        placeholder="Secret Key"
+                        aria-label="Secret key"
+                      />
+                      <button
+                        id="secret-key-toggle"
+                        type="button"
+                        class="field-toggle-btn field-toggle-btn--text"
+                        title="Show/hide secret key"
+                        aria-label="Show secret key"
+                        aria-pressed="false"
+                      >
+                        Show
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="form-actions">
+                  <button
+                    id="bookmark-save-btn"
+                    class="btn"
+                    title="Bookmark this connection"
+                    aria-label="Bookmark this connection"
+                  >
+                    <span
+                      id="bookmark-save-icon"
+                      class="lucide-icon"
+                      data-icon="bookmark"
+                    ></span>
+                    Save Bookmark
+                  </button>
+                  <button id="connect-btn" class="btn btn--primary">
+                    Connect
+                  </button>
+                </div>
+                <p
+                  id="conn-form-error"
+                  class="connection-form__error"
+                  role="alert"
+                  hidden
+                ></p>
+              </div>
+            </div>
+          </div>
         </div>
-      </footer>
+
+        <div id="main-layout" class="main-layout" style="display: none">
+          <button
+            id="sidebar-backdrop"
+            class="sidebar-backdrop"
+            aria-label="Close bucket sidebar"
+            hidden
+          ></button>
+          <button
+            id="inspector-backdrop"
+            class="inspector-backdrop"
+            aria-label="Close inspector"
+            hidden
+          ></button>
+          <aside id="bucket-panel" class="sidebar">
+            <div class="sidebar__header sidebar__header--stacked">
+              <span>Buckets</span>
+              <input
+                id="bucket-filter-input"
+                class="field field--sm sidebar__filter"
+                type="text"
+                placeholder="Filter buckets..."
+                aria-label="Filter buckets"
+              />
+            </div>
+            <ul
+              id="bucket-list"
+              class="list"
+              aria-label="Buckets"
+              aria-busy="false"
+            ></ul>
+          </aside>
+          <div
+            id="sidebar-resizer"
+            class="sidebar-resizer"
+            role="separator"
+            tabindex="0"
+            aria-label="Resize bucket sidebar"
+            aria-orientation="vertical"
+          ></div>
+
+          <section class="content">
+            <div class="content-toolbar">
+              <div class="content-toolbar__left">
+                <button
+                  id="sidebar-toggle"
+                  class="btn btn--icon sidebar-toggle"
+                  title="Toggle buckets"
+                  aria-label="Toggle buckets"
+                >
+                  <span class="lucide-icon" data-icon="database"></span>
+                </button>
+                <button
+                  id="nav-back"
+                  class="btn btn--icon"
+                  title="Back (Alt+Left)"
+                  aria-label="Navigate back"
+                  disabled
+                >
+                  <span class="lucide-icon" data-icon="arrow-left"></span>
+                </button>
+                <button
+                  id="nav-forward"
+                  class="btn btn--icon"
+                  title="Forward (Alt+Right)"
+                  aria-label="Navigate forward"
+                  disabled
+                >
+                  <span class="lucide-icon" data-icon="arrow-right"></span>
+                </button>
+                <button
+                  id="nav-up"
+                  class="btn btn--icon"
+                  title="Go up (Backspace)"
+                  aria-label="Navigate up"
+                  disabled
+                >
+                  <span class="lucide-icon" data-icon="arrow-up"></span>
+                </button>
+                <div
+                  id="location-omnibar"
+                  class="location-omnibar"
+                  title="Click to edit path"
+                >
+                  <nav
+                    id="location-omnibar-browse"
+                    class="breadcrumb location-omnibar__browse"
+                    aria-label="Breadcrumb"
+                  ></nav>
+                  <input
+                    id="location-omnibar-edit"
+                    class="field location-omnibar__edit"
+                    type="text"
+                    placeholder="bucket/prefix/"
+                    aria-label="Location path"
+                    spellcheck="false"
+                    autocomplete="off"
+                    hidden
+                  />
+                </div>
+              </div>
+              <input
+                id="filter-input"
+                class="field filter-input"
+                type="text"
+                placeholder="Filter..."
+                aria-label="Filter objects"
+              />
+              <div class="content-toolbar__actions">
+                <button
+                  id="btn-refresh"
+                  class="btn btn--icon"
+                  title="Refresh (F5)"
+                  aria-label="Refresh"
+                >
+                  <span class="lucide-icon" data-icon="refresh-cw"></span>
+                  <span class="shortcut-chip">F5</span>
+                </button>
+                <button
+                  id="btn-new-folder"
+                  class="btn btn--icon"
+                  title="New Folder (Ctrl+N)"
+                  aria-label="New folder"
+                >
+                  <span class="lucide-icon" data-icon="folder-plus"></span>
+                  <span class="shortcut-chip">⌃N</span>
+                </button>
+                <button
+                  id="btn-upload"
+                  class="btn btn--icon"
+                  title="Upload Files (Ctrl+U)"
+                  aria-label="Upload files"
+                >
+                  <span class="lucide-icon" data-icon="upload"></span>
+                  <span class="shortcut-chip">⌃U</span>
+                </button>
+                <button
+                  id="btn-upload-folder"
+                  class="btn btn--icon"
+                  title="Upload Folder (Ctrl+Shift+U)"
+                  aria-label="Upload folder"
+                >
+                  <span class="lucide-icon" data-icon="folder-up"></span>
+                  <span class="shortcut-chip">⌃⇧U</span>
+                </button>
+                <button
+                  id="btn-download"
+                  class="btn btn--icon"
+                  title="Download"
+                  aria-label="Download selected"
+                  disabled
+                >
+                  <span class="lucide-icon" data-icon="download"></span>
+                </button>
+                <button
+                  id="btn-inspector"
+                  class="btn btn--icon"
+                  title="Inspector"
+                  aria-label="Toggle inspector"
+                  aria-pressed="false"
+                >
+                  <span class="lucide-icon" data-icon="sidebar"></span>
+                </button>
+              </div>
+            </div>
+
+            <div class="content-body">
+              <div class="content-main">
+                <div id="batch-toolbar" class="batch-toolbar" hidden>
+                  <span id="batch-count" class="batch-toolbar__count"></span>
+                  <div class="batch-toolbar__actions">
+                    <button
+                      id="batch-properties"
+                      class="btn btn--sm btn--ghost"
+                    >
+                      <span class="lucide-icon" data-icon="info"></span>
+                      Properties
+                    </button>
+                    <button id="batch-download" class="btn btn--sm">
+                      <span class="lucide-icon" data-icon="download"></span>
+                      Download
+                    </button>
+                    <button id="batch-delete" class="btn btn--sm btn--danger">
+                      <span class="lucide-icon" data-icon="trash-2"></span>
+                      Delete
+                    </button>
+                    <button id="batch-copy-urls" class="btn btn--sm btn--ghost">
+                      Copy URLs
+                    </button>
+                    <button id="batch-deselect" class="btn btn--sm btn--ghost">
+                      Deselect All
+                    </button>
+                  </div>
+                </div>
+
+                <div id="empty-state" class="empty-state">
+                  <span
+                    class="lucide-icon empty-state__icon"
+                    data-icon="cloud"
+                  ></span>
+                  <p class="empty-state__text">
+                    Select a bucket from the sidebar to browse objects.
+                  </p>
+                </div>
+
+                <div id="drop-zone-overlay" class="drop-zone-overlay" hidden>
+                  <div class="drop-zone-overlay__content">
+                    <span
+                      class="lucide-icon drop-zone-overlay__icon"
+                      data-icon="upload"
+                    ></span>
+                    <p class="drop-zone-overlay__text">Drop files to upload</p>
+                    <p id="drop-zone-path" class="drop-zone-overlay__path"></p>
+                  </div>
+                </div>
+                <div
+                  id="object-panel"
+                  class="object-panel"
+                  style="display: none"
+                  aria-busy="false"
+                >
+                  <table class="object-table" aria-label="Objects">
+                    <thead>
+                      <tr>
+                        <th class="col-check">
+                          <input
+                            id="select-all"
+                            type="checkbox"
+                            title="Select all"
+                            aria-label="Select all"
+                          />
+                        </th>
+                        <th
+                          class="col-sortable"
+                          data-sort="name"
+                          aria-sort="ascending"
+                        >
+                          <button
+                            type="button"
+                            class="sort-trigger"
+                            aria-label="Sort by name"
+                          >
+                            Name
+                            <span class="sort-indicator" id="sort-name"
+                              ><span
+                                class="lucide-icon lucide-icon--sort"
+                                data-icon="arrow-up"
+                              ></span
+                            ></span>
+                          </button>
+                        </th>
+                        <th
+                          class="col-sortable"
+                          data-sort="size"
+                          aria-sort="none"
+                        >
+                          <button
+                            type="button"
+                            class="sort-trigger"
+                            aria-label="Sort by size"
+                          >
+                            Size
+                            <span class="sort-indicator" id="sort-size"></span>
+                          </button>
+                        </th>
+                        <th
+                          class="col-sortable"
+                          data-sort="modified"
+                          aria-sort="none"
+                        >
+                          <button
+                            type="button"
+                            class="sort-trigger"
+                            aria-label="Sort by last modified"
+                          >
+                            Last Modified
+                            <span
+                              class="sort-indicator"
+                              id="sort-modified"
+                            ></span>
+                          </button>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody id="object-tbody"></tbody>
+                  </table>
+                  <div
+                    id="load-more-row"
+                    class="load-more-row"
+                    style="display: none"
+                  >
+                    <button id="btn-load-more" class="btn btn--ghost">
+                      Load more...
+                    </button>
+                    <span id="object-count" class="object-count"></span>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                id="inspector-resizer"
+                class="inspector-resizer"
+                role="separator"
+                tabindex="0"
+                aria-label="Resize inspector"
+                aria-orientation="vertical"
+                hidden
+              ></div>
+              <aside id="inspector-panel" class="inspector-panel" hidden>
+                <div class="inspector-panel__header">
+                  <span
+                    id="inspector-header-title"
+                    class="inspector-panel__title"
+                    >Inspector</span
+                  >
+                  <div class="inspector-tabs" role="tablist">
+                    <button
+                      type="button"
+                      class="inspector-tab inspector-tab--active"
+                      data-inspector-tab="preview"
+                      role="tab"
+                      aria-selected="true"
+                    >
+                      Preview
+                    </button>
+                    <button
+                      type="button"
+                      class="inspector-tab"
+                      data-inspector-tab="properties"
+                      role="tab"
+                      aria-selected="false"
+                    >
+                      Properties
+                    </button>
+                  </div>
+                  <button
+                    id="inspector-close"
+                    type="button"
+                    class="btn btn--icon"
+                    aria-label="Close inspector"
+                  >
+                    <span class="lucide-icon" data-icon="x"></span>
+                  </button>
+                </div>
+                <div id="inspector-empty" class="inspector-empty" hidden>
+                  Select an object to inspect.
+                </div>
+                <div id="inspector-pane-preview" class="inspector-pane" hidden>
+                  <div
+                    id="inspector-preview-title"
+                    class="inspector-preview__title"
+                  ></div>
+                  <div
+                    id="inspector-preview-body"
+                    class="inspector-preview__body preview-body"
+                  ></div>
+                </div>
+                <div id="inspector-pane-info" class="inspector-pane" hidden>
+                  <div class="inspector-info__header">
+                    <h3 id="inspector-info-title" class="inspector-info__title">
+                      File Info
+                    </h3>
+                  </div>
+                  <div
+                    class="info-tabs"
+                    id="inspector-info-tabs"
+                    role="tablist"
+                  >
+                    <button
+                      class="info-tab info-tab--active"
+                      data-tab="general"
+                      role="tab"
+                      aria-selected="true"
+                      tabindex="0"
+                    >
+                      General
+                    </button>
+                    <button
+                      class="info-tab"
+                      data-tab="permissions"
+                      role="tab"
+                      aria-selected="false"
+                      tabindex="-1"
+                    >
+                      Permissions
+                    </button>
+                    <button
+                      class="info-tab"
+                      data-tab="metadata"
+                      role="tab"
+                      aria-selected="false"
+                      tabindex="-1"
+                    >
+                      Metadata
+                    </button>
+                    <button
+                      class="info-tab"
+                      data-tab="s3"
+                      role="tab"
+                      aria-selected="false"
+                      tabindex="-1"
+                    >
+                      S3
+                    </button>
+                  </div>
+                  <div
+                    id="inspector-info-body"
+                    class="inspector-info__body modal__body"
+                  ></div>
+                  <div class="inspector-panel__footer">
+                    <button
+                      id="inspector-info-cancel"
+                      type="button"
+                      class="btn btn--ghost btn--sm"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      id="inspector-info-save"
+                      type="button"
+                      class="btn btn--primary btn--sm"
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </section>
+        </div>
+
+        <div id="bottom-drawer" class="bottom-drawer" hidden>
+          <div
+            class="bottom-drawer__resize-handle"
+            role="separator"
+            aria-label="Resize bottom panel"
+            aria-orientation="horizontal"
+            tabindex="0"
+          ></div>
+          <div class="bottom-drawer__header">
+            <div class="bottom-drawer__tabs" role="tablist">
+              <button
+                class="bottom-drawer__tab bottom-drawer__tab--active"
+                id="drawer-tab-activity"
+                role="tab"
+                aria-selected="true"
+                aria-controls="drawer-panel-activity"
+                tabindex="0"
+              >
+                <span class="lucide-icon" data-icon="clipboard-list"></span>
+                Activity
+                <span
+                  id="drawer-activity-badge"
+                  class="drawer-badge"
+                  style="display: none"
+                ></span>
+              </button>
+              <button
+                class="bottom-drawer__tab"
+                id="drawer-tab-transfers"
+                role="tab"
+                aria-selected="false"
+                aria-controls="drawer-panel-transfers"
+                tabindex="-1"
+              >
+                <span class="lucide-icon" data-icon="download"></span>
+                Transfers
+                <span
+                  id="drawer-transfer-badge"
+                  class="drawer-badge"
+                  style="display: none"
+                ></span>
+              </button>
+            </div>
+            <div class="bottom-drawer__actions">
+              <button id="drawer-export" class="btn btn--ghost btn--sm">
+                Export
+              </button>
+              <button id="drawer-clear" class="btn btn--ghost btn--sm">
+                Clear
+              </button>
+              <button
+                id="drawer-minimize"
+                class="btn btn--icon"
+                title="Minimize"
+                aria-label="Minimize panel"
+              >
+                <span class="lucide-icon" data-icon="chevron-down"></span>
+              </button>
+              <button
+                id="drawer-close"
+                class="btn btn--icon"
+                aria-label="Close panel"
+              >
+                <span class="lucide-icon" data-icon="x"></span>
+              </button>
+            </div>
+          </div>
+          <div class="bottom-drawer__body">
+            <div
+              id="drawer-panel-activity"
+              class="bottom-drawer__panel"
+              role="tabpanel"
+              aria-labelledby="drawer-tab-activity"
+            >
+              <div
+                id="activity-list"
+                class="activity-list"
+                role="log"
+                aria-live="polite"
+                aria-label="Activity log"
+              >
+                <div class="activity-empty">
+                  <span
+                    class="lucide-icon empty-state__icon"
+                    data-icon="clipboard-list"
+                  ></span>
+                  <span>No activity yet</span>
+                </div>
+              </div>
+            </div>
+            <div
+              id="drawer-panel-transfers"
+              class="bottom-drawer__panel"
+              role="tabpanel"
+              aria-labelledby="drawer-tab-transfers"
+              hidden
+            >
+              <div class="transfer-toolbar">
+                <div
+                  id="transfer-queue-summary"
+                  class="transfer-queue-summary"
+                  aria-live="polite"
+                ></div>
+                <button id="transfer-pause-all" class="btn btn--ghost btn--sm">
+                  Pause all
+                </button>
+                <button id="transfer-resume-all" class="btn btn--ghost btn--sm">
+                  Resume all
+                </button>
+                <button
+                  id="transfer-more"
+                  type="button"
+                  class="btn btn--icon btn--sm"
+                  title="More transfer actions"
+                  aria-label="More transfer actions"
+                >
+                  <span class="lucide-icon" data-icon="more-horizontal"></span>
+                </button>
+                <span
+                  id="drawer-transfer-throughput"
+                  class="statusbar__count transfer-toolbar__throughput"
+                ></span>
+              </div>
+              <div
+                id="transfer-list"
+                class="transfer-list"
+                aria-label="Transfers"
+              >
+                <div class="transfer-empty">
+                  <span
+                    class="lucide-icon empty-state__icon"
+                    data-icon="download"
+                  ></span>
+                  <span>No transfers</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <footer class="statusbar">
+          <span id="status" role="status" aria-live="polite"></span>
+          <div class="statusbar__right">
+            <span id="statusbar-count" class="statusbar__count"></span>
+            <span id="statusbar-throughput" class="statusbar__count"></span>
+            <button
+              id="activity-toggle"
+              class="btn btn--icon statusbar__transfer"
+              title="Activity log"
+              aria-label="Activity log"
+              aria-controls="bottom-drawer"
+              aria-expanded="false"
+            >
+              <span class="lucide-icon" data-icon="clipboard-list"></span
+              ><span
+                id="activity-badge"
+                class="transfer-badge activity-badge"
+                style="display: none"
+              ></span>
+            </button>
+            <button
+              id="transfer-toggle"
+              class="btn btn--icon statusbar__transfer"
+              title="Transfers"
+              aria-label="Transfers"
+              aria-controls="bottom-drawer"
+              aria-expanded="false"
+            >
+              <span class="lucide-icon" data-icon="download"></span
+              ><span
+                id="transfer-badge"
+                class="transfer-badge"
+                style="display: none"
+              ></span>
+            </button>
+            <span id="version-label"></span>
+          </div>
+        </footer>
+      </main>
     </div>
 
     <div
@@ -962,6 +1197,12 @@
                       type="checkbox"
                     />
                     <span>Remember last download folder</span>
+                  </label>
+                </div>
+                <div class="setting-item">
+                  <label class="setting-checkbox">
+                    <input id="setting-open-transfer-drawer" type="checkbox" />
+                    <span>Open transfer drawer when a transfer starts</span>
                   </label>
                 </div>
                 <div class="setting-item">
@@ -1893,15 +2134,16 @@
           </div>
           <h2 class="setup-wizard-step__title">You're All Set!</h2>
           <p class="setup-wizard-step__desc">
-            S3 Sidekick is ready to go. You can change any of these settings
-            later.
+            Connect to your first S3-compatible storage. Saved connections
+            become bookmark chips in the title bar for one-click access later.
+            You can change any setup choices in Settings.
           </p>
           <div class="setup-wizard-step__actions">
             <button
               id="setup-done-btn"
               class="btn btn--primary setup-wizard-btn-wide"
             >
-              Launch S3 Sidekick
+              Connect to storage
             </button>
           </div>
         </div>

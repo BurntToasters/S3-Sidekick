@@ -10,7 +10,7 @@ function renderFixture(): void {
   document.body.innerHTML = `
     <button id="activity-toggle"></button>
     <span id="activity-badge" style="display:none"></span>
-    <button id="transfer-toggle" hidden>
+    <button id="transfer-toggle">
       <span id="transfer-badge" style="display:none"></span>
     </button>
     <div id="bottom-drawer" class="bottom-drawer" hidden>
@@ -82,7 +82,7 @@ beforeEach(() => {
 });
 
 describe("transfers queue UI", () => {
-  it("hides transfer controls when there are no queued or historical items", async () => {
+  it("keeps transfer toggle visible when idle", async () => {
     const transfers = await loadTransfersModule();
     await transfers.initTransferQueueUI();
 
@@ -91,7 +91,8 @@ describe("transfers queue UI", () => {
     ) as HTMLButtonElement;
     const drawer = document.getElementById("bottom-drawer") as HTMLDivElement;
 
-    expect(toggle.hidden).toBe(true);
+    expect(toggle.hidden).toBe(false);
+    expect(toggle.classList.contains("statusbar__transfer--idle")).toBe(true);
     expect(drawer.hidden).toBe(true);
   });
 
@@ -130,7 +131,7 @@ describe("transfers queue UI", () => {
     });
   });
 
-  it("hides transfer toggle after completed history is cleared", async () => {
+  it("marks transfer toggle idle after completed history is cleared", async () => {
     const transfers = await loadTransfersModule();
     await transfers.initTransferQueueUI();
     transfers.enqueuePaths(["C:\\tmp\\archive.zip"], "uploads/");
@@ -142,7 +143,8 @@ describe("transfers queue UI", () => {
       "transfer-toggle",
     ) as HTMLButtonElement;
 
-    expect(toggle.hidden).toBe(true);
+    expect(toggle.hidden).toBe(false);
+    expect(toggle.classList.contains("statusbar__transfer--idle")).toBe(true);
   });
 
   it("queues downloads and calls download_object", async () => {

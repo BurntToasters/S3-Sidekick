@@ -3,8 +3,10 @@
 
 @import "./styles/tokens.css";
 @import "./styles/header.css";
+@import "./styles/titlebar.css";
 @import "./styles/layout.css";
 @import "./styles/browser.css";
+@import "./styles/inspector.css";
 @import "./styles/controls.css";
 @import "./styles/modals.css";
 @import "./styles/dialogs.css";

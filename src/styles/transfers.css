@@ -9,10 +9,65 @@
 .transfer-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
-  padding: 6px 10px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
+}
+
+.transfer-queue-summary {
+  flex: 1;
+  min-width: 120px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.transfer-toolbar__throughput {
+  margin-left: auto;
+}
+
+#drawer-panel-transfers {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.transfer-op {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.transfer-name {
+  max-width: min(280px, 42vw);
+}
+
+.transfer-progress-wrap--indeterminate .transfer-progress__bar {
+  width: 35% !important;
+  animation: transfer-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes transfer-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.transfer-badge--alert,
+.drawer-badge--alert {
+  background: var(--danger) !important;
+  color: #fff !important;
 }
 
 .transfer-toolbar .statusbar__count {
@@ -210,4 +265,12 @@
   position: relative;
   font-size: 14px;
   padding: 2px 6px;
+}
+
+.statusbar__transfer--idle {
+  opacity: 0.55;
+}
+
+.statusbar__transfer--idle:hover {
+  opacity: 1;
 }

@@ -6,6 +6,32 @@
   height: 100vh;
 }
 
+.app-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 10000;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: var(--radius);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  left: 12px;
+  top: 12px;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -22,6 +48,14 @@
 .header__brand {
   font-size: 16px;
   font-weight: 600;
+  flex-shrink: 0;
+}
+
+.titlebar__main {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
 }
 
 .bookmark-bar {
@@ -32,8 +66,11 @@
   min-width: 0;
   overflow-x: auto;
   padding: 0 12px;
-  -webkit-app-region: no-drag;
   scrollbar-width: none;
+}
+
+body:not(.titlebar-custom) .bookmark-bar {
+  -webkit-app-region: no-drag;
 }
 
 .bookmark-bar::-webkit-scrollbar {
@@ -85,17 +122,12 @@
   background: var(--bg-active);
   border-color: var(--accent);
   color: var(--accent);
-  box-shadow:
-    0 0 0 1px var(--accent),
-    0 2px 8px var(--glow-accent);
+  font-weight: 600;
 }
 
 .bookmark-chip--active:hover {
   background: var(--bg-active);
   border-color: var(--accent);
-  box-shadow:
-    0 0 0 1px var(--accent),
-    0 4px 12px var(--glow-accent);
 }
 
 .bookmark-chip--new {
@@ -112,15 +144,13 @@
   border-style: solid;
 }
 
-.bookmark-chip__region {
-  color: var(--text-secondary);
-  font-weight: 400;
-}
-
 .header__actions {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+body:not(.titlebar-custom) .header__actions {
   -webkit-app-region: no-drag;
 }
 

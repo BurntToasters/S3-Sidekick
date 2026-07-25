@@ -27,8 +27,12 @@ import {
   navigateBack,
   navigateForward,
   navigateUp,
+  navigateToLocationPath,
+  enterLocationEditMode,
+  exitLocationEditMode,
   pruneStaleSelection,
 } from "./browser.ts";
+import { wireInspectorChrome } from "./inspector.ts";
 import { checkUpdates, setUpdateChannel } from "./updater.ts";
 import { loadBookmarks, clearBookmarks } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
@@ -66,6 +70,7 @@ import { setStatus } from "./app-status.ts";
 import { showToast } from "./toast.ts";
 import {
   wireLayoutControls,
+  wireInspectorControls,
   setSidebarOpen,
   closeSidebarOnMobile,
   handleTabListArrowKey,
@@ -112,6 +117,22 @@ import {
 export function wireEvents(): void {
   dom.connectBtn.addEventListener("click", handleConnect);
   dom.disconnectBtn.addEventListener("click", handleDisconnect);
+
+  const connectionFieldIds = [
+    "conn-endpoint",
+    "conn-region",
+    "conn-access-key",
+    "conn-secret-key",
+  ];
+  for (const id of connectionFieldIds) {
+    const field = document.getElementById(id) as HTMLInputElement | null;
+    field?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void handleConnect();
+      }
+    });
+  }
 
   const secretToggle = document.getElementById(
     "secret-key-toggle",
@@ -390,15 +411,34 @@ export function wireEvents(): void {
   document
     .getElementById("nav-forward")
     ?.addEventListener("click", () => void navigateForward());
-
   document
-    .getElementById("empty-connect-btn")
-    ?.addEventListener("click", () => {
-      const endpoint = document.getElementById(
-        "conn-endpoint",
-      ) as HTMLInputElement | null;
-      endpoint?.focus();
-    });
+    .getElementById("nav-up")
+    ?.addEventListener("click", () => void navigateUp());
+
+  const pathInput = document.getElementById(
+    "location-omnibar-edit",
+  ) as HTMLInputElement | null;
+  pathInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void navigateToLocationPath(pathInput.value).then((ok) => {
+        if (ok) exitLocationEditMode(true);
+      });
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      exitLocationEditMode(true);
+    }
+  });
+
+  const locationOmnibar = document.getElementById("location-omnibar");
+  locationOmnibar?.addEventListener("dblclick", (e) => {
+    if ((e.target as HTMLElement).closest(".breadcrumb__segment")) return;
+    enterLocationEditMode();
+  });
+  locationOmnibar?.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).closest(".breadcrumb__segment")) return;
+    if (e.target === locationOmnibar) enterLocationEditMode();
+  });
 
   document
     .getElementById("btn-refresh")!
@@ -412,6 +452,9 @@ export function wireEvents(): void {
   document
     .getElementById("btn-upload-folder")!
     .addEventListener("click", handleUploadFolderButton);
+  document.getElementById("btn-download")!.addEventListener("click", () => {
+    void handleDownload();
+  });
 
   wireObjectFilterInput();
 
@@ -679,6 +722,8 @@ export function wireEvents(): void {
   });
 
   wireLayoutControls();
+  wireInspectorControls();
+  wireInspectorChrome();
 
   initPalette();
   const isMac = state.platformName === "macos";

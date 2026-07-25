@@ -202,6 +202,7 @@ vi.mock("../browser.ts", () => ({
   navigateUp: mockNavigateUp,
   navigateBack: mockNavigateBack,
   navigateForward: mockNavigateForward,
+  navigateToLocationPath: vi.fn(async () => true),
   clearNavHistory: mockClearNavHistory,
   pruneStaleSelection: mockPruneStaleSelection,
 }));
@@ -737,6 +738,7 @@ describe("main integration", () => {
       access_key: "bookmark-access",
       secret_key: "bookmark-secret",
     });
+    await flushMicrotasks();
     expect(
       (document.getElementById("conn-endpoint") as HTMLInputElement).value,
     ).toBe("https://bookmarked.example.com");
@@ -749,9 +751,15 @@ describe("main integration", () => {
     expect(
       (document.getElementById("conn-secret-key") as HTMLInputElement).value,
     ).toBe("bookmark-secret");
+    expect(mockConnect).toHaveBeenCalledWith(
+      "https://bookmarked.example.com",
+      "us-west-2",
+      "bookmark-access",
+      "bookmark-secret",
+    );
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain('Loaded bookmark "Pinned".');
+    ).toContain("Connected");
 
     (document.getElementById("settings-close") as HTMLButtonElement).click();
     (document.getElementById("settings-cancel") as HTMLButtonElement).click();
@@ -1269,7 +1277,9 @@ describe("main integration", () => {
     const objectPanel = document.getElementById(
       "object-panel",
     ) as HTMLDivElement;
-    const breadcrumb = document.getElementById("breadcrumb") as HTMLElement;
+    const breadcrumb = document.getElementById(
+      "location-omnibar-browse",
+    ) as HTMLElement;
     breadcrumb.innerHTML =
       '<button type="button" class="breadcrumb__segment" data-prefix="docs/ctx/"></button>';
     const breadcrumbSeg = breadcrumb.querySelector(

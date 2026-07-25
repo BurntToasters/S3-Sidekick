@@ -8,6 +8,14 @@
   .filter-input {
     width: 120px;
   }
+
+  .path-input {
+    width: min(200px, 28vw);
+  }
+
+  .location-omnibar {
+    min-width: 0;
+  }
 }
 
 @media (max-width: 900px) {
@@ -63,6 +71,43 @@
   .filter-input {
     margin-left: auto;
     margin-right: 8px;
+  }
+
+  .location-omnibar {
+    width: 100%;
+    max-width: none;
+    margin: 0 8px 4px;
+    order: 2;
+  }
+
+  .content-toolbar__left {
+    flex-wrap: wrap;
+  }
+
+  .inspector-panel {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: min(88vw, 360px);
+    min-width: 0;
+    max-width: none;
+    transform: translateX(104%);
+    transition: transform 0.18s ease;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+    z-index: 55;
+  }
+
+  .main-layout.main-layout--inspector-open .inspector-panel {
+    transform: translateX(0);
+  }
+
+  .main-layout.main-layout--inspector-open .inspector-backdrop {
+    display: block;
+  }
+
+  .inspector-resizer {
+    display: none;
   }
 
   .batch-toolbar {

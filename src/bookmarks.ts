@@ -136,11 +136,8 @@ export function renderBookmarkBar(
     chip.className = isActive
       ? "bookmark-chip bookmark-chip--active"
       : "bookmark-chip";
-    chip.title = b.endpoint;
-    const regionSuffix = b.region
-      ? ` <span class="bookmark-chip__region">${escapeHtml(b.region)}</span>`
-      : "";
-    chip.innerHTML = escapeHtml(b.name) + regionSuffix;
+    chip.textContent = b.name;
+    chip.title = b.region ? `${b.endpoint} (${b.region})` : b.endpoint;
     chip.addEventListener("click", () => onSelect(b));
     barEl.appendChild(chip);
   }
@@ -206,16 +203,20 @@ export function renderBookmarkList(
   listEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
   onDelete: (index: number) => void,
+  options: { emptyMessage?: string } = {},
 ): void {
   if (bookmarks.length === 0) {
-    listEl.innerHTML = `<li class="bookmark-empty">No bookmarks saved</li>`;
+    const message = options.emptyMessage ?? "No bookmarks saved";
+    listEl.innerHTML = `<li class="bookmark-empty">${escapeHtml(message)}</li>`;
+    listEl.onkeydown = null;
+    listEl.onclick = null;
     return;
   }
 
   listEl.innerHTML = bookmarks
     .map((b, i) => {
       const regionPart = b.region ? ` (${escapeHtml(b.region)})` : "";
-      return `<li class="bookmark-item" data-index="${i}">
+      return `<li class="bookmark-item" data-index="${i}" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
           <div style="flex:1;min-width:0">
             <div class="bookmark__name">${escapeHtml(b.name)}</div>
             <div class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</div>
@@ -241,10 +242,34 @@ export function renderBookmarkList(
       ".bookmark-item",
     );
     if (item) {
+      highlightBookmarkListItem(listEl, item);
       const idx = parseInt(item.dataset.index!, 10);
       if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
         onSelect(bookmarks[idx]);
       }
     }
   };
+
+  listEl.onkeydown = (e) => {
+    if (e.key !== "Enter") return;
+    const item = (e.target as HTMLElement).closest<HTMLElement>(
+      ".bookmark-item",
+    );
+    if (!item) return;
+    e.preventDefault();
+    highlightBookmarkListItem(listEl, item);
+    const idx = parseInt(item.dataset.index!, 10);
+    if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
+      onSelect(bookmarks[idx]);
+    }
+  };
+}
+
+function highlightBookmarkListItem(
+  listEl: HTMLElement,
+  active: HTMLElement,
+): void {
+  listEl.querySelectorAll(".bookmark-item").forEach((el) => {
+    el.classList.toggle("bookmark-item--selected", el === active);
+  });
 }

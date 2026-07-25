@@ -1,6 +1,8 @@
 # S3-Sidekick
 S3 Sidekick is your buddy for quick GUI S3-compatible storage management! I made this app beause I couldn't find any S3 GUI clients for Linux that I preferred so I decided to make my own!
 
+> **Current release:** [v0.11.0-beta.1](CHANGELOG.md#changes-in-v0110-beta1) — see [CHANGELOG.md](CHANGELOG.md) for release notes. Beta builds use the **latest** GitHub release assets below.
+
 ## ⬇️ Downloads
 
 | <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> MacOS | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux |

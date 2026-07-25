@@ -4,7 +4,10 @@
   "app": {
     "windows": [
       {
-        "title": "S3 Sidekick (Dev)"
+        "label": "main",
+        "title": "S3 Sidekick (Dev)",
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay"
       }
     ]
   }

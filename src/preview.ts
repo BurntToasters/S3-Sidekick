@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
-import { $, escapeHtml, formatSize, basename } from "./utils.ts";
+import { escapeHtml, formatSize, basename } from "./utils.ts";
 import { state } from "./state.ts";
+import {
+  getPreviewTitleEl,
+  getPreviewBodyEl,
+  showPreviewOverlay,
+  hidePreviewOverlay,
+  shouldUseInspectorMount,
+} from "./inspector-mount.ts";
+import {
+  focusInspectorPreviewPane,
+  ensureInspectorOpenForPane,
+} from "./inspector.ts";
 
 interface PreviewResponse {
   content_type: string;
@@ -79,14 +90,18 @@ function clearActivePreviewObjectUrl(): void {
 }
 
 export async function openPreview(key: string): Promise<void> {
-  const overlay = $("preview-overlay");
-  const title = $("preview-title");
-  const body = $("preview-body");
+  ensureInspectorOpenForPane("preview");
+  if (shouldUseInspectorMount()) {
+    focusInspectorPreviewPane();
+  }
+
+  const title = getPreviewTitleEl();
+  const body = getPreviewBodyEl();
   const seq = ++previewSeq;
 
   clearActivePreviewObjectUrl();
   title.textContent = basename(key);
-  overlay.classList.add("active");
+  showPreviewOverlay(true);
   body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading preview&#8230;</div>`;
 
   try {
@@ -126,5 +141,6 @@ export async function openPreview(key: string): Promise<void> {
 
 export function closePreview(): void {
   clearActivePreviewObjectUrl();
-  $("preview-overlay").classList.remove("active");
+  getPreviewBodyEl().innerHTML = "";
+  hidePreviewOverlay();
 }
