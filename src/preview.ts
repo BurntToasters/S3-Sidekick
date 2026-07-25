@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { escapeHtml, formatSize, basename } from "./utils.ts";
+import { escapeHtml, formatSize, basename, friendlyError } from "./utils.ts";
 import { state } from "./state.ts";
 import {
   getPreviewTitleEl,
@@ -8,10 +8,6 @@ import {
   hidePreviewOverlay,
   shouldUseInspectorMount,
 } from "./inspector-mount.ts";
-import {
-  focusInspectorPreviewPane,
-  ensureInspectorOpenForPane,
-} from "./inspector.ts";
 
 interface PreviewResponse {
   content_type: string;
@@ -90,9 +86,15 @@ function clearActivePreviewObjectUrl(): void {
 }
 
 export async function openPreview(key: string): Promise<void> {
+  const {
+    ensureInspectorOpenForPane,
+    focusInspectorPreviewPane,
+    markInspectorHasContent,
+  } = await import("./inspector.ts");
   ensureInspectorOpenForPane("preview");
   if (shouldUseInspectorMount()) {
     focusInspectorPreviewPane();
+    markInspectorHasContent();
   }
 
   const title = getPreviewTitleEl();
@@ -135,12 +137,14 @@ export async function openPreview(key: string): Promise<void> {
 
     body.innerHTML = html;
   } catch (err) {
-    body.innerHTML = `<div class="metadata-loading">Failed to load preview: ${escapeHtml(String(err))}</div>`;
+    body.innerHTML = `<div class="metadata-loading">Failed to load preview: ${escapeHtml(friendlyError(err))}</div>`;
   }
 }
 
 export function closePreview(): void {
   clearActivePreviewObjectUrl();
-  getPreviewBodyEl().innerHTML = "";
+  for (const id of ["inspector-preview-body", "preview-body"]) {
+    document.getElementById(id)?.replaceChildren();
+  }
   hidePreviewOverlay();
 }

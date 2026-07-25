@@ -169,6 +169,12 @@ describe("browser core rendering and selection", () => {
     expect(
       (document.getElementById("btn-download") as HTMLButtonElement).disabled,
     ).toBe(true);
+
+    state.selectedKeys.add("prefix:folder/");
+    browser.updateSelectionUI();
+    expect(
+      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("supports row click multi-selection and select-all", async () => {

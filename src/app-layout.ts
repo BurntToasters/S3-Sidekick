@@ -66,6 +66,16 @@ export function updateShortcutChips(): void {
         .replace(/\u21e7/, "Shift+");
     }
   }
+  updateInspectorToggleShortcutLabel();
+}
+
+export function updateInspectorToggleShortcutLabel(): void {
+  const isMac = state.platformName === "macos";
+  const accel = isMac ? "\u2318\u21e7I" : "Ctrl+Shift+I";
+  const btn = document.getElementById("btn-inspector");
+  if (!btn) return;
+  btn.title = `Inspector (${accel})`;
+  btn.setAttribute("aria-label", `Toggle inspector (${accel})`);
 }
 
 function isMobileSidebarMode(): boolean {
@@ -273,29 +283,31 @@ function applyInspectorWidth(width: number): void {
 export function wireInspectorControls(): void {
   const panel = document.getElementById("inspector-panel");
   const resizer = document.getElementById("inspector-resizer");
-  const backdrop = document.getElementById("inspector-backdrop");
   if (!panel || !resizer) return;
 
+  const readInspectorWidth = () => panel.getBoundingClientRect().width;
   const savedWidthRaw = window.localStorage.getItem(INSPECTOR_STORAGE_KEY);
   const savedWidth = savedWidthRaw ? Number(savedWidthRaw) : NaN;
+  const updateInspectorResizerAria = (width: number) => {
+    const rounded = Math.round(clampInspectorWidth(width));
+    resizer.setAttribute("aria-valuemin", String(INSPECTOR_MIN));
+    resizer.setAttribute("aria-valuemax", String(INSPECTOR_MAX));
+    resizer.setAttribute("aria-valuenow", String(rounded));
+    resizer.setAttribute("aria-valuetext", `${rounded} pixels`);
+  };
   if (Number.isFinite(savedWidth)) {
     applyInspectorWidth(savedWidth);
+    updateInspectorResizerAria(savedWidth);
+  } else {
+    updateInspectorResizerAria(readInspectorWidth());
   }
 
-  const readInspectorWidth = () => panel.getBoundingClientRect().width;
   const persistInspectorWidth = (width: number) => {
     window.localStorage.setItem(
       INSPECTOR_STORAGE_KEY,
       String(clampInspectorWidth(width)),
     );
   };
-
-  const syncInspectorMode = () => {
-    if (!isMobileSidebarMode()) {
-      backdrop?.setAttribute("hidden", "");
-    }
-  };
-  window.addEventListener("resize", syncInspectorMode);
 
   let dragStartX = 0;
   let dragStartWidth = 0;
@@ -306,6 +318,7 @@ export function wireInspectorControls(): void {
     const delta = dragStartX - event.clientX;
     const nextWidth = clampInspectorWidth(dragStartWidth + delta);
     applyInspectorWidth(nextWidth);
+    updateInspectorResizerAria(nextWidth);
   };
 
   const onMouseUp = () => {
@@ -315,7 +328,9 @@ export function wireInspectorControls(): void {
     document.body.style.cursor = "";
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mouseup", onMouseUp);
-    persistInspectorWidth(readInspectorWidth());
+    const width = readInspectorWidth();
+    persistInspectorWidth(width);
+    updateInspectorResizerAria(width);
   };
 
   resizer.addEventListener("mousedown", (event) => {
@@ -328,6 +343,28 @@ export function wireInspectorControls(): void {
     document.body.style.cursor = "col-resize";
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
+  });
+
+  resizer.addEventListener("keydown", (event) => {
+    if (isMobileSidebarMode()) return;
+    const currentWidth = readInspectorWidth();
+    const step = event.shiftKey ? 40 : 16;
+    let nextWidth: number | null = null;
+    if (event.key === "ArrowLeft") {
+      nextWidth = currentWidth + step;
+    } else if (event.key === "ArrowRight") {
+      nextWidth = currentWidth - step;
+    } else if (event.key === "Home") {
+      nextWidth = INSPECTOR_MAX;
+    } else if (event.key === "End") {
+      nextWidth = INSPECTOR_MIN;
+    }
+    if (nextWidth === null) return;
+    event.preventDefault();
+    const clamped = clampInspectorWidth(nextWidth);
+    applyInspectorWidth(clamped);
+    persistInspectorWidth(clamped);
+    updateInspectorResizerAria(clamped);
   });
 }
 

@@ -1,20 +1,17 @@
 import { basename } from "./utils.ts";
+import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
 
 export type InspectorPaneTab = "preview" | "properties";
 
 let inspectorOpen = false;
 let inspectorTab: InspectorPaneTab = "preview";
-let inspectorSyncInFlight = false;
+let inspectorEmptyActive = true;
+let inspectorSyncGeneration = 0;
 
 const INSPECTOR_OPEN_STORAGE_KEY = "s3-sidekick.inspector.open";
 
-export function preferInspectorMount(): boolean {
-  return !isMobileInspectorMode();
-}
-
-/** Opens the docked inspector on desktop/wide layouts before preview/properties render. */
+/** Opens the docked inspector before preview/properties render (desktop slide-out or narrow overlay). */
 export function ensureInspectorOpenForPane(tab: InspectorPaneTab): void {
-  if (!preferInspectorMount()) return;
   if (!inspectorOpen) {
     setInspectorOpen(true);
   }
@@ -37,7 +34,7 @@ export function restoreInspectorOpenState(): void {
     setInspectorOpen(false);
   } else if (
     typeof window.matchMedia === "function" &&
-    window.matchMedia("(min-width: 1181px)").matches
+    window.matchMedia("(min-width: 901px)").matches
   ) {
     setInspectorOpen(true);
   }
@@ -71,6 +68,11 @@ export function setInspectorTab(tab: InspectorPaneTab): void {
   void syncInspectorFromSelection();
 }
 
+export function markInspectorHasContent(): void {
+  inspectorEmptyActive = false;
+  syncInspectorPaneVisibility();
+}
+
 function syncInspectorPaneVisibility(): void {
   const previewPane = document.getElementById("inspector-pane-preview");
   const infoPane = document.getElementById("inspector-pane-info");
@@ -84,11 +86,17 @@ function syncInspectorPaneVisibility(): void {
     return;
   }
 
-  const onPreview = inspectorTab === "preview";
-  const onInfo = inspectorTab === "properties";
-  previewPane.hidden = !onPreview;
-  infoPane.hidden = !onInfo;
-  empty.hidden = onPreview || onInfo;
+  if (inspectorEmptyActive) {
+    empty.hidden = false;
+    previewPane.hidden = true;
+    infoPane.hidden = true;
+  } else {
+    const onPreview = inspectorTab === "preview";
+    const onInfo = inspectorTab === "properties";
+    empty.hidden = true;
+    previewPane.hidden = !onPreview;
+    infoPane.hidden = !onInfo;
+  }
 
   const tabs = document.querySelectorAll<HTMLElement>("[data-inspector-tab]");
   for (const tab of tabs) {
@@ -108,28 +116,51 @@ export function setInspectorOpen(open: boolean): void {
   const backdrop = document.getElementById("inspector-backdrop");
   const layout = document.getElementById("main-layout");
   const toggle = document.getElementById("btn-inspector");
+  const mobile = isMobileInspectorMode();
+
+  if (open && mobile && isDrawerOpen()) {
+    closeDrawer();
+  }
 
   if (panel) panel.hidden = !open;
-  if (resizer) resizer.hidden = !open || isMobileInspectorMode();
-  if (backdrop) backdrop.hidden = !open || !isMobileInspectorMode();
-  layout?.classList.toggle(
-    "main-layout--inspector-open",
-    open && isMobileInspectorMode(),
-  );
+  if (resizer) resizer.hidden = !open || mobile;
+  if (backdrop) backdrop.hidden = !open || !mobile;
+  layout?.classList.toggle("main-layout--inspector-open", open && mobile);
+  layout?.classList.toggle("main-layout--inspector-docked", open && !mobile);
   toggle?.classList.toggle("btn--active", open);
   toggle?.setAttribute("aria-pressed", String(open));
+  document.documentElement.dataset.inspectorOpen = open ? "1" : "0";
 
   syncInspectorPaneVisibility();
   if (open) {
     void syncInspectorFromSelection();
   } else {
+    inspectorEmptyActive = true;
     showInspectorEmpty("Select an object to inspect.");
     void import("./preview.ts").then((m) => m.closePreview());
+    void import("./info-panel.ts").then((m) => m.closeInfoPanel());
   }
 }
 
 export function toggleInspector(): void {
-  setInspectorOpen(!inspectorOpen);
+  if (inspectorOpen) {
+    void requestCloseInspector();
+  } else {
+    setInspectorOpen(true);
+  }
+}
+
+export async function requestCloseInspector(): Promise<boolean> {
+  if (!inspectorOpen) return true;
+  const info = await import("./info-panel.ts");
+  if (
+    info.hasUnsavedInfoChanges() &&
+    !(await info.confirmDiscardInfoProperties())
+  ) {
+    return false;
+  }
+  setInspectorOpen(false);
+  return true;
 }
 
 export function isMobileInspectorMode(): boolean {
@@ -144,70 +175,94 @@ export function closeInspectorOnMobile(): void {
 }
 
 function showInspectorEmpty(message: string): void {
+  inspectorEmptyActive = true;
   const empty = document.getElementById("inspector-empty");
   if (empty) {
     empty.textContent = message;
-    empty.hidden = false;
   }
-  const previewPane = document.getElementById("inspector-pane-preview");
-  const infoPane = document.getElementById("inspector-pane-info");
-  if (previewPane) previewPane.hidden = true;
-  if (infoPane) infoPane.hidden = true;
+  syncInspectorPaneVisibility();
 }
 
 export async function syncInspectorFromSelection(
   selectedKeys?: Set<string>,
 ): Promise<void> {
-  if (!inspectorOpen || inspectorSyncInFlight) return;
+  if (!inspectorOpen) return;
+
+  const syncGen = ++inspectorSyncGeneration;
   const { state } = await import("./state.ts");
+  if (syncGen !== inspectorSyncGeneration) return;
+
   const keysSet = selectedKeys ?? state.selectedKeys;
   const keys = Array.from(keysSet);
 
   if (keys.length === 0) {
     showInspectorEmpty("Select an object to inspect.");
+    document.getElementById("inspector-preview-body")?.replaceChildren();
+    document.getElementById("preview-body")?.replaceChildren();
     return;
   }
 
-  inspectorSyncInFlight = true;
-  try {
-    const headerTitle = document.getElementById("inspector-header-title");
-    if (headerTitle) {
-      headerTitle.textContent =
-        keys.length === 1
-          ? basename(keys[0].startsWith("prefix:") ? keys[0].slice(7) : keys[0])
-          : `${keys.length} selected`;
-    }
+  inspectorEmptyActive = false;
+  syncInspectorPaneVisibility();
 
-    syncInspectorPaneVisibility();
+  const headerTitle = document.getElementById("inspector-header-title");
+  if (headerTitle) {
+    headerTitle.textContent =
+      keys.length === 1
+        ? basename(keys[0].startsWith("prefix:") ? keys[0].slice(7) : keys[0])
+        : `${keys.length} selected`;
+  }
+
+  try {
+    const fileKeys = keys.filter((k) => !k.startsWith("prefix:"));
 
     if (inspectorTab === "preview") {
-      const fileKeys = keys.filter((k) => !k.startsWith("prefix:"));
       const { canPreview, openPreview } = await import("./preview.ts");
+      if (syncGen !== inspectorSyncGeneration) return;
       if (fileKeys.length === 1 && canPreview(basename(fileKeys[0]))) {
         await openPreview(fileKeys[0]);
         return;
       }
-      inspectorTab = "properties";
-      syncInspectorPaneVisibility();
+      if (fileKeys.length === 1) {
+        markInspectorHasContent();
+        const body = document.getElementById("inspector-preview-body");
+        if (body) {
+          body.innerHTML =
+            '<p class="inspector-empty">Preview is not available for this file type.</p>';
+        }
+        focusInspectorPreviewPane();
+        return;
+      }
+      focusInspectorPropertiesPane();
     }
 
+    if (syncGen !== inspectorSyncGeneration) return;
     const { openInfoPanel } = await import("./info-panel.ts");
     await openInfoPanel(keys);
-  } finally {
-    inspectorSyncInFlight = false;
+  } catch (err) {
+    if (syncGen !== inspectorSyncGeneration) return;
+    console.error("Inspector sync failed:", err);
+    showInspectorEmpty("Could not load selection in the inspector.");
   }
 }
 
 export function wireInspectorChrome(): void {
-  document
-    .getElementById("btn-inspector")
-    ?.addEventListener("click", () => toggleInspector());
-  document
-    .getElementById("inspector-close")
-    ?.addEventListener("click", () => setInspectorOpen(false));
+  if (document.documentElement.dataset.inspectorChromeWired === "1") return;
+  document.documentElement.dataset.inspectorChromeWired = "1";
+
+  document.getElementById("btn-inspector")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleInspector();
+  });
+  document.getElementById("inspector-close")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void requestCloseInspector();
+  });
   document
     .getElementById("inspector-backdrop")
-    ?.addEventListener("click", () => setInspectorOpen(false));
+    ?.addEventListener("click", () => void requestCloseInspector());
 
   document
     .querySelectorAll<HTMLElement>("[data-inspector-tab]")
@@ -226,18 +281,29 @@ export function wireInspectorChrome(): void {
   document
     .getElementById("inspector-info-cancel")
     ?.addEventListener("click", () => {
-      void import("./info-panel.ts").then((m) => m.closeInfoPanel());
+      void import("./info-panel.ts").then(async (m) => {
+        if (await m.requestCloseInfoPanel()) {
+          void syncInspectorFromSelection();
+        }
+      });
     });
 
-  restoreInspectorOpenState();
-
-  const inspectorInfoTabs = document.getElementById("inspector-info-tabs");
-  inspectorInfoTabs?.addEventListener("click", (e) => {
-    const tab = (e.target as HTMLElement).closest<HTMLElement>(".info-tab");
-    if (tab?.dataset.tab) {
-      void import("./info-panel.ts").then((m) => m.switchTab(tab.dataset.tab!));
+  window.addEventListener("resize", () => {
+    const mobile = isMobileInspectorMode();
+    const layout = document.getElementById("main-layout");
+    if (!layout || !inspectorOpen) return;
+    layout.classList.toggle("main-layout--inspector-open", mobile);
+    layout.classList.toggle("main-layout--inspector-docked", !mobile);
+    const resizer = document.getElementById("inspector-resizer");
+    const backdrop = document.getElementById("inspector-backdrop");
+    if (resizer) resizer.hidden = !inspectorOpen || mobile;
+    if (backdrop) backdrop.hidden = !inspectorOpen || !mobile;
+    if (mobile && inspectorOpen && isDrawerOpen()) {
+      closeDrawer();
     }
   });
+
+  restoreInspectorOpenState();
 }
 
 // Re-export mount helpers for consumers that need them.

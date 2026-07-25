@@ -21,6 +21,7 @@ import {
   handleRowClick,
   handleSelectAll,
   clearSelection,
+  setLastClickedKey,
   updateSelectionUI,
   getSelectableKeys,
   toggleSort,
@@ -32,13 +33,13 @@ import {
   exitLocationEditMode,
   pruneStaleSelection,
 } from "./browser.ts";
-import { wireInspectorChrome } from "./inspector.ts";
+import { wireInspectorChrome, toggleInspector } from "./inspector.ts";
 import { checkUpdates, setUpdateChannel } from "./updater.ts";
 import { loadBookmarks, clearBookmarks } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
   openInfoPanel,
-  closeInfoPanel,
+  requestCloseInfoPanel,
   saveInfoPanel,
   switchTab,
 } from "./info-panel.ts";
@@ -65,7 +66,7 @@ import {
   handleBiometricToggle,
 } from "./security.ts";
 import { initPalette, registerCommands } from "./command-palette.ts";
-import { basename } from "./utils.ts";
+import { basename, friendlyError } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { showToast } from "./toast.ts";
 import {
@@ -269,30 +270,31 @@ export function wireEvents(): void {
 
   document
     .getElementById("info-close")!
-    .addEventListener("click", closeInfoPanel);
+    .addEventListener("click", () => void requestCloseInfoPanel());
   document
     .getElementById("info-cancel")!
-    .addEventListener("click", closeInfoPanel);
+    .addEventListener("click", () => void requestCloseInfoPanel());
   document
     .getElementById("info-save")!
     .addEventListener("click", saveInfoPanel);
   document.getElementById("info-overlay")!.addEventListener("click", (e) => {
-    if (e.target === e.currentTarget) closeInfoPanel();
+    if (e.target === e.currentTarget) void requestCloseInfoPanel();
   });
 
-  const infoTabs = document.querySelector<HTMLElement>(".info-tabs");
-  infoTabs!.addEventListener("click", (e) => {
-    const tab = (e.target as HTMLElement).closest<HTMLElement>(".info-tab");
-    if (tab?.dataset.tab) switchTab(tab.dataset.tab);
-  });
-  infoTabs!.addEventListener("keydown", (e) => {
-    const tabs = Array.from(
-      document.querySelectorAll<HTMLElement>(".info-tab"),
-    );
-    handleTabListArrowKey(e as KeyboardEvent, tabs, (tab) => {
-      if (tab.dataset.tab) {
-        switchTab(tab.dataset.tab);
-      }
+  document.querySelectorAll<HTMLElement>(".info-tabs").forEach((infoTabs) => {
+    infoTabs.addEventListener("click", (e) => {
+      const tab = (e.target as HTMLElement).closest<HTMLElement>(".info-tab");
+      if (tab?.dataset.tab) switchTab(tab.dataset.tab);
+    });
+    infoTabs.addEventListener("keydown", (e) => {
+      const tabs = Array.from(
+        infoTabs.querySelectorAll<HTMLElement>(".info-tab"),
+      );
+      handleTabListArrowKey(e as KeyboardEvent, tabs, (tab) => {
+        if (tab.dataset.tab) {
+          switchTab(tab.dataset.tab);
+        }
+      });
     });
   });
 
@@ -335,8 +337,8 @@ export function wireEvents(): void {
     .addEventListener("click", toggleActivityLog);
 
   document.getElementById("batch-properties")!.addEventListener("click", () => {
-    const keys = getSelectedFileKeys();
-    if (keys.length > 1) {
+    const keys = Array.from(state.selectedKeys);
+    if (keys.length > 0) {
       void openInfoPanel(keys);
     }
   });
@@ -480,6 +482,8 @@ export function wireEvents(): void {
       await loadMoreObjects();
       renderObjectTable();
       setStatus("");
+    } catch (err) {
+      setStatus(`Failed to load more: ${friendlyError(err)}`);
     } finally {
       loadMoreBtn.disabled = false;
       loadMoreBtn.textContent = "Load more";
@@ -551,6 +555,7 @@ export function wireEvents(): void {
     } else {
       state.selectedKeys.delete(key);
     }
+    setLastClickedKey(key);
     updateSelectionUI();
   });
 
@@ -570,6 +575,7 @@ export function wireEvents(): void {
       } else {
         state.selectedKeys.add(key);
       }
+      setLastClickedKey(key);
       updateSelectionUI();
       return;
     }
@@ -842,6 +848,45 @@ export function wireEvents(): void {
       action: () => {
         document.getElementById("settings-btn")?.click();
       },
+    },
+    {
+      id: "toggle-inspector",
+      label: "Toggle Inspector",
+      icon: "sidebar",
+      shortcut: `${accelLabel}⇧I`,
+      action: () => toggleInspector(),
+      available: () => state.connected,
+    },
+    {
+      id: "preview-selected",
+      label: "Preview Selected File",
+      icon: "eye",
+      action: () => {
+        const fileKeys = getSelectedFileKeys();
+        if (fileKeys.length === 1 && canPreview(basename(fileKeys[0]))) {
+          void openPreview(fileKeys[0]);
+        }
+      },
+      available: () => {
+        const fileKeys = getSelectedFileKeys();
+        return (
+          state.connected &&
+          fileKeys.length === 1 &&
+          canPreview(basename(fileKeys[0]))
+        );
+      },
+    },
+    {
+      id: "properties-selected",
+      label: "Open Properties for Selection",
+      icon: "info",
+      action: () => {
+        const keys = Array.from(state.selectedKeys);
+        if (keys.length > 0) {
+          void openInfoPanel(keys);
+        }
+      },
+      available: () => state.connected && state.selectedKeys.size > 0,
     },
     {
       id: "go-up",

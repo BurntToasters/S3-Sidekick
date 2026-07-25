@@ -8,6 +8,8 @@ import {
   friendlyError,
 } from "./utils.ts";
 import { refreshObjects } from "./connection.ts";
+import { closeInspectorOnMobile } from "./inspector.ts";
+import { getSelectedFileKeys } from "./app-selection.ts";
 
 function hasAccelModifier(e: MouseEvent): boolean {
   if (state.platformName === "macos") {
@@ -167,7 +169,11 @@ export function updateSelectionUI(): void {
     "btn-download",
   ) as HTMLButtonElement | null;
   if (downloadBtn) {
-    downloadBtn.disabled = state.selectedKeys.size === 0;
+    downloadBtn.disabled = getSelectedFileKeys().length === 0;
+    downloadBtn.title =
+      getSelectedFileKeys().length > 0
+        ? `Download ${getSelectedFileKeys().length} selected file${getSelectedFileKeys().length === 1 ? "" : "s"}`
+        : "Select files to download";
   }
 
   void import("./inspector.ts").then((inspector) => {
@@ -176,6 +182,10 @@ export function updateSelectionUI(): void {
 }
 
 let lastClickedKey: string | null = null;
+
+export function setLastClickedKey(key: string | null): void {
+  lastClickedKey = key;
+}
 
 export function handleRowClick(key: string, e: MouseEvent): void {
   const allKeys = getSelectableKeys();
@@ -609,6 +619,7 @@ function restoreListingSnapshot(snapshot: ListingSnapshot): void {
 function resetSelectionForListingChange(): void {
   state.selectedKeys.clear();
   lastClickedKey = null;
+  updateSelectionUI();
 }
 
 function pushNav(bucket: string, prefix: string): void {
@@ -706,6 +717,7 @@ export async function navigateForward(): Promise<void> {
 }
 
 export async function navigateToFolder(prefix: string): Promise<void> {
+  closeInspectorOnMobile();
   clearFilter();
   resetSelectionForListingChange();
   renderObjectTableSkeleton();
@@ -729,6 +741,7 @@ export async function navigateUp(): Promise<void> {
 }
 
 export async function selectBucket(name: string): Promise<void> {
+  closeInspectorOnMobile();
   clearFilter();
   resetSelectionForListingChange();
   state.currentPrefix = "";

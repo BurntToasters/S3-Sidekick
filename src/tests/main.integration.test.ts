@@ -62,6 +62,10 @@ const mockHideContextMenu = vi.fn();
 
 const mockOpenInfoPanel = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockCloseInfoPanel = vi.fn();
+const mockRequestCloseInfoPanel = vi.fn(async () => {
+  mockCloseInfoPanel();
+  return true;
+});
 const mockSaveInfoPanel = vi.fn<() => Promise<void>>();
 const mockSwitchTab = vi.fn();
 
@@ -196,6 +200,7 @@ vi.mock("../browser.ts", () => ({
   handleRowClick: mockHandleRowClick,
   handleSelectAll: mockHandleSelectAll,
   clearSelection: mockClearSelection,
+  setLastClickedKey: vi.fn(),
   updateSelectionUI: mockUpdateSelectionUI,
   getSelectableKeys: mockGetSelectableKeys,
   toggleSort: mockToggleSort,
@@ -238,6 +243,7 @@ vi.mock("../context-menu.ts", () => ({
 vi.mock("../info-panel.ts", () => ({
   openInfoPanel: mockOpenInfoPanel,
   closeInfoPanel: mockCloseInfoPanel,
+  requestCloseInfoPanel: mockRequestCloseInfoPanel,
   saveInfoPanel: mockSaveInfoPanel,
   switchTab: mockSwitchTab,
 }));
@@ -426,6 +432,11 @@ describe("main integration", () => {
     mockHideContextMenu.mockReset();
     mockOpenInfoPanel.mockReset();
     mockCloseInfoPanel.mockReset();
+    mockRequestCloseInfoPanel.mockReset();
+    mockRequestCloseInfoPanel.mockImplementation(async () => {
+      mockCloseInfoPanel();
+      return true;
+    });
     mockSaveInfoPanel.mockReset();
     mockSwitchTab.mockReset();
     mockToggleTransferQueue.mockReset();
@@ -781,7 +792,7 @@ describe("main integration", () => {
       document.getElementById("preview-overlay") as HTMLDivElement
     ).dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(mockCloseLicensesModal).toHaveBeenCalled();
-    expect(mockCloseInfoPanel).toHaveBeenCalled();
+    expect(mockRequestCloseInfoPanel).toHaveBeenCalled();
     expect(mockClosePreview).toHaveBeenCalled();
   });
 
@@ -2316,7 +2327,7 @@ describe("main integration", () => {
     state.selectedKeys.clear();
     state.selectedKeys.add("prefix:docs/folder/");
     state.selectedKeys.add("prefix:docs/other/");
-    const menuBeforeNoItems = mockShowContextMenu.mock.calls.length;
+    const menuBeforeMultiFolder = mockShowContextMenu.mock.calls.length;
     folderRow.dispatchEvent(
       new MouseEvent("contextmenu", {
         bubbles: true,
@@ -2325,7 +2336,14 @@ describe("main integration", () => {
         clientY: 17,
       }),
     );
-    expect(mockShowContextMenu.mock.calls.length).toBe(menuBeforeNoItems);
+    expect(mockShowContextMenu.mock.calls.length).toBe(
+      menuBeforeMultiFolder + 1,
+    );
+    const multiFolderMenu = mockShowContextMenu.mock.calls.at(-1)?.[2] as
+      { label: string }[] | undefined;
+    expect(
+      multiFolderMenu?.some((item) => item.label.includes("Properties")),
+    ).toBe(true);
 
     tbody.innerHTML = `
       <tr class="object-row" data-key="docs/preview.txt" tabindex="0">

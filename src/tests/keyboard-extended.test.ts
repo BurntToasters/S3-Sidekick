@@ -4,6 +4,10 @@ const mockHideContextMenu = vi.fn();
 const mockIsDialogActive = vi.fn();
 const mockClosePreview = vi.fn();
 const mockCloseInfoPanel = vi.fn();
+const mockRequestCloseInfoPanel = vi.fn(async () => {
+  mockCloseInfoPanel();
+  return true;
+});
 const mockCloseLicensesModal = vi.fn();
 const mockCloseDrawer = vi.fn();
 const mockIsDrawerOpen = vi.fn();
@@ -31,6 +35,7 @@ vi.mock("../preview.ts", () => ({
 
 vi.mock("../info-panel.ts", () => ({
   closeInfoPanel: mockCloseInfoPanel,
+  requestCloseInfoPanel: mockRequestCloseInfoPanel,
 }));
 
 vi.mock("../licenses.ts", () => ({
@@ -67,6 +72,7 @@ function renderFixture(): void {
     <div id="info-overlay"></div>
     <div id="licenses-overlay"></div>
     <div id="settings-overlay"></div>
+    <div id="setup-wizard-overlay" hidden></div>
     <div id="support-overlay" hidden>
       <button id="support-no" type="button">Dismiss</button>
     </div>
@@ -93,6 +99,11 @@ describe("keyboard shortcuts extended", () => {
     mockIsDialogActive.mockReset();
     mockClosePreview.mockReset();
     mockCloseInfoPanel.mockReset();
+    mockRequestCloseInfoPanel.mockReset();
+    mockRequestCloseInfoPanel.mockImplementation(async () => {
+      mockCloseInfoPanel();
+      return true;
+    });
     mockCloseLicensesModal.mockReset();
     mockCloseDrawer.mockReset();
     mockIsDrawerOpen.mockReset();
@@ -145,7 +156,7 @@ describe("keyboard shortcuts extended", () => {
     preview.classList.remove("active");
     info.classList.add("active");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    expect(mockCloseInfoPanel).toHaveBeenCalled();
+    expect(mockRequestCloseInfoPanel).toHaveBeenCalled();
 
     info.classList.remove("active");
     licenses.classList.add("active");
@@ -153,6 +164,12 @@ describe("keyboard shortcuts extended", () => {
     expect(mockCloseLicensesModal).toHaveBeenCalled();
 
     licenses.classList.remove("active");
+    settings.classList.add("active");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(mockCloseSettingsModal).toHaveBeenCalledWith(false);
+    settings.classList.remove("active");
+    mockCloseSettingsModal.mockClear();
+
     mockIsDrawerOpen.mockReturnValue(true);
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(mockCloseDrawer).toHaveBeenCalled();
@@ -163,9 +180,16 @@ describe("keyboard shortcuts extended", () => {
     expect(handlers.setSidebarOpen).toHaveBeenCalledWith(false);
 
     layout.classList.remove("main-layout--sidebar-open");
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      `<aside id="inspector-panel"></aside><button id="btn-inspector"></button>`,
+    );
+    const inspector = await import("../inspector.ts");
+    inspector.setInspectorOpen(true);
     settings.classList.add("active");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(mockCloseSettingsModal).toHaveBeenCalledWith(false);
+    expect(inspector.isInspectorOpen()).toBe(true);
   });
 
   it("fires accel/navigation shortcuts and select-all behavior", async () => {
@@ -263,6 +287,17 @@ describe("keyboard shortcuts extended", () => {
       "support-overlay",
     ) as HTMLDivElement;
     supportOverlay.removeAttribute("hidden");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "F5" }));
+    expect(handlers.handleRefresh).not.toHaveBeenCalled();
+  });
+
+  it("blocks refresh while setup wizard is visible", async () => {
+    const keyboard = await import("../keyboard.ts");
+    const handlers = createHandlers();
+    keyboard.wireKeyboardShortcuts(handlers);
+
+    document.getElementById("setup-wizard-overlay")?.removeAttribute("hidden");
+
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "F5" }));
     expect(handlers.handleRefresh).not.toHaveBeenCalled();
   });

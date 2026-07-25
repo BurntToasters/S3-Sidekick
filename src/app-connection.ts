@@ -24,6 +24,7 @@ import { friendlyError } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
 import { clearFilterInputDebounce } from "./app-layout.ts";
+import { setInspectorOpen } from "./inspector.ts";
 
 export function getConnectionInputs() {
   const endpoint = (
@@ -317,6 +318,7 @@ export async function handleDisconnect(): Promise<void> {
   }
   clearNavHistory();
   clearSelection();
+  setInspectorOpen(false);
   setConnectionUI(false);
   showEmptyState();
   setStatus("Disconnected.", 5000);
