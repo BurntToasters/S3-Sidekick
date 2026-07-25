@@ -24,6 +24,7 @@ export const RELEASE_SESSION_RELATIVE_PATH: string;
 
 export function currentReleaseIdentity(root?: string): ReleaseIdentity;
 export function createReleaseSession(root?: string): ReleaseSession;
+export function startReleaseSession(root?: string): ReleaseSession;
 export function clearQualityGateProof(root?: string): void;
 export function recordSuccessfulQualityGate(root?: string): boolean;
 export function validateQualityGate(
