@@ -1,14 +1,14 @@
-<!-- > [!NOTE]
-> 🅱️ This is a Beta build. -->
+> [!NOTE]
+> 🅱️ This is a Beta build.
 
 # ⬇️ Downloads
 
 | <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows                                                                                                                                | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS          | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux                                                                                                                                                      |
 | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> -->                                          | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-arm64.deb) -->                |
-|                                                                                                                                                                                                                                                  |                                                                                                                          | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-arm64.rpm) -->                |
-|                                                                                                                                                                                                                                                  |                                                                                                                          | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-arm64.flatpak) -->    |
+| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Linux-arm64.deb) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> -->                                          | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Linux-arm64.deb) -->                |
+|                                                                                                                                                                                                                                                  |                                                                                                                          | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Linux-arm64.rpm) -->                |
+|                                                                                                                                                                                                                                                  |                                                                                                                          | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.1/S3-Sidekick-Linux-arm64.flatpak) -->    |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
@@ -19,24 +19,37 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
-## Changes in `v0.10.2:`
+## Changes in `v0.11.0-beta.1:`
 
-- **NEW - Windows code signing:** WOO HOO!! Windows Codesigning is here!
-  - After a good while of not having it, Windows Binaries are now signed by Azure Artifact Signing!
-- **Release workflow:** Added resilient GitHub draft-release creation and wait steps so Windows creates one shared draft and macOS/Linux reuse it instead of creating duplicate drafts.
-- **Build performance:** Switched the Rust release profile to thin LTO with parallel code generation for faster release builds.
-- **UI:** Restored the missing upload icon in the file-upload toolbar and command palette.
+Focused UX polish for connection flow, browsing chrome, transfers, and desktop window framing—without a full redesign.
 
-## Changes in `v0.10.1:`
+- **Custom titlebar (macOS & Windows):**
+  - macOS uses Tauri overlay title bar with traffic-light spacing; Windows uses frameless chrome with in-app minimize/maximize/close.
+  - Linux keeps native window decorations (unchanged).
+  - Draggable regions: top drag strip, `data-tauri-drag-region`, selective `-webkit-app-region`, and `startDragging` fallback so the header can move the window without blocking bookmark chips and buttons.
+- **Connection & bookmarks:**
+  - Saved connections and header bookmark chips share the same data; one-click connect from chips and saved list.
+  - Inline connect errors, connecting spinner, Enter-to-connect in credential fields, bookmark tooltips (name in bar, endpoint on hover).
+  - Saved-list empty state, row selection/focus/Enter, form disabled while connecting; copy links saved connections to title-bar bookmarks.
+- **Browser chrome:**
+  - **Location omnibar** replaces separate breadcrumb + path field (browse vs edit path).
+  - **Inspector pane** (Preview | Properties) docked beside the object list, resizable, off-canvas below 900px; open state persisted; wide first visit defaults to open; Preview/Properties open the inspector on desktop (modals remain fallback on narrow layouts).
+  - Toolbar: Up navigation, download action, batch bar at one or more selected items with action tooltips (e.g. download files-only).
+- **Transfers & activity:**
+  - Drawer header: queue summary, Pause/Resume all, overflow menu for prioritize/retry/clear (legacy toolbar buttons removed).
+  - Row presentation: operation chips, indeterminate progress, failure badge; status bar **Transfers** control always visible (muted when idle).
+  - Setting: open transfer drawer when a transfer starts (default on); one-time toast pointing users to the transfers control.
+- **Onboarding & accessibility:**
+  - Setup wizard ends with **Connect to storage** and focuses the connection form; wizard uses the same modal focus trap as settings.
+  - Skip link to main content, `<main>` landmark, modal overlays inset below custom titlebar on macOS/Windows.
+- **Dev / tooling:**
+  - `scripts/sync-version.js` updates the workspace package version in `Cargo.lock` when the npm version changes (fixes `cargo metadata --locked` after version bumps).
+- **Tests:** Vitest coverage for connection UX, omnibar/inspector, transfers UI, titlebar, and related browser/bookmark updates (**321** tests passing).
 
-- **Security:** Bumped PBKDF2-HMAC-SHA256 iterations from `210,000` to `600,000` to match current OWASP recommendations. Existing vaults auto-migrate on next unlock.
-- **Security:** Added cleartext HTTP warning when connecting to non-local endpoints over plain `http://`. Credentials are sent unencrypted in that scenario.
-- **Security:** Documented biometric unlock limitations (key stored in OS credential store is not hardware-bound to Touch ID / Windows Hello).
-- **UI:** Fixed WCAG 1.4.3 AA contrast failures in `--text-muted`, `--text-secondary`, and `--badge-off-text` tokens across both light and dark themes. All text now meets the 4.5:1 minimum.
-- **UI:** Removed dead `.connection-bar` CSS left over from the v0.10.0 redesign and added a responsive breakpoint for `#connection-screen` at narrow widths (≤700px).
-- **UI:** Consolidated duplicate dark-theme token blocks into a single source of truth per selector.
-- **UI:** Added full ARIA support to the command palette — `role="dialog"`, `role="combobox"`, `role="listbox"`/`role="option"`, `aria-activedescendant`, and a keyboard focus trap.
-- **Codebase:** Cleaned up dead responsive CSS targeting the removed `.connection-bar` element.
+## Full v0.X.0 changelog:
+
+<details>
+<summary>Full v0.X.0 changelog</summary>
 
 ## Changes in `v0.10.0:`
 
@@ -58,28 +71,6 @@ v0.10.0 introduces a comprehensive UI/UX modernization, window size memory on re
 - **Security:** Fixed a potential panic in multipart upload if the source file grew larger between the initial size measurement and the upload completing.
 - **UI:** Dialogs now trap focus within the modal (Tab cycles through focusable controls only) and restore focus to the previously focused element on close.
 - **Misc:** Cleaned up all Clippy warnings across the Rust codebase; the build now enforces `-D warnings`.
-- **PKG:** Updated packages.
-
-## Changes in `v0.9.5:`
-
-- **NEW - Settings UI:** The settings UI has been fully re-designed with vertical tabs!
-  - This was a goal of mine for a while; the settings UI for S3 Sidekick was too cramped and chaotic and needed a functional re-design :)
-- **PKG:** Updated packages.
-
-## Full v0.9 changelog:
-
-<details>
-<summary>Full v0.9 changelog</summary>
-
-## Changes in `v0.9.3:`
-
-_Releases before v0.9.2 require a manual update._
-
-- **Security:** Updated Tauri V2 updater signer key.
-  - I accidentally leaked the (still encrypted) private key via a package.json entry. Rookie mistake — I am very sorry, I know how annoying this is. You will have to manually download and install `v0.9.2 (or later)` from this release to update the pubkey.
-  - Since the private key that was leaked was still encrypted with a password, it is a better state than if it was the full unencrypted privkey.
-  - All previous releases and accompanying binaries have been removed from GitHub and my mirror. The tags still remain.
-- **S3:** A bunch of new S3 additions (unstable as I was still testing; better release notes to come).
 - **PKG:** Updated packages.
 
 ## Changes in `v0.9.0:`

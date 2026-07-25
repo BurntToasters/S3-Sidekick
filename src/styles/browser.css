@@ -33,6 +33,26 @@
   flex-shrink: 0;
 }
 
+.path-input {
+  width: min(280px, 32vw);
+  min-width: 120px;
+  max-width: 360px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--mono);
+  flex-shrink: 1;
+  margin-right: 8px;
+}
+
+.object-size--folder {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.object-modified--muted {
+  color: var(--text-muted);
+}
+
 .sidebar-toggle {
   display: none;
   margin-left: 6px;
@@ -88,12 +108,15 @@
 }
 
 .breadcrumb {
-  padding: 8px 16px;
+  padding: 8px 12px;
   font-size: 13px;
   color: var(--text-secondary);
   min-height: 34px;
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .breadcrumb__segment {

@@ -258,6 +258,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       };
       cleanup();
       resolve(result);
+      void import("./app-connection.ts").then((m) => m.focusConnectionScreen());
     }
 
     const wrappedThemeNext = () => void onThemeNext();

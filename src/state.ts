@@ -48,6 +48,8 @@ export const dom = {
     return $("object-tbody");
   },
   get breadcrumb() {
+    const omnibar = document.getElementById("location-omnibar-browse");
+    if (omnibar) return omnibar as HTMLElement;
     return $("breadcrumb");
   },
   get statusEl() {

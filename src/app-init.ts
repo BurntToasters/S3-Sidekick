@@ -35,6 +35,7 @@ import {
 } from "./app-connection.ts";
 import { wireEvents } from "./app-events.ts";
 import { initializeIcons } from "./icons.ts";
+import { wireTitlebar } from "./titlebar.ts";
 
 async function checkSupportPrompt(): Promise<void> {
   try {
@@ -128,6 +129,7 @@ export async function init(): Promise<void> {
 
   state.platformName = await invoke<string>("get_platform_info");
   applyPlatformClass();
+  wireTitlebar();
 
   let settingsValid = true;
   try {

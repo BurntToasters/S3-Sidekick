@@ -107,7 +107,7 @@ function applySidebarWidth(width: number): void {
 
 export function getActiveModalOverlay(): HTMLElement | null {
   const overlays = document.querySelectorAll<HTMLElement>(
-    ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden])",
+    ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden]), .setup-wizard-overlay:not([hidden]), #palette-overlay:not([hidden])",
   );
   return overlays.length > 0 ? overlays[overlays.length - 1] : null;
 }
@@ -255,6 +255,82 @@ export function handleTabListArrowKey(
   nextTab.focus();
 }
 
+const INSPECTOR_MIN = 260;
+const INSPECTOR_MAX = 480;
+const INSPECTOR_STORAGE_KEY = "s3-sidekick.inspector.width";
+
+function clampInspectorWidth(width: number): number {
+  return Math.max(INSPECTOR_MIN, Math.min(INSPECTOR_MAX, width));
+}
+
+function applyInspectorWidth(width: number): void {
+  document.documentElement.style.setProperty(
+    "--inspector-width",
+    `${clampInspectorWidth(width)}px`,
+  );
+}
+
+export function wireInspectorControls(): void {
+  const panel = document.getElementById("inspector-panel");
+  const resizer = document.getElementById("inspector-resizer");
+  const backdrop = document.getElementById("inspector-backdrop");
+  if (!panel || !resizer) return;
+
+  const savedWidthRaw = window.localStorage.getItem(INSPECTOR_STORAGE_KEY);
+  const savedWidth = savedWidthRaw ? Number(savedWidthRaw) : NaN;
+  if (Number.isFinite(savedWidth)) {
+    applyInspectorWidth(savedWidth);
+  }
+
+  const readInspectorWidth = () => panel.getBoundingClientRect().width;
+  const persistInspectorWidth = (width: number) => {
+    window.localStorage.setItem(
+      INSPECTOR_STORAGE_KEY,
+      String(clampInspectorWidth(width)),
+    );
+  };
+
+  const syncInspectorMode = () => {
+    if (!isMobileSidebarMode()) {
+      backdrop?.setAttribute("hidden", "");
+    }
+  };
+  window.addEventListener("resize", syncInspectorMode);
+
+  let dragStartX = 0;
+  let dragStartWidth = 0;
+  let dragging = false;
+
+  const onMouseMove = (event: MouseEvent) => {
+    if (!dragging) return;
+    const delta = dragStartX - event.clientX;
+    const nextWidth = clampInspectorWidth(dragStartWidth + delta);
+    applyInspectorWidth(nextWidth);
+  };
+
+  const onMouseUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove("inspector-resizer--active");
+    document.body.style.cursor = "";
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    persistInspectorWidth(readInspectorWidth());
+  };
+
+  resizer.addEventListener("mousedown", (event) => {
+    if (isMobileSidebarMode()) return;
+    event.preventDefault();
+    dragging = true;
+    dragStartX = event.clientX;
+    dragStartWidth = readInspectorWidth();
+    resizer.classList.add("inspector-resizer--active");
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  });
+}
+
 export function wireLayoutControls(): void {
   const toggleBtn = document.getElementById("sidebar-toggle");
   const backdrop = document.getElementById("sidebar-backdrop");
@@ -361,7 +437,7 @@ export function initModalLayerObserver(): void {
   });
   document
     .querySelectorAll<HTMLElement>(
-      ".modal-overlay, .dialog-overlay, .support-overlay",
+      ".modal-overlay, .dialog-overlay, .support-overlay, .setup-wizard-overlay, #palette-overlay",
     )
     .forEach((overlay) => {
       modalLayerObserver!.observe(overlay, {

@@ -82,7 +82,18 @@ export function refreshSavedConnectionsList(): void {
     (index) => {
       void removeBookmark(index);
     },
+    {
+      emptyMessage:
+        "No saved connections yet. Connect using the form, or save a bookmark after you connect.",
+    },
   );
+}
+
+export function focusConnectionScreen(): void {
+  const endpoint = document.getElementById(
+    "conn-endpoint",
+  ) as HTMLInputElement | null;
+  endpoint?.focus();
 }
 
 export function refreshBookmarkBar(): void {
@@ -114,6 +125,7 @@ export async function handleNewConnection(): Promise<void> {
     await handleDisconnect();
   }
   setConnectionInputs("", "", "", "");
+  setConnectionFormError(null);
   (document.getElementById("conn-endpoint") as HTMLInputElement).focus();
   setStatus("Ready for a new connection.", 5000);
 }
@@ -125,15 +137,64 @@ export async function switchToBookmark(
   accessKey: string,
   secretKey: string,
 ): Promise<void> {
-  const wasConnected = state.connected;
-  if (wasConnected) {
+  if (state.connecting) return;
+  if (state.connected) {
     await handleDisconnect();
   }
   setConnectionInputs(endpoint, region, accessKey, secretKey);
-  if (wasConnected) {
-    await handleConnect();
+  setStatus(`Connecting to "${name}"...`, 5000);
+  await handleConnect();
+}
+
+export function setConnectionFormError(message: string | null): void {
+  const el = document.getElementById("conn-form-error");
+  if (!el) return;
+  if (message) {
+    el.textContent = message;
+    el.hidden = false;
   } else {
-    setStatus(`Loaded bookmark "${name}".`, 5000);
+    el.textContent = "";
+    el.hidden = true;
+  }
+}
+
+function setConnectButtonBusy(busy: boolean): void {
+  const btn = dom.connectBtn;
+  if (busy) {
+    btn.disabled = true;
+    btn.dataset.busy = "true";
+    btn.innerHTML = `<span class="spinner spinner--btn" aria-hidden="true"></span> Connecting…`;
+  } else {
+    btn.disabled = false;
+    delete btn.dataset.busy;
+    btn.textContent = "Connect";
+  }
+  setConnectionFormDisabled(busy);
+}
+
+function setConnectionFormDisabled(disabled: boolean): void {
+  const ids = [
+    "conn-provider-preset",
+    "conn-endpoint",
+    "conn-region",
+    "conn-access-key",
+    "conn-secret-key",
+    "conn-new-btn",
+    "bookmark-save-btn",
+  ];
+  for (const id of ids) {
+    const el = document.getElementById(id) as
+      HTMLInputElement | HTMLSelectElement | HTMLButtonElement | null;
+    if (el) el.disabled = disabled;
+  }
+  const savedList = document.getElementById("conn-saved-list");
+  if (savedList) {
+    savedList.classList.toggle("conn-saved-list--disabled", disabled);
+    savedList
+      .querySelectorAll<HTMLElement>(".bookmark-item")
+      .forEach((item) => {
+        item.tabIndex = disabled ? -1 : 0;
+      });
   }
 }
 
@@ -149,6 +210,7 @@ export function setConnectionUI(connected: boolean): void {
     dom.disconnectBtn.style.display = "";
     if (mainLayout) mainLayout.style.display = "flex";
     if (connScreen) connScreen.style.display = "none";
+    setConnectionFormError(null);
   } else {
     badge.textContent = "Disconnected";
     badge.className = "connection-badge connection-badge--off";
@@ -164,13 +226,19 @@ export async function handleConnect(): Promise<void> {
   if (state.connecting) return;
   const { endpoint, region, accessKey, secretKey } = getConnectionInputs();
   if (!endpoint || !accessKey || !secretKey) {
-    setStatus("Endpoint, access key, and secret key are required.");
+    const message = "Endpoint, access key, and secret key are required.";
+    setConnectionFormError(message);
+    setStatus(message);
     return;
   }
   if (!/^https?:\/\/.+/i.test(endpoint)) {
-    setStatus("Endpoint must start with http:// or https://.");
+    const message = "Endpoint must start with http:// or https://.";
+    setConnectionFormError(message);
+    setStatus(message);
     return;
   }
+
+  setConnectionFormError(null);
 
   // Warn about cleartext HTTP for non-local endpoints (credentials sent unencrypted)
   if (/^http:\/\//i.test(endpoint)) {
@@ -192,7 +260,7 @@ export async function handleConnect(): Promise<void> {
     }
   }
 
-  dom.connectBtn.disabled = true;
+  setConnectButtonBusy(true);
   setStatus("Connecting...");
 
   try {
@@ -224,11 +292,13 @@ export async function handleConnect(): Promise<void> {
     }
   } catch (e) {
     renderBucketList();
-    setStatus(`Connection failed: ${friendlyError(e)}`);
+    const message = `Connection failed: ${friendlyError(e)}`;
+    setConnectionFormError(message);
+    setStatus(message);
     setConnectionUI(false);
-    logActivity(`Connection failed: ${friendlyError(e)}`, "error");
+    logActivity(message, "error");
   } finally {
-    dom.connectBtn.disabled = false;
+    setConnectButtonBusy(false);
   }
 }
 

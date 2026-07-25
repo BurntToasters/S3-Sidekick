@@ -102,7 +102,7 @@ export function updateSelectionUI(): void {
       key.startsWith("prefix:"),
     ).length;
     const totalSelected = selectedFileCount + selectedFolderCount;
-    if (totalSelected >= 2) {
+    if (totalSelected >= 1) {
       const parts: string[] = [];
       if (selectedFileCount > 0)
         parts.push(
@@ -117,7 +117,62 @@ export function updateSelectionUI(): void {
     } else {
       batchToolbar.hidden = true;
     }
+
+    const batchDownload = document.getElementById(
+      "batch-download",
+    ) as HTMLButtonElement | null;
+    const batchDelete = document.getElementById(
+      "batch-delete",
+    ) as HTMLButtonElement | null;
+    const batchProperties = document.getElementById(
+      "batch-properties",
+    ) as HTMLButtonElement | null;
+    const batchCopyUrls = document.getElementById(
+      "batch-copy-urls",
+    ) as HTMLButtonElement | null;
+    const canDownloadFiles = selectedFileCount > 0;
+    const hasOnlyFolders = selectedFolderCount > 0 && selectedFileCount === 0;
+
+    if (batchDownload) {
+      batchDownload.disabled = !canDownloadFiles;
+      batchDownload.title = canDownloadFiles
+        ? `Download ${selectedFileCount} selected file${selectedFileCount === 1 ? "" : "s"}`
+        : hasOnlyFolders
+          ? "Download applies to files only"
+          : "Select files to download";
+    }
+    if (batchDelete) {
+      batchDelete.disabled = totalSelected === 0;
+      batchDelete.title =
+        totalSelected > 0
+          ? `Delete ${totalSelected} selected item${totalSelected === 1 ? "" : "s"}`
+          : "Select items to delete";
+    }
+    if (batchProperties) {
+      batchProperties.disabled = totalSelected === 0;
+      batchProperties.title =
+        totalSelected > 0
+          ? `Properties for ${totalSelected} selected`
+          : "Select items for properties";
+    }
+    if (batchCopyUrls) {
+      batchCopyUrls.disabled = !canDownloadFiles;
+      batchCopyUrls.title = canDownloadFiles
+        ? "Copy presigned URLs for selected files"
+        : "Select files to copy URLs";
+    }
   }
+
+  const downloadBtn = document.getElementById(
+    "btn-download",
+  ) as HTMLButtonElement | null;
+  if (downloadBtn) {
+    downloadBtn.disabled = state.selectedKeys.size === 0;
+  }
+
+  void import("./inspector.ts").then((inspector) => {
+    void inspector.syncInspectorFromSelection(state.selectedKeys);
+  });
 }
 
 let lastClickedKey: string | null = null;
@@ -317,8 +372,8 @@ export function renderObjectTable(): void {
       `<tr class="object-row object-row--folder" data-prefix="${escapeHtml(prefix)}" tabindex="0">
         <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select folder ${escapeHtml(name)}" /></td>
         <td class="object-name" title="${escapeHtml(name)}"><span class="icon-folder">${getIconHtml("folder", { className: "lucide-icon lucide-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
-        <td class="object-size">&mdash;</td>
-        <td class="object-modified">&mdash;</td>
+        <td class="object-size object-size--folder">Folder</td>
+        <td class="object-modified object-modified--muted">&mdash;</td>
       </tr>`,
     );
   }
@@ -402,6 +457,115 @@ export function renderBreadcrumb(): void {
   }
 
   el.innerHTML = parts.join("");
+  syncPathInput();
+  updateNavButtons();
+}
+
+export function formatLocationPath(bucket: string, prefix: string): string {
+  if (!bucket) return "";
+  return prefix ? `${bucket}/${prefix}` : `${bucket}/`;
+}
+
+export function parseLocationPath(
+  raw: string,
+): { bucket: string; prefix: string } | null {
+  let input = raw.trim();
+  if (!input) return null;
+  if (/^s3:\/\//i.test(input)) {
+    input = input.slice(5);
+  }
+  input = input.replace(/^\/+/, "");
+  if (!input) return null;
+
+  const slash = input.indexOf("/");
+  if (slash < 0) {
+    return { bucket: input, prefix: "" };
+  }
+  const bucket = input.slice(0, slash).trim();
+  if (!bucket) return null;
+  let prefix = input.slice(slash + 1).replace(/^\/+/, "");
+  if (prefix && !prefix.endsWith("/")) {
+    // Treat trailing path segments without slash as a folder prefix
+    prefix = `${prefix}/`;
+  }
+  return { bucket, prefix };
+}
+
+export function syncPathInput(): void {
+  const input = document.getElementById(
+    "location-omnibar-edit",
+  ) as HTMLInputElement | null;
+  if (!input || document.activeElement === input || isLocationEditMode())
+    return;
+  input.value = formatLocationPath(state.currentBucket, state.currentPrefix);
+}
+
+let locationEditMode = false;
+
+export function isLocationEditMode(): boolean {
+  return locationEditMode;
+}
+
+export function enterLocationEditMode(): void {
+  const omnibar = document.getElementById("location-omnibar");
+  const browse = document.getElementById("location-omnibar-browse");
+  const edit = document.getElementById(
+    "location-omnibar-edit",
+  ) as HTMLInputElement | null;
+  if (!omnibar || !browse || !edit) return;
+  locationEditMode = true;
+  omnibar.classList.add("location-omnibar--edit");
+  browse.hidden = true;
+  edit.hidden = false;
+  edit.value = formatLocationPath(state.currentBucket, state.currentPrefix);
+  edit.focus();
+  edit.select();
+}
+
+export function exitLocationEditMode(restorePath = true): void {
+  const omnibar = document.getElementById("location-omnibar");
+  const browse = document.getElementById("location-omnibar-browse");
+  const edit = document.getElementById(
+    "location-omnibar-edit",
+  ) as HTMLInputElement | null;
+  if (!omnibar || !browse || !edit) return;
+  locationEditMode = false;
+  omnibar.classList.remove("location-omnibar--edit");
+  edit.hidden = true;
+  browse.hidden = false;
+  if (restorePath) {
+    edit.value = formatLocationPath(state.currentBucket, state.currentPrefix);
+  }
+}
+
+export async function navigateToLocationPath(raw: string): Promise<boolean> {
+  const parsed = parseLocationPath(raw);
+  if (!parsed) {
+    setStatus("Enter a path like bucket/prefix/", 5000);
+    return false;
+  }
+
+  const knownBuckets = state.buckets.map((b) => b.name);
+  if (knownBuckets.length > 0 && !knownBuckets.includes(parsed.bucket)) {
+    setStatus(`Unknown bucket: ${parsed.bucket}`, 5000);
+    return false;
+  }
+
+  try {
+    if (parsed.bucket !== state.currentBucket) {
+      await selectBucket(parsed.bucket);
+    }
+    if (parsed.prefix !== state.currentPrefix) {
+      await navigateToFolder(parsed.prefix);
+    } else {
+      syncPathInput();
+    }
+    return true;
+  } catch (err) {
+    setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
+    syncPathInput();
+    return false;
+  }
 }
 
 interface NavEntry {
@@ -462,8 +626,10 @@ function updateNavButtons(): void {
   const fwdBtn = document.getElementById(
     "nav-forward",
   ) as HTMLButtonElement | null;
+  const upBtn = document.getElementById("nav-up") as HTMLButtonElement | null;
   if (backBtn) backBtn.disabled = navIndex <= 0;
   if (fwdBtn) fwdBtn.disabled = navIndex >= navHistory.length - 1;
+  if (upBtn) upBtn.disabled = !state.currentPrefix;
 }
 
 export function clearNavHistory(): void {
@@ -587,4 +753,13 @@ export function showEmptyState(): void {
   dom.bucketList.innerHTML = "";
   const countEl = document.getElementById("statusbar-count");
   if (countEl) countEl.textContent = "";
+  const pathInput = document.getElementById(
+    "location-omnibar-edit",
+  ) as HTMLInputElement | null;
+  if (pathInput) pathInput.value = "";
+  const downloadBtn = document.getElementById(
+    "btn-download",
+  ) as HTMLButtonElement | null;
+  if (downloadBtn) downloadBtn.disabled = true;
+  updateNavButtons();
 }

@@ -1,0 +1,132 @@
+/* Custom unified titlebar (macOS overlay + Windows frameless). Linux uses native chrome. */
+
+body.titlebar-custom .header__brand {
+  display: none;
+}
+
+body.titlebar-custom .header {
+  position: relative;
+  min-height: var(--titlebar-height, 40px);
+  padding-top: 0;
+  padding-bottom: 0;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+}
+
+/* Full-width top strip (IYERIS-style); reliable drag even with flex children below. */
+body.titlebar-custom .titlebar-drag-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 10px;
+  z-index: 5;
+  -webkit-app-region: drag;
+}
+
+body.titlebar-custom .titlebar__main {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 0;
+  -webkit-app-region: drag;
+}
+
+body.titlebar-custom .titlebar__traffic-spacer {
+  -webkit-app-region: drag;
+}
+
+body.titlebar-custom .bookmark-bar {
+  -webkit-app-region: drag;
+}
+
+body.titlebar-custom .bookmark-chip {
+  -webkit-app-region: no-drag;
+}
+
+body.titlebar-custom .header__actions {
+  position: relative;
+  z-index: 2;
+  -webkit-app-region: drag;
+}
+
+body.titlebar-custom .header__actions .btn,
+body.titlebar-custom .titlebar-win-controls {
+  -webkit-app-region: no-drag;
+}
+
+body:not(.titlebar-custom) .titlebar-drag-handle {
+  display: none;
+}
+
+body:not(.titlebar-custom) .titlebar__traffic-spacer {
+  display: none;
+}
+
+body.titlebar-custom.platform-macos .titlebar__traffic-spacer {
+  flex-shrink: 0;
+  width: var(--titlebar-traffic-spacer, 78px);
+  height: 1px;
+}
+
+body.titlebar-custom.platform-macos .bookmark-bar {
+  padding-left: 4px;
+}
+
+body.titlebar-custom.platform-windows .header {
+  padding-left: 12px;
+  padding-right: 0;
+}
+
+body.titlebar-custom.platform-windows .bookmark-bar {
+  padding-left: 0;
+}
+
+.titlebar-win-controls {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
+.titlebar-win-controls[hidden] {
+  display: none;
+}
+
+.titlebar-win-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  min-height: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-win-btn:hover {
+  background: var(--bg-hover);
+}
+
+.titlebar-win-btn--close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.titlebar-win-btn:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
+}
+
+.titlebar-win-btn .lucide-icon {
+  width: 10px;
+  height: 10px;
+}

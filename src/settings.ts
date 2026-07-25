@@ -385,6 +385,14 @@ export function populateSettingsModal(): void {
       state.currentSettings.rememberDownloadPath;
   }
 
+  const openTransferDrawerCheckbox = document.getElementById(
+    "setting-open-transfer-drawer",
+  ) as HTMLInputElement | null;
+  if (openTransferDrawerCheckbox) {
+    openTransferDrawerCheckbox.checked =
+      state.currentSettings.openTransferDrawerOnStart;
+  }
+
   const presetSelect = document.getElementById(
     "setting-transfer-performance-preset",
   ) as HTMLSelectElement | null;
@@ -615,6 +623,14 @@ export function readSettingsModal(): void {
       rememberDownloadCheckbox.checked;
   }
 
+  const openTransferDrawerCheckbox = document.getElementById(
+    "setting-open-transfer-drawer",
+  ) as HTMLInputElement | null;
+  if (openTransferDrawerCheckbox) {
+    state.currentSettings.openTransferDrawerOnStart =
+      openTransferDrawerCheckbox.checked;
+  }
+
   const presetSelect = document.getElementById(
     "setting-transfer-performance-preset",
   ) as HTMLSelectElement | null;
@@ -806,6 +822,15 @@ export async function incrementLaunchCount(): Promise<number> {
 
 export async function markSupportPromptDismissed(): Promise<void> {
   state.settingsExtras.supportPromptDismissed = true;
+  await saveSettings();
+}
+
+export function isTransfersHintDismissed(): boolean {
+  return state.settingsExtras.transfersHintDismissed === true;
+}
+
+export async function markTransfersHintDismissed(): Promise<void> {
+  state.settingsExtras.transfersHintDismissed = true;
   await saveSettings();
 }
 

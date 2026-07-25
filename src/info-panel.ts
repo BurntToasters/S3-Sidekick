@@ -8,6 +8,18 @@ import {
   getIconHtml,
 } from "./utils.ts";
 import { state } from "./state.ts";
+import {
+  getInfoTitleEl,
+  getInfoBodyEl,
+  getInfoSaveBtn,
+  setInfoOverlayActive,
+  clearInfoOverlayActive,
+  shouldUseInspectorMount,
+} from "./inspector-mount.ts";
+import {
+  focusInspectorPropertiesPane,
+  ensureInspectorOpenForPane,
+} from "./inspector.ts";
 
 interface HeadObjectResponse {
   content_type: string;
@@ -133,9 +145,13 @@ function resetEditorState(): void {
 }
 
 export async function openInfoPanel(keys: string[]): Promise<void> {
-  const overlay = $("info-overlay");
-  const title = $("info-title");
-  const saveBtn = $<HTMLButtonElement>("info-save");
+  ensureInspectorOpenForPane("properties");
+  if (shouldUseInspectorMount()) {
+    focusInspectorPropertiesPane();
+  }
+
+  const title = getInfoTitleEl();
+  const saveBtn = getInfoSaveBtn();
   saveBtn.textContent = "Save";
 
   if (keys.length > 1) {
@@ -149,10 +165,10 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
 
     if (batchKeys.length === 0) {
       title.textContent = `${keys.length} items selected`;
-      overlay.classList.add("active");
+      setInfoOverlayActive(true);
       saveBtn.style.display = "none";
       setTabsVisible(false);
-      const body = $("info-body");
+      const body = getInfoBodyEl();
       body.innerHTML =
         `<div class="metadata-batch-info">` +
         `<p>Selected ${keys.length} folder(s). Properties editing applies to files only.</p>` +
@@ -161,11 +177,11 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     }
 
     title.textContent = `${batchKeys.length} items selected`;
-    overlay.classList.add("active");
+    setInfoOverlayActive(true);
     saveBtn.style.display = "";
     saveBtn.disabled = false;
     setTabsVisible(false);
-    renderBatchView($("info-body"), batchKeys);
+    renderBatchView(getInfoBodyEl(), batchKeys);
     return;
   }
 
@@ -175,7 +191,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   currentKey = keys[0];
   const selectedKey = currentKey;
   title.textContent = basename(currentKey);
-  overlay.classList.add("active");
+  setInfoOverlayActive(true);
   saveBtn.style.display = "";
   saveBtn.disabled = true;
   setTabsVisible(true);
@@ -187,7 +203,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   metadataRows = [];
   resetEditorState();
 
-  const body = $("info-body");
+  const body = getInfoBodyEl();
   body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
 
   try {
@@ -216,8 +232,10 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
 }
 
 function setTabsVisible(visible: boolean): void {
-  const tabs = document.querySelector(".info-tabs") as HTMLElement | null;
-  if (tabs) tabs.style.display = visible ? "" : "none";
+  const tabs = document.querySelectorAll<HTMLElement>(".info-tabs");
+  for (const el of tabs) {
+    el.style.display = visible ? "" : "none";
+  }
 }
 
 function updateTabUI(): void {
@@ -238,7 +256,7 @@ export function switchTab(tab: string): void {
 
 function renderTab(): void {
   if (!headData) return;
-  const body = $("info-body");
+  const body = getInfoBodyEl();
 
   if (activeTab === "general") {
     renderGeneral(body);
@@ -634,7 +652,7 @@ async function saveSingleChanges(): Promise<void> {
     return;
   }
 
-  const saveBtn = $<HTMLButtonElement>("info-save");
+  const saveBtn = getInfoSaveBtn();
   saveBtn.disabled = true;
   saveBtn.textContent = "Saving\u2026";
 
@@ -714,7 +732,7 @@ async function saveBatchChanges(): Promise<void> {
     return;
   }
 
-  const saveBtn = $<HTMLButtonElement>("info-save");
+  const saveBtn = getInfoSaveBtn();
   saveBtn.disabled = true;
   let succeeded = 0;
   let failed = 0;
@@ -819,16 +837,15 @@ async function saveBatchChanges(): Promise<void> {
 
 export function closeInfoPanel(): void {
   panelRequestToken += 1;
-  $("info-overlay").classList.remove("active");
+  clearInfoOverlayActive();
+  getInfoBodyEl().innerHTML = "";
   headData = null;
   aclData = null;
   metadataRows = [];
   currentKey = "";
   batchKeys = [];
   resetEditorState();
-  const saveBtn = document.getElementById(
-    "info-save",
-  ) as HTMLButtonElement | null;
+  const saveBtn = getInfoSaveBtn();
   if (saveBtn) {
     saveBtn.disabled = false;
     saveBtn.textContent = "Save";

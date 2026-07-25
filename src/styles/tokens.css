@@ -46,6 +46,9 @@
   --sidebar-width: 240px;
   --sidebar-min: 200px;
   --sidebar-max: 420px;
+  --inspector-width: 320px;
+  --inspector-min: 260px;
+  --inspector-max: 480px;
   --warning: #f59e0b;
 
   --glass-bg: rgba(255, 255, 255, 0.7);

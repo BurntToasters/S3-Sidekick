@@ -11,6 +11,12 @@ import {
   toggleDrawer,
 } from "./bottom-drawer.ts";
 import { showConfirm } from "./dialogs.ts";
+import { showContextMenu } from "./context-menu.ts";
+import {
+  isTransfersHintDismissed,
+  markTransfersHintDismissed,
+} from "./settings.ts";
+import { showToast } from "./toast.ts";
 
 export interface TransferItem {
   id: number;
@@ -838,18 +844,27 @@ export async function initTransferQueueUI(): Promise<void> {
   document
     .getElementById("transfer-resume-all")
     ?.addEventListener("click", resumeAllTransfers);
-  document
-    .getElementById("transfer-prioritize")
-    ?.addEventListener("click", prioritizeSelectedTransfer);
-  document
-    .getElementById("transfer-retry-failed")
-    ?.addEventListener("click", retryFailedTransfers);
-  document
-    .getElementById("transfer-retry-skipped")
-    ?.addEventListener("click", retrySkippedTransfers);
-  document
-    .getElementById("transfer-clear-non-active")
-    ?.addEventListener("click", clearNonActiveTransfers);
+
+  document.getElementById("transfer-more")?.addEventListener("click", (e) => {
+    const btn = e.currentTarget as HTMLElement;
+    const rect = btn.getBoundingClientRect();
+    showContextMenu(
+      rect.left,
+      rect.bottom + 4,
+      [
+        { label: "Prioritize selected", action: "prioritize" },
+        { label: "Retry failed", action: "retry-failed" },
+        { label: "Retry skipped", action: "retry-skipped" },
+        { label: "Clear finished", action: "clear-non-active" },
+      ],
+      (action) => {
+        if (action === "prioritize") prioritizeSelectedTransfer();
+        else if (action === "retry-failed") retryFailedTransfers();
+        else if (action === "retry-skipped") retrySkippedTransfers();
+        else if (action === "clear-non-active") clearNonActiveTransfers();
+      },
+    );
+  });
 
   const list = document.getElementById("transfer-list");
   if (list && !cancelClickHandler) {
@@ -1045,8 +1060,20 @@ export function setTransferCompleteHandler(
 
 export function showTransferQueue(): void {
   if (queue.length === 0) return;
-  openDrawer("transfers");
+  if (state.currentSettings.openTransferDrawerOnStart) {
+    openDrawer("transfers");
+  }
+  maybeShowTransfersHintToast();
   renderQueue();
+}
+
+function maybeShowTransfersHintToast(): void {
+  if (isTransfersHintDismissed()) return;
+  void markTransfersHintDismissed();
+  showToast("View progress in Transfers (status bar icon).", {
+    type: "info",
+    duration: 6000,
+  });
 }
 
 export function hideTransferQueue(): void {
@@ -1850,6 +1877,7 @@ function renderQueue(): void {
       `</div>`;
     updateBadge();
     updateTransferThroughput();
+    updateQueueSummary();
     syncTransferVisibility();
     writeQueueManifest();
     return;
@@ -1895,16 +1923,35 @@ function renderQueue(): void {
         0,
         Math.min(100, Math.round(t.progress) || 0),
       );
-      const progressBar =
+      const showDeterminate =
         t.totalBytes > 0 &&
         (t.status === "uploading" ||
           t.status === "queued" ||
-          (t.status === "error" && t.progress > 0))
-          ? `<div class="transfer-progress-wrap">` +
-            `<div class="transfer-progress"><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
-            `<span class="transfer-progress__label">${progressPct}%</span>` +
+          (t.status === "error" && t.progress > 0));
+      const showIndeterminate =
+        !showDeterminate &&
+        (t.status === "uploading" ||
+          t.status === "queued" ||
+          t.operation === "copy" ||
+          t.operation === "move");
+      const progressBar = showDeterminate
+        ? `<div class="transfer-progress-wrap">` +
+          `<div class="transfer-progress"><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
+          `<span class="transfer-progress__label">${progressPct}%</span>` +
+          `</div>`
+        : showIndeterminate
+          ? `<div class="transfer-progress-wrap transfer-progress-wrap--indeterminate">` +
+            `<div class="transfer-progress transfer-progress--indeterminate"><div class="transfer-progress__bar"></div></div>` +
             `</div>`
           : "";
+      const opLabel =
+        t.operation === "download"
+          ? "Download"
+          : t.operation === "copy"
+            ? "Copy"
+            : t.operation === "move"
+              ? "Move"
+              : "Upload";
       const target =
         t.operation === "download"
           ? (t.destination ?? "")
@@ -1977,8 +2024,9 @@ function renderQueue(): void {
         `<span class="transfer-status ${statusClass}">${statusIcon}</span>` +
         `<div class="transfer-main">` +
         `<div class="transfer-main__row">` +
+        `<span class="transfer-op">${escapeHtml(opLabel)}</span>` +
         `<span class="transfer-name">${escapeHtml(t.fileName)}</span>` +
-        (t.status !== "uploading" || t.operation !== "upload"
+        (target
           ? `<span class="transfer-arrow">${arrow}</span>` +
             `<span class="transfer-key">${escapeHtml(target)}</span>`
           : "") +
@@ -2002,23 +2050,70 @@ function renderQueue(): void {
 
   updateBadge();
   updateTransferThroughput();
+  updateQueueSummary();
   syncTransferVisibility();
   writeQueueManifest();
+}
+
+function updateQueueSummary(): void {
+  const el = document.getElementById("transfer-queue-summary");
+  if (!el) return;
+
+  const active = queue.filter(
+    (t) => t.status === "queued" || t.status === "uploading",
+  ).length;
+  const failed = queue.filter(
+    (t) => t.status === "error" || t.status === "skipped",
+  ).length;
+  const totalSpeed = queue
+    .filter((item) => item.status === "uploading")
+    .reduce((sum, item) => sum + Math.max(0, item.speedBps), 0);
+
+  const parts: string[] = [];
+  if (active > 0) parts.push(`${active} active`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (totalSpeed > 0) parts.push(formatSpeedBps(totalSpeed));
+  el.textContent = parts.length > 0 ? parts.join(" · ") : "No active transfers";
 }
 
 function updateBadge(): void {
   const active = queue.filter(
     (t) => t.status === "queued" || t.status === "uploading",
   ).length;
+  const failed = queue.filter(
+    (t) => t.status === "error" || t.status === "skipped",
+  ).length;
+  const badgeText = active > 0 ? String(active) : failed > 0 ? "!" : "";
   const badge = document.getElementById("transfer-badge");
   if (badge) {
-    badge.textContent = active > 0 ? String(active) : "";
-    badge.style.display = active > 0 ? "" : "none";
+    badge.textContent = badgeText;
+    badge.style.display = active > 0 || failed > 0 ? "" : "none";
+    badge.classList.toggle("transfer-badge--alert", active === 0 && failed > 0);
   }
   const drawerBadge = document.getElementById("drawer-transfer-badge");
   if (drawerBadge) {
-    drawerBadge.textContent = active > 0 ? String(active) : "";
-    drawerBadge.style.display = active > 0 ? "" : "none";
+    drawerBadge.textContent = badgeText;
+    drawerBadge.style.display = active > 0 || failed > 0 ? "" : "none";
+    drawerBadge.classList.toggle(
+      "drawer-badge--alert",
+      active === 0 && failed > 0,
+    );
+  }
+  const toggle = document.getElementById("transfer-toggle");
+  if (toggle && (active > 0 || failed > 0)) {
+    const speedLabel =
+      queue
+        .filter((item) => item.status === "uploading")
+        .reduce((sum, item) => sum + Math.max(0, item.speedBps), 0) > 0
+        ? formatSpeedBps(
+            queue
+              .filter((item) => item.status === "uploading")
+              .reduce((sum, item) => sum + Math.max(0, item.speedBps), 0),
+          )
+        : "";
+    toggle.title = speedLabel
+      ? `Transfers (${active} active, ${speedLabel})`
+      : `Transfers (${active} active)`;
   }
 }
 
@@ -2041,11 +2136,12 @@ function syncTransferVisibility(): void {
   const toggle = document.getElementById(
     "transfer-toggle",
   ) as HTMLButtonElement | null;
-  const shouldShow = queue.length > 0;
+  const hasQueue = queue.length > 0;
 
   if (toggle) {
-    toggle.hidden = !shouldShow;
-    if (!shouldShow) {
+    toggle.hidden = false;
+    toggle.classList.toggle("statusbar__transfer--idle", !hasQueue);
+    if (!hasQueue) {
       toggle.setAttribute("aria-expanded", "false");
     }
   }

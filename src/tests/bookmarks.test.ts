@@ -160,11 +160,11 @@ describe("renderBookmarkBar", () => {
     bookmarks.renderBookmarkBar(container, () => {});
 
     const chips = container.querySelectorAll("button.bookmark-chip");
-    expect(chips[0].textContent).toContain("alpha");
-    expect(chips[1].textContent).toContain("beta");
+    expect(chips[0].textContent).toBe("alpha");
+    expect(chips[1].textContent).toBe("beta");
   });
 
-  it("includes a region span when the bookmark has a region", async () => {
+  it("sets tooltip to endpoint and region without region label in chip text", async () => {
     standardMock([alphaBookmark]);
     const bookmarks = await loadBookmarksModule();
     await bookmarks.loadBookmarks();
@@ -172,9 +172,12 @@ describe("renderBookmarkBar", () => {
     const container = document.createElement("div");
     bookmarks.renderBookmarkBar(container, () => {});
 
-    const regionSpan = container.querySelector(".bookmark-chip__region");
-    expect(regionSpan).not.toBeNull();
-    expect(regionSpan!.textContent).toBe("us-east-1");
+    const chip = container.querySelector(
+      "button.bookmark-chip",
+    ) as HTMLButtonElement;
+    expect(chip.querySelector(".bookmark-chip__region")).toBeNull();
+    expect(chip.textContent).toBe("alpha");
+    expect(chip.title).toBe("https://alpha.example.com (us-east-1)");
   });
 
   it("calls onSelect with the correct bookmark when a chip is clicked", async () => {
@@ -378,7 +381,9 @@ describe("bookmark import/export/list rendering", () => {
 
     const bar = document.createElement("div");
     bookmarks.renderBookmarkBar(bar, () => {});
-    expect(bar.querySelector(".bookmark-chip__region")).toBeNull();
+    const chip = bar.querySelector("button.bookmark-chip") as HTMLButtonElement;
+    expect(chip.querySelector(".bookmark-chip__region")).toBeNull();
+    expect(chip.title).toBe(alphaBookmark.endpoint);
 
     const list = document.createElement("ul");
     bookmarks.renderBookmarkList(

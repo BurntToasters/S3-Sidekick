@@ -16,6 +16,15 @@
   display: flex;
 }
 
+body.titlebar-custom .modal-overlay.active,
+body.titlebar-custom .dialog-overlay.active,
+body.titlebar-custom .setup-wizard-overlay:not([hidden]),
+body.titlebar-custom #palette-overlay:not([hidden]) {
+  top: var(--titlebar-height, 40px);
+  bottom: 0;
+  height: auto;
+}
+
 .modal {
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
