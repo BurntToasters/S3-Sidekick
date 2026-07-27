@@ -21,6 +21,7 @@ import {
 import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
 import { refreshSecuritySettingsUI } from "./security.ts";
 import { showConfirm, showAlert } from "./dialogs.ts";
+import { friendlyError } from "./utils.ts";
 
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
 
@@ -767,38 +768,42 @@ export async function resetSettings(): Promise<void> {
 
   const fullReset = await showConfirm(
     "Reset Scope",
-    "Keep your bookmarks, or factory reset everything?\n\nFactory reset removes all settings, bookmarks, saved connections, and encryption — a completely clean slate.",
+    "Keep your bookmarks, or factory reset everything?\n\nFactory reset removes all settings, bookmarks, saved connections, transfer recovery data, and encryption — a completely clean slate.",
     { okLabel: "Factory Reset", cancelLabel: "Keep Bookmarks", okDanger: true },
   );
 
-  const extras = fullReset ? {} : { _setupComplete: true };
-  const defaults = mergeSettingsPayload(SETTING_DEFAULTS, extras);
-  try {
-    await invoke("save_settings", { json: defaults });
-  } catch {
-    /* best effort */
-  }
-  try {
-    await invoke("save_connection", { json: "" });
-  } catch {
-    /* best effort */
-  }
-
   if (fullReset) {
+    const finalConfirmation = await showConfirm(
+      "Permanently Delete All App Data?",
+      "This permanently deletes bookmarks, saved connections, encrypted storage, transfer checkpoints, and partial download files. Active transfers will be stopped. This cannot be undone.",
+      {
+        okLabel: "Delete Everything",
+        cancelLabel: "Cancel Reset",
+        okDanger: true,
+      },
+    );
+    if (!finalConfirmation) return;
+
+    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
     try {
-      await invoke("save_bookmarks", { json: "[]" });
-    } catch {
-      /* vault may be locked; backup handles it */
+      await invoke("factory_reset", { settingsJson: defaults });
+      // Remove the legacy plaintext transfer fallback and all other app-local
+      // webview state only after the backend transaction succeeds.
+      localStorage.clear();
+    } catch (err) {
+      await showAlert("Factory Reset Failed", friendlyError(err));
+      return;
     }
+  } else {
+    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {
+      _setupComplete: true,
+    });
     try {
-      await invoke("save_bookmarks_backup", { json: "[]" });
-    } catch {
-      /* best effort */
-    }
-    try {
-      await invoke("reset_security");
-    } catch {
-      /* best effort */
+      await invoke("save_settings", { json: defaults });
+      await invoke("save_connection", { json: "" });
+    } catch (err) {
+      await showAlert("Reset Failed", friendlyError(err));
+      return;
     }
   }
 

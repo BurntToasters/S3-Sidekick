@@ -1,12 +1,12 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use zeroize::Zeroizing;
 
-use crate::lock_storage_ops;
 use crate::security::{
-    constant_time_eq, key_verifier, load_security_config, require_unlocked_key,
-    save_security_config, security_status, set_unlocked_key, SecurityStatus, KEY_LEN,
-    PBKDF2_ITERATIONS,
+    constant_time_eq, ensure_migration_recovered, key_verifier, load_security_config,
+    require_unlocked_key, save_security_config, security_status, set_unlocked_key, SecurityStatus,
+    KEY_LEN, PBKDF2_ITERATIONS,
 };
+use crate::{atomic_write, fsync_parent, lock_storage_ops, security_journal_path};
 
 // ─── Security limitation ───────────────────────────────────────────────────────
 // The biometric unlock flow uses a two-step approach:
@@ -40,8 +40,156 @@ pub fn is_available() -> bool {
     platform::is_available()
 }
 
-pub fn clear_stored_key() {
+/// Remove the biometric key and prove it is no longer present.
+///
+/// Credential-store deletion APIs can fail silently (for example, because the
+/// Keychain is unavailable). Destructive security operations must not report
+/// success until a non-prompting presence check confirms the key is gone.
+pub fn clear_stored_key_verified() -> Result<(), String> {
     platform::remove_key();
+    if platform::has_stored_key()? {
+        Err(
+            "The stored biometric key could not be removed from the system credential store. \
+             Remove it manually before using this device again."
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+/// What a pending cleanup journal means for the stored credential.
+///
+/// The distinction matters because the committed configuration is only
+/// sometimes evidence about the credential. When a transition can still roll
+/// back to an enrolled state, `biometric_enrolled = true` proves the key is
+/// still wanted. When the caller has already destroyed vault state, no config
+/// bit can justify keeping the key.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BiometricCleanupMode {
+    /// Remove the credential unless the committed config still claims enrollment.
+    ClearUnlessEnrolled,
+    /// Remove the credential regardless of what the config claims.
+    ClearUnconditionally,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BiometricCleanupJournal {
+    v: u8,
+    mode: BiometricCleanupMode,
+}
+
+fn biometric_cleanup_journal_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
+    let security_journal = security_journal_path(app)?;
+    let parent = security_journal
+        .parent()
+        .ok_or_else(|| "Security journal has no parent directory".to_string())?;
+    Ok(parent.join("biometric-cleanup.journal"))
+}
+
+fn write_biometric_cleanup_journal<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    mode: BiometricCleanupMode,
+) -> Result<(), String> {
+    let journal = serde_json::to_string_pretty(&BiometricCleanupJournal { v: 1, mode })
+        .map_err(|err| err.to_string())?;
+    atomic_write(&biometric_cleanup_journal_path(app)?, &journal)
+}
+
+fn remove_biometric_cleanup_journal<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<(), String> {
+    let path = biometric_cleanup_journal_path(app)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => fsync_parent(&path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!(
+            "Failed to remove biometric cleanup journal '{}': {}",
+            path.display(),
+            err
+        )),
+    }
+}
+
+/// Complete credential cleanup recorded before a biometric state transition.
+/// The journal is removed last, making both enrollment rollback and disablement
+/// recoverable across crashes and credential-store failures.
+pub(crate) fn recover_pending_biometric_cleanup<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<(), String> {
+    let path = biometric_cleanup_journal_path(app)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|err| {
+        format!(
+            "Biometric cleanup journal '{}' is unreadable and was retained: {}",
+            path.display(),
+            err
+        )
+    })?;
+    let journal: BiometricCleanupJournal = serde_json::from_str(&raw).map_err(|err| {
+        format!(
+            "Biometric cleanup journal '{}' is invalid and was retained: {}",
+            path.display(),
+            err
+        )
+    })?;
+    if journal.v != 1 {
+        return Err(format!(
+            "Unsupported biometric cleanup journal version {}; journal retained",
+            journal.v
+        ));
+    }
+
+    let mut config = load_security_config(app)?;
+    match journal.mode {
+        BiometricCleanupMode::ClearUnlessEnrolled if config.biometric_enrolled => {
+            // The committed configuration still claims enrollment, so the
+            // transition rolled back and the key is still the one that config
+            // describes. Retaining it keeps config and credential consistent.
+        }
+        BiometricCleanupMode::ClearUnlessEnrolled => {
+            clear_stored_key_verified()?;
+        }
+        BiometricCleanupMode::ClearUnconditionally => {
+            if config.biometric_enrolled {
+                config.biometric_enrolled = false;
+                save_security_config(app, &config)?;
+            }
+            clear_stored_key_verified()?;
+        }
+    }
+
+    remove_biometric_cleanup_journal(app)
+}
+
+/// Record that a transition is moving to `biometric_enrolled = false` but may
+/// still roll back. Use only where a surviving `biometric_enrolled = true`
+/// genuinely means the old credential is still the correct one.
+pub(crate) fn journal_cleanup_unless_enrolled<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<(), String> {
+    write_biometric_cleanup_journal(app, BiometricCleanupMode::ClearUnlessEnrolled)
+}
+
+/// Record that the credential must go no matter what the configuration says.
+///
+/// Callers that have already discarded vault data or key material cannot treat
+/// a surviving `biometric_enrolled = true` as evidence, because that bit may
+/// simply be the stale configuration they failed to overwrite.
+pub(crate) fn journal_unconditional_cleanup<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<(), String> {
+    write_biometric_cleanup_journal(app, BiometricCleanupMode::ClearUnconditionally)
+}
+
+fn disable_biometric_durably<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+    journal_unconditional_cleanup(app)?;
+    crate::security::recover_interrupted_migration(app)
 }
 
 #[tauri::command]
@@ -52,28 +200,58 @@ pub(crate) fn biometric_available() -> bool {
 #[tauri::command]
 pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
     let _guard = lock_storage_ops()?;
+    ensure_migration_recovered()?;
     let mut config = load_security_config(&app)?;
     if !config.encryption_enabled {
         return Err("Encryption is not enabled".to_string());
     }
+    if config.biometric_enrolled {
+        return Ok(security_status(&config));
+    }
     if !is_available() {
         return Err("Biometric authentication is not available on this device".to_string());
     }
-    let key = Zeroizing::new(require_unlocked_key()?);
-    let result = platform::store_key(&key);
-    result?;
+
+    // Record rollback intent before placing the key in the credential store. If
+    // the process dies before the config commit, startup removes the key; if the
+    // committed config says enrolled, recovery knows the enrollment succeeded.
+    let key = require_unlocked_key()?;
+    write_biometric_cleanup_journal(&app, BiometricCleanupMode::ClearUnlessEnrolled)?;
+    if let Err(store_error) = platform::store_key(&key) {
+        let cleanup = crate::security::recover_interrupted_migration(&app);
+        return match cleanup {
+            Ok(()) => Err(store_error),
+            Err(cleanup_error) => Err(format!(
+                "{}. Biometric rollback also failed: {}",
+                store_error, cleanup_error
+            )),
+        };
+    }
+
     config.biometric_enrolled = true;
-    save_security_config(&app, &config)?;
+    let save_result = save_security_config(&app, &config);
+    let cleanup_result = crate::security::recover_interrupted_migration(&app);
+    if let Err(save_error) = save_result {
+        return match cleanup_result {
+            Ok(()) => Err(save_error),
+            Err(cleanup_error) => Err(format!(
+                "{}. Biometric enrollment recovery also failed: {}",
+                save_error, cleanup_error
+            )),
+        };
+    }
+    cleanup_result?;
     Ok(security_status(&config))
 }
 
 #[tauri::command]
 pub(crate) async fn disable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
     let _guard = lock_storage_ops()?;
-    let mut config = load_security_config(&app)?;
-    platform::remove_key();
-    config.biometric_enrolled = false;
-    save_security_config(&app, &config)?;
+    ensure_migration_recovered()?;
+    // Persist intent first. Recovery commits `biometric_enrolled = false`,
+    // removes the key, verifies absence, and only then clears the journal.
+    disable_biometric_durably(&app)?;
+    let config = load_security_config(&app)?;
     Ok(security_status(&config))
 }
 
@@ -83,7 +261,7 @@ pub(crate) async fn unlock_biometric(
     window: tauri::Window,
 ) -> Result<SecurityStatus, String> {
     let _guard = lock_storage_ops()?;
-    let mut config = load_security_config(&app)?;
+    let config = load_security_config(&app)?;
     if !config.encryption_enabled || !config.biometric_enrolled {
         return Err("Biometric unlock is not configured".to_string());
     }
@@ -101,9 +279,7 @@ pub(crate) async fn unlock_biometric(
                 || err.contains("Element not found")
                 || err.contains("OSStatus -34018");
             if is_not_found {
-                config.biometric_enrolled = false;
-                let _ = save_security_config(&app, &config);
-                platform::remove_key();
+                disable_biometric_durably(&app)?;
                 return Err(
                     "Biometric credential was removed from the system. Please unlock with your password and re-enable biometric unlock."
                         .to_string(),
@@ -120,16 +296,13 @@ pub(crate) async fn unlock_biometric(
         .decode(&config.verifier)
         .map_err(|e| format!("Invalid verifier: {}", e))?;
     if expected.len() != KEY_LEN {
-        config.biometric_enrolled = false;
-        let _ = save_security_config(&app, &config);
+        disable_biometric_durably(&app)?;
         return Err("Invalid security configuration".to_string());
     }
 
     let computed = key_verifier(&key);
     if !constant_time_eq(&computed, &expected) {
-        config.biometric_enrolled = false;
-        let _ = save_security_config(&app, &config);
-        platform::remove_key();
+        disable_biometric_durably(&app)?;
         return Err(
             "Stored biometric key is no longer valid. Please unlock with your password and re-enable biometric unlock."
                 .to_string(),
@@ -138,6 +311,15 @@ pub(crate) async fn unlock_biometric(
 
     let timeout = config.lock_timeout_minutes as u64 * 60;
     set_unlocked_key(Some(*key), timeout)?;
+    if let Err(err) = crate::security::recover_interrupted_migration(&app) {
+        let _ = set_unlocked_key(None, 0);
+        return Err(err);
+    }
+    let mut config = config;
+    if let Err(err) = crate::security::adopt_legacy_plaintext_files(&app, &mut config) {
+        let _ = set_unlocked_key(None, 0);
+        return Err(err);
+    }
     Ok(security_status(&config))
 }
 
@@ -193,22 +375,59 @@ mod platform {
     // -----------------------------------------------------------------------
     // Touch ID via LAContext (avoids keychain-access-groups entitlement)
     // -----------------------------------------------------------------------
+    //
+    // Two correctness hazards had to be handled here.
+    //
+    // 1. Block lifetime. The reply block used to be a stack local tagged as a
+    //    *global* block. `Block_copy` is a no-op for global blocks, so
+    //    LocalAuthentication retained a pointer straight into the caller's stack
+    //    frame. When the 120-second wait timed out, that frame was destroyed
+    //    while the framework still held the pointer; a late callback would then
+    //    read `block->invoke` out of reclaimed stack memory. Blocks are now heap
+    //    allocated and never freed while the framework might still hold them.
+    //
+    // 2. Reply attribution. The callback wrote its result into a single global
+    //    slot with no notion of which request it belonged to, so a reply from a
+    //    prompt that had already timed out could satisfy a *later* unlock
+    //    attempt — a stale `true` would open the vault. Every request now carries
+    //    its own generation number inside the block, and a waiter only accepts a
+    //    result stamped with its own generation.
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Default)]
+    struct AuthSlot {
+        /// Generation the current waiter is expecting, if any.
+        awaiting: Option<u64>,
+        /// The most recent reply, tagged with the generation it belongs to.
+        result: Option<(u64, bool)>,
+    }
+
     struct AuthState {
-        result: std::sync::Mutex<Option<bool>>,
+        slot: std::sync::Mutex<AuthSlot>,
         condvar: std::sync::Condvar,
     }
 
     static AUTH_STATE: std::sync::OnceLock<AuthState> = std::sync::OnceLock::new();
+    static AUTH_GENERATION: AtomicU64 = AtomicU64::new(1);
+    /// Serialises authentication attempts so two prompts never overlap.
+    static AUTH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const BLOCK_IS_GLOBAL: i32 = 1 << 28;
+    const LA_POLICY_DEVICE_OWNER_AUTHENTICATION: isize = 1;
+    const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
     fn auth_state() -> &'static AuthState {
         AUTH_STATE.get_or_init(|| AuthState {
-            result: std::sync::Mutex::new(None),
+            slot: std::sync::Mutex::new(AuthSlot::default()),
             condvar: std::sync::Condvar::new(),
         })
     }
 
     /// Raw Objective-C block layout for the LAContext reply handler.
-    /// No captured variables — result is communicated via the global AUTH_STATE.
+    ///
+    /// `generation` is a captured variable: it identifies which request this
+    /// block belongs to so the callback can be attributed correctly.
     #[repr(C)]
     struct LAReplyBlock {
         isa: *const c_void,
@@ -216,6 +435,7 @@ mod platform {
         reserved: i32,
         invoke: unsafe extern "C" fn(*mut LAReplyBlock, i8, *const c_void),
         descriptor: *const LAReplyBlockDesc,
+        generation: u64,
     }
 
     #[repr(C)]
@@ -233,26 +453,60 @@ mod platform {
         size: std::mem::size_of::<LAReplyBlock>(),
     };
 
-    /// Recover the Mutex guard whether the Mutex is poisoned or not.
-    fn lock_auth_result(
-        m: &std::sync::Mutex<Option<bool>>,
-    ) -> std::sync::MutexGuard<'_, Option<bool>> {
+    fn lock_slot(m: &std::sync::Mutex<AuthSlot>) -> std::sync::MutexGuard<'_, AuthSlot> {
         m.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Allocate one process-lifetime reply block tagged with `generation`.
+    ///
+    /// LocalAuthentication may retain its reference after invoking the callback,
+    /// so callback completion is not proof that the allocation can be reused or
+    /// mutated. Each prompt therefore receives a stable leaked block. Prompt
+    /// creation is rare, and preserving framework-owned pointer validity is more
+    /// important than reclaiming these few bytes.
+    ///
+    /// # Safety
+    /// The returned pointer stays valid and immutable for the remainder of the process.
+    unsafe fn allocate_reply_block(generation: u64) -> *mut LAReplyBlock {
+        Box::into_raw(Box::new(LAReplyBlock {
+            isa: &_NSConcreteGlobalBlock as *const c_void,
+            flags: BLOCK_IS_GLOBAL,
+            reserved: 0,
+            invoke: la_reply_invoke,
+            descriptor: &LA_REPLY_DESC,
+            generation,
+        }))
+    }
+
     unsafe extern "C" fn la_reply_invoke(
-        _block: *mut LAReplyBlock,
+        block: *mut LAReplyBlock,
         success: i8,
         _error: *const c_void,
     ) {
+        let generation = if block.is_null() {
+            0
+        } else {
+            (*block).generation
+        };
+
         let state = auth_state();
-        *lock_auth_result(&state.result) = Some(success != 0);
-        state.condvar.notify_one();
+        {
+            let mut slot = lock_slot(&state.slot);
+            // Only record a reply the current waiter is actually expecting.
+            // Anything else belongs to an abandoned prompt and must be dropped.
+            if slot.awaiting == Some(generation) {
+                slot.result = Some((generation, success != 0));
+                state.condvar.notify_all();
+            }
+        }
     }
 
     fn authenticate_touch_id() -> Result<(), String> {
+        // One prompt at a time.
+        let _serial = AUTH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let state = auth_state();
-        *lock_auth_result(&state.result) = None;
+        let generation = AUTH_GENERATION.fetch_add(1, Ordering::Relaxed);
 
         unsafe {
             let cls = objc2::runtime::AnyClass::get(c"LAContext")
@@ -260,41 +514,53 @@ mod platform {
             let ctx: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![cls, new];
 
             let reason = CFString::new("Unlock S3 Sidekick encrypted storage");
+            let block = allocate_reply_block(generation);
 
-            let block = LAReplyBlock {
-                isa: &_NSConcreteGlobalBlock as *const c_void,
-                flags: (1 << 28), // BLOCK_IS_GLOBAL
-                reserved: 0,
-                invoke: la_reply_invoke,
-                descriptor: &LA_REPLY_DESC,
-            };
+            {
+                let mut slot = lock_slot(&state.slot);
+                slot.awaiting = Some(generation);
+                slot.result = None;
+            }
 
             let _: () = objc2::msg_send![
                 &*ctx,
-                evaluatePolicy: 1_isize,
+                evaluatePolicy: LA_POLICY_DEVICE_OWNER_AUTHENTICATION,
                 localizedReason: reason.as_concrete_TypeRef() as *const c_void,
-                reply: &block as *const LAReplyBlock as *const c_void
+                reply: block as *const c_void
             ];
 
-            // Block stays alive on the stack while we wait for the async callback.
-            // Use a timeout to prevent indefinite blocking if the callback never fires.
-            let timeout = std::time::Duration::from_secs(120);
-            let mut guard = lock_auth_result(&state.result);
-            while guard.is_none() {
-                let (new_guard, wait_result) = state
-                    .condvar
-                    .wait_timeout(guard, timeout)
-                    .unwrap_or_else(|e| e.into_inner());
-                guard = new_guard;
-                if wait_result.timed_out() && guard.is_none() {
-                    return Err("Touch ID authentication timed out".to_string());
+            let mut slot = lock_slot(&state.slot);
+            let outcome = loop {
+                if let Some((gen, success)) = slot.result.take() {
+                    if gen == generation {
+                        break Some(success);
+                    }
+                    // A reply for some other request; ignore and keep waiting.
+                    continue;
                 }
-            }
+                let (next, wait_result) = state
+                    .condvar
+                    .wait_timeout(slot, AUTH_TIMEOUT)
+                    .unwrap_or_else(|e| e.into_inner());
+                slot = next;
+                if wait_result.timed_out() && slot.result.is_none() {
+                    break None;
+                }
+            };
 
-            if guard.unwrap() {
-                Ok(())
-            } else {
-                Err("Touch ID authentication failed or was canceled".to_string())
+            // Stop expecting a reply. Any callback that arrives from here on finds
+            // no matching generation and is discarded.
+            slot.awaiting = None;
+            drop(slot);
+
+            match outcome {
+                Some(true) => Ok(()),
+                Some(false) => Err("Touch ID authentication failed or was canceled".to_string()),
+                None => {
+                    // Tear the prompt down so it cannot linger and fire later.
+                    let _: () = objc2::msg_send![&*ctx, invalidate];
+                    Err("Touch ID authentication timed out".to_string())
+                }
             }
         }
     }
@@ -402,6 +668,32 @@ mod platform {
             set_base_attrs(dict);
             let _ = SecItemDelete(dict);
             CFRelease(dict);
+        }
+    }
+
+    /// Whether the Keychain still holds our item.
+    ///
+    /// Deliberately does not request the data, so this never prompts for Touch ID
+    /// — it only asks whether the item exists.
+    pub fn has_stored_key() -> Result<bool, String> {
+        const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+        unsafe {
+            let dict = new_dict();
+            set_base_attrs(dict);
+            CFDictionarySetValue(dict, kSecMatchLimit, kSecMatchLimitOne);
+            let status = SecItemCopyMatching(dict, ptr::null_mut());
+            CFRelease(dict);
+            if status == errSecSuccess {
+                Ok(true)
+            } else if status == ERR_SEC_ITEM_NOT_FOUND {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "Failed to verify biometric key removal (OSStatus {})",
+                    status
+                ))
+            }
         }
     }
 }
@@ -608,6 +900,32 @@ mod platform {
             let _ = CredDeleteW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_GENERIC, 0);
         }
     }
+
+    /// Whether the credential still exists. Does not prompt the user.
+    pub fn has_stored_key() -> Result<bool, String> {
+        let target_wide = to_wide(TARGET);
+        unsafe {
+            let mut pcred: *mut CREDENTIALW = ptr::null_mut();
+            match CredReadW(
+                PCWSTR(target_wide.as_ptr()),
+                CRED_TYPE_GENERIC,
+                None,
+                &mut pcred,
+            ) {
+                Ok(()) => {
+                    if !pcred.is_null() {
+                        CredFree(pcred as *const std::ffi::c_void);
+                    }
+                    Ok(true)
+                }
+                Err(err) if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT => Ok(false),
+                Err(err) => Err(format!(
+                    "Failed to verify biometric credential removal: {}",
+                    err
+                )),
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -630,14 +948,8 @@ mod platform {
     }
 
     pub fn remove_key() {}
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clear_stored_key_does_not_panic() {
-        clear_stored_key();
+    pub fn has_stored_key() -> Result<bool, String> {
+        Ok(false)
     }
 }

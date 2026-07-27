@@ -18,18 +18,28 @@ async function getSecurityStatus(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>("get_security_status");
 }
 
+function announceSecurityReady(status: SecurityStatus): void {
+  if (!status.encryption_enabled || status.unlocked) {
+    window.dispatchEvent(new Event("s3-sidekick:security-ready"));
+  }
+}
+
 async function initializeSecurity(
   enableEncryption: boolean,
   password: string | null,
 ): Promise<SecurityStatus> {
-  return invoke<SecurityStatus>("initialize_security", {
+  const status = await invoke<SecurityStatus>("initialize_security", {
     enableEncryption,
     password,
   });
+  announceSecurityReady(status);
+  return status;
 }
 
 async function unlockSecurity(password: string): Promise<SecurityStatus> {
-  return invoke<SecurityStatus>("unlock_security", { password });
+  const status = await invoke<SecurityStatus>("unlock_security", { password });
+  announceSecurityReady(status);
+  return status;
 }
 
 async function setSecurityEncryption(
@@ -37,21 +47,25 @@ async function setSecurityEncryption(
   currentPassword: string | null,
   newPassword: string | null,
 ): Promise<SecurityStatus> {
-  return invoke<SecurityStatus>("set_security_encryption", {
+  const status = await invoke<SecurityStatus>("set_security_encryption", {
     enableEncryption,
     currentPassword,
     newPassword,
   });
+  announceSecurityReady(status);
+  return status;
 }
 
 async function changeSecurityPassword(
   currentPassword: string,
   newPassword: string,
 ): Promise<SecurityStatus> {
-  return invoke<SecurityStatus>("change_security_password", {
+  const status = await invoke<SecurityStatus>("change_security_password", {
     currentPassword,
     newPassword,
   });
+  announceSecurityReady(status);
+  return status;
 }
 
 async function lockSecurity(): Promise<SecurityStatus> {
@@ -71,7 +85,9 @@ async function disableBiometric(): Promise<SecurityStatus> {
 }
 
 async function unlockBiometric(): Promise<SecurityStatus> {
-  return invoke<SecurityStatus>("unlock_biometric");
+  const status = await invoke<SecurityStatus>("unlock_biometric");
+  announceSecurityReady(status);
+  return status;
 }
 
 function biometricLabel(platform: string): string {
@@ -231,8 +247,14 @@ export async function ensureSecurityReady(): Promise<boolean> {
     }
   }
 
-  if (!status.encryption_enabled) return true;
-  if (status.unlocked) return true;
+  if (!status.encryption_enabled) {
+    announceSecurityReady(status);
+    return true;
+  }
+  if (status.unlocked) {
+    announceSecurityReady(status);
+    return true;
+  }
 
   let biometricAttempted = false;
   let biometricErrorCode: string | null = null;

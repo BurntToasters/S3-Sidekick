@@ -4,13 +4,15 @@
 // signatures (and the progress emitter that mirrors them) are intentional.
 #![allow(clippy::too_many_arguments)]
 
-use aws_sdk_s3::types::{Delete, MetadataDirective, ObjectCannedAcl, ObjectIdentifier};
+use aws_sdk_s3::types::{
+    ChecksumAlgorithm, ChecksumType, Delete, MetadataDirective, ObjectCannedAcl, ObjectIdentifier,
+};
 use aws_sdk_s3::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,7 +21,7 @@ use tauri::Emitter;
 use zeroize::Zeroize;
 
 use crate::{
-    load_transfer_checkpoint_json, lock_s3_state, make_temp_path, remove_transfer_checkpoint,
+    load_transfer_checkpoint_json, lock_s3_state, remove_transfer_checkpoint,
     save_transfer_checkpoint_json, validate_destination_path,
     validate_destination_path_allow_overwrite, validate_existing_path, AppState,
 };
@@ -39,9 +41,40 @@ const MAX_UPLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DOWNLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 const TRANSFER_ERROR_PREFIX: &str = "__S3_SIDEKICK_TRANSFER_ERROR__";
 const CHECKSUM_METADATA_KEY: &str = "s3-sidekick-sha256";
-const MULTIPART_COPY_PART_SIZE: u64 = 500 * 1024 * 1024;
+const PREFERRED_MULTIPART_COPY_PART_SIZE: u64 = 500 * 1024 * 1024;
+const MAX_MULTIPART_COPY_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
+const MAX_MULTIPART_COPY_PARTS: u64 = 10_000;
+const MAX_OBJECT_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 const MULTIPART_COPY_THRESHOLD: i64 = 5_368_709_120;
+const MULTIPART_ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_KEY_LEN: usize = 1024;
+
+fn multipart_copy_part_size(object_size: u64) -> Result<u64, String> {
+    if object_size == 0 || object_size > MAX_OBJECT_SIZE {
+        return Err(format!(
+            "Object size {} is outside the supported multipart-copy range (1..={} bytes)",
+            object_size, MAX_OBJECT_SIZE
+        ));
+    }
+
+    // Round the minimum required size up to a MiB boundary. A fixed 500 MiB
+    // part produces 10,486 parts for a valid 5 TiB S3 object, exceeding S3's
+    // 10,000-part limit.
+    let required = object_size.div_ceil(MAX_MULTIPART_COPY_PARTS);
+    let mib = 1024 * 1024;
+    let required_rounded = required.div_ceil(mib) * mib;
+    let part_size = PREFERRED_MULTIPART_COPY_PART_SIZE.max(required_rounded);
+    let part_count = object_size.div_ceil(part_size);
+
+    if part_size > MAX_MULTIPART_COPY_PART_SIZE || part_count > MAX_MULTIPART_COPY_PARTS {
+        return Err(format!(
+            "Object of {} bytes cannot be copied within S3 multipart limits",
+            object_size
+        ));
+    }
+
+    Ok(part_size)
+}
 
 fn validate_key(key: &str, label: &str) -> Result<(), String> {
     if key.is_empty() {
@@ -72,34 +105,272 @@ fn validate_prefix(prefix: &str, label: &str) -> Result<(), String> {
     validate_key(prefix, label)
 }
 
-static CANCELLED_TRANSFERS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
-
-fn cancelled_set() -> &'static Mutex<HashSet<u32>> {
-    CANCELLED_TRANSFERS.get_or_init(|| Mutex::new(HashSet::new()))
+/// Reject an empty prefix for operations that mutate everything beneath it.
+///
+/// `validate_prefix` deliberately allows `""` because listing the bucket root is
+/// legitimate. Deleting, moving, or copying "everything under `""`" is not: it
+/// silently means the entire bucket.
+fn validate_mutating_prefix(prefix: &str, label: &str) -> Result<(), String> {
+    if prefix.is_empty() {
+        return Err(format!(
+            "{} must not be empty. Refusing to operate on every object in the bucket.",
+            label
+        ));
+    }
+    // Rollback backups may be the only surviving copy of a destination another
+    // prefix operation is about to restore. Renaming, copying or deleting that
+    // namespace while a peer operation depends on it would destroy the data the
+    // backups exist to protect.
+    if prefixes_overlap(prefix, ROLLBACK_BACKUP_PREFIX) {
+        return Err(format!(
+            "{} refers to '{}', which S3 Sidekick reserves for copy and move rollback backups. \
+             Choose a different location.",
+            label, ROLLBACK_BACKUP_PREFIX
+        ));
+    }
+    validate_key(prefix, label)
 }
 
-fn is_cancelled(transfer_id: u32) -> bool {
-    cancelled_set()
-        .lock()
-        .map(|set| set.contains(&transfer_id))
-        .unwrap_or(false)
+fn prefixes_overlap(first: &str, second: &str) -> bool {
+    first.starts_with(second) || second.starts_with(first)
 }
 
-fn mark_cancelled(transfer_id: u32) {
-    if let Ok(mut set) = cancelled_set().lock() {
-        set.insert(transfer_id);
+/// Validate a key that is about to be written to, overwritten, or deleted.
+///
+/// Rollback backups may hold the only copy of a destination that an in-flight
+/// copy or move still has to restore, so they are read-only from the UI's point
+/// of view. Reads, downloads and copies *out of* the namespace stay allowed: that
+/// is how a user recovers data from an interrupted operation.
+fn validate_mutating_key(key: &str, label: &str) -> Result<(), String> {
+    validate_key(key, label)?;
+    reject_reserved_backup_key(key, label)
+}
+
+/// Validate a key that is only ever deleted.
+///
+/// `validate_key` rejects `.` and `..` segments because a key is also used to
+/// build a local download path. Deletion never touches the filesystem, and such
+/// keys are legal in S3, so refusing them here would strand objects that earlier
+/// versions could remove. Length, NUL and the reserved namespace still apply.
+fn validate_deletable_key(key: &str, label: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err(format!("{} must not be empty", label));
+    }
+    if key.len() > MAX_KEY_LEN {
+        return Err(format!(
+            "{} is too long (max {} characters)",
+            label, MAX_KEY_LEN
+        ));
+    }
+    if key.as_bytes().contains(&0) {
+        return Err(format!("{} contains invalid characters", label));
+    }
+    reject_reserved_backup_key(key, label)
+}
+
+fn reject_reserved_backup_key(key: &str, label: &str) -> Result<(), String> {
+    if key.starts_with(ROLLBACK_BACKUP_PREFIX) {
+        return Err(format!(
+            "{} is inside '{}', which S3 Sidekick reserves for copy and move rollback backups. \
+             They may hold the only copy of overwritten data, so they cannot be modified here.",
+            label, ROLLBACK_BACKUP_PREFIX
+        ));
+    }
+    Ok(())
+}
+
+/// Cooperative cancellation signal shared by a transfer and its workers.
+///
+/// Replaces the previous `HashSet<u32>` of cancelled ids. That design latched:
+/// an id was inserted by `cancel_transfer` and only removed if the transfer
+/// happened to observe it, so ids belonging to already-finished transfers stayed
+/// behind forever. Because the frontend restarts its id counter at 1 on every
+/// webview reload, a later transfer could be assigned a latched id and abort
+/// before moving a single byte.
+///
+/// Now an entry exists only while a transfer is actually running (created by
+/// `TransferGuard`, removed on drop), so cancelling an unknown id is a no-op.
+#[derive(Default)]
+struct CancelFlag {
+    cancelled: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl CancelFlag {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn cancel(&self) {
+        if !self.cancelled.swap(true, Ordering::AcqRel) {
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// Resolve immediately when cancellation has already happened, or register
+    /// a race-free waiter for the next cancellation signal.
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
+    }
+
+    /// Sleep, waking immediately if cancellation arrives.
+    async fn sleep_unless_cancelled(&self, total: Duration) -> bool {
+        tokio::select! {
+            _ = self.cancelled() => false,
+            _ = tokio::time::sleep(total) => true,
+        }
     }
 }
 
-fn clear_cancelled(transfer_id: u32) {
-    if let Ok(mut set) = cancelled_set().lock() {
-        set.remove(&transfer_id);
+type CancelToken = Arc<CancelFlag>;
+
+static ACTIVE_TRANSFERS: OnceLock<Mutex<HashMap<u32, CancelToken>>> = OnceLock::new();
+static TRANSFERS_DISABLED: AtomicBool = AtomicBool::new(false);
+static ROLLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn active_transfers() -> &'static Mutex<HashMap<u32, CancelToken>> {
+    ACTIVE_TRANSFERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers a running transfer and deregisters it on drop.
+struct TransferGuard {
+    transfer_id: u32,
+    token: CancelToken,
+}
+
+impl TransferGuard {
+    fn register(transfer_id: u32) -> Self {
+        let token: CancelToken = Arc::new(CancelFlag::default());
+        if TRANSFERS_DISABLED.load(Ordering::Acquire) {
+            token.cancel();
+        }
+        if let Ok(mut map) = active_transfers().lock() {
+            // A duplicate id means the frontend reused it. Replace the stale
+            // entry rather than inheriting its cancellation state.
+            map.insert(transfer_id, Arc::clone(&token));
+        }
+        Self { transfer_id, token }
+    }
+
+    fn token(&self) -> CancelToken {
+        Arc::clone(&self.token)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+}
+
+fn transfer_cancel_context(transfer_id: Option<u32>) -> (Option<TransferGuard>, CancelToken) {
+    match transfer_id {
+        Some(id) => {
+            let guard = TransferGuard::register(id);
+            let token = guard.token();
+            (Some(guard), token)
+        }
+        None => (None, Arc::new(CancelFlag::default())),
+    }
+}
+
+impl Drop for TransferGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = active_transfers().lock() {
+            // Only remove our own registration; a newer transfer may have taken
+            // the slot if the frontend reused the id.
+            if map
+                .get(&self.transfer_id)
+                .map(|existing| Arc::ptr_eq(existing, &self.token))
+                .unwrap_or(false)
+            {
+                map.remove(&self.transfer_id);
+            }
+        }
     }
 }
 
 #[tauri::command]
 pub(crate) fn cancel_transfer(transfer_id: u32) {
-    mark_cancelled(transfer_id);
+    if let Ok(map) = active_transfers().lock() {
+        if let Some(token) = map.get(&transfer_id) {
+            token.cancel();
+        }
+    }
+}
+
+pub(crate) fn resume_transfers_after_failed_reset() {
+    TRANSFERS_DISABLED.store(false, Ordering::Release);
+}
+
+pub(crate) async fn stop_all_transfers_for_reset() -> Result<(), String> {
+    TRANSFERS_DISABLED.store(true, Ordering::Release);
+    let started = Instant::now();
+    loop {
+        let tokens = active_transfers()
+            .lock()
+            .map_err(|_| "Transfer registry is unavailable".to_string())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        for token in tokens {
+            token.cancel();
+        }
+        if started.elapsed() >= Duration::from_secs(30) {
+            return Err("Timed out while stopping active transfers for factory reset".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Error returned when a transfer observes cancellation.
+fn cancelled_error() -> String {
+    "Transfer cancelled".to_string()
+}
+
+async fn cleanup_completes_within<F>(timeout: Duration, cleanup: F) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    tokio::time::timeout(timeout, cleanup).await.is_ok()
+}
+
+/// Abort an unfinished multipart operation without allowing a broken endpoint
+/// to hold cancellation or factory reset forever.
+async fn abort_multipart_upload_bounded(client: &Client, bucket: &str, key: &str, upload_id: &str) {
+    let request = client
+        .abort_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .send();
+    let _ = cleanup_completes_within(MULTIPART_ABORT_TIMEOUT, async move {
+        let _ = request.await;
+    })
+    .await;
+}
+
+/// True only when the service explicitly answered 404.
+///
+/// Any other failure (403, 5xx, network) must not be read as "absent", otherwise
+/// a transient error silently becomes permission to overwrite.
+fn is_not_found<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    match err {
+        SdkError::ServiceError(ctx) => ctx.raw().status().as_u16() == 404,
+        _ => false,
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -171,6 +442,16 @@ pub(crate) struct UploadProgress {
     resumable: Option<bool>,
 }
 
+fn encode_copy_source_with_version(bucket: &str, key: &str, version_id: Option<&str>) -> String {
+    let source = encode_copy_source(bucket, key);
+    match version_id {
+        Some(version) if !version.is_empty() => {
+            format!("{}?versionId={}", source, urlencoding::encode(version))
+        }
+        _ => source,
+    }
+}
+
 fn normalize_attempt(attempt: Option<u32>) -> u32 {
     attempt.unwrap_or(1).max(1)
 }
@@ -193,6 +474,11 @@ struct TransferCheckpoint {
     // field existed (those are treated as "no recorded etag" and discarded).
     #[serde(default)]
     etag: String,
+    // Version ID of the immutable object generation when versioning is enabled.
+    // Old checkpoints have no value and are intentionally not resumable against
+    // a versioned object: an ETag can be reused by distinct versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version_id: Option<String>,
 }
 
 fn clamp_part_size_mb(value: Option<u32>, fallback: u32) -> u32 {
@@ -332,8 +618,9 @@ fn emit_transfer_progress(
     );
 }
 
-fn checkpoint_from_json(json: &str) -> Option<TransferCheckpoint> {
-    serde_json::from_str::<TransferCheckpoint>(json).ok()
+fn checkpoint_from_json(json: &str) -> Result<TransferCheckpoint, String> {
+    serde_json::from_str::<TransferCheckpoint>(json)
+        .map_err(|err| format!("Invalid transfer checkpoint JSON: {}", err))
 }
 
 fn save_checkpoint_payload(
@@ -343,6 +630,21 @@ fn save_checkpoint_payload(
 ) -> Result<(), String> {
     let json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
     save_transfer_checkpoint_json(app, checkpoint_id, &json)
+}
+
+fn persist_checkpoint_and_advance<F>(
+    last_saved_at: &mut Instant,
+    last_saved_parts: &mut u32,
+    completed_count: u32,
+    persist: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    persist()?;
+    *last_saved_at = Instant::now();
+    *last_saved_parts = completed_count;
+    Ok(())
 }
 
 fn normalize_checkpoint_parts(parts: &[u32], total_parts: u32) -> Vec<u32> {
@@ -382,14 +684,28 @@ fn digest_to_base64(digest: &[u8]) -> String {
     B64.encode(digest)
 }
 
-fn sha256_hex_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    digest_to_hex(&digest)
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Sha256Checksum {
+    hex: String,
+    base64: String,
 }
 
-async fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
+type UploadedPart = (i32, usize, String, Option<Sha256Checksum>);
+
+fn sha256_checksum_from_digest(digest: &[u8]) -> Sha256Checksum {
+    Sha256Checksum {
+        hex: digest_to_hex(digest),
+        base64: digest_to_base64(digest),
+    }
+}
+
+fn sha256_checksum_bytes(bytes: &[u8]) -> Sha256Checksum {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    sha256_checksum_from_digest(&hasher.finalize())
+}
+
+async fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncReadExt;
     let mut hasher = Sha256::new();
     let mut file = tokio::fs::File::open(path)
@@ -397,10 +713,12 @@ async fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("Failed to open file for checksum: {}", e))?;
     let mut buf = vec![0u8; 256 * 1024];
     loop {
-        let read = file
-            .read(&mut buf)
-            .await
-            .map_err(|e| format!("Failed to read file for checksum: {}", e))?;
+        let read = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = file.read(&mut buf) => {
+                result.map_err(|e| format!("Failed to read file for checksum: {}", e))?
+            }
+        };
         if read == 0 {
             break;
         }
@@ -412,6 +730,17 @@ async fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
 fn expected_checksum_from_head(
     head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
 ) -> Option<ExpectedChecksum> {
+    // Prefer an S3-validated full-object checksum. Composite multipart SHA-256
+    // values are not the SHA-256 of the object bytes, so retain the custom
+    // full-object metadata hint for older composite uploads.
+    if !matches!(head.checksum_type(), Some(ChecksumType::Composite)) {
+        if let Some(value) = head.checksum_sha256() {
+            let trimmed = value.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(ExpectedChecksum::Base64(trimmed));
+            }
+        }
+    }
     if let Some(value) = head
         .metadata()
         .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
@@ -421,17 +750,15 @@ fn expected_checksum_from_head(
             return Some(ExpectedChecksum::Hex(trimmed));
         }
     }
-    if let Some(value) = head.checksum_sha256() {
-        let trimmed = value.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(ExpectedChecksum::Base64(trimmed));
-        }
-    }
     None
 }
 
-async fn verify_file_checksum(path: &Path, expected: &ExpectedChecksum) -> Result<(), String> {
-    let digest = sha256_file(path).await?;
+async fn verify_file_checksum(
+    path: &Path,
+    expected: &ExpectedChecksum,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    let digest = sha256_file(path, cancel).await?;
     match expected {
         ExpectedChecksum::Hex(hex) => {
             let actual = digest_to_hex(&digest);
@@ -463,40 +790,45 @@ async fn verify_file_checksum(path: &Path, expected: &ExpectedChecksum) -> Resul
     }
 }
 
-async fn verify_remote_checksum_metadata(
-    client: &Client,
-    bucket: &str,
-    key: &str,
-    expected_hex: &str,
+fn verify_upload_checksum_response(
+    actual: Option<&str>,
+    expected: &Sha256Checksum,
+    context: &str,
 ) -> Result<(), String> {
-    let head = client
-        .head_object()
-        .bucket(bucket)
-        .key(key)
-        .send()
-        .await
-        .map_err(|e| {
-            structured_transfer_sdk_error("Failed checksum head", &e, "checksum_head", false)
-        })?;
-    let actual = head
-        .metadata()
-        .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| !v.is_empty());
-    if let Some(actual_hex) = actual {
-        if actual_hex != expected_hex {
-            return Err(encode_transfer_error(
-                "checksum_mismatch",
-                false,
-                None,
-                format!(
-                    "Checksum metadata mismatch for uploaded object. Expected {}.",
-                    expected_hex
-                ),
-            ));
-        }
+    let Some(actual) = actual.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(encode_transfer_error(
+            "checksum_unsupported",
+            false,
+            None,
+            format!(
+                "{} succeeded but the storage provider did not return its S3 SHA-256 checksum.",
+                context
+            ),
+        ));
+    };
+    if actual != expected.base64 {
+        return Err(encode_transfer_error(
+            "checksum_mismatch",
+            false,
+            None,
+            format!("{} returned a different S3 SHA-256 checksum.", context),
+        ));
     }
     Ok(())
+}
+
+fn checkpoint_generation_matches(
+    checkpoint: &TransferCheckpoint,
+    current_etag: &str,
+    current_version_id: Option<&str>,
+) -> bool {
+    if checkpoint.etag.is_empty() || checkpoint.etag != current_etag {
+        return false;
+    }
+    match current_version_id {
+        Some(version_id) => checkpoint.version_id.as_deref() == Some(version_id),
+        None => checkpoint.version_id.is_none(),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -728,41 +1060,185 @@ fn structured_transfer_sdk_error<E: std::fmt::Debug>(
     }
 }
 
+fn generation_pinned_download_error<E: std::fmt::Debug>(
+    prefix: &str,
+    err: &aws_sdk_s3::error::SdkError<E>,
+) -> String {
+    use aws_sdk_s3::error::SdkError;
+    if let SdkError::ServiceError(ctx) = err {
+        let status = ctx.raw().status().as_u16();
+        if status == 404 || status == 412 {
+            return encode_transfer_error(
+                "stale_object",
+                false,
+                Some(status),
+                format!(
+                    "{}: the object changed or its recorded version disappeared during download.",
+                    prefix
+                ),
+            );
+        }
+    }
+    structured_transfer_sdk_error(prefix, err, "download_range", true)
+}
+
+/// Recognise a provider saying that object ACLs do not exist here.
+///
+/// Buckets configured with `BucketOwnerEnforced` — the default for new S3
+/// buckets — reject every canned ACL, `private` included, and several
+/// S3-compatible providers never implemented the ACL APIs at all. In those cases
+/// there is no ACL to carry across, so omitting one preserves the source exactly
+/// rather than silently changing permissions. Any other failure still fails
+/// closed, because then an ACL may exist and simply could not be read or applied.
+fn feature_is_unimplemented(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("notimplemented") || lower.contains("not implemented")
+}
+
+fn acls_are_unavailable(message: &str) -> bool {
+    feature_is_unimplemented(message)
+        || message
+            .to_ascii_lowercase()
+            .contains("accesscontrollistnotsupported")
+}
+
 async fn infer_canned_acl_for_object(
     client: &Client,
     bucket: &str,
     key: &str,
-) -> Option<ObjectCannedAcl> {
-    let output = client
-        .get_object_acl()
-        .bucket(bucket)
-        .key(key)
-        .send()
-        .await
-        .ok()?;
-
-    let has_public_read = output.grants().iter().any(|grant| {
-        let is_read = grant
-            .permission()
-            .map(|permission| permission.as_str().eq_ignore_ascii_case("READ"))
-            .unwrap_or(false);
-        if !is_read {
-            return false;
+    version_id: Option<&str>,
+) -> Result<Option<ObjectCannedAcl>, String> {
+    let mut request = client.get_object_acl().bucket(bucket).key(key);
+    if let Some(version_id) = version_id {
+        request = request.version_id(version_id);
+    }
+    let output = match request.send().await {
+        Ok(output) => output,
+        Err(err) => {
+            let message = format!("{:?}", err);
+            if acls_are_unavailable(&message) {
+                return Ok(None);
+            }
+            return Err(format!(
+                "Failed to read the ACL for '{}' before copy; refusing to continue without \
+                 confirmed ACL preservation. A copy does not carry the ACL, so preserving it \
+                 needs the 's3:GetObjectAcl' permission: {}",
+                key, err
+            ));
         }
+    };
 
-        let uri = grant
-            .grantee()
-            .and_then(|grantee| grantee.uri())
+    let owner_id = output
+        .owner()
+        .and_then(|owner| owner.id())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("Object '{}' ACL has no owner identity", key))?;
+    let mut owner_full_control = 0u8;
+    let mut public_read = 0u8;
+    let mut public_write = 0u8;
+    let mut authenticated_read = 0u8;
+
+    for grant in output.grants() {
+        let permission = grant
+            .permission()
+            .map(|value| value.as_str())
+            .unwrap_or_default();
+        let grantee = grant.grantee();
+        let uri = grantee
+            .and_then(|value| value.uri())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        uri.contains("allusers")
-    });
+        let grantee_id = grantee.and_then(|value| value.id()).unwrap_or_default();
 
-    Some(if has_public_read {
-        ObjectCannedAcl::PublicRead
-    } else {
-        ObjectCannedAcl::Private
-    })
+        if grantee_id == owner_id && permission.eq_ignore_ascii_case("FULL_CONTROL") {
+            owner_full_control = owner_full_control.saturating_add(1);
+            continue;
+        }
+        if uri.ends_with("/allusers") && permission.eq_ignore_ascii_case("READ") {
+            public_read = public_read.saturating_add(1);
+            continue;
+        }
+        if uri.ends_with("/allusers") && permission.eq_ignore_ascii_case("WRITE") {
+            public_write = public_write.saturating_add(1);
+            continue;
+        }
+        if uri.ends_with("/authenticatedusers") && permission.eq_ignore_ascii_case("READ") {
+            authenticated_read = authenticated_read.saturating_add(1);
+            continue;
+        }
+
+        return Err(format!(
+            "Object '{}' uses a custom ACL that cannot be represented safely during copy",
+            key
+        ));
+    }
+
+    if owner_full_control != 1 {
+        return Err(format!(
+            "Object '{}' ACL does not contain exactly one owner FULL_CONTROL grant",
+            key
+        ));
+    }
+
+    match (public_read, public_write, authenticated_read) {
+        (0, 0, 0) => Ok(Some(ObjectCannedAcl::Private)),
+        (1, 0, 0) => Ok(Some(ObjectCannedAcl::PublicRead)),
+        (1, 1, 0) => Ok(Some(ObjectCannedAcl::PublicReadWrite)),
+        (0, 0, 1) => Ok(Some(ObjectCannedAcl::AuthenticatedRead)),
+        _ => Err(format!(
+            "Object '{}' ACL grant combination does not exactly match a supported canned ACL",
+            key
+        )),
+    }
+}
+
+async fn encoded_tagging_for_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let mut request = client.get_object_tagging().bucket(bucket).key(key);
+    if let Some(version_id) = version_id {
+        request = request.version_id(version_id);
+    }
+    let output = match request.send().await {
+        Ok(output) => output,
+        Err(err) => {
+            // A provider that never implemented object tagging has no tags to
+            // preserve, so the copy loses nothing by proceeding. Every other
+            // failure still fails closed: tags may exist and simply be unreadable.
+            if feature_is_unimplemented(&format!("{:?}", err)) {
+                return Ok(None);
+            }
+            return Err(format!(
+                "Failed to read tags for '{}' before copy; refusing to continue without confirmed \
+                 tag preservation. Objects at or above 5 GiB are copied in parts, which requires \
+                 restating their tags, so this operation needs the 's3:GetObjectTagging' \
+                 permission: {}",
+                key, err
+            ));
+        }
+    };
+
+    if output.tag_set().is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        output
+            .tag_set()
+            .iter()
+            .map(|tag| {
+                format!(
+                    "{}={}",
+                    urlencoding::encode(tag.key()),
+                    urlencoding::encode(tag.value())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&"),
+    ))
 }
 
 #[tauri::command]
@@ -894,6 +1370,9 @@ pub(crate) async fn list_objects(
     delimiter: String,
     continuation_token: String,
 ) -> Result<ListObjectsResponse, String> {
+    // Listing the bucket root with an empty prefix is legitimate, so this uses
+    // the permissive validator rather than the mutating one.
+    validate_prefix(&prefix, "Prefix")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1042,35 +1521,100 @@ pub(crate) async fn update_metadata(
     content_type: String,
     metadata: HashMap<String, String>,
 ) -> Result<(), String> {
-    validate_key(&key, "Object key")?;
+    validate_mutating_key(&key, "Object key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
 
-    let source = encode_copy_source(&bucket, &key);
-    let preserved_acl = infer_canned_acl_for_object(&client, &bucket, &key).await;
-    let mut req = client
-        .copy_object()
-        .bucket(&bucket)
-        .key(&key)
-        .copy_source(&source)
-        .content_type(&content_type)
-        .metadata_directive(MetadataDirective::Replace);
+    let cancel = Arc::new(CancelFlag::default());
 
-    if let Some(acl) = preserved_acl {
-        req = req.acl(acl);
+    // `MetadataDirective::Replace` discards every system header that is not
+    // re-supplied on the request. Only content type and user metadata used to be
+    // sent, so editing any metadata field silently stripped Cache-Control,
+    // Content-Disposition, Content-Encoding, Content-Language, the website
+    // redirect location, the storage class and the encryption settings. Read the
+    // current state first and carry all of it forward.
+    let mut existing = describe_source(&client, &bucket, &key, &cancel).await?;
+    existing.content_type = Some(content_type.clone());
+    existing.metadata = Some(metadata.clone());
+
+    if existing.size >= MULTIPART_COPY_THRESHOLD {
+        // S3's single CopyObject API is limited to 5 GiB, but an in-place
+        // multipart upload may safely copy ranges from the old object until the
+        // final completion atomically replaces it.
+        return copy_object_multipart(&client, &bucket, &bucket, &key, &key, &existing, &cancel)
+            .await
+            .map(|_| ());
     }
 
-    for (k, v) in &metadata {
-        req = req.metadata(k, v);
+    let source = encode_copy_source_with_version(&bucket, &key, existing.version_id.as_deref());
+    let build_request = |include_acl: bool| {
+        let mut req = client
+            .copy_object()
+            .bucket(&bucket)
+            .key(&key)
+            .copy_source(&source)
+            .content_type(&content_type)
+            .metadata_directive(MetadataDirective::Replace);
+
+        if let Some(etag) = existing.etag.as_deref() {
+            req = req.copy_source_if_match(etag);
+        }
+
+        if let Some(value) = existing.cache_control.as_deref() {
+            req = req.cache_control(value);
+        }
+        if let Some(value) = existing.content_disposition.as_deref() {
+            req = req.content_disposition(value);
+        }
+        if let Some(value) = existing.content_encoding.as_deref() {
+            req = req.content_encoding(value);
+        }
+        if let Some(value) = existing.content_language.as_deref() {
+            req = req.content_language(value);
+        }
+        if let Some(value) = existing.website_redirect_location.as_deref() {
+            req = req.website_redirect_location(value);
+        }
+        if let Some(value) = existing.storage_class.as_ref() {
+            req = req.storage_class(value.clone());
+        }
+        if let Some(value) = existing.server_side_encryption.as_ref() {
+            req = req.server_side_encryption(value.clone());
+        }
+        if let Some(value) = existing.ssekms_key_id.as_deref() {
+            req = req.ssekms_key_id(value);
+        }
+        if let Some(value) = existing.bucket_key_enabled {
+            req = req.bucket_key_enabled(value);
+        }
+        if include_acl {
+            if let Some(acl) = existing.acl.as_ref() {
+                req = req.acl(acl.clone());
+            }
+        }
+
+        for (k, v) in &metadata {
+            req = req.metadata(k, v);
+        }
+        req
+    };
+
+    let mut include_acl = existing.acl.is_some();
+    loop {
+        match build_request(include_acl).send().await {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                let detail = format!("{:?}", err);
+                if include_acl && acls_are_unavailable(&detail) {
+                    include_acl = false;
+                    continue;
+                }
+                return Err(format!("Failed to update metadata: {}", err));
+            }
+        }
     }
-
-    req.send()
-        .await
-        .map_err(|e| format!("Failed to update metadata: {}", e))?;
-
-    Ok(())
 }
 
 #[tauri::command]
@@ -1079,6 +1623,12 @@ pub(crate) async fn delete_objects(
     bucket: String,
     keys: Vec<String>,
 ) -> Result<u32, String> {
+    // This command used to pass its keys straight to `DeleteObjects` with no
+    // validation at all, so a caller could delete anything the credentials
+    // reached, including live rollback backups.
+    for key in &keys {
+        validate_deletable_key(key, "Object key")?;
+    }
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1151,13 +1701,16 @@ pub(crate) async fn upload_object(
     bandwidth_limit_mbps: Option<u32>,
     checksum_verification: Option<bool>,
 ) -> Result<(), String> {
-    validate_key(&key, "Object key")?;
+    validate_mutating_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
 
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+
+    let guard = TransferGuard::register(transfer_id);
+    let cancel = guard.token();
 
     let file_size = tokio::fs::metadata(&upload_path)
         .await
@@ -1167,9 +1720,9 @@ pub(crate) async fn upload_object(
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
-    let expected_checksum_hex = if checksum_enabled {
-        let digest = sha256_file(&upload_path).await?;
-        Some(digest_to_hex(&digest))
+    let expected_checksum = if checksum_enabled {
+        let digest = sha256_file(&upload_path, &cancel).await?;
+        Some(sha256_checksum_from_digest(&digest))
     } else {
         None
     };
@@ -1211,13 +1764,13 @@ pub(crate) async fn upload_object(
             part_workers,
             bandwidth_limit_bps,
             started_at,
-            expected_checksum_hex.as_deref(),
+            expected_checksum.as_ref(),
+            &cancel,
         )
         .await?;
     } else {
-        if is_cancelled(transfer_id) {
-            clear_cancelled(transfer_id);
-            return Err("Transfer cancelled".to_string());
+        if guard.is_cancelled() {
+            return Err(cancelled_error());
         }
 
         let body = aws_sdk_s3::primitives::ByteStream::from_path(upload_path.as_path())
@@ -1229,17 +1782,40 @@ pub(crate) async fn upload_object(
         if !content_type.is_empty() {
             req = req.content_type(&content_type);
         }
-        if let Some(checksum_hex) = expected_checksum_hex.as_deref() {
-            req = req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
+        if let Some(checksum) = expected_checksum.as_ref() {
+            req = req
+                .metadata(CHECKSUM_METADATA_KEY, &checksum.hex)
+                .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                .checksum_sha256(&checksum.base64);
         }
 
-        req.send()
-            .await
-            .map_err(|e| structured_transfer_sdk_error("Failed to upload", &e, "upload", true))?;
+        // A single PutObject cannot be interrupted mid-flight, so race the send
+        // against the cancel signal instead of only checking before it starts.
+        // Without this, cancelling a sub-threshold upload had no effect at all
+        // until the whole body had been transmitted.
+        let send = req.send();
+        tokio::pin!(send);
+        let output = loop {
+            tokio::select! {
+                result = &mut send => {
+                    break result.map_err(|e| {
+                        structured_transfer_sdk_error("Failed to upload", &e, "upload", true)
+                    })?;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(150)) => {
+                    if cancel.is_cancelled() {
+                        return Err(cancelled_error());
+                    }
+                }
+            }
+        };
+        if let Some(checksum) = expected_checksum.as_ref() {
+            verify_upload_checksum_response(output.checksum_sha256(), checksum, "Upload")?;
+        }
     }
 
-    if let Some(expected_checksum) = expected_checksum_hex.as_deref() {
-        verify_remote_checksum_metadata(&client, &bucket, &key, expected_checksum).await?;
+    if guard.is_cancelled() {
+        return Err(cancelled_error());
     }
 
     emit_transfer_progress(
@@ -1256,7 +1832,6 @@ pub(crate) async fn upload_object(
         None,
         None,
     );
-    clear_cancelled(transfer_id);
 
     Ok(())
 }
@@ -1268,24 +1843,38 @@ async fn upload_part_with_retry(
     upload_id: String,
     part_number: i32,
     data: bytes::Bytes,
-) -> Result<(i32, usize, String), String> {
+    checksum_enabled: bool,
+    cancel: CancelToken,
+) -> Result<UploadedPart, String> {
     let bytes = data.len();
+    let checksum = checksum_enabled.then(|| sha256_checksum_bytes(&data));
     let mut last_error = String::new();
     for attempt in 1..=UPLOAD_PART_RETRY_ATTEMPTS {
+        if cancel.is_cancelled() {
+            return Err(cancelled_error());
+        }
         let body = aws_sdk_s3::primitives::ByteStream::from(data.clone());
-        match client
+        let mut request = client
             .upload_part()
             .bucket(&bucket)
             .key(&key)
             .upload_id(&upload_id)
             .part_number(part_number)
-            .body(body)
-            .send()
-            .await
-        {
+            .body(body);
+        if let Some(checksum) = checksum.as_ref() {
+            request = request.checksum_sha256(&checksum.base64);
+        }
+        match request.send().await {
             Ok(output) => {
+                if let Some(checksum) = checksum.as_ref() {
+                    verify_upload_checksum_response(
+                        output.checksum_sha256(),
+                        checksum,
+                        &format!("Upload part {}", part_number),
+                    )?;
+                }
                 let etag = output.e_tag().unwrap_or_default().to_string();
-                return Ok((part_number, bytes, etag));
+                return Ok((part_number, bytes, etag, checksum));
             }
             Err(err) => {
                 last_error = structured_transfer_sdk_error(
@@ -1296,7 +1885,11 @@ async fn upload_part_with_retry(
                 );
                 if attempt < UPLOAD_PART_RETRY_ATTEMPTS {
                     let delay = Duration::from_millis(250 * (2u64.pow(attempt - 1)));
-                    tokio::time::sleep(delay).await;
+                    // Observe cancellation during backoff rather than sleeping
+                    // through it.
+                    if !cancel.sleep_unless_cancelled(delay).await {
+                        return Err(cancelled_error());
+                    }
                 }
             }
         }
@@ -1318,7 +1911,8 @@ async fn upload_multipart(
     max_concurrent_parts: usize,
     bandwidth_limit_bps: u64,
     started_at: Instant,
-    checksum_hex: Option<&str>,
+    checksum: Option<&Sha256Checksum>,
+    cancel: &CancelToken,
 ) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
     use tokio::task::JoinSet;
@@ -1327,8 +1921,11 @@ async fn upload_multipart(
     if !content_type.is_empty() {
         create_req = create_req.content_type(content_type);
     }
-    if let Some(checksum_hex) = checksum_hex {
-        create_req = create_req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
+    if let Some(checksum) = checksum {
+        create_req = create_req
+            .metadata(CHECKSUM_METADATA_KEY, &checksum.hex)
+            .checksum_algorithm(ChecksumAlgorithm::Sha256)
+            .checksum_type(ChecksumType::FullObject);
     }
 
     let create_output = create_req.send().await.map_err(|e| {
@@ -1350,40 +1947,31 @@ async fn upload_multipart(
     let mut part_number = 1i32;
     let mut bytes_sent = 0u64;
     let mut eof = false;
-    let mut join_set: JoinSet<Result<(i32, usize, String), String>> = JoinSet::new();
-
-    let abort = |client: &Client, bucket: &str, key: &str, upload_id: &str| {
-        let client = client.clone();
-        let bucket = bucket.to_string();
-        let key = key.to_string();
-        let upload_id = upload_id.to_string();
-        async move {
-            let _ = client
-                .abort_multipart_upload()
-                .bucket(&bucket)
-                .key(&key)
-                .upload_id(&upload_id)
-                .send()
-                .await;
-        }
-    };
+    let mut join_set: JoinSet<Result<UploadedPart, String>> = JoinSet::new();
 
     loop {
-        if is_cancelled(transfer_id) {
-            clear_cancelled(transfer_id);
+        if cancel.is_cancelled() {
             join_set.abort_all();
-            abort(client, bucket, key, &upload_id).await;
-            return Err("Transfer cancelled".to_string());
+            while join_set.join_next().await.is_some() {}
+            abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+            return Err(cancelled_error());
         }
 
         while join_set.len() < max_concurrent_parts && !eof {
             let mut buf = vec![0u8; part_size_bytes];
             let mut read = 0;
             while read < part_size_bytes {
-                let n = file
-                    .read(&mut buf[read..])
-                    .await
-                    .map_err(|e| format!("Failed to read file: {}", e))?;
+                let n = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        join_set.abort_all();
+                        while join_set.join_next().await.is_some() {}
+                        abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+                        return Err(cancelled_error());
+                    }
+                    result = file.read(&mut buf[read..]) => {
+                        result.map_err(|e| format!("Failed to read file: {}", e))?
+                    }
+                };
                 if n == 0 {
                     break;
                 }
@@ -1400,7 +1988,7 @@ async fn upload_multipart(
             // out of bounds. Abort the upload cleanly instead of panicking.
             if (part_number as usize) > total_parts {
                 join_set.abort_all();
-                abort(client, bucket, key, &upload_id).await;
+                abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
                 return Err(
                     "File changed during upload (grew larger than expected). Upload aborted."
                         .to_string(),
@@ -1412,10 +2000,22 @@ async fn upload_multipart(
             let key = key.to_string();
             let uid = upload_id.clone();
             let pn = part_number;
+            let part_cancel = Arc::clone(cancel);
 
+            let checksum_enabled = checksum.is_some();
             join_set.spawn(async move {
                 let shared = bytes::Bytes::from(buf);
-                upload_part_with_retry(client, bucket, key, uid, pn, shared).await
+                upload_part_with_retry(
+                    client,
+                    bucket,
+                    key,
+                    uid,
+                    pn,
+                    shared,
+                    checksum_enabled,
+                    part_cancel,
+                )
+                .await
             });
 
             part_number += 1;
@@ -1425,20 +2025,35 @@ async fn upload_multipart(
             break;
         }
 
-        match join_set.join_next().await {
-            Some(Ok(Ok((pn, bytes_read, etag)))) => {
-                completed_parts[(pn - 1) as usize] = Some(
-                    aws_sdk_s3::types::CompletedPart::builder()
-                        .part_number(pn)
-                        .e_tag(etag)
-                        .build(),
-                );
+        let joined = tokio::select! {
+            _ = cancel.cancelled() => {
+                join_set.abort_all();
+                while join_set.join_next().await.is_some() {}
+                abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+                return Err(cancelled_error());
+            }
+            result = join_set.join_next() => result,
+        };
+
+        match joined {
+            Some(Ok(Ok((pn, bytes_read, etag, part_checksum)))) => {
+                let mut completed = aws_sdk_s3::types::CompletedPart::builder()
+                    .part_number(pn)
+                    .e_tag(etag);
+                if let Some(part_checksum) = part_checksum {
+                    completed = completed.checksum_sha256(part_checksum.base64);
+                }
+                completed_parts[(pn - 1) as usize] = Some(completed.build());
                 bytes_sent += bytes_read as u64;
                 if bandwidth_limit_bps > 0 {
                     let elapsed = started_at.elapsed().as_secs_f64();
                     let target = bytes_sent as f64 / bandwidth_limit_bps as f64;
-                    if target > elapsed {
-                        tokio::time::sleep(Duration::from_secs_f64(target - elapsed)).await;
+                    if target > elapsed
+                        && !cancel
+                            .sleep_unless_cancelled(Duration::from_secs_f64(target - elapsed))
+                            .await
+                    {
+                        continue;
                     }
                 }
                 emit_transfer_progress(
@@ -1458,16 +2073,46 @@ async fn upload_multipart(
             }
             Some(Ok(Err(e))) => {
                 join_set.abort_all();
-                abort(client, bucket, key, &upload_id).await;
+                while join_set.join_next().await.is_some() {}
+                abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
                 return Err(e);
             }
             Some(Err(e)) => {
                 join_set.abort_all();
-                abort(client, bucket, key, &upload_id).await;
+                while join_set.join_next().await.is_some() {}
+                abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
                 return Err(format!("Upload task failed: {}", e));
             }
             None => break,
         }
+    }
+
+    // Verify the upload is complete before committing it.
+    //
+    // `completed_parts` is sized from the file length measured before the read
+    // loop started. If the file shrank in the meantime the loop hits EOF early
+    // and leaves trailing `None` slots. Flattening those away (as this code used
+    // to do unconditionally) would complete a multipart upload containing only
+    // the parts that happened to be read, publishing a silently truncated object
+    // and reporting success.
+    let missing_parts = completed_parts.iter().filter(|part| part.is_none()).count();
+    let current_size = tokio::fs::metadata(file_path)
+        .await
+        .map(|meta| meta.len())
+        .unwrap_or(file_size);
+    if missing_parts > 0 || bytes_sent != file_size || current_size != file_size {
+        join_set.abort_all();
+        while join_set.join_next().await.is_some() {}
+        abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+        return Err(format!(
+            "File changed during upload: expected {} bytes in {} part(s) but sent {} bytes in {} part(s) \
+             (file is now {} bytes). Upload aborted to avoid publishing a truncated object.",
+            file_size,
+            total_parts,
+            bytes_sent,
+            total_parts - missing_parts,
+            current_size
+        ));
     }
 
     let final_parts: Vec<aws_sdk_s3::types::CompletedPart> =
@@ -1477,22 +2122,53 @@ async fn upload_multipart(
         .set_parts(Some(final_parts))
         .build();
 
-    if let Err(e) = client
+    let mut complete_request = client
         .complete_multipart_upload()
         .bucket(bucket)
         .key(key)
         .upload_id(&upload_id)
         .multipart_upload(completed_upload)
-        .send()
-        .await
-    {
-        abort(client, bucket, key, &upload_id).await;
-        return Err(structured_transfer_sdk_error(
-            "Failed to complete multipart upload",
-            &e,
-            "upload_complete",
-            true,
-        ));
+        .mpu_object_size(file_size as i64);
+    if let Some(checksum) = checksum {
+        complete_request = complete_request
+            .checksum_sha256(&checksum.base64)
+            .checksum_type(ChecksumType::FullObject);
+    }
+    let complete_request = complete_request.send();
+    let complete_result = tokio::select! {
+        _ = cancel.cancelled() => {
+            abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+            return Err(cancelled_error());
+        }
+        result = complete_request => result,
+    };
+
+    let complete_output = match complete_result {
+        Ok(output) => output,
+        Err(e) => {
+            abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+            return Err(structured_transfer_sdk_error(
+                "Failed to complete multipart upload",
+                &e,
+                "upload_complete",
+                true,
+            ));
+        }
+    };
+    if let Some(checksum) = checksum {
+        verify_upload_checksum_response(
+            complete_output.checksum_sha256(),
+            checksum,
+            "Multipart upload",
+        )?;
+        if complete_output.checksum_type() != Some(&ChecksumType::FullObject) {
+            return Err(encode_transfer_error(
+                "checksum_mismatch",
+                false,
+                None,
+                "Multipart upload returned an unexpected checksum type.".to_string(),
+            ));
+        }
     }
 
     Ok(())
@@ -1510,7 +2186,7 @@ pub(crate) async fn upload_object_bytes(
     attempt: Option<u32>,
     checksum_verification: Option<bool>,
 ) -> Result<(), String> {
-    validate_key(&key, "Object key")?;
+    validate_mutating_key(&key, "Object key")?;
     if bytes.len() > MAX_UPLOAD_OBJECT_BYTES {
         return Err(format!(
             "Browser upload fallback is limited to {} MB.",
@@ -1523,15 +2199,17 @@ pub(crate) async fn upload_object_bytes(
         s3.client.clone().ok_or("Not connected")?
     };
 
+    // This path previously never registered, checked, or cleared cancellation.
+    // Cancelling a browser-fallback upload did nothing, and the id stayed in the
+    // old cancelled-id set permanently.
+    let guard = TransferGuard::register(transfer_id);
+    let cancel = guard.token();
+
     let total = bytes.len() as u64;
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
-    let expected_checksum_hex = if checksum_enabled {
-        Some(sha256_hex_bytes(&bytes))
-    } else {
-        None
-    };
+    let expected_checksum = checksum_enabled.then(|| sha256_checksum_bytes(&bytes));
     emit_transfer_progress(
         &app,
         "upload-progress",
@@ -1547,6 +2225,10 @@ pub(crate) async fn upload_object_bytes(
         Some(false),
     );
 
+    if guard.is_cancelled() {
+        return Err(cancelled_error());
+    }
+
     let mut req = client
         .put_object()
         .bucket(&bucket)
@@ -1556,16 +2238,36 @@ pub(crate) async fn upload_object_bytes(
     if !content_type.is_empty() {
         req = req.content_type(&content_type);
     }
-    if let Some(checksum_hex) = expected_checksum_hex.as_deref() {
-        req = req.metadata(CHECKSUM_METADATA_KEY, checksum_hex);
+    if let Some(checksum) = expected_checksum.as_ref() {
+        req = req
+            .metadata(CHECKSUM_METADATA_KEY, &checksum.hex)
+            .checksum_algorithm(ChecksumAlgorithm::Sha256)
+            .checksum_sha256(&checksum.base64);
     }
 
-    req.send()
-        .await
-        .map_err(|e| structured_transfer_sdk_error("Failed to upload", &e, "upload", true))?;
+    let send = req.send();
+    tokio::pin!(send);
+    let output = loop {
+        tokio::select! {
+            result = &mut send => {
+                break result.map_err(|e| {
+                    structured_transfer_sdk_error("Failed to upload", &e, "upload", true)
+                })?;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(150)) => {
+                if cancel.is_cancelled() {
+                    return Err(cancelled_error());
+                }
+            }
+        }
+    };
 
-    if let Some(expected_checksum) = expected_checksum_hex.as_deref() {
-        verify_remote_checksum_metadata(&client, &bucket, &key, expected_checksum).await?;
+    if guard.is_cancelled() {
+        return Err(cancelled_error());
+    }
+
+    if let Some(checksum) = expected_checksum.as_ref() {
+        verify_upload_checksum_response(output.checksum_sha256(), checksum, "Upload")?;
     }
 
     emit_transfer_progress(
@@ -1647,7 +2349,7 @@ pub(crate) async fn set_object_acl(
     key: String,
     visibility: String,
 ) -> Result<(), String> {
-    validate_key(&key, "Object key")?;
+    validate_mutating_key(&key, "Object key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -1680,28 +2382,22 @@ pub(crate) async fn download_object(
     destination: String,
     transfer_id: u32,
     overwrite: bool,
-    temp_path: Option<String>,
     attempt: Option<u32>,
     checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     validate_key(&key, "Object key")?;
     let destination_path = if overwrite {
         validate_destination_path_allow_overwrite(&destination)?
     } else {
         validate_destination_path(&destination)?
     };
-    let temp_path = match temp_path {
-        Some(custom) => {
-            let custom_path = validate_destination_path_allow_overwrite(&custom)?;
-            if custom_path == destination_path {
-                return Err("Temp path must be different from destination".to_string());
-            }
-            custom_path
-        }
-        None => make_temp_path(&destination_path, "download"),
-    };
+    // The scratch path is derived here rather than accepted from the caller.
+    // Accepting it meant any script in the webview could name an arbitrary
+    // existing file and have the backend truncate and overwrite it.
+    let temp_path = crate::download_temp_path(&destination_path);
+    if temp_path == destination_path {
+        return Err("Temp path must be different from destination".to_string());
+    }
     if temp_path.exists() {
         let _ = std::fs::remove_file(&temp_path);
     }
@@ -1714,38 +2410,42 @@ pub(crate) async fn download_object(
         s3.client.clone().ok_or("Not connected")?
     };
 
-    if is_cancelled(transfer_id) {
-        clear_cancelled(transfer_id);
-        return Err("Transfer cancelled".to_string());
+    let guard = TransferGuard::register(transfer_id);
+    let cancel = guard.token();
+
+    if guard.is_cancelled() {
+        return Err(cancelled_error());
     }
 
     let expected_checksum = if checksum_enabled {
-        let head = client
-            .head_object()
-            .bucket(&bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|e| {
-                structured_transfer_sdk_error(
-                    "Failed to read object metadata",
-                    &e,
-                    "download_head",
-                    true,
-                )
-            })?;
+        let head_request = client.head_object().bucket(&bucket).key(&key).send();
+        let head = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = head_request => {
+                result.map_err(|e| {
+                    structured_transfer_sdk_error(
+                        "Failed to read object metadata",
+                        &e,
+                        "download_head",
+                        true,
+                    )
+                })?
+            }
+        };
         expected_checksum_from_head(&head)
     } else {
         None
     };
 
-    let output = client
-        .get_object()
-        .bucket(&bucket)
-        .key(&key)
-        .send()
-        .await
-        .map_err(|e| structured_transfer_sdk_error("Failed to download", &e, "download", true))?;
+    let download_request = client.get_object().bucket(&bucket).key(&key).send();
+    let output = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = download_request => {
+            result.map_err(|e| {
+                structured_transfer_sdk_error("Failed to download", &e, "download", true)
+            })?
+        }
+    };
 
     let total_bytes = output.content_length().unwrap_or(0) as u64;
     emit_transfer_progress(
@@ -1763,43 +2463,120 @@ pub(crate) async fn download_object(
         Some(false),
     );
 
+    // Stream into the scratch file in a scope that owns the handle, so every
+    // failure path closes the file *before* the caller tries to unlink it.
+    // Removing a file that is still open fails outright on Windows, and the
+    // previous code discarded that failure, orphaning the scratch file.
+    let stream_result = stream_body_to_temp(
+        &app,
+        output,
+        &temp_path,
+        transfer_id,
+        attempt,
+        total_bytes,
+        started_at,
+        &cancel,
+    )
+    .await;
+
+    let written = match stream_result {
+        Ok(written) => written,
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(err);
+        }
+    };
+
+    if total_bytes > 0 && written != total_bytes {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!(
+            "Downloaded byte count mismatch. Expected {}, wrote {}.",
+            total_bytes, written
+        ));
+    }
+
+    if let Some(expected) = expected_checksum.as_ref() {
+        if let Err(err) = verify_file_checksum(&temp_path, expected, &cancel).await {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(err);
+        }
+    }
+
+    finalize_download_file(&temp_path, &destination_path)?;
+
+    emit_transfer_progress(
+        &app,
+        "download-progress",
+        transfer_id,
+        written,
+        written,
+        attempt,
+        "verifying",
+        started_at,
+        None,
+        None,
+        None,
+        Some(false),
+    );
+
+    Ok(written)
+}
+
+/// Copy a response body into `temp_path`, returning the byte count.
+///
+/// Owns the file handle for its whole lifetime so the handle is always closed by
+/// the time this returns, whether it succeeds or fails.
+async fn stream_body_to_temp(
+    app: &tauri::AppHandle,
+    output: aws_sdk_s3::operation::get_object::GetObjectOutput,
+    temp_path: &Path,
+    transfer_id: u32,
+    attempt: u32,
+    total_bytes: u64,
+    started_at: Instant,
+    cancel: &CancelToken,
+) -> Result<u64, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     let mut reader = output.body.into_async_read();
     let mut file = tokio::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&temp_path)
+        .open(temp_path)
         .await
         .map_err(|e| format!("Failed to create temp file: {}", e))?;
+
     let mut written = 0u64;
     let mut last_emitted = 0u64;
     let mut buf = [0u8; 64 * 1024];
     const PROGRESS_INTERVAL: u64 = 256 * 1024;
 
     loop {
-        if is_cancelled(transfer_id) {
-            clear_cancelled(transfer_id);
-            drop(file);
-            let _ = std::fs::remove_file(&temp_path);
-            return Err("Transfer cancelled".to_string());
+        if cancel.is_cancelled() {
+            return Err(cancelled_error());
         }
 
-        let count = reader.read(&mut buf).await.map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            format!("Failed to read body: {}", e)
-        })?;
+        let count = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = reader.read(&mut buf) => {
+                result.map_err(|e| format!("Failed to read body: {}", e))?
+            }
+        };
         if count == 0 {
             break;
         }
 
-        file.write_all(&buf[..count]).await.map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            format!("Failed to write temp file: {}", e)
-        })?;
+        tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = file.write_all(&buf[..count]) => {
+                result.map_err(|e| format!("Failed to write temp file: {}", e))?;
+            }
+        }
         written += count as u64;
 
         if written - last_emitted >= PROGRESS_INTERVAL {
             emit_transfer_progress(
-                &app,
+                app,
                 "download-progress",
                 transfer_id,
                 written,
@@ -1816,93 +2593,84 @@ pub(crate) async fn download_object(
         }
     }
 
-    if total_bytes > 0 && written != total_bytes {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(format!(
-            "Downloaded byte count mismatch. Expected {}, wrote {}.",
-            total_bytes, written
-        ));
-    }
-
-    file.flush().await.map_err(|e| {
-        let _ = std::fs::remove_file(&temp_path);
-        format!("Failed to flush temp file: {}", e)
-    })?;
-    file.sync_all().await.map_err(|e| {
-        let _ = std::fs::remove_file(&temp_path);
-        format!("Failed to sync temp file: {}", e)
-    })?;
-    drop(file);
-
-    if let Some(expected) = expected_checksum.as_ref() {
-        if let Err(err) = verify_file_checksum(&temp_path, expected).await {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(err);
-        }
-    }
-
-    finalize_download_file(&temp_path, &destination_path, overwrite)?;
-
-    emit_transfer_progress(
-        &app,
-        "download-progress",
-        transfer_id,
-        written,
-        written,
-        attempt,
-        "verifying",
-        started_at,
-        None,
-        None,
-        None,
-        Some(false),
-    );
-    clear_cancelled(transfer_id);
+    file.flush()
+        .await
+        .map_err(|e| format!("Failed to flush temp file: {}", e))?;
+    file.sync_all()
+        .await
+        .map_err(|e| format!("Failed to sync temp file: {}", e))?;
 
     Ok(written)
 }
 
-fn finalize_download_file(
-    temp_path: &Path,
-    destination_path: &Path,
-    overwrite: bool,
-) -> Result<(), String> {
-    if !overwrite || !destination_path.exists() {
-        if let Err(e) = std::fs::rename(temp_path, destination_path) {
-            let _ = std::fs::remove_file(temp_path);
-            return Err(format!("Failed to finalize download: {}", e));
-        }
-        return Ok(());
-    }
+/// Publish a completed download over its destination.
+///
+/// `std::fs::rename` replaces an existing destination atomically on every
+/// platform this app targets — on Windows it maps to `MoveFileExW` /
+/// `SetFileInformationByHandle`, which replace rather than fail. The previous
+/// implementation moved the destination aside to a backup first and only then
+/// renamed the scratch file into place. That extra step bought nothing and
+/// created a window in which the destination did not exist at all: losing the
+/// process in between left the user with no file at the destination and an
+/// opaque `.download-backup.<pid>.<n>.tmp` beside it that nothing would ever
+/// clean up (the startup sweep only covers the app data directory).
+fn finalize_download_file(temp_path: &Path, destination_path: &Path) -> Result<(), String> {
+    // Publish only bytes that have reached stable storage. The parallel workers
+    // sync each completed range before checkpointing, and this final whole-file
+    // sync closes the window between the last checkpoint and the atomic rename.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open(temp_path)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| format!("Failed to sync completed download: {}", e))?;
 
-    let backup_path = make_temp_path(destination_path, "download-backup");
-    if let Err(e) = std::fs::rename(destination_path, &backup_path) {
+    if let Err(e) = std::fs::rename(temp_path, destination_path) {
         let _ = std::fs::remove_file(temp_path);
+        return Err(format!("Failed to finalize download: {}", e));
+    }
+    crate::fsync_parent(destination_path)?;
+    Ok(())
+}
+
+/// Confirm a response actually honoured the byte range that was requested.
+///
+/// A server that ignores `Range` answers with 200 and the whole object. Without
+/// this check every worker would write the entire object at its own offset,
+/// inflating the scratch file to `workers * object size` and corrupting it,
+/// with the mismatch only surfacing later as a confusing byte-count error.
+fn ensure_range_honoured(
+    content_range: Option<&str>,
+    content_length: Option<i64>,
+    start: u64,
+    end: u64,
+) -> Result<(), String> {
+    let expected_len = end - start + 1;
+
+    if let Some(range) = content_range {
+        // Expected shape: "bytes <start>-<end>/<total>".
+        let spec = range.trim().strip_prefix("bytes").unwrap_or(range).trim();
+        let spec = spec.split('/').next().unwrap_or("").trim();
+        let mut halves = spec.split('-');
+        let got_start = halves.next().and_then(|v| v.trim().parse::<u64>().ok());
+        let got_end = halves.next().and_then(|v| v.trim().parse::<u64>().ok());
+        if got_start == Some(start) && got_end == Some(end) {
+            return Ok(());
+        }
         return Err(format!(
-            "Failed to stage existing destination for replace: {}",
-            e
+            "{}: server returned Content-Range '{}' for requested bytes {}-{}",
+            RANGE_UNSUPPORTED_CODE, range, start, end
         ));
     }
 
-    match std::fs::rename(temp_path, destination_path) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&backup_path);
-            Ok(())
-        }
-        Err(e) => {
-            let restore_err = std::fs::rename(&backup_path, destination_path).err();
-            let _ = std::fs::remove_file(temp_path);
-            match restore_err {
-                Some(restore) => Err(format!(
-                    "Failed to finalize download: {}. Also failed to restore previous destination: {}",
-                    e, restore
-                )),
-                None => Err(format!(
-                    "Failed to finalize download: {}. Previous destination restored.",
-                    e
-                )),
-            }
-        }
+    // No Content-Range at all means the response was not a partial one. Accept it
+    // only in the degenerate case where the requested range is the whole object
+    // and the length still matches.
+    match content_length {
+        Some(len) if len as u64 == expected_len => Ok(()),
+        _ => Err(format!(
+            "{}: server did not return a Content-Range header for requested bytes {}-{}",
+            RANGE_UNSUPPORTED_CODE, start, end
+        )),
     }
 }
 
@@ -1913,29 +2681,42 @@ async fn download_parallel_part(
     temp_path: PathBuf,
     start: u64,
     end: u64,
-    transfer_id: u32,
+    version_id: Option<String>,
+    etag: String,
+    cancel: CancelToken,
 ) -> Result<u64, String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-    if is_cancelled(transfer_id) {
-        return Err("Transfer cancelled".to_string());
+    if cancel.is_cancelled() {
+        return Err(cancelled_error());
     }
 
-    let output = client
+    let expected_len = end - start + 1;
+
+    let mut request = client
         .get_object()
         .bucket(&bucket)
         .key(&key)
-        .range(format!("bytes={}-{}", start, end))
-        .send()
-        .await
-        .map_err(|e| {
-            structured_transfer_sdk_error(
-                &format!("Failed ranged download {}-{}", start, end),
-                &e,
-                "download_range",
-                true,
-            )
-        })?;
+        .range(format!("bytes={}-{}", start, end));
+    if let Some(version_id) = version_id {
+        request = request.version_id(version_id);
+    } else {
+        request = request.if_match(etag);
+    }
+    let request = request.send();
+    let output = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => {
+            result.map_err(|e| {
+                generation_pinned_download_error(
+                    &format!("Failed ranged download {}-{}", start, end),
+                    &e,
+                )
+            })?
+        }
+    };
+
+    ensure_range_honoured(output.content_range(), output.content_length(), start, end)?;
 
     let mut reader = output.body.into_async_read();
     let mut file = tokio::fs::OpenOptions::new()
@@ -1950,25 +2731,52 @@ async fn download_parallel_part(
     let mut written = 0u64;
     let mut buf = [0u8; 128 * 1024];
     loop {
-        if is_cancelled(transfer_id) {
-            return Err("Transfer cancelled".to_string());
+        if cancel.is_cancelled() {
+            return Err(cancelled_error());
         }
-        let count = reader
-            .read(&mut buf)
-            .await
-            .map_err(|e| format!("Failed to read ranged body: {}", e))?;
+        let count = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = reader.read(&mut buf) => {
+                result.map_err(|e| format!("Failed to read ranged body: {}", e))?
+            }
+        };
         if count == 0 {
             break;
         }
-        file.write_all(&buf[..count])
-            .await
-            .map_err(|e| format!("Failed to write ranged temp file: {}", e))?;
+
+        // Never write past the requested range, even if the body keeps going.
+        if written + count as u64 > expected_len {
+            return Err(format!(
+                "{}: server sent more than the requested {} bytes for range {}-{}",
+                RANGE_UNSUPPORTED_CODE, expected_len, start, end
+            ));
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = file.write_all(&buf[..count]) => {
+                result.map_err(|e| format!("Failed to write ranged temp file: {}", e))?;
+            }
+        }
         written += count as u64;
+    }
+
+    if written != expected_len {
+        return Err(format!(
+            "Ranged download {}-{} returned {} bytes, expected {}.",
+            start, end, written, expected_len
+        ));
     }
 
     file.flush()
         .await
         .map_err(|e| format!("Failed to flush ranged temp file: {}", e))?;
+    // The coordinator records this range in the resumable checkpoint as soon as
+    // the worker returns. Make the bytes durable first so a power loss cannot
+    // leave a checkpoint claiming a range that only lived in the page cache.
+    file.sync_all()
+        .await
+        .map_err(|e| format!("Failed to sync ranged temp file: {}", e))?;
     Ok(written)
 }
 
@@ -1981,7 +2789,6 @@ pub(crate) async fn download_object_parallel(
     destination: String,
     transfer_id: u32,
     overwrite: bool,
-    temp_path: Option<String>,
     attempt: Option<u32>,
     parallel_threshold_mb: Option<u32>,
     part_size_mb: Option<u32>,
@@ -1997,16 +2804,11 @@ pub(crate) async fn download_object_parallel(
     } else {
         validate_destination_path(&destination)?
     };
-    let temp_path = match temp_path {
-        Some(custom) => {
-            let custom_path = validate_destination_path_allow_overwrite(&custom)?;
-            if custom_path == destination_path {
-                return Err("Temp path must be different from destination".to_string());
-            }
-            custom_path
-        }
-        None => make_temp_path(&destination_path, "download"),
-    };
+    // Derived, not caller-supplied: see `download_object`.
+    let temp_path = crate::download_temp_path(&destination_path);
+    if temp_path == destination_path {
+        return Err("Temp path must be different from destination".to_string());
+    }
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
     let threshold_mb = parallel_threshold_mb
@@ -2019,27 +2821,34 @@ pub(crate) async fn download_object_parallel(
         s3.client.clone().ok_or("Not connected")?
     };
 
-    if is_cancelled(transfer_id) {
-        clear_cancelled(transfer_id);
-        return Err("Transfer cancelled".to_string());
+    let guard = TransferGuard::register(transfer_id);
+    let cancel = guard.token();
+
+    if guard.is_cancelled() {
+        return Err(cancelled_error());
     }
 
-    let head = client
-        .head_object()
-        .bucket(&bucket)
-        .key(&key)
-        .send()
-        .await
-        .map_err(|e| {
-            structured_transfer_sdk_error(
-                "Failed to read object metadata",
-                &e,
-                "download_head",
-                true,
-            )
-        })?;
+    let head_request = client.head_object().bucket(&bucket).key(&key).send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = head_request => {
+            result.map_err(|e| {
+                structured_transfer_sdk_error(
+                    "Failed to read object metadata",
+                    &e,
+                    "download_head",
+                    true,
+                )
+            })?
+        }
+    };
     let total_bytes = head.content_length().unwrap_or(0) as u64;
     let object_etag = head.e_tag().unwrap_or_default().to_string();
+    let object_version_id = head
+        .version_id()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let expected_checksum = if checksum_enabled {
         expected_checksum_from_head(&head)
     } else {
@@ -2048,6 +2857,9 @@ pub(crate) async fn download_object_parallel(
     let threshold_bytes = (threshold_mb as u64) * 1024 * 1024;
 
     if total_bytes < threshold_bytes || total_bytes == 0 {
+        // Hand off to the sequential path. Release our registration first so
+        // the delegate can register the same id without colliding.
+        drop(guard);
         return download_object(
             app,
             state,
@@ -2056,7 +2868,6 @@ pub(crate) async fn download_object_parallel(
             destination,
             transfer_id,
             overwrite,
-            Some(temp_path.to_string_lossy().to_string()),
             Some(attempt),
             Some(checksum_enabled),
         )
@@ -2067,6 +2878,9 @@ pub(crate) async fn download_object_parallel(
         (clamp_part_size_mb(part_size_mb, DEFAULT_DOWNLOAD_PART_SIZE_MB) as u64) * 1024 * 1024;
     let total_parts = total_bytes.div_ceil(part_size) as u32;
     if total_parts <= 1 {
+        // Hand off to the sequential path. Release our registration first so
+        // the delegate can register the same id without colliding.
+        drop(guard);
         return download_object(
             app,
             state,
@@ -2075,7 +2889,6 @@ pub(crate) async fn download_object_parallel(
             destination,
             transfer_id,
             overwrite,
-            Some(temp_path.to_string_lossy().to_string()),
             Some(attempt),
             Some(checksum_enabled),
         )
@@ -2095,56 +2908,108 @@ pub(crate) async fn download_object_parallel(
             .map(|id| !id.trim().is_empty())
             .unwrap_or(false);
 
-    match client
+    // Preflight: confirm the endpoint really implements ranged reads and pin
+    // the probe to the same immutable generation every worker will request.
+    if object_version_id.is_none() && object_etag.is_empty() {
+        return Err(encode_transfer_error(
+            "generation_unavailable",
+            false,
+            None,
+            "Parallel download is unsafe because the provider returned neither a version ID nor an ETag."
+                .to_string(),
+        ));
+    }
+    let mut probe_request = client
         .get_object()
         .bucket(&bucket)
         .key(&key)
-        .range("bytes=0-0")
-        .send()
-        .await
-    {
-        Ok(_) => {}
+        .range("bytes=0-0");
+    if let Some(version_id) = object_version_id.as_deref() {
+        probe_request = probe_request.version_id(version_id);
+    } else {
+        probe_request = probe_request.if_match(&object_etag);
+    }
+    let probe_request = probe_request.send();
+    let probe_result = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = probe_request => result,
+    };
+    match probe_result {
+        Ok(probe) => {
+            ensure_range_honoured(probe.content_range(), probe.content_length(), 0, 0)?;
+        }
         Err(err) => {
-            let text = format!("{}", err);
-            if maybe_range_unsupported(&text) {
-                return Err(format!("{}: {}", RANGE_UNSUPPORTED_CODE, text));
+            let mapped = generation_pinned_download_error("Ranged download preflight failed", &err);
+            if maybe_range_unsupported(&mapped) {
+                return Err(format!("{}: {}", RANGE_UNSUPPORTED_CODE, mapped));
             }
-            return Err(format!("Ranged download preflight failed: {}", err));
+            return Err(mapped);
         }
     }
 
-    if temp_path.exists() && !checkpoint_enabled {
-        let _ = std::fs::remove_file(&temp_path);
-    }
+    // Decide whether a resume is actually safe before trusting any completed
+    // parts. The scratch file must already exist at exactly the expected length:
+    // a checkpoint whose scratch file was deleted or truncated used to be
+    // honoured anyway, and because the file is reopened with `create(true)` and
+    // `set_len(total_bytes)` the missing regions were silently fabricated as
+    // zeroes. Byte accounting still added up, so the corruption was invisible
+    // unless the object happened to carry a checksum.
+    let temp_len = tokio::fs::metadata(&temp_path)
+        .await
+        .ok()
+        .map(|meta| meta.len());
+    let temp_usable = temp_len == Some(total_bytes);
 
     let mut completed = vec![false; total_parts as usize];
+    let mut resumed = false;
 
     if checkpoint_enabled {
         if let Some(id) = checkpoint_id.as_deref() {
-            if let Ok(Some(json)) = load_transfer_checkpoint_json(&app, id) {
-                if let Some(payload) = checkpoint_from_json(&json) {
-                    // Require the recorded ETag to match the current object so we
-                    // never resume into bytes from a stale/replaced object. Old
-                    // checkpoints written before the etag field (empty string) are
-                    // treated as a mismatch and restart cleanly.
-                    let etag_matches = !payload.etag.is_empty() && payload.etag == object_etag;
-                    if payload.mode == "download_parallel"
-                        && payload.bucket == bucket
-                        && payload.key == key
-                        && payload.temp_path == temp_path.to_string_lossy()
-                        && payload.total_bytes == total_bytes
-                        && payload.part_size == part_size
-                        && etag_matches
-                    {
-                        for part in
-                            normalize_checkpoint_parts(&payload.completed_parts, total_parts)
-                        {
-                            completed[part as usize] = true;
-                        }
+            let checkpoint_json = load_transfer_checkpoint_json(&app, id).map_err(|err| {
+                format!(
+                    "Failed to load resumable download checkpoint '{}'; checkpoint and scratch data were retained: {}",
+                    id, err
+                )
+            })?;
+            if let Some(json) = checkpoint_json {
+                let payload = checkpoint_from_json(&json).map_err(|err| {
+                    format!(
+                        "Failed to parse resumable download checkpoint '{}'; checkpoint and scratch data were retained: {}",
+                        id, err
+                    )
+                })?;
+                // Require the recorded immutable generation to match. Versioned
+                // objects must have the exact version ID; unversioned objects
+                // are pinned by ETag. Old versioned checkpoints lack a version
+                // ID and therefore restart cleanly.
+                let generation_matches = checkpoint_generation_matches(
+                    &payload,
+                    &object_etag,
+                    object_version_id.as_deref(),
+                );
+                if temp_usable
+                    && payload.mode == "download_parallel"
+                    && payload.bucket == bucket
+                    && payload.key == key
+                    && payload.temp_path == temp_path.to_string_lossy()
+                    && payload.total_bytes == total_bytes
+                    && payload.part_size == part_size
+                    && generation_matches
+                {
+                    for part in normalize_checkpoint_parts(&payload.completed_parts, total_parts) {
+                        completed[part as usize] = true;
                     }
+                    resumed = completed.iter().any(|done| *done);
                 }
             }
         }
+    }
+
+    // Anything we are not resuming into starts from a clean slate. This also
+    // covers the case where a checkpoint existed but its scratch file did not.
+    if !resumed && temp_path.exists() {
+        std::fs::remove_file(&temp_path)
+            .map_err(|e| format!("Failed to clear stale temp file: {}", e))?;
     }
 
     let init_file = tokio::fs::OpenOptions::new()
@@ -2201,13 +3066,18 @@ pub(crate) async fn download_object_parallel(
     let mut last_checkpoint_saved_parts = completed.iter().filter(|v| **v).count() as u32;
 
     while next_part < total_parts || !join_set.is_empty() {
-        if is_cancelled(transfer_id) {
-            clear_cancelled(transfer_id);
+        if cancel.is_cancelled() {
+            // `abort_all` only *requests* cancellation. Workers may still hold
+            // the scratch file open and be mid-write, so drain the set before
+            // touching it: unlinking an open handle fails outright on Windows
+            // (orphaning a full-size scratch file) and on Unix lets surviving
+            // workers keep writing into the unlinked inode.
             join_set.abort_all();
+            while join_set.join_next().await.is_some() {}
             if !checkpoint_enabled {
                 let _ = std::fs::remove_file(&temp_path);
             }
-            return Err("Transfer cancelled".to_string());
+            return Err(cancelled_error());
         }
 
         while join_set.len() < part_workers && next_part < total_parts {
@@ -2222,6 +3092,9 @@ pub(crate) async fn download_object_parallel(
             let key_clone = key.clone();
             let path_clone = temp_path.clone();
             let client_clone = client.clone();
+            let version_id_clone = object_version_id.clone();
+            let etag_clone = object_etag.clone();
+            let part_cancel = Arc::clone(&cancel);
             join_set.spawn(async move {
                 let size = download_parallel_part(
                     client_clone,
@@ -2230,22 +3103,40 @@ pub(crate) async fn download_object_parallel(
                     path_clone,
                     start,
                     end,
-                    transfer_id,
+                    version_id_clone,
+                    etag_clone,
+                    part_cancel,
                 )
                 .await?;
                 Ok::<(u32, u64), String>((index, size))
             });
         }
 
-        match join_set.join_next().await {
+        let joined = tokio::select! {
+            _ = cancel.cancelled() => {
+                join_set.abort_all();
+                while join_set.join_next().await.is_some() {}
+                if !checkpoint_enabled {
+                    let _ = std::fs::remove_file(&temp_path);
+                }
+                return Err(cancelled_error());
+            }
+            result = join_set.join_next() => result,
+        };
+
+        match joined {
             Some(Ok(Ok((index, written)))) => {
                 completed[index as usize] = true;
                 let sent = bytes_done.fetch_add(written, Ordering::Relaxed) + written;
                 if bandwidth_limit_bps > 0 {
                     let elapsed = started_at.elapsed().as_secs_f64();
                     let target = sent as f64 / bandwidth_limit_bps as f64;
-                    if target > elapsed {
-                        tokio::time::sleep(Duration::from_secs_f64(target - elapsed)).await;
+                    if target > elapsed
+                        && !cancel
+                            .sleep_unless_cancelled(Duration::from_secs_f64(target - elapsed))
+                            .await
+                    {
+                        continue;
                     }
                 }
                 let completed_count = completed.iter().filter(|v| **v).count() as u32;
@@ -2275,10 +3166,25 @@ pub(crate) async fn download_object_parallel(
                                     .collect(),
                                 updated_at_ms: now_ms(),
                                 etag: object_etag.clone(),
+                                version_id: object_version_id.clone(),
                             };
-                            let _ = save_checkpoint_payload(&app, id, &payload);
-                            last_checkpoint_saved_at = Instant::now();
-                            last_checkpoint_saved_parts = completed_count;
+                            if let Err(err) = persist_checkpoint_and_advance(
+                                &mut last_checkpoint_saved_at,
+                                &mut last_checkpoint_saved_parts,
+                                completed_count,
+                                || save_checkpoint_payload(&app, id, &payload),
+                            ) {
+                                // Other workers may still be writing later
+                                // ranges. Stop and drain them before returning,
+                                // while retaining both checkpoint and scratch so
+                                // the failed persistence can be diagnosed/retried.
+                                join_set.abort_all();
+                                while join_set.join_next().await.is_some() {}
+                                return Err(format!(
+                                    "Failed to persist resumable download checkpoint '{}'; scratch data was retained: {}",
+                                    id, err
+                                ));
+                            }
                         }
                     }
                 }
@@ -2300,6 +3206,7 @@ pub(crate) async fn download_object_parallel(
             }
             Some(Ok(Err(err))) => {
                 join_set.abort_all();
+                while join_set.join_next().await.is_some() {}
                 if !checkpoint_enabled {
                     let _ = std::fs::remove_file(&temp_path);
                 }
@@ -2310,6 +3217,7 @@ pub(crate) async fn download_object_parallel(
             }
             Some(Err(err)) => {
                 join_set.abort_all();
+                while join_set.join_next().await.is_some() {}
                 if !checkpoint_enabled {
                     let _ = std::fs::remove_file(&temp_path);
                 }
@@ -2320,18 +3228,26 @@ pub(crate) async fn download_object_parallel(
     }
 
     let final_bytes = bytes_done.load(Ordering::Relaxed);
-    if final_bytes != total_bytes {
+    let missing_parts = completed.iter().filter(|done| !**done).count();
+    let on_disk = tokio::fs::metadata(&temp_path)
+        .await
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    // Aggregate byte accounting alone cannot prove the file is intact, so check
+    // the part bitmap and the actual file length too.
+    if final_bytes != total_bytes || missing_parts > 0 || on_disk != total_bytes {
         if !checkpoint_enabled {
             let _ = std::fs::remove_file(&temp_path);
         }
         return Err(format!(
-            "Downloaded byte count mismatch. Expected {}, wrote {}.",
-            total_bytes, final_bytes
+            "Download incomplete: expected {} bytes across {} part(s), accounted for {} bytes \
+             with {} part(s) missing, scratch file is {} bytes.",
+            total_bytes, total_parts, final_bytes, missing_parts, on_disk
         ));
     }
 
     if let Some(expected) = expected_checksum.as_ref() {
-        if let Err(err) = verify_file_checksum(&temp_path, expected).await {
+        if let Err(err) = verify_file_checksum(&temp_path, expected, &cancel).await {
             if !checkpoint_enabled {
                 let _ = std::fs::remove_file(&temp_path);
             }
@@ -2339,7 +3255,61 @@ pub(crate) async fn download_object_parallel(
         }
     }
 
-    finalize_download_file(&temp_path, &destination_path, overwrite)?;
+    // Pinning every range to one generation guarantees the assembled bytes are
+    // self-consistent, but it says nothing about whether that generation is still
+    // the object. A resumed download can span an arbitrary amount of wall clock,
+    // so the pinned version may have been superseded — or expired — while the
+    // ranges were being fetched, and publishing it would silently overwrite the
+    // destination with a stale object. Confirm the pinned generation is still
+    // current immediately before the rename, and treat anything else as stale
+    // without touching the destination. The scratch file and checkpoint are kept
+    // so the transfer stays resumable and nothing has to be re-downloaded once
+    // the user re-runs it against the new generation.
+    let still_current = match current_identity_matches(
+        &client,
+        &bucket,
+        &key,
+        &object_etag,
+        None,
+        object_version_id.as_deref(),
+        &cancel,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            // The generation could not be confirmed either way, so publishing
+            // would be a guess. Fail without renaming, and apply the same scratch
+            // retention rule as the stale case below.
+            if !checkpoint_enabled {
+                let _ = std::fs::remove_file(&temp_path);
+            }
+            return Err(err);
+        }
+    };
+    if still_current != Some(true) {
+        // Resumable transfers keep their scratch file and checkpoint, exactly as
+        // every other late failure in this function does, so re-running against
+        // the new generation reuses whatever is still valid. Without checkpoints
+        // there is nothing to resume, and the scratch file lives beside the
+        // destination where no sweep would ever reclaim it, so it goes now.
+        if !checkpoint_enabled {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        return Err(encode_transfer_error(
+            "stale_object",
+            false,
+            None,
+            format!(
+                "'{}' changed while it was being downloaded, so a partially stale copy was not \
+                 published over '{}'.",
+                key,
+                destination_path.display()
+            ),
+        ));
+    }
+
+    finalize_download_file(&temp_path, &destination_path)?;
 
     emit_transfer_progress(
         &app,
@@ -2355,7 +3325,6 @@ pub(crate) async fn download_object_parallel(
         checkpoint_id.as_deref(),
         Some(checkpoint_enabled),
     );
-    clear_cancelled(transfer_id);
 
     if checkpoint_enabled {
         if let Some(id) = checkpoint_id.as_deref() {
@@ -2377,7 +3346,7 @@ pub(crate) async fn create_folder(
         s3.client.clone().ok_or("Not connected")?
     };
 
-    validate_key(&key, "Object key")?;
+    validate_mutating_key(&key, "Object key")?;
     if key.contains("//") {
         return Err("Object key must not contain consecutive slashes".to_string());
     }
@@ -2400,47 +3369,357 @@ pub(crate) async fn create_folder(
     Ok(())
 }
 
+/// Everything about a source object that a copy has to carry forward.
+///
+/// A single-part `CopyObject` preserves all of this implicitly (the default
+/// metadata directive is COPY). A multipart copy does not: the destination is
+/// created by `CreateMultipartUpload`, which starts from nothing, so every
+/// header has to be supplied explicitly.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct CopyReceipt {
+    source_key: String,
+    source_etag: String,
+    source_version_id: Option<String>,
+    destination_key: String,
+    destination_etag: String,
+    destination_version_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct SourceObjectInfo {
+    size: i64,
+    etag: Option<String>,
+    version_id: Option<String>,
+    content_type: Option<String>,
+    cache_control: Option<String>,
+    content_disposition: Option<String>,
+    content_encoding: Option<String>,
+    content_language: Option<String>,
+    website_redirect_location: Option<String>,
+    storage_class: Option<aws_sdk_s3::types::StorageClass>,
+    server_side_encryption: Option<aws_sdk_s3::types::ServerSideEncryption>,
+    ssekms_key_id: Option<String>,
+    bucket_key_enabled: Option<bool>,
+    metadata: Option<HashMap<String, String>>,
+    acl: Option<ObjectCannedAcl>,
+    tagging: Option<String>,
+}
+
+struct DestinationIdentity {
+    etag: String,
+    version_id: Option<String>,
+}
+
+fn source_info_from_head(
+    head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
+) -> SourceObjectInfo {
+    // NOTE: the `Expires` header is deliberately not carried. Both the getter and
+    // the builder setter for it are deprecated in the SDK in favour of a raw
+    // string accessor that has no matching setter, and `Cache-Control` (which is
+    // preserved) supersedes it for every modern client.
+    SourceObjectInfo {
+        size: head.content_length().unwrap_or(0),
+        etag: head.e_tag().map(|v| v.to_string()),
+        version_id: head.version_id().map(|v| v.to_string()),
+        content_type: head.content_type().map(|v| v.to_string()),
+        cache_control: head.cache_control().map(|v| v.to_string()),
+        content_disposition: head.content_disposition().map(|v| v.to_string()),
+        content_encoding: head.content_encoding().map(|v| v.to_string()),
+        content_language: head.content_language().map(|v| v.to_string()),
+        website_redirect_location: head.website_redirect_location().map(|v| v.to_string()),
+        storage_class: head.storage_class().cloned(),
+        server_side_encryption: head.server_side_encryption().cloned(),
+        ssekms_key_id: head.ssekms_key_id().map(|v| v.to_string()),
+        bucket_key_enabled: head.bucket_key_enabled(),
+        metadata: head.metadata().cloned(),
+        acl: None,
+        tagging: None,
+    }
+}
+
+async fn describe_source(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    cancel: &CancelToken,
+) -> Result<SourceObjectInfo, String> {
+    let head_request = client.head_object().bucket(bucket).key(key).send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = head_request => {
+            result.map_err(|e| format!("Failed to get object info for '{}': {}", key, e))?
+        }
+    };
+    let mut info = source_info_from_head(&head);
+
+    // A copy/move is allowed only once the attributes it has to restate have
+    // been read successfully. Treating an unexpected error as "no attributes"
+    // can silently reset ACLs or drop tags, and a move would then delete the
+    // only correctly attributed source object. `CopyObject` does not carry the
+    // ACL, so that read is always required ('s3:GetObjectAcl'); tags are carried
+    // server-side except for multipart copies, which is why the tag read below
+    // is conditional.
+    let version_id = info.version_id.clone();
+    // Only a multipart copy has to restate tags: `CopyObject` defaults its
+    // tagging directive to COPY, so S3 carries them server-side. Reading them
+    // anyway would make `s3:GetObjectTagging` a new requirement for every copy,
+    // move and metadata edit, breaking credentials that never needed it.
+    let needs_explicit_tagging = info.size >= MULTIPART_COPY_THRESHOLD;
+    let properties = async {
+        tokio::join!(
+            infer_canned_acl_for_object(client, bucket, key, version_id.as_deref()),
+            async {
+                if needs_explicit_tagging {
+                    encoded_tagging_for_object(client, bucket, key, version_id.as_deref()).await
+                } else {
+                    Ok(None)
+                }
+            }
+        )
+    };
+    let (acl, tagging) = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = properties => result,
+    };
+    info.acl = acl?;
+    info.tagging = tagging?;
+    Ok(info)
+}
+
+/// Copy a single object, preserving metadata and picking the right mechanism
+/// for its size.
+///
+/// This is the one place that decides between `CopyObject` and a multipart copy.
+/// Previously only `rename_object` and `copy_object_to` made that decision, so
+/// the prefix-wide operations always issued a single `CopyObject` and failed
+/// outright on any object at or above S3's 5 GiB copy-source limit.
+async fn copy_one(
+    client: &Client,
+    src_bucket: &str,
+    src_key: &str,
+    dst_bucket: &str,
+    dst_key: &str,
+    info: Option<SourceObjectInfo>,
+    cancel: &CancelToken,
+) -> Result<DestinationIdentity, String> {
+    if src_bucket == dst_bucket && src_key == dst_key {
+        return Err(format!(
+            "Source and destination are the same object ('{}'). Refusing to copy an object onto itself.",
+            src_key
+        ));
+    }
+    if cancel.is_cancelled() {
+        return Err(cancelled_error());
+    }
+
+    let info = match info {
+        Some(info) => info,
+        None => describe_source(client, src_bucket, src_key, cancel).await?,
+    };
+
+    if info.size >= MULTIPART_COPY_THRESHOLD {
+        return copy_object_multipart(
+            client, src_bucket, dst_bucket, src_key, dst_key, &info, cancel,
+        )
+        .await;
+    }
+
+    let source = encode_copy_source_with_version(src_bucket, src_key, info.version_id.as_deref());
+    let build_copy = |include_acl: bool| {
+        let mut request = client
+            .copy_object()
+            .bucket(dst_bucket)
+            .key(dst_key)
+            .copy_source(&source);
+        if let Some(etag) = info.etag.as_deref() {
+            request = request.copy_source_if_match(etag);
+        }
+        if include_acl {
+            if let Some(acl) = info.acl.as_ref() {
+                request = request.acl(acl.clone());
+            }
+        }
+        // The default COPY metadata directive carries user metadata and content
+        // headers, but storage class and encryption fall back to the destination
+        // bucket's defaults. Restating them keeps an archived or KMS-encrypted
+        // object intact, which matters most for renames and rollback restores
+        // where the original is removed once the copy is believed complete.
+        if let Some(value) = info.storage_class.as_ref() {
+            request = request.storage_class(value.clone());
+        }
+        if let Some(value) = info.server_side_encryption.as_ref() {
+            request = request.server_side_encryption(value.clone());
+        }
+        if let Some(value) = info.ssekms_key_id.as_deref() {
+            request = request.ssekms_key_id(value);
+        }
+        if let Some(value) = info.bucket_key_enabled {
+            request = request.bucket_key_enabled(value);
+        }
+        request
+    };
+
+    let mut include_acl = info.acl.is_some();
+    let copy_output = loop {
+        let request = build_copy(include_acl).send();
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = request => result,
+        };
+        match result {
+            Ok(output) => break output,
+            Err(err) => {
+                let detail = format!("{:?}", err);
+                if include_acl && acls_are_unavailable(&detail) {
+                    // The destination disables ACLs, so the source ACL is not a
+                    // property that can be carried; retry without it.
+                    include_acl = false;
+                    continue;
+                }
+                return Err(format!("Failed to copy '{}': {}", src_key, err));
+            }
+        }
+    };
+    let etag = copy_output
+        .copy_object_result()
+        .and_then(|result| result.e_tag())
+        .filter(|etag| !etag.is_empty())
+        .ok_or_else(|| format!("Copy of '{}' returned no destination ETag", src_key))?
+        .to_string();
+    Ok(DestinationIdentity {
+        etag,
+        version_id: copy_output.version_id().map(|value| value.to_string()),
+    })
+}
+
 async fn copy_object_multipart(
     client: &Client,
     src_bucket: &str,
     dst_bucket: &str,
     source_key: &str,
     dest_key: &str,
-    total_size: i64,
-) -> Result<(), String> {
-    let create_output = client
-        .create_multipart_upload()
-        .bucket(dst_bucket)
-        .key(dest_key)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to create multipart copy: {}", e))?;
+    info: &SourceObjectInfo,
+    cancel: &CancelToken,
+) -> Result<DestinationIdentity, String> {
+    if cancel.is_cancelled() {
+        return Err(cancelled_error());
+    }
+
+    // Validate provider-reported size before creating any remote multipart
+    // state; an unsupported size must not leave an orphaned upload behind.
+    let size = info.size as u64;
+    let part_size = multipart_copy_part_size(size)?;
+
+    // Carry the source's metadata onto the new multipart upload. Without this the
+    // destination was created bare: content type, user metadata, caching headers,
+    // storage class and encryption settings were all silently dropped — and for a
+    // rename the source is deleted immediately afterwards, so the originals were
+    // gone.
+    let build_create = |include_acl: bool| {
+        let mut create_req = client
+            .create_multipart_upload()
+            .bucket(dst_bucket)
+            .key(dest_key);
+        if let Some(value) = info.content_type.as_deref() {
+            create_req = create_req.content_type(value);
+        }
+        if let Some(value) = info.cache_control.as_deref() {
+            create_req = create_req.cache_control(value);
+        }
+        if let Some(value) = info.content_disposition.as_deref() {
+            create_req = create_req.content_disposition(value);
+        }
+        if let Some(value) = info.content_encoding.as_deref() {
+            create_req = create_req.content_encoding(value);
+        }
+        if let Some(value) = info.content_language.as_deref() {
+            create_req = create_req.content_language(value);
+        }
+        if let Some(value) = info.website_redirect_location.as_deref() {
+            create_req = create_req.website_redirect_location(value);
+        }
+        if let Some(value) = info.storage_class.as_ref() {
+            create_req = create_req.storage_class(value.clone());
+        }
+        if let Some(value) = info.server_side_encryption.as_ref() {
+            create_req = create_req.server_side_encryption(value.clone());
+        }
+        if let Some(value) = info.ssekms_key_id.as_deref() {
+            create_req = create_req.ssekms_key_id(value);
+        }
+        if let Some(value) = info.bucket_key_enabled {
+            create_req = create_req.bucket_key_enabled(value);
+        }
+        if let Some(metadata) = info.metadata.as_ref() {
+            if !metadata.is_empty() {
+                create_req = create_req.set_metadata(Some(metadata.clone()));
+            }
+        }
+        if include_acl {
+            if let Some(acl) = info.acl.as_ref() {
+                create_req = create_req.acl(acl.clone());
+            }
+        }
+        if let Some(tagging) = info.tagging.as_deref() {
+            create_req = create_req.tagging(tagging);
+        }
+        create_req
+    };
+
+    let mut include_acl = info.acl.is_some();
+    let create_output = loop {
+        let request = build_create(include_acl).send();
+        let create_result = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = request => result,
+        };
+        match create_result {
+            Ok(output) => break output,
+            Err(err) => {
+                let detail = format!("{:?}", err);
+                if include_acl && acls_are_unavailable(&detail) {
+                    include_acl = false;
+                    continue;
+                }
+                return Err(format!("Failed to create multipart copy: {}", err));
+            }
+        }
+    };
 
     let upload_id = create_output
         .upload_id()
         .ok_or("No upload ID returned for multipart copy")?
         .to_string();
 
-    let copy_source = encode_copy_source(src_bucket, source_key);
+    let copy_source =
+        encode_copy_source_with_version(src_bucket, source_key, info.version_id.as_deref());
     let mut completed_parts = Vec::new();
     let mut part_number = 1i32;
     let mut offset = 0u64;
-    let size = total_size as u64;
 
     while offset < size {
-        let end = std::cmp::min(offset + MULTIPART_COPY_PART_SIZE, size) - 1;
+        let end = std::cmp::min(offset + part_size, size) - 1;
         let range = format!("bytes={}-{}", offset, end);
 
-        let part_result = client
+        let mut part_builder = client
             .upload_part_copy()
             .bucket(dst_bucket)
             .key(dest_key)
             .upload_id(&upload_id)
             .copy_source(&copy_source)
             .copy_source_range(&range)
-            .part_number(part_number)
-            .send()
-            .await;
+            .part_number(part_number);
+        if let Some(etag) = info.etag.as_deref() {
+            part_builder = part_builder.copy_source_if_match(etag);
+        }
+        let part_request = part_builder.send();
+        let part_result = tokio::select! {
+            _ = cancel.cancelled() => {
+                abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
+                return Err(cancelled_error());
+            }
+            result = part_request => result,
+        };
 
         match part_result {
             Ok(output) => {
@@ -2459,13 +3738,7 @@ async fn copy_object_multipart(
                 part_number += 1;
             }
             Err(e) => {
-                let _ = client
-                    .abort_multipart_upload()
-                    .bucket(dst_bucket)
-                    .key(dest_key)
-                    .upload_id(&upload_id)
-                    .send()
-                    .await;
+                abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
                 return Err(format!("Failed to copy part {}: {}", part_number, e));
             }
         }
@@ -2475,26 +3748,83 @@ async fn copy_object_multipart(
         .set_parts(Some(completed_parts))
         .build();
 
-    if let Err(e) = client
+    let complete_request = client
         .complete_multipart_upload()
         .bucket(dst_bucket)
         .key(dest_key)
         .upload_id(&upload_id)
         .multipart_upload(completed_upload)
-        .send()
-        .await
-    {
-        let _ = client
-            .abort_multipart_upload()
-            .bucket(dst_bucket)
-            .key(dest_key)
-            .upload_id(&upload_id)
-            .send()
-            .await;
-        return Err(format!("Failed to complete multipart copy: {}", e));
-    }
+        .send();
+    let complete_result = tokio::select! {
+        _ = cancel.cancelled() => {
+            abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
+            return Err(cancelled_error());
+        }
+        result = complete_request => result,
+    };
 
-    Ok(())
+    let complete_output = match complete_result {
+        Ok(output) => output,
+        Err(e) => {
+            abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
+            return Err(format!("Failed to complete multipart copy: {}", e));
+        }
+    };
+    let etag = complete_output
+        .e_tag()
+        .filter(|etag| !etag.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Completed multipart copy of '{}' returned no destination ETag",
+                source_key
+            )
+        })?
+        .to_string();
+    Ok(DestinationIdentity {
+        etag,
+        version_id: complete_output.version_id().map(|value| value.to_string()),
+    })
+}
+
+async fn copy_with_receipt(
+    client: &Client,
+    src_bucket: &str,
+    src_key: &str,
+    dst_bucket: &str,
+    dst_key: &str,
+    source_info: Option<SourceObjectInfo>,
+    cancel: &CancelToken,
+) -> Result<CopyReceipt, String> {
+    let info = match source_info {
+        Some(info) => info,
+        None => describe_source(client, src_bucket, src_key, cancel).await?,
+    };
+    let source_etag = info
+        .etag
+        .as_deref()
+        .filter(|etag| !etag.is_empty())
+        .ok_or_else(|| format!("Source '{}' did not return an ETag", src_key))?
+        .to_string();
+
+    let destination = copy_one(
+        client,
+        src_bucket,
+        src_key,
+        dst_bucket,
+        dst_key,
+        Some(info.clone()),
+        cancel,
+    )
+    .await?;
+
+    Ok(CopyReceipt {
+        source_key: src_key.to_string(),
+        source_etag,
+        source_version_id: info.version_id,
+        destination_key: dst_key.to_string(),
+        destination_etag: destination.etag,
+        destination_version_id: destination.version_id,
+    })
 }
 
 #[tauri::command]
@@ -2503,51 +3833,22 @@ pub(crate) async fn rename_object(
     bucket: String,
     old_key: String,
     new_key: String,
+    transfer_id: Option<u32>,
 ) -> Result<(), String> {
-    validate_key(&old_key, "Source key")?;
-    validate_key(&new_key, "Destination key")?;
+    validate_mutating_key(&old_key, "Source key")?;
+    validate_mutating_key(&new_key, "Destination key")?;
+    if old_key == new_key {
+        return Err("Source and destination keys are identical.".to_string());
+    }
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    let (_guard, cancel) = transfer_cancel_context(transfer_id);
 
-    let head = client
-        .head_object()
-        .bucket(&bucket)
-        .key(&old_key)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to get object info: {}", e))?;
-
-    let size = head.content_length().unwrap_or(0);
-
-    if size >= MULTIPART_COPY_THRESHOLD {
-        copy_object_multipart(&client, &bucket, &bucket, &old_key, &new_key, size).await?;
-    } else {
-        let source = encode_copy_source(&bucket, &old_key);
-        client
-            .copy_object()
-            .bucket(&bucket)
-            .key(&new_key)
-            .copy_source(&source)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to copy: {}", e))?;
-    }
-
-    if let Err(e) = client
-        .delete_object()
-        .bucket(&bucket)
-        .key(&old_key)
-        .send()
-        .await
-    {
-        return Err(format!(
-            "Rename partially completed: '{}' was copied to '{}' but the original could not be deleted: {}. You may need to remove the original manually.",
-            old_key, new_key, e
-        ));
-    }
-
+    let receipt =
+        copy_with_receipt(&client, &bucket, &old_key, &bucket, &new_key, None, &cancel).await?;
+    delete_receipts_checked(&client, &bucket, &bucket, &[receipt], &cancel).await?;
     Ok(())
 }
 
@@ -2556,6 +3857,7 @@ async fn list_all_keys_under_prefix(
     client: &aws_sdk_s3::Client,
     bucket: &str,
     prefix: &str,
+    cancel: &CancelToken,
 ) -> Result<Vec<String>, String> {
     let mut keys = Vec::new();
     let mut continuation_token: Option<String> = None;
@@ -2565,10 +3867,13 @@ async fn list_all_keys_under_prefix(
         if let Some(ref token) = continuation_token {
             req = req.continuation_token(token);
         }
-        let output = req
-            .send()
-            .await
-            .map_err(|e| format!("Failed to list objects: {}", e))?;
+        let request = req.send();
+        let output = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = request => {
+                result.map_err(|e| format!("Failed to list objects: {}", e))?
+            }
+        };
 
         for obj in output.contents() {
             if let Some(k) = obj.key() {
@@ -2592,7 +3897,7 @@ pub(crate) async fn delete_prefix(
     bucket: String,
     prefix: String,
 ) -> Result<u32, String> {
-    validate_prefix(&prefix, "Prefix")?;
+    validate_mutating_prefix(&prefix, "Prefix")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
@@ -2679,97 +3984,736 @@ pub(crate) async fn delete_prefix(
     Ok(deleted)
 }
 
+/// Copy every object under `src_prefix` to `dst_prefix` as one rollback-safe
+/// transaction and return the exact source/destination identities copied.
+struct DestinationBackup {
+    destination_key: String,
+    backup_key: String,
+    source_info: SourceObjectInfo,
+}
+
+const ROLLBACK_BACKUP_PREFIX: &str = ".s3-sidekick-rollback/";
+
+/// Rollback namespaces belonging to prefix operations running right now.
+///
+/// Transfers run several workers concurrently, so a peer operation's backups are
+/// expected to be present and must not be mistaken for abandoned ones.
+fn active_rollback_namespaces() -> &'static Mutex<HashSet<String>> {
+    static ACTIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Registers a namespace for the lifetime of one prefix operation.
+struct RollbackNamespaceGuard {
+    namespace: String,
+}
+
+impl RollbackNamespaceGuard {
+    fn new() -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let sequence = ROLLBACK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let namespace = format!("{}-{}-{}", std::process::id(), timestamp, sequence);
+        if let Ok(mut active) = active_rollback_namespaces().lock() {
+            active.insert(namespace.clone());
+        }
+        Self { namespace }
+    }
+}
+
+impl Drop for RollbackNamespaceGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = active_rollback_namespaces().lock() {
+            active.remove(&self.namespace);
+        }
+    }
+}
+
+fn namespace_of_backup_key(key: &str) -> Option<&str> {
+    key.strip_prefix(ROLLBACK_BACKUP_PREFIX)
+        .and_then(|rest| rest.split('/').next())
+        .filter(|namespace| !namespace.is_empty())
+}
+
+/// Refuse to start a prefix copy while backups from an abandoned attempt survive.
+///
+/// The backup set only exists in memory for the duration of a call, so a crash
+/// leaves the originals reachable solely through their backup objects. Starting
+/// again would back up the already-overwritten copies and make the surviving
+/// originals unreachable, so an interrupted attempt has to be resolved first.
+/// Backups belonging to an operation still running in this process are skipped:
+/// they are not abandoned, and reporting them would invite a user to delete data
+/// a live operation is depending on.
+async fn ensure_no_orphaned_rollback_backups(
+    client: &Client,
+    bucket: &str,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    let before_listing = active_rollback_namespaces()
+        .lock()
+        .map_err(|_| "Internal rollback namespace state error".to_string())?
+        .clone();
+    let existing =
+        list_all_keys_under_prefix(client, bucket, ROLLBACK_BACKUP_PREFIX, cancel).await?;
+    if existing.is_empty() {
+        return Ok(());
+    }
+
+    // Union the membership seen before and after the listing. A peer operation
+    // that started or finished while the LIST was in flight would otherwise look
+    // abandoned, aborting this operation over keys that are either still in use
+    // or already gone.
+    let mut active = before_listing;
+    active.extend(
+        active_rollback_namespaces()
+            .lock()
+            .map_err(|_| "Internal rollback namespace state error".to_string())?
+            .iter()
+            .cloned(),
+    );
+    let abandoned: Vec<&String> = existing
+        .iter()
+        .filter(|key| {
+            namespace_of_backup_key(key)
+                .map(|namespace| !active.contains(namespace))
+                .unwrap_or(true)
+        })
+        .collect();
+    if abandoned.is_empty() {
+        return Ok(());
+    }
+
+    let sample: Vec<&str> = abandoned.iter().take(3).map(|key| key.as_str()).collect();
+    Err(format!(
+        "Bucket '{}' still holds {} rollback backup object(s) from an interrupted copy or move. \
+         They may hold the only copy of data that was overwritten. Check them under '{}' and \
+         restore or remove them before retrying, and only while no other transfer is running. ({})",
+        bucket,
+        abandoned.len(),
+        ROLLBACK_BACKUP_PREFIX,
+        sample.join(", ")
+    ))
+}
+
+fn rollback_error(original: String, failures: Vec<String>) -> String {
+    if failures.is_empty() {
+        original
+    } else {
+        format!(
+            "{}. Rollback also encountered: {}. Backup objects were retained where restoration could not be confirmed.",
+            original,
+            failures.join("; ")
+        )
+    }
+}
+
+async fn remove_backup_object(
+    client: &Client,
+    bucket: &str,
+    backup: &DestinationBackup,
+) -> Result<(), String> {
+    let mut request = client
+        .delete_object()
+        .bucket(bucket)
+        .key(&backup.backup_key);
+    if let Some(version_id) = backup.source_info.version_id.as_deref() {
+        request = request.version_id(version_id);
+    }
+    request
+        .send()
+        .await
+        .map_err(|err| format!("failed to remove backup '{}': {}", backup.backup_key, err))?;
+    Ok(())
+}
+
+async fn rollback_prefix_copy(
+    client: &Client,
+    bucket: &str,
+    created_destinations: &[CopyReceipt],
+    backups: &[DestinationBackup],
+) -> Vec<String> {
+    let rollback_cancel = Arc::new(CancelFlag::default());
+    let mut failures = Vec::new();
+
+    // Restore overwritten objects first. A backup is deleted only after its
+    // original destination has definitely been recreated.
+    for backup in backups.iter().rev() {
+        match copy_one(
+            client,
+            bucket,
+            &backup.backup_key,
+            bucket,
+            &backup.destination_key,
+            Some(backup.source_info.clone()),
+            &rollback_cancel,
+        )
+        .await
+        {
+            Ok(_) => {
+                if let Err(err) = remove_backup_object(client, bucket, backup).await {
+                    failures.push(format!("restored '{}' but {}", backup.destination_key, err));
+                }
+            }
+            Err(err) => failures.push(format!(
+                "could not restore '{}' from retained backup '{}': {}",
+                backup.destination_key, backup.backup_key, err
+            )),
+        }
+    }
+
+    // Remove only destinations whose successful copy identity is known. The
+    // conditional delete protects unversioned buckets from overwrites between
+    // the original absence check and rollback; a versioned delete removes only
+    // the exact version created by this operation.
+    for receipt in created_destinations.iter().rev() {
+        let mut request = client
+            .delete_object()
+            .bucket(bucket)
+            .key(&receipt.destination_key)
+            .if_match(&receipt.destination_etag);
+        if let Some(version_id) = receipt.destination_version_id.as_deref() {
+            request = request.version_id(version_id);
+        }
+        if let Err(err) = request.send().await {
+            failures.push(format!(
+                "could not conditionally remove newly created destination '{}': {}",
+                receipt.destination_key, err
+            ));
+        }
+    }
+
+    failures
+}
+
+async fn copy_prefix_objects(
+    client: &Client,
+    src_bucket: &str,
+    src_prefix: &str,
+    dst_bucket: &str,
+    dst_prefix: &str,
+    keys: &[String],
+    cancel: &CancelToken,
+) -> Result<Vec<CopyReceipt>, String> {
+    ensure_no_orphaned_rollback_backups(client, dst_bucket, cancel).await?;
+
+    // Validate every derived destination key up front. A rejection discovered
+    // mid-loop would abort a partially applied transaction; as a precondition it
+    // costs nothing and cannot leave state behind.
+    for key in keys {
+        let suffix = key
+            .strip_prefix(src_prefix)
+            .ok_or_else(|| format!("Key '{}' does not start with prefix '{}'", key, src_prefix))?;
+        validate_key(&format!("{}{}", dst_prefix, suffix), "Destination key")?;
+    }
+
+    let namespace_guard = RollbackNamespaceGuard::new();
+    let namespace = namespace_guard.namespace.clone();
+    let mut created_destinations = Vec::new();
+    let mut backups = Vec::new();
+    let mut receipts = Vec::with_capacity(keys.len());
+
+    for (index, key) in keys.iter().enumerate() {
+        if cancel.is_cancelled() {
+            let failures =
+                rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+            return Err(rollback_error(cancelled_error(), failures));
+        }
+
+        // Key-shape rejections must unwind like any other failure. Returning
+        // straight out of the loop would abandon destinations this call already
+        // created and backups it already took.
+        let suffix = match key.strip_prefix(src_prefix) {
+            Some(suffix) => suffix,
+            None => {
+                let failures =
+                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                return Err(rollback_error(
+                    format!("Key '{}' does not start with prefix '{}'", key, src_prefix),
+                    failures,
+                ));
+            }
+        };
+        let new_key = format!("{}{}", dst_prefix, suffix);
+        if let Err(err) = validate_key(&new_key, "Destination key") {
+            let failures =
+                rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+            return Err(rollback_error(err, failures));
+        }
+
+        if src_bucket == dst_bucket && &new_key == key {
+            let failures =
+                rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+            return Err(rollback_error(
+                format!(
+                    "Source and destination resolve to the same object ('{}'). Refusing to copy a prefix onto itself.",
+                    key
+                ),
+                failures,
+            ));
+        }
+
+        let destination_head_request = client.head_object().bucket(dst_bucket).key(&new_key).send();
+        let destination_head = tokio::select! {
+            _ = cancel.cancelled() => {
+                let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                return Err(rollback_error(cancelled_error(), failures));
+            }
+            result = destination_head_request => result,
+        };
+
+        let destination_was_absent = match destination_head {
+            Ok(_) => {
+                let destination_info =
+                    match describe_source(client, dst_bucket, &new_key, cancel).await {
+                        Ok(info) => info,
+                        Err(err) => {
+                            let failures = rollback_prefix_copy(
+                                client,
+                                dst_bucket,
+                                &created_destinations,
+                                &backups,
+                            )
+                            .await;
+                            return Err(rollback_error(err, failures));
+                        }
+                    };
+                let backup_key = format!("{}{}/{}", ROLLBACK_BACKUP_PREFIX, namespace, index);
+                let backup_probe = client
+                    .head_object()
+                    .bucket(dst_bucket)
+                    .key(&backup_key)
+                    .send();
+                let backup_probe_result = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                        return Err(rollback_error(cancelled_error(), failures));
+                    }
+                    result = backup_probe => result,
+                };
+                match backup_probe_result {
+                    Ok(_) => {
+                        let failures = rollback_prefix_copy(
+                            client,
+                            dst_bucket,
+                            &created_destinations,
+                            &backups,
+                        )
+                        .await;
+                        return Err(rollback_error(
+                            format!("Rollback backup key '{}' already exists", backup_key),
+                            failures,
+                        ));
+                    }
+                    Err(err) if is_not_found(&err) => {}
+                    Err(err) => {
+                        let failures = rollback_prefix_copy(
+                            client,
+                            dst_bucket,
+                            &created_destinations,
+                            &backups,
+                        )
+                        .await;
+                        return Err(rollback_error(
+                            format!(
+                                "Failed to reserve rollback backup '{}': {}",
+                                backup_key, err
+                            ),
+                            failures,
+                        ));
+                    }
+                }
+
+                let backup_receipt = match copy_with_receipt(
+                    client,
+                    dst_bucket,
+                    &new_key,
+                    dst_bucket,
+                    &backup_key,
+                    Some(destination_info.clone()),
+                    cancel,
+                )
+                .await
+                {
+                    Ok(receipt) => receipt,
+                    Err(err) => {
+                        let _ = client
+                            .delete_object()
+                            .bucket(dst_bucket)
+                            .key(&backup_key)
+                            .send()
+                            .await;
+                        let failures = rollback_prefix_copy(
+                            client,
+                            dst_bucket,
+                            &created_destinations,
+                            &backups,
+                        )
+                        .await;
+                        return Err(rollback_error(
+                            format!("Failed to back up destination '{}': {}", new_key, err),
+                            failures,
+                        ));
+                    }
+                };
+                let mut backup_info = destination_info;
+                backup_info.etag = Some(backup_receipt.destination_etag);
+                backup_info.version_id = backup_receipt.destination_version_id;
+                backups.push(DestinationBackup {
+                    destination_key: new_key.clone(),
+                    backup_key,
+                    source_info: backup_info,
+                });
+                false
+            }
+            Err(err) if is_not_found(&err) => true,
+            Err(err) => {
+                let failures =
+                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                return Err(rollback_error(
+                    format!("Failed to check destination '{}': {}", new_key, err),
+                    failures,
+                ));
+            }
+        };
+
+        let source_info = match describe_source(client, src_bucket, key, cancel).await {
+            Ok(info) => info,
+            Err(err) => {
+                let failures =
+                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                return Err(rollback_error(err, failures));
+            }
+        };
+        match copy_with_receipt(
+            client,
+            src_bucket,
+            key,
+            dst_bucket,
+            &new_key,
+            Some(source_info),
+            cancel,
+        )
+        .await
+        {
+            Ok(receipt) => {
+                if destination_was_absent {
+                    created_destinations.push(receipt.clone());
+                }
+                receipts.push(receipt);
+            }
+            Err(err) => {
+                let failures =
+                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                return Err(rollback_error(err, failures));
+            }
+        }
+    }
+
+    // Try every backup before reporting. Stopping at the first failure used to
+    // leave the remaining backups in the bucket without ever naming them, so the
+    // user could not tell which objects to clean up or restore from.
+    let mut cleanup_failures = Vec::new();
+    let mut retained_backups = Vec::new();
+    for backup in &backups {
+        if let Err(err) = remove_backup_object(client, dst_bucket, backup).await {
+            cleanup_failures.push(err);
+            retained_backups.push(backup.backup_key.clone());
+        }
+    }
+    if !cleanup_failures.is_empty() {
+        return Err(format!(
+            "Every copy completed and no source was touched, but {} rollback backup(s) could not \
+             be removed: {}. Those objects are copies of destinations this operation successfully \
+             replaced, so they are safe to delete, and doing so is required before retrying. ({})",
+            retained_backups.len(),
+            cleanup_failures.join("; "),
+            retained_backups.join(", ")
+        ));
+    }
+
+    Ok(receipts)
+}
+
+async fn current_identity_matches(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    expected_etag: &str,
+    request_version_id: Option<&str>,
+    expected_version_id: Option<&str>,
+    cancel: &CancelToken,
+) -> Result<Option<bool>, String> {
+    let mut request = client.head_object().bucket(bucket).key(key);
+    if let Some(version_id) = request_version_id {
+        request = request.version_id(version_id);
+    }
+    let request = request.send();
+    let result = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    };
+
+    match result {
+        Ok(head) => {
+            let etag_matches = head.e_tag() == Some(expected_etag);
+            let version_matches = expected_version_id
+                .map(|expected| head.version_id() == Some(expected))
+                .unwrap_or(true);
+            Ok(Some(etag_matches && version_matches))
+        }
+        Err(err) if is_not_found(&err) => Ok(None),
+        Err(err) => Err(format!("Failed to verify '{}': {}", key, err)),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceDeleteDecision {
+    AlreadyDeleted,
+    Delete,
+    Changed,
+}
+
+/// Decide what a resumed versioned move should do with one recorded source.
+///
+/// `exact_version` is the HEAD of the exact version that was copied, and
+/// `current_version` is the HEAD of the key without a version, i.e. whatever is
+/// current now. `None` means the request answered 404.
+///
+/// A versioned source is retired by writing a delete marker over the key rather
+/// than by permanently erasing the copied version (see
+/// `delete_receipts_checked`), so the copied version still exists after a
+/// successful move and the *absence of a current object* is what proves the
+/// deletion already happened. Both "the copied version is gone" and "the copied
+/// version is still there but nothing is current" are therefore completed work,
+/// while any other object being current means the key moved on and the move must
+/// fail closed instead of destroying an unrelated write.
+fn classify_versioned_source_for_delete(
+    exact_version: Option<bool>,
+    current_version: Option<bool>,
+) -> SourceDeleteDecision {
+    match (exact_version, current_version) {
+        (None, _) => SourceDeleteDecision::AlreadyDeleted,
+        (Some(false), _) => SourceDeleteDecision::Changed,
+        (Some(true), Some(true)) => SourceDeleteDecision::Delete,
+        (Some(true), None) => SourceDeleteDecision::AlreadyDeleted,
+        (Some(true), Some(false)) => SourceDeleteDecision::Changed,
+    }
+}
+
+async fn delete_receipts_checked(
+    client: &Client,
+    src_bucket: &str,
+    dst_bucket: &str,
+    receipts: &[CopyReceipt],
+    cancel: &CancelToken,
+) -> Result<u32, String> {
+    // Validate every destination before deleting any source. A stale manifest
+    // or a destination replaced after the copy must fail closed.
+    for receipt in receipts {
+        match current_identity_matches(
+            client,
+            dst_bucket,
+            &receipt.destination_key,
+            &receipt.destination_etag,
+            None,
+            receipt.destination_version_id.as_deref(),
+            cancel,
+        )
+        .await?
+        {
+            Some(true) => {}
+            Some(false) => {
+                return Err(format!(
+                    "Destination '{}' no longer matches the copy receipt; source deletion was refused.",
+                    receipt.destination_key
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "Destination '{}' no longer exists; source deletion was refused.",
+                    receipt.destination_key
+                ));
+            }
+        }
+    }
+
+    // Check all source identities before the first deletion. For versioned
+    // receipts, inspect both the exact copied version and whatever is current:
+    // together they say whether this receipt is still outstanding, was already
+    // retired by an earlier attempt, or has been overtaken by another write.
+    // See `classify_versioned_source_for_delete` for the exact mapping.
+    let mut present = Vec::with_capacity(receipts.len());
+    for receipt in receipts {
+        if let Some(version_id) = receipt.source_version_id.as_deref() {
+            let exact = current_identity_matches(
+                client,
+                src_bucket,
+                &receipt.source_key,
+                &receipt.source_etag,
+                Some(version_id),
+                Some(version_id),
+                cancel,
+            )
+            .await?;
+            let current = if exact == Some(true) {
+                current_identity_matches(
+                    client,
+                    src_bucket,
+                    &receipt.source_key,
+                    &receipt.source_etag,
+                    None,
+                    Some(version_id),
+                    cancel,
+                )
+                .await?
+            } else {
+                None
+            };
+            match classify_versioned_source_for_delete(exact, current) {
+                SourceDeleteDecision::AlreadyDeleted => present.push(false),
+                SourceDeleteDecision::Delete => present.push(true),
+                SourceDeleteDecision::Changed => {
+                    return Err(format!(
+                        "Source '{}' changed after it was copied; deletion was refused.",
+                        receipt.source_key
+                    ));
+                }
+            }
+            continue;
+        }
+
+        match current_identity_matches(
+            client,
+            src_bucket,
+            &receipt.source_key,
+            &receipt.source_etag,
+            None,
+            None,
+            cancel,
+        )
+        .await?
+        {
+            Some(true) => present.push(true),
+            Some(false) => {
+                return Err(format!(
+                    "Source '{}' changed after it was copied; deletion was refused.",
+                    receipt.source_key
+                ));
+            }
+            None => present.push(false),
+        }
+    }
+
+    let mut deleted = 0u32;
+    for (receipt, exists) in receipts.iter().zip(present) {
+        if !exists {
+            continue;
+        }
+        // Never target the copied version id directly. A version-targeted delete
+        // is permanent and unconditional with respect to *which* version is
+        // current: `If-Match` compares ETags, not version ids, so a write that
+        // lands between the check above and this call leaves the copied version
+        // noncurrent while the delete still erases it for good. Deleting the key
+        // itself keeps `If-Match` meaningful and, on a versioned bucket, retires
+        // the object behind a delete marker that the user can remove to recover
+        // from exactly that race. On an unversioned bucket the behaviour is
+        // unchanged, because there the key and its only version are the same
+        // thing.
+        let request = client
+            .delete_object()
+            .bucket(src_bucket)
+            .key(&receipt.source_key)
+            .if_match(&receipt.source_etag)
+            .send();
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = request => result,
+        };
+        result.map_err(|err| {
+            format!(
+                "Copied successfully but conditional deletion of source '{}' failed: {}",
+                receipt.source_key, err
+            )
+        })?;
+        deleted += 1;
+    }
+
+    Ok(deleted)
+}
+
+#[tauri::command]
+pub(crate) async fn delete_copied_objects(
+    state: tauri::State<'_, AppState>,
+    src_bucket: String,
+    dst_bucket: String,
+    receipts: Vec<CopyReceipt>,
+    transfer_id: Option<u32>,
+) -> Result<u32, String> {
+    if receipts.is_empty() {
+        return Ok(0);
+    }
+    let mut source_keys = BTreeSet::new();
+    let mut destination_keys = BTreeSet::new();
+    for receipt in &receipts {
+        // Only the source is deleted here, so only it is a mutating target.
+        validate_mutating_key(&receipt.source_key, "Source key")?;
+        validate_key(&receipt.destination_key, "Destination key")?;
+        if receipt.source_etag.is_empty() || receipt.destination_etag.is_empty() {
+            return Err("Copy receipts must contain non-empty ETags".to_string());
+        }
+        if !source_keys.insert(receipt.source_key.clone())
+            || !destination_keys.insert(receipt.destination_key.clone())
+        {
+            return Err("Copy receipts contain duplicate keys".to_string());
+        }
+    }
+
+    let client = {
+        let s3 = lock_s3_state(&state)?;
+        s3.client.clone().ok_or("Not connected")?
+    };
+    let (_guard, cancel) = transfer_cancel_context(transfer_id);
+    delete_receipts_checked(&client, &src_bucket, &dst_bucket, &receipts, &cancel).await
+}
+
 #[tauri::command]
 pub(crate) async fn rename_prefix(
     state: tauri::State<'_, AppState>,
     bucket: String,
     old_prefix: String,
     new_prefix: String,
+    transfer_id: Option<u32>,
 ) -> Result<u32, String> {
-    validate_prefix(&old_prefix, "Source prefix")?;
-    validate_prefix(&new_prefix, "Destination prefix")?;
+    validate_mutating_prefix(&old_prefix, "Source prefix")?;
+    validate_mutating_prefix(&new_prefix, "Destination prefix")?;
+    if prefixes_overlap(&old_prefix, &new_prefix) {
+        return Err("Source and destination prefixes overlap; move was refused.".to_string());
+    }
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    let (_guard, cancel) = transfer_cancel_context(transfer_id);
 
-    let keys = list_all_keys_under_prefix(&client, &bucket, &old_prefix).await?;
+    let keys = list_all_keys_under_prefix(&client, &bucket, &old_prefix, &cancel).await?;
     if keys.is_empty() {
-        // Nothing under prefix — just means it was an empty folder marker; nothing to move
         return Ok(0);
     }
 
-    // Copy all objects to new prefix, tracking what was copied for rollback
-    let mut copied_keys = Vec::new();
-    for key in &keys {
-        let suffix = key
-            .strip_prefix(old_prefix.as_str())
-            .ok_or_else(|| format!("Key '{}' does not start with prefix '{}'", key, old_prefix))?;
-        let new_key = format!("{}{}", new_prefix, suffix);
-        let source = encode_copy_source(&bucket, key);
-        if let Err(e) = client
-            .copy_object()
-            .bucket(&bucket)
-            .key(&new_key)
-            .copy_source(&source)
-            .send()
-            .await
-        {
-            // Roll back: delete any objects already copied to new prefix
-            for rollback_chunk in copied_keys.chunks(1000) {
-                let objects: Vec<ObjectIdentifier> = rollback_chunk
-                    .iter()
-                    .filter_map(|k: &String| ObjectIdentifier::builder().key(k).build().ok())
-                    .collect();
-                if let Ok(del) = Delete::builder()
-                    .set_objects(Some(objects))
-                    .quiet(true)
-                    .build()
-                {
-                    let _ = client
-                        .delete_objects()
-                        .bucket(&bucket)
-                        .delete(del)
-                        .send()
-                        .await;
-                }
-            }
-            return Err(format!("Failed to copy '{}': {}", key, e));
-        }
-        copied_keys.push(new_key);
-    }
+    let receipts = copy_prefix_objects(
+        &client,
+        &bucket,
+        &old_prefix,
+        &bucket,
+        &new_prefix,
+        &keys,
+        &cancel,
+    )
+    .await?;
 
-    // Delete originals in batches
-    let mut moved = 0u32;
-    for chunk in keys.chunks(1000) {
-        let objects: Vec<ObjectIdentifier> = chunk
-            .iter()
-            .map(|k| {
-                ObjectIdentifier::builder()
-                    .key(k)
-                    .build()
-                    .map_err(|e| format!("Invalid key: {}", e))
-            })
-            .collect::<Result<_, _>>()?;
-
-        let delete = Delete::builder()
-            .set_objects(Some(objects))
-            .quiet(true)
-            .build()
-            .map_err(|e| format!("Delete build error: {}", e))?;
-
-        client
-            .delete_objects()
-            .bucket(&bucket)
-            .delete(delete)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to delete originals: {}", e))?;
-
-        moved += chunk.len() as u32;
-    }
-
-    Ok(moved)
+    delete_receipts_checked(&client, &bucket, &bucket, &receipts, &cancel).await
 }
 
 /// Copy a single object to a (possibly different) bucket/key without deleting the source.
@@ -2780,39 +4724,28 @@ pub(crate) async fn copy_object_to(
     src_key: String,
     dst_bucket: String,
     dst_key: String,
-) -> Result<(), String> {
+    transfer_id: Option<u32>,
+) -> Result<CopyReceipt, String> {
     validate_key(&src_key, "Source key")?;
-    validate_key(&dst_key, "Destination key")?;
+    // Copying out of the backup namespace is how a user restores data from an
+    // interrupted operation, so only the destination is restricted.
+    validate_mutating_key(&dst_key, "Destination key")?;
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    let (_guard, cancel) = transfer_cancel_context(transfer_id);
 
-    let head = client
-        .head_object()
-        .bucket(&src_bucket)
-        .key(&src_key)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to get object info: {}", e))?;
-
-    let size = head.content_length().unwrap_or(0);
-
-    if size >= MULTIPART_COPY_THRESHOLD {
-        copy_object_multipart(&client, &src_bucket, &dst_bucket, &src_key, &dst_key, size).await?;
-    } else {
-        let source = encode_copy_source(&src_bucket, &src_key);
-        client
-            .copy_object()
-            .bucket(&dst_bucket)
-            .key(&dst_key)
-            .copy_source(&source)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to copy: {}", e))?;
-    }
-
-    Ok(())
+    copy_with_receipt(
+        &client,
+        &src_bucket,
+        &src_key,
+        &dst_bucket,
+        &dst_key,
+        None,
+        &cancel,
+    )
+    .await
 }
 
 /// Copy all objects under a prefix to a new prefix (possibly in a different bucket)
@@ -2824,58 +4757,34 @@ pub(crate) async fn copy_prefix_to(
     src_prefix: String,
     dst_bucket: String,
     dst_prefix: String,
-) -> Result<u32, String> {
-    validate_prefix(&src_prefix, "Source prefix")?;
-    validate_prefix(&dst_prefix, "Destination prefix")?;
+    transfer_id: Option<u32>,
+) -> Result<Vec<CopyReceipt>, String> {
+    validate_mutating_prefix(&src_prefix, "Source prefix")?;
+    validate_mutating_prefix(&dst_prefix, "Destination prefix")?;
+    if src_bucket == dst_bucket && prefixes_overlap(&src_prefix, &dst_prefix) {
+        return Err("Source and destination prefixes overlap; copy was refused.".to_string());
+    }
     let client = {
         let s3 = lock_s3_state(&state)?;
         s3.client.clone().ok_or("Not connected")?
     };
+    let (_guard, cancel) = transfer_cancel_context(transfer_id);
 
-    let keys = list_all_keys_under_prefix(&client, &src_bucket, &src_prefix).await?;
+    let keys = list_all_keys_under_prefix(&client, &src_bucket, &src_prefix, &cancel).await?;
     if keys.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    let mut copied_keys = Vec::new();
-    for key in &keys {
-        let suffix = key
-            .strip_prefix(src_prefix.as_str())
-            .ok_or_else(|| format!("Key '{}' does not start with prefix '{}'", key, src_prefix))?;
-        let new_key = format!("{}{}", dst_prefix, suffix);
-        let source = encode_copy_source(&src_bucket, key);
-        if let Err(e) = client
-            .copy_object()
-            .bucket(&dst_bucket)
-            .key(&new_key)
-            .copy_source(&source)
-            .send()
-            .await
-        {
-            for rollback_chunk in copied_keys.chunks(1000) {
-                let objects: Vec<ObjectIdentifier> = rollback_chunk
-                    .iter()
-                    .filter_map(|k: &String| ObjectIdentifier::builder().key(k).build().ok())
-                    .collect();
-                if let Ok(del) = Delete::builder()
-                    .set_objects(Some(objects))
-                    .quiet(true)
-                    .build()
-                {
-                    let _ = client
-                        .delete_objects()
-                        .bucket(&dst_bucket)
-                        .delete(del)
-                        .send()
-                        .await;
-                }
-            }
-            return Err(format!("Failed to copy '{}': {}", key, e));
-        }
-        copied_keys.push(new_key);
-    }
-
-    Ok(keys.len() as u32)
+    copy_prefix_objects(
+        &client,
+        &src_bucket,
+        &src_prefix,
+        &dst_bucket,
+        &dst_prefix,
+        &keys,
+        &cancel,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3124,7 +5033,7 @@ mod tests {
         let destination_path = dir.join("file.txt");
         std::fs::write(&temp_path, b"new").unwrap();
 
-        let result = finalize_download_file(&temp_path, &destination_path, false);
+        let result = finalize_download_file(&temp_path, &destination_path);
         assert!(
             result.is_ok(),
             "finalize should succeed: {:?}",
@@ -3137,14 +5046,14 @@ mod tests {
     }
 
     #[test]
-    fn finalize_download_file_overwrite_replaces_existing() {
+    fn finalize_download_file_replaces_existing_destination() {
         let dir = make_test_dir("finalize-overwrite");
         let temp_path = dir.join("download.tmp");
         let destination_path = dir.join("file.txt");
         std::fs::write(&temp_path, b"new").unwrap();
         std::fs::write(&destination_path, b"old").unwrap();
 
-        let result = finalize_download_file(&temp_path, &destination_path, true);
+        let result = finalize_download_file(&temp_path, &destination_path);
         assert!(
             result.is_ok(),
             "finalize should succeed: {:?}",
@@ -3186,5 +5095,376 @@ mod tests {
             assert!(part_number <= total_parts, "part {part_number} should pass");
         }
         assert!(total_parts + 1 > total_parts, "overflow part is rejected");
+    }
+
+    // -----------------------------------------------------------------------
+    // Range compliance (M3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ensure_range_honoured_accepts_matching_content_range() {
+        assert!(ensure_range_honoured(Some("bytes 0-1023/8192"), Some(1024), 0, 1023).is_ok());
+        assert!(
+            ensure_range_honoured(Some("bytes 4096-8191/8192"), Some(4096), 4096, 8191).is_ok()
+        );
+        // Single-byte probe used by the preflight.
+        assert!(ensure_range_honoured(Some("bytes 0-0/8192"), Some(1), 0, 0).is_ok());
+    }
+
+    #[test]
+    fn ensure_range_honoured_rejects_missing_content_range() {
+        // A server that ignores Range answers 200 with the whole body and no
+        // Content-Range. Letting that through made every worker download the
+        // entire object at its own offset.
+        let err = ensure_range_honoured(None, Some(8192), 0, 1023)
+            .expect_err("a full-body response must be rejected");
+        assert!(err.starts_with(RANGE_UNSUPPORTED_CODE), "got: {}", err);
+    }
+
+    #[test]
+    fn ensure_range_honoured_rejects_wrong_range() {
+        let err = ensure_range_honoured(Some("bytes 0-4095/8192"), Some(4096), 4096, 8191)
+            .expect_err("a mismatched range must be rejected");
+        assert!(err.starts_with(RANGE_UNSUPPORTED_CODE), "got: {}", err);
+    }
+
+    #[test]
+    fn ensure_range_honoured_allows_absent_header_only_for_exact_length() {
+        // Degenerate case: the requested range covers exactly what was returned.
+        assert!(ensure_range_honoured(None, Some(1024), 0, 1023).is_ok());
+        assert!(ensure_range_honoured(None, Some(1023), 0, 1023).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Prefix guards (M6, M7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_prefix_allows_empty_for_listing() {
+        // Listing the bucket root is legitimate.
+        assert!(validate_prefix("", "Prefix").is_ok());
+        assert!(validate_prefix("a/b/", "Prefix").is_ok());
+    }
+
+    #[test]
+    fn validate_mutating_prefix_rejects_empty() {
+        // An empty prefix means "every object in the bucket" for delete, move and
+        // copy, which must never be reachable by accident.
+        let err = validate_mutating_prefix("", "Prefix")
+            .expect_err("empty prefix must be rejected for mutating operations");
+        assert!(err.contains("must not be empty"), "got: {}", err);
+        assert!(validate_mutating_prefix("logs/", "Prefix").is_ok());
+    }
+
+    #[test]
+    fn validate_mutating_prefix_still_rejects_traversal() {
+        assert!(validate_mutating_prefix("../etc/", "Prefix").is_err());
+        assert!(validate_mutating_prefix("a/./b/", "Prefix").is_err());
+    }
+
+    /// Keys containing dot segments are legal in S3 and earlier versions could
+    /// delete them, so batch delete must still accept them while keeping the
+    /// reserved namespace and hard limits enforced.
+    #[test]
+    fn deletable_keys_allow_dot_segments_but_not_reserved_backups() {
+        assert!(validate_deletable_key("data/./odd.txt", "Object key").is_ok());
+        assert!(validate_deletable_key("data/../odd.txt", "Object key").is_ok());
+        assert!(validate_deletable_key("", "Object key").is_err());
+        assert!(validate_deletable_key("a\0b", "Object key").is_err());
+        assert!(
+            validate_deletable_key(".s3-sidekick-rollback/ns/1", "Object key").is_err(),
+            "live rollback backups must stay protected from batch delete"
+        );
+    }
+
+    #[test]
+    fn mutating_keys_cannot_target_rollback_backups_but_reads_can() {
+        let backup = ".s3-sidekick-rollback/1234-99-7/3";
+        let err = validate_mutating_key(backup, "Object key")
+            .expect_err("rollback backups must not be mutable through commands");
+        assert!(err.contains("rollback"), "got: {}", err);
+        // Restoring data out of a backup has to stay possible.
+        assert!(validate_key(backup, "Source key").is_ok());
+        assert!(validate_mutating_key("logs/app.txt", "Object key").is_ok());
+    }
+
+    /// Rollback backups can be the only copy of an overwritten destination, so a
+    /// prefix operation must never target the namespace holding them.
+    #[test]
+    fn validate_mutating_prefix_protects_the_rollback_namespace() {
+        for prefix in [
+            ROLLBACK_BACKUP_PREFIX,
+            ".s3-sidekick-rollback/1234-99-7/",
+            ".s3-sidekick-",
+        ] {
+            let err = validate_mutating_prefix(prefix, "Prefix")
+                .expect_err("rollback backups must not be a mutating target");
+            assert!(err.contains("rollback"), "got: {}", err);
+        }
+        assert!(validate_mutating_prefix("logs/", "Prefix").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cancellation registry (H7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cancelling_an_unknown_transfer_is_a_noop() {
+        // The old design latched cancelled ids forever, so a reused id aborted a
+        // brand new transfer instantly. Cancelling an id that is not running must
+        // leave no trace.
+        let id = 990_001;
+        cancel_transfer(id);
+        let guard = TransferGuard::register(id);
+        assert!(
+            !guard.is_cancelled(),
+            "a stale cancel must not affect a later transfer with the same id"
+        );
+    }
+
+    #[test]
+    fn cancelling_a_running_transfer_is_observed() {
+        let id = 990_002;
+        let guard = TransferGuard::register(id);
+        assert!(!guard.is_cancelled());
+        cancel_transfer(id);
+        assert!(guard.is_cancelled());
+    }
+
+    #[test]
+    fn transfer_registration_is_dropped_on_completion() {
+        let id = 990_003;
+        {
+            let _guard = TransferGuard::register(id);
+        }
+        // Nothing is registered any more, so this cancel goes nowhere.
+        cancel_transfer(id);
+        let next = TransferGuard::register(id);
+        assert!(
+            !next.is_cancelled(),
+            "registration must not survive the guard"
+        );
+    }
+
+    #[test]
+    fn reusing_an_id_replaces_the_previous_registration() {
+        let id = 990_004;
+        let first = TransferGuard::register(id);
+        let second = TransferGuard::register(id);
+        cancel_transfer(id);
+        assert!(
+            second.is_cancelled(),
+            "the live registration must be cancelled"
+        );
+        assert!(
+            !first.is_cancelled(),
+            "the displaced registration must not be affected"
+        );
+        // Dropping the displaced guard must not deregister the live one.
+        drop(first);
+        cancel_transfer(id);
+        assert!(second.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn sleep_unless_cancelled_returns_early_on_cancel() {
+        let flag: CancelToken = Arc::new(CancelFlag::default());
+        let cloned = Arc::clone(&flag);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cloned.cancel();
+        });
+        let started = Instant::now();
+        let completed = flag.sleep_unless_cancelled(Duration::from_secs(30)).await;
+        assert!(!completed, "cancellation must be reported");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "backoff must wake on cancellation instead of sleeping through it"
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_unless_cancelled_completes_when_not_cancelled() {
+        let flag: CancelToken = Arc::new(CancelFlag::default());
+        assert!(
+            flag.sleep_unless_cancelled(Duration::from_millis(120))
+                .await
+        );
+    }
+
+    #[test]
+    fn multipart_copy_part_size_stays_within_s3_limits() {
+        let maximum = multipart_copy_part_size(MAX_OBJECT_SIZE).unwrap();
+        assert!(maximum <= MAX_MULTIPART_COPY_PART_SIZE);
+        assert!(MAX_OBJECT_SIZE.div_ceil(maximum) <= MAX_MULTIPART_COPY_PARTS);
+        assert_eq!(
+            multipart_copy_part_size(MULTIPART_COPY_THRESHOLD as u64).unwrap(),
+            PREFERRED_MULTIPART_COPY_PART_SIZE
+        );
+        assert!(multipart_copy_part_size(0).is_err());
+        assert!(multipart_copy_part_size(MAX_OBJECT_SIZE + 1).is_err());
+    }
+
+    #[test]
+    fn backup_namespaces_are_recoverable_from_their_keys() {
+        assert_eq!(
+            namespace_of_backup_key(".s3-sidekick-rollback/1234-99-7/3"),
+            Some("1234-99-7")
+        );
+        assert_eq!(namespace_of_backup_key("objects/report.pdf"), None);
+        assert_eq!(namespace_of_backup_key(".s3-sidekick-rollback//3"), None);
+    }
+
+    /// A concurrent prefix operation's backups must not be reported as
+    /// abandoned, because the advice for abandoned backups is to remove them.
+    #[test]
+    fn live_backup_namespaces_are_registered_and_released() {
+        let guard = RollbackNamespaceGuard::new();
+        let namespace = guard.namespace.clone();
+        assert!(active_rollback_namespaces()
+            .lock()
+            .unwrap()
+            .contains(&namespace));
+
+        drop(guard);
+        assert!(!active_rollback_namespaces()
+            .lock()
+            .unwrap()
+            .contains(&namespace));
+    }
+
+    #[test]
+    fn prefix_overlap_rejects_nested_source_or_destination() {
+        assert!(prefixes_overlap("photos/", "photos/"));
+        assert!(prefixes_overlap("photos/", "photos/2026/"));
+        assert!(prefixes_overlap("photos/2026/", "photos/"));
+        assert!(!prefixes_overlap("photos/", "photos-archive/"));
+        assert!(!prefixes_overlap("a/", "b/"));
+    }
+
+    #[test]
+    fn checkpoint_generation_requires_version_identity_when_versioned() {
+        let mut checkpoint = TransferCheckpoint {
+            version: 1,
+            mode: "download_parallel".to_string(),
+            bucket: "bucket".to_string(),
+            key: "key".to_string(),
+            destination: None,
+            temp_path: "temp".to_string(),
+            total_bytes: 1,
+            part_size: 1,
+            completed_parts: vec![0],
+            updated_at_ms: 0,
+            etag: "etag".to_string(),
+            version_id: None,
+        };
+        assert!(checkpoint_generation_matches(&checkpoint, "etag", None));
+        assert!(!checkpoint_generation_matches(
+            &checkpoint,
+            "etag",
+            Some("version-1")
+        ));
+
+        checkpoint.version_id = Some("version-1".to_string());
+        assert!(checkpoint_generation_matches(
+            &checkpoint,
+            "etag",
+            Some("version-1")
+        ));
+        assert!(!checkpoint_generation_matches(
+            &checkpoint,
+            "etag",
+            Some("version-2")
+        ));
+        assert!(!checkpoint_generation_matches(&checkpoint, "etag", None));
+    }
+
+    #[test]
+    fn upload_sha256_uses_raw_digest_in_hex_and_base64() {
+        let checksum = sha256_checksum_bytes(b"abc");
+        assert_eq!(
+            checksum.hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            checksum.base64,
+            "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
+        );
+        assert!(verify_upload_checksum_response(Some(&checksum.base64), &checksum, "test").is_ok());
+        assert!(verify_upload_checksum_response(None, &checksum, "test").is_err());
+    }
+
+    #[test]
+    fn versioned_source_resume_distinguishes_deleted_from_replaced() {
+        assert_eq!(
+            classify_versioned_source_for_delete(None, Some(false)),
+            SourceDeleteDecision::AlreadyDeleted
+        );
+        assert_eq!(
+            classify_versioned_source_for_delete(Some(true), Some(true)),
+            SourceDeleteDecision::Delete
+        );
+        assert_eq!(
+            classify_versioned_source_for_delete(Some(true), Some(false)),
+            SourceDeleteDecision::Changed
+        );
+        assert_eq!(
+            classify_versioned_source_for_delete(Some(false), Some(true)),
+            SourceDeleteDecision::Changed
+        );
+        // A completed versioned move leaves the copied version in place behind a
+        // delete marker, so "the version is still there but nothing is current"
+        // must resume as finished rather than as a conflict.
+        assert_eq!(
+            classify_versioned_source_for_delete(Some(true), None),
+            SourceDeleteDecision::AlreadyDeleted
+        );
+    }
+
+    #[test]
+    fn malformed_checkpoint_is_an_error_not_a_fresh_download() {
+        let Err(err) = checkpoint_from_json("{not-json") else {
+            panic!("corrupt resumable state must be surfaced");
+        };
+        assert!(err.contains("Invalid transfer checkpoint JSON"));
+    }
+
+    #[test]
+    fn failed_checkpoint_save_does_not_advance_markers() {
+        let original_time = Instant::now();
+        let mut last_saved_at = original_time;
+        let mut last_saved_parts = 3;
+
+        let err =
+            persist_checkpoint_and_advance(&mut last_saved_at, &mut last_saved_parts, 11, || {
+                Err("disk full".to_string())
+            })
+            .expect_err("persistence failure must be propagated");
+
+        assert_eq!(err, "disk full");
+        assert_eq!(last_saved_at, original_time);
+        assert_eq!(last_saved_parts, 3);
+    }
+
+    #[tokio::test]
+    async fn multipart_cleanup_timeout_is_bounded() {
+        let started = Instant::now();
+        let completed =
+            cleanup_completes_within(Duration::from_millis(20), std::future::pending::<()>()).await;
+        assert!(!completed, "a hung cleanup must time out");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "bounded cleanup took too long"
+        );
+    }
+
+    #[test]
+    fn versioned_copy_source_is_encoded_without_loss() {
+        let source =
+            encode_copy_source_with_version("bucket", "folder/file name.txt", Some("version+id/1"));
+        assert_eq!(
+            source,
+            "bucket/folder/file%20name.txt?versionId=version%2Bid%2F1"
+        );
     }
 }

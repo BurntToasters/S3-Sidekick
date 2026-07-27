@@ -227,9 +227,8 @@ async function preflightDownloadDiskSpace(
   return proceed;
 }
 
-function enqueueDownloadTransfers(entries: DownloadQueueEntry[]): boolean {
+function enqueueDownloadTransfers(entries: DownloadQueueEntry[]): void {
   enqueueDownloads(entries);
-  return true;
 }
 
 export async function handleDownload(): Promise<void> {
@@ -275,43 +274,13 @@ export async function handleDownload(): Promise<void> {
     return;
   }
 
-  if (enqueueDownloadTransfers(resolvedEntries)) {
-    setStatus(`Queued ${resolvedEntries.length} download(s).`, 5000);
-    logActivity(`Queued ${resolvedEntries.length} download(s).`, "info");
-    return;
-  }
-
-  for (const entry of resolvedEntries) {
-    try {
-      setStatus(`Downloading ${basename(entry.key)}...`);
-      const size = await invoke<number>("download_object", {
-        bucket: entry.bucket,
-        key: entry.key,
-        destination: entry.destination,
-        overwrite: entry.conflictResolution === "replace",
-        tempPath: `${entry.destination}.s3-sidekick.download.tmp`,
-        attempt: 1,
-        checksumVerification:
-          state.currentSettings.enableTransferChecksumVerification,
-      });
-      setStatus(
-        `Downloaded ${basename(entry.key)} (${formatSize(size)}).`,
-        5000,
-      );
-      logActivity(
-        `Downloaded ${basename(entry.key)} (${formatSize(size)}).`,
-        "success",
-      );
-    } catch (err) {
-      setStatus(
-        `Download failed for ${basename(entry.key)}: ${friendlyError(err)}`,
-      );
-      logActivity(
-        `Download failed for ${basename(entry.key)}: ${friendlyError(err)}`,
-        "error",
-      );
-    }
-  }
+  // Downloads always go through the transfer queue, which owns transfer ids,
+  // progress, cancellation and resume. The direct `download_object` loop that
+  // used to follow this was unreachable (its guard could not be false) and had
+  // drifted out of sync with the command, omitting the required transfer id.
+  enqueueDownloadTransfers(resolvedEntries);
+  setStatus(`Queued ${resolvedEntries.length} download(s).`, 5000);
+  logActivity(`Queued ${resolvedEntries.length} download(s).`, "info");
 }
 
 export async function handleOpenLastDownloadFolder(): Promise<void> {

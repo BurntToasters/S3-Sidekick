@@ -34,6 +34,7 @@ import {
   setConnectionUI,
 } from "./app-connection.ts";
 import { wireEvents } from "./app-events.ts";
+import { recoverPendingTransfers } from "./transfers.ts";
 import { initializeIcons } from "./icons.ts";
 import { wireTitlebar } from "./titlebar.ts";
 
@@ -122,6 +123,18 @@ async function restoreWindowSize(): Promise<void> {
   }
 }
 
+async function recoverTransfersAfterSecurityReady(): Promise<void> {
+  try {
+    await recoverPendingTransfers();
+  } catch (err) {
+    console.error("Pending transfer recovery failed:", err);
+    logActivity(
+      `Pending transfer recovery deferred: ${String(err)}`,
+      "warning",
+    );
+  }
+}
+
 export async function init(): Promise<void> {
   initializeIcons();
   wireEvents();
@@ -185,6 +198,8 @@ export async function init(): Promise<void> {
         "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
         "warning",
       );
+    } else {
+      await recoverTransfersAfterSecurityReady();
     }
 
     updateShortcutChips();
@@ -231,6 +246,8 @@ export async function init(): Promise<void> {
       "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
       "warning",
     );
+  } else {
+    await recoverTransfersAfterSecurityReady();
   }
 
   void checkSupportPrompt();

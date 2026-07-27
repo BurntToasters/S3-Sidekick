@@ -74,6 +74,7 @@ const mockClearCompletedTransfers = vi.fn();
 const mockEnqueuePaths = vi.fn();
 const mockSetTransferCompleteHandler = vi.fn();
 const mockInitTransferQueueUI = vi.fn<() => Promise<void>>();
+const mockRecoverPendingTransfers = vi.fn<() => Promise<void>>();
 const mockEnqueueFiles = vi.fn();
 const mockDisposeTransferQueueUI = vi.fn<() => Promise<void>>();
 const mockEnqueueDownloads = vi.fn();
@@ -254,6 +255,7 @@ vi.mock("../transfers.ts", () => ({
   enqueuePaths: mockEnqueuePaths,
   setTransferCompleteHandler: mockSetTransferCompleteHandler,
   initTransferQueueUI: mockInitTransferQueueUI,
+  recoverPendingTransfers: mockRecoverPendingTransfers,
   enqueueFiles: mockEnqueueFiles,
   disposeTransferQueueUI: mockDisposeTransferQueueUI,
   enqueueDownloads: mockEnqueueDownloads,
@@ -444,6 +446,7 @@ describe("main integration", () => {
     mockEnqueuePaths.mockReset();
     mockSetTransferCompleteHandler.mockReset();
     mockInitTransferQueueUI.mockReset();
+    mockRecoverPendingTransfers.mockReset();
     mockEnqueueFiles.mockReset();
     mockDisposeTransferQueueUI.mockReset();
     mockEnqueueDownloads.mockReset();
@@ -532,6 +535,7 @@ describe("main integration", () => {
     mockAddBookmark.mockResolvedValue(true);
     mockLoadBookmarks.mockResolvedValue(undefined);
     mockInitTransferQueueUI.mockResolvedValue(undefined);
+    mockRecoverPendingTransfers.mockResolvedValue(undefined);
     mockDisposeTransferQueueUI.mockResolvedValue(undefined);
     mockCanPreview.mockReturnValue(true);
     mockOpenPreview.mockResolvedValue(undefined);
@@ -2896,6 +2900,10 @@ describe("main integration", () => {
       value: 700,
       configurable: true,
     });
+
+    // Startup persistence is unrelated to the resize debounce and can land late
+    // when the suite runs under load. Only saves caused by this resize matter.
+    mockSaveSettings.mockClear();
 
     window.dispatchEvent(new Event("resize"));
     vi.advanceTimersByTime(200);

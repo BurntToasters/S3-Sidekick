@@ -48,6 +48,7 @@ import {
   clearCompletedTransfers,
   setTransferCompleteHandler,
   initTransferQueueUI,
+  recoverPendingTransfers,
   disposeTransferQueueUI,
 } from "./transfers.ts";
 import { wireKeyboardShortcuts } from "./keyboard.ts";
@@ -318,6 +319,15 @@ export function wireEvents(): void {
   void initTransferQueueUI().catch((err) => {
     console.error("Failed to initialize transfer queue UI:", err);
     logActivity(`Transfer queue events unavailable: ${String(err)}`, "warning");
+  });
+  window.addEventListener("s3-sidekick:security-ready", () => {
+    void recoverPendingTransfers().catch((err) => {
+      console.error("Failed to recover pending transfers:", err);
+      logActivity(
+        `Pending transfer recovery deferred: ${friendlyError(err)}`,
+        "warning",
+      );
+    });
   });
   window.addEventListener("beforeunload", () => {
     disposeFilterInputDebounce();

@@ -28,6 +28,7 @@ const WAIT_POLL_INTERVAL_MS = Number.parseInt(
 );
 
 const packageJson = require('../package.json');
+const { formatReleaseTitle } = require('./release-title.cjs');
 const VERSION = packageJson.version;
 const TAG_NAME = 'v' + VERSION;
 const IS_PRERELEASE = VERSION.includes('beta') || VERSION.includes('alpha');
@@ -208,10 +209,10 @@ async function ensureDraftRelease() {
       'POST',
       '/repos/' + REPO_OWNER + '/' + REPO_NAME + '/releases',
       {
-        // Match electron-builder's createRelease() so it reuses this draft:
-        // tag = "v" + version, name defaults to the version, draft:true.
+        // Tag stays machine-readable ("v" + version) so the updater and asset
+        // URLs keep working; the title is the BCLS human-facing form.
         tag_name: TAG_NAME,
-        name: VERSION,
+        name: formatReleaseTitle(VERSION),
         draft: true,
         prerelease: IS_PRERELEASE,
       }
