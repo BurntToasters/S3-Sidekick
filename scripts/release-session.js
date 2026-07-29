@@ -24,6 +24,19 @@ function command(commandName, args, root) {
   }).trim();
 }
 
+/** Porcelain status; preserve leading XY spaces (do not trim). */
+function gitPorcelainStatus(root = defaultRoot) {
+  return execFileSync(
+    "git",
+    ["status", "--porcelain=v1", "--untracked-files=all"],
+    {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  ).replace(/(?:\r?\n)+$/, "");
+}
+
 function sha256File(filePath) {
   return crypto
     .createHash("sha256")
@@ -117,13 +130,15 @@ function parsePorcelainPaths(status) {
   return status
     .split("\n")
     .map((line) => line.replace(/\r$/, ""))
-    .filter((line) => line.trim().length > 0)
+    .filter((line) => line.length > 0)
     .map((line) => {
-      const match = line.match(/^.. (.+)$/);
+      // XY (2 chars) + space + path. Leading space in XY must be preserved;
+      // callers must not trim() the porcelain blob before parsing.
+      const match = line.match(/^(.{2}) (.*)$/);
       if (!match) return "";
-      const rest = match[1].trim();
+      const rest = match[2];
       const renameArrow = rest.indexOf(" -> ");
-      return renameArrow >= 0 ? rest.slice(renameArrow + 4).trim() : rest;
+      return renameArrow >= 0 ? rest.slice(renameArrow + 4) : rest;
     })
     .filter(Boolean);
 }
@@ -140,14 +155,25 @@ function clearQualityGateProof(root = defaultRoot) {
   fs.rmSync(path.join(root, QUALITY_GATE_RELATIVE_PATH), { force: true });
 }
 
+function blockingReleaseWorkingTreePaths(root = defaultRoot) {
+  let status;
+  try {
+    status = gitPorcelainStatus(root);
+  } catch {
+    return ["<git status failed>"];
+  }
+  if (isAcceptableReleaseWorkingTree(status)) {
+    return [];
+  }
+  return parsePorcelainPaths(status).filter(
+    (p) => !RELEASE_BOOTSTRAP_PATHS.has(p),
+  );
+}
+
 function recordSuccessfulQualityGate(root = defaultRoot) {
   let status;
   try {
-    status = command(
-      "git",
-      ["status", "--porcelain=v1", "--untracked-files=all"],
-      root,
-    );
+    status = gitPorcelainStatus(root);
   } catch {
     return false;
   }
@@ -256,10 +282,13 @@ export {
   QUALITY_GATE_RELATIVE_PATH,
   RELEASE_BOOTSTRAP_PATHS,
   RELEASE_SESSION_RELATIVE_PATH,
+  blockingReleaseWorkingTreePaths,
   clearQualityGateProof,
   createReleaseSession,
   currentReleaseIdentity,
+  gitPorcelainStatus,
   isAcceptableReleaseWorkingTree,
+  parsePorcelainPaths,
   recordSuccessfulQualityGate,
   startReleaseSession,
   validateQualityGate,

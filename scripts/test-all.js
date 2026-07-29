@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import {
+  blockingReleaseWorkingTreePaths,
   clearQualityGateProof,
   recordSuccessfulQualityGate,
 } from "./release-session.js";
@@ -12,7 +13,7 @@ const __dirname = dirname(__filename);
 const packageJsonPath = resolve(__dirname, "..", "package.json");
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 const appVersion = packageJson.version ?? "unknown";
-const scriptVersion = "1.1.0";
+const scriptVersion = "1.1.1";
 
 const colors = {
   reset: "\x1b[0m",
@@ -47,6 +48,39 @@ function printTail(output) {
   const lines = cleanOutput.split("\n");
   const tail = lines.slice(-20).join("\n");
   console.log(`${colors.red}${tail}${colors.reset}`);
+}
+
+function printRustFailures(output) {
+  const cleanOutput = stripAnsi(output);
+  const failedNames = cleanOutput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.endsWith("FAILED"))
+    .map((line) =>
+      line
+        .replace(/\s+FAILED$/, "")
+        .replace(/^test\s+/, "")
+        .replace(/\s+\.\.\.$/, "")
+        .trim(),
+    );
+  const failuresBlock = cleanOutput.match(
+    /\nfailures:\n\n([\s\S]*?)\n\ntest result:/,
+  );
+  const listed = failuresBlock
+    ? failuresBlock[1]
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("----"))
+    : [];
+  const names = [...new Set([...failedNames, ...listed])].filter(Boolean);
+  if (names.length === 0) {
+    printTail(output);
+    return;
+  }
+  console.log(`${colors.red}Failed tests (${names.length}):${colors.reset}`);
+  for (const name of names) {
+    console.log(`${colors.red}  - ${name}${colors.reset}`);
+  }
 }
 
 function parseTest(output, results) {
@@ -104,7 +138,11 @@ function runCommand(name, command, args, parser, results, options = {}) {
       ? `signal ${run.signal || "unknown"}`
       : `exit code ${run.status}`;
   console.log(`${colors.red}✗ ${name} failed (${reason})${colors.reset}`);
-  printTail(output);
+  if (name === "rust") {
+    printRustFailures(output);
+  } else {
+    printTail(output);
+  }
   console.log("");
   return false;
 }
@@ -201,12 +239,20 @@ function main() {
 
   const exitCode = printSummary(results);
   if (exitCode === 0) {
-    if (recordSuccessfulQualityGate(resolve(__dirname, ".."))) {
+    const root = resolve(__dirname, "..");
+    if (recordSuccessfulQualityGate(root)) {
       console.log("Release quality-gate proof recorded for this clean commit.");
     } else {
+      const blockers = blockingReleaseWorkingTreePaths(root);
       console.log(
         "Release quality-gate proof not recorded because the working tree is dirty.",
       );
+      if (blockers.length > 0) {
+        console.log("Blocking paths:");
+        for (const p of blockers) {
+          console.log(`  - ${p}`);
+        }
+      }
       console.log(
         "Commit or stash changes (only version/metainfo lockfile drift from bootstrap is allowed).",
       );
