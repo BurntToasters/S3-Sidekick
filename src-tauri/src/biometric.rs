@@ -722,7 +722,11 @@ mod platform {
 
     const TARGET: &str = "run.rosie.s3-sidekick/biometric-key";
     const WINDOWS_HELLO_RETRY_HRESULT: i32 = 0x80098044u32 as i32;
+    /// `ERROR_NOT_FOUND` (1168) as an HRESULT — no matching generic credential.
     const WINDOWS_HELLO_NOT_FOUND_HRESULT: i32 = 0x80070490u32 as i32;
+    /// `ERROR_NO_SUCH_LOGON_SESSION` (1312). Common on headless/RDP/test VMs
+    /// where Credential Manager has no usable interactive logon session.
+    const WINDOWS_NO_SUCH_LOGON_SESSION_HRESULT: i32 = 0x80070520u32 as i32;
     const WINDOWS_CREDREAD_RETRY_DELAY_MS: u64 = 500;
     const WINDOWS_HELLO_VERIFY_RETRY_DELAY_MS: u64 = 800;
     const WINDOWS_HELLO_VERIFY_MAX_RETRIES: usize = 2;
@@ -901,7 +905,12 @@ mod platform {
         }
     }
 
-    /// Whether the credential still exists. Does not prompt the user.
+    /// Whether the credential still exists and is readable. Does not prompt.
+    ///
+    /// Returns `Ok(false)` both when the item is missing and when the credential
+    /// store is unreachable for this process (no logon session). Presence checks
+    /// after delete only need to fail closed when the key is *still readable*;
+    /// an inaccessible store cannot hand the key to the app either.
     pub fn has_stored_key() -> Result<bool, String> {
         let target_wide = to_wide(TARGET);
         unsafe {
@@ -918,7 +927,12 @@ mod platform {
                     }
                     Ok(true)
                 }
-                Err(err) if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT => Ok(false),
+                Err(err)
+                    if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT
+                        || err.code().0 == WINDOWS_NO_SUCH_LOGON_SESSION_HRESULT =>
+                {
+                    Ok(false)
+                }
                 Err(err) => Err(format!(
                     "Failed to verify biometric credential removal: {}",
                     err

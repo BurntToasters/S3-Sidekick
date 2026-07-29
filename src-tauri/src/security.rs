@@ -2072,6 +2072,10 @@ mod tests {
             std::env::set_var("LOCALAPPDATA", &localappdata);
             std::env::set_var("XDG_DATA_HOME", &xdg_data_home);
             std::env::set_var("S3_SIDEKICK_TEST_APP_DATA", &test_app_data);
+            // Process-global latch: one failed biometric/migration cleanup must
+            // not poison every later test in the same cargo-test process.
+            set_migration_recovery_failure(None);
+            let _ = set_unlocked_key(None, 0);
 
             Self {
                 _lock: lock,
@@ -2087,6 +2091,8 @@ mod tests {
 
     impl Drop for TestEnvGuard {
         fn drop(&mut self) {
+            set_migration_recovery_failure(None);
+            let _ = set_unlocked_key(None, 0);
             restore_env_var("HOME", &self.home);
             restore_env_var("APPDATA", &self.appdata);
             restore_env_var("LOCALAPPDATA", &self.localappdata);
