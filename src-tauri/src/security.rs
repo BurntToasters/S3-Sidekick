@@ -1997,7 +1997,6 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};
-    use tauri::Manager;
 
     fn unique_test_suffix(label: &str) -> String {
         let nanos = std::time::SystemTime::now()
