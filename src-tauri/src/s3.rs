@@ -2618,8 +2618,12 @@ fn finalize_download_file(temp_path: &Path, destination_path: &Path) -> Result<(
     // Publish only bytes that have reached stable storage. The parallel workers
     // sync each completed range before checkpointing, and this final whole-file
     // sync closes the window between the last checkpoint and the atomic rename.
+    //
+    // Windows FlushFileBuffers requires GENERIC_WRITE; a read-only handle
+    // returns ERROR_ACCESS_DENIED, so open with write as well.
     std::fs::OpenOptions::new()
         .read(true)
+        .write(true)
         .open(temp_path)
         .and_then(|file| file.sync_all())
         .map_err(|e| format!("Failed to sync completed download: {}", e))?;

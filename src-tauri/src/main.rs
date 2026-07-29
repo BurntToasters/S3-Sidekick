@@ -46,91 +46,76 @@ pub(crate) fn lock_storage_ops() -> Result<std::sync::MutexGuard<'static, ()>, S
         .map_err(|err| err.to_string())
 }
 
-fn settings_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+/// Resolve the app data directory, honouring the test-only override.
+///
+/// On Windows, Tauri uses the Known Folder API for `app_data_dir()`, which
+/// ignores `APPDATA`. Tests therefore set `S3_SIDEKICK_TEST_APP_DATA` so they
+/// never touch the real roaming profile (and so `tauri::test::mock_app`, which
+/// can resolve to the roaming root itself, cannot pollute it).
+pub(crate) fn resolved_app_data_dir<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
+    #[cfg(test)]
+    if let Some(dir) = std::env::var_os("S3_SIDEKICK_TEST_APP_DATA") {
+        let path = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+        return Ok(path);
+    }
+
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e: tauri::Error| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("settings.json"))
+    Ok(dir)
+}
+
+fn settings_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
+    Ok(resolved_app_data_dir(app)?.join("settings.json"))
 }
 
 fn connection_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e: tauri::Error| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("connection.json"))
+    Ok(resolved_app_data_dir(app)?.join("connection.json"))
 }
 
 fn bookmarks_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e: tauri::Error| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("bookmarks.json"))
+    Ok(resolved_app_data_dir(app)?.join("bookmarks.json"))
 }
 
 fn bookmarks_backup_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e: tauri::Error| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("bookmarks.json.bak"))
+    Ok(resolved_app_data_dir(app)?.join("bookmarks.json.bak"))
 }
 
 fn security_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e: tauri::Error| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("security.json"))
+    Ok(resolved_app_data_dir(app)?.join("security.json"))
 }
 
 pub(crate) fn transfer_manifest_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e: tauri::Error| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("transfer-manifest.json"))
+    Ok(resolved_app_data_dir(app)?.join("transfer-manifest.json"))
 }
 
 pub(crate) fn security_journal_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e: tauri::Error| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("security-migration.journal"))
+    Ok(resolved_app_data_dir(app)?.join("security-migration.journal"))
 }
 
 fn transfer_checkpoint_dir<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e: tauri::Error| e.to_string())?;
-    let checkpoints = dir.join("transfer-checkpoints");
+    let checkpoints = resolved_app_data_dir(app)?.join("transfer-checkpoints");
     std::fs::create_dir_all(&checkpoints).map_err(|e| e.to_string())?;
     Ok(checkpoints)
 }
@@ -846,8 +831,15 @@ pub(crate) fn fsync_parent(path: &std::path::Path) -> Result<(), String> {
         // Windows cannot open a directory as a regular file handle. Syncing the
         // renamed file after the rename flushes the containing volume's
         // metadata for that entry, which is the closest available equivalent.
+        //
+        // FlushFileBuffers requires GENERIC_WRITE; opening read-only fails with
+        // ERROR_ACCESS_DENIED on Windows.
         let _ = parent;
-        match std::fs::OpenOptions::new().read(true).open(path) {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
             Ok(file) => file.sync_all().map_err(|e| e.to_string()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.to_string()),
@@ -933,7 +925,7 @@ fn main() {
                     .map(|path| !path.exists())
                     .unwrap_or(false)
             {
-                if let Ok(dir) = app.path().app_data_dir() {
+                if let Ok(dir) = resolved_app_data_dir(app.handle()) {
                     if let Ok(entries) = std::fs::read_dir(&dir) {
                         for entry in entries.flatten() {
                             if entry.path().extension().and_then(|e| e.to_str()) == Some("tmp") {

@@ -12,7 +12,7 @@ const __dirname = dirname(__filename);
 const packageJsonPath = resolve(__dirname, "..", "package.json");
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 const appVersion = packageJson.version ?? "unknown";
-const scriptVersion = "1.0.0";
+const scriptVersion = "1.1.0";
 
 const colors = {
   reset: "\x1b[0m",
@@ -29,7 +29,7 @@ function createInitialResults() {
     typecheck: { status: "pending" },
     format: { status: "pending" },
     test: { status: "pending", passed: null, failed: null, files: null },
-    rust: { status: "pending" },
+    rust: { status: "pending", passed: null, failed: null },
   };
 }
 
@@ -62,6 +62,17 @@ function parseTest(output, results) {
 
   if (filesMatch) {
     results.test.files = parseInt(filesMatch[1], 10);
+  }
+}
+
+function parseRustTest(output, results) {
+  const cleanOutput = stripAnsi(output);
+  const resultMatch = cleanOutput.match(
+    /test result:\s+(?:ok|FAILED)\.\s+(\d+)\s+passed;\s+(\d+)\s+failed/,
+  );
+  if (resultMatch) {
+    results.rust.passed = parseInt(resultMatch[1], 10);
+    results.rust.failed = parseInt(resultMatch[2], 10);
   }
 }
 
@@ -145,11 +156,15 @@ ${colors.reset}`);
     }${results.test.files ? `, ${results.test.files} files` : ""})`,
   );
   console.log(
-    `${colors.bold}Rust Check:${colors.reset} ${
+    `${colors.bold}Rust tests:${colors.reset}  ${
       results.rust.status === "passed"
         ? `${colors.green}✓ PASS`
         : `${colors.red}✗ FAIL`
-    }${colors.reset}`,
+    }${colors.reset} (${results.rust.passed ?? "n/a"} passed${
+      results.rust.failed && results.rust.failed > 0
+        ? `, ${results.rust.failed} failed`
+        : ""
+    })`,
   );
 
   console.log("");
@@ -178,8 +193,8 @@ function main() {
   runCommand(
     "rust",
     "cargo",
-    ["check", "--manifest-path", "src-tauri/Cargo.toml"],
-    null,
+    ["test", "--manifest-path", "src-tauri/Cargo.toml"],
+    parseRustTest,
     results,
     { timeout: rustTimeoutMs },
   );

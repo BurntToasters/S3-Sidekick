@@ -909,7 +909,7 @@ mod platform {
             match CredReadW(
                 PCWSTR(target_wide.as_ptr()),
                 CRED_TYPE_GENERIC,
-                None,
+                0,
                 &mut pcred,
             ) {
                 Ok(()) => {

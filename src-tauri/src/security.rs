@@ -2038,6 +2038,7 @@ mod tests {
         appdata: Option<OsString>,
         localappdata: Option<OsString>,
         xdg_data_home: Option<OsString>,
+        test_app_data: Option<OsString>,
     }
 
     impl TestEnvGuard {
@@ -2051,21 +2052,27 @@ mod tests {
             let appdata = root.join("appdata");
             let localappdata = root.join("localappdata");
             let xdg_data_home = root.join("xdg-data-home");
+            // Dedicated override: Windows Known Folders ignore APPDATA, and
+            // tauri::test::mock_app can resolve app_data_dir to the roaming root.
+            let test_app_data = root.join("app-data");
 
             std::fs::create_dir_all(&home).unwrap();
             std::fs::create_dir_all(&appdata).unwrap();
             std::fs::create_dir_all(&localappdata).unwrap();
             std::fs::create_dir_all(&xdg_data_home).unwrap();
+            std::fs::create_dir_all(&test_app_data).unwrap();
 
             let prior_home = std::env::var_os("HOME");
             let prior_appdata = std::env::var_os("APPDATA");
             let prior_localappdata = std::env::var_os("LOCALAPPDATA");
             let prior_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+            let prior_test_app_data = std::env::var_os("S3_SIDEKICK_TEST_APP_DATA");
 
             std::env::set_var("HOME", &home);
             std::env::set_var("APPDATA", &appdata);
             std::env::set_var("LOCALAPPDATA", &localappdata);
             std::env::set_var("XDG_DATA_HOME", &xdg_data_home);
+            std::env::set_var("S3_SIDEKICK_TEST_APP_DATA", &test_app_data);
 
             Self {
                 _lock: lock,
@@ -2074,6 +2081,7 @@ mod tests {
                 appdata: prior_appdata,
                 localappdata: prior_localappdata,
                 xdg_data_home: prior_xdg_data_home,
+                test_app_data: prior_test_app_data,
             }
         }
     }
@@ -2084,6 +2092,7 @@ mod tests {
             restore_env_var("APPDATA", &self.appdata);
             restore_env_var("LOCALAPPDATA", &self.localappdata);
             restore_env_var("XDG_DATA_HOME", &self.xdg_data_home);
+            restore_env_var("S3_SIDEKICK_TEST_APP_DATA", &self.test_app_data);
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
@@ -2098,7 +2107,7 @@ mod tests {
 
     impl TestAppDataGuard {
         fn new<R: tauri::Runtime, M: tauri::Manager<R>>(app: &M) -> Self {
-            let path = app.path().app_data_dir().unwrap();
+            let path = crate::resolved_app_data_dir(app).unwrap();
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Self { path }
@@ -3205,7 +3214,9 @@ mod tests {
         initialize_security_inner(&handle, false, None).unwrap();
         let seeded = seed_managed_files(&handle);
 
-        let destination = handle.path().app_data_dir().unwrap().join("download.bin");
+        let destination = crate::resolved_app_data_dir(&handle)
+            .unwrap()
+            .join("download.bin");
         let scratch = crate::download_temp_path(&destination);
         std::fs::write(&scratch, b"partial").unwrap();
         let checkpoint = serde_json::json!({
