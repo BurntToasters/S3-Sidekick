@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { state } from "./state.ts";
 import { showConfirm } from "./dialogs.ts";
 import { logActivity } from "./activity-log.ts";
-import { basename } from "./utils.ts";
+import { basename, friendlyError } from "./utils.ts";
 import type { ConflictPolicy } from "./settings-model.ts";
 import type { DownloadQueueEntry } from "./app-downloads.ts";
 
@@ -49,8 +49,15 @@ export async function resolveDownloadEntriesWithConflicts(
         return await invoke<boolean>("path_exists", {
           path: entry.destination,
         });
-      } catch {
-        return false;
+      } catch (err) {
+        // Fail closed: an unreadable destination must not be taken as "free to
+        // overwrite". Treat it as a conflict so the user is asked.
+        logActivity(
+          `Could not check whether ${entry.destination} exists (${friendlyError(err)}). ` +
+            "Treating it as a conflict.",
+          "warning",
+        );
+        return true;
       }
     }),
   );
@@ -106,11 +113,18 @@ export async function resolveObjectConflict(
   hasBatchRemainder: boolean,
 ): Promise<Exclude<ConflictPolicy, "ask">> {
   const conflictPolicy = state.currentSettings.conflictPolicy;
-  let exists = false;
+  let exists: boolean;
   try {
     exists = await invoke<boolean>("object_exists", { bucket, key });
-  } catch {
-    exists = false;
+  } catch (err) {
+    // Fail closed. A transient error or a denied HeadObject must not be read as
+    // "the object is absent", which would silently authorise an overwrite.
+    logActivity(
+      `Could not check whether ${bucket}/${key} exists (${friendlyError(err)}). ` +
+        "Treating it as a conflict.",
+      "warning",
+    );
+    exists = true;
   }
   if (!exists) return "replace";
   if (conflictPolicy === "replace") return "replace";

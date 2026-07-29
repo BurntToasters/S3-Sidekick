@@ -133,6 +133,16 @@ fn collect_local_files_from_root(
                 continue;
             }
             if !file_type.is_file() {
+                // `file_type` comes from the directory entry, so it does not follow
+                // symlinks: links are neither traversed (no loops, no escaping the
+                // selected root) nor uploaded. Say so, because a folder upload that
+                // silently omits linked files is surprising.
+                if file_type.is_symlink() {
+                    warnings.push(format!(
+                        "Skipping '{}' because it is a symbolic link.",
+                        path.to_string_lossy()
+                    ));
+                }
                 continue;
             }
 

@@ -62,6 +62,10 @@ const mockHideContextMenu = vi.fn();
 
 const mockOpenInfoPanel = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockCloseInfoPanel = vi.fn();
+const mockRequestCloseInfoPanel = vi.fn(async () => {
+  mockCloseInfoPanel();
+  return true;
+});
 const mockSaveInfoPanel = vi.fn<() => Promise<void>>();
 const mockSwitchTab = vi.fn();
 
@@ -70,6 +74,7 @@ const mockClearCompletedTransfers = vi.fn();
 const mockEnqueuePaths = vi.fn();
 const mockSetTransferCompleteHandler = vi.fn();
 const mockInitTransferQueueUI = vi.fn<() => Promise<void>>();
+const mockRecoverPendingTransfers = vi.fn<() => Promise<void>>();
 const mockEnqueueFiles = vi.fn();
 const mockDisposeTransferQueueUI = vi.fn<() => Promise<void>>();
 const mockEnqueueDownloads = vi.fn();
@@ -196,6 +201,7 @@ vi.mock("../browser.ts", () => ({
   handleRowClick: mockHandleRowClick,
   handleSelectAll: mockHandleSelectAll,
   clearSelection: mockClearSelection,
+  setLastClickedKey: vi.fn(),
   updateSelectionUI: mockUpdateSelectionUI,
   getSelectableKeys: mockGetSelectableKeys,
   toggleSort: mockToggleSort,
@@ -238,6 +244,7 @@ vi.mock("../context-menu.ts", () => ({
 vi.mock("../info-panel.ts", () => ({
   openInfoPanel: mockOpenInfoPanel,
   closeInfoPanel: mockCloseInfoPanel,
+  requestCloseInfoPanel: mockRequestCloseInfoPanel,
   saveInfoPanel: mockSaveInfoPanel,
   switchTab: mockSwitchTab,
 }));
@@ -248,6 +255,7 @@ vi.mock("../transfers.ts", () => ({
   enqueuePaths: mockEnqueuePaths,
   setTransferCompleteHandler: mockSetTransferCompleteHandler,
   initTransferQueueUI: mockInitTransferQueueUI,
+  recoverPendingTransfers: mockRecoverPendingTransfers,
   enqueueFiles: mockEnqueueFiles,
   disposeTransferQueueUI: mockDisposeTransferQueueUI,
   enqueueDownloads: mockEnqueueDownloads,
@@ -426,6 +434,11 @@ describe("main integration", () => {
     mockHideContextMenu.mockReset();
     mockOpenInfoPanel.mockReset();
     mockCloseInfoPanel.mockReset();
+    mockRequestCloseInfoPanel.mockReset();
+    mockRequestCloseInfoPanel.mockImplementation(async () => {
+      mockCloseInfoPanel();
+      return true;
+    });
     mockSaveInfoPanel.mockReset();
     mockSwitchTab.mockReset();
     mockToggleTransferQueue.mockReset();
@@ -433,6 +446,7 @@ describe("main integration", () => {
     mockEnqueuePaths.mockReset();
     mockSetTransferCompleteHandler.mockReset();
     mockInitTransferQueueUI.mockReset();
+    mockRecoverPendingTransfers.mockReset();
     mockEnqueueFiles.mockReset();
     mockDisposeTransferQueueUI.mockReset();
     mockEnqueueDownloads.mockReset();
@@ -521,6 +535,7 @@ describe("main integration", () => {
     mockAddBookmark.mockResolvedValue(true);
     mockLoadBookmarks.mockResolvedValue(undefined);
     mockInitTransferQueueUI.mockResolvedValue(undefined);
+    mockRecoverPendingTransfers.mockResolvedValue(undefined);
     mockDisposeTransferQueueUI.mockResolvedValue(undefined);
     mockCanPreview.mockReturnValue(true);
     mockOpenPreview.mockResolvedValue(undefined);
@@ -781,7 +796,7 @@ describe("main integration", () => {
       document.getElementById("preview-overlay") as HTMLDivElement
     ).dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(mockCloseLicensesModal).toHaveBeenCalled();
-    expect(mockCloseInfoPanel).toHaveBeenCalled();
+    expect(mockRequestCloseInfoPanel).toHaveBeenCalled();
     expect(mockClosePreview).toHaveBeenCalled();
   });
 
@@ -2316,7 +2331,7 @@ describe("main integration", () => {
     state.selectedKeys.clear();
     state.selectedKeys.add("prefix:docs/folder/");
     state.selectedKeys.add("prefix:docs/other/");
-    const menuBeforeNoItems = mockShowContextMenu.mock.calls.length;
+    const menuBeforeMultiFolder = mockShowContextMenu.mock.calls.length;
     folderRow.dispatchEvent(
       new MouseEvent("contextmenu", {
         bubbles: true,
@@ -2325,7 +2340,14 @@ describe("main integration", () => {
         clientY: 17,
       }),
     );
-    expect(mockShowContextMenu.mock.calls.length).toBe(menuBeforeNoItems);
+    expect(mockShowContextMenu.mock.calls.length).toBe(
+      menuBeforeMultiFolder + 1,
+    );
+    const multiFolderMenu = mockShowContextMenu.mock.calls.at(-1)?.[2] as
+      { label: string }[] | undefined;
+    expect(
+      multiFolderMenu?.some((item) => item.label.includes("Properties")),
+    ).toBe(true);
 
     tbody.innerHTML = `
       <tr class="object-row" data-key="docs/preview.txt" tabindex="0">
@@ -2878,6 +2900,10 @@ describe("main integration", () => {
       value: 700,
       configurable: true,
     });
+
+    // Startup persistence is unrelated to the resize debounce and can land late
+    // when the suite runs under load. Only saves caused by this resize matter.
+    mockSaveSettings.mockClear();
 
     window.dispatchEvent(new Event("resize"));
     vi.advanceTimersByTime(200);

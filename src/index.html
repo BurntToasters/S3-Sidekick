@@ -371,8 +371,8 @@
                 <button
                   id="btn-inspector"
                   class="btn btn--icon"
-                  title="Inspector"
-                  aria-label="Toggle inspector"
+                  title="Inspector (Ctrl+Shift+I)"
+                  aria-label="Toggle inspector (Ctrl+Shift+I)"
                   aria-pressed="false"
                 >
                   <span class="lucide-icon" data-icon="sidebar"></span>
@@ -522,7 +522,13 @@
                 aria-orientation="vertical"
                 hidden
               ></div>
-              <aside id="inspector-panel" class="inspector-panel" hidden>
+              <aside
+                id="inspector-panel"
+                class="inspector-panel"
+                role="complementary"
+                aria-label="Inspector"
+                hidden
+              >
                 <div class="inspector-panel__header">
                   <span
                     id="inspector-header-title"

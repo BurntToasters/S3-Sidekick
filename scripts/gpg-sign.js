@@ -6,7 +6,11 @@ import crypto from "crypto";
 import { execSync, spawnSync } from "child_process";
 import https from "https";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import { verifyReleaseSession } from "./release-session.js";
+
+// CommonJS so `ensure-draft-release.cjs` can share the exact same titling rules.
+const { formatReleaseTitle } = createRequire(import.meta.url)("./release-title.cjs");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -773,7 +777,7 @@ async function getOrCreateRelease() {
 
   return await ghRequest("POST", `/repos/${REPO_OWNER}/${REPO_NAME}/releases`, {
     tag_name: TAG,
-    name: `S3 Sidekick ${VERSION}`,
+    name: formatReleaseTitle(VERSION),
     draft: true,
     prerelease: VERSION.includes("beta") || VERSION.includes("alpha"),
   });

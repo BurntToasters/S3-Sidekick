@@ -806,4 +806,69 @@ describe("info panel", () => {
     expect(state.statusTimeout).toBeUndefined();
     vi.useRealTimers();
   });
+
+  it("shows folder-only message for a single selected prefix", async () => {
+    renderFixture();
+    const info = await import("../info-panel.ts");
+
+    await info.openInfoPanel(["prefix:docs/"]);
+
+    expect(mockInvoke).not.toHaveBeenCalled();
+    expect(document.getElementById("info-body")?.textContent).toMatch(
+      /folder/i,
+    );
+    expect(
+      (document.getElementById("info-save") as HTMLButtonElement).style.display,
+    ).toBe("none");
+  });
+
+  it("requestCloseInfoPanel closes without prompt when clean", async () => {
+    renderFixture();
+    const dialogs = await import("../dialogs.ts");
+    const confirmSpy = vi.spyOn(dialogs, "showConfirm");
+    const info = await import("../info-panel.ts");
+
+    await info.openInfoPanel(["prefix:docs/"]);
+    const closed = await info.requestCloseInfoPanel();
+
+    expect(closed).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("requestCloseInfoPanel prompts before discarding dirty metadata", async () => {
+    renderFixture();
+    const dialogs = await import("../dialogs.ts");
+    const confirmSpy = vi
+      .spyOn(dialogs, "showConfirm")
+      .mockResolvedValue(false);
+
+    mockInvoke.mockResolvedValueOnce({
+      content_type: "text/plain",
+      content_length: 1,
+      last_modified: "2025-01-01T00:00:00Z",
+      etag: '"x"',
+      storage_class: "STANDARD",
+      cache_control: "",
+      content_disposition: "",
+      content_encoding: "",
+      server_side_encryption: "",
+      metadata: {},
+    });
+
+    const info = await import("../info-panel.ts");
+    await info.openInfoPanel(["dirty.txt"]);
+    info.switchTab("metadata");
+    const valueInput = document.querySelector<HTMLInputElement>(
+      ".metadata-entry__value",
+    );
+    expect(valueInput).toBeTruthy();
+    valueInput!.value = "changed";
+    valueInput!.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const closed = await info.requestCloseInfoPanel();
+    expect(closed).toBe(false);
+    expect(confirmSpy).toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
 });

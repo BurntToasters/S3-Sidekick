@@ -779,6 +779,134 @@ describe("transfers queue UI", () => {
     });
   });
 
+  it("durably saves copy identities before exact source deletion", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    const receipt = {
+      source_key: "source/file.txt",
+      source_etag: '"source-etag"',
+      source_version_id: null,
+      destination_key: "archive/file.txt",
+      destination_etag: '"destination-etag"',
+      destination_version_id: null,
+    };
+
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "object_exists") return false;
+      if (cmd === "copy_object_to") return receipt;
+      if (cmd === "save_transfer_manifest") return undefined;
+      if (cmd === "delete_copied_objects") return 1;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "move",
+        sourceBucket: "source-bucket",
+        sourceKey: receipt.source_key,
+        fileName: "file.txt",
+        destinationBucket: "destination-bucket",
+        destinationKey: receipt.destination_key,
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "delete_copied_objects"),
+      ).toBe(true);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "copy_object_to",
+      expect.objectContaining({ transferId: expect.any(Number) }),
+    );
+    expect(mockInvoke).toHaveBeenCalledWith("delete_copied_objects", {
+      srcBucket: "source-bucket",
+      dstBucket: "destination-bucket",
+      receipts: [receipt],
+      transferId: expect.any(Number),
+    });
+    const markerSaveIndex = mockInvoke.mock.calls.findIndex(
+      ([cmd, payload]) =>
+        cmd === "save_transfer_manifest" &&
+        typeof payload === "object" &&
+        payload !== null &&
+        String((payload as { json?: unknown }).json).includes(
+          '"movePhase":"copied"',
+        ) &&
+        String((payload as { json?: unknown }).json).includes(
+          '"destination_etag":"\\"destination-etag\\""',
+        ),
+    );
+    const deleteIndex = mockInvoke.mock.calls.findIndex(
+      ([cmd]) => cmd === "delete_copied_objects",
+    );
+    expect(markerSaveIndex).toBeGreaterThanOrEqual(0);
+    expect(deleteIndex).toBeGreaterThan(markerSaveIndex);
+  });
+
+  it("refuses source deletion when the durable move marker cannot be saved", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    const receipt = {
+      source_key: "source/file.txt",
+      source_etag: '"source-etag"',
+      source_version_id: null,
+      destination_key: "archive/file.txt",
+      destination_etag: '"destination-etag"',
+      destination_version_id: null,
+    };
+
+    mockInvoke.mockImplementation(async (cmd, payload) => {
+      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "object_exists") return false;
+      if (cmd === "copy_object_to") return receipt;
+      if (
+        cmd === "save_transfer_manifest" &&
+        typeof payload === "object" &&
+        payload !== null &&
+        String((payload as { json?: unknown }).json).includes(
+          '"movePhase":"copied"',
+        )
+      ) {
+        throw new Error("manifest disk full");
+      }
+      if (cmd === "delete_copied_objects") return 1;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "move",
+        sourceBucket: "source-bucket",
+        sourceKey: receipt.source_key,
+        fileName: "file.txt",
+        destinationBucket: "destination-bucket",
+        destinationKey: receipt.destination_key,
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("transfer-list") as HTMLDivElement)
+          .textContent,
+      ).toContain("manifest disk full");
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "delete_copied_objects",
+      expect.anything(),
+    );
+  });
+
   it("handles missing transfer list and safe dispose before initialization", async () => {
     const transfers = await loadTransfersModule();
     await transfers.disposeTransferQueueUI();

@@ -27,7 +27,14 @@
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  min-height: 0;
+  align-self: stretch;
   overflow: hidden;
+}
+
+.inspector-panel[hidden],
+.inspector-resizer[hidden] {
+  display: none !important;
 }
 
 .inspector-panel__header {
@@ -37,6 +44,8 @@
   padding: 8px 10px;
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .inspector-panel__title {
@@ -53,6 +62,7 @@
 .inspector-tabs {
   display: flex;
   gap: 2px;
+  flex-shrink: 0;
 }
 
 .inspector-tab {
@@ -138,7 +148,11 @@
   width: 8px;
   cursor: col-resize;
   flex-shrink: 0;
+  align-self: stretch;
+  min-height: 0;
   position: relative;
+  z-index: 3;
+  touch-action: none;
   background: linear-gradient(
     to right,
     transparent 2px,
@@ -164,6 +178,14 @@
   border: 0;
   background: rgba(0, 0, 0, 0.35);
   z-index: 45;
+  display: none;
+}
+
+.main-layout--inspector-docked .content-main {
+  min-width: 0;
+}
+
+.main-layout--inspector-docked .inspector-preview__title {
   display: none;
 }
 

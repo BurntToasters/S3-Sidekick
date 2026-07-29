@@ -84,6 +84,10 @@
     flex-wrap: wrap;
   }
 
+  .content-body {
+    position: relative;
+  }
+
   .inspector-panel {
     position: absolute;
     right: 0;
@@ -104,6 +108,10 @@
 
   .main-layout.main-layout--inspector-open .inspector-backdrop {
     display: block;
+  }
+
+  .main-layout.main-layout--inspector-open .inspector-backdrop[hidden] {
+    display: none !important;
   }
 
   .inspector-resizer {

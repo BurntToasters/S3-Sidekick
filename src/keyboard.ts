@@ -3,7 +3,7 @@ import { isEditableElement } from "./utils.ts";
 import { hideContextMenu } from "./context-menu.ts";
 import { isDialogActive } from "./dialogs.ts";
 import { closePreview } from "./preview.ts";
-import { closeInfoPanel } from "./info-panel.ts";
+import { requestCloseInfoPanel } from "./info-panel.ts";
 import { closeLicensesModal } from "./licenses.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
 import { closeSettingsModal } from "./settings.ts";
@@ -15,6 +15,11 @@ import {
   getSelectableKeys,
   updateSelectionUI,
 } from "./browser.ts";
+import {
+  isInspectorOpen,
+  requestCloseInspector,
+  toggleInspector,
+} from "./inspector.ts";
 
 export interface KeyboardHandlers {
   setSidebarOpen: (open: boolean) => void;
@@ -45,8 +50,13 @@ function isSupportOverlayVisible(): boolean {
   return !!overlay && !overlay.hasAttribute("hidden");
 }
 
-export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
-  document.addEventListener("keydown", (e) => {
+function isSetupWizardVisible(): boolean {
+  const overlay = document.getElementById("setup-wizard-overlay");
+  return !!overlay && !overlay.hasAttribute("hidden");
+}
+
+export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
+  const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Escape") {
       hideContextMenu();
 
@@ -74,7 +84,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
 
       const infoOverlay = document.getElementById("info-overlay");
       if (infoOverlay?.classList.contains("active")) {
-        closeInfoPanel();
+        void requestCloseInfoPanel();
         return;
       }
 
@@ -90,6 +100,13 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
         return;
       }
 
+      const settingsOverlay = document.getElementById("settings-overlay");
+      if (settingsOverlay?.classList.contains("active")) {
+        e.preventDefault();
+        void closeSettingsModal(false);
+        return;
+      }
+
       if (isDrawerOpen()) {
         closeDrawer();
         return;
@@ -101,14 +118,27 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
         return;
       }
 
-      const overlay = document.getElementById("settings-overlay");
-      if (overlay?.classList.contains("active")) {
-        void closeSettingsModal(false);
+      if (isInspectorOpen()) {
+        e.preventDefault();
+        const previewBody = document.getElementById("inspector-preview-body");
+        const usingDockedPreview =
+          document.documentElement.dataset.inspectorOpen === "1" &&
+          previewBody &&
+          previewBody.childElementCount > 0;
+        if (usingDockedPreview) {
+          closePreview();
+          return;
+        }
+        void requestCloseInspector();
+        return;
       }
     }
 
     const inInput = isEditableElement(document.activeElement);
-    const modalOpen = isModalLayerActive() || isSupportOverlayVisible();
+    const modalOpen =
+      isModalLayerActive() ||
+      isSupportOverlayVisible() ||
+      isSetupWizardVisible();
     const accel = hasAccelModifier(e);
     const key = e.key.toLowerCase();
 
@@ -186,6 +216,12 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
         void handlers.handleCreateFolder();
       }
 
+      if (key === "i" && e.shiftKey && !inInput && state.connected) {
+        e.preventDefault();
+        toggleInspector();
+        return;
+      }
+
       if (key === "f") {
         e.preventDefault();
         const filterEl = document.getElementById(
@@ -197,5 +233,8 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
         }
       }
     }
-  });
+  };
+
+  document.addEventListener("keydown", onKeyDown);
+  return () => document.removeEventListener("keydown", onKeyDown);
 }

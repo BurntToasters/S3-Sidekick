@@ -6,8 +6,10 @@ import {
   formatDate,
   basename,
   getIconHtml,
+  friendlyError,
 } from "./utils.ts";
 import { state } from "./state.ts";
+import { showConfirm } from "./dialogs.ts";
 import {
   getInfoTitleEl,
   getInfoBodyEl,
@@ -16,10 +18,6 @@ import {
   clearInfoOverlayActive,
   shouldUseInspectorMount,
 } from "./inspector-mount.ts";
-import {
-  focusInspectorPropertiesPane,
-  ensureInspectorOpenForPane,
-} from "./inspector.ts";
 
 interface HeadObjectResponse {
   content_type: string;
@@ -145,9 +143,15 @@ function resetEditorState(): void {
 }
 
 export async function openInfoPanel(keys: string[]): Promise<void> {
+  const {
+    ensureInspectorOpenForPane,
+    focusInspectorPropertiesPane,
+    markInspectorHasContent,
+  } = await import("./inspector.ts");
   ensureInspectorOpenForPane("properties");
   if (shouldUseInspectorMount()) {
     focusInspectorPropertiesPane();
+    markInspectorHasContent();
   }
 
   const title = getInfoTitleEl();
@@ -186,6 +190,25 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   }
 
   batchKeys = [];
+
+  if (keys.length === 1 && keys[0].startsWith("prefix:")) {
+    panelRequestToken += 1;
+    currentKey = "";
+    headData = null;
+    aclData = null;
+    metadataRows = [];
+    resetEditorState();
+    const folderPrefix = keys[0].slice("prefix:".length);
+    title.textContent = basename(folderPrefix) || folderPrefix;
+    setInfoOverlayActive(true);
+    saveBtn.style.display = "none";
+    setTabsVisible(false);
+    getInfoBodyEl().innerHTML =
+      `<div class="metadata-batch-info">` +
+      `<p>Folder selected. Properties editing applies to files only.</p>` +
+      `</div>`;
+    return;
+  }
 
   const requestToken = ++panelRequestToken;
   currentKey = keys[0];
@@ -227,19 +250,28 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     if (requestToken !== panelRequestToken || currentKey !== selectedKey) {
       return;
     }
-    body.innerHTML = `<div class="metadata-loading">Failed to load: ${escapeHtml(String(err))}</div>`;
+    body.innerHTML = `<div class="metadata-loading">Failed to load: ${escapeHtml(friendlyError(err))}</div>`;
   }
 }
 
+function infoTabRoot(): ParentNode | null {
+  if (shouldUseInspectorMount()) {
+    return document.getElementById("inspector-pane-info");
+  }
+  return document.getElementById("info-overlay");
+}
+
 function setTabsVisible(visible: boolean): void {
-  const tabs = document.querySelectorAll<HTMLElement>(".info-tabs");
-  for (const el of tabs) {
-    el.style.display = visible ? "" : "none";
+  const root = infoTabRoot();
+  const tabs = root?.querySelector<HTMLElement>(".info-tabs");
+  if (tabs) {
+    tabs.style.display = visible ? "" : "none";
   }
 }
 
 function updateTabUI(): void {
-  const tabs = document.querySelectorAll<HTMLElement>(".info-tab");
+  const root = infoTabRoot();
+  const tabs = root?.querySelectorAll<HTMLElement>(".info-tab") ?? [];
   for (const tab of tabs) {
     const isActive = tab.dataset.tab === activeTab;
     tab.classList.toggle("info-tab--active", isActive);
@@ -350,7 +382,7 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
       ) {
         return;
       }
-      body.innerHTML = `<div class="metadata-loading">Failed to load permissions: ${escapeHtml(String(err))}</div>`;
+      body.innerHTML = `<div class="metadata-loading">Failed to load permissions: ${escapeHtml(friendlyError(err))}</div>`;
       return;
     }
   }
@@ -599,7 +631,26 @@ function infoRow(label: string, value: string, mono = false): string {
 }
 
 function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return friendlyError(err);
+}
+
+export function hasUnsavedInfoChanges(): boolean {
+  return metadataDirty || aclDirty;
+}
+
+export async function confirmDiscardInfoProperties(): Promise<boolean> {
+  if (!hasUnsavedInfoChanges()) return true;
+  return showConfirm("Discard changes?", "You have unsaved property changes.", {
+    okLabel: "Discard",
+    okDanger: true,
+    cancelLabel: "Keep editing",
+  });
+}
+
+export async function requestCloseInfoPanel(): Promise<boolean> {
+  if (!(await confirmDiscardInfoProperties())) return false;
+  closeInfoPanel();
+  return true;
 }
 
 function collectSingleMetadata(): {
@@ -838,17 +889,21 @@ async function saveBatchChanges(): Promise<void> {
 export function closeInfoPanel(): void {
   panelRequestToken += 1;
   clearInfoOverlayActive();
-  getInfoBodyEl().innerHTML = "";
+  for (const id of ["inspector-info-body", "info-body"]) {
+    document.getElementById(id)?.replaceChildren();
+  }
   headData = null;
   aclData = null;
   metadataRows = [];
   currentKey = "";
   batchKeys = [];
   resetEditorState();
-  const saveBtn = getInfoSaveBtn();
-  if (saveBtn) {
-    saveBtn.disabled = false;
-    saveBtn.textContent = "Save";
+  for (const id of ["inspector-info-save", "info-save"]) {
+    const saveBtn = document.getElementById(id) as HTMLButtonElement | null;
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save";
+    }
   }
 }
 

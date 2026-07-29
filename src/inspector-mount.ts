@@ -2,7 +2,8 @@ import { $ } from "./utils.ts";
 
 export function shouldUseInspectorMount(): boolean {
   const panel = document.getElementById("inspector-panel");
-  return !!panel && !panel.hidden;
+  if (!panel || panel.hidden) return false;
+  return document.documentElement.dataset.inspectorOpen === "1";
 }
 
 export function getPreviewTitleEl(): HTMLElement {
@@ -19,13 +20,14 @@ export function getPreviewBodyEl(): HTMLElement {
 
 export function showPreviewOverlay(active: boolean): void {
   if (shouldUseInspectorMount()) return;
-  $("preview-overlay").classList.toggle("active", active);
+  document
+    .getElementById("preview-overlay")
+    ?.classList.toggle("active", active);
 }
 
 export function hidePreviewOverlay(): void {
-  if (!shouldUseInspectorMount()) {
-    $("preview-overlay").classList.remove("active");
-  }
+  if (shouldUseInspectorMount()) return;
+  document.getElementById("preview-overlay")?.classList.remove("active");
 }
 
 export function getInfoTitleEl(): HTMLElement {
@@ -48,11 +50,10 @@ export function getInfoSaveBtn(): HTMLButtonElement {
 
 export function setInfoOverlayActive(active: boolean): void {
   if (shouldUseInspectorMount()) return;
-  $("info-overlay").classList.toggle("active", active);
+  document.getElementById("info-overlay")?.classList.toggle("active", active);
 }
 
 export function clearInfoOverlayActive(): void {
-  if (!shouldUseInspectorMount()) {
-    $("info-overlay").classList.remove("active");
-  }
+  if (shouldUseInspectorMount()) return;
+  document.getElementById("info-overlay")?.classList.remove("active");
 }

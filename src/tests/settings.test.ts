@@ -372,6 +372,36 @@ describe("settings module", () => {
     });
   });
 
+  it("factory reset gets final consent before one backend transaction", async () => {
+    const settings = await import("../settings.ts");
+    localStorage.setItem("s3-sidekick.transfer-manifest.v1", "plaintext");
+
+    mockShowConfirm
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    await settings.resetSettings();
+    expect(mockInvoke).not.toHaveBeenCalled();
+    expect(localStorage.getItem("s3-sidekick.transfer-manifest.v1")).toBe(
+      "plaintext",
+    );
+
+    mockShowConfirm
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
+    mockInvoke.mockResolvedValue(undefined);
+    mockRelaunch.mockResolvedValue(undefined);
+    await settings.resetSettings();
+
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("factory_reset", {
+      settingsJson: expect.stringContaining('"theme": "system"'),
+    });
+    expect(localStorage.length).toBe(0);
+    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+  });
+
   it("reverts in-memory settings when close modal is cancelled", async () => {
     document.body.innerHTML = `<div id="settings-overlay" class="modal-overlay active"></div>`;
     const settings = await import("../settings.ts");
