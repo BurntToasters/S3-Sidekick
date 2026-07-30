@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:cov:watch": "vitest --coverage",
-    "test:all": "node scripts/test-all.js && npm run test:release-assets && npm run icons:check",
+    "test:all": "node scripts/test-all.js && npm run test:release-assets && npm run icons:check && node scripts/finalize-quality-gate.js",
     "test:release-assets": "node --test scripts/post-release-assets.test.js scripts/release-session.test.js scripts/release-title.test.cjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",

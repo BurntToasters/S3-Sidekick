@@ -23,6 +23,10 @@ test("isAcceptableReleaseWorkingTree allows bootstrap-only drift", () => {
     isAcceptableReleaseWorkingTree(" M scripts/release-title.test.cjs"),
     true,
   );
+  assert.equal(
+    isAcceptableReleaseWorkingTree(" M package-lock.json"),
+    true,
+  );
   assert.equal(isAcceptableReleaseWorkingTree(" M package.json"), false);
 });
 

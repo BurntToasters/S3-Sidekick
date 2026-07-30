@@ -2,11 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import {
-  blockingReleaseWorkingTreePaths,
-  clearQualityGateProof,
-  recordSuccessfulQualityGate,
-} from "./release-session.js";
+import { clearQualityGateProof } from "./release-session.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -238,26 +234,6 @@ function main() {
   );
 
   const exitCode = printSummary(results);
-  if (exitCode === 0) {
-    const root = resolve(__dirname, "..");
-    if (recordSuccessfulQualityGate(root)) {
-      console.log("Release quality-gate proof recorded for this clean commit.");
-    } else {
-      const blockers = blockingReleaseWorkingTreePaths(root);
-      console.log(
-        "Release quality-gate proof not recorded because the working tree is dirty.",
-      );
-      if (blockers.length > 0) {
-        console.log("Blocking paths:");
-        for (const p of blockers) {
-          console.log(`  - ${p}`);
-        }
-      }
-      console.log(
-        "Commit or stash changes (only version/metainfo lockfile drift from bootstrap is allowed).",
-      );
-    }
-  }
   return exitCode;
 }
 
