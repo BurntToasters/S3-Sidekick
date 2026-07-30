@@ -124,6 +124,7 @@ const RELEASE_BOOTSTRAP_PATHS = new Set([
   "src-tauri/tauri.conf.json",
   "src-tauri/Cargo.toml",
   "src-tauri/Cargo.lock",
+  "scripts/release-title.test.cjs",
 ]);
 
 function parsePorcelainPaths(status) {
