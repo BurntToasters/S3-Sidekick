@@ -1,7 +1,9 @@
-import { basename } from "./utils.ts";
+import { basename, escapeHtml } from "./utils.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
 
 export type InspectorPaneTab = "preview" | "properties";
+
+type InspectorSyncReason = "selection" | "tab";
 
 let inspectorOpen = false;
 let inspectorTab: InspectorPaneTab = "preview";
@@ -61,16 +63,38 @@ export function focusInspectorPropertiesPane(): void {
 export function setInspectorTab(tab: InspectorPaneTab): void {
   if (inspectorTab === tab) {
     syncInspectorPaneVisibility();
+    void syncInspectorFromSelection(undefined, { reason: "tab" });
     return;
   }
   inspectorTab = tab;
   syncInspectorPaneVisibility();
-  void syncInspectorFromSelection();
+  void syncInspectorFromSelection(undefined, { reason: "tab" });
 }
 
 export function markInspectorHasContent(): void {
   inspectorEmptyActive = false;
   syncInspectorPaneVisibility();
+}
+
+function updatePreviewTabAffordance(previewAvailable: boolean): void {
+  const tab = document.querySelector<HTMLElement>(
+    '[data-inspector-tab="preview"]',
+  );
+  if (!tab) return;
+  tab.classList.toggle("inspector-tab--unavailable", !previewAvailable);
+  tab.setAttribute("aria-disabled", String(!previewAvailable));
+  tab.title = previewAvailable
+    ? "Preview"
+    : "Preview is not available for this selection";
+}
+
+function showPreviewUnavailable(message: string): void {
+  markInspectorHasContent();
+  focusInspectorPreviewPane();
+  const body = document.getElementById("inspector-preview-body");
+  if (body) {
+    body.innerHTML = `<p class="inspector-preview-unavailable">${escapeHtml(message)}</p>`;
+  }
 }
 
 function syncInspectorPaneVisibility(): void {
@@ -176,6 +200,7 @@ export function closeInspectorOnMobile(): void {
 
 function showInspectorEmpty(message: string): void {
   inspectorEmptyActive = true;
+  updatePreviewTabAffordance(false);
   const empty = document.getElementById("inspector-empty");
   if (empty) {
     empty.textContent = message;
@@ -183,11 +208,23 @@ function showInspectorEmpty(message: string): void {
   syncInspectorPaneVisibility();
 }
 
+function previewUnavailableMessage(fileKeys: string[]): string {
+  if (fileKeys.length === 1) {
+    return "Preview is not available for this file type.";
+  }
+  if (fileKeys.length === 0) {
+    return "Preview is available for files only.";
+  }
+  return "Preview is available for a single previewable file.";
+}
+
 export async function syncInspectorFromSelection(
   selectedKeys?: Set<string>,
+  options?: { reason?: InspectorSyncReason },
 ): Promise<void> {
   if (!inspectorOpen) return;
 
+  const reason: InspectorSyncReason = options?.reason ?? "selection";
   const syncGen = ++inspectorSyncGeneration;
   const { state } = await import("./state.ts");
   if (syncGen !== inspectorSyncGeneration) return;
@@ -202,8 +239,9 @@ export async function syncInspectorFromSelection(
     return;
   }
 
-  inspectorEmptyActive = false;
-  syncInspectorPaneVisibility();
+  // Selection exists — never leave the global empty placeholder visible while
+  // async preview/properties work loads (or fails mid-flight).
+  markInspectorHasContent();
 
   const headerTitle = document.getElementById("inspector-header-title");
   if (headerTitle) {
@@ -215,25 +253,35 @@ export async function syncInspectorFromSelection(
 
   try {
     const fileKeys = keys.filter((k) => !k.startsWith("prefix:"));
+    const { canPreview, openPreview } = await import("./preview.ts");
+    if (syncGen !== inspectorSyncGeneration) return;
 
-    if (inspectorTab === "preview") {
-      const { canPreview, openPreview } = await import("./preview.ts");
-      if (syncGen !== inspectorSyncGeneration) return;
-      if (fileKeys.length === 1 && canPreview(basename(fileKeys[0]))) {
+    const singlePreviewable =
+      fileKeys.length === 1 && canPreview(basename(fileKeys[0]));
+    updatePreviewTabAffordance(singlePreviewable);
+
+    if (reason === "selection") {
+      // Selection change picks the useful default pane.
+      if (singlePreviewable) {
+        focusInspectorPreviewPane();
         await openPreview(fileKeys[0]);
         return;
       }
-      if (fileKeys.length === 1) {
-        markInspectorHasContent();
-        const body = document.getElementById("inspector-preview-body");
-        if (body) {
-          body.innerHTML =
-            '<p class="inspector-empty">Preview is not available for this file type.</p>';
-        }
-        focusInspectorPreviewPane();
+      focusInspectorPropertiesPane();
+      const { openInfoPanel } = await import("./info-panel.ts");
+      if (syncGen !== inspectorSyncGeneration) return;
+      await openInfoPanel(keys);
+      return;
+    }
+
+    // Explicit tab click: respect the chosen tab.
+    if (inspectorTab === "preview") {
+      if (singlePreviewable) {
+        await openPreview(fileKeys[0]);
         return;
       }
-      focusInspectorPropertiesPane();
+      showPreviewUnavailable(previewUnavailableMessage(fileKeys));
+      return;
     }
 
     if (syncGen !== inspectorSyncGeneration) return;

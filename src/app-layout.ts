@@ -265,8 +265,8 @@ export function handleTabListArrowKey(
   nextTab.focus();
 }
 
-const INSPECTOR_MIN = 260;
-const INSPECTOR_MAX = 480;
+const INSPECTOR_MIN = 280;
+const INSPECTOR_MAX = 560;
 const INSPECTOR_STORAGE_KEY = "s3-sidekick.inspector.width";
 
 function clampInspectorWidth(width: number): number {

@@ -2,9 +2,12 @@
 
 import fs from "fs";
 import path from "path";
+import { createRequire } from "module";
 import { fileURLToPath } from "url";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const require = createRequire(import.meta.url);
+const { formatReleaseTitle } = require("./release-title.cjs");
 const version = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8")).version;
 
 const tauriConf = path.join(root, "src-tauri", "tauri.conf.json");
@@ -52,5 +55,28 @@ if (fs.existsSync(cargoLockPath)) {
     const nextLock = cargoLock.replace(lockPackagePattern, `$1"${version}"`);
     fs.writeFileSync(cargoLockPath, nextLock);
     console.log(`Cargo.lock      → ${version}`);
+  }
+}
+
+// Keep the shipped-version release-title assertion aligned with package.json so
+// `npm run u` / workspace:bootstrap does not leave a stale Beta N expectation.
+const releaseTitleTestPath = path.join(root, "scripts", "release-title.test.cjs");
+if (fs.existsSync(releaseTitleTestPath)) {
+  const releaseTitle = formatReleaseTitle(version);
+  const releaseTitleTest = fs.readFileSync(releaseTitleTestPath, "utf-8");
+  const titleConstantPattern =
+    /^(const EXPECTED_SHIPPED_RELEASE_TITLE = )'[^']*'(;)/m;
+  if (!titleConstantPattern.test(releaseTitleTest)) {
+    throw new Error(
+      "scripts/release-title.test.cjs is missing EXPECTED_SHIPPED_RELEASE_TITLE",
+    );
+  }
+  const nextReleaseTitleTest = releaseTitleTest.replace(
+    titleConstantPattern,
+    `$1'${releaseTitle}'$2`,
+  );
+  if (nextReleaseTitleTest !== releaseTitleTest) {
+    fs.writeFileSync(releaseTitleTestPath, nextReleaseTitleTest);
+    console.log(`release-title.test.cjs → ${releaseTitle}`);
   }
 }

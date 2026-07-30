@@ -63,7 +63,7 @@
   font-size: 11px;
   word-break: break-all;
   color: var(--accent);
-  max-width: 260px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

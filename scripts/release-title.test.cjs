@@ -28,11 +28,15 @@ test('stable and unrecognised versions only lose the v prefix', () => {
   assert.equal(formatReleaseTitle(undefined), '');
 });
 
+// Kept in sync with package.json by `npm run sync-version`
+// (via `npm run u` / workspace:bootstrap). Do not edit by hand.
+const EXPECTED_SHIPPED_RELEASE_TITLE = '0.11.0 Beta 4';
+
 test('the shipped package version produces the expected release title', () => {
   const pkg = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')
   );
-  assert.equal(formatReleaseTitle(pkg.version), '0.11.0 Beta 3');
+  assert.equal(formatReleaseTitle(pkg.version), EXPECTED_SHIPPED_RELEASE_TITLE);
 });
 
 test('both release scripts derive their title from this helper', () => {

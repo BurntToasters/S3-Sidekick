@@ -39,6 +39,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
   padding: 6px 14px;
   background: var(--bg-active);
   border-bottom: 1px solid var(--glass-border);
@@ -64,10 +67,34 @@
 .batch-toolbar__count {
   color: var(--text);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .batch-toolbar__actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
+  justify-content: flex-end;
+  flex: 1;
+}
+
+/* Inspector steals width from content-main — collapse labels, keep icons. */
+@container content-main (max-width: 560px) {
+  .batch-toolbar__actions .btn {
+    padding-inline: 8px;
+  }
+
+  .batch-toolbar__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
 }
