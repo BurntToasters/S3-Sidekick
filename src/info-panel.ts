@@ -135,6 +135,16 @@ function deriveAclVisibility(data: AclResponse): ObjectVisibility {
   return hasPublicRead ? "public-read" : "private";
 }
 
+function setInspectorFooterVisible(visible: boolean): void {
+  if (!shouldUseInspectorMount()) return;
+  const footer = document
+    .getElementById("inspector-info-save")
+    ?.closest(".inspector-panel__footer");
+  if (footer instanceof HTMLElement) {
+    footer.hidden = !visible;
+  }
+}
+
 function resetEditorState(): void {
   metadataDirty = false;
   aclDirty = false;
@@ -171,6 +181,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
       title.textContent = `${keys.length} items selected`;
       setInfoOverlayActive(true);
       saveBtn.style.display = "none";
+      setInspectorFooterVisible(false);
       setTabsVisible(false);
       const body = getInfoBodyEl();
       body.innerHTML =
@@ -183,6 +194,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     title.textContent = `${batchKeys.length} items selected`;
     setInfoOverlayActive(true);
     saveBtn.style.display = "";
+    setInspectorFooterVisible(true);
     saveBtn.disabled = false;
     setTabsVisible(false);
     renderBatchView(getInfoBodyEl(), batchKeys);
@@ -202,6 +214,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     title.textContent = basename(folderPrefix) || folderPrefix;
     setInfoOverlayActive(true);
     saveBtn.style.display = "none";
+    setInspectorFooterVisible(false);
     setTabsVisible(false);
     getInfoBodyEl().innerHTML =
       `<div class="metadata-batch-info">` +
@@ -216,6 +229,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   title.textContent = basename(currentKey);
   setInfoOverlayActive(true);
   saveBtn.style.display = "";
+  setInspectorFooterVisible(true);
   saveBtn.disabled = true;
   setTabsVisible(true);
   activeTab = "general";

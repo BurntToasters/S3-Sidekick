@@ -8,7 +8,11 @@ import {
   friendlyError,
 } from "./utils.ts";
 import { refreshObjects } from "./connection.ts";
-import { closeInspectorOnMobile } from "./inspector.ts";
+import {
+  closeInspectorOnMobile,
+  markInspectorHasContent,
+  syncInspectorFromSelection,
+} from "./inspector.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
 
 function hasAccelModifier(e: MouseEvent): boolean {
@@ -176,9 +180,10 @@ export function updateSelectionUI(): void {
         : "Select files to download";
   }
 
-  void import("./inspector.ts").then((inspector) => {
-    void inspector.syncInspectorFromSelection(state.selectedKeys);
-  });
+  if (state.selectedKeys.size > 0) {
+    markInspectorHasContent();
+  }
+  void syncInspectorFromSelection(state.selectedKeys);
 }
 
 let lastClickedKey: string | null = null;
