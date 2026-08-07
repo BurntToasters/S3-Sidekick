@@ -9,10 +9,15 @@ import { isDirectExecution as isModuleDirectExecution } from "./direct-execution
 import {
   CLI_FLAG,
   copyReleaseAssets,
+  isBetaReleaseVersion,
   isDirectExecution,
   pathsEqual,
   run,
+  shouldSkipBetaMirror,
 } from "./post-release-assets.js";
+
+const STABLE_VERSION = "0.11.0";
+const BETA_VERSION = "0.11.0-beta.4";
 
 test("module entrypoint comparison tolerates Windows path casing", () => {
   const scriptUrl = new URL("./post-release-assets.js", import.meta.url);
@@ -72,11 +77,19 @@ test("cleans, mirrors, and verifies release entries", () => {
     "installer",
   );
 
-  assert.deepEqual(run({ releaseDir, env: { AFTER_PACK_LOC: destination } }), {
-    mirrored: true,
-    destination,
-    copiedEntries: 1,
-  });
+  assert.deepEqual(
+    run({
+      releaseDir,
+      env: { AFTER_PACK_LOC: destination },
+      version: STABLE_VERSION,
+    }),
+    {
+      mirrored: true,
+      destination,
+      copiedEntries: 1,
+      skippedBetaMirror: false,
+    },
+  );
   assert.equal(fs.existsSync(path.join(releaseDir, "nsis")), false);
   assert.equal(
     fs.readFileSync(
@@ -84,6 +97,64 @@ test("cleans, mirrors, and verifies release entries", () => {
       "utf8",
     ),
     "installer",
+  );
+});
+
+test("skips AFTER_PACK_LOC mirroring for beta versions unless overridden", () => {
+  const root = makeTemporaryDirectory();
+  const releaseDir = path.join(root, "release");
+  const destination = path.join(root, "mirror");
+  fs.mkdirSync(path.join(releaseDir, "nsis"), { recursive: true });
+  fs.writeFileSync(path.join(releaseDir, "nsis", "build-only.exe"), "build");
+  fs.writeFileSync(
+    path.join(releaseDir, "S3-Sidekick-Windows-x64.exe"),
+    "installer",
+  );
+
+  assert.equal(isBetaReleaseVersion(BETA_VERSION), true);
+  assert.equal(shouldSkipBetaMirror({}, BETA_VERSION), true);
+  assert.equal(
+    shouldSkipBetaMirror({ OVERRIDE_BETA_MIRROR_SKIP: "1" }, BETA_VERSION),
+    false,
+  );
+
+  assert.deepEqual(
+    run({
+      releaseDir,
+      env: { AFTER_PACK_LOC: destination },
+      version: BETA_VERSION,
+    }),
+    {
+      mirrored: false,
+      destination: null,
+      skippedBetaMirror: true,
+    },
+  );
+  assert.equal(fs.existsSync(path.join(releaseDir, "nsis")), false);
+  assert.equal(
+    fs.existsSync(path.join(destination, "S3-Sidekick-Windows-x64.exe")),
+    false,
+  );
+
+  fs.writeFileSync(
+    path.join(releaseDir, "S3-Sidekick-Windows-x64.exe"),
+    "installer",
+  );
+  assert.deepEqual(
+    run({
+      releaseDir,
+      env: {
+        AFTER_PACK_LOC: destination,
+        OVERRIDE_BETA_MIRROR_SKIP: "1",
+      },
+      version: BETA_VERSION,
+    }),
+    {
+      mirrored: true,
+      destination,
+      copiedEntries: 1,
+      skippedBetaMirror: false,
+    },
   );
 });
 
