@@ -53,7 +53,7 @@ const targetReleaseDir = path.join(
 const tauriCli = fileURLToPath(
   new URL("../node_modules/@tauri-apps/cli/tauri.js", import.meta.url),
 );
-execFileSync(process.execPath, [tauriCli, "build", ...args], {
+execFileSync(process.execPath, [tauriCli, "build", ...args, "--", "--locked"], {
   stdio: "inherit",
   env: process.env,
 });
