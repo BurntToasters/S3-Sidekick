@@ -33,8 +33,10 @@ function run({ now = new Date() } = {}) {
   } catch (error) {
     throw new Error(
       `Failed to parse package.json: ${
-        error && typeof error === "object" && "message" in error ? String(error.message) : String(error)
-      }`
+        error && typeof error === "object" && "message" in error
+          ? String(error.message)
+          : String(error)
+      }`,
     );
   }
 
@@ -61,9 +63,11 @@ function run({ now = new Date() } = {}) {
     throw new Error("Could not locate releases section");
   }
 
-  const releaseTagRegex = /<release\b[^>]*\/>|<release\b[^>]*>[\s\S]*?<\/release>/g;
+  const releaseTagRegex =
+    /<release\b[^>]*\/>|<release\b[^>]*>[\s\S]*?<\/release>/g;
   const releaseVersionRegex = /version="([^"]+)"/;
-  const existingReleaseTags = releasesSectionMatch[0].match(releaseTagRegex) || [];
+  const existingReleaseTags =
+    releasesSectionMatch[0].match(releaseTagRegex) || [];
 
   const rebuiltEntries = [];
   let replacedCurrentVersion = false;
@@ -105,13 +109,17 @@ if (isDirectExecution(import.meta.url)) {
   try {
     const result = run();
     if (result.updated) {
-      console.log(`Updated AppStream release to ${result.version} (${result.date})`);
+      console.log(
+        `Updated AppStream release to ${result.version} (${result.date})`,
+      );
     } else {
       console.log("AppStream metadata already up to date");
     }
   } catch (error) {
     const message =
-      error && typeof error === "object" && "message" in error ? String(error.message) : String(error);
+      error && typeof error === "object" && "message" in error
+        ? String(error.message)
+        : String(error);
     console.error(`Failed to update AppStream metadata: ${message}`);
     process.exit(1);
   }

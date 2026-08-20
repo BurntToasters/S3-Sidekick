@@ -208,11 +208,9 @@ function verifyQualityGate(root = defaultRoot, options) {
 function writeReleaseSession(session, root = defaultRoot) {
   const sessionPath = path.join(root, RELEASE_SESSION_RELATIVE_PATH);
   fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
-  fs.writeFileSync(
-    sessionPath,
-    `${JSON.stringify(session, null, 2)}\n`,
-    { mode: 0o600 },
-  );
+  fs.writeFileSync(sessionPath, `${JSON.stringify(session, null, 2)}\n`, {
+    mode: 0o600,
+  });
   return session;
 }
 

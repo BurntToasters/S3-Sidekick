@@ -10,12 +10,16 @@ import { createRequire } from "module";
 import { verifyReleaseSession } from "./release-session.js";
 
 // CommonJS so `ensure-draft-release.cjs` can share the exact same titling rules.
-const { formatReleaseTitle } = createRequire(import.meta.url)("./release-title.cjs");
+const { formatReleaseTitle } = createRequire(import.meta.url)(
+  "./release-title.cjs",
+);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const releaseDir = path.join(root, "release");
-const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8"));
+const pkg = JSON.parse(
+  fs.readFileSync(path.join(root, "package.json"), "utf-8"),
+);
 
 const VERSION = pkg.version;
 const TAG = `v${VERSION}`;
@@ -28,12 +32,14 @@ const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
 const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
 const TAG_DOWNLOAD_BASE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${encodeURIComponent(TAG)}`;
 const RELEASE_DOWNLOAD_BASE_URL = (
-  process.env.RELEASE_DOWNLOAD_BASE_URL ||
-  TAG_DOWNLOAD_BASE_URL
+  process.env.RELEASE_DOWNLOAD_BASE_URL || TAG_DOWNLOAD_BASE_URL
 ).replace(/\/+$/, "");
 const RELEASE_NOTES = process.env.RELEASE_NOTES || "";
-const RELEASE_PUB_DATE = process.env.RELEASE_PUB_DATE || new Date().toISOString();
-const REQUIRED_LINUX_TARGETS = (process.env.REQUIRED_LINUX_TARGETS || "").trim();
+const RELEASE_PUB_DATE =
+  process.env.RELEASE_PUB_DATE || new Date().toISOString();
+const REQUIRED_LINUX_TARGETS = (
+  process.env.REQUIRED_LINUX_TARGETS || ""
+).trim();
 const REQUIRE_LINUX_AARCH64 = /^(1|true|yes|on)$/i.test(
   String(process.env.REQUIRE_LINUX_AARCH64 || "").trim(),
 );
@@ -49,7 +55,11 @@ const isChecksumTextName = rx(/^SHA256SUMS(?:-[a-z0-9_-]+)?\.txt$/i);
 const ARTIFACT_RULES = [
   rx(/-setup\.exe$/i),
   rx(/^S3-Sidekick-(?:Windows|Linux|macOS)-(?:x64|arm64)\.exe$/i),
-  ext(".msi"), ext(".dmg"), ext(".deb"), ext(".rpm"), ext(".flatpak"),
+  ext(".msi"),
+  ext(".dmg"),
+  ext(".deb"),
+  ext(".rpm"),
+  ext(".flatpak"),
   rx(/\.appimage$/i),
   rx(/\.zip$/i),
   rx(/\.nsis\.zip$/i),
@@ -61,7 +71,12 @@ const ARTIFACT_RULES = [
 ];
 
 const SIGN_RULES = [
-  ext(".exe"), ext(".msi"), ext(".dmg"), ext(".deb"), ext(".rpm"), ext(".flatpak"),
+  ext(".exe"),
+  ext(".msi"),
+  ext(".dmg"),
+  ext(".deb"),
+  ext(".rpm"),
+  ext(".flatpak"),
   rx(/\.appimage$/i),
   rx(/\.zip$/i),
   rx(/\.nsis\.zip$/i),
@@ -77,13 +92,12 @@ const SEARCH_DIRS = [
   path.join(root, "dist"),
 ];
 
-
 function readBuildSession() {
   try {
     return verifyReleaseSession(root);
   } catch (error) {
     throw new Error(
-      `Release build session is missing or invalid. Run npm run release:prepare before building: ${error instanceof Error ? error.message : String(error)}`
+      `Release build session is missing or invalid. Run npm run release:prepare before building: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
@@ -98,7 +112,9 @@ function wasBuiltInSession(filePath, session) {
 
 function artifactMatchesVersion(name) {
   if (isPerTargetManifest(name)) return true;
-  const versions = name.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/g);
+  const versions = name.match(
+    /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/g,
+  );
   if (!versions || versions.length === 0) return true;
   return versions.some((v) => v === VERSION || v.startsWith(VERSION + "-"));
 }
@@ -137,7 +153,9 @@ function clearPreStagedUpdaterManifests() {
     removed.push(name);
   }
   if (removed.length > 0) {
-    console.log(`  ~ Removed ${removed.length} stale updater manifest(s) from release/`);
+    console.log(
+      `  ~ Removed ${removed.length} stale updater manifest(s) from release/`,
+    );
   }
 }
 
@@ -186,7 +204,8 @@ function cleanArtifactBaseName(name) {
   if (/arm64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-arm64.exe";
 
   if (/amd64\.AppImage$/i.test(name)) return "S3-Sidekick-Linux-x64.AppImage";
-  if (/aarch64\.AppImage$/i.test(name)) return "S3-Sidekick-Linux-arm64.AppImage";
+  if (/aarch64\.AppImage$/i.test(name))
+    return "S3-Sidekick-Linux-arm64.AppImage";
 
   if (/amd64\.deb$/i.test(name)) return "S3-Sidekick-Linux-x64.deb";
   if (/aarch64\.deb$/i.test(name)) return "S3-Sidekick-Linux-arm64.deb";
@@ -235,14 +254,14 @@ function inferArchFromName(name) {
 function normalizeArchToken(token) {
   const normalized = token.toLowerCase();
   if (normalized === "aarch64" || normalized === "arm64") return "aarch64";
-  if (normalized === "x86_64" || normalized === "amd64" || normalized === "x64") return "x86_64";
+  if (normalized === "x86_64" || normalized === "amd64" || normalized === "x64")
+    return "x86_64";
   if (normalized === "i686" || normalized === "x86") return "i686";
   return null;
 }
 
 function requiredLinuxTargetKeys(channelVariants) {
-  const tokens = REQUIRED_LINUX_TARGETS
-    .split(/[,\s]+/)
+  const tokens = REQUIRED_LINUX_TARGETS.split(/[,\s]+/)
     .map((token) => token.trim())
     .filter(Boolean);
   if (REQUIRE_LINUX_AARCH64) {
@@ -251,7 +270,9 @@ function requiredLinuxTargetKeys(channelVariants) {
 
   const targetKeys = new Set();
   for (const token of tokens) {
-    const explicitMatch = token.toLowerCase().match(/^(linux(?:-beta)?)-([a-z0-9_]+)$/);
+    const explicitMatch = token
+      .toLowerCase()
+      .match(/^(linux(?:-beta)?)-([a-z0-9_]+)$/);
     if (explicitMatch) {
       const targetName = explicitMatch[1];
       const arch = normalizeArchToken(explicitMatch[2]);
@@ -307,7 +328,9 @@ function assertLinuxX64PackageSet(byName) {
   }
 
   const requiredInstallers = ["appimage", "deb", "rpm"];
-  const missing = requiredInstallers.filter((installer) => !installers.has(installer));
+  const missing = requiredInstallers.filter(
+    (installer) => !installers.has(installer),
+  );
   if (missing.length > 0) {
     throw new Error(
       `Incomplete Linux x86_64 bundle set: missing ${missing.join(", ")} artifact(s). ` +
@@ -380,8 +403,7 @@ function normalizeUpdaterSignature(sigPath) {
     if (decoded.includes("untrusted comment:")) {
       return trimmed;
     }
-  } catch {
-  }
+  } catch {}
 
   if (trimmed.includes("untrusted comment:")) {
     return Buffer.from(trimmed, "utf8").toString("base64");
@@ -407,9 +429,14 @@ function generateUpdaterManifests(files) {
 
   const manifests = new Map();
   const requiredTargetKeys = new Set();
-  const channelVariants = [{ targetSuffix: "", baseUrl: RELEASE_DOWNLOAD_BASE_URL }];
+  const channelVariants = [
+    { targetSuffix: "", baseUrl: RELEASE_DOWNLOAD_BASE_URL },
+  ];
   if (IS_PRERELEASE) {
-    channelVariants.push({ targetSuffix: "-beta", baseUrl: TAG_DOWNLOAD_BASE_URL });
+    channelVariants.push({
+      targetSuffix: "-beta",
+      baseUrl: TAG_DOWNLOAD_BASE_URL,
+    });
   }
   const expectedLinuxTargetKeys = requiredLinuxTargetKeys(channelVariants);
   const generatedLinuxAppImageTargets = new Set();
@@ -420,7 +447,9 @@ function generateUpdaterManifests(files) {
     if (targets.length === 0) continue;
     for (const target of targets) {
       for (const channel of channelVariants) {
-        requiredTargetKeys.add(`${target.os}${channel.targetSuffix}-${target.arch}`);
+        requiredTargetKeys.add(
+          `${target.os}${channel.targetSuffix}-${target.arch}`,
+        );
       }
     }
 
@@ -461,11 +490,13 @@ function generateUpdaterManifests(files) {
           manifest.platforms[targetName] = { url, signature };
         }
 
-        const priority = FALLBACK_INSTALLER_PRIORITY[target.os]?.[target.installer] ?? 0;
+        const priority =
+          FALLBACK_INSTALLER_PRIORITY[target.os]?.[target.installer] ?? 0;
         if (
           priority > 0 &&
           canPopulateFallbackTarget(target) &&
-          (!manifest.platforms[fallbackKey] || priority > manifest.fallbackPriority)
+          (!manifest.platforms[fallbackKey] ||
+            priority > manifest.fallbackPriority)
         ) {
           manifest.platforms[fallbackKey] = { url, signature };
           manifest.fallbackPriority = priority;
@@ -498,7 +529,9 @@ function generateUpdaterManifests(files) {
     }
     const dest = path.join(releaseDir, manifestName);
     fs.writeFileSync(dest, JSON.stringify(output, null, 2) + "\n");
-    console.log(`  + ${manifestName} (${Object.keys(output.platforms).length} platform entries)`);
+    console.log(
+      `  + ${manifestName} (${Object.keys(output.platforms).length} platform entries)`,
+    );
     generated.push(dest);
     const targetKey = parseManifestTargetKey(manifestName);
     if (targetKey) {
@@ -540,7 +573,7 @@ function targetKeysForArtifactName(name) {
 
   const baseName = name.endsWith(".sig") ? name.slice(0, -4) : name;
   return Array.from(
-    new Set(resolveUpdaterTargets(baseName).map((t) => `${t.os}-${t.arch}`))
+    new Set(resolveUpdaterTargets(baseName).map((t) => `${t.os}-${t.arch}`)),
   );
 }
 
@@ -593,11 +626,17 @@ function collectArtifacts() {
   const buildSession = readBuildSession();
 
   const discovered = SEARCH_DIRS.flatMap((d) => walk(d));
-  const found = discovered.filter((filePath) => artifactMatchesVersion(path.basename(filePath)) && wasBuiltInSession(filePath, buildSession));
+  const found = discovered.filter(
+    (filePath) =>
+      artifactMatchesVersion(path.basename(filePath)) &&
+      wasBuiltInSession(filePath, buildSession),
+  );
   if (found.length > 0) {
     clearReleaseStaging();
     if (found.length < discovered.length) {
-      console.log(`  ~ Skipped ${discovered.length - found.length} artifact(s) not matching ${VERSION}`);
+      console.log(
+        `  ~ Skipped ${discovered.length - found.length} artifact(s) not matching ${VERSION}`,
+      );
     }
 
     const selected = pickNewestByBasename(found);
@@ -619,33 +658,43 @@ function collectArtifacts() {
   }
 
   clearPreStagedUpdaterManifests();
-  const staged = fs.readdirSync(releaseDir)
-    .filter((n) =>
-      isArtifact(n) &&
-      !isPerTargetManifest(n) &&
-      artifactMatchesVersion(n) &&
-      !n.endsWith(".asc") &&
-      !isChecksumTextName(n)
+  const staged = fs
+    .readdirSync(releaseDir)
+    .filter(
+      (n) =>
+        isArtifact(n) &&
+        !isPerTargetManifest(n) &&
+        artifactMatchesVersion(n) &&
+        !n.endsWith(".asc") &&
+        !isChecksumTextName(n),
     )
     .map((n) => path.join(releaseDir, n));
 
   const currentStaged = staged.filter((filePath) =>
-    wasBuiltInSession(filePath, buildSession)
+    wasBuiltInSession(filePath, buildSession),
   );
 
   if (currentStaged.length === 0) {
-    console.error("No build artifacts found in:", [...SEARCH_DIRS, releaseDir].join(", "));
+    console.error(
+      "No build artifacts found in:",
+      [...SEARCH_DIRS, releaseDir].join(", "),
+    );
     process.exit(1);
   }
 
-  console.log(`  Found ${currentStaged.length} pre-staged artifact(s) in release/`);
+  console.log(
+    `  Found ${currentStaged.length} pre-staged artifact(s) in release/`,
+  );
   const normalizedStaged = normalizePreStagedArtifacts(currentStaged);
   const manifests = generateUpdaterManifests(normalizedStaged);
   return Array.from(new Set([...normalizedStaged, ...manifests]));
 }
 
 function sha256(filePath) {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  return crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(filePath))
+    .digest("hex");
 }
 
 function generateChecksums(files) {
@@ -655,7 +704,11 @@ function generateChecksums(files) {
   });
 
   const manifestTargetKeys = Array.from(
-    new Set(candidates.map((f) => parseManifestTargetKey(path.basename(f))).filter(Boolean))
+    new Set(
+      candidates
+        .map((f) => parseManifestTargetKey(path.basename(f)))
+        .filter(Boolean),
+    ),
   );
 
   const buckets = new Map();
@@ -709,7 +762,9 @@ function signFile(filePath) {
   const result = spawnSync("gpg", args, { stdio: "pipe" });
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(`GPG signing failed: ${result.stderr?.toString() || "unknown error"}`);
+    throw new Error(
+      `GPG signing failed: ${result.stderr?.toString() || "unknown error"}`,
+    );
   }
   return asc;
 }
@@ -749,7 +804,9 @@ function ghRequest(method, endpoint, body) {
           if (res.statusCode >= 200 && res.statusCode < 300) {
             resolve(json);
           } else {
-            reject(new Error(`GitHub ${res.statusCode}: ${json.message || data}`));
+            reject(
+              new Error(`GitHub ${res.statusCode}: ${json.message || data}`),
+            );
           }
         } catch {
           resolve(data);
@@ -764,16 +821,20 @@ function ghRequest(method, endpoint, body) {
 
 async function getOrCreateRelease() {
   try {
-    return await ghRequest("GET", `/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${TAG}`);
-  } catch {
-  }
+    return await ghRequest(
+      "GET",
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${TAG}`,
+    );
+  } catch {}
 
   try {
-    const releases = await ghRequest("GET", `/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=30`);
+    const releases = await ghRequest(
+      "GET",
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=30`,
+    );
     const draft = releases.find((r) => r.draft && r.tag_name === TAG);
     if (draft) return draft;
-  } catch {
-  }
+  } catch {}
 
   return await ghRequest("POST", `/repos/${REPO_OWNER}/${REPO_NAME}/releases`, {
     tag_name: TAG,
@@ -818,15 +879,16 @@ async function uploadAsset(uploadUrl, filePath) {
               if (parsed && typeof parsed.message === "string") {
                 detail = parsed.message;
               }
-            } catch {
-            }
+            } catch {}
             reject(
               new Error(
                 `Upload ${fileName} was rejected (422): ${detail}. Remove the conflicting release asset and retry.`,
               ),
             );
           } else {
-            reject(new Error(`Upload ${fileName} failed ${res.statusCode}: ${data}`));
+            reject(
+              new Error(`Upload ${fileName} failed ${res.statusCode}: ${data}`),
+            );
           }
         });
       },
@@ -879,7 +941,10 @@ function isBetaManifestName(name) {
   return /^latest-[a-z0-9]+-beta-[a-z0-9_]+\.json$/i.test(name);
 }
 
-async function syncBetaManifestsToLatestStable(uploadedFiles, currentReleaseId) {
+async function syncBetaManifestsToLatestStable(
+  uploadedFiles,
+  currentReleaseId,
+) {
   const betaManifests = uploadedFiles.filter((filePath) =>
     isBetaManifestName(path.basename(filePath)),
   );
@@ -904,7 +969,9 @@ async function syncBetaManifestsToLatestStable(uploadedFiles, currentReleaseId) 
     typeof latestStable.id !== "number" ||
     typeof latestStable.upload_url !== "string"
   ) {
-    console.warn("  ! Latest stable release metadata is invalid; skipping beta manifest sync.");
+    console.warn(
+      "  ! Latest stable release metadata is invalid; skipping beta manifest sync.",
+    );
     return;
   }
   if (latestStable.id === currentReleaseId) {
@@ -913,7 +980,9 @@ async function syncBetaManifestsToLatestStable(uploadedFiles, currentReleaseId) 
 
   for (const filePath of betaManifests) {
     await uploadAssetWithReplace(latestStable, filePath);
-    console.log(`  ~ synced ${path.basename(filePath)} to latest stable release`);
+    console.log(
+      `  ~ synced ${path.basename(filePath)} to latest stable release`,
+    );
   }
 }
 
@@ -922,11 +991,15 @@ async function main() {
 
   console.log("[1/5] Checking GPG...");
   if (!GPG_KEY_ID) {
-    console.error("GPG_KEY_ID is required. Set it in your environment or .env file.");
+    console.error(
+      "GPG_KEY_ID is required. Set it in your environment or .env file.",
+    );
     process.exit(1);
   }
   if (!GPG_PASSPHRASE) {
-    console.error("GPG_PASSPHRASE is required. Set it in your environment or .env file.");
+    console.error(
+      "GPG_PASSPHRASE is required. Set it in your environment or .env file.",
+    );
     process.exit(1);
   }
   try {
@@ -972,7 +1045,9 @@ async function main() {
     await syncBetaManifestsToLatestStable(everything, release.id);
   }
 
-  console.log(`\nDone — ${TAG} uploaded as ${release.draft ? "draft" : "published"}.\n`);
+  console.log(
+    `\nDone — ${TAG} uploaded as ${release.draft ? "draft" : "published"}.\n`,
+  );
 }
 
 main().catch((err) => {

@@ -7,7 +7,9 @@ import {
   recordSuccessfulQualityGate,
 } from "./release-session.js";
 
-export function finalizeQualityGate(root = resolve(dirname(fileURLToPath(import.meta.url)), "..")) {
+export function finalizeQualityGate(
+  root = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+) {
   if (recordSuccessfulQualityGate(root)) {
     return { ok: true };
   }
@@ -40,6 +42,9 @@ function main() {
   process.exit(1);
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+if (
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1])
+) {
   main();
 }

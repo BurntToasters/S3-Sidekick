@@ -25,6 +25,8 @@ function createInitialResults() {
   return {
     typecheck: { status: "pending" },
     format: { status: "pending" },
+    cargoSafeUpdate: { status: "pending" },
+    cargoUpdatePolicy: { status: "pending" },
     test: { status: "pending", passed: null, failed: null, files: null },
     rust: { status: "pending", passed: null, failed: null },
   };
@@ -179,6 +181,20 @@ ${colors.reset}`);
     }${colors.reset}`,
   );
   console.log(
+    `${colors.bold}Cargo Safe Update:${colors.reset} ${
+      results.cargoSafeUpdate?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Cargo Policy:${colors.reset}      ${
+      results.cargoUpdatePolicy?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
     `${colors.bold}Tests:${colors.reset}      ${
       results.test.status === "passed"
         ? `${colors.green}✓ PASS`
@@ -215,19 +231,37 @@ ${colors.reset}`);
   return 1;
 }
 
-function main() {
-  clearQualityGateProof(resolve(__dirname, ".."));
+function main({
+  root = resolve(__dirname, ".."),
+  clearProof = clearQualityGateProof,
+  runner = runCommand,
+} = {}) {
+  clearProof(root);
   const results = createInitialResults();
   const npm = getNpmCommand();
   printBanner();
 
-  runCommand("typecheck", npm, ["run", "typecheck"], null, results);
-  runCommand("format", npm, ["run", "format:check"], null, results);
-  runCommand("test", npm, ["run", "test"], parseTest, results);
-  runCommand(
+  runner("typecheck", npm, ["run", "typecheck"], null, results);
+  runner("format", npm, ["run", "format:check"], null, results);
+  runner(
+    "cargoSafeUpdate",
+    npm,
+    ["run", "test:cargo-safe-update"],
+    null,
+    results,
+  );
+  runner(
+    "cargoUpdatePolicy",
+    npm,
+    ["run", "check:cargo-update-policy"],
+    null,
+    results,
+  );
+  runner("test", npm, ["run", "test"], parseTest, results);
+  runner(
     "rust",
     "cargo",
-     ["test", "--locked", "--manifest-path", "src-tauri/Cargo.toml"],
+    ["test", "--locked", "--manifest-path", "src-tauri/Cargo.toml"],
     parseRustTest,
     results,
     { timeout: rustTimeoutMs },
@@ -237,4 +271,21 @@ function main() {
   return exitCode;
 }
 
-process.exit(main());
+function isDirectExecution() {
+  if (!process.argv[1]) return false;
+  return fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+}
+
+if (isDirectExecution()) {
+  process.exit(main());
+}
+
+export {
+  createInitialResults,
+  getNpmCommand,
+  main,
+  parseRustTest,
+  parseTest,
+  printSummary,
+  runCommand,
+};

@@ -15,18 +15,12 @@ test("isAcceptableReleaseWorkingTree allows bootstrap-only drift", () => {
     isAcceptableReleaseWorkingTree(" M run.rosie.s3-sidekick.metainfo.xml"),
     true,
   );
-  assert.equal(
-    isAcceptableReleaseWorkingTree(" M src-tauri/Cargo.lock"),
-    true,
-  );
+  assert.equal(isAcceptableReleaseWorkingTree(" M src-tauri/Cargo.lock"), true);
   assert.equal(
     isAcceptableReleaseWorkingTree(" M scripts/release-title.test.cjs"),
     true,
   );
-  assert.equal(
-    isAcceptableReleaseWorkingTree(" M package-lock.json"),
-    true,
-  );
+  assert.equal(isAcceptableReleaseWorkingTree(" M package-lock.json"), true);
   assert.equal(isAcceptableReleaseWorkingTree(" M package.json"), false);
 });
 
