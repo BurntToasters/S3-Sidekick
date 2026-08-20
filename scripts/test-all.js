@@ -227,7 +227,7 @@ function main() {
   runCommand(
     "rust",
     "cargo",
-    ["test", "--manifest-path", "src-tauri/Cargo.toml"],
+     ["test", "--locked", "--manifest-path", "src-tauri/Cargo.toml"],
     parseRustTest,
     results,
     { timeout: rustTimeoutMs },
