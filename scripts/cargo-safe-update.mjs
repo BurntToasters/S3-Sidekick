@@ -4,6 +4,7 @@
  * global minimum publish age; then restore direct `cargo update` call sites. */
 
 import { spawnSync } from "node:child_process";
+import console from "node:console";
 import {
   copyFileSync,
   cpSync,
@@ -16,8 +17,11 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+export const CARGO_SAFE_UPDATE_POLICY_VERSION = 2;
+export const CARGO_SAFE_UPDATE_VERSION = 2;
 export const MIN_PUBLISH_AGE_MS = 72 * 60 * 60 * 1000;
 const CRATES_IO_INDEX = "https://index.crates.io";
 const IGNORED_COPY_DIRECTORIES = new Set([
@@ -136,15 +140,6 @@ function run(command, args, { cwd = process.cwd(), env = process.env } = {}) {
   return result;
 }
 
-function manifestArguments(cargoArgs) {
-  for (let index = 0; index < cargoArgs.length; index += 1) {
-    const argument = cargoArgs[index];
-    if (argument === "--manifest-path") return [argument, cargoArgs[index + 1]];
-    if (argument.startsWith("--manifest-path=")) return [argument];
-  }
-  return [];
-}
-
 function cargoMetadata(cargoArgs, cwd, env) {
   const result = run(
     "cargo",
@@ -159,7 +154,18 @@ function cargoMetadata(cargoArgs, cwd, env) {
   return JSON.parse(result.stdout);
 }
 
-function manifestPath(cargoArgs, cwd) {
+function manifestArguments(cargoArgs) {
+  for (let index = 0; index < cargoArgs.length; index += 1) {
+    const argument = cargoArgs[index];
+    if (argument === "--manifest-path") {
+      return [argument, cargoArgs[index + 1]];
+    }
+    if (argument.startsWith("--manifest-path=")) return [argument];
+  }
+  return [];
+}
+
+export function manifestPath(cargoArgs, cwd) {
   for (let index = 0; index < cargoArgs.length; index += 1) {
     const argument = cargoArgs[index];
     if (argument === "--manifest-path") {
@@ -174,18 +180,7 @@ function manifestPath(cargoArgs, cwd) {
   return path.join(cwd, "Cargo.toml");
 }
 
-function nearestLock(manifest) {
-  let directory = path.dirname(manifest);
-  while (true) {
-    const candidate = path.join(directory, "Cargo.lock");
-    if (existsSync(candidate)) return candidate;
-    const parent = path.dirname(directory);
-    if (parent === directory) return null;
-    directory = parent;
-  }
-}
-
-function selectedPackages(metadata) {
+export function selectedPackages(metadata) {
   const packages = Array.isArray(metadata.packages) ? metadata.packages : [];
   const nodes = Array.isArray(metadata.resolve?.nodes)
     ? metadata.resolve.nodes
@@ -208,36 +203,21 @@ function sourceKind(source) {
 }
 
 function gitRevision(source) {
-  return source.split("#", 2)[1]?.split("?", 1)[0]?.trim() ?? "";
+  const hash = source.split("#", 2)[1]?.split("?", 1)[0] ?? "";
+  return hash.trim();
 }
 
 function packageOverride(set, pkg, value) {
   return set.has(`${pkg.name}@${value}`);
 }
 
-function cargoSupportsTemporaryLockfile() {
+export function cargoSupportsTemporaryLockfile() {
   const version = run("cargo", ["--version"]).stdout;
   const match = version.match(/cargo\s+(\d+)\.(\d+)/i);
   if (!match) return false;
   const major = Number(match[1]);
   const minor = Number(match[2]);
   return major > 1 || (major === 1 && minor >= 97);
-}
-
-function findWorkspaceRoot(manifest) {
-  let directory = path.dirname(manifest);
-  while (true) {
-    const cargoToml = path.join(directory, "Cargo.toml");
-    if (
-      existsSync(cargoToml) &&
-      /^\[workspace\]/m.test(readFileSync(cargoToml, "utf8"))
-    ) {
-      return directory;
-    }
-    const parent = path.dirname(directory);
-    if (parent === directory) return path.dirname(manifest);
-    directory = parent;
-  }
 }
 
 function rewriteManifestArguments(cargoArgs, originalCwd, copiedRoot) {
@@ -254,11 +234,36 @@ function rewriteManifestArguments(cargoArgs, originalCwd, copiedRoot) {
         originalCwd,
         rewritten[index].slice("--manifest-path=".length),
       );
-      rewritten[index] =
-        `--manifest-path=${path.join(copiedRoot, path.relative(findWorkspaceRoot(original), original))}`;
+      rewritten[index] = `--manifest-path=${path.join(
+        copiedRoot,
+        path.relative(findWorkspaceRoot(original), original),
+      )}`;
     }
   }
   return rewritten;
+}
+
+export function findWorkspaceRoot(manifest) {
+  let directory = path.dirname(path.resolve(manifest));
+  let outermostWorkspace = null;
+  while (true) {
+    const candidateToml = path.join(directory, "Cargo.toml");
+    if (existsSync(candidateToml)) {
+      try {
+        const contents = readFileSync(candidateToml, "utf8");
+        if (/^\[workspace\]/m.test(contents)) {
+          outermostWorkspace = directory;
+        }
+      } catch {
+        // ignore read errors
+      }
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  if (outermostWorkspace !== null) return outermostWorkspace;
+  return path.dirname(path.resolve(manifest));
 }
 
 function copyWorkspace(sourceRoot, destinationRoot) {
@@ -267,8 +272,8 @@ function copyWorkspace(sourceRoot, destinationRoot) {
     filter(source) {
       const relative = path.relative(sourceRoot, source);
       if (!relative) return true;
-      if (IGNORED_COPY_DIRECTORIES.has(relative.split(path.sep)[0]))
-        return false;
+      const first = relative.split(path.sep)[0];
+      if (IGNORED_COPY_DIRECTORIES.has(first)) return false;
       try {
         return !lstatSync(source).isSymbolicLink();
       } catch {
@@ -285,13 +290,16 @@ export function prepareCandidate({
   baselineMetadata,
   tempRoot,
 }) {
+  const useTemporaryLockfile = cargoSupportsTemporaryLockfile();
   const dryArgs = cargoArgs.filter(
     (argument) => argument !== "--dry" && argument !== "--dry-run",
   );
-  if (cargoSupportsTemporaryLockfile()) {
+  if (useTemporaryLockfile) {
     const candidateLock = path.join(tempRoot, "Cargo.lock");
-    if (realLock && existsSync(realLock)) copyFileSync(realLock, candidateLock);
-    else writeFileSync(candidateLock, "", "utf8");
+    if (realLock && existsSync(realLock)) {
+      copyFileSync(realLock, candidateLock);
+    }
+    // IMPORTANT: if no existing lockfile, leave candidateLock NONEXISTENT!
     return {
       args: dryArgs,
       cwd,
@@ -324,22 +332,24 @@ function registryIndexBase(source) {
 
 async function readRegistryRecord(pkg) {
   const url = `${registryIndexBase(pkg.source)}/${crateIndexPath(pkg.name)}`;
-  const response = await fetch(url, {
+  const response = await globalThis.fetch(url, {
     headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(30_000),
+    signal: globalThis.AbortSignal.timeout(30_000),
   });
   if (!response.ok)
     throw new Error(
       `registry index returned HTTP ${response.status} for ${url}`,
     );
-  for (const line of (await response.text()).split(/\r?\n/u)) {
+  const body = await response.text();
+  for (const line of body.split(/\r?\n/u)) {
     if (!line.trim()) continue;
+    let record;
     try {
-      const record = JSON.parse(line);
-      if (record.vers === pkg.version) return record;
+      record = JSON.parse(line);
     } catch {
-      // Ignore non-record lines and fail closed below if exact version is absent.
+      continue;
     }
+    if (record.vers === pkg.version) return record;
   }
   throw new Error(
     `registry index has no exact ${pkg.name} ${pkg.version} record at ${url}`,
@@ -355,7 +365,8 @@ function formatAge(ageMs) {
   let remaining = Math.abs(ageMs);
   const hours = Math.floor(remaining / (60 * 60 * 1000));
   remaining %= 60 * 60 * 1000;
-  return `${sign}${hours}h ${Math.floor(remaining / (60 * 1000))}m`;
+  const minutes = Math.floor(remaining / (60 * 1000));
+  return `${sign}${hours}h ${minutes}m`;
 }
 
 export async function validateCandidate(
@@ -367,9 +378,9 @@ export async function validateCandidate(
   const baselineKeys = new Set(baseline.map(packageKey));
   const baselineByName = new Map();
   for (const pkg of baseline) {
-    const sources = baselineByName.get(pkg.name) ?? [];
-    sources.push(pkg.source ?? "");
-    baselineByName.set(pkg.name, sources);
+    const values = baselineByName.get(pkg.name) ?? [];
+    values.push(pkg.source ?? "");
+    baselineByName.set(pkg.name, values);
   }
 
   const newlySelected = candidate.filter(
@@ -381,9 +392,11 @@ export async function validateCandidate(
   for (const pkg of newlySelected) {
     const kind = sourceKind(pkg.source);
     if (kind === "path") continue;
+
     if (kind === "git") {
       const revision = gitRevision(pkg.source);
-      if (!packageOverride(overrides.allowGit, pkg, revision)) {
+      const override = packageOverride(overrides.allowGit, pkg, revision);
+      if (!override) {
         const oldSources = baselineByName.get(pkg.name) ?? [];
         violations.push(
           [
@@ -399,16 +412,19 @@ export async function validateCandidate(
       }
       continue;
     }
+
     if (kind !== "registry") {
       violations.push(
         `Blocked dependency with unsupported source: ${pkg.name} ${pkg.version} ${pkg.source ?? "<missing>"}`,
       );
       continue;
     }
+
     if (packageOverride(overrides.allowYoung, pkg, pkg.version)) {
       approved.push(`YOUNG OVERRIDE ${pkg.name} ${pkg.version}`);
       continue;
     }
+
     try {
       const record = await readRegistryRecord(pkg);
       const published = parsePublishTime(record.pubtime);
@@ -441,32 +457,83 @@ export async function validateCandidate(
     }
   }
 
-  if (violations.length > 0)
+  if (violations.length > 0) {
     throw new Error(
       `${violations.join("\n\n")}\n\nCargo.lock was not modified.`,
     );
+  }
+
   return { newlySelected, approved };
 }
 
-export function installValidatedLock(candidateLock, realLock, cargoArgs, cwd) {
-  const existed = existsSync(realLock);
-  const previous = existed ? readFileSync(realLock) : null;
-  copyFileSync(candidateLock, realLock);
+function finalMetadata(cargoArgs, cwd) {
+  return cargoMetadata(cargoArgs, cwd, process.env);
+}
+
+export function installValidatedLock(
+  candidateLock,
+  originalLockOrPath,
+  cargoArgs,
+  cwd,
+) {
+  const targetPath =
+    typeof originalLockOrPath === "object" &&
+    originalLockOrPath !== null &&
+    "path" in originalLockOrPath
+      ? originalLockOrPath.path
+      : originalLockOrPath;
+  const existed =
+    typeof originalLockOrPath === "object" &&
+    originalLockOrPath !== null &&
+    "existed" in originalLockOrPath
+      ? originalLockOrPath.existed
+      : existsSync(targetPath);
+  const previousBytes =
+    typeof originalLockOrPath === "object" &&
+    originalLockOrPath !== null &&
+    "bytes" in originalLockOrPath
+      ? originalLockOrPath.bytes
+      : existed && existsSync(targetPath)
+        ? readFileSync(targetPath)
+        : null;
+
+  copyFileSync(candidateLock, targetPath);
   try {
-    cargoMetadata(cargoArgs, cwd, process.env);
+    finalMetadata(cargoArgs, cwd);
   } catch (error) {
-    if (previous === null) rmSync(realLock, { force: true });
-    else writeFileSync(realLock, previous);
+    if (existed && previousBytes !== null) {
+      writeFileSync(targetPath, previousBytes);
+    } else {
+      rmSync(targetPath, { force: true });
+    }
     throw new Error(
       `Final Cargo.lock verification failed; original lock restored.\n${error.message}`,
+      { cause: error },
     );
   }
 }
 
-export function restoreRealLock(realLock, previous) {
-  if (!realLock || !previous) return;
-  const current = existsSync(realLock) ? readFileSync(realLock) : null;
-  if (!current || !current.equals(previous)) writeFileSync(realLock, previous);
+export function restoreRealLock(realLock, original) {
+  if (!realLock && (!original || !original.path)) return;
+  const targetPath = realLock || original.path;
+  const existed =
+    typeof original === "object" && original !== null && "existed" in original
+      ? original.existed
+      : original !== null && original !== undefined;
+  const bytes =
+    typeof original === "object" && original !== null && "bytes" in original
+      ? original.bytes
+      : original;
+
+  if (existed && bytes !== null) {
+    if (!existsSync(targetPath) || !readFileSync(targetPath).equals(bytes)) {
+      writeFileSync(targetPath, bytes);
+    }
+  } else {
+    if (existsSync(targetPath)) {
+      rmSync(targetPath, { force: true });
+    }
+  }
 }
 
 async function main() {
@@ -475,12 +542,17 @@ async function main() {
   const manifest = manifestPath(parsed.cargoArgs, cwd);
   if (!existsSync(manifest))
     throw new Error(`Cargo manifest not found: ${manifest}`);
-  const existingLock = nearestLock(manifest);
-  const baselineMetadata = existingLock
+
+  const workspaceRoot = findWorkspaceRoot(manifest);
+  const destinationLock = path.join(workspaceRoot, "Cargo.lock");
+  const originalLock = {
+    path: destinationLock,
+    existed: existsSync(destinationLock),
+    bytes: existsSync(destinationLock) ? readFileSync(destinationLock) : null,
+  };
+
+  const baselineMetadata = originalLock.existed
     ? cargoMetadata(parsed.cargoArgs, cwd, process.env)
-    : null;
-  const realLock = baselineMetadata
-    ? path.join(baselineMetadata.workspace_root, "Cargo.lock")
     : null;
   const baseline = baselineMetadata ? selectedPackages(baselineMetadata) : [];
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), "cargo-safe-update-"));
@@ -489,12 +561,11 @@ async function main() {
     const candidate = prepareCandidate({
       cargoArgs: parsed.cargoArgs,
       cwd,
-      realLock,
+      realLock: originalLock.existed ? originalLock.path : null,
       baselineMetadata,
       tempRoot,
     });
-    const beforeRealLock =
-      realLock && existsSync(realLock) ? readFileSync(realLock) : null;
+
     let updateResult;
     try {
       updateResult = run("cargo", ["update", ...candidate.args], {
@@ -502,20 +573,28 @@ async function main() {
         env: candidate.env,
       });
     } catch (error) {
-      restoreRealLock(realLock, beforeRealLock);
+      restoreRealLock(originalLock.path, originalLock);
       throw error;
     }
     if (updateResult.stdout) process.stdout.write(updateResult.stdout);
     if (updateResult.stderr) process.stderr.write(updateResult.stderr);
-    if (
-      beforeRealLock &&
-      realLock &&
-      (!existsSync(realLock) || !readFileSync(realLock).equals(beforeRealLock))
-    ) {
-      restoreRealLock(realLock, beforeRealLock);
-      throw new Error(
-        "Cargo modified real Cargo.lock despite temporary-lockfile policy",
-      );
+
+    // Verify real workspace lock was not created or modified before approval
+    if (!originalLock.existed) {
+      if (existsSync(originalLock.path)) {
+        restoreRealLock(originalLock.path, originalLock);
+        throw new Error("Cargo created real Cargo.lock before age approval");
+      }
+    } else {
+      if (
+        !existsSync(originalLock.path) ||
+        !readFileSync(originalLock.path).equals(originalLock.bytes)
+      ) {
+        restoreRealLock(originalLock.path, originalLock);
+        throw new Error(
+          "Cargo modified real Cargo.lock despite temporary-lockfile policy",
+        );
+      }
     }
 
     const candidateMetadata = cargoMetadata(
@@ -524,43 +603,35 @@ async function main() {
       candidate.env,
     );
     const candidateLock = candidate.candidateLock;
-    if (!existsSync(candidateLock))
+    if (!existsSync(candidateLock)) {
       throw new Error(`Candidate Cargo.lock not found: ${candidateLock}`);
-    if (realLock === null && !candidate.copiedWorkspace) {
-      const unexpectedRealLock = path.join(
-        candidateMetadata.workspace_root,
-        "Cargo.lock",
-      );
-      if (existsSync(unexpectedRealLock)) {
-        rmSync(unexpectedRealLock, { force: true });
-        throw new Error("Cargo created real Cargo.lock before age approval");
-      }
     }
 
-    const validation = await validateCandidate(
-      baseline,
-      selectedPackages(candidateMetadata),
-      parsed,
-    );
-    if (validation.newlySelected.length === 0)
+    let validation;
+    try {
+      validation = await validateCandidate(
+        baseline,
+        selectedPackages(candidateMetadata),
+        parsed,
+      );
+    } catch (validationError) {
+      restoreRealLock(originalLock.path, originalLock);
+      throw validationError;
+    }
+
+    if (validation.newlySelected.length === 0) {
       console.log("No new dependency versions selected.");
-    else for (const line of validation.approved) console.log(line);
+    } else {
+      for (const line of validation.approved) console.log(line);
+    }
+
     if (parsed.dryRun) {
       console.log("Dry run: real Cargo.lock was not modified.");
       return;
     }
 
-    const destination = path.join(
-      candidateMetadata.workspace_root,
-      "Cargo.lock",
-    );
-    installValidatedLock(
-      candidateLock,
-      realLock ?? destination,
-      parsed.cargoArgs,
-      cwd,
-    );
-    console.log(`Validated Cargo.lock installed: ${realLock ?? destination}`);
+    installValidatedLock(candidateLock, originalLock, parsed.cargoArgs, cwd);
+    console.log(`Validated Cargo.lock installed: ${originalLock.path}`);
     if (parsed.reason)
       console.log(`Emergency override reason: ${parsed.reason}`);
   } finally {
