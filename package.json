@@ -27,7 +27,7 @@
     "licenses:npm": "npx --no-install license-checker --production --json --out public/licenses.json",
     "licenses:cargo": "node scripts/generate-cargo-licenses.js",
     "tauri:dev": "npm run sync-version && npm run licenses && tauri dev --config src-tauri/tauri.dev.conf.json",
-    "tauri:build": "npm run sync-version && npm run licenses && tauri build",
+    "tauri:build": "npm run sync-version && npm run licenses && tauri build -- --locked",
     "sync-version": "node scripts/sync-version.js",
     "icons:normalize": "node scripts/normalize-iconsets.js",
     "icons:check": "node --test scripts/normalize-iconsets.test.js && node scripts/normalize-iconsets.js --check",
