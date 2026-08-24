@@ -17,6 +17,10 @@ test("isAcceptableReleaseWorkingTree allows bootstrap-only drift", () => {
   );
   assert.equal(isAcceptableReleaseWorkingTree(" M src-tauri/Cargo.lock"), true);
   assert.equal(
+    isAcceptableReleaseWorkingTree(" M src-tauri/gen/schemas/linux-schema.json"),
+    true,
+  );
+  assert.equal(
     isAcceptableReleaseWorkingTree(" M scripts/release-title.test.cjs"),
     true,
   );

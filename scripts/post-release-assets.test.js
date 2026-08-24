@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -42,6 +43,31 @@ function makeTemporaryDirectory() {
   return directory;
 }
 
+function prepareFinalizeHarness(version) {
+  const root = makeTemporaryDirectory();
+  const scriptsDir = path.join(root, "scripts");
+  const releaseDir = path.join(root, "release");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.mkdirSync(releaseDir);
+  fs.writeFileSync(
+    path.join(root, "package.json"),
+    JSON.stringify({ name: "s3-sidekick", version }),
+  );
+  const repoScripts = path.dirname(fileURLToPath(import.meta.url));
+  for (const name of [
+    "post-release-assets.js",
+    "finalize-release-assets.js",
+    "direct-execution.js",
+  ]) {
+    fs.copyFileSync(path.join(repoScripts, name), path.join(scriptsDir, name));
+  }
+  fs.writeFileSync(
+    path.join(releaseDir, "S3-Sidekick-Windows-x64.exe"),
+    "installer",
+  );
+  return { scriptsDir, releaseDir };
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -63,6 +89,23 @@ test("explicit finalizer flag does not depend on path identity", () => {
   assert.equal(
     isDirectExecution(["node", "unrelated.js", CLI_FLAG], "win32"),
     true,
+  );
+});
+
+test("Windows basename match is enough to run the finalizer", () => {
+  assert.equal(
+    isDirectExecution(
+      ["node", "D:\\mapped\\S3-Sidekick\\scripts\\POST-RELEASE-ASSETS.JS"],
+      "win32",
+    ),
+    true,
+  );
+  assert.equal(
+    isDirectExecution(
+      ["node", "D:\\mapped\\S3-Sidekick\\scripts\\gpg-sign.js"],
+      "win32",
+    ),
+    false,
   );
 });
 
@@ -111,7 +154,9 @@ test("skips AFTER_PACK_LOC mirroring for beta versions unless overridden", () =>
     "installer",
   );
 
+  assert.equal(isBetaReleaseVersion(STABLE_VERSION), false);
   assert.equal(isBetaReleaseVersion(BETA_VERSION), true);
+  assert.equal(shouldSkipBetaMirror({}, STABLE_VERSION), false);
   assert.equal(shouldSkipBetaMirror({}, BETA_VERSION), true);
   assert.equal(
     shouldSkipBetaMirror({ OVERRIDE_BETA_MIRROR_SKIP: "1" }, BETA_VERSION),
@@ -134,6 +179,19 @@ test("skips AFTER_PACK_LOC mirroring for beta versions unless overridden", () =>
   assert.equal(
     fs.existsSync(path.join(destination, "S3-Sidekick-Windows-x64.exe")),
     false,
+  );
+
+  assert.deepEqual(
+    run({
+      releaseDir,
+      env: {},
+      version: BETA_VERSION,
+    }),
+    {
+      mirrored: false,
+      destination: null,
+      skippedBetaMirror: true,
+    },
   );
 
   fs.writeFileSync(
@@ -175,5 +233,98 @@ test("rejects a mirror inside the release directory", () => {
   assert.throws(
     () => copyReleaseAssets(releaseDir, path.join(releaseDir, "mirror")),
     /cannot be inside the release directory/,
+  );
+});
+
+test("release finalization runs the observable mirror command first", () => {
+  const packageJson = JSON.parse(
+    fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  assert.match(packageJson.scripts.r, /origin\/main/);
+  assert.match(packageJson.scripts.b, /origin\/beta/);
+  assert.match(
+    packageJson.scripts["release:mirror"],
+    /scripts\/finalize-release-assets\.js/,
+  );
+  assert.match(
+    packageJson.scripts["release:finalize"],
+    /^npm run release:mirror &&/,
+  );
+  assert.match(packageJson.scripts["release:win"], /release:win:continue/);
+  assert.match(packageJson.scripts["release:mac"], /release:mac:continue/);
+  assert.match(
+    packageJson.scripts["release:linux:x64"],
+    /release:linux:x64:continue/,
+  );
+});
+
+test("dedicated runner copies stable artifacts without an argv path guard", () => {
+  const { scriptsDir } = prepareFinalizeHarness(STABLE_VERSION);
+  const destination = path.join(makeTemporaryDirectory(), "mirror");
+
+  const ran = spawnSync(
+    process.execPath,
+    [path.join(scriptsDir, "finalize-release-assets.js")],
+    {
+      encoding: "utf8",
+      env: { ...process.env, AFTER_PACK_LOC: destination, SKIP_RELEASE_MIRROR: "" },
+    },
+  );
+  const combined = `${ran.stdout ?? ""}${ran.stderr ?? ""}`;
+  assert.equal(ran.status, 0, combined);
+  assert.match(combined, /\[release:mirror] starting/);
+  assert.match(combined, /Mirrored and verified 1 cleaned release entries/);
+  assert.equal(
+    fs.readFileSync(
+      path.join(destination, "S3-Sidekick-Windows-x64.exe"),
+      "utf8",
+    ),
+    "installer",
+  );
+});
+
+test("dedicated runner skips the mirror for beta versions even when AFTER_PACK_LOC is set", () => {
+  const { scriptsDir } = prepareFinalizeHarness(BETA_VERSION);
+  const destination = path.join(makeTemporaryDirectory(), "mirror");
+
+  const ran = spawnSync(
+    process.execPath,
+    [path.join(scriptsDir, "finalize-release-assets.js")],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AFTER_PACK_LOC: destination,
+        SKIP_RELEASE_MIRROR: "",
+        OVERRIDE_BETA_MIRROR_SKIP: "",
+      },
+    },
+  );
+  const combined = `${ran.stdout ?? ""}${ran.stderr ?? ""}`;
+  assert.equal(ran.status, 0, combined);
+  assert.match(combined, /skipping AFTER_PACK_LOC mirror/);
+  assert.equal(
+    fs.existsSync(path.join(destination, "S3-Sidekick-Windows-x64.exe")),
+    false,
+  );
+});
+
+test("dedicated runner refuses a stable finalize when AFTER_PACK_LOC is unset", () => {
+  const { scriptsDir, releaseDir } = prepareFinalizeHarness(STABLE_VERSION);
+
+  const ran = spawnSync(
+    process.execPath,
+    [path.join(scriptsDir, "finalize-release-assets.js")],
+    {
+      encoding: "utf8",
+      env: { ...process.env, AFTER_PACK_LOC: "", SKIP_RELEASE_MIRROR: "" },
+    },
+  );
+  const combined = `${ran.stdout ?? ""}${ran.stderr ?? ""}`;
+  assert.equal(ran.status, 1, combined);
+  assert.match(combined, /Stable release .* requires AFTER_PACK_LOC/);
+  assert.equal(
+    fs.existsSync(path.join(releaseDir, "S3-Sidekick-Windows-x64.exe")),
+    true,
   );
 });

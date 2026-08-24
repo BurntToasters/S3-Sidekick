@@ -3,10 +3,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import {
-  isDirectExecution as isModuleDirectExecution,
-  pathsEqual,
-} from "./direct-execution.js";
+import { pathsEqual } from "./direct-execution.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -77,7 +74,12 @@ function shouldSkipBetaMirror(env = process.env, version) {
 
 function isDirectExecution(argv = process.argv, platform = process.platform) {
   if (argv.includes(CLI_FLAG)) return true;
-  return isModuleDirectExecution(import.meta.url, argv, platform);
+  const entry = argv[1];
+  if (!entry) return false;
+  // Basename only: argv vs import.meta.url mismatches on Windows ESM
+  // (case, slashes, mapped drives) and previously caused a silent no-op.
+  const basename = (platform === "win32" ? path.win32 : path).basename(entry);
+  return basename.toLowerCase() === "post-release-assets.js";
 }
 
 function getReleaseEntries(releaseDir) {
@@ -160,15 +162,16 @@ function run({
 } = {}) {
   cleanReleaseArtifacts(releaseDir);
 
-  let destination = getAfterPackLocation(env);
   let skippedBetaMirror = false;
-  if (destination && shouldSkipBetaMirror(env, version)) {
+  if (shouldSkipBetaMirror(env, version)) {
     skippedBetaMirror = true;
     console.warn(
       `beta version ${version}; skipping AFTER_PACK_LOC mirror (set OVERRIDE_BETA_MIRROR_SKIP=1 to force).`,
     );
-    destination = "";
+    return { mirrored: false, destination: null, skippedBetaMirror };
   }
+
+  const destination = getAfterPackLocation(env);
   if (!destination) {
     return { mirrored: false, destination: null, skippedBetaMirror };
   }
@@ -182,23 +185,31 @@ function run({
   };
 }
 
+function finalizeReleaseAssets({
+  releaseDir = RELEASE_DIR,
+  env = process.env,
+  version = readPackageVersion(),
+} = {}) {
+  const result = run({ releaseDir, env, version });
+  if (result.mirrored) {
+    console.log(
+      `Mirrored and verified ${result.copiedEntries} cleaned release entries to: ${result.destination}`,
+    );
+  } else if (result.skippedBetaMirror) {
+    console.warn(
+      `WARNING: Cleaned release assets without mirroring (beta version ${version}; set OVERRIDE_BETA_MIRROR_SKIP=1 to force).`,
+    );
+  } else {
+    console.warn(
+      "WARNING: Cleaned release assets, but AFTER_PACK_LOC is not set; mirror intentionally skipped.",
+    );
+  }
+  return result;
+}
+
 if (isDirectExecution()) {
   try {
-    const version = readPackageVersion();
-    const result = run({ version });
-    if (result.mirrored) {
-      console.log(
-        `Mirrored and verified ${result.copiedEntries} cleaned release entries to: ${result.destination}`,
-      );
-    } else if (result.skippedBetaMirror) {
-      console.warn(
-        `WARNING: Cleaned release assets without mirroring (beta version ${version}; set OVERRIDE_BETA_MIRROR_SKIP=1 to force).`,
-      );
-    } else {
-      console.warn(
-        "WARNING: Cleaned release assets, but AFTER_PACK_LOC is not set; mirror intentionally skipped.",
-      );
-    }
+    finalizeReleaseAssets();
   } catch (error) {
     const message =
       error && typeof error === "object" && "message" in error
@@ -235,4 +246,5 @@ export {
   verifyCopiedPath,
   copyReleaseAssets,
   run,
+  finalizeReleaseAssets,
 };

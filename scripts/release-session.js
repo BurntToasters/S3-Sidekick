@@ -127,6 +127,19 @@ const RELEASE_BOOTSTRAP_PATHS = new Set([
   "package-lock.json",
   "scripts/release-title.test.cjs",
 ]);
+const RELEASE_BOOTSTRAP_PREFIXES = ["src-tauri/gen/schemas/"];
+
+function normalizePorcelainPath(value) {
+  let normalized = String(value).replace(/\\/g, "/");
+  if (
+    normalized.startsWith('"') &&
+    normalized.endsWith('"') &&
+    normalized.length >= 2
+  ) {
+    normalized = normalized.slice(1, -1).replace(/\\"/g, '"');
+  }
+  return normalized;
+}
 
 function parsePorcelainPaths(status) {
   return status
@@ -140,17 +153,26 @@ function parsePorcelainPaths(status) {
       if (!match) return "";
       const rest = match[2];
       const renameArrow = rest.indexOf(" -> ");
-      return renameArrow >= 0 ? rest.slice(renameArrow + 4) : rest;
+      return normalizePorcelainPath(
+        renameArrow >= 0 ? rest.slice(renameArrow + 4) : rest,
+      );
     })
     .filter(Boolean);
 }
 
-/** Clean tree, or only files that workspace:bootstrap may touch before test:all. */
+function isAllowedBootstrapPath(filePath) {
+  if (RELEASE_BOOTSTRAP_PATHS.has(filePath)) return true;
+  return RELEASE_BOOTSTRAP_PREFIXES.some((prefix) =>
+    filePath.startsWith(prefix),
+  );
+}
+
+/** Clean tree, or only files that workspace:bootstrap / cargo check may touch before proof. */
 function isAcceptableReleaseWorkingTree(status) {
   if (!status.trim()) return true;
   const paths = parsePorcelainPaths(status);
   if (paths.length === 0) return false;
-  return paths.every((p) => RELEASE_BOOTSTRAP_PATHS.has(p));
+  return paths.every((filePath) => isAllowedBootstrapPath(filePath));
 }
 
 function clearQualityGateProof(root = defaultRoot) {
@@ -168,7 +190,7 @@ function blockingReleaseWorkingTreePaths(root = defaultRoot) {
     return [];
   }
   return parsePorcelainPaths(status).filter(
-    (p) => !RELEASE_BOOTSTRAP_PATHS.has(p),
+    (filePath) => !isAllowedBootstrapPath(filePath),
   );
 }
 
