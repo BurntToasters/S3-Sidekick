@@ -47,6 +47,7 @@ const MAX_MULTIPART_COPY_PARTS: u64 = 10_000;
 const MAX_OBJECT_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 const MULTIPART_COPY_THRESHOLD: i64 = 5_368_709_120;
 const MULTIPART_ABORT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PREFIX_TRANSACTION_OBJECTS: usize = 100_000;
 const MAX_KEY_LEN: usize = 1024;
 
 fn multipart_copy_part_size(object_size: u64) -> Result<u64, String> {
@@ -841,13 +842,19 @@ pub(crate) struct PreviewResponse {
 }
 
 fn is_text_content_type(ct: &str) -> bool {
-    ct.starts_with("text/")
-        || ct == "application/json"
-        || ct == "application/xml"
-        || ct == "application/javascript"
-        || ct == "image/svg+xml"
-        || ct == "application/x-yaml"
-        || ct == "application/toml"
+    let media_type = ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    media_type.starts_with("text/")
+        || media_type == "application/json"
+        || media_type == "application/xml"
+        || media_type == "application/javascript"
+        || media_type == "image/svg+xml"
+        || media_type == "application/x-yaml"
+        || media_type == "application/toml"
 }
 
 fn encode_copy_source(bucket: &str, key: &str) -> String {
@@ -1241,6 +1248,95 @@ async fn encoded_tagging_for_object(
     ))
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct ConnectResult {
+    pub region: String,
+    pub connection_id: String,
+    pub connection_identity: String,
+}
+
+fn mint_connection_id() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn connection_identity(endpoint: &str, access_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(endpoint.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(access_key.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+pub(crate) fn require_connection_session(
+    s3: &crate::S3State,
+    connection_id: &str,
+) -> Result<(), String> {
+    if connection_id.trim().is_empty() {
+        return Err("Connection id is required".to_string());
+    }
+    match s3.connection_id.as_deref() {
+        Some(current) if current == connection_id => Ok(()),
+        Some(_) => Err("Connection changed".to_string()),
+        None => Err("Not connected".to_string()),
+    }
+}
+
+pub(crate) fn invalidate_connection_session(s3: &mut crate::S3State) {
+    s3.connection_generation = s3.connection_generation.wrapping_add(1);
+    s3.client = None;
+    s3.bucket_hint = None;
+    s3.endpoint.clear();
+    s3.region.clear();
+    s3.connection_id = None;
+    s3.connection_identity = None;
+}
+
+fn require_connected_client(s3: &crate::S3State, connection_id: &str) -> Result<Client, String> {
+    require_connection_session(s3, connection_id)?;
+    s3.client.clone().ok_or_else(|| "Not connected".to_string())
+}
+
+fn require_client(
+    state: &tauri::State<'_, AppState>,
+    connection_id: &str,
+) -> Result<Client, String> {
+    let s3 = lock_s3_state(state)?;
+    require_connected_client(&s3, connection_id)
+}
+
+fn require_client_and_bucket_hint(
+    state: &tauri::State<'_, AppState>,
+    connection_id: &str,
+) -> Result<(Client, Option<String>), String> {
+    let s3 = lock_s3_state(state)?;
+    let client = require_connected_client(&s3, connection_id)?;
+    Ok((client, s3.bucket_hint.clone()))
+}
+
+fn require_endpoint(
+    state: &tauri::State<'_, AppState>,
+    connection_id: &str,
+) -> Result<String, String> {
+    let s3 = lock_s3_state(state)?;
+    if connection_id.trim().is_empty() {
+        return Err("Connection id is required".to_string());
+    }
+    match s3.connection_id.as_deref() {
+        Some(current) if current == connection_id => {
+            if s3.endpoint.is_empty() {
+                Err("Not connected".to_string())
+            } else {
+                Ok(s3.endpoint.clone())
+            }
+        }
+        Some(_) => Err("Connection changed".to_string()),
+        None => Err("Not connected".to_string()),
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn connect(
     state: tauri::State<'_, AppState>,
@@ -1248,13 +1344,19 @@ pub(crate) async fn connect(
     region: String,
     mut access_key: String,
     mut secret_key: String,
-) -> Result<String, String> {
+) -> Result<ConnectResult, String> {
     let endpoint = endpoint.trim().to_string();
     if endpoint.is_empty() {
         return Err("Endpoint is required".to_string());
     }
+    let connection_generation = {
+        let mut s3 = lock_s3_state(&state)?;
+        s3.connection_generation = s3.connection_generation.wrapping_add(1);
+        s3.connection_generation
+    };
     let resolved_region = resolve_region(&endpoint, &region)?;
     let (normalized, bucket_hint) = normalize_endpoint(&endpoint);
+    let identity = connection_identity(&normalized, &access_key);
 
     let creds =
         aws_sdk_s3::config::Credentials::new(&access_key, &secret_key, None, None, "s3-sidekick");
@@ -1301,36 +1403,50 @@ pub(crate) async fn connect(
         }
     }
 
+    let connection_id = mint_connection_id();
     let mut s3 = lock_s3_state(&state)?;
+    if s3.connection_generation != connection_generation {
+        return Err("Connection attempt superseded".to_string());
+    }
     s3.client = Some(client);
     s3.endpoint = normalized;
     s3.region = resolved_region.clone();
     s3.bucket_hint = bucket_hint;
+    s3.connection_id = Some(connection_id.clone());
+    s3.connection_identity = Some(identity.clone());
 
-    Ok(resolved_region)
+    Ok(ConnectResult {
+        region: resolved_region,
+        connection_id,
+        connection_identity: identity,
+    })
 }
 
 #[tauri::command]
-pub(crate) fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn disconnect(
+    state: tauri::State<'_, AppState>,
+    connection_id: String,
+) -> Result<(), String> {
     let mut s3 = lock_s3_state(&state)?;
-    s3.client = None;
-    s3.bucket_hint = None;
-    s3.endpoint.clear();
-    s3.region.clear();
+    match s3.connection_id.as_deref() {
+        Some(current) if current == connection_id => {}
+        Some(_) => return Err("Connection changed".to_string()),
+        None => {
+            if !connection_id.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+    invalidate_connection_session(&mut s3);
     Ok(())
 }
 
 #[tauri::command]
 pub(crate) async fn list_buckets(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
 ) -> Result<Vec<BucketInfo>, String> {
-    let (client, bucket_hint) = {
-        let s3 = lock_s3_state(&state)?;
-        (
-            s3.client.clone().ok_or("Not connected")?,
-            s3.bucket_hint.clone(),
-        )
-    };
+    let (client, bucket_hint) = require_client_and_bucket_hint(&state, &connection_id)?;
 
     match client.list_buckets().send().await {
         Ok(output) => {
@@ -1365,6 +1481,7 @@ pub(crate) async fn list_buckets(
 #[tauri::command]
 pub(crate) async fn list_objects(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     prefix: String,
     delimiter: String,
@@ -1373,10 +1490,7 @@ pub(crate) async fn list_objects(
     // Listing the bucket root with an empty prefix is legitimate, so this uses
     // the permissive validator rather than the mutating one.
     validate_prefix(&prefix, "Prefix")?;
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     let mut req = client.list_objects_v2().bucket(&bucket).max_keys(1000);
 
@@ -1433,14 +1547,12 @@ pub(crate) async fn list_objects(
 #[tauri::command]
 pub(crate) async fn head_object(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
 ) -> Result<HeadObjectResponse, String> {
     validate_key(&key, "Object key")?;
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     let output = client
         .head_object()
@@ -1481,14 +1593,12 @@ pub(crate) async fn head_object(
 #[tauri::command]
 pub(crate) async fn object_exists(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
 ) -> Result<bool, String> {
     validate_key(&key, "Object key")?;
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     match client.head_object().bucket(&bucket).key(&key).send().await {
         Ok(_) => Ok(true),
@@ -1516,16 +1626,14 @@ pub(crate) async fn object_exists(
 #[tauri::command]
 pub(crate) async fn update_metadata(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
     content_type: String,
     metadata: HashMap<String, String>,
 ) -> Result<(), String> {
     validate_mutating_key(&key, "Object key")?;
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     let cancel = Arc::new(CancelFlag::default());
 
@@ -1617,79 +1725,121 @@ pub(crate) async fn update_metadata(
     }
 }
 
+const MAX_DELETE_ERROR_DETAILS: usize = 20;
+
+#[derive(Debug, Default, serde::Serialize)]
+pub(crate) struct DeleteResult {
+    deleted: u32,
+    failed: u32,
+    incomplete: bool,
+    errors: Vec<String>,
+}
+
+fn record_delete_error(result: &mut DeleteResult, detail: String) {
+    if result.errors.len() < MAX_DELETE_ERROR_DETAILS {
+        result.errors.push(detail);
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn delete_objects(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     keys: Vec<String>,
-) -> Result<u32, String> {
+) -> Result<DeleteResult, String> {
     // This command used to pass its keys straight to `DeleteObjects` with no
     // validation at all, so a caller could delete anything the credentials
     // reached, including live rollback backups.
     for key in &keys {
         validate_deletable_key(key, "Object key")?;
     }
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
-    let mut deleted = 0u32;
+    let mut result = DeleteResult::default();
     for chunk in keys.chunks(1000) {
-        let objects: Vec<ObjectIdentifier> = chunk
+        let objects = chunk
             .iter()
             .map(|k| {
                 ObjectIdentifier::builder()
                     .key(k)
                     .build()
-                    .map_err(|e| format!("Invalid key: {}", e))
+                    .map_err(|e| format!("Invalid key after deleting {}: {}", result.deleted, e))
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<ObjectIdentifier>, _>>();
+        let objects = match objects {
+            Ok(objects) => objects,
+            Err(err) => {
+                result.incomplete = true;
+                record_delete_error(&mut result, err);
+                break;
+            }
+        };
 
-        let delete = Delete::builder()
+        let delete = match Delete::builder()
             .set_objects(Some(objects))
             .quiet(true)
             .build()
-            .map_err(|e| format!("Delete build error: {}", e))?;
+        {
+            Ok(delete) => delete,
+            Err(err) => {
+                result.incomplete = true;
+                let confirmed = result.deleted;
+                record_delete_error(
+                    &mut result,
+                    format!("Delete build error after deleting {}: {}", confirmed, err),
+                );
+                break;
+            }
+        };
 
-        let output = client
+        let output = match client
             .delete_objects()
             .bucket(&bucket)
             .delete(delete)
             .send()
             .await
-            .map_err(|e| format!("Batch delete failed: {}", e))?;
+        {
+            Ok(output) => output,
+            Err(err) => {
+                result.incomplete = true;
+                let confirmed = result.deleted;
+                record_delete_error(
+                    &mut result,
+                    format!(
+                        "Batch delete response failed after {} confirmed deletion(s): {}",
+                        confirmed, err
+                    ),
+                );
+                break;
+            }
+        };
 
         let errors = output.errors();
-        if !errors.is_empty() {
-            let sample: Vec<String> = errors
-                .iter()
-                .take(3)
-                .map(|err| {
-                    format!(
-                        "{}: {}",
-                        err.key().unwrap_or("?"),
-                        err.message().unwrap_or("unknown error")
-                    )
-                })
-                .collect();
-            return Err(format!(
-                "Failed to delete {} object(s). {}",
-                errors.len(),
-                sample.join("; ")
-            ));
+        result.failed = result.failed.saturating_add(errors.len() as u32);
+        result.deleted = result
+            .deleted
+            .saturating_add(chunk.len().saturating_sub(errors.len()) as u32);
+        for err in errors {
+            record_delete_error(
+                &mut result,
+                format!(
+                    "{}: {}",
+                    err.key().unwrap_or("?"),
+                    err.message().unwrap_or("unknown error")
+                ),
+            );
         }
-
-        deleted += chunk.len() as u32;
     }
 
-    Ok(deleted)
+    Ok(result)
 }
 
 #[tauri::command]
 pub(crate) async fn upload_object(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
     file_path: String,
@@ -1701,13 +1851,11 @@ pub(crate) async fn upload_object(
     bandwidth_limit_mbps: Option<u32>,
     checksum_verification: Option<bool>,
 ) -> Result<(), String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
 
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     let guard = TransferGuard::register(transfer_id);
     let cancel = guard.token();
@@ -1937,9 +2085,13 @@ async fn upload_multipart(
         .ok_or("No upload ID returned")?
         .to_string();
 
-    let mut file = tokio::fs::File::open(file_path)
-        .await
-        .map_err(|e| format!("Failed to open file: {}", e))?;
+    let mut file = match tokio::fs::File::open(file_path).await {
+        Ok(file) => file,
+        Err(err) => {
+            abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+            return Err(format!("Failed to open file: {}", err));
+        }
+    };
 
     let total_parts = file_size.div_ceil(part_size_bytes as u64) as usize;
     let mut completed_parts: Vec<Option<aws_sdk_s3::types::CompletedPart>> =
@@ -1969,7 +2121,15 @@ async fn upload_multipart(
                         return Err(cancelled_error());
                     }
                     result = file.read(&mut buf[read..]) => {
-                        result.map_err(|e| format!("Failed to read file: {}", e))?
+                        match result {
+                            Ok(n) => n,
+                            Err(err) => {
+                                join_set.abort_all();
+                                while join_set.join_next().await.is_some() {}
+                                abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+                                return Err(format!("Failed to read file: {}", err));
+                            }
+                        }
                     }
                 };
                 if n == 0 {
@@ -2178,6 +2338,7 @@ async fn upload_multipart(
 pub(crate) async fn upload_object_bytes(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
     bytes: Vec<u8>,
@@ -2186,6 +2347,7 @@ pub(crate) async fn upload_object_bytes(
     attempt: Option<u32>,
     checksum_verification: Option<bool>,
 ) -> Result<(), String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_key(&key, "Object key")?;
     if bytes.len() > MAX_UPLOAD_OBJECT_BYTES {
         return Err(format!(
@@ -2194,10 +2356,7 @@ pub(crate) async fn upload_object_bytes(
         ));
     }
 
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     // This path previously never registered, checked, or cleared cancellation.
     // Cancelling a browser-fallback upload did nothing, and the id stayed in the
@@ -2291,14 +2450,12 @@ pub(crate) async fn upload_object_bytes(
 #[tauri::command]
 pub(crate) async fn get_object_acl(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
 ) -> Result<AclResponse, String> {
     validate_key(&key, "Object key")?;
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     let output = client
         .get_object_acl()
@@ -2345,15 +2502,13 @@ pub(crate) async fn get_object_acl(
 #[tauri::command]
 pub(crate) async fn set_object_acl(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
     visibility: String,
 ) -> Result<(), String> {
     validate_mutating_key(&key, "Object key")?;
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     let acl = match visibility.trim().to_ascii_lowercase().as_str() {
         "private" => ObjectCannedAcl::Private,
@@ -2377,6 +2532,7 @@ pub(crate) async fn set_object_acl(
 pub(crate) async fn download_object(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
     destination: String,
@@ -2385,6 +2541,7 @@ pub(crate) async fn download_object(
     attempt: Option<u32>,
     checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_key(&key, "Object key")?;
     let destination_path = if overwrite {
         validate_destination_path_allow_overwrite(&destination)?
@@ -2398,17 +2555,21 @@ pub(crate) async fn download_object(
     if temp_path == destination_path {
         return Err("Temp path must be different from destination".to_string());
     }
+    let client = require_client(&state, &connection_id)?;
+    crate::issue_download_scratch_lease(&app, &destination_path, &temp_path)?;
+    let _temp_guard = match crate::claim_download_temp(&temp_path, &destination_path) {
+        Ok(guard) => guard,
+        Err(err) => {
+            crate::release_download_scratch_lease(&app, &destination_path);
+            return Err(err);
+        }
+    };
     if temp_path.exists() {
-        let _ = std::fs::remove_file(&temp_path);
+        crate::clear_unusable_download_scratch(&temp_path)?;
     }
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
-
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
 
     let guard = TransferGuard::register(transfer_id);
     let cancel = guard.token();
@@ -2503,6 +2664,7 @@ pub(crate) async fn download_object(
     }
 
     finalize_download_file(&temp_path, &destination_path)?;
+    crate::release_download_scratch_lease(&app, &destination_path);
 
     emit_transfer_progress(
         &app,
@@ -2788,6 +2950,7 @@ async fn download_parallel_part(
 pub(crate) async fn download_object_parallel(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
     destination: String,
@@ -2802,6 +2965,7 @@ pub(crate) async fn download_object_parallel(
     enable_resume: Option<bool>,
     checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_key(&key, "Object key")?;
     let destination_path = if overwrite {
         validate_destination_path_allow_overwrite(&destination)?
@@ -2813,17 +2977,21 @@ pub(crate) async fn download_object_parallel(
     if temp_path == destination_path {
         return Err("Temp path must be different from destination".to_string());
     }
+    let client = require_client(&state, &connection_id)?;
+    crate::issue_download_scratch_lease(&app, &destination_path, &temp_path)?;
+    let _temp_guard = match crate::claim_download_temp(&temp_path, &destination_path) {
+        Ok(guard) => guard,
+        Err(err) => {
+            crate::release_download_scratch_lease(&app, &destination_path);
+            return Err(err);
+        }
+    };
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
     let threshold_mb = parallel_threshold_mb
         .unwrap_or(PARALLEL_DOWNLOAD_THRESHOLD_MB)
         .max(1);
     let checksum_enabled = checksum_verification.unwrap_or(false);
-
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
 
     let guard = TransferGuard::register(transfer_id);
     let cancel = guard.token();
@@ -2864,9 +3032,12 @@ pub(crate) async fn download_object_parallel(
         // Hand off to the sequential path. Release our registration first so
         // the delegate can register the same id without colliding.
         drop(guard);
+        drop(_storage_guard);
+        drop(_temp_guard);
         return download_object(
             app,
             state,
+            connection_id,
             bucket,
             key,
             destination,
@@ -2885,9 +3056,12 @@ pub(crate) async fn download_object_parallel(
         // Hand off to the sequential path. Release our registration first so
         // the delegate can register the same id without colliding.
         drop(guard);
+        drop(_storage_guard);
+        drop(_temp_guard);
         return download_object(
             app,
             state,
+            connection_id,
             bucket,
             key,
             destination,
@@ -3009,11 +3183,11 @@ pub(crate) async fn download_object_parallel(
         }
     }
 
-    // Anything we are not resuming into starts from a clean slate. This also
-    // covers the case where a checkpoint existed but its scratch file did not.
+    // Anything we are not resuming into starts from a clean slate. The durable
+    // scratch lease issued above authorizes replacing a leftover file from a
+    // crashed attempt that had no valid checkpoint.
     if !resumed && temp_path.exists() {
-        std::fs::remove_file(&temp_path)
-            .map_err(|e| format!("Failed to clear stale temp file: {}", e))?;
+        crate::clear_unusable_download_scratch(&temp_path)?;
     }
 
     let init_file = tokio::fs::OpenOptions::new()
@@ -3157,7 +3331,7 @@ pub(crate) async fn download_object_parallel(
                                 mode: "download_parallel".to_string(),
                                 bucket: bucket.clone(),
                                 key: key.clone(),
-                                destination: Some(destination.clone()),
+                                destination: Some(destination_path.to_string_lossy().to_string()),
                                 temp_path: temp_path.to_string_lossy().to_string(),
                                 total_bytes,
                                 part_size,
@@ -3276,6 +3450,7 @@ pub(crate) async fn download_object_parallel(
         &object_etag,
         None,
         object_version_id.as_deref(),
+        None,
         &cancel,
     )
     .await
@@ -3314,6 +3489,7 @@ pub(crate) async fn download_object_parallel(
     }
 
     finalize_download_file(&temp_path, &destination_path)?;
+    crate::release_download_scratch_lease(&app, &destination_path);
 
     emit_transfer_progress(
         &app,
@@ -3342,13 +3518,11 @@ pub(crate) async fn download_object_parallel(
 #[tauri::command]
 pub(crate) async fn create_folder(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
 ) -> Result<(), String> {
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     validate_mutating_key(&key, "Object key")?;
     if key.contains("//") {
@@ -3383,6 +3557,8 @@ pub(crate) async fn create_folder(
 pub(crate) struct CopyReceipt {
     source_key: String,
     source_etag: String,
+    #[serde(default)]
+    source_fingerprint: String,
     source_version_id: Option<String>,
     destination_key: String,
     destination_etag: String,
@@ -3392,6 +3568,7 @@ pub(crate) struct CopyReceipt {
 #[derive(Clone)]
 struct SourceObjectInfo {
     size: i64,
+    last_modified: Option<String>,
     etag: Option<String>,
     version_id: Option<String>,
     content_type: Option<String>,
@@ -3414,6 +3591,192 @@ struct DestinationIdentity {
     version_id: Option<String>,
 }
 
+fn hash_generation_fields(fields: Vec<(&str, String)>) -> String {
+    let mut hasher = Sha256::new();
+    for (name, value) in fields {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn head_generation_fingerprint(
+    head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
+) -> String {
+    let mut fields = vec![
+        ("etag", head.e_tag().unwrap_or_default().to_string()),
+        (
+            "last_modified",
+            head.last_modified()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "content_length",
+            head.content_length().unwrap_or_default().to_string(),
+        ),
+        (
+            "content_type",
+            head.content_type().unwrap_or_default().to_string(),
+        ),
+        (
+            "cache_control",
+            head.cache_control().unwrap_or_default().to_string(),
+        ),
+        (
+            "content_disposition",
+            head.content_disposition().unwrap_or_default().to_string(),
+        ),
+        (
+            "content_encoding",
+            head.content_encoding().unwrap_or_default().to_string(),
+        ),
+        (
+            "content_language",
+            head.content_language().unwrap_or_default().to_string(),
+        ),
+        (
+            "website_redirect_location",
+            head.website_redirect_location()
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        (
+            "storage_class",
+            head.storage_class()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "server_side_encryption",
+            head.server_side_encryption()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "ssekms_key_id",
+            head.ssekms_key_id().unwrap_or_default().to_string(),
+        ),
+        (
+            "bucket_key_enabled",
+            head.bucket_key_enabled()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+    ];
+    let mut metadata = head
+        .metadata()
+        .map(|values| {
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    metadata.sort();
+    fields.extend(
+        metadata
+            .into_iter()
+            .map(|(key, value)| ("metadata", format!("{}={}", key, value))),
+    );
+    hash_generation_fields(fields)
+}
+
+fn source_generation_fingerprint(info: &SourceObjectInfo) -> String {
+    let mut fields = vec![
+        ("etag", info.etag.clone().unwrap_or_default()),
+        (
+            "last_modified",
+            info.last_modified.clone().unwrap_or_default(),
+        ),
+        ("content_length", info.size.to_string()),
+        (
+            "content_type",
+            info.content_type.clone().unwrap_or_default(),
+        ),
+        (
+            "cache_control",
+            info.cache_control.clone().unwrap_or_default(),
+        ),
+        (
+            "content_disposition",
+            info.content_disposition.clone().unwrap_or_default(),
+        ),
+        (
+            "content_encoding",
+            info.content_encoding.clone().unwrap_or_default(),
+        ),
+        (
+            "content_language",
+            info.content_language.clone().unwrap_or_default(),
+        ),
+        (
+            "website_redirect_location",
+            info.website_redirect_location.clone().unwrap_or_default(),
+        ),
+        (
+            "storage_class",
+            info.storage_class
+                .as_ref()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "server_side_encryption",
+            info.server_side_encryption
+                .as_ref()
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "ssekms_key_id",
+            info.ssekms_key_id.clone().unwrap_or_default(),
+        ),
+        (
+            "bucket_key_enabled",
+            info.bucket_key_enabled
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+    ];
+    let mut metadata = info
+        .metadata
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
+    metadata.sort();
+    fields.extend(
+        metadata
+            .into_iter()
+            .map(|(key, value)| ("metadata", format!("{}={}", key, value))),
+    );
+    hash_generation_fields(fields)
+}
+
+async fn destination_identity_from_head(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    cancel: &CancelToken,
+) -> Result<DestinationIdentity, String> {
+    let request = client.head_object().bucket(bucket).key(key).send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result.map_err(|err| format!("Failed to read destination identity for '{}': {}", key, err))?,
+    };
+    let etag = head
+        .e_tag()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("Destination '{}' returned no ETag after copy", key))?;
+    Ok(DestinationIdentity {
+        etag: etag.to_string(),
+        version_id: head.version_id().map(str::to_string),
+    })
+}
+
 fn source_info_from_head(
     head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
 ) -> SourceObjectInfo {
@@ -3423,6 +3786,7 @@ fn source_info_from_head(
     // preserved) supersedes it for every modern client.
     SourceObjectInfo {
         size: head.content_length().unwrap_or(0),
+        last_modified: head.last_modified().map(|value| value.to_string()),
         etag: head.e_tag().map(|v| v.to_string()),
         version_id: head.version_id().map(|v| v.to_string()),
         content_type: head.content_type().map(|v| v.to_string()),
@@ -3584,16 +3948,17 @@ async fn copy_one(
             }
         }
     };
-    let etag = copy_output
+    if let Some(etag) = copy_output
         .copy_object_result()
         .and_then(|result| result.e_tag())
         .filter(|etag| !etag.is_empty())
-        .ok_or_else(|| format!("Copy of '{}' returned no destination ETag", src_key))?
-        .to_string();
-    Ok(DestinationIdentity {
-        etag,
-        version_id: copy_output.version_id().map(|value| value.to_string()),
-    })
+    {
+        return Ok(DestinationIdentity {
+            etag: etag.to_string(),
+            version_id: copy_output.version_id().map(|value| value.to_string()),
+        });
+    }
+    destination_identity_from_head(client, dst_bucket, dst_key, cancel).await
 }
 
 async fn copy_object_multipart(
@@ -3774,20 +4139,13 @@ async fn copy_object_multipart(
             return Err(format!("Failed to complete multipart copy: {}", e));
         }
     };
-    let etag = complete_output
-        .e_tag()
-        .filter(|etag| !etag.is_empty())
-        .ok_or_else(|| {
-            format!(
-                "Completed multipart copy of '{}' returned no destination ETag",
-                source_key
-            )
-        })?
-        .to_string();
-    Ok(DestinationIdentity {
-        etag,
-        version_id: complete_output.version_id().map(|value| value.to_string()),
-    })
+    if let Some(etag) = complete_output.e_tag().filter(|value| !value.is_empty()) {
+        return Ok(DestinationIdentity {
+            etag: etag.to_string(),
+            version_id: complete_output.version_id().map(|value| value.to_string()),
+        });
+    }
+    destination_identity_from_head(client, dst_bucket, dest_key, cancel).await
 }
 
 async fn copy_with_receipt(
@@ -3809,6 +4167,7 @@ async fn copy_with_receipt(
         .filter(|etag| !etag.is_empty())
         .ok_or_else(|| format!("Source '{}' did not return an ETag", src_key))?
         .to_string();
+    let source_fingerprint = source_generation_fingerprint(&info);
 
     let destination = copy_one(
         client,
@@ -3824,6 +4183,7 @@ async fn copy_with_receipt(
     Ok(CopyReceipt {
         source_key: src_key.to_string(),
         source_etag,
+        source_fingerprint,
         source_version_id: info.version_id,
         destination_key: dst_key.to_string(),
         destination_etag: destination.etag,
@@ -3834,6 +4194,7 @@ async fn copy_with_receipt(
 #[tauri::command]
 pub(crate) async fn rename_object(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     old_key: String,
     new_key: String,
@@ -3844,10 +4205,7 @@ pub(crate) async fn rename_object(
     if old_key == new_key {
         return Err("Source and destination keys are identical.".to_string());
     }
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
 
     let receipt =
@@ -3898,27 +4256,36 @@ async fn list_all_keys_under_prefix(
 #[tauri::command]
 pub(crate) async fn delete_prefix(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     prefix: String,
-) -> Result<u32, String> {
+) -> Result<DeleteResult, String> {
     validate_mutating_prefix(&prefix, "Prefix")?;
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
-    let mut deleted = 0u32;
+    let mut result = DeleteResult::default();
     let mut continuation_token: Option<String> = None;
 
-    loop {
+    'pages: loop {
         let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
         if let Some(ref token) = continuation_token {
             req = req.continuation_token(token);
         }
-        let output = req
-            .send()
-            .await
-            .map_err(|e| format!("Failed to list objects: {}", e))?;
+        let output = match req.send().await {
+            Ok(output) => output,
+            Err(err) => {
+                result.incomplete = true;
+                let confirmed = result.deleted;
+                record_delete_error(
+                    &mut result,
+                    format!(
+                        "Failed to list remaining objects after {} confirmed deletion(s): {}",
+                        confirmed, err
+                    ),
+                );
+                break;
+            }
+        };
 
         let keys: Vec<String> = output
             .contents()
@@ -3926,66 +4293,112 @@ pub(crate) async fn delete_prefix(
             .filter_map(|obj| obj.key().map(|k| k.to_string()))
             .collect();
 
-        if keys.is_empty() && deleted == 0 {
-            return Ok(0);
+        if keys.is_empty() {
+            if output.is_truncated().unwrap_or(false) {
+                continuation_token = output.next_continuation_token().map(|s| s.to_string());
+                if continuation_token.is_none() {
+                    result.incomplete = true;
+                    record_delete_error(
+                        &mut result,
+                        "S3 listing was truncated without a continuation token".to_string(),
+                    );
+                    break;
+                }
+                continue;
+            }
+            break;
         }
 
         for chunk in keys.chunks(1000) {
-            let objects: Vec<ObjectIdentifier> = chunk
+            let objects = chunk
                 .iter()
                 .map(|k| {
-                    ObjectIdentifier::builder()
-                        .key(k)
-                        .build()
-                        .map_err(|e| format!("Invalid key: {}", e))
+                    ObjectIdentifier::builder().key(k).build().map_err(|e| {
+                        format!("Invalid key after deleting {}: {}", result.deleted, e)
+                    })
                 })
-                .collect::<Result<_, _>>()?;
+                .collect::<Result<Vec<ObjectIdentifier>, _>>();
+            let objects = match objects {
+                Ok(objects) => objects,
+                Err(err) => {
+                    result.incomplete = true;
+                    record_delete_error(&mut result, err);
+                    break 'pages;
+                }
+            };
 
-            let delete = Delete::builder()
+            let delete = match Delete::builder()
                 .set_objects(Some(objects))
                 .quiet(true)
                 .build()
-                .map_err(|e| format!("Delete build error: {}", e))?;
+            {
+                Ok(delete) => delete,
+                Err(err) => {
+                    result.incomplete = true;
+                    let confirmed = result.deleted;
+                    record_delete_error(
+                        &mut result,
+                        format!("Delete build error after deleting {}: {}", confirmed, err),
+                    );
+                    break 'pages;
+                }
+            };
 
-            let del_output = client
+            let del_output = match client
                 .delete_objects()
                 .bucket(&bucket)
                 .delete(delete)
                 .send()
                 .await
-                .map_err(|e| format!("Batch delete failed: {}", e))?;
+            {
+                Ok(output) => output,
+                Err(err) => {
+                    result.incomplete = true;
+                    let confirmed = result.deleted;
+                    record_delete_error(
+                        &mut result,
+                        format!(
+                            "Batch delete response failed after {} confirmed deletion(s): {}",
+                            confirmed, err
+                        ),
+                    );
+                    break 'pages;
+                }
+            };
 
             let errors = del_output.errors();
-            if !errors.is_empty() {
-                let sample: Vec<String> = errors
-                    .iter()
-                    .take(3)
-                    .map(|err| {
-                        format!(
-                            "{}: {}",
-                            err.key().unwrap_or("?"),
-                            err.message().unwrap_or("unknown error")
-                        )
-                    })
-                    .collect();
-                return Err(format!(
-                    "Failed to delete {} object(s) under prefix. {}",
-                    errors.len(),
-                    sample.join("; ")
-                ));
+            result.failed = result.failed.saturating_add(errors.len() as u32);
+            result.deleted = result
+                .deleted
+                .saturating_add(chunk.len().saturating_sub(errors.len()) as u32);
+            for err in errors {
+                record_delete_error(
+                    &mut result,
+                    format!(
+                        "{}: {}",
+                        err.key().unwrap_or("?"),
+                        err.message().unwrap_or("unknown error")
+                    ),
+                );
             }
-
-            deleted += chunk.len() as u32;
         }
 
         if output.is_truncated().unwrap_or(false) {
             continuation_token = output.next_continuation_token().map(|s| s.to_string());
+            if continuation_token.is_none() {
+                result.incomplete = true;
+                record_delete_error(
+                    &mut result,
+                    "S3 listing was truncated without a continuation token".to_string(),
+                );
+                break;
+            }
         } else {
             break;
         }
     }
 
-    Ok(deleted)
+    Ok(result)
 }
 
 /// Copy every object under `src_prefix` to `dst_prefix` as one rollback-safe
@@ -4197,81 +4610,163 @@ async fn copy_prefix_objects(
     src_prefix: &str,
     dst_bucket: &str,
     dst_prefix: &str,
-    keys: &[String],
+    collect_receipts: bool,
     cancel: &CancelToken,
 ) -> Result<Vec<CopyReceipt>, String> {
     ensure_no_orphaned_rollback_backups(client, dst_bucket, cancel).await?;
-
-    // Validate every derived destination key up front. A rejection discovered
-    // mid-loop would abort a partially applied transaction; as a precondition it
-    // costs nothing and cannot leave state behind.
-    for key in keys {
-        let suffix = key
-            .strip_prefix(src_prefix)
-            .ok_or_else(|| format!("Key '{}' does not start with prefix '{}'", key, src_prefix))?;
-        validate_key(&format!("{}{}", dst_prefix, suffix), "Destination key")?;
-    }
 
     let namespace_guard = RollbackNamespaceGuard::new();
     let namespace = namespace_guard.namespace.clone();
     let mut created_destinations = Vec::new();
     let mut backups = Vec::new();
-    let mut receipts = Vec::with_capacity(keys.len());
+    let mut receipts = Vec::new();
+    let mut continuation_token: Option<String> = None;
+    let mut operation_index = 0usize;
 
-    for (index, key) in keys.iter().enumerate() {
-        if cancel.is_cancelled() {
-            let failures =
-                rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
-            return Err(rollback_error(cancelled_error(), failures));
+    loop {
+        let mut list_request = client
+            .list_objects_v2()
+            .bucket(src_bucket)
+            .prefix(src_prefix);
+        if let Some(token) = continuation_token.as_deref() {
+            list_request = list_request.continuation_token(token);
         }
+        let list_output = tokio::select! {
+            _ = cancel.cancelled() => {
+                let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                return Err(rollback_error(cancelled_error(), failures));
+            }
+            result = list_request.send() => match result {
+                Ok(output) => output,
+                Err(e) => {
+                    let failures = rollback_prefix_copy(
+                        client,
+                        dst_bucket,
+                        &created_destinations,
+                        &backups,
+                    )
+                    .await;
+                    return Err(rollback_error(
+                        format!("Failed to list objects: {}", e),
+                        failures,
+                    ));
+                }
+            },
+        };
+        let keys: Vec<String> = list_output
+            .contents()
+            .iter()
+            .filter_map(|object| object.key().map(str::to_string))
+            .collect();
 
-        // Key-shape rejections must unwind like any other failure. Returning
-        // straight out of the loop would abandon destinations this call already
-        // created and backups it already took.
-        let suffix = match key.strip_prefix(src_prefix) {
-            Some(suffix) => suffix,
-            None => {
+        for key in &keys {
+            if operation_index >= MAX_PREFIX_TRANSACTION_OBJECTS {
                 let failures =
                     rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
                 return Err(rollback_error(
-                    format!("Key '{}' does not start with prefix '{}'", key, src_prefix),
+                    format!(
+                        "Prefix operation exceeds the {}-object transaction limit; no source was deleted",
+                        MAX_PREFIX_TRANSACTION_OBJECTS
+                    ),
                     failures,
                 ));
             }
-        };
-        let new_key = format!("{}{}", dst_prefix, suffix);
-        if let Err(err) = validate_key(&new_key, "Destination key") {
-            let failures =
-                rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
-            return Err(rollback_error(err, failures));
-        }
+            let index = operation_index;
+            operation_index += 1;
+            if cancel.is_cancelled() {
+                let failures =
+                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                return Err(rollback_error(cancelled_error(), failures));
+            }
 
-        if src_bucket == dst_bucket && &new_key == key {
-            let failures =
-                rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
-            return Err(rollback_error(
+            // Key-shape rejections must unwind like any other failure. Returning
+            // straight out of the loop would abandon destinations this call already
+            // created and backups it already took.
+            let suffix = match key.strip_prefix(src_prefix) {
+                Some(suffix) => suffix,
+                None => {
+                    let failures =
+                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
+                            .await;
+                    return Err(rollback_error(
+                        format!("Key '{}' does not start with prefix '{}'", key, src_prefix),
+                        failures,
+                    ));
+                }
+            };
+            let new_key = format!("{}{}", dst_prefix, suffix);
+            if let Err(err) = validate_key(&new_key, "Destination key") {
+                let failures =
+                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                return Err(rollback_error(err, failures));
+            }
+
+            if src_bucket == dst_bucket && &new_key == key {
+                let failures =
+                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                return Err(rollback_error(
                 format!(
                     "Source and destination resolve to the same object ('{}'). Refusing to copy a prefix onto itself.",
                     key
                 ),
                 failures,
             ));
-        }
-
-        let destination_head_request = client.head_object().bucket(dst_bucket).key(&new_key).send();
-        let destination_head = tokio::select! {
-            _ = cancel.cancelled() => {
-                let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
-                return Err(rollback_error(cancelled_error(), failures));
             }
-            result = destination_head_request => result,
-        };
 
-        let destination_was_absent = match destination_head {
-            Ok(_) => {
-                let destination_info =
-                    match describe_source(client, dst_bucket, &new_key, cancel).await {
-                        Ok(info) => info,
+            let destination_head_request =
+                client.head_object().bucket(dst_bucket).key(&new_key).send();
+            let destination_head = tokio::select! {
+                _ = cancel.cancelled() => {
+                    let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                    return Err(rollback_error(cancelled_error(), failures));
+                }
+                result = destination_head_request => result,
+            };
+
+            let destination_was_absent = match destination_head {
+                Ok(_) => {
+                    let destination_info =
+                        match describe_source(client, dst_bucket, &new_key, cancel).await {
+                            Ok(info) => info,
+                            Err(err) => {
+                                let failures = rollback_prefix_copy(
+                                    client,
+                                    dst_bucket,
+                                    &created_destinations,
+                                    &backups,
+                                )
+                                .await;
+                                return Err(rollback_error(err, failures));
+                            }
+                        };
+                    let backup_key = format!("{}{}/{}", ROLLBACK_BACKUP_PREFIX, namespace, index);
+                    let backup_probe = client
+                        .head_object()
+                        .bucket(dst_bucket)
+                        .key(&backup_key)
+                        .send();
+                    let backup_probe_result = tokio::select! {
+                        _ = cancel.cancelled() => {
+                            let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                            return Err(rollback_error(cancelled_error(), failures));
+                        }
+                        result = backup_probe => result,
+                    };
+                    match backup_probe_result {
+                        Ok(_) => {
+                            let failures = rollback_prefix_copy(
+                                client,
+                                dst_bucket,
+                                &created_destinations,
+                                &backups,
+                            )
+                            .await;
+                            return Err(rollback_error(
+                                format!("Rollback backup key '{}' already exists", backup_key),
+                                failures,
+                            ));
+                        }
+                        Err(err) if is_not_found(&err) => {}
                         Err(err) => {
                             let failures = rollback_prefix_copy(
                                 client,
@@ -4280,138 +4775,122 @@ async fn copy_prefix_objects(
                                 &backups,
                             )
                             .await;
-                            return Err(rollback_error(err, failures));
+                            return Err(rollback_error(
+                                format!(
+                                    "Failed to reserve rollback backup '{}': {}",
+                                    backup_key, err
+                                ),
+                                failures,
+                            ));
+                        }
+                    }
+
+                    let backup_receipt = match copy_with_receipt(
+                        client,
+                        dst_bucket,
+                        &new_key,
+                        dst_bucket,
+                        &backup_key,
+                        Some(destination_info.clone()),
+                        cancel,
+                    )
+                    .await
+                    {
+                        Ok(receipt) => receipt,
+                        Err(err) => {
+                            let _ = client
+                                .delete_object()
+                                .bucket(dst_bucket)
+                                .key(&backup_key)
+                                .send()
+                                .await;
+                            let failures = rollback_prefix_copy(
+                                client,
+                                dst_bucket,
+                                &created_destinations,
+                                &backups,
+                            )
+                            .await;
+                            return Err(rollback_error(
+                                format!("Failed to back up destination '{}': {}", new_key, err),
+                                failures,
+                            ));
                         }
                     };
-                let backup_key = format!("{}{}/{}", ROLLBACK_BACKUP_PREFIX, namespace, index);
-                let backup_probe = client
-                    .head_object()
-                    .bucket(dst_bucket)
-                    .key(&backup_key)
-                    .send();
-                let backup_probe_result = tokio::select! {
-                    _ = cancel.cancelled() => {
-                        let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
-                        return Err(rollback_error(cancelled_error(), failures));
-                    }
-                    result = backup_probe => result,
-                };
-                match backup_probe_result {
-                    Ok(_) => {
-                        let failures = rollback_prefix_copy(
-                            client,
-                            dst_bucket,
-                            &created_destinations,
-                            &backups,
-                        )
-                        .await;
-                        return Err(rollback_error(
-                            format!("Rollback backup key '{}' already exists", backup_key),
-                            failures,
-                        ));
-                    }
-                    Err(err) if is_not_found(&err) => {}
-                    Err(err) => {
-                        let failures = rollback_prefix_copy(
-                            client,
-                            dst_bucket,
-                            &created_destinations,
-                            &backups,
-                        )
-                        .await;
-                        return Err(rollback_error(
-                            format!(
-                                "Failed to reserve rollback backup '{}': {}",
-                                backup_key, err
-                            ),
-                            failures,
-                        ));
-                    }
+                    let mut backup_info = destination_info;
+                    backup_info.etag = Some(backup_receipt.destination_etag);
+                    backup_info.version_id = backup_receipt.destination_version_id;
+                    backups.push(DestinationBackup {
+                        destination_key: new_key.clone(),
+                        backup_key,
+                        source_info: backup_info,
+                    });
+                    false
                 }
-
-                let backup_receipt = match copy_with_receipt(
-                    client,
-                    dst_bucket,
-                    &new_key,
-                    dst_bucket,
-                    &backup_key,
-                    Some(destination_info.clone()),
-                    cancel,
-                )
-                .await
-                {
-                    Ok(receipt) => receipt,
-                    Err(err) => {
-                        let _ = client
-                            .delete_object()
-                            .bucket(dst_bucket)
-                            .key(&backup_key)
-                            .send()
+                Err(err) if is_not_found(&err) => true,
+                Err(err) => {
+                    let failures =
+                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
                             .await;
-                        let failures = rollback_prefix_copy(
-                            client,
-                            dst_bucket,
-                            &created_destinations,
-                            &backups,
-                        )
-                        .await;
-                        return Err(rollback_error(
-                            format!("Failed to back up destination '{}': {}", new_key, err),
-                            failures,
-                        ));
-                    }
-                };
-                let mut backup_info = destination_info;
-                backup_info.etag = Some(backup_receipt.destination_etag);
-                backup_info.version_id = backup_receipt.destination_version_id;
-                backups.push(DestinationBackup {
-                    destination_key: new_key.clone(),
-                    backup_key,
-                    source_info: backup_info,
-                });
-                false
-            }
-            Err(err) if is_not_found(&err) => true,
-            Err(err) => {
-                let failures =
-                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
-                return Err(rollback_error(
-                    format!("Failed to check destination '{}': {}", new_key, err),
-                    failures,
-                ));
-            }
-        };
-
-        let source_info = match describe_source(client, src_bucket, key, cancel).await {
-            Ok(info) => info,
-            Err(err) => {
-                let failures =
-                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
-                return Err(rollback_error(err, failures));
-            }
-        };
-        match copy_with_receipt(
-            client,
-            src_bucket,
-            key,
-            dst_bucket,
-            &new_key,
-            Some(source_info),
-            cancel,
-        )
-        .await
-        {
-            Ok(receipt) => {
-                if destination_was_absent {
-                    created_destinations.push(receipt.clone());
+                    return Err(rollback_error(
+                        format!("Failed to check destination '{}': {}", new_key, err),
+                        failures,
+                    ));
                 }
-                receipts.push(receipt);
+            };
+
+            let source_info = match describe_source(client, src_bucket, key, cancel).await {
+                Ok(info) => info,
+                Err(err) => {
+                    let failures =
+                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
+                            .await;
+                    return Err(rollback_error(err, failures));
+                }
+            };
+            match copy_with_receipt(
+                client,
+                src_bucket,
+                key,
+                dst_bucket,
+                &new_key,
+                Some(source_info),
+                cancel,
+            )
+            .await
+            {
+                Ok(receipt) => {
+                    if destination_was_absent {
+                        created_destinations.push(receipt.clone());
+                    }
+                    if collect_receipts {
+                        receipts.push(receipt);
+                    }
+                }
+                Err(err) => {
+                    let failures =
+                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
+                            .await;
+                    return Err(rollback_error(err, failures));
+                }
             }
-            Err(err) => {
-                let failures =
-                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
-                return Err(rollback_error(err, failures));
+        }
+
+        if list_output.is_truncated().unwrap_or(false) {
+            match list_output.next_continuation_token() {
+                Some(token) => continuation_token = Some(token.to_string()),
+                None => {
+                    let failures =
+                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
+                            .await;
+                    return Err(rollback_error(
+                        "S3 listing was truncated without a continuation token".to_string(),
+                        failures,
+                    ));
+                }
             }
+        } else {
+            break;
         }
     }
 
@@ -4447,6 +4926,7 @@ async fn current_identity_matches(
     expected_etag: &str,
     request_version_id: Option<&str>,
     expected_version_id: Option<&str>,
+    expected_fingerprint: Option<&str>,
     cancel: &CancelToken,
 ) -> Result<Option<bool>, String> {
     let mut request = client.head_object().bucket(bucket).key(key);
@@ -4465,7 +4945,10 @@ async fn current_identity_matches(
             let version_matches = expected_version_id
                 .map(|expected| head.version_id() == Some(expected))
                 .unwrap_or(true);
-            Ok(Some(etag_matches && version_matches))
+            let fingerprint_matches = expected_fingerprint
+                .map(|expected| head_generation_fingerprint(&head) == expected)
+                .unwrap_or(true);
+            Ok(Some(etag_matches && version_matches && fingerprint_matches))
         }
         Err(err) if is_not_found(&err) => Ok(None),
         Err(err) => Err(format!("Failed to verify '{}': {}", key, err)),
@@ -4523,6 +5006,7 @@ async fn delete_receipts_checked(
             &receipt.destination_etag,
             None,
             receipt.destination_version_id.as_deref(),
+            None,
             cancel,
         )
         .await?
@@ -4558,6 +5042,8 @@ async fn delete_receipts_checked(
                 &receipt.source_etag,
                 Some(version_id),
                 Some(version_id),
+                (!receipt.source_fingerprint.is_empty())
+                    .then_some(receipt.source_fingerprint.as_str()),
                 cancel,
             )
             .await?;
@@ -4569,6 +5055,8 @@ async fn delete_receipts_checked(
                     &receipt.source_etag,
                     None,
                     Some(version_id),
+                    (!receipt.source_fingerprint.is_empty())
+                        .then_some(receipt.source_fingerprint.as_str()),
                     cancel,
                 )
                 .await?
@@ -4595,6 +5083,7 @@ async fn delete_receipts_checked(
             &receipt.source_etag,
             None,
             None,
+            (!receipt.source_fingerprint.is_empty()).then_some(receipt.source_fingerprint.as_str()),
             cancel,
         )
         .await?
@@ -4625,6 +5114,11 @@ async fn delete_receipts_checked(
         // from exactly that race. On an unversioned bucket the behaviour is
         // unchanged, because there the key and its only version are the same
         // thing.
+        //
+        // Unversioned limitation: S3 If-Match evaluates ETag only. Tags and ACL
+        // are not part of ETag, and a metadata-only write can land between the
+        // fingerprint HEAD and this DELETE. Versioning is required for a safe
+        // move; without it a tag/ACL/metadata race cannot be closed.
         let request = client
             .delete_object()
             .bucket(src_bucket)
@@ -4650,6 +5144,7 @@ async fn delete_receipts_checked(
 #[tauri::command]
 pub(crate) async fn delete_copied_objects(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     src_bucket: String,
     dst_bucket: String,
     receipts: Vec<CopyReceipt>,
@@ -4674,10 +5169,7 @@ pub(crate) async fn delete_copied_objects(
         }
     }
 
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
     delete_receipts_checked(&client, &src_bucket, &dst_bucket, &receipts, &cancel).await
 }
@@ -4685,6 +5177,7 @@ pub(crate) async fn delete_copied_objects(
 #[tauri::command]
 pub(crate) async fn rename_prefix(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     old_prefix: String,
     new_prefix: String,
@@ -4695,16 +5188,8 @@ pub(crate) async fn rename_prefix(
     if prefixes_overlap(&old_prefix, &new_prefix) {
         return Err("Source and destination prefixes overlap; move was refused.".to_string());
     }
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
-
-    let keys = list_all_keys_under_prefix(&client, &bucket, &old_prefix, &cancel).await?;
-    if keys.is_empty() {
-        return Ok(0);
-    }
 
     let receipts = copy_prefix_objects(
         &client,
@@ -4712,7 +5197,7 @@ pub(crate) async fn rename_prefix(
         &old_prefix,
         &bucket,
         &new_prefix,
-        &keys,
+        true,
         &cancel,
     )
     .await?;
@@ -4724,6 +5209,7 @@ pub(crate) async fn rename_prefix(
 #[tauri::command]
 pub(crate) async fn copy_object_to(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     src_bucket: String,
     src_key: String,
     dst_bucket: String,
@@ -4734,10 +5220,7 @@ pub(crate) async fn copy_object_to(
     // Copying out of the backup namespace is how a user restores data from an
     // interrupted operation, so only the destination is restricted.
     validate_mutating_key(&dst_key, "Destination key")?;
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
 
     copy_with_receipt(
@@ -4757,27 +5240,21 @@ pub(crate) async fn copy_object_to(
 #[tauri::command]
 pub(crate) async fn copy_prefix_to(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     src_bucket: String,
     src_prefix: String,
     dst_bucket: String,
     dst_prefix: String,
     transfer_id: Option<u32>,
+    collect_receipts: Option<bool>,
 ) -> Result<Vec<CopyReceipt>, String> {
     validate_mutating_prefix(&src_prefix, "Source prefix")?;
     validate_mutating_prefix(&dst_prefix, "Destination prefix")?;
     if src_bucket == dst_bucket && prefixes_overlap(&src_prefix, &dst_prefix) {
         return Err("Source and destination prefixes overlap; copy was refused.".to_string());
     }
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
-
-    let keys = list_all_keys_under_prefix(&client, &src_bucket, &src_prefix, &cancel).await?;
-    if keys.is_empty() {
-        return Ok(Vec::new());
-    }
 
     copy_prefix_objects(
         &client,
@@ -4785,7 +5262,7 @@ pub(crate) async fn copy_prefix_to(
         &src_prefix,
         &dst_bucket,
         &dst_prefix,
-        &keys,
+        collect_receipts.unwrap_or(false),
         &cancel,
     )
     .await
@@ -4794,14 +5271,12 @@ pub(crate) async fn copy_prefix_to(
 #[tauri::command]
 pub(crate) fn build_object_url(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
 ) -> Result<String, String> {
-    let s3 = lock_s3_state(&state)?;
-    if s3.endpoint.is_empty() {
-        return Err("Not connected".to_string());
-    }
-    let base = s3.endpoint.trim_end_matches('/');
+    let endpoint = require_endpoint(&state, &connection_id)?;
+    let base = endpoint.trim_end_matches('/');
     let encoded_bucket = urlencoding::encode(&bucket);
     let encoded_key = key
         .split('/')
@@ -4814,6 +5289,7 @@ pub(crate) fn build_object_url(
 #[tauri::command]
 pub(crate) async fn generate_presigned_url(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
     expires_in_secs: u64,
@@ -4822,10 +5298,7 @@ pub(crate) async fn generate_presigned_url(
     if !(60..=604800).contains(&expires_in_secs) {
         return Err("Expiration must be between 60 and 604800 seconds".to_string());
     }
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     let presigning_config =
         aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(expires_in_secs))
@@ -4845,14 +5318,12 @@ pub(crate) async fn generate_presigned_url(
 #[tauri::command]
 pub(crate) async fn preview_object(
     state: tauri::State<'_, AppState>,
+    connection_id: String,
     bucket: String,
     key: String,
 ) -> Result<PreviewResponse, String> {
     validate_key(&key, "Object key")?;
-    let client = {
-        let s3 = lock_s3_state(&state)?;
-        s3.client.clone().ok_or("Not connected")?
-    };
+    let client = require_client(&state, &connection_id)?;
 
     let head = client
         .head_object()
@@ -4881,25 +5352,47 @@ pub(crate) async fn preview_object(
         .await
         .map_err(|e| format!("Failed to download preview: {}", e))?;
 
-    let raw_bytes = output
-        .body
-        .collect()
-        .await
-        .map_err(|e| format!("Failed to read preview body: {}", e))?
-        .into_bytes();
+    if truncated {
+        ensure_range_honoured(
+            output.content_range(),
+            output.content_length(),
+            0,
+            MAX_PREVIEW as u64 - 1,
+        )?;
+    }
 
-    let bytes = if raw_bytes.len() > MAX_PREVIEW as usize {
-        raw_bytes.slice(..MAX_PREVIEW as usize)
+    use tokio::io::AsyncReadExt;
+    let mut reader = output.body.into_async_read();
+    let max_bytes = MAX_PREVIEW as usize;
+    let mut raw_bytes = Vec::with_capacity(max_bytes + 1);
+    let mut buffer = [0u8; 64 * 1024];
+    while raw_bytes.len() <= max_bytes {
+        let count = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|e| format!("Failed to read preview body: {}", e))?;
+        if count == 0 {
+            break;
+        }
+        let remaining = max_bytes + 1 - raw_bytes.len();
+        raw_bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+        if raw_bytes.len() > max_bytes {
+            break;
+        }
+    }
+
+    let bytes: &[u8] = if raw_bytes.len() > max_bytes {
+        &raw_bytes[..max_bytes]
     } else {
-        raw_bytes
+        raw_bytes.as_slice()
     };
 
     let is_text = is_text_content_type(&content_type);
 
     let data = if is_text {
-        String::from_utf8_lossy(&bytes).to_string()
+        String::from_utf8_lossy(bytes).to_string()
     } else {
-        B64.encode(&bytes)
+        B64.encode(bytes)
     };
 
     Ok(PreviewResponse {
@@ -4936,6 +5429,8 @@ mod tests {
         assert!(is_text_content_type("text/plain"));
         assert!(is_text_content_type("text/html"));
         assert!(is_text_content_type("text/css"));
+        assert!(is_text_content_type("text/plain; charset=utf-8"));
+        assert!(is_text_content_type("APPLICATION/JSON; CHARSET=UTF-8"));
     }
 
     #[test]
@@ -5470,5 +5965,70 @@ mod tests {
             source,
             "bucket/folder/file%20name.txt?versionId=version%2Bid%2F1"
         );
+    }
+
+    #[test]
+    fn connection_identity_is_stable_and_distinguishes_accounts() {
+        let a = connection_identity("https://s3.example.com", "AKIA1");
+        let b = connection_identity("https://s3.example.com", "AKIA1");
+        let c = connection_identity("https://s3.example.com", "AKIA2");
+        let d = connection_identity("https://s3.other.example", "AKIA1");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn mint_connection_id_is_unique_per_call() {
+        let first = mint_connection_id();
+        let second = mint_connection_id();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 32);
+        assert!(first.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn require_connected_client_rejects_empty_and_mismatched_ids() {
+        let s3 = crate::S3State {
+            client: None,
+            endpoint: String::new(),
+            region: String::new(),
+            bucket_hint: None,
+            connection_generation: 0,
+            connection_id: Some("session-a".to_string()),
+            connection_identity: Some("ident-a".to_string()),
+        };
+        let empty = require_connected_client(&s3, "").expect_err("empty id");
+        assert!(empty.contains("required"), "{empty}");
+        let changed = require_connected_client(&s3, "session-b").expect_err("mismatch");
+        assert!(changed.contains("changed"), "{changed}");
+        assert!(require_connection_session(&s3, "session-a").is_ok());
+        let missing_client = require_connected_client(&s3, "session-a").expect_err("no client");
+        assert!(missing_client.contains("Not connected"), "{missing_client}");
+    }
+
+    #[test]
+    fn invalidating_connection_clears_identity_and_advances_generation() {
+        let mut s3 = crate::S3State {
+            client: None,
+            endpoint: "https://s3.example.com".to_string(),
+            region: "us-east-1".to_string(),
+            bucket_hint: Some("bucket".to_string()),
+            connection_generation: 41,
+            connection_id: Some("session-a".to_string()),
+            connection_identity: Some("ident-a".to_string()),
+        };
+
+        invalidate_connection_session(&mut s3);
+
+        assert_eq!(s3.connection_generation, 42);
+        assert!(s3.client.is_none());
+        assert!(s3.endpoint.is_empty());
+        assert!(s3.region.is_empty());
+        assert!(s3.bucket_hint.is_none());
+        assert!(s3.connection_id.is_none());
+        assert!(s3.connection_identity.is_none());
     }
 }

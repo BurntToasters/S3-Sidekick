@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -92,6 +93,10 @@ function getReleaseEntries(releaseDir) {
   return entries;
 }
 
+function sha256File(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
 function verifyCopiedPath(sourcePath, destinationPath) {
   const source = fs.statSync(sourcePath);
   let destination;
@@ -108,6 +113,9 @@ function verifyCopiedPath(sourcePath, destinationPath) {
       `mirrored file size differs: ${destinationPath} (${destination.size} bytes; expected ${source.size})`,
     );
   }
+  if (source.isFile() && sha256File(sourcePath) !== sha256File(destinationPath)) {
+    throw new Error(`mirrored file hash differs: ${destinationPath}`);
+  }
   if (source.isDirectory()) {
     for (const entry of fs.readdirSync(sourcePath)) {
       verifyCopiedPath(
@@ -115,6 +123,22 @@ function verifyCopiedPath(sourcePath, destinationPath) {
         path.join(destinationPath, entry),
       );
     }
+  }
+}
+
+function removeDestinationExtras(sourcePath, destinationPath) {
+  if (!fs.statSync(sourcePath).isDirectory()) return;
+  const sourceEntries = new Set(fs.readdirSync(sourcePath));
+  for (const entry of fs.readdirSync(destinationPath)) {
+    if (!sourceEntries.has(entry)) {
+      removePath(path.join(destinationPath, entry));
+    }
+  }
+  for (const entry of sourceEntries) {
+    removeDestinationExtras(
+      path.join(sourcePath, entry),
+      path.join(destinationPath, entry),
+    );
   }
 }
 
@@ -152,6 +176,7 @@ function copyReleaseAssets(releaseDir = RELEASE_DIR, destination) {
     });
     verifyCopiedPath(sourcePath, destinationPath);
   }
+  removeDestinationExtras(resolvedReleaseDir, resolvedDestination);
   return entries.length;
 }
 

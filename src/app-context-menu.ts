@@ -152,7 +152,12 @@ export function handleContextMenu(e: MouseEvent): void {
     else if (action === "rename") void handleRename();
     else if (action === "copy-move") openCopyMoveDialog();
     else if (action === "delete") void handleDelete();
-    else if (action === "open-folder") void navigateToFolder(prefix);
+    else if (action === "open-folder") {
+      void navigateToFolder(prefix).catch((err) => {
+        setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+        logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
+      });
+    }
   });
 }
 

@@ -1,9 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+const { showConfirmMock } = vi.hoisted(() => ({
+  showConfirmMock: vi.fn<(...args: unknown[]) => Promise<boolean>>(),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: mockInvoke,
+}));
+
+vi.mock("../dialogs.ts", () => ({
+  showConfirm: showConfirmMock,
 }));
 
 function renderFixture(): void {
@@ -64,9 +71,12 @@ describe("info panel", () => {
   beforeEach(async () => {
     vi.resetModules();
     mockInvoke.mockReset();
+    showConfirmMock.mockReset().mockResolvedValue(true);
     renderFixture();
     const { state } = await import("../state.ts");
     state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.statusTimeout = undefined;
   });
 
@@ -285,6 +295,7 @@ describe("info panel", () => {
       bucket: "bucket-a",
       key: "single-acl.txt",
       visibility: "public-read",
+      connectionId: "test-connection",
     });
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "update_metadata",
@@ -342,11 +353,13 @@ describe("info panel", () => {
       bucket: "bucket-a",
       key: "alpha.txt",
       visibility: "public-read",
+      connectionId: "test-connection",
     });
     expect(mockInvoke).toHaveBeenCalledWith("set_object_acl", {
       bucket: "bucket-a",
       key: "beta.txt",
       visibility: "public-read",
+      connectionId: "test-connection",
     });
     expect(
       (document.getElementById("status") as HTMLDivElement).textContent,

@@ -24,9 +24,16 @@ const rustTimeoutMs = process.platform === "win32" ? 1_200_000 : 600_000;
 function createInitialResults() {
   return {
     typecheck: { status: "pending" },
+    lint: { status: "pending" },
     format: { status: "pending" },
     cargoSafeUpdate: { status: "pending" },
     cargoUpdatePolicy: { status: "pending" },
+    clippy: { status: "pending" },
+    cargoFmt: { status: "pending" },
+    frontendBuild: { status: "pending" },
+    nativeBuild: { status: "pending" },
+    tauriBuild: { status: "pending" },
+    scriptTests: { status: "pending" },
     test: { status: "pending", passed: null, failed: null, files: null },
     rust: { status: "pending", passed: null, failed: null },
   };
@@ -181,6 +188,13 @@ ${colors.reset}`);
     }${colors.reset}`,
   );
   console.log(
+    `${colors.bold}Lint:${colors.reset}       ${
+      results.lint.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
     `${colors.bold}Cargo Safe Update:${colors.reset} ${
       results.cargoSafeUpdate?.status === "passed"
         ? `${colors.green}✓ PASS`
@@ -190,6 +204,48 @@ ${colors.reset}`);
   console.log(
     `${colors.bold}Cargo Policy:${colors.reset}      ${
       results.cargoUpdatePolicy?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Clippy:${colors.reset}     ${
+      results.clippy.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Cargo fmt:${colors.reset}  ${
+      results.cargoFmt?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Frontend build:${colors.reset} ${
+      results.frontendBuild?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Native build:${colors.reset} ${
+      results.nativeBuild.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Tauri build:${colors.reset}  ${
+      results.tauriBuild?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Script tests:${colors.reset} ${
+      results.scriptTests.status === "passed"
         ? `${colors.green}✓ PASS`
         : `${colors.red}✗ FAIL`
     }${colors.reset}`,
@@ -242,6 +298,7 @@ function main({
   printBanner();
 
   runner("typecheck", npm, ["run", "typecheck"], null, results);
+  runner("lint", npm, ["run", "lint"], null, results);
   runner("format", npm, ["run", "format:check"], null, results);
   runner(
     "cargoSafeUpdate",
@@ -257,7 +314,68 @@ function main({
     null,
     results,
   );
-  runner("test", npm, ["run", "test"], parseTest, results);
+  runner(
+    "clippy",
+    "cargo",
+    [
+      "clippy",
+      "--locked",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings",
+    ],
+    null,
+    results,
+    { timeout: rustTimeoutMs },
+  );
+  runner(
+    "cargoFmt",
+    "cargo",
+    [
+      "fmt",
+      "--all",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--",
+      "--check",
+    ],
+    null,
+    results,
+  );
+  runner("frontendBuild", npm, ["run", "build"], null, results);
+  runner(
+    "nativeBuild",
+    "cargo",
+    [
+      "build",
+      "--release",
+      "--locked",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+    ],
+    null,
+    results,
+    { timeout: rustTimeoutMs },
+  );
+  runner(
+    "tauriBuild",
+    npm,
+    ["run", "tauri", "--", "build", "--no-bundle", "--", "--locked"],
+    null,
+    results,
+    { timeout: rustTimeoutMs },
+  );
+  runner(
+    "scriptTests",
+    "node",
+    ["--test", "scripts/github-cli.test.cjs", "scripts/test-all.test.js"],
+    null,
+    results,
+  );
+  runner("test", npm, ["run", "test:cov"], parseTest, results);
   runner(
     "rust",
     "cargo",

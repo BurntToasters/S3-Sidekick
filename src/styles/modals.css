@@ -122,6 +122,13 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   line-height: 1.35;
 }
 
+.security-biometric-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .security-controls {
   width: 100%;
   display: flex;

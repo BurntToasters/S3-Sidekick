@@ -12,8 +12,7 @@ import {
   navigateUp,
   navigateBack,
   navigateForward,
-  getSelectableKeys,
-  updateSelectionUI,
+  handleSelectAll,
 } from "./browser.ts";
 import {
   isInspectorOpen,
@@ -197,9 +196,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
 
       if (key === "a" && !inInput) {
         e.preventDefault();
-        const allKeys = getSelectableKeys();
-        for (const k of allKeys) state.selectedKeys.add(k);
-        updateSelectionUI();
+        handleSelectAll(true);
       }
 
       if (key === "u" && !inInput) {

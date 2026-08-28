@@ -460,7 +460,7 @@
                   <table class="object-table" aria-label="Objects">
                     <thead>
                       <tr>
-                        <th class="col-check">
+                        <th scope="col" class="col-check">
                           <input
                             id="select-all"
                             type="checkbox"
@@ -469,6 +469,7 @@
                           />
                         </th>
                         <th
+                          scope="col"
                           class="col-sortable"
                           data-sort="name"
                           aria-sort="ascending"
@@ -488,6 +489,7 @@
                           </button>
                         </th>
                         <th
+                          scope="col"
                           class="col-sortable"
                           data-sort="size"
                           aria-sort="none"
@@ -502,6 +504,7 @@
                           </button>
                         </th>
                         <th
+                          scope="col"
                           class="col-sortable"
                           data-sort="modified"
                           aria-sort="none"
@@ -1051,7 +1054,7 @@
                 <div class="setting-item">
                   <label class="toggle-row">
                     <input id="setting-updates" type="checkbox" />
-                    <span>Check for updates automatically</span>
+                    <span>Download updates automatically</span>
                   </label>
                 </div>
                 <div class="setting-item">
@@ -1572,6 +1575,13 @@
                 style="display: none"
               >
                 <label for="biometric-toggle">Biometric Unlock</label>
+                <span
+                  id="biometric-security-note"
+                  class="security-biometric-note text-secondary"
+                >
+                  Biometric prompt is defense-in-depth; stored key is not
+                  hardware-bound.
+                </span>
                 <button
                   id="biometric-toggle"
                   class="btn"
@@ -1648,6 +1658,9 @@
             class="dialog-input-icon lucide-icon"
             data-icon="lock"
           ></span>
+          <label id="dialog-input-label" class="sr-only" for="dialog-input"
+            >Value</label
+          >
           <input
             id="dialog-input"
             class="field dialog-box__input"
@@ -1948,11 +1961,18 @@
       class="setup-wizard-overlay"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="setup-wizard-title"
+      aria-labelledby="setup-wizard-title-welcome"
       hidden
     >
       <div class="setup-wizard-card">
-        <div class="setup-wizard-progress">
+        <div
+          class="setup-wizard-progress"
+          role="progressbar"
+          aria-label="Setup progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
           <div
             class="setup-wizard-progress__bar"
             id="setup-wizard-progress-bar"
@@ -1966,7 +1986,7 @@
               data-icon="hand"
             ></span>
           </div>
-          <h2 id="setup-wizard-title" class="setup-wizard-step__title">
+          <h2 id="setup-wizard-title-welcome" class="setup-wizard-step__title">
             Welcome to S3 Sidekick
           </h2>
           <p class="setup-wizard-step__desc">
@@ -1994,16 +2014,35 @@
               data-icon="palette"
             ></span>
           </div>
-          <h2 class="setup-wizard-step__title">Choose Your Theme</h2>
+          <h2 id="setup-wizard-title-theme" class="setup-wizard-step__title">
+            Choose Your Theme
+          </h2>
           <p class="setup-wizard-step__desc">Pick how S3 Sidekick looks.</p>
-          <div class="setup-wizard-theme-options" id="setup-theme-options">
-            <button class="setup-wizard-theme-btn" data-theme-value="light">
+          <div
+            class="setup-wizard-theme-options"
+            id="setup-theme-options"
+            role="radiogroup"
+            aria-label="Theme"
+          >
+            <button
+              class="setup-wizard-theme-btn"
+              data-theme-value="light"
+              role="radio"
+              aria-checked="false"
+              tabindex="-1"
+            >
               <span
                 class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--light"
               ></span>
               <span>Light</span>
             </button>
-            <button class="setup-wizard-theme-btn" data-theme-value="dark">
+            <button
+              class="setup-wizard-theme-btn"
+              data-theme-value="dark"
+              role="radio"
+              aria-checked="false"
+              tabindex="-1"
+            >
               <span
                 class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--dark"
               ></span>
@@ -2012,6 +2051,9 @@
             <button
               class="setup-wizard-theme-btn setup-wizard-theme-btn--active"
               data-theme-value="system"
+              role="radio"
+              aria-checked="true"
+              tabindex="0"
             >
               <span
                 class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--system"
@@ -2037,7 +2079,10 @@
               data-icon="lock"
             ></span>
           </div>
-          <h2 class="setup-wizard-step__title">
+          <h2
+            id="setup-wizard-title-encryption"
+            class="setup-wizard-step__title"
+          >
             Encrypt Your Credentials On-Disk
           </h2>
           <p class="setup-wizard-step__desc">
@@ -2045,6 +2090,7 @@
           </p>
           <div class="setup-wizard-encryption-form" id="setup-encryption-form">
             <div class="field-with-toggle setup-wizard-field">
+              <label class="sr-only" for="setup-enc-password">Password</label>
               <input
                 id="setup-enc-password"
                 class="field"
@@ -2063,6 +2109,9 @@
               </button>
             </div>
             <div class="field-with-toggle setup-wizard-field">
+              <label class="sr-only" for="setup-enc-confirm"
+                >Confirm password</label
+              >
               <input
                 id="setup-enc-confirm"
                 class="field"
@@ -2080,7 +2129,13 @@
                 <span class="lucide-icon" data-icon="eye"></span>
               </button>
             </div>
-            <p id="setup-enc-error" class="setup-wizard-enc-error" hidden></p>
+            <p
+              id="setup-enc-error"
+              class="setup-wizard-enc-error"
+              role="alert"
+              aria-live="assertive"
+              hidden
+            ></p>
             <label
               id="setup-biometric-label"
               class="setup-wizard-checkbox-row"
@@ -2116,7 +2171,9 @@
               data-icon="refresh-cw"
             ></span>
           </div>
-          <h2 class="setup-wizard-step__title">Updates</h2>
+          <h2 id="setup-wizard-title-updates" class="setup-wizard-step__title">
+            Updates
+          </h2>
           <p class="setup-wizard-step__desc">
             Stay up to date with the latest features and fixes.
           </p>
@@ -2160,7 +2217,9 @@
               data-icon="rocket"
             ></span>
           </div>
-          <h2 class="setup-wizard-step__title">You're All Set!</h2>
+          <h2 id="setup-wizard-title-done" class="setup-wizard-step__title">
+            You're All Set!
+          </h2>
           <p class="setup-wizard-step__desc">
             Connect to your first S3-compatible storage. Saved connections
             become bookmark chips in the title bar for one-click access later.

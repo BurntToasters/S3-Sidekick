@@ -16,6 +16,7 @@ import {
   getBookmarks,
   exportBookmarksJson,
   importBookmarksJson,
+  MAX_IMPORT_BYTES,
   type Bookmark,
 } from "./bookmarks.ts";
 import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
@@ -745,6 +746,7 @@ export async function closeSettingsModal(save: boolean): Promise<void> {
     } catch (err) {
       applyTheme(state.lastPersistedSettings.theme);
       state.currentSettings = { ...state.lastPersistedSettings };
+      setUpdateChannel(state.lastPersistedSettings.updateChannel);
       const statusEl = document.getElementById("status");
       if (statusEl)
         statusEl.textContent = `Failed to save settings: ${String(err)}`;
@@ -800,7 +802,7 @@ export async function resetSettings(): Promise<void> {
     });
     try {
       await invoke("save_settings", { json: defaults });
-      await invoke("save_connection", { json: "" });
+      await invoke("clear_saved_connection");
     } catch (err) {
       await showAlert("Reset Failed", friendlyError(err));
       return;
@@ -866,7 +868,12 @@ async function refreshBookmarkListUI(): Promise<void> {
         { okLabel: "Delete", okDanger: true },
       );
       if (!confirmed) return;
-      await removeBookmark(index);
+      try {
+        await removeBookmark(index);
+      } catch (err) {
+        void showAlert("Delete Failed", friendlyError(err));
+        return;
+      }
       void refreshBookmarkListUI();
     },
   );
@@ -885,14 +892,24 @@ function wireBookmarkImportExport(): void {
   ) as HTMLInputElement | null;
 
   exportBtn?.addEventListener("click", () => {
-    const json = exportBookmarksJson();
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "s3-sidekick-bookmarks.json";
-    a.click();
-    URL.revokeObjectURL(url);
+    void showConfirm(
+      "Export bookmark secrets?",
+      "Including secret keys writes them to a plaintext file. Choose redacted export to leave secrets out.",
+      {
+        okLabel: "Include secrets",
+        cancelLabel: "Export redacted",
+        okDanger: true,
+      },
+    ).then((includeSecrets) => {
+      const json = exportBookmarksJson(includeSecrets);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "s3-sidekick-bookmarks.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    });
   });
 
   importBtn?.addEventListener("click", () => {
@@ -902,6 +919,11 @@ function wireBookmarkImportExport(): void {
   importInput?.addEventListener("change", () => {
     const file = importInput.files?.[0];
     if (!file) return;
+    if (file.size > MAX_IMPORT_BYTES) {
+      importInput.value = "";
+      void showAlert("Import Failed", "Bookmark import is too large");
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const text = reader.result as string;

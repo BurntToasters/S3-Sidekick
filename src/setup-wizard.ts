@@ -3,6 +3,7 @@ import { applyTheme, saveSettings } from "./settings.ts";
 import { state } from "./state.ts";
 import type { ThemePreference } from "./settings-model.ts";
 import type { SecurityStatus } from "./security.ts";
+import { focusConnectionScreen } from "./app-connection.ts";
 
 const LAST_STEP = 4;
 
@@ -20,16 +21,32 @@ function $(id: string): HTMLElement {
 
 function setProgress(step: number): void {
   const bar = $("setup-wizard-progress-bar");
+  const progress = bar.parentElement;
   const pct = (step / LAST_STEP) * 100;
   bar.style.width = `${pct}%`;
+  progress?.setAttribute("aria-valuenow", String(Math.round(pct)));
 }
 
 function showStep(step: number): void {
+  const overlay = document.getElementById("setup-wizard-overlay");
+  const headingIds = [
+    "setup-wizard-title-welcome",
+    "setup-wizard-title-theme",
+    "setup-wizard-title-encryption",
+    "setup-wizard-title-updates",
+    "setup-wizard-title-done",
+  ];
   const steps = document.querySelectorAll<HTMLElement>(".setup-wizard-step");
   for (const s of steps) {
     const idx = Number(s.dataset.step);
     s.hidden = idx !== step;
+    s.setAttribute("aria-hidden", String(idx !== step));
+    if (idx === step) {
+      s.tabIndex = -1;
+      s.focus();
+    }
   }
+  overlay?.setAttribute("aria-labelledby", headingIds[step] ?? headingIds[0]);
   setProgress(step);
 }
 
@@ -52,7 +69,6 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     overlay.hidden = false;
 
     let selectedTheme: ThemePreference = "system";
-    let currentStep = 0;
     let securityAlreadyInitialized = false;
 
     const securityCheckDone = invoke<SecurityStatus>("get_security_status")
@@ -66,7 +82,6 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     showStep(0);
 
     function goTo(step: number): void {
-      currentStep = step;
       showStep(step);
     }
 
@@ -84,6 +99,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       for (const btn of themeBtns) {
         btn.removeEventListener("click", onThemeSelect);
       }
+      themeOptions?.removeEventListener("keydown", onThemeKeydown);
     }
 
     const welcomeNext = $("setup-welcome-next") as HTMLButtonElement;
@@ -110,6 +126,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     const themeBtns = document.querySelectorAll<HTMLButtonElement>(
       ".setup-wizard-theme-btn",
     );
+    const themeOptions = document.getElementById("setup-theme-options");
 
     function wireRevealToggle(
       input: HTMLInputElement,
@@ -127,6 +144,16 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     }
     wireRevealToggle(encPassword, encPasswordReveal);
     wireRevealToggle(encConfirm, encConfirmReveal);
+
+    let encryptionCommitted = false;
+    let biometricEnrolled = false;
+    const encSkipDefaultLabel = encSkip.textContent;
+    const encNextDefaultLabel = encNext.textContent;
+
+    function restoreEncActionLabels(): void {
+      encSkip.textContent = encSkipDefaultLabel;
+      encNext.textContent = encNextDefaultLabel;
+    }
 
     void initBiometricUI();
 
@@ -149,13 +176,51 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       }
     }
 
+    function syncThemeRovingTabindex(): void {
+      for (const btn of themeBtns) {
+        btn.tabIndex = btn.getAttribute("aria-checked") === "true" ? 0 : -1;
+      }
+    }
+
     function onThemeSelect(this: HTMLButtonElement): void {
       for (const btn of themeBtns) {
         btn.classList.remove("setup-wizard-theme-btn--active");
+        btn.setAttribute("aria-checked", "false");
       }
       this.classList.add("setup-wizard-theme-btn--active");
+      this.setAttribute("aria-checked", "true");
       selectedTheme = (this.dataset.themeValue as ThemePreference) ?? "system";
       applyTheme(selectedTheme);
+      syncThemeRovingTabindex();
+    }
+
+    function onThemeKeydown(event: KeyboardEvent): void {
+      if (
+        event.key !== "ArrowLeft" &&
+        event.key !== "ArrowRight" &&
+        event.key !== "ArrowUp" &&
+        event.key !== "ArrowDown" &&
+        event.key !== "Home" &&
+        event.key !== "End"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      const list = Array.from(themeBtns);
+      if (list.length === 0) return;
+      const current = list.findIndex(
+        (btn) => btn.getAttribute("aria-checked") === "true",
+      );
+      let next = current < 0 ? 0 : current;
+      if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = list.length - 1;
+      else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        next = (current + 1 + list.length) % list.length;
+      } else {
+        next = (current - 1 + list.length) % list.length;
+      }
+      list[next].click();
+      list[next].focus();
     }
 
     function showEncError(msg: string): void {
@@ -186,18 +251,26 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
     function onEncBack(): void {
       hideEncError();
+      restoreEncActionLabels();
       goTo(1);
     }
 
     async function onEncSkip(): Promise<void> {
       hideEncError();
+      if (encryptionCommitted) {
+        encBiometric.checked = false;
+        restoreEncActionLabels();
+        goTo(3);
+        return;
+      }
       try {
         await invoke<SecurityStatus>("initialize_security", {
           enableEncryption: false,
           password: null,
         });
-      } catch {
-        // non-fatal
+      } catch (err) {
+        showEncError(`Failed to disable encryption: ${String(err)}`);
+        return;
       }
       goTo(3);
     }
@@ -207,35 +280,47 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       const pw = encPassword.value;
       const confirm = encConfirm.value;
 
-      if (pw.length < 8) {
-        showEncError("Password must be at least 8 characters.");
-        return;
-      }
-      if (pw !== confirm) {
-        showEncError("Passwords do not match.");
-        return;
+      if (!encryptionCommitted) {
+        if (pw.length < 8) {
+          showEncError("Password must be at least 8 characters.");
+          return;
+        }
+        if (pw !== confirm) {
+          showEncError("Passwords do not match.");
+          return;
+        }
       }
 
       encNext.disabled = true;
+      encSkip.disabled = true;
       try {
-        await invoke<SecurityStatus>("initialize_security", {
-          enableEncryption: true,
-          password: pw,
-        });
+        if (!encryptionCommitted) {
+          await invoke<SecurityStatus>("initialize_security", {
+            enableEncryption: true,
+            password: pw,
+          });
+          encryptionCommitted = true;
+        }
 
-        if (encBiometric.checked) {
+        if (encBiometric.checked && !biometricEnrolled) {
           try {
             await invoke<SecurityStatus>("enable_biometric");
-          } catch {
-            // biometric enable failed, non-fatal
+            biometricEnrolled = true;
+          } catch (err) {
+            showEncError(`Failed to enable biometric: ${String(err)}`);
+            encNext.textContent = "Retry biometric";
+            encSkip.textContent = "Continue without biometric";
+            return;
           }
         }
 
+        restoreEncActionLabels();
         goTo(3);
       } catch (err) {
         showEncError(`Failed to enable encryption: ${String(err)}`);
       } finally {
         encNext.disabled = false;
+        encSkip.disabled = false;
       }
     }
 
@@ -251,14 +336,14 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     function onDone(): void {
       const result: SetupResult = {
         theme: selectedTheme,
-        encryptionEnabled: encPassword.value.length >= 8 && currentStep > 2,
-        biometricEnabled: encBiometric.checked,
+        encryptionEnabled: encryptionCommitted,
+        biometricEnabled: biometricEnrolled,
         autoCheckUpdates: autoUpdates.checked,
         updateChannel: updateChannel.value === "beta" ? "beta" : "release",
       };
       cleanup();
       resolve(result);
-      void import("./app-connection.ts").then((m) => m.focusConnectionScreen());
+      focusConnectionScreen();
     }
 
     const wrappedThemeNext = () => void onThemeNext();
@@ -278,5 +363,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     for (const btn of themeBtns) {
       btn.addEventListener("click", onThemeSelect);
     }
+    themeOptions?.addEventListener("keydown", onThemeKeydown);
+    syncThemeRovingTabindex();
   });
 }

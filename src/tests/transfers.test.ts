@@ -47,7 +47,12 @@ async function loadTransfersModule() {
   }));
   const drawer = await import("../bottom-drawer.ts");
   drawer.initDrawer();
-  return import("../transfers.ts");
+  const transfers = await import("../transfers.ts");
+  const { state } = await import("../state.ts");
+  state.connectionId = "test-connection";
+  state.connectionIdentity = "test-identity";
+  state.connected = true;
+  return transfers;
 }
 
 async function flushMicrotasks(cycles = 2): Promise<void> {
@@ -405,6 +410,7 @@ describe("transfers queue UI", () => {
         uploadCount: 1,
         downloadCount: 0,
         errorCount: 0,
+        skippedCount: 0,
       });
     });
 
@@ -430,13 +436,24 @@ describe("transfers queue UI", () => {
         uploadCount: 0,
         downloadCount: 1,
         errorCount: 0,
+        skippedCount: 0,
       });
     });
 
     mockInvoke.mockRejectedValueOnce(new Error("upload failed"));
     transfers.enqueuePaths(["C:\\tmp\\second.txt"], "uploads/");
     await flushMicrotasks(20);
-    expect(onComplete.mock.calls.length).toBe(2);
+    await vi.waitFor(() => {
+      expect(onComplete.mock.calls.length).toBe(3);
+      expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
+        hadUpload: false,
+        hadDownload: false,
+        uploadCount: 0,
+        downloadCount: 0,
+        errorCount: 1,
+        skippedCount: 0,
+      });
+    });
   });
 
   it("uses browser-file upload fallback and surfaces oversize browser upload errors", async () => {
@@ -526,9 +543,12 @@ describe("transfers queue UI", () => {
       expect(
         (document.getElementById("transfer-list") as HTMLDivElement)
           .textContent,
-      ).not.toContain("slow.txt");
+      ).toContain("Cancelled");
     });
     transfers.clearCompletedTransfers();
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).not.toContain("slow.txt");
 
     state.currentSettings.maxConcurrentTransfers = 0;
     transfers.enqueuePaths(["C:\\tmp\\queued.txt"], "uploads/");
@@ -544,6 +564,139 @@ describe("transfers queue UI", () => {
           .textContent,
       ).toContain("Cancelled");
     });
+  });
+
+  it("waits for an active download to stop before ordered recovery cleanup", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    state.currentSettings.enableTransferResume = true;
+    await transfers.initTransferQueueUI();
+
+    const events: string[] = [];
+    let stopDownload = () => {};
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "path_exists" || cmd === "object_exists") return false;
+      if (cmd === "head_object") return { content_length: 1 };
+      if (cmd === "download_object") {
+        return new Promise<number>((_resolve, reject) => {
+          stopDownload = () => {
+            events.push("transfer-stopped");
+            reject(new Error("Transfer cancelled"));
+          };
+        });
+      }
+      if (cmd === "cancel_transfer") {
+        events.push("cancel-signal");
+        stopDownload();
+        return undefined;
+      }
+      if (cmd === "discard_download_scratch") {
+        events.push("scratch-discarded");
+        return undefined;
+      }
+      if (cmd === "transfer_checkpoint_remove") {
+        events.push("checkpoint-removed");
+        return undefined;
+      }
+      return undefined;
+    });
+
+    transfers.enqueueDownloads([
+      {
+        bucket: "bucket-a",
+        key: "docs/cancel-me.txt",
+        destination: "C:\\tmp\\cancel-me.txt",
+      },
+    ]);
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "download_object"),
+      ).toBe(true);
+    });
+
+    const row = Array.from(
+      document.querySelectorAll<HTMLDivElement>(".transfer-item"),
+    ).find((entry) => entry.textContent?.includes("cancel-me.txt"));
+    (row?.querySelector(".transfer-cancel") as HTMLButtonElement).click();
+
+    await vi.waitFor(() => {
+      expect(events).toEqual([
+        "cancel-signal",
+        "transfer-stopped",
+        "scratch-discarded",
+        "checkpoint-removed",
+      ]);
+    });
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("Cancelled");
+  });
+
+  it("retains paused recovery state when cancellation cleanup fails", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    state.currentSettings.enableTransferResume = true;
+    await transfers.initTransferQueueUI();
+
+    let stopDownload = () => {};
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "path_exists" || cmd === "object_exists") return false;
+      if (cmd === "head_object") return { content_length: 1 };
+      if (cmd === "download_object") {
+        return new Promise<number>((_resolve, reject) => {
+          stopDownload = () => reject(new Error("Transfer cancelled"));
+        });
+      }
+      if (cmd === "cancel_transfer") {
+        stopDownload();
+        return undefined;
+      }
+      if (cmd === "discard_download_scratch") {
+        throw new Error("scratch busy");
+      }
+      return undefined;
+    });
+
+    transfers.enqueueDownloads([
+      {
+        bucket: "bucket-a",
+        key: "docs/retain-me.txt",
+        destination: "C:\\tmp\\retain-me.txt",
+      },
+    ]);
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "download_object"),
+      ).toBe(true);
+    });
+    const row = Array.from(
+      document.querySelectorAll<HTMLDivElement>(".transfer-item"),
+    ).find((entry) => entry.textContent?.includes("retain-me.txt"));
+    (row?.querySelector(".transfer-cancel") as HTMLButtonElement).click();
+
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("transfer-list") as HTMLDivElement)
+          .textContent,
+      ).toContain("Cancellation cleanup failed");
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "transfer_checkpoint_remove",
+      expect.anything(),
+    );
+    const manifest = JSON.parse(
+      localStorage.getItem("s3-sidekick.transfer-manifest.v1") ?? "{}",
+    ) as { items?: Array<{ paused?: boolean; destination?: string }> };
+    expect(manifest.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          paused: true,
+          destination: "C:\\tmp\\retain-me.txt",
+        }),
+      ]),
+    );
   });
 
   it("updates progress via transfer events and cleans up listeners on dispose", async () => {
@@ -830,6 +983,7 @@ describe("transfers queue UI", () => {
       dstBucket: "destination-bucket",
       receipts: [receipt],
       transferId: expect.any(Number),
+      connectionId: "test-connection",
     });
     const markerSaveIndex = mockInvoke.mock.calls.findIndex(
       ([cmd, payload]) =>
@@ -848,6 +1002,231 @@ describe("transfers queue UI", () => {
     );
     expect(markerSaveIndex).toBeGreaterThanOrEqual(0);
     expect(deleteIndex).toBeGreaterThan(markerSaveIndex);
+  });
+
+  it("keeps the bound session for source deletion after a mid-move reconnect", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    const receipt = {
+      source_key: "source/file.txt",
+      source_etag: '"source-etag"',
+      source_version_id: null,
+      destination_key: "archive/file.txt",
+      destination_etag: '"destination-etag"',
+      destination_version_id: null,
+    };
+
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "object_exists") return false;
+      if (cmd === "copy_object_to") {
+        state.connectionId = "reconnected-session";
+        state.connectionIdentity = "test-identity";
+        return receipt;
+      }
+      if (cmd === "save_transfer_manifest") return undefined;
+      if (cmd === "delete_copied_objects") return 1;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "move",
+        sourceBucket: "source-bucket",
+        sourceKey: receipt.source_key,
+        fileName: "file.txt",
+        destinationBucket: "destination-bucket",
+        destinationKey: receipt.destination_key,
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "delete_copied_objects"),
+      ).toBe(true);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("copy_object_to", {
+      srcBucket: "source-bucket",
+      srcKey: receipt.source_key,
+      dstBucket: "destination-bucket",
+      dstKey: receipt.destination_key,
+      transferId: expect.any(Number),
+      connectionId: "test-connection",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("delete_copied_objects", {
+      srcBucket: "source-bucket",
+      dstBucket: "destination-bucket",
+      receipts: [receipt],
+      transferId: expect.any(Number),
+      connectionId: "test-connection",
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "delete_copied_objects",
+      expect.objectContaining({ connectionId: "reconnected-session" }),
+    );
+  });
+
+  it("deletes prefix-move sources using collected copy receipts", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    const receipt = {
+      source_key: "docs/folder/file.txt",
+      source_etag: '"source-etag"',
+      source_version_id: null,
+      destination_key: "archive/folder/file.txt",
+      destination_etag: '"destination-etag"',
+      destination_version_id: null,
+    };
+
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "list_objects") {
+        return {
+          objects: [],
+          prefixes: [],
+          truncated: false,
+          next_continuation_token: "",
+        };
+      }
+      if (cmd === "copy_prefix_to") return [receipt];
+      if (cmd === "save_transfer_manifest") return undefined;
+      if (cmd === "delete_copied_objects") return 1;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "move",
+        sourceBucket: "source-bucket",
+        sourcePrefix: "docs/folder/",
+        fileName: "folder",
+        destinationBucket: "destination-bucket",
+        destinationPrefix: "archive/folder/",
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "delete_copied_objects"),
+      ).toBe(true);
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "copy_prefix_to",
+      expect.objectContaining({
+        srcPrefix: "docs/folder/",
+        dstPrefix: "archive/folder/",
+        connectionId: "test-connection",
+        collectReceipts: true,
+      }),
+    );
+    expect(mockInvoke).toHaveBeenCalledWith("delete_copied_objects", {
+      srcBucket: "source-bucket",
+      dstBucket: "destination-bucket",
+      receipts: [receipt],
+      transferId: expect.any(Number),
+      connectionId: "test-connection",
+    });
+  });
+
+  it("does not delete prefix-move sources when copy returns no receipts", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "list_objects") {
+        return {
+          objects: [],
+          prefixes: [],
+          truncated: false,
+          next_continuation_token: "",
+        };
+      }
+      if (cmd === "copy_prefix_to") return [];
+      if (cmd === "save_transfer_manifest") return undefined;
+      if (cmd === "delete_copied_objects") return 1;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "move",
+        sourceBucket: "source-bucket",
+        sourcePrefix: "docs/empty/",
+        fileName: "empty",
+        destinationBucket: "destination-bucket",
+        destinationPrefix: "archive/empty/",
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "copy_prefix_to"),
+      ).toBe(true);
+    });
+    await flushMicrotasks(8);
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "delete_copied_objects",
+      expect.anything(),
+    );
+  });
+
+  it("refuses queued transfers after reconnecting a different account", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 0;
+
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "copy_object_to") {
+        throw new Error("copy must not run against a different account");
+      }
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "copy",
+        sourceBucket: "source-bucket",
+        sourceKey: "docs/file.txt",
+        fileName: "file.txt",
+        destinationBucket: "destination-bucket",
+        destinationKey: "archive/file.txt",
+      },
+    ]);
+
+    state.connectionId = "other-connection";
+    state.connectionIdentity = "other-identity";
+    state.currentSettings.maxConcurrentTransfers = 1;
+    transfers.enqueueCopyMoveEntries([]);
+
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("transfer-list") as HTMLDivElement)
+          .textContent,
+      ).toContain("Connection changed");
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "copy_object_to",
+      expect.anything(),
+    );
   });
 
   it("refuses source deletion when the durable move marker cannot be saved", async () => {

@@ -15,6 +15,7 @@ import {
   pathsEqual,
   run,
   shouldSkipBetaMirror,
+  verifyCopiedPath,
 } from "./post-release-assets.js";
 
 const STABLE_VERSION = "0.11.0";
@@ -140,6 +141,18 @@ test("cleans, mirrors, and verifies release entries", () => {
       "utf8",
     ),
     "installer",
+  );
+});
+
+test("verifyCopiedPath rejects same-size content with a different hash", () => {
+  const root = makeTemporaryDirectory();
+  const source = path.join(root, "a.bin");
+  const destination = path.join(root, "b.bin");
+  fs.writeFileSync(source, "aaaa");
+  fs.writeFileSync(destination, "bbbb");
+  assert.throws(
+    () => verifyCopiedPath(source, destination),
+    /mirrored file hash differs/,
   );
 });
 

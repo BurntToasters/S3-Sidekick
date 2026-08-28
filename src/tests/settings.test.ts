@@ -35,6 +35,7 @@ vi.mock("../bookmarks.ts", () => ({
   getBookmarks: mockGetBookmarks,
   exportBookmarksJson: mockExportBookmarksJson,
   importBookmarksJson: mockImportBookmarksJson,
+  MAX_IMPORT_BYTES: 1_048_576,
 }));
 
 vi.mock("../updater.ts", () => ({
@@ -352,7 +353,7 @@ describe("settings module", () => {
         json: expect.stringContaining('"theme": "system"'),
       }),
     );
-    expect(mockInvoke).toHaveBeenCalledWith("save_connection", { json: "" });
+    expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection");
     expect(mockRelaunch).toHaveBeenCalledTimes(1);
 
     const assignMock = vi.fn();
@@ -513,6 +514,56 @@ describe("settings module", () => {
     expect(mockRenderBookmarkList).toHaveBeenCalledTimes(2);
   });
 
+  it("alerts when bookmark deletion fails", async () => {
+    document.body.innerHTML = `
+      <div id="settings-overlay" class="modal-overlay active"></div>
+      <select id="setting-theme"><option value="system" selected>system</option></select>
+      <input id="setting-updates" type="checkbox" checked />
+      <select id="setting-update-channel"><option value="release" selected>release</option></select>
+      <select id="setting-presigned-expiration"><option value="3600" selected>3600</option></select>
+      <select id="setting-max-concurrent"><option value="3" selected>3</option></select>
+      <div id="updater-section"></div>
+      <div id="updater-unsupported"></div>
+      <ul id="bookmark-list"></ul>
+      <div id="security-status-text"></div>
+      <button id="security-toggle"></button>
+      <button id="security-change-password"></button>
+      <div id="security-warning"></div>
+      <div id="security-lock-settings"></div>
+      <div id="security-lock-action"></div>
+      <select id="security-lock-timeout"></select>
+      <div id="security-biometric-settings"></div>
+      <button id="biometric-toggle"></button>
+      <span id="settings-version"></span>
+      <span id="settings-platform"></span>
+      <div class="settings-tabs">
+        <button class="settings-tab" data-settings-tab="general"></button>
+      </div>
+      <div class="settings-panel" data-settings-panel="general"></div>
+      <button id="bookmarks-export-btn"></button>
+      <button id="bookmarks-import-btn"></button>
+      <input id="bookmarks-import-input" type="file" />
+    `;
+    const settings = await import("../settings.ts");
+    mockGetBookmarks.mockReturnValue([{ name: "Saved One" }]);
+    mockShowConfirm.mockResolvedValue(true);
+    mockRemoveBookmark.mockRejectedValueOnce(new Error("disk full"));
+
+    settings.openSettingsModal();
+    await flushMicrotasks();
+    const onDelete = mockRenderBookmarkList.mock.calls[0][2] as (
+      index: number,
+    ) => Promise<void>;
+    await onDelete(0);
+    await flushMicrotasks();
+
+    expect(mockShowAlert).toHaveBeenCalledWith(
+      "Delete Failed",
+      "Error: disk full",
+    );
+    expect(mockRenderBookmarkList).toHaveBeenCalledTimes(1);
+  });
+
   it("invokes bookmark select handler and closes overlay on selection", async () => {
     document.body.innerHTML = `
       <div id="settings-overlay" class="modal-overlay active"></div>
@@ -649,6 +700,7 @@ describe("settings module", () => {
     (
       document.getElementById("bookmarks-export-btn") as HTMLButtonElement
     ).click();
+    await flushMicrotasks(2);
     expect(mockExportBookmarksJson).toHaveBeenCalledTimes(1);
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(anchorClick).toHaveBeenCalledTimes(1);
@@ -708,6 +760,23 @@ describe("settings module", () => {
       "Import Complete",
       "Imported 1 bookmark(s).",
     );
+
+    const oversized = new File(["tiny"], "huge.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(oversized, "size", { value: 1_048_577 });
+    Object.defineProperty(importInput, "files", {
+      value: [oversized],
+      configurable: true,
+    });
+    const importCalls = mockImportBookmarksJson.mock.calls.length;
+    importInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushMicrotasks(5);
+    expect(mockShowAlert).toHaveBeenCalledWith(
+      "Import Failed",
+      "Bookmark import is too large",
+    );
+    expect(mockImportBookmarksJson.mock.calls.length).toBe(importCalls);
   });
 
   it("handles missing settings controls and overlay elements safely", async () => {

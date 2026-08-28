@@ -1,5 +1,15 @@
 import { basename, escapeHtml } from "./utils.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
+import { state } from "./state.ts";
+import { canPreview, closePreview, openPreview } from "./preview.ts";
+import {
+  closeInfoPanel,
+  confirmDiscardInfoProperties,
+  hasUnsavedInfoChanges,
+  openInfoPanel,
+  requestCloseInfoPanel,
+  saveInfoPanel,
+} from "./info-panel.ts";
 
 export type InspectorPaneTab = "preview" | "properties";
 
@@ -161,8 +171,8 @@ export function setInspectorOpen(open: boolean): void {
   } else {
     inspectorEmptyActive = true;
     showInspectorEmpty("Select an object to inspect.");
-    void import("./preview.ts").then((m) => m.closePreview());
-    void import("./info-panel.ts").then((m) => m.closeInfoPanel());
+    closePreview();
+    closeInfoPanel();
   }
 }
 
@@ -176,11 +186,7 @@ export function toggleInspector(): void {
 
 export async function requestCloseInspector(): Promise<boolean> {
   if (!inspectorOpen) return true;
-  const info = await import("./info-panel.ts");
-  if (
-    info.hasUnsavedInfoChanges() &&
-    !(await info.confirmDiscardInfoProperties())
-  ) {
+  if (hasUnsavedInfoChanges() && !(await confirmDiscardInfoProperties())) {
     return false;
   }
   setInspectorOpen(false);
@@ -226,7 +232,7 @@ export async function syncInspectorFromSelection(
 
   const reason: InspectorSyncReason = options?.reason ?? "selection";
   const syncGen = ++inspectorSyncGeneration;
-  const { state } = await import("./state.ts");
+  await Promise.resolve();
   if (syncGen !== inspectorSyncGeneration) return;
 
   const keysSet = selectedKeys ?? state.selectedKeys;
@@ -253,7 +259,6 @@ export async function syncInspectorFromSelection(
 
   try {
     const fileKeys = keys.filter((k) => !k.startsWith("prefix:"));
-    const { canPreview, openPreview } = await import("./preview.ts");
     if (syncGen !== inspectorSyncGeneration) return;
 
     const singlePreviewable =
@@ -268,7 +273,6 @@ export async function syncInspectorFromSelection(
         return;
       }
       focusInspectorPropertiesPane();
-      const { openInfoPanel } = await import("./info-panel.ts");
       if (syncGen !== inspectorSyncGeneration) return;
       await openInfoPanel(keys);
       return;
@@ -285,7 +289,6 @@ export async function syncInspectorFromSelection(
     }
 
     if (syncGen !== inspectorSyncGeneration) return;
-    const { openInfoPanel } = await import("./info-panel.ts");
     await openInfoPanel(keys);
   } catch (err) {
     if (syncGen !== inspectorSyncGeneration) return;
@@ -324,16 +327,16 @@ export function wireInspectorChrome(): void {
   document
     .getElementById("inspector-info-save")
     ?.addEventListener("click", () => {
-      void import("./info-panel.ts").then((m) => m.saveInfoPanel());
+      void saveInfoPanel();
     });
   document
     .getElementById("inspector-info-cancel")
     ?.addEventListener("click", () => {
-      void import("./info-panel.ts").then(async (m) => {
-        if (await m.requestCloseInfoPanel()) {
+      void (async () => {
+        if (await requestCloseInfoPanel()) {
           void syncInspectorFromSelection();
         }
-      });
+      })();
     });
 
   window.addEventListener("resize", () => {

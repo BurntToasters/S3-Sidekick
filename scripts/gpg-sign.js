@@ -22,6 +22,9 @@ const releaseDir = path.join(root, "release");
 const pkg = JSON.parse(
   fs.readFileSync(path.join(root, "package.json"), "utf-8"),
 );
+const tauriConfig = JSON.parse(
+  fs.readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf-8"),
+);
 
 const VERSION = pkg.version;
 const TAG = `v${VERSION}`;
@@ -38,6 +41,7 @@ const RELEASE_DOWNLOAD_BASE_URL = (
 const RELEASE_NOTES = process.env.RELEASE_NOTES || "";
 const RELEASE_PUB_DATE =
   process.env.RELEASE_PUB_DATE || new Date().toISOString();
+const UPDATER_PUBLIC_KEY = tauriConfig.plugins?.updater?.pubkey;
 const REQUIRED_LINUX_TARGETS = (
   process.env.REQUIRED_LINUX_TARGETS || ""
 ).trim();
@@ -393,24 +397,136 @@ function releaseAssetUrl(fileName, baseUrl = RELEASE_DOWNLOAD_BASE_URL) {
   return `${baseUrl}/${encodeURIComponent(fileName)}`;
 }
 
+function decodeBase64(value, label) {
+  const compact = String(value).replace(/\s/g, "");
+  if (
+    !compact ||
+    compact.length % 4 === 1 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(compact)
+  ) {
+    throw new Error(`Invalid base64 in ${label}.`);
+  }
+  const padded = compact + "=".repeat((4 - (compact.length % 4)) % 4);
+  const decoded = Buffer.from(padded, "base64");
+  const canonical = decoded.toString("base64").replace(/=+$/, "");
+  if (canonical !== compact.replace(/=+$/, "")) {
+    throw new Error(`Invalid base64 in ${label}.`);
+  }
+  return decoded;
+}
+
+function readMinisignText(filePath) {
+  const raw = fs.readFileSync(filePath, "utf8").trim();
+  if (!raw) {
+    throw new Error(`Minisign signature is empty: ${filePath}`);
+  }
+  if (raw.includes("untrusted comment:")) {
+    return { text: raw, encoded: false };
+  }
+
+  const decoded = decodeBase64(raw, `Minisign signature ${filePath}`).toString(
+    "utf8",
+  );
+  if (!decoded.includes("untrusted comment:")) {
+    throw new Error(`Minisign signature is malformed: ${filePath}`);
+  }
+  return { text: decoded.trim(), encoded: true };
+}
+
+function parseMinisignSignature(text, filePath) {
+  const lines = text.split(/\r?\n/);
+  if (
+    lines.length < 4 ||
+    !lines[0].startsWith("untrusted comment: ") ||
+    !lines[2].startsWith("trusted comment: ")
+  ) {
+    throw new Error(`Minisign signature is malformed: ${filePath}`);
+  }
+  const signed = decodeBase64(
+    lines[1],
+    `Minisign signature ${filePath}`,
+  );
+  const global = decodeBase64(
+    lines[3],
+    `Minisign global signature ${filePath}`,
+  );
+  if (signed.length !== 74 || global.length !== 64) {
+    throw new Error(`Minisign signature has invalid length: ${filePath}`);
+  }
+  if (!signed.subarray(0, 2).equals(Buffer.from("ED"))) {
+    throw new Error(
+      `Minisign signature must use the Tauri prehashed ED algorithm: ${filePath}`,
+    );
+  }
+  return {
+    keyId: signed.subarray(2, 10),
+    signature: signed.subarray(10, 74),
+    trustedComment: lines[2].slice("trusted comment: ".length),
+    globalSignature: global,
+  };
+}
+
+function parseMinisignPublicKey(publicKeyValue) {
+  const text = String(publicKeyValue ?? "").includes("untrusted comment:")
+    ? String(publicKeyValue).trim()
+    : decodeBase64(publicKeyValue, "Tauri updater public key").toString("utf8").trim();
+  const lines = text.split(/\r?\n/);
+  if (lines.length < 2 || !lines[0].startsWith("untrusted comment: ")) {
+    throw new Error("Tauri updater public key is malformed.");
+  }
+  const decoded = decodeBase64(lines[1], "Tauri updater public key");
+  if (decoded.length !== 42 || !decoded.subarray(0, 2).equals(Buffer.from("Ed"))) {
+    throw new Error("Tauri updater public key has an unsupported format.");
+  }
+  return {
+    keyId: decoded.subarray(2, 10),
+    publicKey: decoded.subarray(10, 42),
+  };
+}
+
+function verifyUpdaterSignature(filePath, sigPath, publicKeyValue = UPDATER_PUBLIC_KEY) {
+  const signatureText = readMinisignText(sigPath);
+  const signature = parseMinisignSignature(signatureText.text, sigPath);
+  const publicKey = parseMinisignPublicKey(publicKeyValue);
+  if (!crypto.timingSafeEqual(publicKey.keyId, signature.keyId)) {
+    throw new Error(
+      `Updater signature key ID does not match configured public key: ${path.basename(filePath)}`,
+    );
+  }
+
+  const publicKeyObject = crypto.createPublicKey({
+    key: Buffer.concat([
+      Buffer.from("302a300506032b6570032100", "hex"),
+      publicKey.publicKey,
+    ]),
+    format: "der",
+    type: "spki",
+  });
+  const digest = crypto
+    .createHash("blake2b512")
+    .update(fs.readFileSync(filePath))
+    .digest();
+  if (!crypto.verify(null, digest, publicKeyObject, signature.signature)) {
+    throw new Error(
+      `Updater signature verification failed: ${path.basename(filePath)}`,
+    );
+  }
+  const globalMessage = Buffer.concat([
+    signature.signature,
+    Buffer.from(signature.trustedComment, "utf8"),
+  ]);
+  if (!crypto.verify(null, globalMessage, publicKeyObject, signature.globalSignature)) {
+    throw new Error(
+      `Updater trusted-comment signature verification failed: ${path.basename(filePath)}`,
+    );
+  }
+  return true;
+}
+
 function normalizeUpdaterSignature(sigPath) {
-  const trimmed = fs.readFileSync(sigPath, "utf8").trim();
-  if (!trimmed) {
-    return trimmed;
-  }
-
-  try {
-    const decoded = Buffer.from(trimmed, "base64").toString("utf8");
-    if (decoded.includes("untrusted comment:")) {
-      return trimmed;
-    }
-  } catch {}
-
-  if (trimmed.includes("untrusted comment:")) {
-    return Buffer.from(trimmed, "utf8").toString("base64");
-  }
-
-  return trimmed;
+  const { text, encoded } = readMinisignText(sigPath);
+  parseMinisignSignature(text, sigPath);
+  return encoded ? fs.readFileSync(sigPath, "utf8").trim() : Buffer.from(text).toString("base64");
 }
 
 function generateUpdaterManifests(files) {
@@ -460,6 +576,7 @@ function generateUpdaterManifests(files) {
       continue;
     }
 
+    verifyUpdaterSignature(filePath, sigPath);
     const signature = normalizeUpdaterSignature(sigPath);
     for (const target of targets) {
       for (const channel of channelVariants) {
@@ -957,7 +1074,20 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
+) {
+  main().catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
+
+export {
+  assertLinuxX64PackageSet,
+  generateUpdaterManifests,
+  normalizeUpdaterSignature,
+  parseMinisignSignature,
+  verifyUpdaterSignature,
+};

@@ -13,6 +13,10 @@ import {
   markInspectorHasContent,
   syncInspectorFromSelection,
 } from "./inspector.ts";
+import {
+  confirmDiscardInfoProperties,
+  hasUnsavedInfoChanges,
+} from "./info-panel.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
 
 function hasAccelModifier(e: MouseEvent): boolean {
@@ -50,13 +54,32 @@ export function getSelectableKeys(): string[] {
   return keys;
 }
 
+function getVisibleSelectableKeys(): string[] {
+  const filter = state.filterText.toLowerCase();
+  const keys: string[] = [];
+  for (const prefix of state.prefixes) {
+    if (!filter || basename(prefix).toLowerCase().includes(filter)) {
+      keys.push("prefix:" + prefix);
+    }
+  }
+  for (const obj of state.objects) {
+    if (
+      !obj.is_folder &&
+      (!filter || basename(obj.key).toLowerCase().includes(filter))
+    ) {
+      keys.push(obj.key);
+    }
+  }
+  return keys;
+}
+
 export function clearSelection(): void {
   state.selectedKeys.clear();
   updateSelectionUI();
 }
 
 export function pruneStaleSelection(): void {
-  const valid = new Set(getSelectableKeys());
+  const valid = new Set(getVisibleSelectableKeys());
   for (const key of state.selectedKeys) {
     if (!valid.has(key)) {
       state.selectedKeys.delete(key);
@@ -83,7 +106,7 @@ export function updateSelectionUI(): void {
     row.classList.toggle("object-row--selected", selected);
     if (cb) cb.checked = selected;
   }
-  const allKeys = getSelectableKeys();
+  const allKeys = getVisibleSelectableKeys();
   const selectAll = document.getElementById(
     "select-all",
   ) as HTMLInputElement | null;
@@ -193,7 +216,7 @@ export function setLastClickedKey(key: string | null): void {
 }
 
 export function handleRowClick(key: string, e: MouseEvent): void {
-  const allKeys = getSelectableKeys();
+  const allKeys = getVisibleSelectableKeys();
 
   if (e.shiftKey && lastClickedKey) {
     const startIdx = allKeys.indexOf(lastClickedKey);
@@ -216,16 +239,30 @@ export function handleRowClick(key: string, e: MouseEvent): void {
     state.selectedKeys.add(key);
   }
 
+  for (const row of dom.objectTbody.querySelectorAll<HTMLElement>(
+    ".object-row",
+  )) {
+    row.tabIndex = -1;
+  }
+  const clickedRow = Array.from(
+    dom.objectTbody.querySelectorAll<HTMLElement>(".object-row"),
+  ).find(
+    (row) =>
+      row.dataset.key === key ||
+      (key.startsWith("prefix:") &&
+        row.dataset.prefix === key.slice("prefix:".length)),
+  );
+  if (clickedRow) clickedRow.tabIndex = 0;
   lastClickedKey = key;
   updateSelectionUI();
 }
 
 export function handleSelectAll(checked: boolean): void {
-  const allKeys = getSelectableKeys();
+  const allKeys = getVisibleSelectableKeys();
   if (checked) {
     for (const k of allKeys) state.selectedKeys.add(k);
   } else {
-    state.selectedKeys.clear();
+    for (const k of allKeys) state.selectedKeys.delete(k);
   }
   updateSelectionUI();
 }
@@ -421,6 +458,11 @@ export function renderObjectTable(): void {
     tbody.innerHTML = rows.join("");
   }
 
+  const renderedRows = tbody.querySelectorAll<HTMLElement>(".object-row");
+  for (const row of renderedRows) row.tabIndex = -1;
+  const firstRow = renderedRows[0];
+  if (firstRow) firstRow.tabIndex = 0;
+
   dom.objectPanel.style.display = "";
   dom.objectPanel.setAttribute("aria-busy", "false");
   dom.emptyState.style.display = "none";
@@ -590,7 +632,8 @@ interface NavEntry {
 
 let navHistory: NavEntry[] = [];
 let navIndex = -1;
-let navSuppressPush = false;
+let historySuppressRequest = 0;
+let navigationGeneration = 0;
 
 interface ListingSnapshot {
   currentBucket: string;
@@ -627,8 +670,9 @@ function resetSelectionForListingChange(): void {
   updateSelectionUI();
 }
 
-function pushNav(bucket: string, prefix: string): void {
-  if (navSuppressPush) return;
+function pushNav(bucket: string, prefix: string, request: number): void {
+  if (request !== navigationGeneration) return;
+  if (historySuppressRequest === request) return;
   navHistory = navHistory.slice(0, navIndex + 1);
   navHistory.push({ bucket, prefix });
   navIndex = navHistory.length - 1;
@@ -649,19 +693,27 @@ function updateNavButtons(): void {
 }
 
 export function clearNavHistory(): void {
+  navigationGeneration += 1;
   navHistory = [];
   navIndex = -1;
-  navSuppressPush = false;
+  historySuppressRequest = 0;
   updateNavButtons();
+}
+
+async function confirmDiscardThenNavigate(): Promise<boolean> {
+  if (!hasUnsavedInfoChanges()) return true;
+  return confirmDiscardInfoProperties();
 }
 
 export async function navigateBack(): Promise<void> {
   if (navIndex <= 0) return;
+  if (!(await confirmDiscardThenNavigate())) return;
+  const request = ++navigationGeneration;
   const snapshot = captureListingSnapshot();
   const prevIndex = navIndex;
   navIndex--;
   const entry = navHistory[navIndex];
-  navSuppressPush = true;
+  historySuppressRequest = request;
   clearFilter();
   resetSelectionForListingChange();
   renderObjectTableSkeleton();
@@ -673,9 +725,11 @@ export async function navigateBack(): Promise<void> {
     } else {
       await refreshObjects(entry.bucket, entry.prefix);
     }
+    if (request !== navigationGeneration) return;
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
+    if (request !== navigationGeneration) return;
     navIndex = prevIndex;
     restoreListingSnapshot(snapshot);
     renderBucketList();
@@ -683,18 +737,22 @@ export async function navigateBack(): Promise<void> {
     renderBreadcrumb();
     setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
   } finally {
-    navSuppressPush = false;
+    if (historySuppressRequest === request) {
+      historySuppressRequest = 0;
+    }
     updateNavButtons();
   }
 }
 
 export async function navigateForward(): Promise<void> {
   if (navIndex >= navHistory.length - 1) return;
+  if (!(await confirmDiscardThenNavigate())) return;
+  const request = ++navigationGeneration;
   const snapshot = captureListingSnapshot();
   const prevIndex = navIndex;
   navIndex++;
   const entry = navHistory[navIndex];
-  navSuppressPush = true;
+  historySuppressRequest = request;
   clearFilter();
   resetSelectionForListingChange();
   renderObjectTableSkeleton();
@@ -706,9 +764,11 @@ export async function navigateForward(): Promise<void> {
     } else {
       await refreshObjects(entry.bucket, entry.prefix);
     }
+    if (request !== navigationGeneration) return;
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
+    if (request !== navigationGeneration) return;
     navIndex = prevIndex;
     restoreListingSnapshot(snapshot);
     renderBucketList();
@@ -716,23 +776,39 @@ export async function navigateForward(): Promise<void> {
     renderBreadcrumb();
     setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
   } finally {
-    navSuppressPush = false;
+    if (historySuppressRequest === request) {
+      historySuppressRequest = 0;
+    }
     updateNavButtons();
   }
 }
 
 export async function navigateToFolder(prefix: string): Promise<void> {
+  if (!(await confirmDiscardThenNavigate())) return;
+  const request = ++navigationGeneration;
+  const snapshot = captureListingSnapshot();
+  const bucket = state.currentBucket;
   closeInspectorOnMobile();
   clearFilter();
   resetSelectionForListingChange();
   renderObjectTableSkeleton();
   try {
     await refreshObjects(state.currentBucket, prefix);
-    pushNav(state.currentBucket, prefix);
+    if (
+      request !== navigationGeneration ||
+      state.currentBucket !== bucket ||
+      state.currentPrefix !== prefix
+    ) {
+      return;
+    }
+    pushNav(state.currentBucket, prefix, request);
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
+    if (request !== navigationGeneration) return;
+    restoreListingSnapshot(snapshot);
     renderObjectTable();
+    renderBreadcrumb();
     throw err;
   }
 }
@@ -742,10 +818,17 @@ export async function navigateUp(): Promise<void> {
   const trimmed = state.currentPrefix.replace(/\/$/, "");
   const idx = trimmed.lastIndexOf("/");
   const newPrefix = idx >= 0 ? trimmed.slice(0, idx + 1) : "";
-  await navigateToFolder(newPrefix);
+  try {
+    await navigateToFolder(newPrefix);
+  } catch (err) {
+    setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
+  }
 }
 
 export async function selectBucket(name: string): Promise<void> {
+  if (!(await confirmDiscardThenNavigate())) return;
+  const request = ++navigationGeneration;
+  const snapshot = captureListingSnapshot();
   closeInspectorOnMobile();
   clearFilter();
   resetSelectionForListingChange();
@@ -753,12 +836,19 @@ export async function selectBucket(name: string): Promise<void> {
   renderObjectTableSkeleton();
   try {
     await refreshObjects(name, "");
-    pushNav(name, "");
+    if (request !== navigationGeneration || state.currentBucket !== name) {
+      return;
+    }
+    pushNav(name, "", request);
     renderBucketList();
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
+    if (request !== navigationGeneration) return;
+    restoreListingSnapshot(snapshot);
+    renderBucketList();
     renderObjectTable();
+    renderBreadcrumb();
     throw err;
   }
 }

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ConnectionSnapshot } from "../connection.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
@@ -25,6 +26,19 @@ const mockLoadConnection = vi.fn<() => Promise<unknown>>();
 const mockRefreshBuckets = vi.fn<() => Promise<void>>();
 const mockRefreshObjects = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockLoadMoreObjects = vi.fn<() => Promise<void>>();
+const mockFinishConnecting = vi.fn<(generation: number) => void>();
+const mockCaptureConnectionSnapshot = vi.fn<() => ConnectionSnapshot>();
+const mockConnectionSnapshotChanged = vi.fn<
+  (snap: ConnectionSnapshot) => boolean
+>(() => false);
+const mockConnectionIdentityChanged = vi.fn<
+  (
+    snap: Pick<
+      ConnectionSnapshot,
+      "connectionId" | "connectionIdentity" | "endpoint" | "bucket"
+    >,
+  ) => boolean
+>(() => false);
 
 const mockRenderBucketList = vi.fn();
 const mockRenderObjectTable = vi.fn();
@@ -187,6 +201,24 @@ vi.mock("../connection.ts", () => ({
   refreshBuckets: mockRefreshBuckets,
   refreshObjects: mockRefreshObjects,
   loadMoreObjects: mockLoadMoreObjects,
+  invokeS3: (cmd: string, args: Record<string, unknown> = {}) =>
+    mockInvoke(cmd, { ...args, connectionId: "test-connection" }),
+  invokeS3For: (
+    connectionId: string,
+    cmd: string,
+    args: Record<string, unknown> = {},
+  ) => mockInvoke(cmd, { ...args, connectionId }),
+  currentConnectionGeneration: () => 1,
+  finishConnecting: (generation: number) => mockFinishConnecting(generation),
+  captureConnectionSnapshot: () => mockCaptureConnectionSnapshot(),
+  connectionSnapshotChanged: (snap: ConnectionSnapshot) =>
+    mockConnectionSnapshotChanged(snap),
+  connectionIdentityChanged: (
+    snap: Pick<
+      ConnectionSnapshot,
+      "connectionId" | "connectionIdentity" | "endpoint" | "bucket"
+    >,
+  ) => mockConnectionIdentityChanged(snap),
 }));
 
 vi.mock("../browser.ts", () => ({
@@ -403,6 +435,10 @@ describe("main integration", () => {
     mockRefreshBuckets.mockReset();
     mockRefreshObjects.mockReset();
     mockLoadMoreObjects.mockReset();
+    mockFinishConnecting.mockReset();
+    mockCaptureConnectionSnapshot.mockReset();
+    mockConnectionSnapshotChanged.mockReset();
+    mockConnectionIdentityChanged.mockReset();
     mockRenderBucketList.mockReset();
     mockRenderObjectTable.mockReset();
     mockRenderBreadcrumb.mockReset();
@@ -477,7 +513,9 @@ describe("main integration", () => {
 
     mockInvoke.mockImplementation(async (cmd, payload) => {
       if (cmd === "get_platform_info") return "windows";
-      if (cmd === "delete_objects") return 1;
+      if (cmd === "delete_objects") {
+        return { deleted: 1, failed: 0, incomplete: false, errors: [] };
+      }
       if (cmd === "build_object_url") {
         return `https://example.com/${(payload as { key?: string }).key ?? ""}`;
       }
@@ -556,10 +594,53 @@ describe("main integration", () => {
 
     const { state } = await import("../state.ts");
     state.connected = false;
+    state.connecting = false;
     state.currentBucket = "";
     state.currentPrefix = "";
     state.platformName = "";
     state.selectedKeys.clear();
+    mockFinishConnecting.mockImplementation(() => {
+      state.connecting = false;
+    });
+    mockCaptureConnectionSnapshot.mockImplementation(() => {
+      if (
+        !state.connected ||
+        !state.connectionId ||
+        !state.connectionIdentity ||
+        !state.currentBucket
+      ) {
+        throw new Error("Not connected");
+      }
+      return {
+        connectionId: state.connectionId,
+        connectionIdentity: state.connectionIdentity,
+        endpoint: state.endpoint,
+        bucket: state.currentBucket,
+        prefix: state.currentPrefix,
+      };
+    });
+    mockConnectionSnapshotChanged.mockImplementation(
+      (snap: ConnectionSnapshot) =>
+        !state.connected ||
+        state.connectionId !== snap.connectionId ||
+        state.connectionIdentity !== snap.connectionIdentity ||
+        state.endpoint !== snap.endpoint ||
+        state.currentBucket !== snap.bucket ||
+        state.currentPrefix !== snap.prefix,
+    );
+    mockConnectionIdentityChanged.mockImplementation(
+      (
+        snap: Pick<
+          ConnectionSnapshot,
+          "connectionId" | "connectionIdentity" | "endpoint" | "bucket"
+        >,
+      ) =>
+        !state.connected ||
+        state.connectionId !== snap.connectionId ||
+        state.connectionIdentity !== snap.connectionIdentity ||
+        state.endpoint !== snap.endpoint ||
+        state.currentBucket !== snap.bucket,
+    );
   });
 
   it("initializes app and wires base controls", async () => {
@@ -689,6 +770,8 @@ describe("main integration", () => {
     expect(mockSaveConnection).toHaveBeenCalledTimes(1);
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -702,6 +785,7 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("create_folder", {
       bucket: "bucket-a",
       key: "docs/new-folder",
+      connectionId: "test-connection",
     });
 
     (document.getElementById("btn-upload") as HTMLButtonElement).click();
@@ -709,6 +793,11 @@ describe("main integration", () => {
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
       ["C:\\tmp\\upload-a.txt", "C:\\tmp\\upload-b.txt"],
       "docs/",
+      expect.objectContaining({
+        bucket: "bucket-a",
+        connectionId: "test-connection",
+        connectionIdentity: "test-identity",
+      }),
     );
 
     (document.getElementById("btn-upload-folder") as HTMLButtonElement).click();
@@ -716,6 +805,10 @@ describe("main integration", () => {
     expect(mockEnqueueFolderEntries).toHaveBeenCalledWith(
       expect.any(Array),
       "docs/",
+      expect.objectContaining({
+        bucket: "bucket-a",
+        connectionId: "test-connection",
+      }),
     );
 
     vi.useFakeTimers();
@@ -806,6 +899,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     state.selectedKeys.clear();
@@ -921,11 +1016,13 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("build_object_url", {
       bucket: "bucket-a",
       key: "docs/file.txt",
+      connectionId: "test-connection",
     });
     expect(mockInvoke).toHaveBeenCalledWith("generate_presigned_url", {
       bucket: "bucket-a",
       key: "docs/file.txt",
       expiresInSecs: expect.any(Number),
+      connectionId: "test-connection",
     });
     expect(clipboardWriteText).toHaveBeenCalledWith("docs/file.txt");
     expect(clipboardWriteText).toHaveBeenCalledWith(
@@ -935,19 +1032,28 @@ describe("main integration", () => {
       bucket: "bucket-a",
       oldKey: "docs/file.txt",
       newKey: "docs/renamed.txt",
+      connectionId: "test-connection",
     });
     expect(mockInvoke).toHaveBeenCalledWith("delete_objects", {
       bucket: "bucket-a",
       keys: ["docs/file.txt"],
+      connectionId: "test-connection",
     });
     expect(mockOpenInfoPanel).toHaveBeenCalledWith(["docs/file.txt"]);
-    expect(mockEnqueueDownloads).toHaveBeenCalledWith([
-      {
+    expect(mockEnqueueDownloads).toHaveBeenCalledWith(
+      [
+        {
+          bucket: "bucket-a",
+          key: "docs/file.txt",
+          destination: "C:\\tmp\\download.txt",
+        },
+      ],
+      expect.objectContaining({
         bucket: "bucket-a",
-        key: "docs/file.txt",
-        destination: "C:\\tmp\\download.txt",
-      },
-    ]);
+        connectionId: "test-connection",
+        connectionIdentity: "test-identity",
+      }),
+    );
   });
 
   it("builds preview and multi-select properties context menu variants", async () => {
@@ -956,6 +1062,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     const tbody = document.getElementById(
@@ -1017,6 +1125,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     state.buckets = [
@@ -1078,18 +1188,26 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("object_exists", {
       bucket: "bucket-b",
       key: "archive/file.txt",
+      connectionId: "test-connection",
     });
-    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith([
-      {
-        operation: "copy",
-        sourceBucket: "bucket-a",
-        fileName: "file.txt",
-        sourceKey: "docs/file.txt",
-        destinationBucket: "bucket-b",
-        destinationKey: "archive/file.txt",
-        conflictResolution: "replace",
-      },
-    ]);
+    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith(
+      [
+        {
+          operation: "copy",
+          sourceBucket: "bucket-a",
+          fileName: "file.txt",
+          sourceKey: "docs/file.txt",
+          destinationBucket: "bucket-b",
+          destinationKey: "archive/file.txt",
+          conflictResolution: "replace",
+        },
+      ],
+      expect.objectContaining({
+        bucket: "bucket-a",
+        connectionId: "test-connection",
+        connectionIdentity: "test-identity",
+      }),
+    );
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "delete_objects",
       expect.objectContaining({ keys: ["docs/file.txt"] }),
@@ -1129,18 +1247,26 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("object_exists", {
       bucket: "bucket-a",
       key: "moved/file.txt",
+      connectionId: "test-connection",
     });
-    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith([
-      {
-        operation: "move",
-        sourceBucket: "bucket-a",
-        fileName: "file.txt",
-        sourceKey: "docs/file.txt",
-        destinationBucket: "bucket-a",
-        destinationKey: "moved/file.txt",
-        conflictResolution: "replace",
-      },
-    ]);
+    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith(
+      [
+        {
+          operation: "move",
+          sourceBucket: "bucket-a",
+          fileName: "file.txt",
+          sourceKey: "docs/file.txt",
+          destinationBucket: "bucket-a",
+          destinationKey: "moved/file.txt",
+          conflictResolution: "replace",
+        },
+      ],
+      expect.objectContaining({
+        bucket: "bucket-a",
+        connectionId: "test-connection",
+        connectionIdentity: "test-identity",
+      }),
+    );
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "copy_object_to",
       expect.anything(),
@@ -1214,6 +1340,8 @@ describe("main integration", () => {
     ).toContain("Connect to a bucket first.");
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "";
     mockShowPrompt
@@ -1237,6 +1365,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -1337,6 +1467,7 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("create_folder", {
       bucket: "bucket-a",
       key: "docs/from-context",
+      connectionId: "test-connection",
     });
     expect(mockEnqueuePaths).toHaveBeenCalled();
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
@@ -1421,6 +1552,8 @@ describe("main integration", () => {
     ).toContain("Connect to a bucket first.");
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     capturedDragDropHandler!({
       payload: {
@@ -1449,7 +1582,11 @@ describe("main integration", () => {
       },
     });
     await flushMicrotasks();
-    expect(mockEnqueuePaths).toHaveBeenCalledWith(["C:\\tmp\\a.txt"], "docs/");
+    expect(mockEnqueuePaths).toHaveBeenCalledWith(
+      ["C:\\tmp\\a.txt"],
+      "docs/",
+      expect.anything(),
+    );
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Dropped 1 file(s). Queued for upload.");
@@ -1520,6 +1657,8 @@ describe("main integration", () => {
     );
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "";
 
@@ -1593,6 +1732,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -1623,12 +1764,48 @@ describe("main integration", () => {
     expect(mockRenderObjectTable).toHaveBeenCalled();
   });
 
+  it("cancels a confirmed delete when the connection changes", async () => {
+    const { state } = await import("../state.ts");
+    await import("../main.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.endpoint = "https://old.example.com";
+    state.connectionId = "old-connection";
+    state.connectionIdentity = "old-identity";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.selectedKeys.add("docs/file.txt");
+
+    const priorDeleteCalls = mockInvoke.mock.calls.filter(
+      ([cmd]) => cmd === "delete_objects",
+    ).length;
+    mockShowConfirm.mockImplementationOnce(async () => {
+      state.endpoint = "https://new.example.com";
+      state.connectionId = "new-connection";
+      state.connectionIdentity = "new-identity";
+      return true;
+    });
+
+    (document.getElementById("batch-delete") as HTMLButtonElement).click();
+    await flushMicrotasks(6);
+
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "delete_objects").length,
+    ).toBe(priorDeleteCalls);
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("connection or selection changed");
+  });
+
   it("handles settings/info tab interactions, wrapper button handlers, and unload cleanup", async () => {
     const { state } = await import("../state.ts");
     await import("../main.ts");
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     state.selectedKeys.clear();
@@ -1716,6 +1893,7 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("build_object_url", {
       bucket: "bucket-a",
       key: "docs/file-a.txt",
+      connectionId: "test-connection",
     });
     expect(clipboardWriteText).toHaveBeenCalled();
 
@@ -1840,6 +2018,8 @@ describe("main integration", () => {
     expect(getCommand("go-up").available?.()).toBe(false);
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     state.selectedKeys.clear();
@@ -1891,13 +2071,14 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("create_folder", {
       bucket: "bucket-a",
       key: "docs/cmd-folder",
+      connectionId: "test-connection",
     });
     expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
     expect(mockInvoke).toHaveBeenCalledWith(
       "delete_objects",
       expect.objectContaining({ bucket: "bucket-a" }),
     );
-    expect(mockUpdateSelectionUI).toHaveBeenCalled();
+    expect(mockHandleSelectAll).toHaveBeenCalledWith(true);
     expect(mockClearSelection).toHaveBeenCalled();
     expect(focusSpy).toHaveBeenCalled();
     expect(mockToggleActivityLog).toHaveBeenCalled();
@@ -1911,6 +2092,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -1932,7 +2115,12 @@ describe("main integration", () => {
     let listMode: "normal" | "empty" | "throw" = "normal";
     mockInvoke.mockImplementation(async (cmd, payload) => {
       if (cmd === "delete_objects" && failDelete) {
-        throw new Error("delete failed");
+        return {
+          deleted: 1,
+          failed: 1,
+          incomplete: false,
+          errors: ["docs/other.txt: access denied"],
+        };
       }
       if (cmd === "rename_object" && failRename) {
         throw new Error("rename failed");
@@ -2191,6 +2379,9 @@ describe("main integration", () => {
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Delete failed");
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("deleted 1 item");
     failDelete = false;
 
     mockShowPrompt.mockResolvedValueOnce(null);
@@ -2237,6 +2428,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -2267,6 +2460,8 @@ describe("main integration", () => {
     expect(mockShowContextMenu.mock.calls.length).toBe(ctxBeforeDisconnected);
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     mockSelectBucket.mockRejectedValueOnce(new Error("ctx open failed"));
     (
       bucketPanel.querySelector(".list__item-btn") as HTMLButtonElement
@@ -2734,6 +2929,8 @@ describe("main integration", () => {
     expect(filterInput.value).toBe("");
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     const bucketPanel = document.getElementById(
       "bucket-panel",
     ) as HTMLDivElement;
@@ -2754,6 +2951,8 @@ describe("main integration", () => {
     expect(mockRefreshBuckets.mock.calls.length).toBe(refreshBucketsBefore);
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -2782,6 +2981,7 @@ describe("main integration", () => {
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
       ["C:\\tmp\\dropped.txt"],
       "docs/",
+      expect.anything(),
     );
 
     capturedDragDropHandler!({
@@ -2795,6 +2995,7 @@ describe("main integration", () => {
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
       ["/home/user/from-tauri.txt"],
       "docs/",
+      expect.anything(),
     );
 
     const tbody = document.getElementById(

@@ -4,6 +4,8 @@ import {
   disconnect,
   saveConnection,
   refreshBuckets,
+  currentConnectionGeneration,
+  finishConnecting,
 } from "./connection.ts";
 import {
   renderBucketList,
@@ -25,6 +27,7 @@ import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
 import { clearFilterInputDebounce } from "./app-layout.ts";
 import { setInspectorOpen } from "./inspector.ts";
+import { showConfirm } from "./dialogs.ts";
 
 export function getConnectionInputs() {
   const endpoint = (
@@ -123,7 +126,7 @@ export function refreshBookmarkBar(): void {
 
 export async function handleNewConnection(): Promise<void> {
   if (state.connected) {
-    await handleDisconnect();
+    if (!(await handleDisconnect())) return;
   }
   setConnectionInputs("", "", "", "");
   setConnectionFormError(null);
@@ -140,7 +143,7 @@ export async function switchToBookmark(
 ): Promise<void> {
   if (state.connecting) return;
   if (state.connected) {
-    await handleDisconnect();
+    if (!(await handleDisconnect())) return;
   }
   setConnectionInputs(endpoint, region, accessKey, secretKey);
   setStatus(`Connecting to "${name}"...`, 5000);
@@ -240,70 +243,143 @@ export async function handleConnect(): Promise<void> {
   }
 
   setConnectionFormError(null);
-
-  // Warn about cleartext HTTP for non-local endpoints (credentials sent unencrypted)
-  if (/^http:\/\//i.test(endpoint)) {
-    try {
-      const host = new URL(endpoint).hostname;
-      const isLocal =
-        host === "localhost" ||
-        host === "127.0.0.1" ||
-        host === "::1" ||
-        host.endsWith(".local");
-      if (!isLocal) {
-        logActivity(
-          `Warning: connecting over plain HTTP to ${host}. Credentials will be sent in cleartext.`,
-          "warning",
-        );
-      }
-    } catch {
-      // URL parse failure handled by the regex check above
-    }
-  }
-
+  state.connecting = true;
   setConnectButtonBusy(true);
-  setStatus("Connecting...");
+  const wasConnected = state.connected;
+  let establishedConnectionId = "";
+  let workflowGeneration = 0;
+  let saveWarning: string | null = null;
 
   try {
-    const resolvedRegion = await connect(
-      endpoint,
-      region,
-      accessKey,
-      secretKey,
-    );
+    // Warn about cleartext HTTP for non-local endpoints (credentials sent unencrypted)
+    if (/^http:\/\//i.test(endpoint)) {
+      try {
+        const host = new URL(endpoint).hostname;
+        const isLocal =
+          host === "localhost" ||
+          host === "127.0.0.1" ||
+          host === "::1" ||
+          host.endsWith(".local");
+        if (!isLocal) {
+          logActivity(
+            `Warning: connecting over plain HTTP to ${host}. Credentials will be sent in cleartext.`,
+            "warning",
+          );
+          const proceed = await showConfirm(
+            "Insecure connection",
+            `Credentials and object traffic will be sent without TLS to ${host}. Connect anyway?`,
+            {
+              okLabel: "Connect anyway",
+              cancelLabel: "Cancel",
+              okDanger: true,
+            },
+          );
+          if (!proceed) {
+            setStatus("Connection cancelled.", 5000);
+            return;
+          }
+        }
+      } catch {
+        // URL parse failure handled by the regex check above
+      }
+    }
+
+    setStatus("Connecting...");
+    const connectionAttempt = connect(endpoint, region, accessKey, secretKey);
+    workflowGeneration = currentConnectionGeneration();
+    const generation = workflowGeneration;
+    const resolvedRegion = await connectionAttempt;
+    establishedConnectionId = state.connectionId;
     (document.getElementById("conn-region") as HTMLInputElement).value =
       resolvedRegion;
-    setConnectionUI(true);
-    setStatus("Connected.", 5000);
-    logActivity(`Connected to ${endpoint}.`, "success");
     try {
-      await saveConnection(endpoint, resolvedRegion, accessKey, secretKey);
+      await saveConnection(
+        establishedConnectionId,
+        endpoint,
+        resolvedRegion,
+        accessKey,
+        secretKey,
+      );
     } catch (saveErr) {
-      setStatus(`Connected (credentials not saved: ${saveErr}).`, 5000);
+      if (
+        currentConnectionGeneration() !== generation ||
+        state.connectionId !== establishedConnectionId
+      ) {
+        return;
+      }
+      saveWarning = `Connected (credentials not saved: ${saveErr}).`;
       logActivity(
         `Connected, but failed to save credentials: ${saveErr}`,
         "warning",
       );
     }
+    if (
+      currentConnectionGeneration() !== generation ||
+      state.connectionId !== establishedConnectionId
+    ) {
+      return;
+    }
     renderBucketListSkeleton();
     await refreshBuckets();
+    if (
+      currentConnectionGeneration() !== generation ||
+      state.connectionId !== establishedConnectionId
+    ) {
+      return;
+    }
     renderBucketList();
     if (state.buckets.length > 0) {
       await selectBucket(state.buckets[0].name);
     }
+    if (
+      currentConnectionGeneration() !== generation ||
+      state.connectionId !== establishedConnectionId
+    ) {
+      return;
+    }
+    setConnectionUI(true);
+    setStatus(saveWarning ?? "Connected.", 5000);
+    logActivity(`Connected to ${endpoint}.`, "success");
   } catch (e) {
+    const stillOwnSession =
+      Boolean(establishedConnectionId) &&
+      state.connectionId === establishedConnectionId;
+    if (stillOwnSession) {
+      try {
+        await disconnect(establishedConnectionId);
+      } catch (disconnectErr) {
+        const message = `Connection setup failed, and cleanup failed: ${friendlyError(disconnectErr)}`;
+        setConnectionFormError(message);
+        setStatus(message);
+        setConnectionUI(state.connected);
+        logActivity(message, "error");
+        return;
+      }
+    } else if (establishedConnectionId) {
+      return;
+    }
     renderBucketList();
     const message = `Connection failed: ${friendlyError(e)}`;
     setConnectionFormError(message);
     setStatus(message);
-    setConnectionUI(false);
+    setConnectionUI(wasConnected && state.connected);
     logActivity(message, "error");
   } finally {
-    setConnectButtonBusy(false);
+    if (workflowGeneration) {
+      finishConnecting(workflowGeneration);
+    } else if (!state.connected) {
+      state.connecting = false;
+    }
+    if (
+      !workflowGeneration ||
+      currentConnectionGeneration() === workflowGeneration
+    ) {
+      setConnectButtonBusy(false);
+    }
   }
 }
 
-export async function handleDisconnect(): Promise<void> {
+export async function handleDisconnect(): Promise<boolean> {
   clearFilterInputDebounce();
   state.filterText = "";
   const filterInput = document.getElementById(
@@ -315,14 +391,20 @@ export async function handleDisconnect(): Promise<void> {
     await disconnect();
   } catch (err) {
     logActivity(`Disconnect error: ${err}`, "error");
+    setConnectionUI(state.connected);
+    setStatus(`Disconnect failed: ${friendlyError(err)}`, 5000);
+    setConnectButtonBusy(false);
+    return false;
   }
   clearNavHistory();
   clearSelection();
   setInspectorOpen(false);
   setConnectionUI(false);
+  setConnectButtonBusy(false);
   showEmptyState();
   setStatus("Disconnected.", 5000);
   logActivity("Disconnected from endpoint.", "info");
+  return true;
 }
 
 export async function handleBookmarkSave(): Promise<void> {

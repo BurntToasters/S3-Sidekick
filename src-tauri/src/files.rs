@@ -187,10 +187,7 @@ fn collect_local_files_from_root(
     }
 }
 
-#[tauri::command]
-pub(crate) fn list_local_files_recursive(
-    roots: Vec<String>,
-) -> Result<Vec<LocalFileEntry>, String> {
+fn list_local_files_recursive_inner(roots: Vec<String>) -> Result<Vec<LocalFileEntry>, String> {
     let mut normalized_roots = Vec::new();
     for root in roots {
         let trimmed = root.trim();
@@ -255,6 +252,15 @@ pub(crate) fn list_local_files_recursive(
     }
 
     Ok(entries)
+}
+
+#[tauri::command]
+pub(crate) async fn list_local_files_recursive(
+    roots: Vec<String>,
+) -> Result<Vec<LocalFileEntry>, String> {
+    tokio::task::spawn_blocking(move || list_local_files_recursive_inner(roots))
+        .await
+        .map_err(|err| format!("Local file scan task failed: {}", err))?
 }
 
 #[cfg(test)]

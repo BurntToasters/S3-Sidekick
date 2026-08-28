@@ -34,6 +34,20 @@ let updaterSupport: UpdaterSupportInfo = {
   mode: "native",
   release_url: DEFAULT_RELEASE_URL,
 };
+let updateCheckInFlight: Promise<void> | null = null;
+
+function runExclusiveUpdateCheck(work: () => Promise<void>): Promise<void> {
+  if (updateCheckInFlight) return updateCheckInFlight;
+  const run = work();
+  let tracked: Promise<void>;
+  tracked = run.finally(() => {
+    if (updateCheckInFlight === tracked) {
+      updateCheckInFlight = null;
+    }
+  });
+  updateCheckInFlight = tracked;
+  return tracked;
+}
 
 export function setUpdateChannel(channel: UpdateChannel): void {
   updateChannel = channel === "beta" ? "beta" : "release";
@@ -365,7 +379,7 @@ async function notifyReleasePageUpdate(channel: UpdateChannel): Promise<void> {
   );
 }
 
-export async function checkUpdates(): Promise<void> {
+async function checkUpdatesImpl(): Promise<void> {
   const channel = updateChannel;
 
   if (updaterSupport.mode === "flatpak") {
@@ -422,7 +436,11 @@ export async function checkUpdates(): Promise<void> {
   }
 }
 
-export async function autoCheckUpdates(): Promise<void> {
+export function checkUpdates(): Promise<void> {
+  return runExclusiveUpdateCheck(checkUpdatesImpl);
+}
+
+async function autoCheckUpdatesImpl(): Promise<void> {
   if (!state.currentSettings.autoCheckUpdates) return;
   const channel = updateChannel;
 
@@ -464,4 +482,8 @@ export async function autoCheckUpdates(): Promise<void> {
     }
     setStatus("");
   }
+}
+
+export function autoCheckUpdates(): Promise<void> {
+  return runExclusiveUpdateCheck(autoCheckUpdatesImpl);
 }

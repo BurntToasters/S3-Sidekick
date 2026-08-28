@@ -9,11 +9,95 @@ interface ConnectionConfig {
   secret_key: string;
 }
 
+interface ConnectResult {
+  region: string;
+  connection_id: string;
+  connection_identity: string;
+}
+
 interface ListObjectsResponse {
   objects: ObjectInfo[];
   prefixes: string[];
   truncated: boolean;
   next_continuation_token: string;
+}
+
+let connectionGeneration = 0;
+let listingGeneration = 0;
+let paginationRequest = 0;
+
+export function currentConnectionId(): string {
+  if (!state.connectionId) {
+    throw new Error("Not connected");
+  }
+  return state.connectionId;
+}
+
+export function currentConnectionGeneration(): number {
+  return connectionGeneration;
+}
+
+export interface ConnectionSnapshot {
+  connectionId: string;
+  connectionIdentity: string;
+  endpoint: string;
+  bucket: string;
+  prefix: string;
+}
+
+export function captureConnectionSnapshot(): ConnectionSnapshot {
+  if (
+    !state.connected ||
+    !state.connectionId ||
+    !state.connectionIdentity ||
+    !state.currentBucket
+  ) {
+    throw new Error("Not connected");
+  }
+  return {
+    connectionId: state.connectionId,
+    connectionIdentity: state.connectionIdentity,
+    endpoint: state.endpoint,
+    bucket: state.currentBucket,
+    prefix: state.currentPrefix,
+  };
+}
+
+export function connectionIdentityChanged(
+  snap: Pick<
+    ConnectionSnapshot,
+    "connectionId" | "connectionIdentity" | "endpoint" | "bucket"
+  >,
+): boolean {
+  return (
+    !state.connected ||
+    state.connectionId !== snap.connectionId ||
+    state.connectionIdentity !== snap.connectionIdentity ||
+    state.endpoint !== snap.endpoint ||
+    state.currentBucket !== snap.bucket
+  );
+}
+
+export function connectionSnapshotChanged(snap: ConnectionSnapshot): boolean {
+  return connectionIdentityChanged(snap) || state.currentPrefix !== snap.prefix;
+}
+
+export function invokeS3For<T>(
+  connectionId: string,
+  cmd: string,
+  args: Record<string, unknown> = {},
+): Promise<T> {
+  if (!connectionId) {
+    throw new Error("Connection id is required");
+  }
+  return invoke<T>(cmd, { ...args, connectionId });
+}
+
+export function invokeS3<T>(
+  cmd: string,
+  args: Record<string, unknown> = {},
+): Promise<T> {
+  return invokeS3For(currentConnectionId(), cmd, args);
 }
 
 export async function connect(
@@ -22,28 +106,66 @@ export async function connect(
   accessKey: string,
   secretKey: string,
 ): Promise<string> {
+  const generation = ++connectionGeneration;
+  listingGeneration++;
+  paginationRequest++;
   state.connecting = true;
   try {
-    const resolvedRegion = await invoke<string>("connect", {
+    const result = await invoke<ConnectResult>("connect", {
       endpoint,
       region,
       accessKey,
       secretKey,
     });
+    if (generation !== connectionGeneration) {
+      throw new Error("Connection attempt superseded");
+    }
+    if (
+      !result ||
+      typeof result.region !== "string" ||
+      typeof result.connection_id !== "string" ||
+      result.connection_id.length === 0 ||
+      typeof result.connection_identity !== "string" ||
+      result.connection_identity.length === 0
+    ) {
+      throw new Error("Connection did not return a session identity");
+    }
     state.connected = true;
     state.endpoint = endpoint;
-    state.region = resolvedRegion;
-    return resolvedRegion;
-  } finally {
+    state.region = result.region;
+    state.connectionId = result.connection_id;
+    state.connectionIdentity = result.connection_identity;
+    return result.region;
+  } catch (err) {
+    if (generation === connectionGeneration) {
+      state.connecting = false;
+    }
+    throw err;
+  }
+}
+
+export function finishConnecting(generation: number): void {
+  if (generation === connectionGeneration) {
     state.connecting = false;
   }
 }
 
-export async function disconnect(): Promise<void> {
-  await invoke("disconnect");
+export async function disconnect(connectionId?: string): Promise<void> {
+  const expectedId = connectionId ?? state.connectionId;
+  const generation = ++connectionGeneration;
+  listingGeneration++;
+  paginationRequest++;
+  state.connecting = false;
+  await invoke("disconnect", { connectionId: expectedId ?? "" });
+  if (generation !== connectionGeneration) return;
+  if (expectedId && state.connectionId && state.connectionId !== expectedId) {
+    return;
+  }
   state.connected = false;
   state.endpoint = "";
   state.region = "";
+  state.connectionId = "";
+  state.connectionIdentity = "";
   state.currentBucket = "";
   state.currentPrefix = "";
   state.buckets = [];
@@ -55,18 +177,25 @@ export async function disconnect(): Promise<void> {
 }
 
 export async function saveConnection(
+  connectionId: string,
   endpoint: string,
   region: string,
   accessKey: string,
   secretKey: string,
 ): Promise<void> {
+  if (!connectionId) {
+    throw new Error("Connection id is required");
+  }
   const config: ConnectionConfig = {
     endpoint,
     region,
     access_key: accessKey,
     secret_key: secretKey,
   };
-  await invoke("save_connection", { json: JSON.stringify(config) });
+  await invoke("save_connection", {
+    connectionId,
+    json: JSON.stringify(config),
+  });
 }
 
 export async function loadConnection(): Promise<ConnectionConfig | null> {
@@ -91,23 +220,45 @@ export async function loadConnection(): Promise<ConnectionConfig | null> {
 }
 
 export async function refreshBuckets(): Promise<void> {
-  state.buckets = await invoke<BucketInfo[]>("list_buckets");
+  const generation = connectionGeneration;
+  const buckets = await invokeS3<BucketInfo[]>("list_buckets");
+  if (generation === connectionGeneration) {
+    state.buckets = buckets;
+  }
 }
 
 export async function refreshObjects(
   bucket: string,
   prefix: string,
 ): Promise<void> {
+  const request = ++listingGeneration;
+  paginationRequest++;
   state.currentBucket = bucket;
   state.currentPrefix = prefix;
+  state.objects = [];
+  state.prefixes = [];
+  state.selectedKeys.clear();
   state.continuationToken = "";
   state.hasMore = false;
-  const response = await invoke<ListObjectsResponse>("list_objects", {
-    bucket,
-    prefix,
-    delimiter: "/",
-    continuationToken: "",
-  });
+  let response: ListObjectsResponse;
+  try {
+    response = await invokeS3<ListObjectsResponse>("list_objects", {
+      bucket,
+      prefix,
+      delimiter: "/",
+      continuationToken: "",
+    });
+  } catch (error) {
+    if (request === listingGeneration) throw error;
+    return;
+  }
+  if (
+    request !== listingGeneration ||
+    state.currentBucket !== bucket ||
+    state.currentPrefix !== prefix
+  ) {
+    return;
+  }
   state.objects = response.objects;
   state.prefixes = response.prefixes;
   state.continuationToken = response.next_continuation_token;
@@ -117,12 +268,34 @@ export async function refreshObjects(
 
 export async function loadMoreObjects(): Promise<void> {
   if (!state.hasMore || !state.continuationToken) return;
-  const response = await invoke<ListObjectsResponse>("list_objects", {
-    bucket: state.currentBucket,
-    prefix: state.currentPrefix,
-    delimiter: "/",
-    continuationToken: state.continuationToken,
-  });
+  const request = ++paginationRequest;
+  const generation = listingGeneration;
+  const bucket = state.currentBucket;
+  const prefix = state.currentPrefix;
+  const continuationToken = state.continuationToken;
+  let response: ListObjectsResponse;
+  try {
+    response = await invokeS3<ListObjectsResponse>("list_objects", {
+      bucket,
+      prefix,
+      delimiter: "/",
+      continuationToken,
+    });
+  } catch (error) {
+    if (request === paginationRequest && generation === listingGeneration) {
+      throw error;
+    }
+    return;
+  }
+  if (
+    request !== paginationRequest ||
+    generation !== listingGeneration ||
+    state.currentBucket !== bucket ||
+    state.currentPrefix !== prefix ||
+    state.continuationToken !== continuationToken
+  ) {
+    return;
+  }
   state.objects = state.objects.concat(response.objects);
   const existingPrefixes = new Set(state.prefixes);
   for (const p of response.prefixes) {

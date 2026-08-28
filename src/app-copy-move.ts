@@ -1,9 +1,15 @@
-import { invoke } from "@tauri-apps/api/core";
+import {
+  invokeS3For,
+  captureConnectionSnapshot,
+  connectionIdentityChanged,
+  type ConnectionSnapshot,
+} from "./connection.ts";
 import { state } from "./state.ts";
 import { clearSelection } from "./browser.ts";
 import {
   enqueueCopyMoveEntries,
   type CopyMoveQueueEntry,
+  type TransferEnqueueTarget,
 } from "./transfers.ts";
 import { basename, friendlyError } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
@@ -14,6 +20,7 @@ import {
   resolveConflictChoice,
   type ConflictPromptSession,
 } from "./app-conflicts.ts";
+import { showConfirm } from "./dialogs.ts";
 import type { ConflictPolicy } from "./settings-model.ts";
 
 interface RecentCopyMoveDestination {
@@ -23,6 +30,7 @@ interface RecentCopyMoveDestination {
 
 const RECENT_COPY_MOVE_DESTS_STORAGE_KEY =
   "s3-sidekick.recent-copy-move-destinations.v1";
+const MOVE_UNVERSIONED_WARNING_KEY = "s3-sidekick.move-unversioned-warning.v1";
 const RECENT_DESTINATION_LIMIT = 8;
 
 function readRecentCopyMoveDestinations(): RecentCopyMoveDestination[] {
@@ -81,6 +89,30 @@ export function openCopyMoveDialog(): void {
   const fileKeys = getSelectedFileKeys();
   const prefixes = getSelectedPrefixes();
   if (fileKeys.length === 0 && prefixes.length === 0) return;
+
+  let sourceSnap: ConnectionSnapshot;
+  try {
+    sourceSnap = captureConnectionSnapshot();
+  } catch {
+    setStatus("Connect to a bucket first.", 5000);
+    return;
+  }
+  const capturedFileKeys = [...fileKeys];
+  const capturedPrefixes = [...prefixes];
+  const sourceTarget: TransferEnqueueTarget = {
+    bucket: sourceSnap.bucket,
+    connectionId: sourceSnap.connectionId,
+    connectionIdentity: sourceSnap.connectionIdentity,
+  };
+
+  function sourceChanged(): boolean {
+    return (
+      connectionIdentityChanged(sourceSnap) ||
+      JSON.stringify(getSelectedFileKeys()) !==
+        JSON.stringify(capturedFileKeys) ||
+      JSON.stringify(getSelectedPrefixes()) !== JSON.stringify(capturedPrefixes)
+    );
+  }
 
   const overlay = document.getElementById("copy-move-overlay")!;
   const descEl = document.getElementById("copy-move-desc") as HTMLElement;
@@ -216,12 +248,16 @@ export function openCopyMoveDialog(): void {
 
     try {
       const bucket = bucketSelect.value;
-      const resp = await invoke<{ prefixes: string[] }>("list_objects", {
-        bucket,
-        prefix,
-        delimiter: "/",
-        continuationToken: "",
-      });
+      const resp = await invokeS3For<{ prefixes: string[] }>(
+        sourceSnap.connectionId,
+        "list_objects",
+        {
+          bucket,
+          prefix,
+          delimiter: "/",
+          continuationToken: "",
+        },
+      );
 
       if (seq !== loadFolderSeq) return;
 
@@ -310,10 +346,21 @@ export function openCopyMoveDialog(): void {
     browserPanel.hidden = true;
   };
 
-  const srcBucket = state.currentBucket;
+  const srcBucket = sourceSnap.bucket;
   const conflictSession: ConflictPromptSession = { applyAll: null };
+  let operationInFlight = false;
 
   const runCopy = async (move: boolean) => {
+    if (operationInFlight) return;
+    if (sourceChanged()) {
+      setStatus(
+        `${move ? "Move" : "Copy"} cancelled because connection or selection changed.`,
+        5000,
+      );
+      closeFn();
+      return;
+    }
+    conflictSession.applyAll = null;
     const dstBucket = bucketSelect.value;
     const dstPath = pathInput.value.trim();
     if (!dstPath) {
@@ -321,7 +368,43 @@ export function openCopyMoveDialog(): void {
       pathInput.focus();
       return;
     }
+    if (move) {
+      let warned = false;
+      try {
+        warned = localStorage.getItem(MOVE_UNVERSIONED_WARNING_KEY) === "1";
+      } catch {
+        warned = false;
+      }
+      if (!warned) {
+        const proceed = await showConfirm(
+          "Move may permanently delete sources",
+          "On buckets without versioning, a move copies objects and then permanently deletes the sources. Overwrites cannot be undone. Continue?",
+          {
+            okLabel: "Move anyway",
+            cancelLabel: "Cancel",
+            okDanger: true,
+          },
+        );
+        if (!proceed) return;
+        try {
+          localStorage.setItem(MOVE_UNVERSIONED_WARNING_KEY, "1");
+        } catch {
+          // best effort
+        }
+        if (sourceChanged()) {
+          setStatus(
+            "Move cancelled because connection or selection changed.",
+            5000,
+          );
+          closeFn();
+          return;
+        }
+      }
+    }
     const action = move ? "move" : "copy";
+    operationInFlight = true;
+    copyBtn.disabled = true;
+    moveBtn.disabled = true;
 
     try {
       setStatus(`Preparing ${action} transfer(s)...`);
@@ -381,10 +464,10 @@ export function openCopyMoveDialog(): void {
           const dstPrefix = isSingleFolder ? prefix : prefix + folderName + "/";
           let folderHasConflict = false;
           try {
-            const existing = await invoke<{
+            const existing = await invokeS3For<{
               objects: Array<{ key: string }>;
               prefixes: string[];
-            }>("list_objects", {
+            }>(sourceSnap.connectionId, "list_objects", {
               bucket: dstBucket,
               prefix: dstPrefix,
               delimiter: "",
@@ -444,7 +527,16 @@ export function openCopyMoveDialog(): void {
         return;
       }
 
-      enqueueCopyMoveEntries(queuedEntries);
+      if (sourceChanged()) {
+        setStatus(
+          `${move ? "Move" : "Copy"} cancelled because connection or selection changed.`,
+          5000,
+        );
+        closeFn();
+        return;
+      }
+
+      enqueueCopyMoveEntries(queuedEntries, sourceTarget);
       rememberCopyMoveDestination(dstBucket, dstPath);
       const skippedTotal = skippedFiles + skippedFolders;
       const skippedLabel =
@@ -467,6 +559,10 @@ export function openCopyMoveDialog(): void {
         `${move ? "Move" : "Copy"} failed: ${friendlyError(err)}`,
         "error",
       );
+    } finally {
+      operationInFlight = false;
+      copyBtn.disabled = false;
+      moveBtn.disabled = false;
     }
   };
 

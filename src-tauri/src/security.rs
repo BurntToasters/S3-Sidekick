@@ -11,7 +11,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     atomic_write, bookmarks_backup_path, bookmarks_path, collect_transfer_checkpoint_scratch_paths,
-    connection_path, fsync_parent, lock_storage_ops, purge_transfer_checkpoints,
+    connection_path, fsync_parent, lock_storage_meta, lock_storage_ops, purge_transfer_checkpoints,
     security_journal_path, security_path, transfer_manifest_path,
 };
 
@@ -317,13 +317,34 @@ pub(crate) fn load_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     match serde_json::from_str::<SecurityConfig>(&raw) {
         Ok(config) => Ok(config),
         Err(e) => {
-            let backup = path.with_extension("json.corrupt");
-            let _ = std::fs::rename(&path, &backup);
-            Err(format!(
-                "Security config was corrupted and has been backed up to '{}'. Please restart the app. ({})",
-                backup.display(),
-                e
-            ))
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or_default();
+            let backup = path.with_file_name(format!(
+                "security.json.corrupt.{}.{}",
+                std::process::id(),
+                stamp
+            ));
+            match std::fs::rename(&path, &backup) {
+                Ok(()) => match fsync_parent(&backup) {
+                    Ok(()) => Err(format!(
+                        "Security config was corrupted and has been backed up to '{}'. Please restart the app. ({})",
+                        backup.display(),
+                        e
+                    )),
+                    Err(sync_error) => Err(format!(
+                        "Security config was corrupted and moved to '{}', but the backup could not be made durable: {} ({})",
+                        backup.display(),
+                        sync_error,
+                        e
+                    )),
+                },
+                Err(rename_error) => Err(format!(
+                    "Security config was corrupted, but its backup could not be created: {} ({})",
+                    rename_error, e
+                )),
+            }
         }
     }
 }
@@ -711,7 +732,7 @@ struct MigrationJournal {
     target: SecurityConfig,
     entries: Vec<ManagedDataId>,
     #[serde(default)]
-    checkpoint_scratch_paths: Vec<String>,
+    checkpoint_scratch_paths: Vec<crate::CheckpointScratchPath>,
 }
 
 /// Durable intent record for a factory reset.
@@ -725,7 +746,7 @@ struct FactoryResetJournal {
     v: u8,
     settings_json: String,
     entries: Vec<ManagedDataId>,
-    checkpoint_scratch_paths: Vec<String>,
+    checkpoint_scratch_paths: Vec<crate::CheckpointScratchPath>,
 }
 
 fn factory_reset_journal_path<R: tauri::Runtime, M: tauri::Manager<R>>(
@@ -1257,7 +1278,7 @@ where
 #[tauri::command]
 pub(crate) async fn get_security_status(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
     run_blocking(move || {
-        let _storage_guard = lock_storage_ops()?;
+        let _storage_guard = lock_storage_meta()?;
         let config = load_security_config(&app)?;
         Ok(security_status(&config))
     })
@@ -1647,7 +1668,7 @@ fn change_security_password_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
 #[tauri::command]
 pub(crate) async fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
     run_blocking(move || {
-        let _storage_guard = lock_storage_ops()?;
+        let _storage_guard = lock_storage_meta()?;
         let config = load_security_config(&app)?;
         if config.encryption_enabled {
             set_unlocked_key(None, 0)?;
@@ -1666,7 +1687,7 @@ pub(crate) async fn set_lock_timeout(
         return Err("Lock timeout must be between 1 and 1440 minutes".to_string());
     }
     run_blocking(move || {
-        let _storage_guard = lock_storage_ops()?;
+        let _storage_guard = lock_storage_meta()?;
         let mut config = load_security_config(&app)?;
         config.lock_timeout_minutes = minutes;
         save_security_config(&app, &config)?;
@@ -3225,6 +3246,7 @@ mod tests {
         let scratch = crate::download_temp_path(&destination);
         std::fs::write(&scratch, b"partial").unwrap();
         let checkpoint = serde_json::json!({
+            "destination": destination.to_string_lossy(),
             "temp_path": scratch.to_string_lossy(),
             "updated_at_ms": 1
         })

@@ -15,10 +15,14 @@ function readPackageJsonScripts() {
     .scripts;
 }
 
-test("createInitialResults includes cargoSafeUpdate and cargoUpdatePolicy in initial state", () => {
+test("createInitialResults includes cargo quality and frontend build keys", () => {
   const results = createInitialResults();
   assert.equal(results.cargoSafeUpdate.status, "pending");
   assert.equal(results.cargoUpdatePolicy.status, "pending");
+  assert.equal(results.cargoFmt.status, "pending");
+  assert.equal(results.frontendBuild.status, "pending");
+  assert.equal(results.nativeBuild.status, "pending");
+  assert.equal(results.tauriBuild.status, "pending");
 });
 
 test("package.json scripts define cargo safe update test and policy check", () => {
@@ -31,6 +35,27 @@ test("package.json scripts define cargo safe update test and policy check", () =
     scripts["check:cargo-update-policy"],
     "node scripts/check-cargo-update-policy.mjs",
   );
+  assert.match(scripts["test:all"], /node scripts\/test-all\.js/);
+});
+
+test("main fails when cargoFmt fails", () => {
+  const calls = [];
+  const exitCode = main({
+    root: repoRoot,
+    clearProof: () => calls.push("clearProof"),
+    runner: (name, _cmd, _args, _parser, results) => {
+      calls.push(`run:${name}`);
+      if (name === "cargoFmt") {
+        results[name].status = "failed";
+        return false;
+      }
+      results[name].status = "passed";
+      return true;
+    },
+  });
+
+  assert.ok(calls.includes("run:cargoFmt"));
+  assert.equal(exitCode, 1);
 });
 
 test("main fails when cargoSafeUpdate fails", () => {
@@ -78,8 +103,33 @@ test("main succeeds when all checks pass", () => {
   const exitCode = main({
     root: repoRoot,
     clearProof: () => calls.push("clearProof"),
-    runner: (name, _cmd, _args, _parser, results) => {
+    runner: (name, _cmd, args, _parser, results) => {
       calls.push(`run:${name}`);
+      if (name === "test") assert.deepEqual(args, ["run", "test:cov"]);
+      if (name === "cargoFmt") {
+        assert.deepEqual(args, [
+          "fmt",
+          "--all",
+          "--manifest-path",
+          "src-tauri/Cargo.toml",
+          "--",
+          "--check",
+        ]);
+      }
+      if (name === "frontendBuild") {
+        assert.deepEqual(args, ["run", "build"]);
+      }
+      if (name === "tauriBuild") {
+        assert.deepEqual(args, [
+          "run",
+          "tauri",
+          "--",
+          "build",
+          "--no-bundle",
+          "--",
+          "--locked",
+        ]);
+      }
       results[name].status = "passed";
       return true;
     },

@@ -12,6 +12,11 @@ vi.mock("../connection.ts", () => ({
   refreshObjects: refreshObjectsMock,
 }));
 
+vi.mock("../info-panel.ts", () => ({
+  hasUnsavedInfoChanges: () => false,
+  confirmDiscardInfoProperties: async () => true,
+}));
+
 function renderFixture(): void {
   document.body.innerHTML = `
     <input id="filter-input" />
@@ -348,6 +353,36 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("load-more-row") as HTMLDivElement).style
         .display,
     ).toBe("none");
+  });
+
+  it("selects and prunes only visible filtered rows", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.filterText = "txt";
+    state.prefixes = ["txt-folder/", "hidden-folder/"];
+    state.objects = [
+      {
+        key: "visible.txt",
+        size: 1,
+        last_modified: "",
+        is_folder: false,
+      },
+      {
+        key: "hidden.json",
+        size: 1,
+        last_modified: "",
+        is_folder: false,
+      },
+    ];
+    state.selectedKeys.add("hidden.json");
+
+    browser.renderObjectTable();
+    expect(state.selectedKeys.has("hidden.json")).toBe(false);
+    browser.handleSelectAll(true);
+    expect([...state.selectedKeys].sort()).toEqual([
+      "prefix:txt-folder/",
+      "visible.txt",
+    ]);
   });
 
   it("updates sort indicators and handles empty state", async () => {

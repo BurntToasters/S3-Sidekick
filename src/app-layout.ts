@@ -1,6 +1,6 @@
 import { state } from "./state.ts";
 import { hideContextMenu } from "./context-menu.ts";
-import { renderObjectTable } from "./browser.ts";
+import { pruneStaleSelection, renderObjectTable } from "./browser.ts";
 
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 420;
@@ -31,6 +31,7 @@ export function wireObjectFilterInput(): void {
   ) as HTMLInputElement;
   filterInput.addEventListener("input", () => {
     state.filterText = filterInput.value;
+    pruneStaleSelection();
     clearFilterInputDebounce();
     filterInputDebounce = setTimeout(() => {
       renderObjectTable();

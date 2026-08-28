@@ -16,7 +16,7 @@ serde_json = "=1.0.151"
 tauri-plugin-dialog = "=2.7.2"
 tauri-plugin-process = "=2.3.1"
 tauri-plugin-notification = "=2.3.3"
-aws-sdk-s3 = { version = "=1.140.0", default-features = false, features = [
+aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = [
     "default-https-client",
     "http-1x",
     "rt-tokio",

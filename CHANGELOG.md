@@ -28,7 +28,7 @@ Beta 4 is a polish-and-unbreak pass: the docked inspector behaves for files that
 - **Inspector:** Batch selection toolbar wraps and collapses to icons when the docked panel steals width, so **Deselect** / **Copy URLs** no longer clip off the edge.
 - **Inspector:** Properties pane scrolls reliably (`min-height: 0`), drops the redundant “File Info” header, tightens docked padding, hides Save/Cancel for folder-only views, and allows a wider panel (default ~360px, up to 560px).
 - **Release pipeline:** Quality-gate recording no longer trims git porcelain XY columns. Bootstrap-only metainfo drift (` M path`) was being misparsed as an empty dirty set, so `coverage/.release-quality.json` was never written and `release:prepare` failed with ENOENT on clean release VMs.
-- **Release pipeline / CI:** Rust toolchain and CI install `clippy` + `rustfmt` with the pinned `1.97.1` toolchain (CI was failing after tests on “clippy not installed”).
+- **Release pipeline / CI:** Rust toolchain and CI install `clippy` + `rustfmt` with the stable toolchain (CI was failing after tests on “clippy not installed”).
 - **Testing:** `test:all` prints failed Rust test names instead of only the last log lines; security tests clear the process-global migration-recovery latch between cases so one failure cannot poison the rest of the suite.
 - **Windows:** Biometric credential presence checks treat `ERROR_NO_SUCH_LOGON_SESSION` (`0x80070520`) as “no usable key” so vault migration cleanup does not fail closed on headless/RDP/test VMs without an interactive Credential Manager session.
 - **Testing:** Frontend suite at **339** tests passing.
@@ -63,7 +63,7 @@ Beta 3 is a correctness pass over the parts of the app that can lose data: moves
 - **Release workflow:** GitHub release titles are generated from one shared helper and follow the BurntToasters Changelog Standard, so this release is titled `0.11.0 Beta 3` while the tag stays `v0.11.0-beta.3`.
 - **Testing:** Added coverage for checksum verification, generation pinning, move receipts and resume classification, the adoption proof, migration recovery, and release titling (**338** frontend and **114** Rust tests passing).
 - **Ver:** Bumped version to `v0.11.0-beta.3`.
-- **PKG:** Pinned every Rust dependency to an exact version and pinned the Rust toolchain to `1.97.1` in both the repo and CI, so local and CI builds resolve identically.
+- **PKG:** Pinned every Rust dependency to an exact version and use the stable Rust toolchain in the repo and CI, so dependency resolution stays explicit while Rust receives current stable fixes.
 
 ## Changes in `v0.11.0-beta.2:`
 

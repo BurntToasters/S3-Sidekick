@@ -44,6 +44,44 @@ function sha256File(filePath) {
     .digest("hex");
 }
 
+function gitFileList(root, args) {
+  return execFileSync("git", ["ls-files", ...args, "-z"], {
+    cwd: root,
+    encoding: "buffer",
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean);
+}
+
+function sha256WorkingTree(root) {
+  const files = [
+    ...gitFileList(root, []),
+    ...gitFileList(root, ["--others", "--exclude-standard"]),
+  ].sort();
+  const digest = crypto.createHash("sha256");
+  for (const filePath of files) {
+    const normalizedPath = filePath.replace(/\\/g, "/");
+    digest.update(normalizedPath);
+    digest.update("\0");
+    try {
+      const stat = fs.lstatSync(path.join(root, filePath));
+      if (stat.isSymbolicLink()) {
+        digest.update("symlink\0");
+        digest.update(fs.readlinkSync(path.join(root, filePath)));
+      } else {
+        digest.update("file\0");
+        digest.update(fs.readFileSync(path.join(root, filePath)));
+      }
+    } catch {
+      digest.update("missing\0");
+    }
+    digest.update("\0");
+  }
+  return digest.digest("hex");
+}
+
 function currentReleaseIdentity(root = defaultRoot) {
   const packageJson = JSON.parse(
     fs.readFileSync(path.join(root, "package.json"), "utf8"),
@@ -57,6 +95,7 @@ function currentReleaseIdentity(root = defaultRoot) {
     rustc: command("rustc", ["--version"], root),
     packageLockSha256: sha256File(path.join(root, "package-lock.json")),
     cargoLockSha256: sha256File(path.join(root, "src-tauri", "Cargo.lock")),
+    sourceTreeSha256: sha256WorkingTree(root),
   };
 }
 
@@ -186,12 +225,7 @@ function blockingReleaseWorkingTreePaths(root = defaultRoot) {
   } catch {
     return ["<git status failed>"];
   }
-  if (isAcceptableReleaseWorkingTree(status)) {
-    return [];
-  }
-  return parsePorcelainPaths(status).filter(
-    (filePath) => !isAllowedBootstrapPath(filePath),
-  );
+  return parsePorcelainPaths(status);
 }
 
 function recordSuccessfulQualityGate(root = defaultRoot) {
@@ -201,7 +235,7 @@ function recordSuccessfulQualityGate(root = defaultRoot) {
   } catch {
     return false;
   }
-  if (!isAcceptableReleaseWorkingTree(status)) {
+  if (status.trim()) {
     return false;
   }
   const proofPath = path.join(root, QUALITY_GATE_RELATIVE_PATH);
@@ -222,6 +256,12 @@ function verifyQualityGate(root = defaultRoot, options) {
   } catch (error) {
     throw new Error(
       `Release quality-gate proof is missing or invalid. On a clean checkout, run "npm run test:all" (or "npm run workspace:prepare") before release:prepare. ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const blockers = blockingReleaseWorkingTreePaths(root);
+  if (blockers.length > 0) {
+    throw new Error(
+      `Release quality-gate verification requires a clean working tree: ${blockers.join(", ")}`,
     );
   }
   return validateQualityGate(proof, currentReleaseIdentity(root), options);
@@ -252,6 +292,12 @@ function createReleaseSession(root = defaultRoot) {
 }
 
 function verifyReleaseSession(root = defaultRoot, options) {
+  const blockers = blockingReleaseWorkingTreePaths(root);
+  if (blockers.length > 0) {
+    throw new Error(
+      `Release build session verification requires a clean working tree: ${blockers.join(", ")}`,
+    );
+  }
   const sessionPath = path.join(root, RELEASE_SESSION_RELATIVE_PATH);
   let session;
   try {
@@ -317,4 +363,5 @@ export {
   validateReleaseSession,
   verifyQualityGate,
   verifyReleaseSession,
+  sha256WorkingTree,
 };

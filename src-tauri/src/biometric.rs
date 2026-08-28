@@ -37,7 +37,107 @@ use crate::{atomic_write, fsync_parent, lock_storage_ops, security_journal_path}
 // ────────────────────────────────────────────────────────────────────────────────
 
 pub fn is_available() -> bool {
-    platform::is_available()
+    #[cfg(test)]
+    {
+        test_backend::is_available()
+    }
+    #[cfg(not(test))]
+    {
+        platform::is_available()
+    }
+}
+
+#[cfg(test)]
+mod test_backend {
+    use super::KEY_LEN;
+    use std::sync::{Mutex, OnceLock};
+    use zeroize::Zeroizing;
+
+    static STORED_KEY: OnceLock<Mutex<Option<Zeroizing<[u8; KEY_LEN]>>>> = OnceLock::new();
+
+    fn stored_key() -> &'static Mutex<Option<Zeroizing<[u8; KEY_LEN]>>> {
+        STORED_KEY.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn is_available() -> bool {
+        true
+    }
+
+    pub fn store_key(key: &[u8; KEY_LEN]) -> Result<(), String> {
+        let mut stored = stored_key()
+            .lock()
+            .map_err(|_| "Test biometric backend is unavailable".to_string())?;
+        *stored = Some(Zeroizing::new(*key));
+        Ok(())
+    }
+
+    pub fn retrieve_key() -> Result<[u8; KEY_LEN], String> {
+        let stored = stored_key()
+            .lock()
+            .map_err(|_| "Test biometric backend is unavailable".to_string())?;
+        stored
+            .as_ref()
+            .map(|key| **key)
+            .ok_or_else(|| "No test biometric credential found".to_string())
+    }
+
+    pub fn remove_key() {
+        if let Ok(mut stored) = stored_key().lock() {
+            *stored = None;
+        }
+    }
+
+    pub fn has_stored_key() -> Result<bool, String> {
+        let stored = stored_key()
+            .lock()
+            .map_err(|_| "Test biometric backend is unavailable".to_string())?;
+        Ok(stored.is_some())
+    }
+}
+
+fn store_key(key: &[u8; KEY_LEN]) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        test_backend::store_key(key)
+    }
+    #[cfg(not(test))]
+    {
+        platform::store_key(key)
+    }
+}
+
+fn retrieve_key(window: Option<&tauri::Window>) -> Result<[u8; KEY_LEN], String> {
+    #[cfg(test)]
+    {
+        let _ = window;
+        test_backend::retrieve_key()
+    }
+    #[cfg(not(test))]
+    {
+        platform::retrieve_key(window)
+    }
+}
+
+fn remove_key() {
+    #[cfg(test)]
+    {
+        test_backend::remove_key();
+    }
+    #[cfg(not(test))]
+    {
+        platform::remove_key();
+    }
+}
+
+fn has_stored_key() -> Result<bool, String> {
+    #[cfg(test)]
+    {
+        test_backend::has_stored_key()
+    }
+    #[cfg(not(test))]
+    {
+        platform::has_stored_key()
+    }
 }
 
 /// Remove the biometric key and prove it is no longer present.
@@ -46,8 +146,8 @@ pub fn is_available() -> bool {
 /// Keychain is unavailable). Destructive security operations must not report
 /// success until a non-prompting presence check confirms the key is gone.
 pub fn clear_stored_key_verified() -> Result<(), String> {
-    platform::remove_key();
-    if platform::has_stored_key()? {
+    remove_key();
+    if has_stored_key()? {
         Err(
             "The stored biometric key could not be removed from the system credential store. \
              Remove it manually before using this device again."
@@ -217,7 +317,7 @@ pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecuritySt
     // committed config says enrolled, recovery knows the enrollment succeeded.
     let key = require_unlocked_key()?;
     write_biometric_cleanup_journal(&app, BiometricCleanupMode::ClearUnlessEnrolled)?;
-    if let Err(store_error) = platform::store_key(&key) {
+    if let Err(store_error) = store_key(&key) {
         let cleanup = crate::security::recover_interrupted_migration(&app);
         return match cleanup {
             Ok(()) => Err(store_error),
@@ -272,7 +372,7 @@ pub(crate) async fn unlock_biometric(
         );
     }
 
-    let key = Zeroizing::new(match platform::retrieve_key(Some(&window)) {
+    let key = Zeroizing::new(match retrieve_key(Some(&window)) {
         Ok(k) => k,
         Err(err) => {
             let is_not_found = err.contains("0x80070490")
@@ -326,7 +426,7 @@ pub(crate) async fn unlock_biometric(
 // ---------------------------------------------------------------------------
 // macOS: Keychain with biometric access control + LAContext availability check
 // ---------------------------------------------------------------------------
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 mod platform {
     use super::KEY_LEN;
     use core_foundation::base::{kCFAllocatorDefault, CFRelease, TCFType};
@@ -346,6 +446,7 @@ mod platform {
         static kSecAttrAccount: *const c_void;
         static kSecValueData: *const c_void;
         static kSecReturnData: *const c_void;
+        static kSecReturnAttributes: *const c_void;
         static kSecMatchLimit: *const c_void;
         static kSecMatchLimitOne: *const c_void;
         static kSecAttrAccessible: *const c_void;
@@ -681,8 +782,13 @@ mod platform {
         unsafe {
             let dict = new_dict();
             set_base_attrs(dict);
+            CFDictionarySetValue(dict, kSecReturnAttributes, kCFBooleanTrue);
             CFDictionarySetValue(dict, kSecMatchLimit, kSecMatchLimitOne);
-            let status = SecItemCopyMatching(dict, ptr::null_mut());
+            let mut result: *const c_void = ptr::null();
+            let status = SecItemCopyMatching(dict, &mut result);
+            if !result.is_null() {
+                CFRelease(result);
+            }
             CFRelease(dict);
             if status == errSecSuccess {
                 Ok(true)
@@ -701,7 +807,7 @@ mod platform {
 // ---------------------------------------------------------------------------
 // Windows: UserConsentVerifier + Win32 Credential Manager
 // ---------------------------------------------------------------------------
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(test)))]
 mod platform {
     use super::KEY_LEN;
     use std::ptr;
@@ -945,7 +1051,7 @@ mod platform {
 // ---------------------------------------------------------------------------
 // Linux / other: biometric not supported
 // ---------------------------------------------------------------------------
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(not(test), not(any(target_os = "macos", target_os = "windows"))))]
 mod platform {
     use super::KEY_LEN;
 

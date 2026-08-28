@@ -18,12 +18,15 @@ const removeBookmarkMock = vi.fn(async () => undefined);
 const logActivityMock = vi.fn();
 const setStatusMock = vi.fn();
 const clearFilterInputDebounceMock = vi.fn();
+const showConfirmMock = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 
 vi.mock("../connection.ts", () => ({
   connect: connectMock,
   disconnect: disconnectMock,
   saveConnection: saveConnectionMock,
   refreshBuckets: refreshBucketsMock,
+  currentConnectionGeneration: () => 1,
+  finishConnecting: vi.fn(),
 }));
 
 vi.mock("../browser.ts", () => ({
@@ -53,6 +56,10 @@ vi.mock("../app-status.ts", () => ({
 
 vi.mock("../app-layout.ts", () => ({
   clearFilterInputDebounce: clearFilterInputDebounceMock,
+}));
+
+vi.mock("../dialogs.ts", () => ({
+  showConfirm: showConfirmMock,
 }));
 
 function renderFixture(): void {
@@ -92,6 +99,7 @@ describe("connection UX polish", () => {
     logActivityMock.mockReset();
     setStatusMock.mockReset();
     clearFilterInputDebounceMock.mockReset();
+    showConfirmMock.mockReset().mockResolvedValue(true);
     renderFixture();
 
     const { state } = await import("../state.ts");
@@ -184,5 +192,25 @@ describe("connection UX polish", () => {
 
     expect(btn.disabled).toBe(false);
     expect(btn.textContent).toBe("Connect");
+  });
+
+  it("requires confirmation for non-local cleartext HTTP", async () => {
+    const app = await import("../app-connection.ts");
+    (document.getElementById("conn-endpoint") as HTMLInputElement).value =
+      "http://storage.example.com";
+    (document.getElementById("conn-access-key") as HTMLInputElement).value =
+      "AKIA";
+    (document.getElementById("conn-secret-key") as HTMLInputElement).value =
+      "secret";
+
+    showConfirmMock.mockResolvedValueOnce(false);
+    await app.handleConnect();
+
+    expect(showConfirmMock).toHaveBeenCalledWith(
+      "Insecure connection",
+      expect.stringContaining("storage.example.com"),
+      expect.objectContaining({ okDanger: true }),
+    );
+    expect(connectMock).not.toHaveBeenCalled();
   });
 });

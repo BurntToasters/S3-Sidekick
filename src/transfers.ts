@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { invokeS3For } from "./connection.ts";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { escapeHtml, getIconHtml } from "./utils.ts";
 import { state } from "./state.ts";
@@ -21,6 +22,7 @@ import { showToast } from "./toast.ts";
 export interface CopyReceipt {
   source_key: string;
   source_etag: string;
+  source_fingerprint?: string;
   source_version_id: string | null;
   destination_key: string;
   destination_etag: string;
@@ -76,6 +78,8 @@ export interface TransferItem {
    */
   movePhase?: "copied";
   receipts?: CopyReceipt[];
+  connectionId?: string;
+  connectionIdentity?: string;
   /** Transient user intent; never written to the recovery manifest. */
   cancelRequested?: boolean;
 }
@@ -112,10 +116,11 @@ export interface TransferRunSummary {
   uploadCount: number;
   downloadCount: number;
   errorCount: number;
+  skippedCount: number;
 }
 
 interface PersistedTransferManifest {
-  version: 3;
+  version: 4;
   items: PersistedTransferItem[];
 }
 
@@ -145,6 +150,8 @@ interface PersistedTransferItem {
   totalParts?: number;
   movePhase?: "copied";
   receipts?: CopyReceipt[];
+  connectionId?: string;
+  connectionIdentity?: string;
 }
 
 interface HeadObjectSummary {
@@ -469,6 +476,8 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
     totalParts: item.totalParts,
     movePhase: item.movePhase,
     receipts: item.receipts,
+    connectionId: item.connectionId,
+    connectionIdentity: item.connectionIdentity,
   };
 }
 
@@ -483,7 +492,7 @@ function buildQueueManifestJson(): string | null {
   );
   if (pending.length === 0) return null;
   const payload: PersistedTransferManifest = {
-    version: 3,
+    version: 4,
     items: pending.map(serializeManifestItem),
   };
   return JSON.stringify(payload);
@@ -601,6 +610,10 @@ function parseCopyReceipts(value: unknown): CopyReceipt[] | undefined {
     receipts.push({
       source_key: receipt.source_key,
       source_etag: receipt.source_etag,
+      source_fingerprint:
+        typeof receipt.source_fingerprint === "string"
+          ? receipt.source_fingerprint
+          : "",
       source_version_id: receipt.source_version_id,
       destination_key: receipt.destination_key,
       destination_etag: receipt.destination_etag,
@@ -620,7 +633,7 @@ function parseQueueManifest(
     const version = (parsed as { version?: unknown }).version;
     const items = (parsed as { items?: unknown }).items;
     if (
-      (version !== 1 && version !== 2 && version !== 3) ||
+      (version !== 1 && version !== 2 && version !== 3 && version !== 4) ||
       !Array.isArray(items)
     ) {
       return null;
@@ -713,10 +726,19 @@ function parseQueueManifest(
           row.totalParts >= 0
             ? row.totalParts
             : 0,
+        connectionId:
+          typeof row.connectionId === "string" && row.connectionId.length > 0
+            ? row.connectionId
+            : undefined,
+        connectionIdentity:
+          typeof row.connectionIdentity === "string" &&
+          row.connectionIdentity.length > 0
+            ? row.connectionIdentity
+            : undefined,
       });
     }
 
-    return { version: 3, items: valid };
+    return { version: 4, items: valid };
   } catch {
     return null;
   }
@@ -724,18 +746,48 @@ function parseQueueManifest(
 
 async function cleanupRecoveredTempFiles(
   items: PersistedTransferItem[],
-): Promise<void> {
-  const cleanupTargets = items
-    .filter((item) => item.operation === "download" && !item.resumable)
-    .map((item) => item.tempPath)
-    .filter(
-      (value): value is string => typeof value === "string" && value.length > 0,
-    );
-  if (cleanupTargets.length === 0) return;
+): Promise<string[]> {
+  const destinations = [
+    ...new Set(
+      items
+        .filter((item) => item.operation === "download" && !item.resumable)
+        .map((item) => item.destination)
+        .filter(
+          (destination): destination is string =>
+            typeof destination === "string" && destination.length > 0,
+        ),
+    ),
+  ];
+  const failures: string[] = [];
 
-  await Promise.allSettled(
-    cleanupTargets.map((path) => invoke("remove_path_if_exists", { path })),
-  );
+  for (const destination of destinations) {
+    try {
+      await invoke("discard_download_scratch", { destination });
+    } catch (err) {
+      failures.push(`${destination}: ${normalizeError(err)}`);
+    }
+  }
+  return failures;
+}
+
+async function discardTransferRecoveryState(
+  item: Pick<
+    PersistedTransferItem,
+    "operation" | "destination" | "checkpointId"
+  >,
+): Promise<void> {
+  // Scratch first. If it cannot be removed, retain its checkpoint/manifest so
+  // next startup still has a durable path back to the file and can retry.
+  if (item.operation === "download" && item.destination) {
+    await invoke("discard_download_scratch", {
+      destination: item.destination,
+    });
+  }
+  if (item.checkpointId) {
+    await invoke("transfer_checkpoint_remove", {
+      checkpointId: item.checkpointId,
+    });
+  }
 }
 
 function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
@@ -793,6 +845,8 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
     // old phase-only markers so those moves copy again safely.
     movePhase: item.movePhase,
     receipts: item.receipts,
+    connectionId: item.connectionId,
+    connectionIdentity: item.connectionIdentity,
   };
 }
 
@@ -843,19 +897,25 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     ttlHours: effective.transferCheckpointTtlHours,
     keepCheckpointIds: liveCheckpointIds,
   });
-  recoveredQueue = true;
-
   if (!manifest || manifest.items.length === 0) {
     clearQueueManifest();
+    recoveredQueue = true;
     return;
   }
 
   if (!document.getElementById("dialog-overlay")) {
     clearQueueManifest();
+    recoveredQueue = true;
     return;
   }
 
-  await cleanupRecoveredTempFiles(manifest.items);
+  const tempCleanupFailures = await cleanupRecoveredTempFiles(manifest.items);
+  if (tempCleanupFailures.length > 0) {
+    const message = `Could not clean ${tempCleanupFailures.length} interrupted download(s); recovery state was retained.`;
+    logActivity(`${message} ${tempCleanupFailures.join("; ")}`, "error");
+    showToast(message, { type: "error", duration: 0 });
+    return;
+  }
 
   const shouldResume = await showConfirm(
     "Resume Transfers",
@@ -864,15 +924,22 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
   );
 
   if (!shouldResume) {
-    await Promise.allSettled(
-      manifest.items
-        .map((row) => row.checkpointId)
-        .filter((id): id is string => typeof id === "string" && id.length > 0)
-        .map((checkpointId) =>
-          invoke("transfer_checkpoint_remove", { checkpointId }),
-        ),
-    );
+    const failures: string[] = [];
+    for (const row of manifest.items) {
+      try {
+        await discardTransferRecoveryState(row);
+      } catch (err) {
+        failures.push(`${row.fileName}: ${normalizeError(err)}`);
+      }
+    }
+    if (failures.length > 0) {
+      const message = `Could not discard ${failures.length} transfer(s); recovery state was retained.`;
+      logActivity(`${message} ${failures.join("; ")}`, "error");
+      showToast(message, { type: "error", duration: 0 });
+      return;
+    }
     clearQueueManifest();
+    recoveredQueue = true;
     return;
   }
 
@@ -882,6 +949,7 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
   renderQueue();
   showTransferQueue();
   writeQueueManifest();
+  recoveredQueue = true;
 
   void processQueue().catch((err) =>
     logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
@@ -1261,11 +1329,65 @@ export function clearCompletedTransfers(): void {
   resetConflictApplyAllWhenIdle();
 }
 
+export interface TransferEnqueueTarget {
+  bucket: string;
+  connectionId: string;
+  connectionIdentity: string;
+}
+
+function transferConnectionFields(): {
+  connectionId: string;
+  connectionIdentity: string;
+} {
+  if (!state.connectionId || !state.connectionIdentity) {
+    throw new Error("Not connected");
+  }
+  return {
+    connectionId: state.connectionId,
+    connectionIdentity: state.connectionIdentity,
+  };
+}
+
+function resolveEnqueueTarget(
+  target?: TransferEnqueueTarget,
+): TransferEnqueueTarget {
+  if (target) {
+    if (!target.bucket || !target.connectionId || !target.connectionIdentity) {
+      throw new Error("Not connected");
+    }
+    return target;
+  }
+  return {
+    bucket: state.currentBucket,
+    ...transferConnectionFields(),
+  };
+}
+
+function bindTransferConnection(item: TransferItem): string {
+  if (!state.connectionId || !state.connectionIdentity) {
+    throw new Error("Not connected");
+  }
+  if (!item.connectionIdentity) {
+    throw new Error(
+      "Transfer is missing connection identity; refusing to run against the current account.",
+    );
+  }
+  if (item.connectionIdentity !== state.connectionIdentity) {
+    throw new Error("Connection changed");
+  }
+  // Rebind the session for this attempt so queued work can continue after a
+  // same-account reconnect. Every command in the attempt uses this frozen ID.
+  item.connectionId = state.connectionId;
+  return item.connectionId;
+}
+
 export function enqueueFiles(
   files: FileList | File[],
   targetPrefix: string,
+  target?: TransferEnqueueTarget,
 ): void {
-  const bucket = state.currentBucket;
+  const enqueueTarget = resolveEnqueueTarget(target);
+  const bucket = enqueueTarget.bucket;
   const allFiles = Array.from(files);
   const maxAttempts = maxAttemptsFromSettings();
   for (const file of allFiles) {
@@ -1276,6 +1398,8 @@ export function enqueueFiles(
     const key = targetPrefix + file.name;
     queue.push({
       id: allocateTransferId(),
+      connectionId: enqueueTarget.connectionId,
+      connectionIdentity: enqueueTarget.connectionIdentity,
       operation: "upload",
       bucket,
       fileName: file.name,
@@ -1317,8 +1441,13 @@ export function enqueueFiles(
   );
 }
 
-export function enqueuePaths(paths: string[], targetPrefix: string): void {
-  const bucket = state.currentBucket;
+export function enqueuePaths(
+  paths: string[],
+  targetPrefix: string,
+  target?: TransferEnqueueTarget,
+): void {
+  const enqueueTarget = resolveEnqueueTarget(target);
+  const bucket = enqueueTarget.bucket;
   const maxAttempts = maxAttemptsFromSettings();
   for (const filePath of paths) {
     const normalizedPath = filePath.trim();
@@ -1327,6 +1456,8 @@ export function enqueuePaths(paths: string[], targetPrefix: string): void {
     const key = targetPrefix + fileName;
     queue.push({
       id: allocateTransferId(),
+      connectionId: enqueueTarget.connectionId,
+      connectionIdentity: enqueueTarget.connectionIdentity,
       operation: "upload",
       bucket,
       fileName,
@@ -1370,8 +1501,10 @@ export function enqueuePaths(paths: string[], targetPrefix: string): void {
 export function enqueueFolderEntries(
   entries: FolderUploadEntry[],
   targetPrefix: string,
+  target?: TransferEnqueueTarget,
 ): void {
-  const bucket = state.currentBucket;
+  const enqueueTarget = resolveEnqueueTarget(target);
+  const bucket = enqueueTarget.bucket;
   const maxAttempts = maxAttemptsFromSettings();
   for (const entry of entries) {
     const rel = entry.relative_path.replace(/\\/g, "/").replace(/^\/+/, "");
@@ -1381,6 +1514,8 @@ export function enqueueFolderEntries(
     const key = targetPrefix + rel;
     queue.push({
       id: allocateTransferId(),
+      connectionId: enqueueTarget.connectionId,
+      connectionIdentity: enqueueTarget.connectionIdentity,
       operation: "upload",
       bucket,
       fileName,
@@ -1421,7 +1556,11 @@ export function enqueueFolderEntries(
   );
 }
 
-export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
+export function enqueueDownloads(
+  entries: DownloadQueueEntry[],
+  target?: TransferEnqueueTarget,
+): void {
+  const enqueueTarget = resolveEnqueueTarget(target);
   const maxAttempts = maxAttemptsFromSettings();
   const effective = getEffectiveTransferSettings();
   for (const entry of entries) {
@@ -1437,6 +1576,8 @@ export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
       : undefined;
     queue.push({
       id: allocateTransferId(),
+      connectionId: enqueueTarget.connectionId,
+      connectionIdentity: enqueueTarget.connectionIdentity,
       operation: "download",
       bucket: entry.bucket,
       fileName,
@@ -1477,7 +1618,11 @@ export function enqueueDownloads(entries: DownloadQueueEntry[]): void {
   );
 }
 
-export function enqueueCopyMoveEntries(entries: CopyMoveQueueEntry[]): void {
+export function enqueueCopyMoveEntries(
+  entries: CopyMoveQueueEntry[],
+  target?: TransferEnqueueTarget,
+): void {
+  const enqueueTarget = resolveEnqueueTarget(target);
   const maxAttempts = maxAttemptsFromSettings();
   for (const entry of entries) {
     const keyLike = entry.sourceKey ?? entry.sourcePrefix ?? "";
@@ -1485,6 +1630,8 @@ export function enqueueCopyMoveEntries(entries: CopyMoveQueueEntry[]): void {
       entry.destinationKey ?? entry.destinationPrefix ?? "";
     queue.push({
       id: allocateTransferId(),
+      connectionId: enqueueTarget.connectionId,
+      connectionIdentity: enqueueTarget.connectionIdentity,
       operation: entry.operation,
       bucket: entry.sourceBucket,
       fileName: entry.fileName,
@@ -1540,9 +1687,12 @@ async function processQueue(): Promise<void> {
   processing = true;
   let completedUploadThisRun = false;
   let completedDownloadThisRun = false;
+  let attemptedUploadThisRun = false;
+  let attemptedDownloadThisRun = false;
   let uploadCount = 0;
   let downloadCount = 0;
   let errorCount = 0;
+  let skippedCount = 0;
 
   const workers: Promise<void>[] = [];
   for (let i = 0; i < maxConcurrent; i += 1) {
@@ -1565,6 +1715,9 @@ async function processQueue(): Promise<void> {
       const item = claimNextItem();
       if (!item) break;
 
+      if (item.operation === "upload") attemptedUploadThisRun = true;
+      if (item.operation === "download") attemptedDownloadThisRun = true;
+
       renderQueue();
       writeQueueManifest();
 
@@ -1578,6 +1731,7 @@ async function processQueue(): Promise<void> {
           completedUploadThisRun = true;
           uploadCount += 1;
         }
+        if (item.status === "skipped") skippedCount += 1;
 
         if (completed) {
           queue = queue.filter((t) => t.id !== item.id);
@@ -1587,7 +1741,30 @@ async function processQueue(): Promise<void> {
         }
       } catch (err) {
         const errorText = normalizeError(err);
-        if (item.paused && /cancel/i.test(errorText)) {
+        if (item.cancelRequested) {
+          try {
+            await discardTransferRecoveryState(item);
+            item.status = "error";
+            item.phase = "finalizing";
+            item.error = "Cancelled";
+            item.browserFile = undefined;
+          } catch (cleanupErr) {
+            const cleanupMessage = `Cancellation cleanup failed: ${normalizeError(cleanupErr)}`;
+            // Keep this item recoverable and cancellable. Excluding it from the
+            // manifest here would orphan scratch/checkpoint state.
+            item.status = "queued";
+            item.phase = "paused";
+            item.paused = true;
+            item.cancelRequested = false;
+            item.error = cleanupMessage;
+            logActivity(
+              `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(cleanupErr)}`,
+              "error",
+            );
+            showToast(cleanupMessage, { type: "error", duration: 0 });
+          }
+          errorCount += 1;
+        } else if (item.paused && /cancel/i.test(errorText)) {
           item.status = "queued";
           item.phase = "paused";
           item.error = "Paused";
@@ -1620,13 +1797,20 @@ async function processQueue(): Promise<void> {
   processing = false;
   resetConflictApplyAllWhenIdle();
 
-  if (onComplete && (completedUploadThisRun || completedDownloadThisRun)) {
+  if (
+    onComplete &&
+    (attemptedUploadThisRun ||
+      attemptedDownloadThisRun ||
+      errorCount > 0 ||
+      skippedCount > 0)
+  ) {
     onComplete({
       hadUpload: completedUploadThisRun,
       hadDownload: completedDownloadThisRun,
       uploadCount,
       downloadCount,
       errorCount,
+      skippedCount,
     });
   }
 }
@@ -1655,7 +1839,8 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
     writeQueueManifest();
 
     try {
-      const conflictDecision = await resolveConflict(item);
+      const connectionId = bindTransferConnection(item);
+      const conflictDecision = await resolveConflict(item, connectionId);
       ensureTransferActive(item);
       item.conflictResolution = conflictDecision;
 
@@ -1679,13 +1864,20 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
         return false;
       }
 
-      await executeTransfer(item, attempt, conflictDecision === "replace");
+      await executeTransfer(
+        item,
+        attempt,
+        conflictDecision === "replace",
+        connectionId,
+      );
+      ensureTransferActive(item);
       item.phase = "verifying";
       queueRender();
 
       if (item.operation === "upload") {
-        await verifyUploadedObject(item);
+        await verifyUploadedObject(item, connectionId);
       }
+      ensureTransferActive(item);
 
       item.progress = 100;
       item.verified = true;
@@ -1740,6 +1932,7 @@ async function executeTransfer(
   item: TransferItem,
   attempt: number,
   overwrite: boolean,
+  connectionId: string,
 ): Promise<void> {
   const effective = getEffectiveTransferSettings();
   ensureTransferActive(item);
@@ -1749,10 +1942,14 @@ async function executeTransfer(
       throw new Error("No destination available for download transfer.");
     }
 
-    const head = await invoke<HeadObjectSummary>("head_object", {
-      bucket: item.bucket,
-      key: item.key,
-    });
+    const head = await invokeS3For<HeadObjectSummary>(
+      connectionId,
+      "head_object",
+      {
+        bucket: item.bucket,
+        key: item.key,
+      },
+    );
     ensureTransferActive(item);
     const shouldUseParallel =
       head.content_length >=
@@ -1773,28 +1970,32 @@ async function executeTransfer(
     let size = 0;
     if (shouldUseParallel) {
       try {
-        size = await invoke<number>("download_object_parallel", {
-          bucket: item.bucket,
-          key: item.key,
-          destination: item.destination,
-          transferId: item.id,
-          overwrite,
-          attempt,
-          parallelThresholdMb: effective.downloadParallelThresholdMb,
-          partSizeMb: effective.downloadPartSizeMb,
-          partConcurrency: effective.downloadPartConcurrency,
-          bandwidthLimitMbps: effective.bandwidthLimitMbps,
-          checkpointId,
-          enableResume: item.resumable && effective.enableTransferResume,
-          checksumVerification: effective.enableTransferChecksumVerification,
-        });
+        size = await invokeS3For<number>(
+          connectionId,
+          "download_object_parallel",
+          {
+            bucket: item.bucket,
+            key: item.key,
+            destination: item.destination,
+            transferId: item.id,
+            overwrite,
+            attempt,
+            parallelThresholdMb: effective.downloadParallelThresholdMb,
+            partSizeMb: effective.downloadPartSizeMb,
+            partConcurrency: effective.downloadPartConcurrency,
+            bandwidthLimitMbps: effective.bandwidthLimitMbps,
+            checkpointId,
+            enableResume: item.resumable && effective.enableTransferResume,
+            checksumVerification: effective.enableTransferChecksumVerification,
+          },
+        );
       } catch (err) {
         const text = normalizeError(err).toLowerCase();
         if (!text.includes("__range_unsupported__")) {
           throw err;
         }
         ensureTransferActive(item);
-        size = await invoke<number>("download_object", {
+        size = await invokeS3For<number>(connectionId, "download_object", {
           bucket: item.bucket,
           key: item.key,
           destination: item.destination,
@@ -1805,7 +2006,7 @@ async function executeTransfer(
         });
       }
     } else {
-      size = await invoke<number>("download_object", {
+      size = await invokeS3For<number>(connectionId, "download_object", {
         bucket: item.bucket,
         key: item.key,
         destination: item.destination,
@@ -1845,27 +2046,41 @@ async function executeTransfer(
 
       let receipts: CopyReceipt[];
       if (item.sourceKey && item.destinationKey) {
-        const receipt = await invoke<CopyReceipt>("copy_object_to", {
-          srcBucket,
-          srcKey: item.sourceKey,
-          dstBucket,
-          dstKey: item.destinationKey,
-          transferId: item.id,
-        });
+        const receipt = await invokeS3For<CopyReceipt>(
+          connectionId,
+          "copy_object_to",
+          {
+            srcBucket,
+            srcKey: item.sourceKey,
+            dstBucket,
+            dstKey: item.destinationKey,
+            transferId: item.id,
+          },
+        );
         receipts = [receipt];
       } else if (item.sourcePrefix && item.destinationPrefix) {
-        receipts = await invoke<CopyReceipt[]>("copy_prefix_to", {
-          srcBucket,
-          srcPrefix: item.sourcePrefix,
-          dstBucket,
-          dstPrefix: item.destinationPrefix,
-          transferId: item.id,
-        });
+        receipts = await invokeS3For<CopyReceipt[]>(
+          connectionId,
+          "copy_prefix_to",
+          {
+            srcBucket,
+            srcPrefix: item.sourcePrefix,
+            dstBucket,
+            dstPrefix: item.destinationPrefix,
+            transferId: item.id,
+            collectReceipts: item.operation === "move",
+          },
+        );
       } else {
         throw new Error("Invalid copy/move transfer configuration.");
       }
 
       if (item.operation === "copy") {
+        item.progress = 100;
+        return;
+      }
+
+      if (receipts.length === 0) {
         item.progress = 100;
         return;
       }
@@ -1893,7 +2108,7 @@ async function executeTransfer(
     if (item.paused || item.cancelRequested) {
       throw new Error("Cancelled");
     }
-    await invoke("delete_copied_objects", {
+    await invokeS3For(connectionId, "delete_copied_objects", {
       srcBucket,
       dstBucket,
       receipts,
@@ -1909,7 +2124,7 @@ async function executeTransfer(
   if (item.filePath) {
     item.resumable = false;
     item.checkpointId = undefined;
-    await invoke("upload_object", {
+    await invokeS3For(connectionId, "upload_object", {
       bucket: item.bucket,
       key: item.key,
       filePath: item.filePath,
@@ -1932,7 +2147,7 @@ async function executeTransfer(
       new Uint8Array(await item.browserFile.arrayBuffer()),
     );
     ensureTransferActive(item);
-    await invoke("upload_object_bytes", {
+    await invokeS3For(connectionId, "upload_object_bytes", {
       bucket: item.bucket,
       key: item.key,
       bytes,
@@ -1947,14 +2162,21 @@ async function executeTransfer(
   }
 }
 
-async function verifyUploadedObject(item: TransferItem): Promise<void> {
+async function verifyUploadedObject(
+  item: TransferItem,
+  connectionId: string,
+): Promise<void> {
   const expected = item.totalBytes > 0 ? item.totalBytes : 0;
   if (expected <= 0) return;
 
-  const head = await invoke<HeadObjectSummary>("head_object", {
-    bucket: item.bucket,
-    key: item.key,
-  });
+  const head = await invokeS3For<HeadObjectSummary>(
+    connectionId,
+    "head_object",
+    {
+      bucket: item.bucket,
+      key: item.key,
+    },
+  );
   ensureTransferActive(item);
   if (head.content_length !== expected) {
     throw new Error(
@@ -1974,10 +2196,11 @@ function withConflictPromptLock<T>(work: () => Promise<T>): Promise<T> {
 
 async function resolveConflict(
   item: TransferItem,
+  connectionId: string,
 ): Promise<"ask" | "skip" | "replace"> {
   let conflictExists: boolean;
   try {
-    conflictExists = await checkConflictExists(item);
+    conflictExists = await checkConflictExists(item, connectionId);
   } catch (err) {
     // The probe failed, so we do not know whether the destination is occupied.
     // Assume it is and let the normal conflict handling below decide, rather
@@ -2054,7 +2277,10 @@ async function resolveConflict(
  * HeadObject silently became permission to overwrite without ever asking the
  * user. Propagating the error makes the caller prompt instead.
  */
-async function checkConflictExists(item: TransferItem): Promise<boolean> {
+async function checkConflictExists(
+  item: TransferItem,
+  connectionId: string,
+): Promise<boolean> {
   if (item.operation === "download") {
     if (!item.destination) return false;
     return invoke<boolean>("path_exists", { path: item.destination });
@@ -2062,16 +2288,16 @@ async function checkConflictExists(item: TransferItem): Promise<boolean> {
   if (item.operation === "copy" || item.operation === "move") {
     const bucket = item.destinationBucket ?? item.bucket;
     if (item.destinationKey) {
-      return invoke<boolean>("object_exists", {
+      return invokeS3For<boolean>(connectionId, "object_exists", {
         bucket,
         key: item.destinationKey,
       });
     }
     if (!item.destinationPrefix) return false;
-    const existing = await invoke<{
+    const existing = await invokeS3For<{
       objects: Array<{ key: string }>;
       prefixes: string[];
-    }>("list_objects", {
+    }>(connectionId, "list_objects", {
       bucket,
       prefix: item.destinationPrefix,
       delimiter: "",
@@ -2079,7 +2305,7 @@ async function checkConflictExists(item: TransferItem): Promise<boolean> {
     });
     return existing.objects.length > 0 || existing.prefixes.length > 0;
   }
-  return invoke<boolean>("object_exists", {
+  return invokeS3For<boolean>(connectionId, "object_exists", {
     bucket: item.bucket,
     key: item.key,
   });
@@ -2170,12 +2396,12 @@ function renderQueue(): void {
           t.operation === "move");
       const progressBar = showDeterminate
         ? `<div class="transfer-progress-wrap">` +
-          `<div class="transfer-progress"><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
+          `<div class="transfer-progress" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressPct}"><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
           `<span class="transfer-progress__label">${progressPct}%</span>` +
           `</div>`
         : showIndeterminate
           ? `<div class="transfer-progress-wrap transfer-progress-wrap--indeterminate">` +
-            `<div class="transfer-progress transfer-progress--indeterminate"><div class="transfer-progress__bar"></div></div>` +
+            `<div class="transfer-progress transfer-progress--indeterminate" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-busy="true"><div class="transfer-progress__bar"></div></div>` +
             `</div>`
           : "";
       const opLabel =
@@ -2269,7 +2495,7 @@ function renderQueue(): void {
           ? `<div class="transfer-meta">${attemptLabel}${phaseLabel}${speedLabel}${etaLabel}${partsLabel}</div>`
           : "") +
         progressBar +
-        (t.status === "error" || t.status === "skipped"
+        (t.status === "error" || t.status === "skipped" || (t.paused && t.error)
           ? `<span class="transfer-error" title="${escapeHtml(t.error ?? "")}">${escapeHtml(t.error ?? "Error")}</span>`
           : "") +
         `</div>` +
@@ -2296,9 +2522,8 @@ function updateQueueSummary(): void {
   const active = queue.filter(
     (t) => t.status === "queued" || t.status === "uploading",
   ).length;
-  const failed = queue.filter(
-    (t) => t.status === "error" || t.status === "skipped",
-  ).length;
+  const failed = queue.filter((t) => t.status === "error").length;
+  const skipped = queue.filter((t) => t.status === "skipped").length;
   const totalSpeed = queue
     .filter((item) => item.status === "uploading")
     .reduce((sum, item) => sum + Math.max(0, item.speedBps), 0);
@@ -2306,6 +2531,7 @@ function updateQueueSummary(): void {
   const parts: string[] = [];
   if (active > 0) parts.push(`${active} active`);
   if (failed > 0) parts.push(`${failed} failed`);
+  if (skipped > 0) parts.push(`${skipped} skipped`);
   if (totalSpeed > 0) parts.push(formatSpeedBps(totalSpeed));
   el.textContent = parts.length > 0 ? parts.join(" · ") : "No active transfers";
 }
@@ -2314,27 +2540,30 @@ function updateBadge(): void {
   const active = queue.filter(
     (t) => t.status === "queued" || t.status === "uploading",
   ).length;
-  const failed = queue.filter(
+  const attention = queue.filter(
     (t) => t.status === "error" || t.status === "skipped",
   ).length;
-  const badgeText = active > 0 ? String(active) : failed > 0 ? "!" : "";
+  const badgeText = active > 0 ? String(active) : attention > 0 ? "!" : "";
   const badge = document.getElementById("transfer-badge");
   if (badge) {
     badge.textContent = badgeText;
-    badge.style.display = active > 0 || failed > 0 ? "" : "none";
-    badge.classList.toggle("transfer-badge--alert", active === 0 && failed > 0);
+    badge.style.display = active > 0 || attention > 0 ? "" : "none";
+    badge.classList.toggle(
+      "transfer-badge--alert",
+      active === 0 && attention > 0,
+    );
   }
   const drawerBadge = document.getElementById("drawer-transfer-badge");
   if (drawerBadge) {
     drawerBadge.textContent = badgeText;
-    drawerBadge.style.display = active > 0 || failed > 0 ? "" : "none";
+    drawerBadge.style.display = active > 0 || attention > 0 ? "" : "none";
     drawerBadge.classList.toggle(
       "drawer-badge--alert",
-      active === 0 && failed > 0,
+      active === 0 && attention > 0,
     );
   }
   const toggle = document.getElementById("transfer-toggle");
-  if (toggle && (active > 0 || failed > 0)) {
+  if (toggle && (active > 0 || attention > 0)) {
     const speedLabel =
       queue
         .filter((item) => item.status === "uploading")
@@ -2348,6 +2577,8 @@ function updateBadge(): void {
     toggle.title = speedLabel
       ? `Transfers (${active} active, ${speedLabel})`
       : `Transfers (${active} active)`;
+  } else if (toggle) {
+    toggle.title = "Transfers";
   }
 }
 
@@ -2386,14 +2617,36 @@ async function cancelTransferItem(id: number): Promise<void> {
   if (!item) return;
   item.cancelRequested = true;
   if (item.status === "queued") {
-    item.status = "error";
-    item.error = "Cancelled";
+    try {
+      await discardTransferRecoveryState(item);
+      item.status = "error";
+      item.error = "Cancelled";
+      item.browserFile = undefined;
+    } catch (err) {
+      item.status = "queued";
+      item.phase = "paused";
+      item.paused = true;
+      item.cancelRequested = false;
+      item.error = `Cancellation cleanup failed: ${normalizeError(err)}`;
+      logActivity(
+        `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(err)}`,
+        "error",
+      );
+      showToast(item.error, { type: "error", duration: 0 });
+    }
     renderQueue();
   } else if (item.status === "uploading") {
     try {
       await invoke("cancel_transfer", { transferId: id });
-    } catch {
-      // best effort
+      item.error = "Cancelling...";
+      renderQueue();
+    } catch (err) {
+      item.cancelRequested = false;
+      item.error = undefined;
+      const message = `Could not cancel ${item.fileName}: ${normalizeError(err)}`;
+      logActivity(message, "error");
+      showToast(message, { type: "error" });
+      renderQueue();
     }
   }
   writeQueueManifest();

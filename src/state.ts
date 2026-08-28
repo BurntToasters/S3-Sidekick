@@ -21,6 +21,8 @@ export const state = {
   connecting: false,
   endpoint: "",
   region: "",
+  connectionId: "",
+  connectionIdentity: "",
   currentBucket: "",
   currentPrefix: "",
   buckets: [] as BucketInfo[],

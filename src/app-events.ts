@@ -23,7 +23,6 @@ import {
   clearSelection,
   setLastClickedKey,
   updateSelectionUI,
-  getSelectableKeys,
   toggleSort,
   navigateBack,
   navigateForward,
@@ -539,7 +538,12 @@ export function wireEvents(): void {
       !target.closest(".col-check")
     ) {
       const prefix = row.dataset.prefix;
-      if (prefix !== undefined) void navigateToFolder(prefix);
+      if (prefix !== undefined) {
+        void navigateToFolder(prefix).catch((err) => {
+          setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+          logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
+        });
+      }
       return;
     }
 
@@ -590,12 +594,34 @@ export function wireEvents(): void {
       return;
     }
 
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const rows = Array.from(
+        dom.objectTbody.querySelectorAll<HTMLElement>(".object-row"),
+      );
+      const currentIndex = rows.indexOf(row);
+      const nextIndex =
+        e.key === "ArrowDown" ? currentIndex + 1 : currentIndex - 1;
+      rows[nextIndex]?.focus();
+      return;
+    }
+    if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      const rows = Array.from(
+        dom.objectTbody.querySelectorAll<HTMLElement>(".object-row"),
+      );
+      (e.key === "Home" ? rows[0] : rows[rows.length - 1])?.focus();
+      return;
+    }
+
     if (e.key === "Enter") {
       e.preventDefault();
       if (row.classList.contains("object-row--folder")) {
         const prefix = row.dataset.prefix;
         if (prefix !== undefined) {
-          void navigateToFolder(prefix);
+          void navigateToFolder(prefix).catch((err) => {
+            setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+          });
         }
         return;
       }
@@ -614,8 +640,6 @@ export function wireEvents(): void {
     const row = (e.target as HTMLElement).closest<HTMLElement>(".object-row");
     if (!row) return;
     if (row.classList.contains("object-row--folder")) {
-      const prefix = row.dataset.prefix;
-      if (prefix !== undefined) void navigateToFolder(prefix);
       return;
     }
     const key = row.dataset.key;
@@ -657,7 +681,11 @@ export function wireEvents(): void {
     );
     if (!seg) return;
     const prefix = seg.dataset.prefix;
-    if (prefix !== undefined) void navigateToFolder(prefix);
+    if (prefix !== undefined) {
+      void navigateToFolder(prefix).catch((err) => {
+        setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+      });
+    }
   });
 
   const objectPanel = dom.objectPanel;
@@ -707,9 +735,28 @@ export function wireEvents(): void {
 
   setTransferCompleteHandler(async (summary) => {
     if (summary.hadUpload && state.connected && state.currentBucket) {
-      await refreshObjects(state.currentBucket, state.currentPrefix);
-      pruneStaleSelection();
-      renderObjectTable();
+      const bucket = state.currentBucket;
+      const prefix = state.currentPrefix;
+      try {
+        await refreshObjects(bucket, prefix);
+        if (
+          state.connected &&
+          state.currentBucket === bucket &&
+          state.currentPrefix === prefix
+        ) {
+          pruneStaleSelection();
+          renderObjectTable();
+        }
+      } catch (err) {
+        setStatus(
+          `Transfer completed, but listing refresh failed: ${friendlyError(err)}`,
+          5000,
+        );
+        logActivity(
+          `Transfer completed, but listing refresh failed: ${friendlyError(err)}`,
+          "warning",
+        );
+      }
     }
 
     const parts: string[] = [];
@@ -733,6 +780,12 @@ export function wireEvents(): void {
         {
           type: "error",
         },
+      );
+    }
+    if (summary.skippedCount > 0) {
+      showToast(
+        `${summary.skippedCount} transfer${summary.skippedCount === 1 ? "" : "s"} skipped`,
+        { type: "warning" },
       );
     }
   });
@@ -797,9 +850,7 @@ export function wireEvents(): void {
       icon: "check-square",
       shortcut: `${accelLabel}A`,
       action: () => {
-        const keys = getSelectableKeys();
-        keys.forEach((k) => state.selectedKeys.add(k));
-        updateSelectionUI();
+        handleSelectAll(true);
       },
       available: () => state.connected,
     },

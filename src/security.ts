@@ -338,6 +338,7 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
   const biometricToggle = document.getElementById(
     "biometric-toggle",
   ) as HTMLButtonElement | null;
+  const biometricNote = document.getElementById("biometric-security-note");
   if (!statusText || !toggleBtn || !changeBtn || !warning) return;
 
   try {
@@ -386,6 +387,9 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
               ? `Disable ${label} unlock`
               : `Enable ${label} unlock`,
           );
+          if (biometricNote) {
+            biometricNote.textContent = `${label} is a convenience gate and defense-in-depth; the stored key is not hardware-bound.`;
+          }
         } else {
           biometricSettings.style.display = "none";
         }

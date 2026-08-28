@@ -44,6 +44,9 @@ function els() {
       ".dialog-input-wrapper",
     ) as HTMLElement,
     inputIcon: document.getElementById("dialog-input-icon") as HTMLElement,
+    inputLabel: document.getElementById(
+      "dialog-input-label",
+    ) as HTMLElement | null,
     input: document.getElementById("dialog-input") as HTMLInputElement,
     reveal: document.getElementById("dialog-input-reveal") as HTMLButtonElement,
     cancel: document.getElementById("dialog-cancel") as HTMLButtonElement,
@@ -80,8 +83,12 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.input.value = config.inputDefault;
 
     const isPassword = config.inputType === "password";
+    const inputLabel = isPassword ? "Password" : "Value";
+    el.input.setAttribute("aria-label", inputLabel);
+    if (el.inputLabel) el.inputLabel.textContent = inputLabel;
     el.inputWrapper.classList.toggle("dialog-input-wrapper--icon", isPassword);
     el.reveal.hidden = !isPassword;
+    el.reveal.tabIndex = isPassword ? 0 : -1;
     if (isPassword) {
       el.reveal.textContent = "Show";
       el.reveal.setAttribute("aria-label", "Show password");
@@ -112,6 +119,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       // so it is deliberately excluded here to match native Tab behavior.
       const candidates: (HTMLElement | null)[] = [
         config.showInput ? el.input : null,
+        config.showInput && isPassword ? el.reveal : null,
         config.showCancel ? el.cancel : null,
         el.ok,
       ];
@@ -175,21 +183,40 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       }
     }
 
+    let validating = false;
+    let validateGeneration = 0;
+
     function onCancel() {
+      validateGeneration += 1;
+      validating = false;
       cleanup();
       resolve(config.showInput ? null : false);
     }
 
     async function onOk() {
+      if (validating) return;
       if (config.validate) {
+        const generation = ++validateGeneration;
+        validating = true;
         el.ok.disabled = true;
-        const ok = await config.validate(el.input.value);
-        el.ok.disabled = false;
-        if (!ok) {
+        try {
+          const ok = await config.validate(el.input.value);
+          if (generation !== validateGeneration) return;
+          if (!ok) {
+            shakeDialogBox(el.box);
+            el.input.value = "";
+            el.input.focus();
+            return;
+          }
+        } catch {
+          if (generation !== validateGeneration) return;
           shakeDialogBox(el.box);
-          el.input.value = "";
-          el.input.focus();
           return;
+        } finally {
+          if (generation === validateGeneration) {
+            validating = false;
+            el.ok.disabled = false;
+          }
         }
       }
       cleanup();
