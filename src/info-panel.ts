@@ -1,4 +1,10 @@
-import { invokeS3 } from "./connection.ts";
+import {
+  invokeS3,
+  invokeS3For,
+  captureConnectionSnapshot,
+  connectionIdentityChanged,
+} from "./connection.ts";
+import type { ConnectionSnapshot } from "./connection.ts";
 import {
   $,
   escapeHtml,
@@ -703,14 +709,20 @@ export async function saveInfoPanel(): Promise<void> {
 
 async function saveSingleChanges(): Promise<void> {
   const selectedKey = currentKey;
-  const selectedBucket = state.currentBucket;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    setStatus("Save cancelled: not connected.", 5000);
+    return;
+  }
   const requestToken = panelRequestToken;
   if (!selectedKey) return;
 
   const isCurrentRequest = () =>
     requestToken === panelRequestToken &&
     currentKey === selectedKey &&
-    state.currentBucket === selectedBucket;
+    !connectionIdentityChanged(target);
 
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl =
@@ -731,7 +743,7 @@ async function saveSingleChanges(): Promise<void> {
   ) {
     const confirmed = await showConfirm(
       "Make object public?",
-      `Anyone with the object URL will be able to read ${selectedBucket}/${selectedKey}. Continue?`,
+      `Anyone with the object URL will be able to read ${target.bucket}/${selectedKey}. Continue?`,
       { okLabel: "Make public", cancelLabel: "Cancel", okDanger: true },
     );
     if (!confirmed || !isCurrentRequest()) return;
@@ -749,8 +761,8 @@ async function saveSingleChanges(): Promise<void> {
       try {
         if (!isCurrentRequest()) return;
         const payload = collectSingleMetadata();
-        await invokeS3("update_metadata", {
-          bucket: selectedBucket,
+        await invokeS3For(target.connectionId, "update_metadata", {
+          bucket: target.bucket,
           key: selectedKey,
           contentType: payload.contentType,
           metadata: payload.metadata,
@@ -764,8 +776,8 @@ async function saveSingleChanges(): Promise<void> {
     if (shouldApplyAcl && requestedVisibility) {
       try {
         if (!isCurrentRequest()) return;
-        await invokeS3("set_object_acl", {
-          bucket: selectedBucket,
+        await invokeS3For(target.connectionId, "set_object_acl", {
+          bucket: target.bucket,
           key: selectedKey,
           visibility: requestedVisibility,
         });
@@ -812,11 +824,16 @@ async function saveSingleChanges(): Promise<void> {
 
 async function saveBatchChanges(): Promise<void> {
   const requestToken = panelRequestToken;
-  const selectedBucket = state.currentBucket;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    setStatus("Save cancelled: not connected.", 5000);
+    return;
+  }
   const targetKeys = [...batchKeys];
   const isCurrentRequest = () =>
-    requestToken === panelRequestToken &&
-    state.currentBucket === selectedBucket;
+    requestToken === panelRequestToken && !connectionIdentityChanged(target);
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl = aclDirty && requestedVisibility !== null;
 
@@ -836,7 +853,7 @@ async function saveBatchChanges(): Promise<void> {
   if (shouldApplyAcl && requestedVisibility === "public-read") {
     const confirmed = await showConfirm(
       "Make selected objects public?",
-      `This will allow anonymous read access to ${targetKeys.length} object(s) in bucket ${selectedBucket}. Continue?`,
+      `This will allow anonymous read access to ${targetKeys.length} object(s) in bucket ${target.bucket}. Continue?`,
       { okLabel: "Make public", cancelLabel: "Cancel", okDanger: true },
     );
     if (!confirmed || !isCurrentRequest()) return;
@@ -861,16 +878,20 @@ async function saveBatchChanges(): Promise<void> {
 
         if (shouldApplyMetadata) {
           try {
-            const head = await invokeS3<HeadObjectResponse>("head_object", {
-              bucket: selectedBucket,
-              key,
-            });
+            const head = await invokeS3For<HeadObjectResponse>(
+              target.connectionId,
+              "head_object",
+              {
+                bucket: target.bucket,
+                key,
+              },
+            );
             const merged: Record<string, string> = {
               ...head.metadata,
               ...newMeta,
             };
-            await invokeS3("update_metadata", {
-              bucket: selectedBucket,
+            await invokeS3For(target.connectionId, "update_metadata", {
+              bucket: target.bucket,
               key,
               contentType: head.content_type,
               metadata: merged,
@@ -882,8 +903,8 @@ async function saveBatchChanges(): Promise<void> {
 
         if (shouldApplyAcl && requestedVisibility) {
           try {
-            await invokeS3("set_object_acl", {
-              bucket: selectedBucket,
+            await invokeS3For(target.connectionId, "set_object_acl", {
+              bucket: target.bucket,
               key,
               visibility: requestedVisibility,
             });

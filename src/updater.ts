@@ -76,7 +76,7 @@ export async function initUpdater(): Promise<void> {
       };
     } catch {
       updaterSupport = {
-        mode: "native",
+        mode: "manual",
         release_url: DEFAULT_RELEASE_URL,
       };
     }

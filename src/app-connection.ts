@@ -29,6 +29,11 @@ import { clearFilterInputDebounce } from "./app-layout.ts";
 import { setInspectorOpen } from "./inspector.ts";
 import { showConfirm } from "./dialogs.ts";
 
+export function awsRegionalEndpoint(region: string): string {
+  const trimmed = region.trim() || "us-east-1";
+  return `https://s3.${trimmed}.amazonaws.com`;
+}
+
 export function getConnectionInputs() {
   const endpoint = (
     document.getElementById("conn-endpoint") as HTMLInputElement

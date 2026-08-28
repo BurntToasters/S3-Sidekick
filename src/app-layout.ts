@@ -117,10 +117,17 @@ function applySidebarWidth(width: number): void {
 }
 
 export function getActiveModalOverlay(): HTMLElement | null {
-  const overlays = document.querySelectorAll<HTMLElement>(
-    ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden]), .setup-wizard-overlay:not([hidden]), #palette-overlay:not([hidden])",
+  const overlays = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden]), .setup-wizard-overlay:not([hidden]), #palette-overlay:not([hidden])",
+    ),
   );
-  return overlays.length > 0 ? overlays[overlays.length - 1] : null;
+  if (overlays.length === 0) return null;
+  return overlays.reduce((top, overlay) => {
+    const topZ = Number.parseInt(getComputedStyle(top).zIndex, 10) || 0;
+    const overlayZ = Number.parseInt(getComputedStyle(overlay).zIndex, 10) || 0;
+    return overlayZ >= topZ ? overlay : top;
+  });
 }
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {

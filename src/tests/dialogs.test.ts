@@ -69,6 +69,38 @@ describe("dialogs", () => {
     await expect(promptPromise).resolves.toBe("valid");
   });
 
+  it("showPrompt resets OK when validation is cancelled", async () => {
+    const dialogs = await import("../dialogs.ts");
+    const input = document.getElementById("dialog-input") as HTMLInputElement;
+    const ok = document.getElementById("dialog-ok") as HTMLButtonElement;
+    let releaseValidate: (() => void) | undefined;
+    const validateGate = new Promise<boolean>((resolve) => {
+      releaseValidate = () => resolve(false);
+    });
+
+    const promptPromise = dialogs.showPrompt("Password", "Enter password", {
+      inputType: "password",
+      validate: async () => validateGate,
+    });
+
+    input.value = "wrong";
+    ok.click();
+    await tick();
+    expect(ok.disabled).toBe(true);
+
+    (document.getElementById("dialog-cancel") as HTMLButtonElement).click();
+    releaseValidate?.();
+    await expect(promptPromise).resolves.toBeNull();
+
+    const secondPromise = dialogs.showPrompt("Password", "Try again", {
+      inputType: "password",
+    });
+    expect(ok.disabled).toBe(false);
+    input.value = "value";
+    ok.click();
+    await expect(secondPromise).resolves.toBe("value");
+  });
+
   it("showAlert resolves on Escape and dialog queue runs sequentially", async () => {
     vi.useFakeTimers();
     const dialogs = await import("../dialogs.ts");

@@ -74,6 +74,8 @@ describe("info panel", () => {
     showConfirmMock.mockReset().mockResolvedValue(true);
     renderFixture();
     const { state } = await import("../state.ts");
+    state.connected = true;
+    state.endpoint = "https://example.com";
     state.currentBucket = "bucket-a";
     state.connectionId = "test-connection";
     state.connectionIdentity = "test-identity";
@@ -252,6 +254,7 @@ describe("info panel", () => {
         key: "single-success.txt",
         contentType: "text/plain",
         metadata: { "Cache-Control": "max-age=60" },
+        connectionId: "test-connection",
       }),
     );
     expect(
@@ -468,6 +471,7 @@ describe("info panel", () => {
           source: "alpha",
           "Cache-Control": "no-cache",
         }),
+        connectionId: "test-connection",
       }),
     );
     expect(
@@ -795,6 +799,7 @@ describe("info panel", () => {
       expect.objectContaining({
         key: "perm-error.txt",
         metadata: {},
+        connectionId: "test-connection",
       }),
     );
   });

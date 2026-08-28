@@ -523,6 +523,7 @@ describe("main integration", () => {
         return `https://signed/${(payload as { key?: string }).key ?? ""}`;
       }
       if (cmd === "rename_object") return undefined;
+      if (cmd === "object_exists") return false;
       if (cmd === "create_folder") return undefined;
       if (cmd === "download_object") return 128;
       if (cmd === "list_local_files_recursive") {
@@ -688,7 +689,11 @@ describe("main integration", () => {
 
     const presets: Array<{ value: string; endpoint: string; region: string }> =
       [
-        { value: "aws", endpoint: "", region: "us-east-1" },
+        {
+          value: "aws",
+          endpoint: "https://s3.us-east-1.amazonaws.com",
+          region: "us-east-1",
+        },
         {
           value: "backblaze",
           endpoint: "https://s3.us-west-004.backblazeb2.com",
@@ -1032,6 +1037,7 @@ describe("main integration", () => {
       bucket: "bucket-a",
       oldKey: "docs/file.txt",
       newKey: "docs/renamed.txt",
+      overwrite: expect.any(Boolean),
       connectionId: "test-connection",
     });
     expect(mockInvoke).toHaveBeenCalledWith("delete_objects", {
@@ -2125,6 +2131,7 @@ describe("main integration", () => {
       if (cmd === "rename_object" && failRename) {
         throw new Error("rename failed");
       }
+      if (cmd === "object_exists") return false;
       if (cmd === "create_folder" && failCreateFolder) {
         throw new Error("create folder failed");
       }
@@ -2343,7 +2350,7 @@ describe("main integration", () => {
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
       ((action: string) => void) | undefined;
     onAction?.("rename");
-    await flushMicrotasks(4);
+    await flushMicrotasks(10);
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Rename failed");

@@ -89,6 +89,7 @@ import {
   refreshBookmarkBar,
   updateBookmarkBtn,
   handleNewConnection,
+  awsRegionalEndpoint,
 } from "./app-connection.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
 import {
@@ -167,8 +168,9 @@ export function wireEvents(): void {
       ) as HTMLInputElement | null;
       const preset = providerPreset.value;
       if (preset === "aws") {
-        if (endpointInput) endpointInput.value = "";
-        if (regionInput) regionInput.value = "us-east-1";
+        const region = "us-east-1";
+        if (endpointInput) endpointInput.value = awsRegionalEndpoint(region);
+        if (regionInput) regionInput.value = region;
       } else if (preset === "do") {
         if (endpointInput)
           endpointInput.value = "https://nyc3.digitaloceanspaces.com";

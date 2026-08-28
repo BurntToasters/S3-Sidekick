@@ -23,6 +23,11 @@ import { logActivity, exportActivityLogText } from "./activity-log.ts";
 import { basename, friendlyError } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { getSelectedFileKeys, getSelectedPrefixes } from "./app-selection.ts";
+import {
+  resolveObjectConflict,
+  resolveConflictChoice,
+  type ConflictPromptSession,
+} from "./app-conflicts.ts";
 
 interface DeleteResult {
   deleted: number;
@@ -320,12 +325,33 @@ export async function handleRename(): Promise<void> {
     const keyPrefix = oldKey.slice(0, oldKey.length - oldName.length);
     const newKey = keyPrefix + newName;
 
+    const conflictSession: ConflictPromptSession = { applyAll: null };
+    const decision = await resolveObjectConflict(
+      targetBucket,
+      newKey,
+      conflictSession,
+      false,
+    );
+    if (decision === "skip") {
+      setStatus(`Rename skipped: "${newName}" already exists.`, 5000);
+      return;
+    }
+    if (
+      !state.connected ||
+      state.currentBucket !== targetBucket ||
+      state.currentPrefix !== targetPrefix
+    ) {
+      setStatus("Rename cancelled because location changed.", 5000);
+      return;
+    }
+
     try {
       setStatus("Renaming...");
       await invokeS3("rename_object", {
         bucket: targetBucket,
         oldKey,
         newKey,
+        overwrite: decision === "replace",
       });
       if (
         !state.connected ||
@@ -383,12 +409,68 @@ export async function handleRename(): Promise<void> {
 
     const newPrefix = parentPrefix + newName + "/";
 
+    let overwrite = false;
+    let folderHasConflict = false;
+    try {
+      const existing = await invokeS3<{
+        objects: Array<{ key: string }>;
+        prefixes: string[];
+      }>("list_objects", {
+        bucket: targetBucket,
+        prefix: newPrefix,
+        delimiter: "",
+        continuationToken: "",
+      });
+      folderHasConflict =
+        existing.objects.length > 0 || existing.prefixes.length > 0;
+    } catch (err) {
+      folderHasConflict = true;
+      logActivity(
+        `Could not check whether ${targetBucket}/${newPrefix} exists (${friendlyError(err)}). ` +
+          "Treating it as a conflict.",
+        "warning",
+      );
+    }
+
+    if (folderHasConflict) {
+      const conflictSession: ConflictPromptSession = { applyAll: null };
+      const policy = state.currentSettings.conflictPolicy;
+      let decision: "replace" | "skip";
+      if (policy === "replace") {
+        decision = "replace";
+      } else if (policy === "skip") {
+        setStatus(`Folder rename skipped: "${newName}" already exists.`, 5000);
+        return;
+      } else {
+        decision = await resolveConflictChoice(
+          `${targetBucket}/${newPrefix}`,
+          conflictSession,
+          false,
+        );
+      }
+      if (decision === "skip") {
+        setStatus(`Folder rename skipped: "${newName}" already exists.`, 5000);
+        return;
+      }
+      overwrite = true;
+    }
+
+    if (
+      !state.connected ||
+      state.currentBucket !== targetBucket ||
+      state.currentPrefix !== targetPrefix
+    ) {
+      setStatus("Folder rename cancelled because location changed.", 5000);
+      return;
+    }
+
     try {
       setStatus(`Renaming folder "${folderName}"...`);
       await invokeS3("rename_prefix", {
         bucket: targetBucket,
         oldPrefix,
         newPrefix,
+        overwrite,
       });
       if (
         !state.connected ||

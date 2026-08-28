@@ -475,8 +475,13 @@ export function openCopyMoveDialog(): void {
             });
             folderHasConflict =
               existing.objects.length > 0 || existing.prefixes.length > 0;
-          } catch {
-            folderHasConflict = false;
+          } catch (err) {
+            folderHasConflict = true;
+            logActivity(
+              `Could not check whether ${dstBucket}/${dstPrefix} exists (${friendlyError(err)}). ` +
+                "Treating it as a conflict.",
+              "warning",
+            );
           }
           if (folderHasConflict) {
             let decision: Exclude<ConflictPolicy, "ask">;

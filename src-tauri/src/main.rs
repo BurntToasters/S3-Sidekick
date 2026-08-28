@@ -721,6 +721,7 @@ fn read_download_lease_json<R: tauri::Runtime>(
 pub(crate) fn purge_download_leases<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<(), String> {
+    let app_handle = app.app_handle();
     let dir = resolved_app_data_dir(app)?.join("download-leases");
     let iter = match std::fs::read_dir(&dir) {
         Ok(iter) => iter,
@@ -733,16 +734,32 @@ pub(crate) fn purge_download_leases<R: tauri::Runtime, M: tauri::Manager<R>>(
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        if let Ok(json) = std::fs::read_to_string(&path) {
-            if let Ok(lease) = serde_json::from_str::<DownloadScratchLease>(&json) {
-                if let (Ok(destination), Ok(temp_path)) = (
-                    parse_user_path(&lease.destination, "Lease destination"),
-                    parse_user_path(&lease.temp_path, "Lease scratch"),
-                ) {
-                    if temp_path == download_temp_path(&destination) {
-                        let _ = clear_unusable_download_scratch(&temp_path);
-                    }
-                }
+        let json = std::fs::read_to_string(&path).map_err(|err| {
+            format!(
+                "Failed to read download lease '{}': {}",
+                path.display(),
+                err
+            )
+        })?;
+        let lease = match serde_json::from_str::<DownloadScratchLease>(&json) {
+            Ok(lease) => lease,
+            Err(_) => {
+                let legacy_json = read_download_lease_json(app_handle, &path)?;
+                serde_json::from_str(&legacy_json).map_err(|err| {
+                    format!(
+                        "Failed to parse download lease '{}': {}",
+                        path.display(),
+                        err
+                    )
+                })?
+            }
+        };
+        if let (Ok(destination), Ok(temp_path)) = (
+            parse_user_path(&lease.destination, "Lease destination"),
+            parse_user_path(&lease.temp_path, "Lease scratch"),
+        ) {
+            if temp_path == download_temp_path(&destination) && temp_path.exists() {
+                clear_unusable_download_scratch(&temp_path)?;
             }
         }
         match std::fs::remove_file(&path) {

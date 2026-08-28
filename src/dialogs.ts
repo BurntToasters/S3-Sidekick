@@ -98,6 +98,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.cancel.textContent = config.cancelLabel;
     el.ok.textContent = config.okLabel;
     el.ok.className = config.okDanger ? "btn btn--danger" : "btn btn--primary";
+    el.ok.disabled = false;
 
     el.overlay.classList.add("active");
     active = true;
@@ -170,6 +171,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       el.reveal.removeEventListener("click", onReveal);
       el.input.type = "text";
       el.reveal.hidden = true;
+      el.ok.disabled = false;
       document.removeEventListener("keydown", onEscape, true);
       document.removeEventListener("keydown", onTrapFocus, true);
       active = false;
@@ -189,6 +191,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     function onCancel() {
       validateGeneration += 1;
       validating = false;
+      el.ok.disabled = false;
       cleanup();
       resolve(config.showInput ? null : false);
     }

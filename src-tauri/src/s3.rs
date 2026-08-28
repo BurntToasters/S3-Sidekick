@@ -147,6 +147,26 @@ fn validate_mutating_key(key: &str, label: &str) -> Result<(), String> {
     reject_reserved_backup_key(key, label)
 }
 
+/// Validate a key for read-only operations (head, download, preview, presign).
+///
+/// Like `validate_deletable_key`, dot segments are allowed because they are legal
+/// in S3. Reads never derive a local filesystem path from the key.
+fn validate_readable_key(key: &str, label: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err(format!("{} must not be empty", label));
+    }
+    if key.len() > MAX_KEY_LEN {
+        return Err(format!(
+            "{} is too long (max {} characters)",
+            label, MAX_KEY_LEN
+        ));
+    }
+    if key.as_bytes().contains(&0) {
+        return Err(format!("{} contains invalid characters", label));
+    }
+    Ok(())
+}
+
 /// Validate a key that is only ever deleted.
 ///
 /// `validate_key` rejects `.` and `..` segments because a key is also used to
@@ -372,6 +392,34 @@ fn is_not_found<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> boo
         SdkError::ServiceError(ctx) => ctx.raw().status().as_u16() == 404,
         _ => false,
     }
+}
+
+async fn destination_object_exists(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+) -> Result<bool, String> {
+    match client.head_object().bucket(bucket).key(key).send().await {
+        Ok(_) => Ok(true),
+        Err(err) if is_not_found(&err) => Ok(false),
+        Err(err) => Err(format!("Failed to check destination '{}': {}", key, err)),
+    }
+}
+
+async fn prefix_has_content(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    prefix: &str,
+) -> Result<bool, String> {
+    let output = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix(prefix)
+        .max_keys(1)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to check destination prefix '{}': {}", prefix, e))?;
+    Ok(output.key_count().unwrap_or(0) > 0 || !output.common_prefixes().is_empty())
 }
 
 #[derive(serde::Serialize)]
@@ -1551,7 +1599,7 @@ pub(crate) async fn head_object(
     bucket: String,
     key: String,
 ) -> Result<HeadObjectResponse, String> {
-    validate_key(&key, "Object key")?;
+    validate_readable_key(&key, "Object key")?;
     let client = require_client(&state, &connection_id)?;
 
     let output = client
@@ -1597,7 +1645,7 @@ pub(crate) async fn object_exists(
     bucket: String,
     key: String,
 ) -> Result<bool, String> {
-    validate_key(&key, "Object key")?;
+    validate_readable_key(&key, "Object key")?;
     let client = require_client(&state, &connection_id)?;
 
     match client.head_object().bucket(&bucket).key(&key).send().await {
@@ -2454,7 +2502,7 @@ pub(crate) async fn get_object_acl(
     bucket: String,
     key: String,
 ) -> Result<AclResponse, String> {
-    validate_key(&key, "Object key")?;
+    validate_readable_key(&key, "Object key")?;
     let client = require_client(&state, &connection_id)?;
 
     let output = client
@@ -2542,7 +2590,7 @@ pub(crate) async fn download_object(
     checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
     let _storage_guard = crate::acquire_transfer_storage().await?;
-    validate_key(&key, "Object key")?;
+    validate_readable_key(&key, "Object key")?;
     let destination_path = if overwrite {
         validate_destination_path_allow_overwrite(&destination)?
     } else {
@@ -4198,6 +4246,7 @@ pub(crate) async fn rename_object(
     bucket: String,
     old_key: String,
     new_key: String,
+    overwrite: bool,
     transfer_id: Option<u32>,
 ) -> Result<(), String> {
     validate_mutating_key(&old_key, "Source key")?;
@@ -4207,6 +4256,13 @@ pub(crate) async fn rename_object(
     }
     let client = require_client(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
+
+    if !overwrite && destination_object_exists(&client, &bucket, &new_key).await? {
+        return Err(format!(
+            "Destination '{}' already exists. Rename with overwrite to replace it.",
+            new_key
+        ));
+    }
 
     let receipt =
         copy_with_receipt(&client, &bucket, &old_key, &bucket, &new_key, None, &cancel).await?;
@@ -5173,6 +5229,7 @@ pub(crate) async fn rename_prefix(
     bucket: String,
     old_prefix: String,
     new_prefix: String,
+    overwrite: bool,
     transfer_id: Option<u32>,
 ) -> Result<u32, String> {
     validate_mutating_prefix(&old_prefix, "Source prefix")?;
@@ -5182,6 +5239,13 @@ pub(crate) async fn rename_prefix(
     }
     let client = require_client(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
+
+    if !overwrite && prefix_has_content(&client, &bucket, &new_prefix).await? {
+        return Err(format!(
+            "Destination prefix '{}' already exists. Rename with overwrite to replace it.",
+            new_prefix
+        ));
+    }
 
     let receipts = copy_prefix_objects(
         &client,
@@ -5208,7 +5272,7 @@ pub(crate) async fn copy_object_to(
     dst_key: String,
     transfer_id: Option<u32>,
 ) -> Result<CopyReceipt, String> {
-    validate_key(&src_key, "Source key")?;
+    validate_readable_key(&src_key, "Source key")?;
     // Copying out of the backup namespace is how a user restores data from an
     // interrupted operation, so only the destination is restricted.
     validate_mutating_key(&dst_key, "Destination key")?;
@@ -5267,6 +5331,7 @@ pub(crate) fn build_object_url(
     bucket: String,
     key: String,
 ) -> Result<String, String> {
+    validate_readable_key(&key, "Object key")?;
     let endpoint = require_endpoint(&state, &connection_id)?;
     let base = endpoint.trim_end_matches('/');
     let encoded_bucket = urlencoding::encode(&bucket);
@@ -5286,7 +5351,7 @@ pub(crate) async fn generate_presigned_url(
     key: String,
     expires_in_secs: u64,
 ) -> Result<String, String> {
-    validate_key(&key, "Object key")?;
+    validate_readable_key(&key, "Object key")?;
     if !(60..=604800).contains(&expires_in_secs) {
         return Err("Expiration must be between 60 and 604800 seconds".to_string());
     }
@@ -5314,7 +5379,7 @@ pub(crate) async fn preview_object(
     bucket: String,
     key: String,
 ) -> Result<PreviewResponse, String> {
-    validate_key(&key, "Object key")?;
+    validate_readable_key(&key, "Object key")?;
     let client = require_client(&state, &connection_id)?;
 
     let head = client
@@ -5666,6 +5731,15 @@ mod tests {
             validate_deletable_key(".s3-sidekick-rollback/ns/1", "Object key").is_err(),
             "live rollback backups must stay protected from batch delete"
         );
+    }
+
+    #[test]
+    fn readable_keys_allow_dot_segments_for_inspect_and_download() {
+        assert!(validate_readable_key("data/./odd.txt", "Object key").is_ok());
+        assert!(validate_readable_key("data/../odd.txt", "Object key").is_ok());
+        assert!(validate_readable_key("", "Object key").is_err());
+        assert!(validate_readable_key("a\0b", "Object key").is_err());
+        assert!(validate_readable_key(".s3-sidekick-rollback/ns/1", "Object key").is_ok());
     }
 
     #[test]

@@ -1683,8 +1683,8 @@ pub(crate) async fn set_lock_timeout(
     app: tauri::AppHandle,
     minutes: u16,
 ) -> Result<SecurityStatus, String> {
-    if minutes == 0 || minutes > 1440 {
-        return Err("Lock timeout must be between 1 and 1440 minutes".to_string());
+    if minutes > 1440 {
+        return Err("Lock timeout must be between 0 and 1440 minutes".to_string());
     }
     run_blocking(move || {
         let _storage_guard = lock_storage_meta()?;
