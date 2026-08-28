@@ -5104,21 +5104,13 @@ async fn delete_receipts_checked(
         if !exists {
             continue;
         }
-        // Never target the copied version id directly. A version-targeted delete
-        // is permanent and unconditional with respect to *which* version is
-        // current: `If-Match` compares ETags, not version ids, so a write that
-        // lands between the check above and this call leaves the copied version
-        // noncurrent while the delete still erases it for good. Deleting the key
-        // itself keeps `If-Match` meaningful and, on a versioned bucket, retires
-        // the object behind a delete marker that the user can remove to recover
-        // from exactly that race. On an unversioned bucket the behaviour is
-        // unchanged, because there the key and its only version are the same
-        // thing.
-        //
-        // Unversioned limitation: S3 If-Match evaluates ETag only. Tags and ACL
-        // are not part of ETag, and a metadata-only write can land between the
-        // fingerprint HEAD and this DELETE. Versioning is required for a safe
-        // move; without it a tag/ACL/metadata race cannot be closed.
+        // Delete the key, not the copied version ID. Version-targeted deletion is
+        // permanent, while If-Match compares ETags and cannot prove that version
+        // is still current after the earlier check. Deleting the key keeps
+        // If-Match meaningful and, on versioned buckets, creates a recoverable
+        // delete marker. Unversioned buckets retain the old behavior, but tags,
+        // ACLs, and metadata are outside the ETag; only versioning closes those
+        // races safely.
         let request = client
             .delete_object()
             .bucket(src_bucket)

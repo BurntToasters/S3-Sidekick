@@ -8,33 +8,14 @@ use crate::security::{
 };
 use crate::{atomic_write, fsync_parent, lock_storage_ops, security_journal_path};
 
-// ─── Security limitation ───────────────────────────────────────────────────────
-// The biometric unlock flow uses a two-step approach:
-//   1. The AES key is stored in an OS credential store (macOS Keychain /
-//      Windows Credential Manager).
-//   2. A separate biometric prompt (LAContext on macOS, UserConsentVerifier on
-//      Windows) gates the UI before the key is read.
-//
-// However, the stored key is NOT cryptographically bound to the biometric.
-// On macOS, the Keychain item uses kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-// but does NOT use SecAccessControl with .biometryCurrentSet, so any process
-// running as the same user can read it without passing Touch ID.
-// On Windows, the key is a plain GenericCredential (CRED_PERSIST_ENTERPRISE);
-// UserConsentVerifier is a UI-only gate, not a TPM/NGC-bound operation.
-//
-// Mitigation paths (future work):
-//   macOS: Create the Keychain item with SecAccessControlCreateWithFlags(
-//          ..., .biometryCurrentSet | .privateKeyUsage, ...) and pass
-//          kSecUseAuthenticationContext so the key never leaves the Secure Enclave
-//          without a live biometric check.
-//   Windows: Wrap the key using KeyCredentialManager (NGC/TPM-backed) or
-//          DPAPI-NG with a Windows Hello credential, instead of a plain
-//          GenericCredential.
-//
-// Until then, the biometric gate provides defence-in-depth (requires physical
-// presence at the machine) but should not be considered equivalent to hardware-
-// bound key protection.
-// ────────────────────────────────────────────────────────────────────────────────
+// Security limitation: biometric prompts gate the UI before the AES key is read
+// from the OS credential store, but the key is not cryptographically bound to
+// biometrics. On macOS, the Keychain item lacks biometric SecAccessControl, so
+// same-user processes can read it without Touch ID. On Windows, the stored
+// GenericCredential is protected only by the UserConsentVerifier UI gate.
+// Treat this as defense-in-depth, not hardware-bound protection. A stronger
+// implementation should use Secure Enclave access control on macOS and
+// KeyCredentialManager or DPAPI-NG with Windows Hello on Windows.
 
 pub fn is_available() -> bool {
     #[cfg(test)]
@@ -473,26 +454,14 @@ mod platform {
     const SERVICE: &str = "run.rosie.s3-sidekick";
     const ACCOUNT: &str = "biometric-encryption-key";
 
-    // -----------------------------------------------------------------------
-    // Touch ID via LAContext (avoids keychain-access-groups entitlement)
-    // -----------------------------------------------------------------------
-    //
-    // Two correctness hazards had to be handled here.
-    //
-    // 1. Block lifetime. The reply block used to be a stack local tagged as a
-    //    *global* block. `Block_copy` is a no-op for global blocks, so
-    //    LocalAuthentication retained a pointer straight into the caller's stack
-    //    frame. When the 120-second wait timed out, that frame was destroyed
-    //    while the framework still held the pointer; a late callback would then
-    //    read `block->invoke` out of reclaimed stack memory. Blocks are now heap
-    //    allocated and never freed while the framework might still hold them.
-    //
-    // 2. Reply attribution. The callback wrote its result into a single global
-    //    slot with no notion of which request it belonged to, so a reply from a
-    //    prompt that had already timed out could satisfy a *later* unlock
-    //    attempt — a stale `true` would open the vault. Every request now carries
-    //    its own generation number inside the block, and a waiter only accepts a
-    //    result stamped with its own generation.
+    // Touch ID via LAContext avoids the keychain-access-groups entitlement.
+    // Two correctness hazards are handled here:
+    // 1. The reply block was wrongly tagged global, making Block_copy a no-op and
+    //    leaving LocalAuthentication with a stack pointer after timeout. Blocks
+    //    are now heap allocated and retained while the framework may call them.
+    // 2. A single untagged result slot let a timed-out prompt satisfy a later
+    //    unlock. Requests and replies now carry generations, and waiters accept
+    //    only their own generation.
 
     use std::sync::atomic::{AtomicU64, Ordering};
 
