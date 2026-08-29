@@ -1291,7 +1291,7 @@ fn fsync_directory(dir: &std::path::Path) -> Result<(), String> {
     unsafe {
         let handle = CreateFileW(
             PCWSTR(wide.as_ptr()),
-            FILE_GENERIC_WRITE,
+            FILE_GENERIC_WRITE.0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             None,
             OPEN_EXISTING,
