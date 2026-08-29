@@ -361,6 +361,7 @@ export function openCopyMoveDialog(): void {
       return;
     }
     conflictSession.applyAll = null;
+    conflictSession.unguardedWriteAuthorized = false;
     const dstBucket = bucketSelect.value;
     const dstPath = pathInput.value.trim();
     if (!dstPath) {
@@ -411,17 +412,30 @@ export function openCopyMoveDialog(): void {
       const queuedEntries: CopyMoveQueueEntry[] = [];
       let skippedFiles = 0;
       let skippedFolders = 0;
+      let cancelledWrites = 0;
 
       if (isSingleFile) {
-        const decision = await resolveObjectConflict(
+        const sourceSize =
+          state.objects.find((object) => object.key === fileKeys[0])?.size ??
+          undefined;
+        const intent = await resolveObjectConflict(
           dstBucket,
           dstPath,
           conflictSession,
           false,
+          sourceSnap.connectionId,
+          { operation: "copy", byteLength: sourceSize },
         );
-        if (decision === "skip") {
+        if (intent === "skip") {
           setStatus(
             `Skipped "${basename(fileKeys[0])}" (destination exists).`,
+            5000,
+          );
+          return;
+        }
+        if (intent === "cancel") {
+          setStatus(
+            `${move ? "Move" : "Copy"} cancelled: unconditional write was not authorized.`,
             5000,
           );
           return;
@@ -433,20 +447,31 @@ export function openCopyMoveDialog(): void {
           sourceKey: fileKeys[0],
           destinationBucket: dstBucket,
           destinationKey: dstPath,
-          conflictResolution: decision,
+          conflictResolution: intent.overwrite ? "replace" : "ask",
+          overwrite: intent.overwrite,
+          ...(sourceSize === undefined ? {} : { size: sourceSize }),
         });
       } else {
         const prefix = dstPath.endsWith("/") ? dstPath : dstPath + "/";
         for (const key of fileKeys) {
           const dstKey = prefix + basename(key);
-          const decision = await resolveObjectConflict(
+          const sourceSize =
+            state.objects.find((object) => object.key === key)?.size ??
+            undefined;
+          const intent = await resolveObjectConflict(
             dstBucket,
             dstKey,
             conflictSession,
             true,
+            sourceSnap.connectionId,
+            { operation: "copy", byteLength: sourceSize },
           );
-          if (decision === "skip") {
+          if (intent === "skip") {
             skippedFiles += 1;
+            continue;
+          }
+          if (intent === "cancel") {
+            cancelledWrites += 1;
             continue;
           }
           queuedEntries.push({
@@ -456,7 +481,9 @@ export function openCopyMoveDialog(): void {
             sourceKey: key,
             destinationBucket: dstBucket,
             destinationKey: dstKey,
-            conflictResolution: decision,
+            conflictResolution: intent.overwrite ? "replace" : "ask",
+            overwrite: intent.overwrite,
+            ...(sourceSize === undefined ? {} : { size: sourceSize }),
           });
         }
         for (const srcPrefix of prefixes) {
@@ -525,10 +552,11 @@ export function openCopyMoveDialog(): void {
       }
 
       if (queuedEntries.length === 0) {
-        setStatus(
-          "No copy/move transfers queued (all conflicts skipped).",
-          5000,
-        );
+        const reason =
+          cancelledWrites > 0
+            ? "unconditional writes were not authorized"
+            : "all conflicts were skipped";
+        setStatus(`No copy/move transfers queued (${reason}).`, 5000);
         return;
       }
 
@@ -548,12 +576,16 @@ export function openCopyMoveDialog(): void {
         skippedTotal > 0
           ? ` Skipped ${skippedTotal} due to destination conflicts.`
           : "";
+      const cancelledLabel =
+        cancelledWrites > 0
+          ? ` Cancelled ${cancelledWrites} unconditional write${cancelledWrites === 1 ? "" : "s"}.`
+          : "";
       setStatus(
-        `Queued ${queuedEntries.length} ${action} transfer(s).${skippedLabel}`,
+        `Queued ${queuedEntries.length} ${action} transfer(s).${skippedLabel}${cancelledLabel}`,
         5000,
       );
       logActivity(
-        `Queued ${queuedEntries.length} ${action} transfer(s) to "${dstBucket}/${dstPath}".${skippedLabel}`,
+        `Queued ${queuedEntries.length} ${action} transfer(s) to "${dstBucket}/${dstPath}".${skippedLabel}${cancelledLabel}`,
         "success",
       );
       closeFn();

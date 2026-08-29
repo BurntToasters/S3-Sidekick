@@ -171,4 +171,30 @@ describe("dialogs", () => {
     await expect(second).resolves.toBe(false);
     vi.useRealTimers();
   });
+
+  it("keeps continuation dialogs behind already queued consent", async () => {
+    vi.useFakeTimers();
+    const dialogs = await import("../dialogs.ts");
+    const title = document.getElementById("dialog-title") as HTMLElement;
+    const ok = document.getElementById("dialog-ok") as HTMLButtonElement;
+
+    const first = dialogs.showConfirm("First", "Continue?");
+    const second = dialogs.showConfirm("Already queued", "Continue?");
+    ok.click();
+    await expect(first).resolves.toBe(true);
+
+    const followUp = dialogs.showConfirm("Follow-up", "Apply to all?");
+    vi.runOnlyPendingTimers();
+    await tick();
+    expect(title.textContent).toBe("Already queued");
+    ok.click();
+    await expect(second).resolves.toBe(true);
+
+    vi.runOnlyPendingTimers();
+    await tick();
+    expect(title.textContent).toBe("Follow-up");
+    ok.click();
+    await expect(followUp).resolves.toBe(true);
+    vi.useRealTimers();
+  });
 });

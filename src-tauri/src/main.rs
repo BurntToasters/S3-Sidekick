@@ -129,6 +129,20 @@ pub(crate) struct S3State {
     pub connection_generation: u64,
     pub connection_id: Option<String>,
     pub connection_identity: Option<String>,
+    pub storage_provider: StorageProviderKind,
+}
+
+/// Detected S3-compatible backend for provider-specific API behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum StorageProviderKind {
+    #[default]
+    Generic,
+    Aws,
+    CloudflareR2,
+    Minio,
+    Wasabi,
+    Backblaze,
+    DigitalOcean,
 }
 
 pub(crate) struct AppState(pub Mutex<S3State>);
@@ -797,7 +811,8 @@ pub(crate) fn clear_unusable_download_scratch(temp_path: &Path) -> Result<(), St
             temp_path.display()
         ));
     }
-    std::fs::remove_file(temp_path).map_err(|err| err.to_string())
+    std::fs::remove_file(temp_path).map_err(|err| err.to_string())?;
+    fsync_parent(temp_path)
 }
 
 fn discard_download_scratch_for_destination<R: tauri::Runtime>(
@@ -1251,6 +1266,46 @@ pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
     path.with_extension(extension)
 }
 
+/// Flush directory metadata after creating, replacing, or removing an entry.
+#[cfg(unix)]
+fn fsync_directory(dir: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::File::open(dir).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn fsync_directory(dir: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FlushFileBuffers, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let handle = CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        let flush = FlushFileBuffers(handle);
+        let _ = CloseHandle(handle);
+        flush.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Flush the directory entry created or replaced by a rename.
 ///
 /// `File::sync_all` on the temp file only commits its contents. The rename
@@ -1264,26 +1319,27 @@ pub(crate) fn fsync_parent(path: &std::path::Path) -> Result<(), String> {
 
     #[cfg(unix)]
     {
-        let dir = std::fs::File::open(parent).map_err(|e| e.to_string())?;
-        dir.sync_all().map_err(|e| e.to_string())
+        fsync_directory(parent)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         // Windows cannot open a directory as a regular file handle. Syncing the
         // renamed file after the rename flushes the containing volume's
         // metadata for that entry, which is the closest available equivalent.
         //
+        // After deletion the path is gone; flush the parent directory so the
+        // removal survives power loss instead of treating NotFound as success.
+        //
         // FlushFileBuffers requires GENERIC_WRITE; opening read-only fails with
         // ERROR_ACCESS_DENIED on Windows.
-        let _ = parent;
         match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(path)
         {
             Ok(file) => file.sync_all().map_err(|e| e.to_string()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fsync_directory(parent),
             Err(e) => Err(e.to_string()),
         }
     }
@@ -1409,6 +1465,7 @@ fn main() {
             connection_generation: 0,
             connection_id: None,
             connection_identity: None,
+            storage_provider: StorageProviderKind::default(),
         })))
         .invoke_handler(tauri::generate_handler![
             s3::connect,
@@ -1615,6 +1672,17 @@ mod tests {
         clear_unusable_download_scratch(&temp).unwrap();
         assert!(!temp.exists());
         clear_unusable_download_scratch(&temp).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fsync_parent_after_delete_syncs_parent_directory() {
+        let dir = scratch_dir("fsync-after-delete");
+        let temp = dir.join("scratch.tmp");
+        std::fs::write(&temp, b"x").unwrap();
+        std::fs::remove_file(&temp).unwrap();
+        fsync_parent(&temp).unwrap();
+        assert!(!temp.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

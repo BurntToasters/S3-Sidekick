@@ -24,6 +24,11 @@ const CONNECT_RESULT = {
   region: "us-west-2",
   connection_id: "conn-1",
   connection_identity: "ident-1",
+  create_only_capabilities: {
+    put_object: true,
+    complete_multipart: false,
+    copy_object: true,
+  },
 };
 
 describe("connection module", () => {
@@ -78,6 +83,46 @@ describe("connection module", () => {
     expect(state.region).toBe("us-west-2");
     expect(state.connectionId).toBe("conn-1");
     expect(state.connectionIdentity).toBe("ident-1");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: true,
+      complete_multipart: false,
+      copy_object: true,
+    });
+  });
+
+  it("connect treats missing or malformed capability metadata as unsupported", async () => {
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+
+    mockInvoke.mockResolvedValueOnce({
+      region: "us-west-2",
+      connection_id: "conn-missing",
+      connection_identity: "ident-missing",
+    });
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    });
+
+    mockInvoke.mockResolvedValueOnce({
+      region: "us-west-2",
+      connection_id: "conn-malformed",
+      connection_identity: "ident-malformed",
+      create_only_capabilities: {
+        put_object: true,
+        complete_multipart: "yes",
+        copy_object: true,
+      },
+    });
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    });
   });
 
   it("connect clears connecting flag on failure", async () => {
@@ -439,6 +484,11 @@ describe("connection module", () => {
       region: "us-east-1",
       connection_id: "stale",
       connection_identity: "stale-ident",
+      create_only_capabilities: {
+        put_object: true,
+        complete_multipart: true,
+        copy_object: true,
+      },
     });
 
     await expect(connecting).rejects.toThrow("superseded");

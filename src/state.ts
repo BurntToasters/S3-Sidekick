@@ -1,4 +1,8 @@
 import { type UserSettings, SETTING_DEFAULTS } from "./settings-model.ts";
+import {
+  FULL_CREATE_ONLY_CAPABILITIES,
+  type CreateOnlyCapabilities,
+} from "./create-only-capabilities.ts";
 import { $ } from "./utils.ts";
 
 export interface BucketInfo {
@@ -23,6 +27,9 @@ export const state = {
   region: "",
   connectionId: "",
   connectionIdentity: "",
+  createOnlyCapabilities: {
+    ...FULL_CREATE_ONLY_CAPABILITIES,
+  } as CreateOnlyCapabilities,
   currentBucket: "",
   currentPrefix: "",
   buckets: [] as BucketInfo[],

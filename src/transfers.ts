@@ -18,6 +18,10 @@ import {
   markTransfersHintDismissed,
 } from "./settings.ts";
 import { showToast } from "./toast.ts";
+import {
+  lacksAtomicCreateForCopy,
+  lacksAtomicCreateForUpload,
+} from "./create-only-capabilities.ts";
 
 export interface CopyReceipt {
   source_key: string;
@@ -80,6 +84,8 @@ export interface TransferItem {
   receipts?: CopyReceipt[];
   connectionId?: string;
   connectionIdentity?: string;
+  /** Explicit overwrite intent for S3 writes; not persisted in the manifest. */
+  overwrite?: boolean;
   /** Transient user intent; never written to the recovery manifest. */
   cancelRequested?: boolean;
 }
@@ -108,6 +114,8 @@ export interface CopyMoveQueueEntry {
   destinationKey?: string;
   destinationPrefix?: string;
   conflictResolution?: "ask" | "skip" | "replace";
+  overwrite?: boolean;
+  size?: number;
 }
 
 export interface TransferRunSummary {
@@ -208,6 +216,7 @@ let cancelClickHandler: ((e: Event) => void) | null = null;
 let recoveredQueue = false;
 let recoveryInFlight: Promise<void> | null = null;
 let conflictApplyAll: "skip" | "replace" | null = null;
+let unguardedWriteAuthorized = false;
 let conflictPromptQueue: Promise<void> = Promise.resolve();
 let selectedTransferId: number | null = null;
 let queuePaused = false;
@@ -234,7 +243,43 @@ function resetConflictApplyAllWhenIdle(): void {
   );
   if (!hasActive) {
     conflictApplyAll = null;
+    unguardedWriteAuthorized = false;
   }
+}
+
+async function confirmUnguardedTransferWrite(): Promise<boolean> {
+  if (unguardedWriteAuthorized) return true;
+  const proceed = await showConfirm(
+    "Unconditional Write",
+    "This storage provider cannot enforce create-only writes. Another client could create the same key before this transfer finishes. Write anyway?",
+    { okLabel: "Write anyway", cancelLabel: "Cancel" },
+  );
+  if (!proceed) return false;
+  const remaining = queue.filter(
+    (entry) => entry.status === "queued" || entry.status === "uploading",
+  ).length;
+  if (remaining > 1) {
+    const applyAll = await showConfirm(
+      "Apply Choice",
+      'Apply "Write anyway" to remaining new destinations on this provider?',
+      { okLabel: "Apply to all", cancelLabel: "Only this one" },
+    );
+    if (applyAll) {
+      unguardedWriteAuthorized = true;
+    }
+  }
+  return true;
+}
+
+function lacksAtomicCreateForTransferItem(item: TransferItem): boolean {
+  const byteLength = item.totalBytes || item.size || undefined;
+  if (item.operation === "upload") {
+    return lacksAtomicCreateForUpload(state.createOnlyCapabilities, byteLength);
+  }
+  if (item.operation === "copy" || item.operation === "move") {
+    return lacksAtomicCreateForCopy(state.createOnlyCapabilities, byteLength);
+  }
+  return false;
 }
 
 function normalizeError(err: unknown): string {
@@ -1644,7 +1689,7 @@ export function enqueueCopyMoveEntries(
       destinationKey: entry.destinationKey,
       destinationPrefix: entry.destinationPrefix,
       destination: destinationLike,
-      size: 0,
+      size: entry.size ?? 0,
       status: "queued",
       progress: 0,
       totalBytes: 0,
@@ -1653,6 +1698,7 @@ export function enqueueCopyMoveEntries(
       verified: false,
       conflictResolution:
         entry.conflictResolution ?? state.currentSettings.conflictPolicy,
+      overwrite: entry.overwrite,
       phase: "running",
       speedBps: 0,
       etaSeconds: null,
@@ -1840,13 +1886,15 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
 
     try {
       const connectionId = bindTransferConnection(item);
-      const conflictDecision = await resolveConflict(item, connectionId);
+      const conflictOutcome = await resolveConflict(item, connectionId);
       ensureTransferActive(item);
-      item.conflictResolution = conflictDecision;
-
-      if (conflictDecision === "skip") {
+      if (conflictOutcome === "skip" || conflictOutcome === "cancel") {
+        const cancelled = conflictOutcome === "cancel";
+        item.conflictResolution = "skip";
         item.status = "skipped";
-        item.error = "Skipped (destination exists)";
+        item.error = cancelled
+          ? "Cancelled (unconditional write not authorized)"
+          : "Skipped (destination exists)";
         item.speedBps = 0;
         item.etaSeconds = null;
         logActivity(
@@ -1858,16 +1906,22 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
                 : item.operation === "copy"
                   ? "Copy"
                   : "Move"
-          } skipped for ${item.fileName}: destination exists.`,
+          } ${cancelled ? "cancelled" : "skipped"} for ${item.fileName}: ${
+            cancelled
+              ? "unconditional write was not authorized"
+              : "destination exists"
+          }.`,
           "warning",
         );
         return false;
       }
+      item.conflictResolution = conflictOutcome.overwrite ? "replace" : "ask";
+      item.overwrite = conflictOutcome.overwrite;
 
       await executeTransfer(
         item,
         attempt,
-        conflictDecision === "replace",
+        conflictOutcome.overwrite,
         connectionId,
       );
       ensureTransferActive(item);
@@ -2054,6 +2108,7 @@ async function executeTransfer(
             srcKey: item.sourceKey,
             dstBucket,
             dstKey: item.destinationKey,
+            overwrite,
             transferId: item.id,
           },
         );
@@ -2067,6 +2122,7 @@ async function executeTransfer(
             srcPrefix: item.sourcePrefix,
             dstBucket,
             dstPrefix: item.destinationPrefix,
+            overwrite,
             transferId: item.id,
             collectReceipts: item.operation === "move",
           },
@@ -2131,6 +2187,7 @@ async function executeTransfer(
       contentType,
       transferId: item.id,
       attempt,
+      overwrite,
       partSizeMb: effective.uploadPartSizeMb,
       partConcurrency: effective.uploadPartConcurrency,
       bandwidthLimitMbps: effective.bandwidthLimitMbps,
@@ -2154,6 +2211,7 @@ async function executeTransfer(
       contentType,
       transferId: item.id,
       attempt,
+      overwrite,
       checksumVerification: effective.enableTransferChecksumVerification,
     });
     item.browserFile = undefined;
@@ -2197,7 +2255,7 @@ function withConflictPromptLock<T>(work: () => Promise<T>): Promise<T> {
 async function resolveConflict(
   item: TransferItem,
   connectionId: string,
-): Promise<"ask" | "skip" | "replace"> {
+): Promise<"skip" | "cancel" | { overwrite: boolean }> {
   let conflictExists: boolean;
   try {
     conflictExists = await checkConflictExists(item, connectionId);
@@ -2212,23 +2270,32 @@ async function resolveConflict(
     );
     conflictExists = true;
   }
-  if (!conflictExists) return "replace";
+  if (!conflictExists) {
+    if (item.overwrite === true) return { overwrite: true };
+    if (lacksAtomicCreateForTransferItem(item)) {
+      const authorized = await withConflictPromptLock(() =>
+        confirmUnguardedTransferWrite(),
+      );
+      return authorized ? { overwrite: true } : "cancel";
+    }
+    return { overwrite: false };
+  }
 
   const effectivePolicy =
     item.conflictResolution === "replace" || item.conflictResolution === "skip"
       ? item.conflictResolution
       : state.currentSettings.conflictPolicy;
 
-  if (effectivePolicy === "replace") return "replace";
+  if (effectivePolicy === "replace") return { overwrite: true };
   if (effectivePolicy === "skip") return "skip";
 
   if (conflictApplyAll) {
-    return conflictApplyAll;
+    return conflictApplyAll === "replace" ? { overwrite: true } : "skip";
   }
 
   return withConflictPromptLock(async () => {
     if (conflictApplyAll) {
-      return conflictApplyAll;
+      return conflictApplyAll === "replace" ? { overwrite: true } : "skip";
     }
 
     const target =
@@ -2265,7 +2332,7 @@ async function resolveConflict(
       }
     }
 
-    return decision;
+    return decision === "replace" ? { overwrite: true } : "skip";
   });
 }
 

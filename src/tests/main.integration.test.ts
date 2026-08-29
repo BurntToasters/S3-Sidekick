@@ -524,6 +524,7 @@ describe("main integration", () => {
       }
       if (cmd === "rename_object") return undefined;
       if (cmd === "object_exists") return false;
+      if (cmd === "path_exists") return false;
       if (cmd === "create_folder") return undefined;
       if (cmd === "download_object") return 128;
       if (cmd === "list_local_files_recursive") {
@@ -1037,7 +1038,7 @@ describe("main integration", () => {
       bucket: "bucket-a",
       oldKey: "docs/file.txt",
       newKey: "docs/renamed.txt",
-      overwrite: expect.any(Boolean),
+      overwrite: false,
       connectionId: "test-connection",
     });
     expect(mockInvoke).toHaveBeenCalledWith("delete_objects", {
@@ -1205,7 +1206,8 @@ describe("main integration", () => {
           sourceKey: "docs/file.txt",
           destinationBucket: "bucket-b",
           destinationKey: "archive/file.txt",
-          conflictResolution: "replace",
+          conflictResolution: "ask",
+          overwrite: false,
         },
       ],
       expect.objectContaining({
@@ -1264,7 +1266,8 @@ describe("main integration", () => {
           sourceKey: "docs/file.txt",
           destinationBucket: "bucket-a",
           destinationKey: "moved/file.txt",
-          conflictResolution: "replace",
+          conflictResolution: "ask",
+          overwrite: false,
         },
       ],
       expect.objectContaining({
@@ -2426,6 +2429,172 @@ describe("main integration", () => {
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Folder upload failed");
+  });
+
+  it("rename binds connection snapshot and preserves create-only overwrite intent", async () => {
+    const { state } = await import("../state.ts");
+    const { handleRename } = await import("../app-objects.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
+    state.endpoint = "https://s3.example.com";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+
+    mockShowPrompt.mockResolvedValueOnce("renamed-only.txt");
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") return false;
+      if (cmd === "rename_object") return undefined;
+      return undefined;
+    });
+
+    await handleRename();
+    await flushMicrotasks();
+
+    expect(mockInvoke).toHaveBeenCalledWith("rename_object", {
+      bucket: "bucket-a",
+      oldKey: "docs/file.txt",
+      newKey: "docs/renamed-only.txt",
+      overwrite: false,
+      connectionId: "test-connection",
+    });
+
+    mockInvoke.mockClear();
+    let snapshotChecks = 0;
+    mockConnectionSnapshotChanged.mockImplementation(() => {
+      snapshotChecks += 1;
+      return snapshotChecks >= 2;
+    });
+    mockShowPrompt.mockResolvedValueOnce("renamed-after-switch.txt");
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+    await handleRename();
+    await flushMicrotasks();
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "rename_object")).toBe(
+      false,
+    );
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("connection changed");
+
+    mockInvoke.mockClear();
+    mockConnectionSnapshotChanged.mockImplementation(
+      (snap: ConnectionSnapshot) =>
+        !state.connected ||
+        state.connectionId !== snap.connectionId ||
+        state.connectionIdentity !== snap.connectionIdentity ||
+        state.endpoint !== snap.endpoint ||
+        state.currentBucket !== snap.bucket ||
+        state.currentPrefix !== snap.prefix,
+    );
+    state.currentSettings.conflictPolicy = "replace";
+    mockShowPrompt.mockResolvedValueOnce("replaced.txt");
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") return true;
+      if (cmd === "rename_object") return undefined;
+      return undefined;
+    });
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+    await handleRename();
+    await flushMicrotasks();
+    expect(mockInvoke).toHaveBeenCalledWith("rename_object", {
+      bucket: "bucket-a",
+      oldKey: "docs/file.txt",
+      newKey: "docs/replaced.txt",
+      overwrite: true,
+      connectionId: "test-connection",
+    });
+    state.currentSettings.conflictPolicy = "ask";
+  });
+
+  it("folder rename requires consent when create-only copy cannot be enforced", async () => {
+    const { state } = await import("../state.ts");
+    const { handleRename } = await import("../app-objects.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
+    state.endpoint = "https://s3.example.com";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.createOnlyCapabilities = {
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    };
+    state.selectedKeys.clear();
+    state.selectedKeys.add("prefix:docs/folder/");
+
+    mockShowPrompt.mockResolvedValueOnce("renamed-folder");
+    mockShowConfirm.mockResolvedValueOnce(false);
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "list_objects") return { objects: [], prefixes: [] };
+      return undefined;
+    });
+
+    await handleRename();
+    await flushMicrotasks();
+
+    expect(mockShowConfirm).toHaveBeenCalledWith(
+      "Unconditional Write",
+      expect.stringContaining("cannot enforce create-only writes"),
+      expect.anything(),
+    );
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "rename_prefix")).toBe(
+      false,
+    );
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("unconditional write was not authorized");
+  });
+
+  it("reports connection change instead of skip when reconnect happens during rename probe", async () => {
+    const { state } = await import("../state.ts");
+    const { handleRename } = await import("../app-objects.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
+    state.endpoint = "https://s3.example.com";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.currentSettings.conflictPolicy = "skip";
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+
+    let probeFinished = false;
+    mockConnectionSnapshotChanged.mockImplementation(() => probeFinished);
+    mockShowPrompt.mockResolvedValueOnce("other-name.txt");
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") {
+        probeFinished = true;
+        return true;
+      }
+      return undefined;
+    });
+
+    await handleRename();
+    await flushMicrotasks();
+
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "rename_object")).toBe(
+      false,
+    );
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("connection changed");
+    state.currentSettings.conflictPolicy = "ask";
+  });
+
+  it("dot-segment object keys normalize away in browser URL paths", () => {
+    const url = new URL("https://example.com/bucket/data/%2E%2E/odd.txt");
+    expect(url.pathname).toBe("/bucket/odd.txt");
   });
 
   it("covers additional table, context-menu, and layout guard branches", async () => {

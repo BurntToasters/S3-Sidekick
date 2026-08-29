@@ -174,14 +174,19 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       el.ok.disabled = false;
       document.removeEventListener("keydown", onEscape, true);
       document.removeEventListener("keydown", onTrapFocus, true);
-      active = false;
       // Restore focus to whatever was focused before the dialog opened, unless
       // another dialog is about to take over from the queue.
       if (queue.length > 0) {
+        // Reserve active state until scheduled dialog starts. Promise
+        // continuations may enqueue follow-up dialogs before next timer fires;
+        // letting them present immediately would overlap handlers and reorder
+        // user consent.
+        active = true;
         const next = queue.shift();
         if (next) setTimeout(next, 0);
-      } else if (previouslyFocused?.isConnected) {
-        previouslyFocused.focus();
+      } else {
+        active = false;
+        if (previouslyFocused?.isConnected) previouslyFocused.focus();
       }
     }
 

@@ -74,7 +74,7 @@ test("createReleaseSession rejects when quality gate proof is missing", () => {
 
 test("validateQualityGate rejects a tampered source-tree hash", () => {
   const expected = {
-    version: "0.11.0-beta.4",
+    version: "0.11.0-beta.5",
     commit: "abc123",
     platform: "darwin",
     arch: "arm64",

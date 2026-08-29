@@ -64,7 +64,7 @@ async function syncReleaseNotesBody(release, body) {
   const updated = await githubRequestWithRetry(
     'PATCH',
     '/repos/' + REPO_OWNER + '/' + REPO_NAME + '/releases/' + release.id,
-    { body }
+    { name: formatReleaseTitle(VERSION), body }
   );
   console.log(
     '   Synced CHANGELOG.md into release notes (' +
@@ -179,8 +179,8 @@ async function ensureDraftRelease() {
       'POST',
       '/repos/' + REPO_OWNER + '/' + REPO_NAME + '/releases',
       {
-        // Tag stays machine-readable ("v" + version) so the updater and asset
-        // URLs keep working; the title is the BCLS human-facing form.
+        // Tag stays machine-readable ("v" + version). Title is the version
+        // with no leading v, no app name, and no spelled-out Beta subtitle.
         tag_name: TAG_NAME,
         name: formatReleaseTitle(VERSION),
         body,

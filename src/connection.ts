@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { state } from "./state.ts";
 import type { BucketInfo, ObjectInfo } from "./state.ts";
+import {
+  FULL_CREATE_ONLY_CAPABILITIES,
+  NO_CREATE_ONLY_CAPABILITIES,
+  type CreateOnlyCapabilities,
+} from "./create-only-capabilities.ts";
 
 interface ConnectionConfig {
   endpoint: string;
@@ -13,6 +18,7 @@ interface ConnectResult {
   region: string;
   connection_id: string;
   connection_identity: string;
+  create_only_capabilities?: unknown;
 }
 
 interface ListObjectsResponse {
@@ -25,6 +31,25 @@ interface ListObjectsResponse {
 let connectionGeneration = 0;
 let listingGeneration = 0;
 let paginationRequest = 0;
+
+function parseCreateOnlyCapabilities(value: unknown): CreateOnlyCapabilities {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ...NO_CREATE_ONLY_CAPABILITIES };
+  }
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.put_object !== "boolean" ||
+    typeof row.complete_multipart !== "boolean" ||
+    typeof row.copy_object !== "boolean"
+  ) {
+    return { ...NO_CREATE_ONLY_CAPABILITIES };
+  }
+  return {
+    put_object: row.put_object,
+    complete_multipart: row.complete_multipart,
+    copy_object: row.copy_object,
+  };
+}
 
 export function currentConnectionId(): string {
   if (!state.connectionId) {
@@ -135,6 +160,9 @@ export async function connect(
     state.region = result.region;
     state.connectionId = result.connection_id;
     state.connectionIdentity = result.connection_identity;
+    state.createOnlyCapabilities = parseCreateOnlyCapabilities(
+      result.create_only_capabilities,
+    );
     return result.region;
   } catch (err) {
     if (generation === connectionGeneration) {
@@ -166,6 +194,7 @@ export async function disconnect(connectionId?: string): Promise<void> {
   state.region = "";
   state.connectionId = "";
   state.connectionIdentity = "";
+  state.createOnlyCapabilities = { ...FULL_CREATE_ONLY_CAPABILITIES };
   state.currentBucket = "";
   state.currentPrefix = "";
   state.buckets = [];

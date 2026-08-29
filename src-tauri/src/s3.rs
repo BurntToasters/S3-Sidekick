@@ -24,6 +24,7 @@ use crate::{
     load_transfer_checkpoint_json, lock_s3_state, remove_transfer_checkpoint,
     save_transfer_checkpoint_json, validate_destination_path,
     validate_destination_path_allow_overwrite, validate_existing_path, AppState,
+    StorageProviderKind,
 };
 
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
@@ -99,16 +100,41 @@ fn validate_key(key: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_prefix(prefix: &str, label: &str) -> Result<(), String> {
+/// Validate a prefix for read-only listing.
+///
+/// Dot segments are legal S3 keys and must be listable so users can navigate
+/// folders whose names contain `.` or `..`. An empty prefix lists the bucket root.
+fn validate_list_prefix(prefix: &str, label: &str) -> Result<(), String> {
     if prefix.is_empty() {
         return Ok(());
     }
-    validate_key(prefix, label)
+    if prefix.len() > MAX_KEY_LEN {
+        return Err(format!(
+            "{} is too long (max {} characters)",
+            label, MAX_KEY_LEN
+        ));
+    }
+    if prefix.as_bytes().contains(&0) {
+        return Err(format!("{} contains invalid characters", label));
+    }
+    Ok(())
+}
+
+/// Encode one URL path segment for object keys without dot-segment components.
+fn encode_object_url_segment(segment: &str) -> String {
+    urlencoding::encode(segment).into_owned()
+}
+
+/// Dot-segment keys cannot be turned into browser-safe path URLs; `%2E%2E` still
+/// normalises to `..` under the URL standard.
+fn key_has_unsafe_url_segments(key: &str) -> bool {
+    key.split('/')
+        .any(|segment| segment == "." || segment == "..")
 }
 
 /// Reject an empty prefix for operations that mutate everything beneath it.
 ///
-/// `validate_prefix` deliberately allows `""` because listing the bucket root is
+/// `validate_list_prefix` deliberately allows `""` because listing the bucket root is
 /// legitimate. Deleting, moving, or copying "everything under `""`" is not: it
 /// silently means the entire bucket.
 fn validate_mutating_prefix(prefix: &str, label: &str) -> Result<(), String> {
@@ -391,6 +417,276 @@ fn is_not_found<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> boo
     match err {
         SdkError::ServiceError(ctx) => ctx.raw().status().as_u16() == 404,
         _ => false,
+    }
+}
+
+/// S3 create-only writes use `If-None-Match: *` so the destination must be absent
+/// at commit time, not merely at an earlier probe.
+const CREATE_ONLY_IF_NONE_MATCH: &str = "*";
+/// Cloudflare R2 requires this proprietary header on CopyObject (beta).
+const R2_COPY_DESTINATION_IF_NONE_MATCH: &str = "cf-copy-destination-if-none-match";
+/// DigitalOcean Spaces documents `x-amz-copy-if-none-match`, not destination `If-None-Match`.
+const DIGITALOCEAN_COPY_IF_NONE_MATCH: &str = "x-amz-copy-if-none-match";
+
+/// Provider-specific support for atomic create-only writes (`overwrite: false`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyCreateOnlyStrategy {
+    AwsIfNoneMatch,
+    R2DestinationHeader,
+    DigitalOceanCopyIfNoneMatch,
+}
+
+struct CreateOnlyCapabilities {
+    put_object: bool,
+    complete_multipart: bool,
+    copy_object: Option<CopyCreateOnlyStrategy>,
+}
+
+impl CreateOnlyCapabilities {
+    fn for_provider(provider: StorageProviderKind) -> Self {
+        match provider {
+            StorageProviderKind::Aws | StorageProviderKind::Wasabi => Self {
+                put_object: true,
+                complete_multipart: true,
+                copy_object: Some(CopyCreateOnlyStrategy::AwsIfNoneMatch),
+            },
+            // MinIO documents If-None-Match on CreateMultipartUpload, not CompleteMultipartUpload.
+            StorageProviderKind::Minio => Self {
+                put_object: true,
+                complete_multipart: false,
+                copy_object: Some(CopyCreateOnlyStrategy::AwsIfNoneMatch),
+            },
+            StorageProviderKind::CloudflareR2 => Self {
+                put_object: true,
+                complete_multipart: true,
+                copy_object: Some(CopyCreateOnlyStrategy::R2DestinationHeader),
+            },
+            StorageProviderKind::DigitalOcean => Self {
+                put_object: false,
+                complete_multipart: false,
+                copy_object: Some(CopyCreateOnlyStrategy::DigitalOceanCopyIfNoneMatch),
+            },
+            StorageProviderKind::Backblaze | StorageProviderKind::Generic => Self {
+                put_object: false,
+                complete_multipart: false,
+                copy_object: None,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct CreateOnlyCapabilityInfo {
+    pub put_object: bool,
+    pub complete_multipart: bool,
+    pub copy_object: bool,
+}
+
+impl CreateOnlyCapabilityInfo {
+    fn from_provider(provider: StorageProviderKind) -> Self {
+        let caps = CreateOnlyCapabilities::for_provider(provider);
+        Self {
+            put_object: caps.put_object,
+            complete_multipart: caps.complete_multipart,
+            copy_object: caps.copy_object.is_some(),
+        }
+    }
+}
+
+fn create_only_unsupported_error(key: &str, action: &str) -> String {
+    format!(
+        "This storage provider cannot enforce a create-only {} for '{}'. Explicitly authorize an unconditional write before retrying.",
+        action, key
+    )
+}
+
+fn apply_put_create_only_guard(
+    request: aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder,
+    provider: StorageProviderKind,
+    key: &str,
+) -> Result<aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder, String> {
+    if CreateOnlyCapabilities::for_provider(provider).put_object {
+        Ok(request.if_none_match(CREATE_ONLY_IF_NONE_MATCH))
+    } else {
+        Err(create_only_unsupported_error(key, "upload"))
+    }
+}
+
+fn require_put_create_only_support(provider: StorageProviderKind, key: &str) -> Result<(), String> {
+    if CreateOnlyCapabilities::for_provider(provider).put_object {
+        Ok(())
+    } else {
+        Err(create_only_unsupported_error(key, "upload"))
+    }
+}
+
+fn apply_complete_multipart_create_only_guard(
+    request: aws_sdk_s3::operation::complete_multipart_upload::builders::CompleteMultipartUploadFluentBuilder,
+    provider: StorageProviderKind,
+    key: &str,
+) -> Result<aws_sdk_s3::operation::complete_multipart_upload::builders::CompleteMultipartUploadFluentBuilder, String>
+{
+    if CreateOnlyCapabilities::for_provider(provider).complete_multipart {
+        Ok(request.if_none_match(CREATE_ONLY_IF_NONE_MATCH))
+    } else {
+        Err(create_only_unsupported_error(key, "multipart write"))
+    }
+}
+
+fn require_complete_multipart_create_only_support(
+    provider: StorageProviderKind,
+    key: &str,
+) -> Result<(), String> {
+    if CreateOnlyCapabilities::for_provider(provider).complete_multipart {
+        Ok(())
+    } else {
+        Err(create_only_unsupported_error(key, "multipart write"))
+    }
+}
+
+fn require_copy_create_only_strategy(
+    provider: StorageProviderKind,
+    key: &str,
+) -> Result<CopyCreateOnlyStrategy, String> {
+    CreateOnlyCapabilities::for_provider(provider)
+        .copy_object
+        .ok_or_else(|| create_only_unsupported_error(key, "copy"))
+}
+
+fn service_error_status<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> Option<u16> {
+    use aws_sdk_s3::error::SdkError;
+    match err {
+        SdkError::ServiceError(ctx) => Some(ctx.raw().status().as_u16()),
+        _ => None,
+    }
+}
+
+fn is_destination_occupied<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    service_error_status(err) == Some(412)
+}
+
+fn is_concurrent_write_conflict<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    service_error_status(err) == Some(409)
+}
+
+fn destination_conflict_error(key: &str) -> String {
+    format!(
+        "Destination '{}' already exists. Choose overwrite to replace it.",
+        key
+    )
+}
+
+fn map_create_only_write_error<E: std::fmt::Debug>(
+    key: &str,
+    err: &aws_sdk_s3::error::SdkError<E>,
+    overwrite: bool,
+    action: &str,
+) -> String {
+    if overwrite {
+        return format!("Failed to {} '{}': {:?}", action, key, err);
+    }
+    if is_destination_occupied(err) {
+        return destination_conflict_error(key);
+    }
+    if is_concurrent_write_conflict(err) {
+        return encode_transfer_error(
+            "concurrent_write",
+            true,
+            Some(409),
+            format!(
+                "Destination '{}' changed during {}; retry the operation.",
+                key, action
+            ),
+        );
+    }
+    format!("Failed to {} '{}': {:?}", action, key, err)
+}
+
+fn detect_storage_provider(endpoint: &str) -> StorageProviderKind {
+    let host = parse_endpoint_host(endpoint).unwrap_or_default();
+    let is_domain = |domain: &str| {
+        host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    };
+    if is_domain("r2.cloudflarestorage.com") {
+        return StorageProviderKind::CloudflareR2;
+    }
+    if is_domain("amazonaws.com") || is_domain("amazonaws.com.cn") {
+        return StorageProviderKind::Aws;
+    }
+    if is_domain("wasabisys.com") {
+        return StorageProviderKind::Wasabi;
+    }
+    if is_domain("backblazeb2.com") {
+        return StorageProviderKind::Backblaze;
+    }
+    if is_domain("digitaloceanspaces.com") {
+        return StorageProviderKind::DigitalOcean;
+    }
+    if host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.split('.').any(|label| label == "minio")
+    {
+        return StorageProviderKind::Minio;
+    }
+    StorageProviderKind::Generic
+}
+
+fn require_storage_provider(
+    state: &tauri::State<'_, AppState>,
+    connection_id: &str,
+) -> Result<StorageProviderKind, String> {
+    let s3 = lock_s3_state(state)?;
+    require_connection_session(&s3, connection_id)?;
+    Ok(s3.storage_provider)
+}
+
+fn apply_aws_copy_create_only_guard(
+    request: aws_sdk_s3::operation::copy_object::builders::CopyObjectFluentBuilder,
+) -> aws_sdk_s3::operation::copy_object::builders::CopyObjectFluentBuilder {
+    request.if_none_match(CREATE_ONLY_IF_NONE_MATCH)
+}
+
+async fn send_copy_object_create_only(
+    request: aws_sdk_s3::operation::copy_object::builders::CopyObjectFluentBuilder,
+    create_only_strategy: Option<CopyCreateOnlyStrategy>,
+) -> Result<
+    aws_sdk_s3::operation::copy_object::CopyObjectOutput,
+    aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::copy_object::CopyObjectError>,
+> {
+    match create_only_strategy {
+        None => request.customize().send().await,
+        Some(strategy) => match strategy {
+            CopyCreateOnlyStrategy::R2DestinationHeader => {
+                request
+                    .customize()
+                    .mutate_request(|req| {
+                        req.headers_mut()
+                            .insert(R2_COPY_DESTINATION_IF_NONE_MATCH, CREATE_ONLY_IF_NONE_MATCH);
+                    })
+                    .send()
+                    .await
+            }
+            CopyCreateOnlyStrategy::DigitalOceanCopyIfNoneMatch => {
+                request
+                    .customize()
+                    .mutate_request(|req| {
+                        req.headers_mut()
+                            .insert(DIGITALOCEAN_COPY_IF_NONE_MATCH, CREATE_ONLY_IF_NONE_MATCH);
+                    })
+                    .send()
+                    .await
+            }
+            CopyCreateOnlyStrategy::AwsIfNoneMatch => {
+                apply_aws_copy_create_only_guard(request)
+                    .customize()
+                    .send()
+                    .await
+            }
+        },
     }
 }
 
@@ -1301,6 +1597,7 @@ pub(crate) struct ConnectResult {
     pub region: String,
     pub connection_id: String,
     pub connection_identity: String,
+    pub create_only_capabilities: CreateOnlyCapabilityInfo,
 }
 
 fn mint_connection_id() -> String {
@@ -1340,6 +1637,7 @@ pub(crate) fn invalidate_connection_session(s3: &mut crate::S3State) {
     s3.region.clear();
     s3.connection_id = None;
     s3.connection_identity = None;
+    s3.storage_provider = StorageProviderKind::default();
 }
 
 fn require_connected_client(s3: &crate::S3State, connection_id: &str) -> Result<Client, String> {
@@ -1452,6 +1750,7 @@ pub(crate) async fn connect(
     }
 
     let connection_id = mint_connection_id();
+    let storage_provider = detect_storage_provider(&normalized);
     let mut s3 = lock_s3_state(&state)?;
     if s3.connection_generation != connection_generation {
         return Err("Connection attempt superseded".to_string());
@@ -1462,11 +1761,13 @@ pub(crate) async fn connect(
     s3.bucket_hint = bucket_hint;
     s3.connection_id = Some(connection_id.clone());
     s3.connection_identity = Some(identity.clone());
+    s3.storage_provider = storage_provider;
 
     Ok(ConnectResult {
         region: resolved_region,
         connection_id,
         connection_identity: identity,
+        create_only_capabilities: CreateOnlyCapabilityInfo::from_provider(storage_provider),
     })
 }
 
@@ -1537,7 +1838,7 @@ pub(crate) async fn list_objects(
 ) -> Result<ListObjectsResponse, String> {
     // Listing the bucket root with an empty prefix is legitimate, so this uses
     // the permissive validator rather than the mutating one.
-    validate_prefix(&prefix, "Prefix")?;
+    validate_list_prefix(&prefix, "Prefix")?;
     let client = require_client(&state, &connection_id)?;
 
     let mut req = client.list_objects_v2().bucket(&bucket).max_keys(1000);
@@ -1682,6 +1983,7 @@ pub(crate) async fn update_metadata(
 ) -> Result<(), String> {
     validate_mutating_key(&key, "Object key")?;
     let client = require_client(&state, &connection_id)?;
+    let provider = require_storage_provider(&state, &connection_id)?;
 
     let cancel = Arc::new(CancelFlag::default());
 
@@ -1699,9 +2001,11 @@ pub(crate) async fn update_metadata(
         // S3's single CopyObject API is limited to 5 GiB, but an in-place
         // multipart upload may safely copy ranges from the old object until the
         // final completion atomically replaces it.
-        return copy_object_multipart(&client, &bucket, &bucket, &key, &key, &existing, &cancel)
-            .await
-            .map(|_| ());
+        return copy_object_multipart(
+            &client, &bucket, &bucket, &key, &key, &existing, true, provider, &cancel,
+        )
+        .await
+        .map(|_| ());
     }
 
     let source = encode_copy_source_with_version(&bucket, &key, existing.version_id.as_deref());
@@ -1894,6 +2198,7 @@ pub(crate) async fn upload_object(
     content_type: String,
     transfer_id: u32,
     attempt: Option<u32>,
+    overwrite: Option<bool>,
     part_size_mb: Option<u32>,
     part_concurrency: Option<u32>,
     bandwidth_limit_mbps: Option<u32>,
@@ -1904,6 +2209,7 @@ pub(crate) async fn upload_object(
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
 
     let client = require_client(&state, &connection_id)?;
+    let provider = require_storage_provider(&state, &connection_id)?;
 
     let guard = TransferGuard::register(transfer_id);
     let cancel = guard.token();
@@ -1914,6 +2220,7 @@ pub(crate) async fn upload_object(
         .len();
 
     let attempt = normalize_attempt(attempt);
+    let overwrite = overwrite.unwrap_or(false);
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
     let expected_checksum = if checksum_enabled {
@@ -1961,12 +2268,17 @@ pub(crate) async fn upload_object(
             bandwidth_limit_bps,
             started_at,
             expected_checksum.as_ref(),
+            overwrite,
+            provider,
             &cancel,
         )
         .await?;
     } else {
         if guard.is_cancelled() {
             return Err(cancelled_error());
+        }
+        if !overwrite {
+            require_put_create_only_support(provider, &key)?;
         }
 
         let body = aws_sdk_s3::primitives::ByteStream::from_path(upload_path.as_path())
@@ -1984,6 +2296,9 @@ pub(crate) async fn upload_object(
                 .checksum_algorithm(ChecksumAlgorithm::Sha256)
                 .checksum_sha256(&checksum.base64);
         }
+        if !overwrite {
+            req = apply_put_create_only_guard(req, provider, &key)?;
+        }
 
         // A single PutObject cannot be interrupted mid-flight, so race the send
         // against the cancel signal instead of only checking before it starts.
@@ -1995,6 +2310,9 @@ pub(crate) async fn upload_object(
             tokio::select! {
                 result = &mut send => {
                     break result.map_err(|e| {
+                        if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
+                            return map_create_only_write_error(&key, &e, overwrite, "upload");
+                        }
                         structured_transfer_sdk_error("Failed to upload", &e, "upload", true)
                     })?;
                 }
@@ -2108,10 +2426,17 @@ async fn upload_multipart(
     bandwidth_limit_bps: u64,
     started_at: Instant,
     checksum: Option<&Sha256Checksum>,
+    overwrite: bool,
+    provider: StorageProviderKind,
     cancel: &CancelToken,
 ) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
     use tokio::task::JoinSet;
+
+    if !overwrite {
+        // Reject before creating remote multipart state or transferring bytes.
+        require_complete_multipart_create_only_support(provider, key)?;
+    }
 
     let mut create_req = client.create_multipart_upload().bucket(bucket).key(key);
     if !content_type.is_empty() {
@@ -2342,6 +2667,10 @@ async fn upload_multipart(
             .checksum_sha256(&checksum.base64)
             .checksum_type(ChecksumType::FullObject);
     }
+    if !overwrite {
+        complete_request =
+            apply_complete_multipart_create_only_guard(complete_request, provider, key)?;
+    }
     let complete_request = complete_request.send();
     let complete_result = tokio::select! {
         _ = cancel.cancelled() => {
@@ -2355,6 +2684,14 @@ async fn upload_multipart(
         Ok(output) => output,
         Err(e) => {
             abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+            if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
+                return Err(map_create_only_write_error(
+                    key,
+                    &e,
+                    overwrite,
+                    "complete upload",
+                ));
+            }
             return Err(structured_transfer_sdk_error(
                 "Failed to complete multipart upload",
                 &e,
@@ -2393,6 +2730,7 @@ pub(crate) async fn upload_object_bytes(
     content_type: String,
     transfer_id: u32,
     attempt: Option<u32>,
+    overwrite: Option<bool>,
     checksum_verification: Option<bool>,
 ) -> Result<(), String> {
     let _storage_guard = crate::acquire_transfer_storage().await?;
@@ -2405,6 +2743,7 @@ pub(crate) async fn upload_object_bytes(
     }
 
     let client = require_client(&state, &connection_id)?;
+    let provider = require_storage_provider(&state, &connection_id)?;
 
     // This path previously never registered, checked, or cleared cancellation.
     // Cancelling a browser-fallback upload did nothing, and the id stayed in the
@@ -2414,6 +2753,7 @@ pub(crate) async fn upload_object_bytes(
 
     let total = bytes.len() as u64;
     let attempt = normalize_attempt(attempt);
+    let overwrite = overwrite.unwrap_or(false);
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
     let expected_checksum = checksum_enabled.then(|| sha256_checksum_bytes(&bytes));
@@ -2435,6 +2775,9 @@ pub(crate) async fn upload_object_bytes(
     if guard.is_cancelled() {
         return Err(cancelled_error());
     }
+    if !overwrite {
+        require_put_create_only_support(provider, &key)?;
+    }
 
     let mut req = client
         .put_object()
@@ -2451,6 +2794,9 @@ pub(crate) async fn upload_object_bytes(
             .checksum_algorithm(ChecksumAlgorithm::Sha256)
             .checksum_sha256(&checksum.base64);
     }
+    if !overwrite {
+        req = apply_put_create_only_guard(req, provider, &key)?;
+    }
 
     let send = req.send();
     tokio::pin!(send);
@@ -2458,6 +2804,9 @@ pub(crate) async fn upload_object_bytes(
         tokio::select! {
             result = &mut send => {
                 break result.map_err(|e| {
+                    if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
+                        return map_create_only_write_error(&key, &e, overwrite, "upload");
+                    }
                     structured_transfer_sdk_error("Failed to upload", &e, "upload", true)
                 })?;
             }
@@ -3916,6 +4265,8 @@ async fn copy_one(
     dst_bucket: &str,
     dst_key: &str,
     info: Option<SourceObjectInfo>,
+    overwrite: bool,
+    provider: StorageProviderKind,
     cancel: &CancelToken,
 ) -> Result<DestinationIdentity, String> {
     if src_bucket == dst_bucket && src_key == dst_key {
@@ -3935,10 +4286,16 @@ async fn copy_one(
 
     if info.size >= MULTIPART_COPY_THRESHOLD {
         return copy_object_multipart(
-            client, src_bucket, dst_bucket, src_key, dst_key, &info, cancel,
+            client, src_bucket, dst_bucket, src_key, dst_key, &info, overwrite, provider, cancel,
         )
         .await;
     }
+
+    let create_only_strategy = if overwrite {
+        None
+    } else {
+        Some(require_copy_create_only_strategy(provider, dst_key)?)
+    };
 
     let source = encode_copy_source_with_version(src_bucket, src_key, info.version_id.as_deref());
     let build_copy = |include_acl: bool| {
@@ -3977,10 +4334,11 @@ async fn copy_one(
 
     let mut include_acl = info.acl.is_some();
     let copy_output = loop {
-        let request = build_copy(include_acl).send();
+        let request = build_copy(include_acl);
+        let send = send_copy_object_create_only(request, create_only_strategy);
         let result = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
-            result = request => result,
+            result = send => result,
         };
         match result {
             Ok(output) => break output,
@@ -3991,6 +4349,13 @@ async fn copy_one(
                     // property that can be carried; retry without it.
                     include_acl = false;
                     continue;
+                }
+                if !overwrite
+                    && (is_destination_occupied(&err) || is_concurrent_write_conflict(&err))
+                {
+                    return Err(map_create_only_write_error(
+                        dst_key, &err, overwrite, "copy",
+                    ));
                 }
                 return Err(format!("Failed to copy '{}': {}", src_key, err));
             }
@@ -4016,10 +4381,17 @@ async fn copy_object_multipart(
     source_key: &str,
     dest_key: &str,
     info: &SourceObjectInfo,
+    overwrite: bool,
+    provider: StorageProviderKind,
     cancel: &CancelToken,
 ) -> Result<DestinationIdentity, String> {
     if cancel.is_cancelled() {
         return Err(cancelled_error());
+    }
+
+    if !overwrite {
+        // Reject before creating remote multipart state or copying any parts.
+        require_complete_multipart_create_only_support(provider, dest_key)?;
     }
 
     // Validate provider-reported size before creating any remote multipart
@@ -4165,13 +4537,17 @@ async fn copy_object_multipart(
         .set_parts(Some(completed_parts))
         .build();
 
-    let complete_request = client
+    let mut complete_request = client
         .complete_multipart_upload()
         .bucket(dst_bucket)
         .key(dest_key)
         .upload_id(&upload_id)
-        .multipart_upload(completed_upload)
-        .send();
+        .multipart_upload(completed_upload);
+    if !overwrite {
+        complete_request =
+            apply_complete_multipart_create_only_guard(complete_request, provider, dest_key)?;
+    }
+    let complete_request = complete_request.send();
     let complete_result = tokio::select! {
         _ = cancel.cancelled() => {
             abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
@@ -4184,6 +4560,14 @@ async fn copy_object_multipart(
         Ok(output) => output,
         Err(e) => {
             abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
+            if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
+                return Err(map_create_only_write_error(
+                    dest_key,
+                    &e,
+                    overwrite,
+                    "complete multipart copy",
+                ));
+            }
             return Err(format!("Failed to complete multipart copy: {}", e));
         }
     };
@@ -4203,6 +4587,8 @@ async fn copy_with_receipt(
     dst_bucket: &str,
     dst_key: &str,
     source_info: Option<SourceObjectInfo>,
+    overwrite: bool,
+    provider: StorageProviderKind,
     cancel: &CancelToken,
 ) -> Result<CopyReceipt, String> {
     let info = match source_info {
@@ -4224,6 +4610,8 @@ async fn copy_with_receipt(
         dst_bucket,
         dst_key,
         Some(info.clone()),
+        overwrite,
+        provider,
         cancel,
     )
     .await?;
@@ -4255,6 +4643,7 @@ pub(crate) async fn rename_object(
         return Err("Source and destination keys are identical.".to_string());
     }
     let client = require_client(&state, &connection_id)?;
+    let provider = require_storage_provider(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
 
     if !overwrite && destination_object_exists(&client, &bucket, &new_key).await? {
@@ -4264,8 +4653,10 @@ pub(crate) async fn rename_object(
         ));
     }
 
-    let receipt =
-        copy_with_receipt(&client, &bucket, &old_key, &bucket, &new_key, None, &cancel).await?;
+    let receipt = copy_with_receipt(
+        &client, &bucket, &old_key, &bucket, &new_key, None, overwrite, provider, &cancel,
+    )
+    .await?;
     delete_receipts_checked(&client, &bucket, &bucket, &[receipt], &cancel).await?;
     Ok(())
 }
@@ -4606,6 +4997,7 @@ async fn rollback_prefix_copy(
     bucket: &str,
     created_destinations: &[CopyReceipt],
     backups: &[DestinationBackup],
+    provider: StorageProviderKind,
 ) -> Vec<String> {
     let rollback_cancel = Arc::new(CancelFlag::default());
     let mut failures = Vec::new();
@@ -4620,6 +5012,8 @@ async fn rollback_prefix_copy(
             bucket,
             &backup.destination_key,
             Some(backup.source_info.clone()),
+            true,
+            provider,
             &rollback_cancel,
         )
         .await
@@ -4667,6 +5061,8 @@ async fn copy_prefix_objects(
     dst_bucket: &str,
     dst_prefix: &str,
     collect_receipts: bool,
+    overwrite: bool,
+    provider: StorageProviderKind,
     cancel: &CancelToken,
 ) -> Result<Vec<CopyReceipt>, String> {
     ensure_no_orphaned_rollback_backups(client, dst_bucket, cancel).await?;
@@ -4689,7 +5085,7 @@ async fn copy_prefix_objects(
         }
         let list_output = tokio::select! {
             _ = cancel.cancelled() => {
-                let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups, provider).await;
                 return Err(rollback_error(cancelled_error(), failures));
             }
             result = list_request.send() => match result {
@@ -4700,6 +5096,7 @@ async fn copy_prefix_objects(
                         dst_bucket,
                         &created_destinations,
                         &backups,
+                        provider,
                     )
                     .await;
                     return Err(rollback_error(
@@ -4717,8 +5114,14 @@ async fn copy_prefix_objects(
 
         for key in &keys {
             if operation_index >= MAX_PREFIX_TRANSACTION_OBJECTS {
-                let failures =
-                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
                 return Err(rollback_error(
                     format!(
                         "Prefix operation exceeds the {}-object transaction limit; no source was deleted",
@@ -4730,8 +5133,14 @@ async fn copy_prefix_objects(
             let index = operation_index;
             operation_index += 1;
             if cancel.is_cancelled() {
-                let failures =
-                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
                 return Err(rollback_error(cancelled_error(), failures));
             }
 
@@ -4741,9 +5150,14 @@ async fn copy_prefix_objects(
             let suffix = match key.strip_prefix(src_prefix) {
                 Some(suffix) => suffix,
                 None => {
-                    let failures =
-                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
-                            .await;
+                    let failures = rollback_prefix_copy(
+                        client,
+                        dst_bucket,
+                        &created_destinations,
+                        &backups,
+                        provider,
+                    )
+                    .await;
                     return Err(rollback_error(
                         format!("Key '{}' does not start with prefix '{}'", key, src_prefix),
                         failures,
@@ -4752,14 +5166,26 @@ async fn copy_prefix_objects(
             };
             let new_key = format!("{}{}", dst_prefix, suffix);
             if let Err(err) = validate_key(&new_key, "Destination key") {
-                let failures =
-                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
                 return Err(rollback_error(err, failures));
             }
 
             if src_bucket == dst_bucket && &new_key == key {
-                let failures =
-                    rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
                 return Err(rollback_error(
                 format!(
                     "Source and destination resolve to the same object ('{}'). Refusing to copy a prefix onto itself.",
@@ -4773,7 +5199,7 @@ async fn copy_prefix_objects(
                 client.head_object().bucket(dst_bucket).key(&new_key).send();
             let destination_head = tokio::select! {
                 _ = cancel.cancelled() => {
-                    let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                    let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups, provider).await;
                     return Err(rollback_error(cancelled_error(), failures));
                 }
                 result = destination_head_request => result,
@@ -4781,6 +5207,20 @@ async fn copy_prefix_objects(
 
             let destination_was_absent = match destination_head {
                 Ok(_) => {
+                    if !overwrite {
+                        let failures = rollback_prefix_copy(
+                            client,
+                            dst_bucket,
+                            &created_destinations,
+                            &backups,
+                            provider,
+                        )
+                        .await;
+                        return Err(rollback_error(
+                            destination_conflict_error(&new_key),
+                            failures,
+                        ));
+                    }
                     let destination_info =
                         match describe_source(client, dst_bucket, &new_key, cancel).await {
                             Ok(info) => info,
@@ -4790,6 +5230,7 @@ async fn copy_prefix_objects(
                                     dst_bucket,
                                     &created_destinations,
                                     &backups,
+                                    provider,
                                 )
                                 .await;
                                 return Err(rollback_error(err, failures));
@@ -4803,7 +5244,7 @@ async fn copy_prefix_objects(
                         .send();
                     let backup_probe_result = tokio::select! {
                         _ = cancel.cancelled() => {
-                            let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups).await;
+                            let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups, provider).await;
                             return Err(rollback_error(cancelled_error(), failures));
                         }
                         result = backup_probe => result,
@@ -4815,6 +5256,7 @@ async fn copy_prefix_objects(
                                 dst_bucket,
                                 &created_destinations,
                                 &backups,
+                                provider,
                             )
                             .await;
                             return Err(rollback_error(
@@ -4829,6 +5271,7 @@ async fn copy_prefix_objects(
                                 dst_bucket,
                                 &created_destinations,
                                 &backups,
+                                provider,
                             )
                             .await;
                             return Err(rollback_error(
@@ -4848,6 +5291,8 @@ async fn copy_prefix_objects(
                         dst_bucket,
                         &backup_key,
                         Some(destination_info.clone()),
+                        true,
+                        provider,
                         cancel,
                     )
                     .await
@@ -4865,6 +5310,7 @@ async fn copy_prefix_objects(
                                 dst_bucket,
                                 &created_destinations,
                                 &backups,
+                                provider,
                             )
                             .await;
                             return Err(rollback_error(
@@ -4885,9 +5331,14 @@ async fn copy_prefix_objects(
                 }
                 Err(err) if is_not_found(&err) => true,
                 Err(err) => {
-                    let failures =
-                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
-                            .await;
+                    let failures = rollback_prefix_copy(
+                        client,
+                        dst_bucket,
+                        &created_destinations,
+                        &backups,
+                        provider,
+                    )
+                    .await;
                     return Err(rollback_error(
                         format!("Failed to check destination '{}': {}", new_key, err),
                         failures,
@@ -4898,9 +5349,14 @@ async fn copy_prefix_objects(
             let source_info = match describe_source(client, src_bucket, key, cancel).await {
                 Ok(info) => info,
                 Err(err) => {
-                    let failures =
-                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
-                            .await;
+                    let failures = rollback_prefix_copy(
+                        client,
+                        dst_bucket,
+                        &created_destinations,
+                        &backups,
+                        provider,
+                    )
+                    .await;
                     return Err(rollback_error(err, failures));
                 }
             };
@@ -4911,6 +5367,8 @@ async fn copy_prefix_objects(
                 dst_bucket,
                 &new_key,
                 Some(source_info),
+                overwrite,
+                provider,
                 cancel,
             )
             .await
@@ -4924,9 +5382,14 @@ async fn copy_prefix_objects(
                     }
                 }
                 Err(err) => {
-                    let failures =
-                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
-                            .await;
+                    let failures = rollback_prefix_copy(
+                        client,
+                        dst_bucket,
+                        &created_destinations,
+                        &backups,
+                        provider,
+                    )
+                    .await;
                     return Err(rollback_error(err, failures));
                 }
             }
@@ -4936,9 +5399,14 @@ async fn copy_prefix_objects(
             match list_output.next_continuation_token() {
                 Some(token) => continuation_token = Some(token.to_string()),
                 None => {
-                    let failures =
-                        rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups)
-                            .await;
+                    let failures = rollback_prefix_copy(
+                        client,
+                        dst_bucket,
+                        &created_destinations,
+                        &backups,
+                        provider,
+                    )
+                    .await;
                     return Err(rollback_error(
                         "S3 listing was truncated without a continuation token".to_string(),
                         failures,
@@ -5238,6 +5706,7 @@ pub(crate) async fn rename_prefix(
         return Err("Source and destination prefixes overlap; move was refused.".to_string());
     }
     let client = require_client(&state, &connection_id)?;
+    let provider = require_storage_provider(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
 
     if !overwrite && prefix_has_content(&client, &bucket, &new_prefix).await? {
@@ -5254,6 +5723,8 @@ pub(crate) async fn rename_prefix(
         &bucket,
         &new_prefix,
         true,
+        overwrite,
+        provider,
         &cancel,
     )
     .await?;
@@ -5270,6 +5741,7 @@ pub(crate) async fn copy_object_to(
     src_key: String,
     dst_bucket: String,
     dst_key: String,
+    overwrite: Option<bool>,
     transfer_id: Option<u32>,
 ) -> Result<CopyReceipt, String> {
     validate_readable_key(&src_key, "Source key")?;
@@ -5278,6 +5750,8 @@ pub(crate) async fn copy_object_to(
     validate_mutating_key(&dst_key, "Destination key")?;
     let client = require_client(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
+    let overwrite = overwrite.unwrap_or(false);
+    let provider = require_storage_provider(&state, &connection_id)?;
 
     copy_with_receipt(
         &client,
@@ -5286,6 +5760,8 @@ pub(crate) async fn copy_object_to(
         &dst_bucket,
         &dst_key,
         None,
+        overwrite,
+        provider,
         &cancel,
     )
     .await
@@ -5301,6 +5777,7 @@ pub(crate) async fn copy_prefix_to(
     src_prefix: String,
     dst_bucket: String,
     dst_prefix: String,
+    overwrite: Option<bool>,
     transfer_id: Option<u32>,
     collect_receipts: Option<bool>,
 ) -> Result<Vec<CopyReceipt>, String> {
@@ -5311,6 +5788,8 @@ pub(crate) async fn copy_prefix_to(
     }
     let client = require_client(&state, &connection_id)?;
     let (_guard, cancel) = transfer_cancel_context(transfer_id);
+    let overwrite = overwrite.unwrap_or(false);
+    let provider = require_storage_provider(&state, &connection_id)?;
 
     copy_prefix_objects(
         &client,
@@ -5319,6 +5798,8 @@ pub(crate) async fn copy_prefix_to(
         &dst_bucket,
         &dst_prefix,
         collect_receipts.unwrap_or(false),
+        overwrite,
+        provider,
         &cancel,
     )
     .await
@@ -5332,12 +5813,19 @@ pub(crate) fn build_object_url(
     key: String,
 ) -> Result<String, String> {
     validate_readable_key(&key, "Object key")?;
+    if key_has_unsafe_url_segments(&key) {
+        return Err(
+            "Object keys containing '.' or '..' path segments cannot be copied as browser URLs. \
+             Use Download or Preview in S3 Sidekick instead."
+                .to_string(),
+        );
+    }
     let endpoint = require_endpoint(&state, &connection_id)?;
     let base = endpoint.trim_end_matches('/');
     let encoded_bucket = urlencoding::encode(&bucket);
     let encoded_key = key
         .split('/')
-        .map(|segment| urlencoding::encode(segment).to_string())
+        .map(encode_object_url_segment)
         .collect::<Vec<_>>()
         .join("/");
     Ok(format!("{}/{}/{}", base, encoded_bucket, encoded_key))
@@ -5352,6 +5840,14 @@ pub(crate) async fn generate_presigned_url(
     expires_in_secs: u64,
 ) -> Result<String, String> {
     validate_readable_key(&key, "Object key")?;
+    if key_has_unsafe_url_segments(&key) {
+        return Err(
+            "Object keys containing '.' or '..' path segments cannot be shared as presigned URLs \
+             because browsers normalize those path segments and break the signature. \
+             Use Download or Preview in S3 Sidekick instead."
+                .to_string(),
+        );
+    }
     if !(60..=604800).contains(&expires_in_secs) {
         return Err("Expiration must be between 60 and 604800 seconds".to_string());
     }
@@ -5696,10 +6192,166 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn validate_prefix_allows_empty_for_listing() {
+    fn validate_list_prefix_allows_empty_for_listing() {
         // Listing the bucket root is legitimate.
-        assert!(validate_prefix("", "Prefix").is_ok());
-        assert!(validate_prefix("a/b/", "Prefix").is_ok());
+        assert!(validate_list_prefix("", "Prefix").is_ok());
+        assert!(validate_list_prefix("a/b/", "Prefix").is_ok());
+    }
+
+    #[test]
+    fn validate_list_prefix_allows_dot_segments() {
+        assert!(validate_list_prefix("data/../", "Prefix").is_ok());
+        assert!(validate_list_prefix("a/./b/", "Prefix").is_ok());
+        assert!(validate_mutating_prefix("data/../", "Prefix").is_err());
+    }
+
+    #[test]
+    fn detect_storage_provider_recognises_major_backends() {
+        assert_eq!(
+            detect_storage_provider("https://abc123.r2.cloudflarestorage.com"),
+            StorageProviderKind::CloudflareR2
+        );
+        assert_eq!(
+            detect_storage_provider("https://s3.us-east-1.amazonaws.com"),
+            StorageProviderKind::Aws
+        );
+        assert_eq!(
+            detect_storage_provider("http://localhost:9000"),
+            StorageProviderKind::Minio
+        );
+        assert_eq!(
+            detect_storage_provider("https://s3.wasabisys.com"),
+            StorageProviderKind::Wasabi
+        );
+    }
+
+    #[test]
+    fn key_has_unsafe_url_segments_detects_dot_paths() {
+        assert!(key_has_unsafe_url_segments("data/../odd.txt"));
+        assert!(key_has_unsafe_url_segments("a/./b.txt"));
+        assert!(!key_has_unsafe_url_segments("data/odd.txt"));
+    }
+
+    #[test]
+    fn create_only_writes_use_wildcard_if_none_match() {
+        assert_eq!(CREATE_ONLY_IF_NONE_MATCH, "*");
+        assert_eq!(
+            R2_COPY_DESTINATION_IF_NONE_MATCH,
+            "cf-copy-destination-if-none-match"
+        );
+        assert_eq!(DIGITALOCEAN_COPY_IF_NONE_MATCH, "x-amz-copy-if-none-match");
+    }
+
+    #[test]
+    fn create_only_capability_matrix_matches_documented_providers() {
+        let aws = CreateOnlyCapabilities::for_provider(StorageProviderKind::Aws);
+        assert!(aws.put_object);
+        assert!(aws.complete_multipart);
+        assert_eq!(
+            aws.copy_object,
+            Some(CopyCreateOnlyStrategy::AwsIfNoneMatch)
+        );
+
+        let minio = CreateOnlyCapabilities::for_provider(StorageProviderKind::Minio);
+        assert!(minio.put_object);
+        assert!(!minio.complete_multipart);
+        assert_eq!(
+            minio.copy_object,
+            Some(CopyCreateOnlyStrategy::AwsIfNoneMatch)
+        );
+
+        let r2 = CreateOnlyCapabilities::for_provider(StorageProviderKind::CloudflareR2);
+        assert!(r2.put_object);
+        assert_eq!(
+            r2.copy_object,
+            Some(CopyCreateOnlyStrategy::R2DestinationHeader)
+        );
+
+        let spaces = CreateOnlyCapabilities::for_provider(StorageProviderKind::DigitalOcean);
+        assert!(!spaces.put_object);
+        assert!(!spaces.complete_multipart);
+        assert_eq!(
+            spaces.copy_object,
+            Some(CopyCreateOnlyStrategy::DigitalOceanCopyIfNoneMatch)
+        );
+
+        let b2 = CreateOnlyCapabilities::for_provider(StorageProviderKind::Backblaze);
+        assert!(!b2.put_object);
+        assert_eq!(b2.copy_object, None);
+
+        let aws_info = CreateOnlyCapabilityInfo::from_provider(StorageProviderKind::Aws);
+        assert!(aws_info.put_object && aws_info.complete_multipart && aws_info.copy_object);
+
+        let b2_info = CreateOnlyCapabilityInfo::from_provider(StorageProviderKind::Backblaze);
+        assert!(!b2_info.put_object && !b2_info.complete_multipart && !b2_info.copy_object);
+    }
+
+    #[test]
+    fn unsupported_create_only_operations_fail_closed() {
+        for provider in [
+            StorageProviderKind::DigitalOcean,
+            StorageProviderKind::Backblaze,
+            StorageProviderKind::Generic,
+        ] {
+            let put_error = require_put_create_only_support(provider, "new-key")
+                .expect_err("unsupported put must be rejected");
+            assert!(put_error.contains("Explicitly authorize"));
+        }
+
+        for provider in [StorageProviderKind::Backblaze, StorageProviderKind::Generic] {
+            let copy_error = require_copy_create_only_strategy(provider, "new-key")
+                .expect_err("unsupported copy must be rejected");
+            assert!(copy_error.contains("Explicitly authorize"));
+        }
+
+        for provider in [
+            StorageProviderKind::Minio,
+            StorageProviderKind::DigitalOcean,
+            StorageProviderKind::Backblaze,
+            StorageProviderKind::Generic,
+        ] {
+            let multipart_error =
+                require_complete_multipart_create_only_support(provider, "new-key")
+                    .expect_err("unsupported multipart completion must be rejected");
+            assert!(multipart_error.contains("Explicitly authorize"));
+        }
+    }
+
+    #[test]
+    fn detect_storage_provider_recognises_digitalocean_and_backblaze() {
+        assert_eq!(
+            detect_storage_provider("https://my-space.nyc3.digitaloceanspaces.com"),
+            StorageProviderKind::DigitalOcean
+        );
+        assert_eq!(
+            detect_storage_provider("https://s3.us-west-004.backblazeb2.com"),
+            StorageProviderKind::Backblaze
+        );
+    }
+
+    #[test]
+    fn detect_storage_provider_requires_domain_boundaries() {
+        for endpoint in [
+            "https://amazonaws.com.example.invalid",
+            "https://notwasabisys.com",
+            "https://backblazeb2.com.example.invalid",
+            "https://digitaloceanspaces.com.example.invalid",
+            "https://notminio.example.invalid",
+        ] {
+            assert_eq!(
+                detect_storage_provider(endpoint),
+                StorageProviderKind::Generic,
+                "misclassified {endpoint}"
+            );
+        }
+        assert_eq!(
+            detect_storage_provider("https://minio.example.invalid"),
+            StorageProviderKind::Minio
+        );
+        assert_eq!(
+            detect_storage_provider("https://s3.cn-north-1.amazonaws.com.cn"),
+            StorageProviderKind::Aws
+        );
     }
 
     #[test]
@@ -6065,6 +6717,7 @@ mod tests {
             connection_generation: 0,
             connection_id: Some("session-a".to_string()),
             connection_identity: Some("ident-a".to_string()),
+            storage_provider: StorageProviderKind::default(),
         };
         let empty = require_connected_client(&s3, "").expect_err("empty id");
         assert!(empty.contains("required"), "{empty}");
@@ -6085,6 +6738,7 @@ mod tests {
             connection_generation: 41,
             connection_id: Some("session-a".to_string()),
             connection_identity: Some("ident-a".to_string()),
+            storage_provider: StorageProviderKind::default(),
         };
 
         invalidate_connection_session(&mut s3);

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockListen =
   vi.fn<
     (event: string, callback: (event: unknown) => void) => Promise<() => void>
@@ -45,6 +46,9 @@ async function loadTransfersModule() {
   vi.doMock("@tauri-apps/api/event", () => ({
     listen: mockListen,
   }));
+  vi.doMock("../dialogs.ts", () => ({
+    showConfirm: mockShowConfirm,
+  }));
   const drawer = await import("../bottom-drawer.ts");
   drawer.initDrawer();
   const transfers = await import("../transfers.ts");
@@ -82,6 +86,8 @@ beforeEach(() => {
   });
   mockListen.mockReset();
   mockListen.mockResolvedValue(() => {});
+  mockShowConfirm.mockReset();
+  mockShowConfirm.mockResolvedValue(false);
   localStorage.clear();
   renderFixture();
 });
@@ -134,6 +140,113 @@ describe("transfers queue UI", () => {
     await vi.waitFor(() => {
       expect(list.textContent).not.toContain("photo.png");
     });
+  });
+
+  it("serializes unconditional-write consent and applies one batch choice", async () => {
+    const promptResolvers: Array<(value: boolean) => void> = [];
+    mockShowConfirm.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          promptResolvers.push(resolve);
+        }),
+    );
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 3;
+    state.createOnlyCapabilities = {
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    };
+    await transfers.initTransferQueueUI();
+
+    transfers.enqueuePaths(
+      ["C:\\tmp\\one.txt", "C:\\tmp\\two.txt", "C:\\tmp\\three.txt"],
+      "uploads/",
+    );
+
+    await vi.waitFor(() => expect(mockShowConfirm).toHaveBeenCalledTimes(1));
+    promptResolvers.shift()?.(true);
+    await vi.waitFor(() => expect(mockShowConfirm).toHaveBeenCalledTimes(2));
+    expect(mockShowConfirm.mock.calls[1]?.[0]).toBe("Apply Choice");
+    promptResolvers.shift()?.(true);
+
+    await vi.waitFor(() => {
+      const uploadCalls = mockInvoke.mock.calls.filter(
+        ([cmd]) => cmd === "upload_object",
+      );
+      expect(uploadCalls).toHaveLength(3);
+      for (const [, payload] of uploadCalls) {
+        expect(payload).toEqual(expect.objectContaining({ overwrite: true }));
+      }
+    });
+    expect(mockShowConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports declined unconditional writes as cancellations", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    state.createOnlyCapabilities = {
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    };
+    await transfers.initTransferQueueUI();
+
+    transfers.enqueuePaths(["C:\\tmp\\declined.txt"], "uploads/");
+
+    await vi.waitFor(() => expect(mockShowConfirm).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("activity-list") as HTMLDivElement)
+          .textContent,
+      ).toContain("unconditional write was not authorized");
+    });
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "upload_object")).toBe(
+      false,
+    );
+    expect(
+      (document.getElementById("activity-list") as HTMLDivElement).textContent,
+    ).not.toContain("destination exists");
+  });
+
+  it("rechecks explicit create-only copy intent against provider capability", async () => {
+    mockShowConfirm.mockResolvedValueOnce(true);
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    state.createOnlyCapabilities = {
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    };
+    await transfers.initTransferQueueUI();
+
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "copy",
+        sourceBucket: "source",
+        sourceKey: "old.txt",
+        fileName: "old.txt",
+        destinationBucket: "destination",
+        destinationKey: "new.txt",
+        overwrite: false,
+        size: 10,
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "copy_object_to",
+        expect.objectContaining({
+          srcKey: "old.txt",
+          dstKey: "new.txt",
+          overwrite: true,
+        }),
+      );
+    });
+    expect(mockShowConfirm).toHaveBeenCalledTimes(1);
   });
 
   it("marks transfer toggle idle after completed history is cleared", async () => {
@@ -440,7 +553,12 @@ describe("transfers queue UI", () => {
       });
     });
 
-    mockInvoke.mockRejectedValueOnce(new Error("upload failed"));
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") return false;
+      if (cmd === "upload_object") throw new Error("upload failed");
+      if (cmd === "head_object") return { content_length: 0 };
+      return undefined;
+    });
     transfers.enqueuePaths(["C:\\tmp\\second.txt"], "uploads/");
     await flushMicrotasks(20);
     await vi.waitFor(() => {
@@ -1055,6 +1173,7 @@ describe("transfers queue UI", () => {
       srcKey: receipt.source_key,
       dstBucket: "destination-bucket",
       dstKey: receipt.destination_key,
+      overwrite: false,
       transferId: expect.any(Number),
       connectionId: "test-connection",
     });
@@ -1125,6 +1244,7 @@ describe("transfers queue UI", () => {
       expect.objectContaining({
         srcPrefix: "docs/folder/",
         dstPrefix: "archive/folder/",
+        overwrite: false,
         connectionId: "test-connection",
         collectReceipts: true,
       }),

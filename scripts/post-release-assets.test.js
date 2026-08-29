@@ -19,7 +19,7 @@ import {
 } from "./post-release-assets.js";
 
 const STABLE_VERSION = "0.11.0";
-const BETA_VERSION = "0.11.0-beta.4";
+const BETA_VERSION = "0.11.0-beta.5";
 
 test("module entrypoint comparison tolerates Windows path casing", () => {
   const scriptUrl = new URL("./post-release-assets.js", import.meta.url);
