@@ -226,9 +226,11 @@
             id="inspector-backdrop"
             class="inspector-backdrop"
             aria-label="Close inspector"
+            aria-hidden="true"
+            tabindex="-1"
             hidden
           ></button>
-          <aside id="bucket-panel" class="sidebar">
+          <aside id="bucket-panel" class="sidebar" aria-label="Buckets">
             <div class="sidebar__header sidebar__header--stacked">
               <span>Buckets</span>
               <input
@@ -263,6 +265,8 @@
                   class="btn btn--icon sidebar-toggle"
                   title="Toggle buckets"
                   aria-label="Toggle buckets"
+                  aria-controls="bucket-panel"
+                  aria-expanded="false"
                 >
                   <span class="lucide-icon" data-icon="database"></span>
                 </button>
@@ -374,6 +378,8 @@
                   title="Inspector (Ctrl+Shift+I)"
                   aria-label="Toggle inspector (Ctrl+Shift+I)"
                   aria-pressed="false"
+                  aria-expanded="false"
+                  aria-controls="inspector-panel"
                 >
                   <span class="lucide-icon" data-icon="sidebar"></span>
                 </button>
@@ -1677,6 +1683,13 @@
             Show
           </button>
         </div>
+        <p
+          id="dialog-validation-error"
+          class="dialog-validation-error"
+          role="alert"
+          aria-live="assertive"
+          hidden
+        ></p>
         <div class="dialog-box__actions">
           <button id="dialog-cancel" class="btn btn--ghost">Cancel</button>
           <button id="dialog-ok" class="btn btn--primary">OK</button>

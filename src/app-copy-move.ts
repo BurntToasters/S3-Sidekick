@@ -17,6 +17,7 @@ import { setStatus } from "./app-status.ts";
 import { getSelectedFileKeys, getSelectedPrefixes } from "./app-selection.ts";
 import {
   resolveObjectConflict,
+  resolveAbsentObjectWriteIntent,
   resolveConflictChoice,
   type ConflictPromptSession,
 } from "./app-conflicts.ts";
@@ -32,6 +33,7 @@ const RECENT_COPY_MOVE_DESTS_STORAGE_KEY =
   "s3-sidekick.recent-copy-move-destinations.v1";
 const MOVE_UNVERSIONED_WARNING_KEY = "s3-sidekick.move-unversioned-warning.v1";
 const RECENT_DESTINATION_LIMIT = 8;
+let copyMoveDialogGeneration = 0;
 
 function readRecentCopyMoveDestinations(): RecentCopyMoveDestination[] {
   try {
@@ -89,6 +91,7 @@ export function openCopyMoveDialog(): void {
   const fileKeys = getSelectedFileKeys();
   const prefixes = getSelectedPrefixes();
   if (fileKeys.length === 0 && prefixes.length === 0) return;
+  const dialogGeneration = ++copyMoveDialogGeneration;
 
   let sourceSnap: ConnectionSnapshot;
   try {
@@ -259,7 +262,11 @@ export function openCopyMoveDialog(): void {
         },
       );
 
-      if (seq !== loadFolderSeq) return;
+      if (
+        dialogGeneration !== copyMoveDialogGeneration ||
+        seq !== loadFolderSeq
+      )
+        return;
 
       browserList.innerHTML = "";
 
@@ -287,6 +294,7 @@ export function openCopyMoveDialog(): void {
         browserList.appendChild(btn);
       }
     } catch {
+      if (dialogGeneration !== copyMoveDialogGeneration) return;
       browserList.innerHTML =
         '<div class="copy-move-browser-empty">Failed to load folders</div>';
     }
@@ -341,7 +349,19 @@ export function openCopyMoveDialog(): void {
     if (!browserPanel.hidden) void loadFolders("");
   };
 
+  let operationGeneration = 0;
+  const runIsCurrent = (runGeneration: number): boolean =>
+    dialogGeneration === copyMoveDialogGeneration &&
+    runGeneration === operationGeneration;
+
   const closeFn = () => {
+    // A stale async run from an earlier dialog must not close a dialog that was
+    // opened later against the same shared DOM nodes.
+    if (dialogGeneration !== copyMoveDialogGeneration) return;
+    copyBtn.disabled = false;
+    moveBtn.disabled = false;
+    copyMoveDialogGeneration += 1;
+    operationGeneration += 1;
     overlay.classList.remove("active");
     browserPanel.hidden = true;
   };
@@ -352,6 +372,7 @@ export function openCopyMoveDialog(): void {
 
   const runCopy = async (move: boolean) => {
     if (operationInFlight) return;
+    const runGeneration = ++operationGeneration;
     if (sourceChanged()) {
       setStatus(
         `${move ? "Move" : "Copy"} cancelled because connection or selection changed.`,
@@ -386,6 +407,7 @@ export function openCopyMoveDialog(): void {
             okDanger: true,
           },
         );
+        if (!runIsCurrent(runGeneration)) return;
         if (!proceed) return;
         try {
           localStorage.setItem(MOVE_UNVERSIONED_WARNING_KEY, "1");
@@ -419,13 +441,14 @@ export function openCopyMoveDialog(): void {
           state.objects.find((object) => object.key === fileKeys[0])?.size ??
           undefined;
         const intent = await resolveObjectConflict(
+          sourceSnap.connectionId,
           dstBucket,
           dstPath,
           conflictSession,
           false,
-          sourceSnap.connectionId,
           { operation: "copy", byteLength: sourceSize },
         );
+        if (!runIsCurrent(runGeneration)) return;
         if (intent === "skip") {
           setStatus(
             `Skipped "${basename(fileKeys[0])}" (destination exists).`,
@@ -447,7 +470,7 @@ export function openCopyMoveDialog(): void {
           sourceKey: fileKeys[0],
           destinationBucket: dstBucket,
           destinationKey: dstPath,
-          conflictResolution: intent.overwrite ? "replace" : "ask",
+          conflictResolution: state.currentSettings.conflictPolicy,
           overwrite: intent.overwrite,
           ...(sourceSize === undefined ? {} : { size: sourceSize }),
         });
@@ -459,13 +482,14 @@ export function openCopyMoveDialog(): void {
             state.objects.find((object) => object.key === key)?.size ??
             undefined;
           const intent = await resolveObjectConflict(
+            sourceSnap.connectionId,
             dstBucket,
             dstKey,
             conflictSession,
             true,
-            sourceSnap.connectionId,
             { operation: "copy", byteLength: sourceSize },
           );
+          if (!runIsCurrent(runGeneration)) return;
           if (intent === "skip") {
             skippedFiles += 1;
             continue;
@@ -481,7 +505,7 @@ export function openCopyMoveDialog(): void {
             sourceKey: key,
             destinationBucket: dstBucket,
             destinationKey: dstKey,
-            conflictResolution: intent.overwrite ? "replace" : "ask",
+            conflictResolution: state.currentSettings.conflictPolicy,
             overwrite: intent.overwrite,
             ...(sourceSize === undefined ? {} : { size: sourceSize }),
           });
@@ -500,9 +524,11 @@ export function openCopyMoveDialog(): void {
               delimiter: "",
               continuationToken: "",
             });
+            if (!runIsCurrent(runGeneration)) return;
             folderHasConflict =
               existing.objects.length > 0 || existing.prefixes.length > 0;
           } catch (err) {
+            if (!runIsCurrent(runGeneration)) return;
             folderHasConflict = true;
             logActivity(
               `Could not check whether ${dstBucket}/${dstPrefix} exists (${friendlyError(err)}). ` +
@@ -524,6 +550,7 @@ export function openCopyMoveDialog(): void {
                 conflictSession,
                 true,
               );
+              if (!runIsCurrent(runGeneration)) return;
             }
             if (decision === "skip") {
               skippedFolders += 1;
@@ -536,8 +563,22 @@ export function openCopyMoveDialog(): void {
               sourcePrefix: srcPrefix,
               destinationBucket: dstBucket,
               destinationPrefix: dstPrefix,
-              conflictResolution: decision,
+              conflictResolution: state.currentSettings.conflictPolicy,
+              overwrite: true,
             });
+            continue;
+          }
+
+          const absentIntent =
+            state.currentSettings.conflictPolicy === "replace" ||
+            conflictSession.applyAll === "replace"
+              ? { overwrite: true }
+              : await resolveAbsentObjectWriteIntent(conflictSession, true, {
+                  operation: "copy",
+                });
+          if (!runIsCurrent(runGeneration)) return;
+          if (absentIntent === "cancel") {
+            cancelledWrites += 1;
             continue;
           }
           queuedEntries.push({
@@ -547,6 +588,8 @@ export function openCopyMoveDialog(): void {
             sourcePrefix: srcPrefix,
             destinationBucket: dstBucket,
             destinationPrefix: dstPrefix,
+            conflictResolution: state.currentSettings.conflictPolicy,
+            overwrite: absentIntent.overwrite,
           });
         }
       }
@@ -560,6 +603,7 @@ export function openCopyMoveDialog(): void {
         return;
       }
 
+      if (!runIsCurrent(runGeneration)) return;
       if (sourceChanged()) {
         setStatus(
           `${move ? "Move" : "Copy"} cancelled because connection or selection changed.`,
@@ -591,6 +635,7 @@ export function openCopyMoveDialog(): void {
       closeFn();
       clearSelection();
     } catch (err) {
+      if (!runIsCurrent(runGeneration)) return;
       setStatus(`${move ? "Move" : "Copy"} failed: ${friendlyError(err)}`);
       logActivity(
         `${move ? "Move" : "Copy"} failed: ${friendlyError(err)}`,
@@ -598,8 +643,10 @@ export function openCopyMoveDialog(): void {
       );
     } finally {
       operationInFlight = false;
-      copyBtn.disabled = false;
-      moveBtn.disabled = false;
+      if (dialogGeneration === copyMoveDialogGeneration) {
+        copyBtn.disabled = false;
+        moveBtn.disabled = false;
+      }
     }
   };
 

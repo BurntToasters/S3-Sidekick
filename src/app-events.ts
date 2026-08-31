@@ -116,6 +116,8 @@ import {
   handleBucketContextMenu,
 } from "./app-context-menu.ts";
 
+let dragDropUnlisten: (() => void) | null = null;
+
 export function wireEvents(): void {
   dom.connectBtn.addEventListener("click", handleConnect);
   dom.disconnectBtn.addEventListener("click", handleDisconnect);
@@ -333,6 +335,8 @@ export function wireEvents(): void {
   window.addEventListener("beforeunload", () => {
     disposeFilterInputDebounce();
     disposeModalLayerObserver();
+    dragDropUnlisten?.();
+    dragDropUnlisten = null;
     void disposeTransferQueueUI();
   });
 
@@ -399,9 +403,11 @@ export function wireEvents(): void {
     .getElementById("security-lock-btn")!
     .addEventListener("click", () => {
       void (async () => {
+        // Disconnect first so the backend cancels and drains operations that
+        // already cloned the S3 client before encrypted credentials are locked.
+        if (state.connected && !(await handleDisconnect())) return;
         const locked = await handleLockNow(setStatus);
         if (locked) {
-          if (state.connected) await handleDisconnect();
           setConnectionInputs("", "", "", "");
           clearBookmarks();
           refreshBookmarkBar();
@@ -707,42 +713,62 @@ export function wireEvents(): void {
   objectPanel.addEventListener("drop", suppressDrag);
   dropOverlay.addEventListener("drop", suppressDrag);
 
-  void getCurrentWebview().onDragDropEvent((event) => {
-    if (event.payload.type === "enter") {
-      if (state.connected && state.currentBucket) {
-        dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
-        dropOverlay.hidden = false;
-      }
-      objectPanel.classList.add("object-panel--dragover");
-    } else if (event.payload.type === "leave") {
-      objectPanel.classList.remove("object-panel--dragover");
-      dropOverlay.hidden = true;
-    } else if (event.payload.type === "drop") {
-      objectPanel.classList.remove("object-panel--dragover");
-      dropOverlay.hidden = true;
+  void getCurrentWebview()
+    .onDragDropEvent((event) => {
+      if (event.payload.type === "enter") {
+        if (state.connected && state.currentBucket) {
+          dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
+          dropOverlay.hidden = false;
+        }
+        objectPanel.classList.add("object-panel--dragover");
+      } else if (event.payload.type === "leave") {
+        objectPanel.classList.remove("object-panel--dragover");
+        dropOverlay.hidden = true;
+      } else if (event.payload.type === "drop") {
+        objectPanel.classList.remove("object-panel--dragover");
+        dropOverlay.hidden = true;
 
-      if (!state.connected || !state.currentBucket) {
-        setStatus("Connect to a bucket first.");
-        return;
-      }
+        if (!state.connected || !state.currentBucket) {
+          setStatus("Connect to a bucket first.");
+          return;
+        }
 
-      const paths = event.payload.paths;
-      if (paths.length > 0) {
-        void queueDroppedPaths(paths, state.currentPrefix);
-      } else {
-        setStatus("No dropped files detected. Try Upload Files instead.", 5000);
+        const paths = event.payload.paths;
+        if (paths.length > 0) {
+          void queueDroppedPaths(paths, state.currentPrefix);
+        } else {
+          setStatus(
+            "No dropped files detected. Try Upload Files instead.",
+            5000,
+          );
+        }
       }
-    }
-  });
+    })
+    .then((unlisten) => {
+      dragDropUnlisten?.();
+      dragDropUnlisten = unlisten;
+    })
+    .catch((err) => {
+      console.error("Failed to register native drag and drop:", err);
+      logActivity(
+        `Native drag and drop unavailable: ${friendlyError(err)}`,
+        "warning",
+      );
+    });
 
   setTransferCompleteHandler(async (summary) => {
     if (summary.hadUpload && state.connected && state.currentBucket) {
+      const connectionId = state.connectionId;
       const bucket = state.currentBucket;
       const prefix = state.currentPrefix;
       try {
-        await refreshObjects(bucket, prefix);
+        const committed = await refreshObjects(bucket, prefix, {
+          supersedePending: false,
+        });
         if (
+          committed &&
           state.connected &&
+          state.connectionId === connectionId &&
           state.currentBucket === bucket &&
           state.currentPrefix === prefix
         ) {

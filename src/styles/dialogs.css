@@ -132,3 +132,14 @@ body.modal-open .dialog-overlay.active {
 .modal--wide {
   width: min(560px, 94vw);
 }
+
+.dialog-validation-error {
+  margin: -12px 0 20px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.dialog-box__input[aria-invalid="true"] {
+  border-color: var(--danger);
+}

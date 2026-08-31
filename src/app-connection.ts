@@ -25,7 +25,7 @@ import {
 import { friendlyError } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
-import { clearFilterInputDebounce } from "./app-layout.ts";
+import { clearFilterInputDebounce, setSidebarOpen } from "./app-layout.ts";
 import { setInspectorOpen } from "./inspector.ts";
 import { showConfirm } from "./dialogs.ts";
 
@@ -351,7 +351,8 @@ export async function handleConnect(): Promise<void> {
       state.connectionId === establishedConnectionId;
     if (stillOwnSession) {
       try {
-        await disconnect(establishedConnectionId);
+        const disconnected = await disconnect(establishedConnectionId);
+        if (!disconnected) return;
       } catch (disconnectErr) {
         const message = `Connection setup failed, and cleanup failed: ${friendlyError(disconnectErr)}`;
         setConnectionFormError(message);
@@ -385,15 +386,9 @@ export async function handleConnect(): Promise<void> {
 }
 
 export async function handleDisconnect(): Promise<boolean> {
-  clearFilterInputDebounce();
-  state.filterText = "";
-  const filterInput = document.getElementById(
-    "filter-input",
-  ) as HTMLInputElement | null;
-  if (filterInput) filterInput.value = "";
-
+  let disconnected: boolean;
   try {
-    await disconnect();
+    disconnected = await disconnect();
   } catch (err) {
     logActivity(`Disconnect error: ${err}`, "error");
     setConnectionUI(state.connected);
@@ -401,11 +396,28 @@ export async function handleDisconnect(): Promise<boolean> {
     setConnectButtonBusy(false);
     return false;
   }
+  // A resolved old disconnect may have been superseded by a newer session.
+  // Only the call that actually cleared connection state owns the UI teardown.
+  if (!disconnected || state.connected) {
+    setConnectButtonBusy(false);
+    return false;
+  }
+
+  clearFilterInputDebounce();
+  state.filterText = "";
+  const filterInput = document.getElementById(
+    "filter-input",
+  ) as HTMLInputElement | null;
+  if (filterInput) filterInput.value = "";
+
   clearNavHistory();
   clearSelection();
   setInspectorOpen(false);
+  // Release mobile sidebar-owned inert state before swapping to the reconnect UI.
+  setSidebarOpen(false);
   setConnectionUI(false);
   setConnectButtonBusy(false);
+  dom.connectBtn.focus();
   showEmptyState();
   setStatus("Disconnected.", 5000);
   logActivity("Disconnected from endpoint.", "info");

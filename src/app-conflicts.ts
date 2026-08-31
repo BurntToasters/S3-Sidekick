@@ -165,11 +165,11 @@ export async function resolveAbsentObjectWriteIntent(
 }
 
 export async function resolveObjectConflict(
+  connectionId: string,
   bucket: string,
   key: string,
   session: ConflictPromptSession,
   hasBatchRemainder: boolean,
-  connectionId: string,
   options: ObjectConflictOptions,
 ): Promise<ObjectWriteIntent> {
   const conflictPolicy = state.currentSettings.conflictPolicy;
@@ -190,6 +190,9 @@ export async function resolveObjectConflict(
     exists = true;
   }
   if (!exists) {
+    if (conflictPolicy === "replace" || session.applyAll === "replace") {
+      return { overwrite: true };
+    }
     return resolveAbsentObjectWriteIntent(session, hasBatchRemainder, options);
   }
   if (conflictPolicy === "replace") return { overwrite: true };

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const connectMock = vi.fn(async () => "us-east-1");
-const disconnectMock = vi.fn(async () => undefined);
+const disconnectMock = vi.fn(async () => true);
 const saveConnectionMock = vi.fn(async () => undefined);
 const refreshBucketsMock = vi.fn(async () => undefined);
 const selectBucketMock = vi.fn(async () => undefined);
@@ -85,7 +85,7 @@ describe("connection UX polish", () => {
   beforeEach(async () => {
     vi.resetModules();
     connectMock.mockReset().mockResolvedValue("us-east-1");
-    disconnectMock.mockReset().mockResolvedValue(undefined);
+    disconnectMock.mockReset().mockResolvedValue(true);
     saveConnectionMock.mockReset().mockResolvedValue(undefined);
     refreshBucketsMock.mockReset().mockResolvedValue(undefined);
     selectBucketMock.mockReset().mockResolvedValue(undefined);

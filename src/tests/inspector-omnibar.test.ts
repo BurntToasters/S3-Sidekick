@@ -46,15 +46,26 @@ describe("inspector chrome", () => {
       })),
     });
     document.body.innerHTML = `
-      <div id="main-layout"></div>
-      <aside id="inspector-panel" hidden></aside>
-      <div id="inspector-resizer" hidden></div>
-      <button id="inspector-backdrop" hidden></button>
-      <button id="btn-inspector"></button>
-      <div id="inspector-pane-preview" hidden></div>
-      <div id="inspector-pane-info" hidden></div>
-      <div id="inspector-empty" hidden></div>
-      <div id="inspector-preview-body"></div>
+      <div id="app">
+        <div id="main-layout">
+          <div id="inspector-background">
+            <button id="btn-inspector"></button>
+          </div>
+          <button id="inspector-backdrop" hidden></button>
+          <aside id="inspector-panel" role="complementary" aria-label="Inspector" hidden>
+            <span id="inspector-header-title">Inspector</span>
+            <button type="button" class="inspector-tab" data-inspector-tab="preview" aria-selected="true">Preview</button>
+            <button type="button" class="inspector-tab" data-inspector-tab="properties" aria-selected="false">Properties</button>
+            <button id="inspector-close">Close</button>
+            <div id="inspector-pane-preview" hidden>
+              <div id="inspector-preview-body"></div>
+            </div>
+            <div id="inspector-pane-info" hidden></div>
+            <div id="inspector-empty" hidden></div>
+          </aside>
+          <div id="inspector-resizer" hidden></div>
+        </div>
+      </div>
       <div id="preview-body"></div>
       <div id="preview-overlay"></div>
     `;
@@ -82,6 +93,66 @@ describe("inspector chrome", () => {
     const info = document.getElementById("inspector-pane-info") as HTMLElement;
     expect(empty.hidden).toBe(false);
     expect(info.hidden).toBe(true);
+  });
+
+  it("treats the mobile inspector as a trapped modal and restores focus", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query === "(max-width: 900px)",
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const toggle = document.getElementById(
+      "btn-inspector",
+    ) as HTMLButtonElement;
+    const background = document.getElementById(
+      "inspector-background",
+    ) as HTMLElement & { inert: boolean };
+    toggle.focus();
+
+    const inspector = await import("../inspector.ts");
+    inspector.setInspectorOpen(true);
+
+    const panel = document.getElementById("inspector-panel") as HTMLElement;
+    const previewTab = panel.querySelector<HTMLElement>(
+      '[data-inspector-tab="preview"]',
+    )!;
+    const close = document.getElementById(
+      "inspector-close",
+    ) as HTMLButtonElement;
+    expect(panel.getAttribute("role")).toBe("dialog");
+    expect(panel.getAttribute("aria-modal")).toBe("true");
+    expect(panel.getAttribute("aria-labelledby")).toBe(
+      "inspector-header-title",
+    );
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(background.inert).toBe(true);
+    expect(background.getAttribute("aria-hidden")).toBe("true");
+    expect(document.activeElement).toBe(previewTab);
+
+    close.focus();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+    );
+    expect(document.activeElement).toBe(previewTab);
+    previewTab.focus();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+      }),
+    );
+    expect(document.activeElement).toBe(close);
+
+    inspector.setInspectorOpen(false);
+    expect(panel.getAttribute("role")).toBe("complementary");
+    expect(panel.hasAttribute("aria-modal")).toBe(false);
+    expect(background.inert).toBe(false);
+    expect(background.hasAttribute("aria-hidden")).toBe(false);
+    expect(document.activeElement).toBe(toggle);
   });
 
   it("wires every info-tabs region for File Info switching", () => {

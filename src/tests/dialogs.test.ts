@@ -14,9 +14,11 @@ describe("dialogs", () => {
           <div id="dialog-message"></div>
           <div class="dialog-input-wrapper">
             <span id="dialog-input-icon"></span>
+            <label id="dialog-input-label" for="dialog-input">Value</label>
             <input id="dialog-input" />
             <button id="dialog-input-reveal" hidden></button>
           </div>
+          <p id="dialog-validation-error" role="alert" hidden></p>
           <div class="dialog-box__actions">
             <button id="dialog-cancel"></button>
             <button id="dialog-ok"></button>
@@ -24,6 +26,11 @@ describe("dialogs", () => {
         </div>
       </div>
     `;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: vi.fn().mockReturnValue({ matches: false }),
+    });
     if (!HTMLElement.prototype.animate) {
       Object.defineProperty(HTMLElement.prototype, "animate", {
         value: vi.fn(() => ({ finished: Promise.resolve() })),
@@ -67,6 +74,40 @@ describe("dialogs", () => {
       new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
     );
     await expect(promptPromise).resolves.toBe("valid");
+  });
+
+  it("announces validation errors, clears ARIA state, and honors reduced motion", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn().mockReturnValue({ matches: true }),
+    });
+    const animate = vi.spyOn(HTMLElement.prototype, "animate");
+    animate.mockClear();
+    const dialogs = await import("../dialogs.ts");
+    const input = document.getElementById("dialog-input") as HTMLInputElement;
+    const error = document.getElementById(
+      "dialog-validation-error",
+    ) as HTMLElement;
+    const promptPromise = dialogs.showPrompt("Name", "Type value", {
+      validationMessage: "Use a unique name.",
+      validate: async () => false,
+    });
+
+    input.value = "duplicate";
+    (document.getElementById("dialog-ok") as HTMLButtonElement).click();
+    await tick();
+
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-errormessage")).toBe(error.id);
+    expect(error.hidden).toBe(false);
+    expect(error.textContent).toBe("Use a unique name.");
+    expect(animate).not.toHaveBeenCalled();
+
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(input.hasAttribute("aria-invalid")).toBe(false);
+    expect(error.hidden).toBe(true);
+    (document.getElementById("dialog-cancel") as HTMLButtonElement).click();
+    await expect(promptPromise).resolves.toBeNull();
   });
 
   it("showPrompt resets OK when validation is cancelled", async () => {

@@ -30,11 +30,11 @@ describe("app-conflicts", () => {
     const { resolveObjectConflict } = await import("../app-conflicts.ts");
 
     const intent = await resolveObjectConflict(
+      "frozen-connection",
       "bucket-a",
       "docs/new.txt",
       { applyAll: null },
       false,
-      "frozen-connection",
       { operation: "copy" },
     );
 
@@ -53,11 +53,11 @@ describe("app-conflicts", () => {
     const { resolveObjectConflict } = await import("../app-conflicts.ts");
 
     const intent = await resolveObjectConflict(
+      "frozen-connection",
       "bucket-a",
       "docs/existing.txt",
       { applyAll: null },
       false,
-      "frozen-connection",
       { operation: "copy" },
     );
 
@@ -71,11 +71,11 @@ describe("app-conflicts", () => {
     const { resolveObjectConflict } = await import("../app-conflicts.ts");
 
     const intent = await resolveObjectConflict(
+      "frozen-connection",
       "bucket-a",
       "docs/new.txt",
       { applyAll: null },
       false,
-      "frozen-connection",
       { operation: "upload" },
     );
 
@@ -94,11 +94,11 @@ describe("app-conflicts", () => {
     const { resolveObjectConflict } = await import("../app-conflicts.ts");
 
     const intent = await resolveObjectConflict(
+      "frozen-connection",
       "bucket-a",
       "docs/new.txt",
       { applyAll: null },
       false,
-      "frozen-connection",
       { operation: "upload" },
     );
 
@@ -118,11 +118,11 @@ describe("app-conflicts", () => {
     const { resolveObjectConflict } = await import("../app-conflicts.ts");
 
     const intent = await resolveObjectConflict(
+      "frozen-connection",
       "bucket-a",
       "docs/new.txt",
       { applyAll: null },
       false,
-      "frozen-connection",
       { operation: "copy" },
     );
 

@@ -5,14 +5,15 @@
 #![allow(clippy::too_many_arguments)]
 
 use aws_sdk_s3::types::{
-    ChecksumAlgorithm, ChecksumType, Delete, MetadataDirective, ObjectCannedAcl, ObjectIdentifier,
+    ChecksumAlgorithm, ChecksumMode, ChecksumType, Delete, MetadataDirective, ObjectCannedAcl,
+    ObjectIdentifier,
 };
 use aws_sdk_s3::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -23,8 +24,8 @@ use zeroize::Zeroize;
 use crate::{
     load_transfer_checkpoint_json, lock_s3_state, remove_transfer_checkpoint,
     save_transfer_checkpoint_json, validate_destination_path,
-    validate_destination_path_allow_overwrite, validate_existing_path, AppState,
-    StorageProviderKind,
+    validate_destination_path_allow_overwrite, validate_existing_path,
+    validate_transfer_recovery_session, AppState, StorageProviderKind,
 };
 
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
@@ -281,32 +282,77 @@ impl CancelFlag {
 
 type CancelToken = Arc<CancelFlag>;
 
-static ACTIVE_TRANSFERS: OnceLock<Mutex<HashMap<u32, CancelToken>>> = OnceLock::new();
-static TRANSFERS_DISABLED: AtomicBool = AtomicBool::new(false);
-static ROLLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
-fn active_transfers() -> &'static Mutex<HashMap<u32, CancelToken>> {
-    ACTIVE_TRANSFERS.get_or_init(|| Mutex::new(HashMap::new()))
+struct ActiveTransfer {
+    transfer_id: Option<u32>,
+    token: CancelToken,
 }
 
-/// Registers a running transfer and deregisters it on drop.
+#[derive(Default)]
+struct TransferRegistryState {
+    disabled: bool,
+    next_registration_id: u64,
+    registrations: HashMap<u64, ActiveTransfer>,
+}
+
+static TRANSFER_REGISTRY: OnceLock<Mutex<TransferRegistryState>> = OnceLock::new();
+static ROLLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn transfer_registry() -> &'static Mutex<TransferRegistryState> {
+    TRANSFER_REGISTRY.get_or_init(|| Mutex::new(TransferRegistryState::default()))
+}
+
+fn lock_transfer_registry() -> Result<std::sync::MutexGuard<'static, TransferRegistryState>, String>
+{
+    transfer_registry()
+        .lock()
+        .map_err(|_| "Transfer registry is unavailable".to_string())
+}
+
+/// Registers running S3 activity and deregisters it on drop.
+///
+/// The frontend ID is only a cancellation label. Every operation receives a
+/// unique backend registration so a reloaded webview or failed localStorage
+/// write cannot displace an older operation that happens to reuse the same ID.
 struct TransferGuard {
-    transfer_id: u32,
+    registration_id: u64,
     token: CancelToken,
 }
 
 impl TransferGuard {
-    fn register(transfer_id: u32) -> Self {
+    #[cfg(test)]
+    fn register(transfer_id: u32) -> Result<Self, String> {
+        Self::register_optional(Some(transfer_id))
+    }
+
+    fn register_optional(transfer_id: Option<u32>) -> Result<Self, String> {
         let token: CancelToken = Arc::new(CancelFlag::default());
-        if TRANSFERS_DISABLED.load(Ordering::Acquire) {
-            token.cancel();
+        let mut registry = lock_transfer_registry()?;
+        if registry.disabled {
+            return Err(cancelled_error());
         }
-        if let Ok(mut map) = active_transfers().lock() {
-            // A duplicate id means the frontend reused it. Replace the stale
-            // entry rather than inheriting its cancellation state.
-            map.insert(transfer_id, Arc::clone(&token));
-        }
-        Self { transfer_id, token }
+        let start = registry.next_registration_id;
+        let mut candidate = start;
+        let registration_id = loop {
+            candidate = candidate.wrapping_add(1);
+            if !registry.registrations.contains_key(&candidate) {
+                registry.next_registration_id = candidate;
+                break candidate;
+            }
+            if candidate == start {
+                return Err("Transfer registry is full".to_string());
+            }
+        };
+        registry.registrations.insert(
+            registration_id,
+            ActiveTransfer {
+                transfer_id,
+                token: Arc::clone(&token),
+            },
+        );
+        Ok(Self {
+            registration_id,
+            token,
+        })
     }
 
     fn token(&self) -> CancelToken {
@@ -316,57 +362,84 @@ impl TransferGuard {
     fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
     }
-}
 
-fn transfer_cancel_context(transfer_id: Option<u32>) -> (Option<TransferGuard>, CancelToken) {
-    match transfer_id {
-        Some(id) => {
-            let guard = TransferGuard::register(id);
-            let token = guard.token();
-            (Some(guard), token)
+    /// Run a short commit while registration remains open. Holding the registry
+    /// lock makes the final connect install atomic with respect to gate closure.
+    fn with_open_registration<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let registry = lock_transfer_registry()?;
+        if registry.disabled
+            || self.is_cancelled()
+            || !registry.registrations.contains_key(&self.registration_id)
+        {
+            return Err(cancelled_error());
         }
-        None => (None, Arc::new(CancelFlag::default())),
+        action()
     }
 }
 
 impl Drop for TransferGuard {
     fn drop(&mut self) {
-        if let Ok(mut map) = active_transfers().lock() {
-            // Only remove our own registration; a newer transfer may have taken
-            // the slot if the frontend reused the id.
-            if map
-                .get(&self.transfer_id)
-                .map(|existing| Arc::ptr_eq(existing, &self.token))
-                .unwrap_or(false)
-            {
-                map.remove(&self.transfer_id);
-            }
+        if let Ok(mut registry) = transfer_registry().lock() {
+            registry.registrations.remove(&self.registration_id);
         }
     }
 }
 
 #[tauri::command]
 pub(crate) fn cancel_transfer(transfer_id: u32) {
-    if let Ok(map) = active_transfers().lock() {
-        if let Some(token) = map.get(&transfer_id) {
-            token.cancel();
-        }
+    let tokens = transfer_registry()
+        .lock()
+        .map(|registry| {
+            registry
+                .registrations
+                .values()
+                .filter(|active| active.transfer_id == Some(transfer_id))
+                .map(|active| Arc::clone(&active.token))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for token in tokens {
+        token.cancel();
     }
 }
 
-pub(crate) fn resume_transfers_after_failed_reset() {
-    TRANSFERS_DISABLED.store(false, Ordering::Release);
+fn reopen_transfer_registry() -> Result<(), String> {
+    lock_transfer_registry()?.disabled = false;
+    Ok(())
 }
 
-pub(crate) async fn stop_all_transfers_for_reset() -> Result<(), String> {
-    TRANSFERS_DISABLED.store(true, Ordering::Release);
+pub(crate) fn resume_transfers_after_failed_reset() {
+    // A poisoned registry remains closed: subsequent registrations also fail,
+    // so credential-bearing work can never escape an unobservable drain state.
+    let _ = reopen_transfer_registry();
+}
+
+fn close_transfer_registry() -> Result<Vec<CancelToken>, String> {
+    let mut registry = lock_transfer_registry()?;
+    registry.disabled = true;
+    Ok(registry
+        .registrations
+        .values()
+        .map(|active| Arc::clone(&active.token))
+        .collect())
+}
+
+fn cancel_tokens(tokens: Vec<CancelToken>) {
+    for token in tokens {
+        token.cancel();
+    }
+}
+
+async fn cancel_all_registered_transfers(context: &str) -> Result<(), String> {
     let started = Instant::now();
     loop {
-        let tokens = active_transfers()
-            .lock()
-            .map_err(|_| "Transfer registry is unavailable".to_string())?
+        let tokens = lock_transfer_registry()?
+            .registrations
             .values()
-            .cloned()
+            .map(|active| Arc::clone(&active.token))
             .collect::<Vec<_>>();
         if tokens.is_empty() {
             return Ok(());
@@ -375,10 +448,19 @@ pub(crate) async fn stop_all_transfers_for_reset() -> Result<(), String> {
             token.cancel();
         }
         if started.elapsed() >= Duration::from_secs(30) {
-            return Err("Timed out while stopping active transfers for factory reset".to_string());
+            return Err(format!(
+                "Timed out while stopping active transfers for {}",
+                context
+            ));
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+pub(crate) async fn stop_all_transfers_for_reset() -> Result<(), String> {
+    let tokens = close_transfer_registry()?;
+    cancel_tokens(tokens);
+    cancel_all_registered_transfers("factory reset").await
 }
 
 /// Error returned when a transfer observes cancellation.
@@ -635,15 +717,6 @@ fn detect_storage_provider(endpoint: &str) -> StorageProviderKind {
     StorageProviderKind::Generic
 }
 
-fn require_storage_provider(
-    state: &tauri::State<'_, AppState>,
-    connection_id: &str,
-) -> Result<StorageProviderKind, String> {
-    let s3 = lock_s3_state(state)?;
-    require_connection_session(&s3, connection_id)?;
-    Ok(s3.storage_provider)
-}
-
 fn apply_aws_copy_create_only_guard(
     request: aws_sdk_s3::operation::copy_object::builders::CopyObjectFluentBuilder,
 ) -> aws_sdk_s3::operation::copy_object::builders::CopyObjectFluentBuilder {
@@ -655,9 +728,9 @@ async fn send_copy_object_create_only(
     create_only_strategy: Option<CopyCreateOnlyStrategy>,
 ) -> Result<
     aws_sdk_s3::operation::copy_object::CopyObjectOutput,
-    aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::copy_object::CopyObjectError>,
+    Box<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::copy_object::CopyObjectError>>,
 > {
-    match create_only_strategy {
+    let result = match create_only_strategy {
         None => request.customize().send().await,
         Some(strategy) => match strategy {
             CopyCreateOnlyStrategy::R2DestinationHeader => {
@@ -687,15 +760,22 @@ async fn send_copy_object_create_only(
                     .await
             }
         },
-    }
+    };
+    result.map_err(Box::new)
 }
 
 async fn destination_object_exists(
     client: &aws_sdk_s3::Client,
     bucket: &str,
     key: &str,
+    cancel: &CancelToken,
 ) -> Result<bool, String> {
-    match client.head_object().bucket(bucket).key(key).send().await {
+    let request = client.head_object().bucket(bucket).key(key).send();
+    let result = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    };
+    match result {
         Ok(_) => Ok(true),
         Err(err) if is_not_found(&err) => Ok(false),
         Err(err) => Err(format!("Failed to check destination '{}': {}", key, err)),
@@ -706,15 +786,19 @@ async fn prefix_has_content(
     client: &aws_sdk_s3::Client,
     bucket: &str,
     prefix: &str,
+    cancel: &CancelToken,
 ) -> Result<bool, String> {
-    let output = client
+    let request = client
         .list_objects_v2()
         .bucket(bucket)
         .prefix(prefix)
         .max_keys(1)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to check destination prefix '{}': {}", prefix, e))?;
+        .send();
+    let output = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    }
+    .map_err(|e| format!("Failed to check destination prefix '{}': {}", prefix, e))?;
     Ok(output.key_count().unwrap_or(0) > 0 || !output.common_prefixes().is_empty())
 }
 
@@ -972,9 +1056,10 @@ fn save_checkpoint_payload(
     app: &tauri::AppHandle,
     checkpoint_id: &str,
     payload: &TransferCheckpoint,
+    recovery_session: &str,
 ) -> Result<(), String> {
     let json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    save_transfer_checkpoint_json(app, checkpoint_id, &json)
+    save_transfer_checkpoint_json(app, checkpoint_id, &json, recovery_session)
 }
 
 fn persist_checkpoint_and_advance<F>(
@@ -1050,6 +1135,25 @@ fn sha256_checksum_bytes(bytes: &[u8]) -> Sha256Checksum {
     sha256_checksum_from_digest(&hasher.finalize())
 }
 
+fn sha256_composite_checksum(parts: &[Sha256Checksum]) -> Result<(String, String), String> {
+    if parts.is_empty() {
+        return Err("Cannot calculate a multipart checksum without parts".to_string());
+    }
+    let mut hasher = Sha256::new();
+    for part in parts {
+        let digest = B64
+            .decode(&part.base64)
+            .map_err(|err| format!("Invalid multipart checksum encoding: {}", err))?;
+        if digest.len() != 32 {
+            return Err("Invalid multipart SHA-256 checksum length".to_string());
+        }
+        hasher.update(digest);
+    }
+    let base64 = digest_to_base64(&hasher.finalize());
+    let response_value = format!("{}-{}", base64, parts.len());
+    Ok((base64, response_value))
+}
+
 async fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncReadExt;
     let mut hasher = Sha256::new();
@@ -1098,6 +1202,56 @@ fn expected_checksum_from_head(
     None
 }
 
+async fn expected_download_checksum(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    initial_head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
+    cancel: &CancelToken,
+) -> Result<ExpectedChecksum, String> {
+    if let Some(expected) = expected_checksum_from_head(initial_head) {
+        return Ok(expected);
+    }
+
+    let mut request = client
+        .head_object()
+        .bucket(bucket)
+        .key(key)
+        .checksum_mode(ChecksumMode::Enabled);
+    if let Some(etag) = initial_head
+        .e_tag()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        request = request.if_match(etag);
+    }
+    let request = request.send();
+    let checksum_head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result.map_err(|err| {
+            encode_transfer_error(
+                "checksum_unsupported",
+                false,
+                None,
+                format!(
+                    "Checksum verification was requested, but the provider could not return object checksums: {}",
+                    err
+                ),
+            )
+        })?,
+    };
+
+    expected_checksum_from_head(&checksum_head).ok_or_else(|| {
+        encode_transfer_error(
+            "checksum_unsupported",
+            false,
+            None,
+            "Checksum verification was requested, but the object has no comparable full-object SHA-256 checksum."
+                .to_string(),
+        )
+    })
+}
+
 async fn verify_file_checksum(
     path: &Path,
     expected: &ExpectedChecksum,
@@ -1135,9 +1289,9 @@ async fn verify_file_checksum(
     }
 }
 
-fn verify_upload_checksum_response(
+fn verify_upload_checksum_value(
     actual: Option<&str>,
-    expected: &Sha256Checksum,
+    expected: &str,
     context: &str,
 ) -> Result<(), String> {
     let Some(actual) = actual.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -1151,7 +1305,7 @@ fn verify_upload_checksum_response(
             ),
         ));
     };
-    if actual != expected.base64 {
+    if actual != expected {
         return Err(encode_transfer_error(
             "checksum_mismatch",
             false,
@@ -1160,6 +1314,14 @@ fn verify_upload_checksum_response(
         ));
     }
     Ok(())
+}
+
+fn verify_upload_checksum_response(
+    actual: Option<&str>,
+    expected: &Sha256Checksum,
+    context: &str,
+) -> Result<(), String> {
+    verify_upload_checksum_value(actual, &expected.base64, context)
 }
 
 fn checkpoint_generation_matches(
@@ -1645,21 +1807,113 @@ fn require_connected_client(s3: &crate::S3State, connection_id: &str) -> Result<
     s3.client.clone().ok_or_else(|| "Not connected".to_string())
 }
 
+/// Keeps a stored AWS client clone registered until the clone is dropped.
+///
+/// The explicit drop order matters: the credential-bearing client must go away
+/// before its registry entry, otherwise a drain could observe an empty registry
+/// while a clone from the old session was still alive.
+struct RegisteredClient {
+    client: Option<Client>,
+    provider: StorageProviderKind,
+    guard: Option<TransferGuard>,
+}
+
+impl RegisteredClient {
+    fn new(client: Client, provider: StorageProviderKind, guard: TransferGuard) -> Self {
+        Self {
+            client: Some(client),
+            provider,
+            guard: Some(guard),
+        }
+    }
+
+    fn provider(&self) -> StorageProviderKind {
+        self.provider
+    }
+
+    fn token(&self) -> CancelToken {
+        self.guard
+            .as_ref()
+            .expect("registered client guard is present")
+            .token()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.guard
+            .as_ref()
+            .expect("registered client guard is present")
+            .is_cancelled()
+    }
+}
+
+impl std::ops::Deref for RegisteredClient {
+    type Target = Client;
+
+    fn deref(&self) -> &Self::Target {
+        self.client.as_ref().expect("registered client is present")
+    }
+}
+
+impl Drop for RegisteredClient {
+    fn drop(&mut self) {
+        self.client.take();
+        self.guard.take();
+    }
+}
+
+/// Register before taking `S3State` so closing the registry gate cannot race a
+/// client clone into existence without a corresponding drain entry.
 fn require_client(
     state: &tauri::State<'_, AppState>,
     connection_id: &str,
-) -> Result<Client, String> {
-    let s3 = lock_s3_state(state)?;
-    require_connected_client(&s3, connection_id)
+    transfer_id: Option<u32>,
+) -> Result<RegisteredClient, String> {
+    let guard = TransferGuard::register_optional(transfer_id)?;
+    if guard.is_cancelled() {
+        return Err(cancelled_error());
+    }
+    let (client, provider) = {
+        let s3 = lock_s3_state(state)?;
+        if guard.is_cancelled() {
+            return Err(cancelled_error());
+        }
+        (
+            require_connected_client(&s3, connection_id)?,
+            s3.storage_provider,
+        )
+    };
+    let registered = RegisteredClient::new(client, provider, guard);
+    if registered.is_cancelled() {
+        return Err(cancelled_error());
+    }
+    Ok(registered)
 }
 
 fn require_client_and_bucket_hint(
     state: &tauri::State<'_, AppState>,
     connection_id: &str,
-) -> Result<(Client, Option<String>), String> {
-    let s3 = lock_s3_state(state)?;
-    let client = require_connected_client(&s3, connection_id)?;
-    Ok((client, s3.bucket_hint.clone()))
+    transfer_id: Option<u32>,
+) -> Result<(RegisteredClient, Option<String>), String> {
+    let guard = TransferGuard::register_optional(transfer_id)?;
+    if guard.is_cancelled() {
+        return Err(cancelled_error());
+    }
+    let (client, provider, bucket_hint) = {
+        let s3 = lock_s3_state(state)?;
+        if guard.is_cancelled() {
+            return Err(cancelled_error());
+        }
+        (
+            require_connected_client(&s3, connection_id)?,
+            s3.storage_provider,
+            s3.bucket_hint.clone(),
+        )
+    };
+    let registered = RegisteredClient::new(client, provider, guard);
+    if registered.is_cancelled() {
+        return Err(cancelled_error());
+    }
+    Ok((registered, bucket_hint))
 }
 
 fn require_endpoint(
@@ -1695,8 +1949,17 @@ pub(crate) async fn connect(
     if endpoint.is_empty() {
         return Err("Endpoint is required".to_string());
     }
+
+    // Pending connection attempts are anonymous session activity. Register
+    // before touching credentials or S3State so disconnect/reset can cancel and
+    // drain the attempt without leaving a credential-bearing client behind.
+    let connect_guard = TransferGuard::register_optional(None)?;
+    let cancel = connect_guard.token();
     let connection_generation = {
         let mut s3 = lock_s3_state(&state)?;
+        if connect_guard.is_cancelled() {
+            return Err(cancelled_error());
+        }
         s3.connection_generation = s3.connection_generation.wrapping_add(1);
         s3.connection_generation
     };
@@ -1724,7 +1987,11 @@ pub(crate) async fn connect(
     // Verify connectivity. Try list_buckets first; if that gets AccessDenied
     // (common with scoped keys on DO Spaces), fall back to head_bucket using
     // the bucket extracted from the endpoint URL.
-    let list_result = client.list_buckets().send().await;
+    let list_request = client.list_buckets().send();
+    let list_result = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = list_request => result,
+    };
     if let Err(list_err) = &list_result {
         let is_access_denied = {
             use aws_sdk_s3::error::SdkError;
@@ -1734,12 +2001,13 @@ pub(crate) async fn connect(
         if is_access_denied {
             if let Some(ref bucket) = bucket_hint {
                 // Fall back: verify we can at least reach this specific bucket.
-                client
-                    .head_bucket()
-                    .bucket(bucket)
-                    .send()
-                    .await
-                    .map_err(|e| format_sdk_error("Connection failed", &e))?;
+                let head_request = client.head_bucket().bucket(bucket).send();
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(cancelled_error()),
+                    result = head_request => result
+                        .map(|_| ())
+                        .map_err(|e| format_sdk_error("Connection failed", &e))?,
+                }
             } else {
                 // No bucket hint to fall back on — report the 403.
                 return Err(format_sdk_error("Connection failed", list_err));
@@ -1751,17 +2019,20 @@ pub(crate) async fn connect(
 
     let connection_id = mint_connection_id();
     let storage_provider = detect_storage_provider(&normalized);
-    let mut s3 = lock_s3_state(&state)?;
-    if s3.connection_generation != connection_generation {
-        return Err("Connection attempt superseded".to_string());
-    }
-    s3.client = Some(client);
-    s3.endpoint = normalized;
-    s3.region = resolved_region.clone();
-    s3.bucket_hint = bucket_hint;
-    s3.connection_id = Some(connection_id.clone());
-    s3.connection_identity = Some(identity.clone());
-    s3.storage_provider = storage_provider;
+    connect_guard.with_open_registration(|| {
+        let mut s3 = lock_s3_state(&state)?;
+        if s3.connection_generation != connection_generation {
+            return Err("Connection attempt superseded".to_string());
+        }
+        s3.client = Some(client);
+        s3.endpoint = normalized;
+        s3.region = resolved_region.clone();
+        s3.bucket_hint = bucket_hint;
+        s3.connection_id = Some(connection_id.clone());
+        s3.connection_identity = Some(identity.clone());
+        s3.storage_provider = storage_provider;
+        Ok(())
+    })?;
 
     Ok(ConnectResult {
         region: resolved_region,
@@ -1772,22 +2043,51 @@ pub(crate) async fn connect(
 }
 
 #[tauri::command]
-pub(crate) fn disconnect(
+pub(crate) async fn disconnect(
     state: tauri::State<'_, AppState>,
     connection_id: String,
 ) -> Result<(), String> {
-    let mut s3 = lock_s3_state(&state)?;
-    match s3.connection_id.as_deref() {
-        Some(current) if current == connection_id => {}
-        Some(_) => return Err("Connection changed".to_string()),
-        None => {
-            if !connection_id.is_empty() {
-                return Ok(());
+    // Close registration before checking S3State. Every command registers before
+    // it takes that state lock, so once this succeeds no untracked client clone
+    // from the session can appear behind the drain.
+    let tokens = close_transfer_registry()?;
+    let should_invalidate = match lock_s3_state(&state) {
+        Ok(s3) => match s3.connection_id.as_deref() {
+            Some(current) if current == connection_id => true,
+            Some(_) => {
+                let _ = reopen_transfer_registry();
+                return Err("Connection changed".to_string());
             }
+            None => false,
+        },
+        Err(err) => {
+            let _ = reopen_transfer_registry();
+            return Err(err);
         }
+    };
+
+    cancel_tokens(tokens);
+    if let Err(err) = cancel_all_registered_transfers("disconnect").await {
+        // No backend state was committed yet, so a timeout leaves the UI and
+        // backend consistently connected and allows the user to retry.
+        let _ = reopen_transfer_registry();
+        return Err(err);
     }
-    invalidate_connection_session(&mut s3);
-    Ok(())
+
+    let invalidation = if should_invalidate {
+        lock_s3_state(&state).and_then(|mut s3| {
+            if s3.connection_id.as_deref() != Some(connection_id.as_str()) {
+                return Err("Connection changed".to_string());
+            }
+            invalidate_connection_session(&mut s3);
+            Ok(())
+        })
+    } else {
+        Ok(())
+    };
+    let reopening = reopen_transfer_registry();
+    invalidation?;
+    reopening
 }
 
 #[tauri::command]
@@ -1795,9 +2095,15 @@ pub(crate) async fn list_buckets(
     state: tauri::State<'_, AppState>,
     connection_id: String,
 ) -> Result<Vec<BucketInfo>, String> {
-    let (client, bucket_hint) = require_client_and_bucket_hint(&state, &connection_id)?;
+    let (client, bucket_hint) = require_client_and_bucket_hint(&state, &connection_id, None)?;
+    let cancel = client.token();
+    let request = client.list_buckets().send();
+    let result = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    };
 
-    match client.list_buckets().send().await {
+    match result {
         Ok(output) => {
             let buckets = output
                 .buckets()
@@ -1839,7 +2145,8 @@ pub(crate) async fn list_objects(
     // Listing the bucket root with an empty prefix is legitimate, so this uses
     // the permissive validator rather than the mutating one.
     validate_list_prefix(&prefix, "Prefix")?;
-    let client = require_client(&state, &connection_id)?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
     let mut req = client.list_objects_v2().bucket(&bucket).max_keys(1000);
 
@@ -1853,10 +2160,12 @@ pub(crate) async fn list_objects(
         req = req.continuation_token(&continuation_token);
     }
 
-    let output = req
-        .send()
-        .await
-        .map_err(|e| format!("Failed to list objects: {}", e))?;
+    let request = req.send();
+    let output = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    }
+    .map_err(|e| format!("Failed to list objects: {}", e))?;
 
     let objects = output
         .contents()
@@ -1901,15 +2210,15 @@ pub(crate) async fn head_object(
     key: String,
 ) -> Result<HeadObjectResponse, String> {
     validate_readable_key(&key, "Object key")?;
-    let client = require_client(&state, &connection_id)?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
-    let output = client
-        .head_object()
-        .bucket(&bucket)
-        .key(&key)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to get object info: {}", e))?;
+    let request = client.head_object().bucket(&bucket).key(&key).send();
+    let output = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    }
+    .map_err(|e| format!("Failed to get object info: {}", e))?;
 
     let metadata = output
         .metadata()
@@ -1947,9 +2256,15 @@ pub(crate) async fn object_exists(
     key: String,
 ) -> Result<bool, String> {
     validate_readable_key(&key, "Object key")?;
-    let client = require_client(&state, &connection_id)?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
-    match client.head_object().bucket(&bucket).key(&key).send().await {
+    let request = client.head_object().bucket(&bucket).key(&key).send();
+    let result = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    };
+    match result {
         Ok(_) => Ok(true),
         Err(err) => {
             use aws_sdk_s3::error::SdkError;
@@ -1981,11 +2296,11 @@ pub(crate) async fn update_metadata(
     content_type: String,
     metadata: HashMap<String, String>,
 ) -> Result<(), String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_key(&key, "Object key")?;
-    let client = require_client(&state, &connection_id)?;
-    let provider = require_storage_provider(&state, &connection_id)?;
-
-    let cancel = Arc::new(CancelFlag::default());
+    let client = require_client(&state, &connection_id, None)?;
+    let provider = client.provider();
+    let cancel = client.token();
 
     // `MetadataDirective::Replace` discards every system header that is not
     // re-supplied on the request. Only content type and user metadata used to be
@@ -2063,7 +2378,12 @@ pub(crate) async fn update_metadata(
 
     let mut include_acl = existing.acl.is_some();
     loop {
-        match build_request(include_acl).send().await {
+        let request = build_request(include_acl).send();
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = request => result,
+        };
+        match result {
             Ok(_) => return Ok(()),
             Err(err) => {
                 let detail = format!("{:?}", err);
@@ -2100,13 +2420,15 @@ pub(crate) async fn delete_objects(
     bucket: String,
     keys: Vec<String>,
 ) -> Result<DeleteResult, String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     // This command used to pass its keys straight to `DeleteObjects` with no
     // validation at all, so a caller could delete anything the credentials
     // reached, including live rollback backups.
     for key in &keys {
         validate_deletable_key(key, "Object key")?;
     }
-    let client = require_client(&state, &connection_id)?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
     let mut result = DeleteResult::default();
     for chunk in keys.chunks(1000) {
@@ -2145,13 +2467,20 @@ pub(crate) async fn delete_objects(
             }
         };
 
-        let output = match client
+        let delete_request = client
             .delete_objects()
             .bucket(&bucket)
             .delete(delete)
-            .send()
-            .await
-        {
+            .send();
+        let delete_result = tokio::select! {
+            _ = cancel.cancelled() => {
+                result.incomplete = true;
+                record_delete_error(&mut result, cancelled_error());
+                break;
+            }
+            result = delete_request => result,
+        };
+        let output = match delete_result {
             Ok(output) => output,
             Err(err) => {
                 result.incomplete = true;
@@ -2208,11 +2537,9 @@ pub(crate) async fn upload_object(
     validate_mutating_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
 
-    let client = require_client(&state, &connection_id)?;
-    let provider = require_storage_provider(&state, &connection_id)?;
-
-    let guard = TransferGuard::register(transfer_id);
-    let cancel = guard.token();
+    let client = require_client(&state, &connection_id, Some(transfer_id))?;
+    let provider = client.provider();
+    let cancel = client.token();
 
     let file_size = tokio::fs::metadata(&upload_path)
         .await
@@ -2223,7 +2550,10 @@ pub(crate) async fn upload_object(
     let overwrite = overwrite.unwrap_or(false);
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
-    let expected_checksum = if checksum_enabled {
+    // Multipart safety always needs a baseline digest, even when remote checksum
+    // headers are disabled for provider compatibility. This extra local read is
+    // what detects same-size rewrites before CompleteMultipartUpload publishes.
+    let expected_checksum = if checksum_enabled || file_size >= MULTIPART_THRESHOLD {
         let digest = sha256_file(&upload_path, &cancel).await?;
         Some(sha256_checksum_from_digest(&digest))
     } else {
@@ -2253,6 +2583,9 @@ pub(crate) async fn upload_object(
             MAX_UPLOAD_INFLIGHT_BYTES,
         );
         let bandwidth_limit_bps = clamp_bandwidth_limit_bps(bandwidth_limit_mbps);
+        let baseline_checksum = expected_checksum
+            .as_ref()
+            .ok_or_else(|| "Multipart upload baseline checksum is unavailable".to_string())?;
         upload_multipart(
             &app,
             &client,
@@ -2267,14 +2600,15 @@ pub(crate) async fn upload_object(
             part_workers,
             bandwidth_limit_bps,
             started_at,
-            expected_checksum.as_ref(),
+            baseline_checksum,
+            checksum_enabled,
             overwrite,
             provider,
             &cancel,
         )
         .await?;
     } else {
-        if guard.is_cancelled() {
+        if client.is_cancelled() {
             return Err(cancelled_error());
         }
         if !overwrite {
@@ -2328,7 +2662,7 @@ pub(crate) async fn upload_object(
         }
     }
 
-    if guard.is_cancelled() {
+    if client.is_cancelled() {
         return Err(cancelled_error());
     }
 
@@ -2378,7 +2712,12 @@ async fn upload_part_with_retry(
         if let Some(checksum) = checksum.as_ref() {
             request = request.checksum_sha256(&checksum.base64);
         }
-        match request.send().await {
+        let send = request.send();
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = send => result,
+        };
+        match result {
             Ok(output) => {
                 if let Some(checksum) = checksum.as_ref() {
                     verify_upload_checksum_response(
@@ -2425,7 +2764,8 @@ async fn upload_multipart(
     max_concurrent_parts: usize,
     bandwidth_limit_bps: u64,
     started_at: Instant,
-    checksum: Option<&Sha256Checksum>,
+    baseline_checksum: &Sha256Checksum,
+    checksum_verification: bool,
     overwrite: bool,
     provider: StorageProviderKind,
     cancel: &CancelToken,
@@ -2442,14 +2782,19 @@ async fn upload_multipart(
     if !content_type.is_empty() {
         create_req = create_req.content_type(content_type);
     }
-    if let Some(checksum) = checksum {
+    if checksum_verification {
         create_req = create_req
-            .metadata(CHECKSUM_METADATA_KEY, &checksum.hex)
+            .metadata(CHECKSUM_METADATA_KEY, &baseline_checksum.hex)
             .checksum_algorithm(ChecksumAlgorithm::Sha256)
-            .checksum_type(ChecksumType::FullObject);
+            .checksum_type(ChecksumType::Composite);
     }
 
-    let create_output = create_req.send().await.map_err(|e| {
+    let create_request = create_req.send();
+    let create_output = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = create_request => result,
+    }
+    .map_err(|e| {
         structured_transfer_sdk_error("Failed to create multipart upload", &e, "upload_init", true)
     })?;
 
@@ -2469,10 +2814,13 @@ async fn upload_multipart(
     let total_parts = file_size.div_ceil(part_size_bytes as u64) as usize;
     let mut completed_parts: Vec<Option<aws_sdk_s3::types::CompletedPart>> =
         vec![None; total_parts];
+    let mut part_checksums: Vec<Option<Sha256Checksum>> = vec![None; total_parts];
+    let mut completed_count = 0u32;
     let mut part_number = 1i32;
     let mut bytes_sent = 0u64;
     let mut eof = false;
     let mut join_set: JoinSet<Result<UploadedPart, String>> = JoinSet::new();
+    let mut uploaded_bytes_hasher = Sha256::new();
 
     loop {
         if cancel.is_cancelled() {
@@ -2515,6 +2863,7 @@ async fn upload_multipart(
                 break;
             }
             buf.truncate(read);
+            uploaded_bytes_hasher.update(&buf);
 
             // Guard against the file growing after `file_size` was measured: a
             // part number beyond `total_parts` would index `completed_parts`
@@ -2535,7 +2884,7 @@ async fn upload_multipart(
             let pn = part_number;
             let part_cancel = Arc::clone(cancel);
 
-            let checksum_enabled = checksum.is_some();
+            let checksum_enabled = checksum_verification;
             join_set.spawn(async move {
                 let shared = bytes::Bytes::from(buf);
                 upload_part_with_retry(
@@ -2574,9 +2923,11 @@ async fn upload_multipart(
                     .part_number(pn)
                     .e_tag(etag);
                 if let Some(part_checksum) = part_checksum {
-                    completed = completed.checksum_sha256(part_checksum.base64);
+                    completed = completed.checksum_sha256(part_checksum.base64.clone());
+                    part_checksums[(pn - 1) as usize] = Some(part_checksum);
                 }
                 completed_parts[(pn - 1) as usize] = Some(completed.build());
+                completed_count += 1;
                 bytes_sent += bytes_read as u64;
                 if bandwidth_limit_bps > 0 {
                     let elapsed = started_at.elapsed().as_secs_f64();
@@ -2598,7 +2949,7 @@ async fn upload_multipart(
                     attempt,
                     "running",
                     started_at,
-                    Some((pn as u32).min(total_parts as u32)),
+                    Some(completed_count),
                     Some(total_parts as u32),
                     None,
                     None,
@@ -2648,6 +2999,24 @@ async fn upload_multipart(
         ));
     }
 
+    let actual_checksum = sha256_checksum_from_digest(&uploaded_bytes_hasher.finalize());
+    if actual_checksum.hex != baseline_checksum.hex {
+        abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+        return Err(
+            "File contents changed during multipart upload. Upload aborted before publication."
+                .to_string(),
+        );
+    }
+
+    let composite_checksum = if checksum_verification {
+        let checksums = part_checksums
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| "Multipart upload completed without every part checksum".to_string())?;
+        Some(sha256_composite_checksum(&checksums)?)
+    } else {
+        None
+    };
     let final_parts: Vec<aws_sdk_s3::types::CompletedPart> =
         completed_parts.into_iter().flatten().collect();
 
@@ -2662,10 +3031,10 @@ async fn upload_multipart(
         .upload_id(&upload_id)
         .multipart_upload(completed_upload)
         .mpu_object_size(file_size as i64);
-    if let Some(checksum) = checksum {
+    if let Some((request_checksum, _)) = composite_checksum.as_ref() {
         complete_request = complete_request
-            .checksum_sha256(&checksum.base64)
-            .checksum_type(ChecksumType::FullObject);
+            .checksum_sha256(request_checksum)
+            .checksum_type(ChecksumType::Composite);
     }
     if !overwrite {
         complete_request =
@@ -2700,13 +3069,13 @@ async fn upload_multipart(
             ));
         }
     };
-    if let Some(checksum) = checksum {
-        verify_upload_checksum_response(
+    if let Some((_, response_checksum)) = composite_checksum.as_ref() {
+        verify_upload_checksum_value(
             complete_output.checksum_sha256(),
-            checksum,
+            response_checksum,
             "Multipart upload",
         )?;
-        if complete_output.checksum_type() != Some(&ChecksumType::FullObject) {
+        if complete_output.checksum_type() != Some(&ChecksumType::Composite) {
             return Err(encode_transfer_error(
                 "checksum_mismatch",
                 false,
@@ -2742,14 +3111,9 @@ pub(crate) async fn upload_object_bytes(
         ));
     }
 
-    let client = require_client(&state, &connection_id)?;
-    let provider = require_storage_provider(&state, &connection_id)?;
-
-    // This path previously never registered, checked, or cleared cancellation.
-    // Cancelling a browser-fallback upload did nothing, and the id stayed in the
-    // old cancelled-id set permanently.
-    let guard = TransferGuard::register(transfer_id);
-    let cancel = guard.token();
+    let client = require_client(&state, &connection_id, Some(transfer_id))?;
+    let provider = client.provider();
+    let cancel = client.token();
 
     let total = bytes.len() as u64;
     let attempt = normalize_attempt(attempt);
@@ -2772,7 +3136,7 @@ pub(crate) async fn upload_object_bytes(
         Some(false),
     );
 
-    if guard.is_cancelled() {
+    if client.is_cancelled() {
         return Err(cancelled_error());
     }
     if !overwrite {
@@ -2818,7 +3182,7 @@ pub(crate) async fn upload_object_bytes(
         }
     };
 
-    if guard.is_cancelled() {
+    if client.is_cancelled() {
         return Err(cancelled_error());
     }
 
@@ -2852,15 +3216,15 @@ pub(crate) async fn get_object_acl(
     key: String,
 ) -> Result<AclResponse, String> {
     validate_readable_key(&key, "Object key")?;
-    let client = require_client(&state, &connection_id)?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
-    let output = client
-        .get_object_acl()
-        .bucket(&bucket)
-        .key(&key)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to get ACL: {}", e))?;
+    let request = client.get_object_acl().bucket(&bucket).key(&key).send();
+    let output = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    }
+    .map_err(|e| format!("Failed to get ACL: {}", e))?;
 
     let owner = output
         .owner()
@@ -2904,8 +3268,10 @@ pub(crate) async fn set_object_acl(
     key: String,
     visibility: String,
 ) -> Result<(), String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_key(&key, "Object key")?;
-    let client = require_client(&state, &connection_id)?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
     let acl = match visibility.trim().to_ascii_lowercase().as_str() {
         "private" => ObjectCannedAcl::Private,
@@ -2913,16 +3279,18 @@ pub(crate) async fn set_object_acl(
         other => return Err(format!("Unsupported ACL visibility: {}", other)),
     };
 
-    client
+    let request = client
         .put_object_acl()
         .bucket(&bucket)
         .key(&key)
         .acl(acl)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to update ACL: {}", e))?;
-
-    Ok(())
+        .send();
+    tokio::select! {
+        _ = cancel.cancelled() => Err(cancelled_error()),
+        result = request => result
+            .map(|_| ())
+            .map_err(|e| format!("Failed to update ACL: {}", e)),
+    }
 }
 
 #[tauri::command]
@@ -2952,15 +3320,11 @@ pub(crate) async fn download_object(
     if temp_path == destination_path {
         return Err("Temp path must be different from destination".to_string());
     }
-    let client = require_client(&state, &connection_id)?;
-    crate::issue_download_scratch_lease(&app, &destination_path, &temp_path)?;
-    let _temp_guard = match crate::claim_download_temp(&temp_path, &destination_path) {
-        Ok(guard) => guard,
-        Err(err) => {
-            crate::release_download_scratch_lease(&app, &destination_path);
-            return Err(err);
-        }
-    };
+    let client = require_client(&state, &connection_id, Some(transfer_id))?;
+    let cancel = client.token();
+    let _temp_guard = crate::claim_download_temp(&temp_path, &destination_path)?;
+    let download_lease_nonce =
+        crate::issue_download_scratch_lease(&app, &destination_path, &temp_path)?;
     if temp_path.exists() {
         crate::clear_unusable_download_scratch(&temp_path)?;
     }
@@ -2968,16 +3332,13 @@ pub(crate) async fn download_object(
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
 
-    let guard = TransferGuard::register(transfer_id);
-    let cancel = guard.token();
-
-    if guard.is_cancelled() {
+    if client.is_cancelled() {
         return Err(cancelled_error());
     }
 
-    let expected_checksum = if checksum_enabled {
+    let checksum_head = if checksum_enabled {
         let head_request = client.head_object().bucket(&bucket).key(&key).send();
-        let head = tokio::select! {
+        Some(tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
             result = head_request => {
                 result.map_err(|e| {
@@ -2989,13 +3350,27 @@ pub(crate) async fn download_object(
                     )
                 })?
             }
-        };
-        expected_checksum_from_head(&head)
+        })
     } else {
         None
     };
+    let expected_checksum = match checksum_head.as_ref() {
+        Some(head) => {
+            Some(expected_download_checksum(&client, &bucket, &key, head, &cancel).await?)
+        }
+        None => None,
+    };
 
-    let download_request = client.get_object().bucket(&bucket).key(&key).send();
+    let mut download_request = client.get_object().bucket(&bucket).key(&key);
+    if let Some(etag) = checksum_head
+        .as_ref()
+        .and_then(|head| head.e_tag())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        download_request = download_request.if_match(etag);
+    }
+    let download_request = download_request.send();
     let output = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
         result = download_request => {
@@ -3060,8 +3435,8 @@ pub(crate) async fn download_object(
         }
     }
 
-    finalize_download_file(&temp_path, &destination_path)?;
-    crate::release_download_scratch_lease(&app, &destination_path);
+    finalize_download_file(&temp_path, &destination_path, overwrite)?;
+    crate::release_download_scratch_lease(&app, &destination_path, &download_lease_nonce);
 
     emit_transfer_progress(
         &app,
@@ -3173,7 +3548,11 @@ async fn stream_body_to_temp(
 /// process in between left the user with no file at the destination and an
 /// opaque `.download-backup.<pid>.<n>.tmp` beside it that nothing would ever
 /// clean up (the startup sweep only covers the app data directory).
-fn finalize_download_file(temp_path: &Path, destination_path: &Path) -> Result<(), String> {
+fn finalize_download_file(
+    temp_path: &Path,
+    destination_path: &Path,
+    overwrite: bool,
+) -> Result<(), String> {
     // Publish only bytes that have reached stable storage. The parallel workers
     // sync each completed range before checkpointing, and this final whole-file
     // sync closes the window between the last checkpoint and the atomic rename.
@@ -3187,12 +3566,8 @@ fn finalize_download_file(temp_path: &Path, destination_path: &Path) -> Result<(
         .and_then(|file| file.sync_all())
         .map_err(|e| format!("Failed to sync completed download: {}", e))?;
 
-    if let Err(e) = std::fs::rename(temp_path, destination_path) {
-        let _ = std::fs::remove_file(temp_path);
-        return Err(format!("Failed to finalize download: {}", e));
-    }
-    crate::fsync_parent(destination_path)?;
-    Ok(())
+    crate::publish_temp_file(temp_path, destination_path, overwrite)
+        .map_err(|err| format!("Failed to finalize download: {}", err))
 }
 
 /// Confirm a response actually honoured the byte range that was requested.
@@ -3359,10 +3734,19 @@ pub(crate) async fn download_object_parallel(
     part_concurrency: Option<u32>,
     bandwidth_limit_mbps: Option<u32>,
     checkpoint_id: Option<String>,
+    recovery_session: String,
     enable_resume: Option<bool>,
     checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
     let _storage_guard = crate::acquire_transfer_storage().await?;
+    let checkpoint_enabled = enable_resume.unwrap_or(true)
+        && checkpoint_id
+            .as_ref()
+            .map(|id| !id.trim().is_empty())
+            .unwrap_or(false);
+    if checkpoint_enabled {
+        validate_transfer_recovery_session(&app, &recovery_session)?;
+    }
     validate_key(&key, "Object key")?;
     let destination_path = if overwrite {
         validate_destination_path_allow_overwrite(&destination)?
@@ -3374,15 +3758,11 @@ pub(crate) async fn download_object_parallel(
     if temp_path == destination_path {
         return Err("Temp path must be different from destination".to_string());
     }
-    let client = require_client(&state, &connection_id)?;
-    crate::issue_download_scratch_lease(&app, &destination_path, &temp_path)?;
-    let _temp_guard = match crate::claim_download_temp(&temp_path, &destination_path) {
-        Ok(guard) => guard,
-        Err(err) => {
-            crate::release_download_scratch_lease(&app, &destination_path);
-            return Err(err);
-        }
-    };
+    let client = require_client(&state, &connection_id, Some(transfer_id))?;
+    let cancel = client.token();
+    let _temp_guard = crate::claim_download_temp(&temp_path, &destination_path)?;
+    let download_lease_nonce =
+        crate::issue_download_scratch_lease(&app, &destination_path, &temp_path)?;
     let attempt = normalize_attempt(attempt);
     let started_at = Instant::now();
     let threshold_mb = parallel_threshold_mb
@@ -3390,10 +3770,7 @@ pub(crate) async fn download_object_parallel(
         .max(1);
     let checksum_enabled = checksum_verification.unwrap_or(false);
 
-    let guard = TransferGuard::register(transfer_id);
-    let cancel = guard.token();
-
-    if guard.is_cancelled() {
+    if client.is_cancelled() {
         return Err(cancelled_error());
     }
 
@@ -3419,16 +3796,16 @@ pub(crate) async fn download_object_parallel(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let expected_checksum = if checksum_enabled {
-        expected_checksum_from_head(&head)
+        Some(expected_download_checksum(&client, &bucket, &key, &head, &cancel).await?)
     } else {
         None
     };
     let threshold_bytes = (threshold_mb as u64) * 1024 * 1024;
 
     if total_bytes < threshold_bytes || total_bytes == 0 {
-        // Hand off to the sequential path. Release our registration first so
-        // the delegate can register the same id without colliding.
-        drop(guard);
+        // Hand off to the sequential path. Release our registered client first
+        // so disconnect/reset never observes an untracked credential clone.
+        drop(client);
         drop(_storage_guard);
         drop(_temp_guard);
         return download_object(
@@ -3450,9 +3827,9 @@ pub(crate) async fn download_object_parallel(
         (clamp_part_size_mb(part_size_mb, DEFAULT_DOWNLOAD_PART_SIZE_MB) as u64) * 1024 * 1024;
     let total_parts = total_bytes.div_ceil(part_size) as u32;
     if total_parts <= 1 {
-        // Hand off to the sequential path. Release our registration first so
-        // the delegate can register the same id without colliding.
-        drop(guard);
+        // Hand off to the sequential path. Release our registered client first
+        // so disconnect/reset never observes an untracked credential clone.
+        drop(client);
         drop(_storage_guard);
         drop(_temp_guard);
         return download_object(
@@ -3477,11 +3854,6 @@ pub(crate) async fn download_object_parallel(
         MAX_DOWNLOAD_INFLIGHT_BYTES,
     );
     let bandwidth_limit_bps = clamp_bandwidth_limit_bps(bandwidth_limit_mbps);
-    let checkpoint_enabled = enable_resume.unwrap_or(true)
-        && checkpoint_id
-            .as_ref()
-            .map(|id| !id.trim().is_empty())
-            .unwrap_or(false);
 
     // Preflight: confirm the endpoint really implements ranged reads and pin
     // the probe to the same immutable generation every worker will request.
@@ -3540,7 +3912,8 @@ pub(crate) async fn download_object_parallel(
 
     if checkpoint_enabled {
         if let Some(id) = checkpoint_id.as_deref() {
-            let checkpoint_json = load_transfer_checkpoint_json(&app, id).map_err(|err| {
+            let checkpoint_json = load_transfer_checkpoint_json(&app, id, &recovery_session)
+                .map_err(|err| {
                 format!(
                     "Failed to load resumable download checkpoint '{}'; checkpoint and scratch data were retained: {}",
                     id, err
@@ -3747,7 +4120,7 @@ pub(crate) async fn download_object_parallel(
                                 &mut last_checkpoint_saved_at,
                                 &mut last_checkpoint_saved_parts,
                                 completed_count,
-                                || save_checkpoint_payload(&app, id, &payload),
+                                || save_checkpoint_payload(&app, id, &payload, &recovery_session),
                             ) {
                                 // Other workers may still be writing later
                                 // ranges. Stop and drain them before returning,
@@ -3885,8 +4258,8 @@ pub(crate) async fn download_object_parallel(
         ));
     }
 
-    finalize_download_file(&temp_path, &destination_path)?;
-    crate::release_download_scratch_lease(&app, &destination_path);
+    finalize_download_file(&temp_path, &destination_path, overwrite)?;
+    crate::release_download_scratch_lease(&app, &destination_path, &download_lease_nonce);
 
     emit_transfer_progress(
         &app,
@@ -3905,7 +4278,16 @@ pub(crate) async fn download_object_parallel(
 
     if checkpoint_enabled {
         if let Some(id) = checkpoint_id.as_deref() {
-            let _ = remove_transfer_checkpoint(&app, id);
+            // The destination is already durably published. A metadata cleanup
+            // failure must not turn a successful create-only download into a
+            // failed transfer that retries against the completed destination.
+            // The retained unreferenced checkpoint remains eligible for GC.
+            if let Err(err) = remove_transfer_checkpoint(&app, id, &recovery_session) {
+                eprintln!(
+                    "Download completed, but checkpoint '{}' cleanup was deferred: {}",
+                    id, err
+                );
+            }
         }
     }
 
@@ -3919,7 +4301,9 @@ pub(crate) async fn create_folder(
     bucket: String,
     key: String,
 ) -> Result<(), String> {
-    let client = require_client(&state, &connection_id)?;
+    let _storage_guard = crate::acquire_transfer_storage().await?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
     validate_mutating_key(&key, "Object key")?;
     if key.contains("//") {
@@ -3932,16 +4316,18 @@ pub(crate) async fn create_folder(
         format!("{}/", key)
     };
 
-    client
+    let request = client
         .put_object()
         .bucket(&bucket)
         .key(&folder_key)
         .body(aws_sdk_s3::primitives::ByteStream::from_static(b""))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to create folder: {}", e))?;
-
-    Ok(())
+        .send();
+    tokio::select! {
+        _ = cancel.cancelled() => Err(cancelled_error()),
+        result = request => result
+            .map(|_| ())
+            .map_err(|e| format!("Failed to create folder: {}", e)),
+    }
 }
 
 /// Everything about a source object that a copy has to carry forward.
@@ -4157,20 +4543,55 @@ async fn destination_identity_from_head(
     client: &Client,
     bucket: &str,
     key: &str,
+    response_version_id: Option<&str>,
     cancel: &CancelToken,
 ) -> Result<DestinationIdentity, String> {
-    let request = client.head_object().bucket(bucket).key(key).send();
+    let version_id = response_version_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Copy to '{}' may have committed, but the response contained neither an ETag nor a version ID. The destination was retained.",
+                key
+            )
+        })?;
+    // After the write commits, only its response-owned version can identify the
+    // destination safely. An unversioned HEAD could bind a concurrent writer.
+    let request = client
+        .head_object()
+        .bucket(bucket)
+        .key(key)
+        .version_id(version_id)
+        .send();
     let head = tokio::select! {
-        _ = cancel.cancelled() => return Err(cancelled_error()),
-        result = request => result.map_err(|err| format!("Failed to read destination identity for '{}': {}", key, err))?,
+        _ = cancel.cancelled() => return Err(format!(
+            "Copy to '{}' may have committed, but destination identity verification was cancelled. The destination was retained.",
+            key
+        )),
+        result = request => result.map_err(|err| format!(
+            "Copy to '{}' may have committed, but exact version '{}' could not be verified: {}. The destination was retained.",
+            key, version_id, err
+        ))?,
     };
+    if head.version_id() != Some(version_id) {
+        return Err(format!(
+            "Copy to '{}' may have committed, but exact version '{}' was not confirmed by the provider. The destination was retained.",
+            key, version_id
+        ));
+    }
     let etag = head
         .e_tag()
+        .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("Destination '{}' returned no ETag after copy", key))?;
+        .ok_or_else(|| {
+            format!(
+                "Copy to '{}' may have committed, but exact version '{}' returned no ETag. The destination was retained.",
+                key, version_id
+            )
+        })?;
     Ok(DestinationIdentity {
         etag: etag.to_string(),
-        version_id: head.version_id().map(str::to_string),
+        version_id: Some(version_id.to_string()),
     })
 }
 
@@ -4351,10 +4772,14 @@ async fn copy_one(
                     continue;
                 }
                 if !overwrite
-                    && (is_destination_occupied(&err) || is_concurrent_write_conflict(&err))
+                    && (is_destination_occupied(err.as_ref())
+                        || is_concurrent_write_conflict(err.as_ref()))
                 {
                     return Err(map_create_only_write_error(
-                        dst_key, &err, overwrite, "copy",
+                        dst_key,
+                        err.as_ref(),
+                        overwrite,
+                        "copy",
                     ));
                 }
                 return Err(format!("Failed to copy '{}': {}", src_key, err));
@@ -4371,7 +4796,14 @@ async fn copy_one(
             version_id: copy_output.version_id().map(|value| value.to_string()),
         });
     }
-    destination_identity_from_head(client, dst_bucket, dst_key, cancel).await
+    destination_identity_from_head(
+        client,
+        dst_bucket,
+        dst_key,
+        copy_output.version_id(),
+        cancel,
+    )
+    .await
 }
 
 async fn copy_object_multipart(
@@ -4577,7 +5009,14 @@ async fn copy_object_multipart(
             version_id: complete_output.version_id().map(|value| value.to_string()),
         });
     }
-    destination_identity_from_head(client, dst_bucket, dest_key, cancel).await
+    destination_identity_from_head(
+        client,
+        dst_bucket,
+        dest_key,
+        complete_output.version_id(),
+        cancel,
+    )
+    .await
 }
 
 async fn copy_with_receipt(
@@ -4637,16 +5076,17 @@ pub(crate) async fn rename_object(
     overwrite: bool,
     transfer_id: Option<u32>,
 ) -> Result<(), String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_key(&old_key, "Source key")?;
     validate_mutating_key(&new_key, "Destination key")?;
     if old_key == new_key {
         return Err("Source and destination keys are identical.".to_string());
     }
-    let client = require_client(&state, &connection_id)?;
-    let provider = require_storage_provider(&state, &connection_id)?;
-    let (_guard, cancel) = transfer_cancel_context(transfer_id);
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let provider = client.provider();
+    let cancel = client.token();
 
-    if !overwrite && destination_object_exists(&client, &bucket, &new_key).await? {
+    if !overwrite && destination_object_exists(&client, &bucket, &new_key, &cancel).await? {
         return Err(format!(
             "Destination '{}' already exists. Rename with overwrite to replace it.",
             new_key
@@ -4661,7 +5101,28 @@ pub(crate) async fn rename_object(
     Ok(())
 }
 
-/// List every key under a prefix (no delimiter, fully recursive, paginated).
+fn next_page_token(
+    truncated: bool,
+    token: Option<&str>,
+    seen: &mut HashSet<String>,
+) -> Result<Option<String>, String> {
+    if !truncated {
+        return Ok(None);
+    }
+    let token = token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "S3 listing was truncated without a continuation token".to_string())?
+        .to_string();
+    if !seen.insert(token.clone()) {
+        return Err(
+            "S3 listing repeated a continuation token; refusing to loop indefinitely".to_string(),
+        );
+    }
+    Ok(Some(token))
+}
+
+/// List rollback keys defensively (no delimiter, recursive, paginated).
 async fn list_all_keys_under_prefix(
     client: &aws_sdk_s3::Client,
     bucket: &str,
@@ -4670,6 +5131,7 @@ async fn list_all_keys_under_prefix(
 ) -> Result<Vec<String>, String> {
     let mut keys = Vec::new();
     let mut continuation_token: Option<String> = None;
+    let mut seen_tokens = HashSet::new();
 
     loop {
         let mut req = client.list_objects_v2().bucket(bucket).prefix(prefix);
@@ -4686,14 +5148,23 @@ async fn list_all_keys_under_prefix(
 
         for obj in output.contents() {
             if let Some(k) = obj.key() {
+                if keys.len() >= MAX_PREFIX_TRANSACTION_OBJECTS {
+                    return Err(format!(
+                        "Rollback backup discovery exceeds the {}-object safety limit",
+                        MAX_PREFIX_TRANSACTION_OBJECTS
+                    ));
+                }
                 keys.push(k.to_string());
             }
         }
 
-        if output.is_truncated().unwrap_or(false) {
-            continuation_token = output.next_continuation_token().map(|s| s.to_string());
-        } else {
-            break;
+        match next_page_token(
+            output.is_truncated().unwrap_or(false),
+            output.next_continuation_token(),
+            &mut seen_tokens,
+        )? {
+            Some(token) => continuation_token = Some(token),
+            None => break,
         }
     }
 
@@ -4707,18 +5178,30 @@ pub(crate) async fn delete_prefix(
     bucket: String,
     prefix: String,
 ) -> Result<DeleteResult, String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_prefix(&prefix, "Prefix")?;
-    let client = require_client(&state, &connection_id)?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
     let mut result = DeleteResult::default();
     let mut continuation_token: Option<String> = None;
+    let mut seen_tokens = HashSet::new();
 
     'pages: loop {
         let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
         if let Some(ref token) = continuation_token {
             req = req.continuation_token(token);
         }
-        let output = match req.send().await {
+        let list_request = req.send();
+        let list_result = tokio::select! {
+            _ = cancel.cancelled() => {
+                result.incomplete = true;
+                record_delete_error(&mut result, cancelled_error());
+                break;
+            }
+            result = list_request => result,
+        };
+        let output = match list_result {
             Ok(output) => output,
             Err(err) => {
                 result.incomplete = true;
@@ -4739,18 +5222,22 @@ pub(crate) async fn delete_prefix(
             .iter()
             .filter_map(|obj| obj.key().map(|k| k.to_string()))
             .collect();
+        let next_token = match next_page_token(
+            output.is_truncated().unwrap_or(false),
+            output.next_continuation_token(),
+            &mut seen_tokens,
+        ) {
+            Ok(token) => token,
+            Err(err) => {
+                result.incomplete = true;
+                record_delete_error(&mut result, err);
+                break;
+            }
+        };
 
         if keys.is_empty() {
-            if output.is_truncated().unwrap_or(false) {
-                continuation_token = output.next_continuation_token().map(|s| s.to_string());
-                if continuation_token.is_none() {
-                    result.incomplete = true;
-                    record_delete_error(
-                        &mut result,
-                        "S3 listing was truncated without a continuation token".to_string(),
-                    );
-                    break;
-                }
+            if let Some(token) = next_token {
+                continuation_token = Some(token);
                 continue;
             }
             break;
@@ -4791,13 +5278,20 @@ pub(crate) async fn delete_prefix(
                 }
             };
 
-            let del_output = match client
+            let delete_request = client
                 .delete_objects()
                 .bucket(&bucket)
                 .delete(delete)
-                .send()
-                .await
-            {
+                .send();
+            let delete_result = tokio::select! {
+                _ = cancel.cancelled() => {
+                    result.incomplete = true;
+                    record_delete_error(&mut result, cancelled_error());
+                    break 'pages;
+                }
+                result = delete_request => result,
+            };
+            let del_output = match delete_result {
                 Ok(output) => output,
                 Err(err) => {
                     result.incomplete = true;
@@ -4830,16 +5324,8 @@ pub(crate) async fn delete_prefix(
             }
         }
 
-        if output.is_truncated().unwrap_or(false) {
-            continuation_token = output.next_continuation_token().map(|s| s.to_string());
-            if continuation_token.is_none() {
-                result.incomplete = true;
-                record_delete_error(
-                    &mut result,
-                    "S3 listing was truncated without a continuation token".to_string(),
-                );
-                break;
-            }
+        if let Some(token) = next_token {
+            continuation_token = Some(token);
         } else {
             break;
         }
@@ -4984,6 +5470,14 @@ async fn remove_backup_object(
         .key(&backup.backup_key);
     if let Some(version_id) = backup.source_info.version_id.as_deref() {
         request = request.version_id(version_id);
+    } else if let Some(etag) = backup
+        .source_info
+        .etag
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        request = request.if_match(etag);
     }
     request
         .send()
@@ -4992,7 +5486,7 @@ async fn remove_backup_object(
     Ok(())
 }
 
-async fn rollback_prefix_copy(
+async fn rollback_prefix_copy_unbounded(
     client: &Client,
     bucket: &str,
     created_destinations: &[CopyReceipt],
@@ -5054,14 +5548,27 @@ async fn rollback_prefix_copy(
     failures
 }
 
+async fn rollback_prefix_copy(
+    client: &Client,
+    bucket: &str,
+    created_destinations: &[CopyReceipt],
+    backups: &[DestinationBackup],
+    provider: StorageProviderKind,
+) -> Vec<String> {
+    // Rollback owns the only in-memory map from overwritten destinations to
+    // their backups. Dropping it on a timer can strand a partially restored
+    // transaction, so once rollback begins it must be awaited to completion.
+    rollback_prefix_copy_unbounded(client, bucket, created_destinations, backups, provider).await
+}
+
 async fn copy_prefix_objects(
     client: &Client,
     src_bucket: &str,
     src_prefix: &str,
     dst_bucket: &str,
     dst_prefix: &str,
-    collect_receipts: bool,
     overwrite: bool,
+    collect_receipts: bool,
     provider: StorageProviderKind,
     cancel: &CancelToken,
 ) -> Result<Vec<CopyReceipt>, String> {
@@ -5073,6 +5580,7 @@ async fn copy_prefix_objects(
     let mut backups = Vec::new();
     let mut receipts = Vec::new();
     let mut continuation_token: Option<String> = None;
+    let mut seen_tokens = HashSet::new();
     let mut operation_index = 0usize;
 
     loop {
@@ -5206,6 +5714,23 @@ async fn copy_prefix_objects(
             };
 
             let destination_was_absent = match destination_head {
+                Ok(_) if !overwrite => {
+                    let failures = rollback_prefix_copy(
+                        client,
+                        dst_bucket,
+                        &created_destinations,
+                        &backups,
+                        provider,
+                    )
+                    .await;
+                    return Err(rollback_error(
+                        format!(
+                            "Destination '{}' now exists and overwrite was not authorized.",
+                            new_key
+                        ),
+                        failures,
+                    ));
+                }
                 Ok(_) => {
                     if !overwrite {
                         let failures = rollback_prefix_copy(
@@ -5299,12 +5824,10 @@ async fn copy_prefix_objects(
                     {
                         Ok(receipt) => receipt,
                         Err(err) => {
-                            let _ = client
-                                .delete_object()
-                                .bucket(dst_bucket)
-                                .key(&backup_key)
-                                .send()
-                                .await;
+                            // The backup copy may already have committed. Without
+                            // an operation-owned identity, deleting this key could
+                            // remove the only recoverable copy or a concurrent
+                            // writer, so retain it and report the ambiguity.
                             let failures = rollback_prefix_copy(
                                 client,
                                 dst_bucket,
@@ -5395,26 +5918,24 @@ async fn copy_prefix_objects(
             }
         }
 
-        if list_output.is_truncated().unwrap_or(false) {
-            match list_output.next_continuation_token() {
-                Some(token) => continuation_token = Some(token.to_string()),
-                None => {
-                    let failures = rollback_prefix_copy(
-                        client,
-                        dst_bucket,
-                        &created_destinations,
-                        &backups,
-                        provider,
-                    )
-                    .await;
-                    return Err(rollback_error(
-                        "S3 listing was truncated without a continuation token".to_string(),
-                        failures,
-                    ));
-                }
+        match next_page_token(
+            list_output.is_truncated().unwrap_or(false),
+            list_output.next_continuation_token(),
+            &mut seen_tokens,
+        ) {
+            Ok(Some(token)) => continuation_token = Some(token),
+            Ok(None) => break,
+            Err(err) => {
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
+                return Err(rollback_error(err, failures));
             }
-        } else {
-            break;
         }
     }
 
@@ -5666,6 +6187,7 @@ pub(crate) async fn delete_copied_objects(
     receipts: Vec<CopyReceipt>,
     transfer_id: Option<u32>,
 ) -> Result<u32, String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     if receipts.is_empty() {
         return Ok(0);
     }
@@ -5685,8 +6207,8 @@ pub(crate) async fn delete_copied_objects(
         }
     }
 
-    let client = require_client(&state, &connection_id)?;
-    let (_guard, cancel) = transfer_cancel_context(transfer_id);
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let cancel = client.token();
     delete_receipts_checked(&client, &src_bucket, &dst_bucket, &receipts, &cancel).await
 }
 
@@ -5700,16 +6222,17 @@ pub(crate) async fn rename_prefix(
     overwrite: bool,
     transfer_id: Option<u32>,
 ) -> Result<u32, String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_prefix(&old_prefix, "Source prefix")?;
     validate_mutating_prefix(&new_prefix, "Destination prefix")?;
     if prefixes_overlap(&old_prefix, &new_prefix) {
         return Err("Source and destination prefixes overlap; move was refused.".to_string());
     }
-    let client = require_client(&state, &connection_id)?;
-    let provider = require_storage_provider(&state, &connection_id)?;
-    let (_guard, cancel) = transfer_cancel_context(transfer_id);
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let provider = client.provider();
+    let cancel = client.token();
 
-    if !overwrite && prefix_has_content(&client, &bucket, &new_prefix).await? {
+    if !overwrite && prefix_has_content(&client, &bucket, &new_prefix, &cancel).await? {
         return Err(format!(
             "Destination prefix '{}' already exists. Rename with overwrite to replace it.",
             new_prefix
@@ -5722,8 +6245,8 @@ pub(crate) async fn rename_prefix(
         &old_prefix,
         &bucket,
         &new_prefix,
-        true,
         overwrite,
+        true,
         provider,
         &cancel,
     )
@@ -5744,14 +6267,22 @@ pub(crate) async fn copy_object_to(
     overwrite: Option<bool>,
     transfer_id: Option<u32>,
 ) -> Result<CopyReceipt, String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_readable_key(&src_key, "Source key")?;
     // Copying out of the backup namespace is how a user restores data from an
     // interrupted operation, so only the destination is restricted.
     validate_mutating_key(&dst_key, "Destination key")?;
-    let client = require_client(&state, &connection_id)?;
-    let (_guard, cancel) = transfer_cancel_context(transfer_id);
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let provider = client.provider();
+    let cancel = client.token();
     let overwrite = overwrite.unwrap_or(false);
-    let provider = require_storage_provider(&state, &connection_id)?;
+
+    if !overwrite && destination_object_exists(&client, &dst_bucket, &dst_key, &cancel).await? {
+        return Err(format!(
+            "Destination '{}' now exists and overwrite was not authorized.",
+            dst_key
+        ));
+    }
 
     copy_with_receipt(
         &client,
@@ -5781,15 +6312,16 @@ pub(crate) async fn copy_prefix_to(
     transfer_id: Option<u32>,
     collect_receipts: Option<bool>,
 ) -> Result<Vec<CopyReceipt>, String> {
+    let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_prefix(&src_prefix, "Source prefix")?;
     validate_mutating_prefix(&dst_prefix, "Destination prefix")?;
     if src_bucket == dst_bucket && prefixes_overlap(&src_prefix, &dst_prefix) {
         return Err("Source and destination prefixes overlap; copy was refused.".to_string());
     }
-    let client = require_client(&state, &connection_id)?;
-    let (_guard, cancel) = transfer_cancel_context(transfer_id);
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let provider = client.provider();
+    let cancel = client.token();
     let overwrite = overwrite.unwrap_or(false);
-    let provider = require_storage_provider(&state, &connection_id)?;
 
     copy_prefix_objects(
         &client,
@@ -5797,8 +6329,8 @@ pub(crate) async fn copy_prefix_to(
         &src_prefix,
         &dst_bucket,
         &dst_prefix,
-        collect_receipts.unwrap_or(false),
         overwrite,
+        collect_receipts.unwrap_or(false),
         provider,
         &cancel,
     )
@@ -5851,19 +6383,23 @@ pub(crate) async fn generate_presigned_url(
     if !(60..=604800).contains(&expires_in_secs) {
         return Err("Expiration must be between 60 and 604800 seconds".to_string());
     }
-    let client = require_client(&state, &connection_id)?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
     let presigning_config =
         aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(expires_in_secs))
             .map_err(|e| format!("Invalid expiration: {}", e))?;
 
-    let presigned = client
+    let request = client
         .get_object()
         .bucket(&bucket)
         .key(&key)
-        .presigned(presigning_config)
-        .await
-        .map_err(|e| format!("Failed to generate presigned URL: {}", e))?;
+        .presigned(presigning_config);
+    let presigned = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    }
+    .map_err(|e| format!("Failed to generate presigned URL: {}", e))?;
 
     Ok(presigned.uri().to_string())
 }
@@ -5876,15 +6412,15 @@ pub(crate) async fn preview_object(
     key: String,
 ) -> Result<PreviewResponse, String> {
     validate_readable_key(&key, "Object key")?;
-    let client = require_client(&state, &connection_id)?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
-    let head = client
-        .head_object()
-        .bucket(&bucket)
-        .key(&key)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to get object info: {}", e))?;
+    let head_request = client.head_object().bucket(&bucket).key(&key).send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = head_request => result,
+    }
+    .map_err(|e| format!("Failed to get object info: {}", e))?;
 
     let total_size = head.content_length().unwrap_or(0);
     let content_type = head
@@ -5893,19 +6429,43 @@ pub(crate) async fn preview_object(
         .to_string();
 
     const MAX_PREVIEW: i64 = 1_048_576;
-    let truncated = total_size > MAX_PREVIEW;
+    let head_truncated = total_size > MAX_PREVIEW;
+    let version_id = head
+        .version_id()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let etag = head
+        .e_tag()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if version_id.is_none() && etag.is_none() {
+        return Err(
+            "Preview is unavailable because the provider returned no object generation identity."
+                .to_string(),
+        );
+    }
 
     let mut req = client.get_object().bucket(&bucket).key(&key);
-    if truncated {
+    // Prefer a conditional current-object read so preview does not require the
+    // broader GetObjectVersion permission on otherwise readable versioned buckets.
+    if let Some(etag) = etag {
+        req = req.if_match(etag);
+    } else if let Some(version_id) = version_id.as_deref() {
+        req = req.version_id(version_id);
+    }
+    if head_truncated {
         req = req.range(format!("bytes=0-{}", MAX_PREVIEW - 1));
     }
 
-    let output = req
-        .send()
-        .await
-        .map_err(|e| format!("Failed to download preview: {}", e))?;
+    let request = req.send();
+    let output = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    }
+    .map_err(|e| format!("Failed to download preview: {}", e))?;
 
-    if truncated {
+    if head_truncated {
         ensure_range_honoured(
             output.content_range(),
             output.content_length(),
@@ -5920,10 +6480,12 @@ pub(crate) async fn preview_object(
     let mut raw_bytes = Vec::with_capacity(max_bytes + 1);
     let mut buffer = [0u8; 64 * 1024];
     while raw_bytes.len() <= max_bytes {
-        let count = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|e| format!("Failed to read preview body: {}", e))?;
+        let read = reader.read(&mut buffer);
+        let count = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = read => result,
+        }
+        .map_err(|e| format!("Failed to read preview body: {}", e))?;
         if count == 0 {
             break;
         }
@@ -5934,7 +6496,8 @@ pub(crate) async fn preview_object(
         }
     }
 
-    let bytes: &[u8] = if raw_bytes.len() > max_bytes {
+    let observed_truncation = raw_bytes.len() > max_bytes;
+    let bytes: &[u8] = if observed_truncation {
         &raw_bytes[..max_bytes]
     } else {
         raw_bytes.as_slice()
@@ -5952,7 +6515,7 @@ pub(crate) async fn preview_object(
         content_type,
         data,
         is_text,
-        truncated,
+        truncated: head_truncated || observed_truncation,
         total_size,
     })
 }
@@ -6085,7 +6648,7 @@ mod tests {
         let destination_path = dir.join("file.txt");
         std::fs::write(&temp_path, b"new").unwrap();
 
-        let result = finalize_download_file(&temp_path, &destination_path);
+        let result = finalize_download_file(&temp_path, &destination_path, false);
         assert!(
             result.is_ok(),
             "finalize should succeed: {:?}",
@@ -6105,7 +6668,7 @@ mod tests {
         std::fs::write(&temp_path, b"new").unwrap();
         std::fs::write(&destination_path, b"old").unwrap();
 
-        let result = finalize_download_file(&temp_path, &destination_path);
+        let result = finalize_download_file(&temp_path, &destination_path, true);
         assert!(
             result.is_ok(),
             "finalize should succeed: {:?}",
@@ -6432,7 +6995,7 @@ mod tests {
         // leave no trace.
         let id = 990_001;
         cancel_transfer(id);
-        let guard = TransferGuard::register(id);
+        let guard = TransferGuard::register(id).expect("registration should succeed");
         assert!(
             !guard.is_cancelled(),
             "a stale cancel must not affect a later transfer with the same id"
@@ -6442,7 +7005,7 @@ mod tests {
     #[test]
     fn cancelling_a_running_transfer_is_observed() {
         let id = 990_002;
-        let guard = TransferGuard::register(id);
+        let guard = TransferGuard::register(id).expect("registration should succeed");
         assert!(!guard.is_cancelled());
         cancel_transfer(id);
         assert!(guard.is_cancelled());
@@ -6452,11 +7015,11 @@ mod tests {
     fn transfer_registration_is_dropped_on_completion() {
         let id = 990_003;
         {
-            let _guard = TransferGuard::register(id);
+            let _guard = TransferGuard::register(id).expect("registration should succeed");
         }
         // Nothing is registered any more, so this cancel goes nowhere.
         cancel_transfer(id);
-        let next = TransferGuard::register(id);
+        let next = TransferGuard::register(id).expect("registration should succeed");
         assert!(
             !next.is_cancelled(),
             "registration must not survive the guard"
@@ -6464,20 +7027,20 @@ mod tests {
     }
 
     #[test]
-    fn reusing_an_id_replaces_the_previous_registration() {
+    fn reusing_an_id_keeps_every_registration_cancellable() {
         let id = 990_004;
-        let first = TransferGuard::register(id);
-        let second = TransferGuard::register(id);
+        let first = TransferGuard::register(id).expect("first registration should succeed");
+        let second = TransferGuard::register(id).expect("second registration should succeed");
         cancel_transfer(id);
         assert!(
             second.is_cancelled(),
-            "the live registration must be cancelled"
+            "the newer registration must be cancelled"
         );
         assert!(
-            !first.is_cancelled(),
-            "the displaced registration must not be affected"
+            first.is_cancelled(),
+            "reusing a frontend id must not orphan the older registration"
         );
-        // Dropping the displaced guard must not deregister the live one.
+        // Dropping either guard must not deregister the other registration.
         drop(first);
         cancel_transfer(id);
         assert!(second.is_cancelled());

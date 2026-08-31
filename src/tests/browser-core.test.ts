@@ -1,10 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { syncInspectorMock, markInspectorHasContentMock } = vi.hoisted(() => ({
+  syncInspectorMock: vi.fn<(selectedKeys?: Set<string>) => Promise<void>>(
+    async () => {},
+  ),
+  markInspectorHasContentMock: vi.fn(),
+}));
+
+vi.mock("../inspector.ts", () => ({
+  closeInspectorOnMobile: vi.fn(),
+  markInspectorHasContent: markInspectorHasContentMock,
+  syncInspectorFromSelection: syncInspectorMock,
+}));
+
 const refreshObjectsMock = vi.fn(
-  async (bucket: string, prefix: string): Promise<void> => {
+  async (bucket: string, prefix: string): Promise<boolean> => {
     const { state } = await import("../state.ts");
     state.currentBucket = bucket;
     state.currentPrefix = prefix;
+    state.selectedKeys.clear();
+    return true;
   },
 );
 
@@ -52,6 +67,8 @@ describe("browser core rendering and selection", () => {
   beforeEach(async () => {
     vi.resetModules();
     refreshObjectsMock.mockClear();
+    syncInspectorMock.mockClear();
+    markInspectorHasContentMock.mockClear();
     renderFixture();
     const { state } = await import("../state.ts");
     state.connected = true;
@@ -482,5 +499,115 @@ describe("browser core rendering and selection", () => {
     expect(() => browser.renderObjectTable()).not.toThrow();
     document.getElementById("status")?.remove();
     expect(() => browser.showEmptyState()).not.toThrow();
+  });
+
+  it("separates visual repaint from semantic inspector selection sync", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.objects = [
+      {
+        key: "selected.txt",
+        size: 10,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+      {
+        key: "other.txt",
+        size: 20,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    state.selectedKeys.add("selected.txt");
+
+    browser.renderObjectTable();
+    expect(syncInspectorMock).toHaveBeenCalledTimes(1);
+    const selectionSnapshot = syncInspectorMock.mock
+      .calls[0]?.[0] as Set<string>;
+    expect([...selectionSnapshot]).toEqual(["selected.txt"]);
+
+    browser.updateSelectionUI();
+    browser.renderObjectTable();
+    browser.toggleSort("size");
+    expect(syncInspectorMock).toHaveBeenCalledTimes(1);
+
+    state.objects[0].size = 11;
+    browser.renderObjectTable();
+    expect(syncInspectorMock).toHaveBeenCalledTimes(2);
+
+    browser.invalidateInspectorSelectionSync();
+    browser.renderObjectTable();
+    expect(syncInspectorMock).toHaveBeenCalledTimes(3);
+
+    state.filterText = "other";
+    browser.renderObjectTable();
+    expect(state.selectedKeys.size).toBe(0);
+    expect(syncInspectorMock).toHaveBeenCalledTimes(4);
+    expect([...selectionSnapshot]).toEqual(["selected.txt"]);
+  });
+
+  it("benchmarks a 50k-object virtual window with bounded keyed DOM work", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    const panel = document.getElementById("object-panel") as HTMLDivElement;
+    Object.defineProperty(panel, "clientHeight", {
+      configurable: true,
+      value: 360,
+    });
+    state.objects = Array.from({ length: 50_000 }, (_, index) => ({
+      key: `file-${String(index).padStart(5, "0")}.txt`,
+      size: index,
+      last_modified: "2024-01-01T00:00:00Z",
+      is_folder: false,
+    }));
+
+    const started = performance.now();
+    browser.renderObjectTable();
+    const elapsedMs = performance.now() - started;
+    const initialRows = document.querySelectorAll("#object-tbody .object-row");
+    expect(initialRows.length).toBeLessThanOrEqual(30);
+    expect(
+      document.querySelector(".object-table")?.getAttribute("aria-rowcount") ??
+        document.querySelector("table")?.getAttribute("aria-rowcount"),
+    ).toBe("50001");
+    expect(elapsedMs).toBeLessThan(5_000);
+
+    const retained = document.querySelector<HTMLElement>(
+      '[data-key="file-00010.txt"]',
+    );
+    panel.scrollTop = 5 * 36;
+    browser.renderObjectTable();
+    expect(document.querySelector('[data-key="file-00010.txt"]')).toBe(
+      retained,
+    );
+    retained?.focus();
+
+    panel.scrollTop = 50_000 * 36;
+    browser.renderObjectTable();
+    const finalRows = document.querySelectorAll("#object-tbody .object-row");
+    expect(finalRows.length).toBeLessThanOrEqual(30);
+    expect(document.querySelector('[data-key="file-49999.txt"]')).toBeTruthy();
+    expect(
+      document
+        .querySelector('[data-key="file-49999.txt"]')
+        ?.getAttribute("aria-rowindex"),
+    ).toBe("50001");
+    expect(
+      (document.activeElement as HTMLElement | null)?.classList.contains(
+        "object-row",
+      ),
+    ).toBe(true);
+
+    state.objects = state.objects.slice(0, 300);
+    browser.renderObjectTable();
+    const shrunkRows = document.querySelectorAll("#object-tbody .object-row");
+    expect(shrunkRows.length).toBeGreaterThan(0);
+    expect(shrunkRows.length).toBeLessThanOrEqual(30);
+    expect(document.querySelector('[data-key="file-00299.txt"]')).toBeTruthy();
+    expect(
+      (document.activeElement as HTMLElement | null)?.classList.contains(
+        "object-row",
+      ),
+    ).toBe(true);
   });
 });

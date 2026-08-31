@@ -249,7 +249,7 @@ if (isDirectExecution()) {
       `Platform: ${process.platform}; Node: ${process.version}; cwd: ${process.cwd()}`,
     );
     console.error(
-      "The following git reset/clean was blocked. Correct the problem and rerun npm run release:finalize.",
+      "Release asset finalization stopped. Correct the problem and rerun npm run release:finalize.",
     );
     process.exit(1);
   }

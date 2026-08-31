@@ -7,6 +7,7 @@ mod s3;
 mod security;
 
 use aws_sdk_s3::Client;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 #[cfg(unix)]
@@ -242,6 +243,133 @@ pub(crate) fn transfer_manifest_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     Ok(resolved_app_data_dir(app)?.join("transfer-manifest.json"))
 }
 
+pub(crate) fn transfer_legacy_import_tombstone_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
+    Ok(resolved_app_data_dir(app)?.join("transfer-legacy-import-v1.closed"))
+}
+
+fn transfer_legacy_import_allowed_unchecked<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<bool, String> {
+    let path = transfer_legacy_import_tombstone_path(app)?;
+    match std::fs::metadata(&path) {
+        Ok(_) => Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(err) => Err(format!(
+            "Could not inspect legacy transfer-import fence '{}': {}",
+            path.display(),
+            err
+        )),
+    }
+}
+
+pub(crate) fn close_transfer_legacy_import_unchecked<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<(), String> {
+    atomic_write(&transfer_legacy_import_tombstone_path(app)?, "closed\n")
+}
+
+fn transfer_recovery_session_path<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<std::path::PathBuf, String> {
+    Ok(resolved_app_data_dir(app)?.join("transfer-recovery-session"))
+}
+
+const TRANSFER_RECOVERY_SESSION_LEN: usize = 64;
+const STALE_TRANSFER_RECOVERY_SESSION: &str =
+    "Transfer recovery session is stale or missing; reload the application.";
+
+fn valid_transfer_recovery_session(value: &str) -> bool {
+    value.len() == TRANSFER_RECOVERY_SESSION_LEN
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+pub(crate) fn mint_transfer_recovery_session() -> String {
+    let mut bytes = [0u8; TRANSFER_RECOVERY_SESSION_LEN / 2];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
+pub(crate) fn set_transfer_recovery_session_unchecked<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    recovery_session: &str,
+) -> Result<(), String> {
+    if !valid_transfer_recovery_session(recovery_session) {
+        return Err(STALE_TRANSFER_RECOVERY_SESSION.to_string());
+    }
+    atomic_write(&transfer_recovery_session_path(app)?, recovery_session)
+}
+
+fn read_transfer_recovery_session_unchecked<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<String, String> {
+    let path = transfer_recovery_session_path(app)?;
+    let value = match std::fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(STALE_TRANSFER_RECOVERY_SESSION.to_string())
+        }
+        Err(err) => {
+            return Err(format!(
+                "Transfer recovery session could not be read; reload the application: {}",
+                err
+            ))
+        }
+    };
+    if !valid_transfer_recovery_session(&value) {
+        return Err(STALE_TRANSFER_RECOVERY_SESSION.to_string());
+    }
+    Ok(value)
+}
+
+pub(crate) fn load_or_create_transfer_recovery_session_unchecked<
+    R: tauri::Runtime,
+    M: tauri::Manager<R>,
+>(
+    app: &M,
+) -> Result<String, String> {
+    match read_transfer_recovery_session_unchecked(app) {
+        Ok(value) => Ok(value),
+        Err(err)
+            if err == STALE_TRANSFER_RECOVERY_SESSION
+                && !transfer_recovery_session_path(app)?.exists() =>
+        {
+            let value = mint_transfer_recovery_session();
+            set_transfer_recovery_session_unchecked(app, &value)?;
+            Ok(value)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+pub(crate) fn require_transfer_recovery_session_unchecked<
+    R: tauri::Runtime,
+    M: tauri::Manager<R>,
+>(
+    app: &M,
+    supplied: &str,
+) -> Result<(), String> {
+    if !valid_transfer_recovery_session(supplied) {
+        return Err(STALE_TRANSFER_RECOVERY_SESSION.to_string());
+    }
+    let current = read_transfer_recovery_session_unchecked(app)?;
+    if current != supplied {
+        return Err(STALE_TRANSFER_RECOVERY_SESSION.to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_transfer_recovery_session<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    supplied: &str,
+) -> Result<(), String> {
+    let _storage_guard = lock_storage_meta()?;
+    require_transfer_recovery_session_unchecked(app, supplied)
+}
+
 pub(crate) fn security_journal_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
@@ -278,12 +406,11 @@ fn transfer_checkpoint_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     Ok(dir.join(format!("{}.json", checkpoint_file_name(checkpoint_id))))
 }
 
-/// Read a checkpoint, transparently decrypting it when the vault is enabled.
+/// Read a checkpoint without acquiring or validating the recovery-session lock.
 ///
-/// Only a genuinely missing file is reported as absent. Locked, corrupt, or
-/// otherwise unreadable checkpoints are retained and surfaced as errors so a
-/// recovery/GC pass cannot silently discard resumable state.
-pub(crate) fn load_transfer_checkpoint_json<R: tauri::Runtime>(
+/// Trusted migration/reset callers use this only while storage is exclusive.
+/// Normal transfer callers must use [`load_transfer_checkpoint_json`].
+pub(crate) fn load_transfer_checkpoint_json_unchecked<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     checkpoint_id: &str,
 ) -> Result<Option<String>, String> {
@@ -303,7 +430,17 @@ pub(crate) fn load_transfer_checkpoint_json<R: tauri::Runtime>(
     }
 }
 
-pub(crate) fn save_transfer_checkpoint_json<R: tauri::Runtime>(
+pub(crate) fn load_transfer_checkpoint_json<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    checkpoint_id: &str,
+    recovery_session: &str,
+) -> Result<Option<String>, String> {
+    let _storage_guard = lock_storage_meta()?;
+    require_transfer_recovery_session_unchecked(app, recovery_session)?;
+    load_transfer_checkpoint_json_unchecked(app, checkpoint_id)
+}
+
+pub(crate) fn save_transfer_checkpoint_json_unchecked<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     checkpoint_id: &str,
     json: &str,
@@ -313,15 +450,37 @@ pub(crate) fn save_transfer_checkpoint_json<R: tauri::Runtime>(
     write_protected_file(&path, json, &security)
 }
 
-pub(crate) fn remove_transfer_checkpoint(
-    app: &tauri::AppHandle,
+pub(crate) fn save_transfer_checkpoint_json<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    checkpoint_id: &str,
+    json: &str,
+    recovery_session: &str,
+) -> Result<(), String> {
+    let _storage_guard = lock_storage_meta()?;
+    require_transfer_recovery_session_unchecked(app, recovery_session)?;
+    save_transfer_checkpoint_json_unchecked(app, checkpoint_id, json)
+}
+
+pub(crate) fn remove_transfer_checkpoint_unchecked<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     checkpoint_id: &str,
 ) -> Result<(), String> {
     let path = transfer_checkpoint_path(app, checkpoint_id)?;
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => fsync_parent(&path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
     }
-    Ok(())
+}
+
+pub(crate) fn remove_transfer_checkpoint<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    checkpoint_id: &str,
+    recovery_session: &str,
+) -> Result<(), String> {
+    let _storage_guard = lock_storage_meta()?;
+    require_transfer_recovery_session_unchecked(app, recovery_session)?;
+    remove_transfer_checkpoint_unchecked(app, checkpoint_id)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -594,6 +753,34 @@ pub(crate) fn download_temp_path(destination: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+fn download_path_identity(path: &Path) -> Result<PathBuf, String> {
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "Download path must include a parent directory: {}",
+            path.display()
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("Download path must include a file name: {}", path.display()))?;
+    let canonical_parent = std::fs::canonicalize(parent).map_err(|err| {
+        format!(
+            "Failed to resolve download parent '{}': {}",
+            parent.display(),
+            err
+        )
+    })?;
+    // Case folding may serialize distinct case-sensitive paths, but it prevents
+    // a second owner on case-insensitive volumes. Over-serialization is safer
+    // than allowing two writers to target one physical scratch file.
+    Ok(PathBuf::from(
+        canonical_parent
+            .join(file_name)
+            .to_string_lossy()
+            .to_lowercase(),
+    ))
+}
+
 fn owned_download_temps() -> &'static Mutex<std::collections::HashMap<PathBuf, PathBuf>> {
     OWNED_DOWNLOAD_TEMPS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
@@ -621,27 +808,35 @@ pub(crate) fn claim_download_temp(
             temp_path.display()
         ));
     }
+    let temp_identity = download_path_identity(temp_path)?;
+    let destination_identity = download_path_identity(destination)?;
     let mut owned = owned_download_temps()
         .lock()
         .map_err(|_| "Download scratch ownership state is unavailable".to_string())?;
-    if owned.contains_key(temp_path) {
+    if owned.contains_key(&temp_identity) {
         return Err(format!(
             "Download scratch path is already in use: {}",
             temp_path.display()
         ));
     }
-    owned.insert(temp_path.to_path_buf(), destination.to_path_buf());
+    owned.insert(temp_identity.clone(), destination_identity);
     Ok(DownloadTempGuard {
-        temp_path: temp_path.to_path_buf(),
+        temp_path: temp_identity,
     })
 }
 
 fn is_claimed_download_temp(temp_path: &Path, destination: &Path) -> bool {
+    let Ok(temp_identity) = download_path_identity(temp_path) else {
+        return false;
+    };
+    let Ok(destination_identity) = download_path_identity(destination) else {
+        return false;
+    };
     owned_download_temps()
         .lock()
         .ok()
-        .and_then(|owned| owned.get(temp_path).cloned())
-        .map(|claimed_destination| claimed_destination == destination)
+        .and_then(|owned| owned.get(&temp_identity).cloned())
+        .map(|claimed_destination| claimed_destination == destination_identity)
         .unwrap_or(false)
 }
 
@@ -662,9 +857,10 @@ fn download_lease_path<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
     destination: &Path,
 ) -> Result<PathBuf, String> {
+    let destination_identity = download_path_identity(destination)?;
     Ok(download_lease_dir(app)?.join(format!(
         "{}.json",
-        checkpoint_file_name(&destination.to_string_lossy())
+        checkpoint_file_name(&destination_identity.to_string_lossy())
     )))
 }
 
@@ -709,10 +905,25 @@ pub(crate) fn issue_download_scratch_lease<R: tauri::Runtime>(
 pub(crate) fn release_download_scratch_lease<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     destination: &Path,
+    nonce: &str,
 ) {
-    if let Ok(path) = download_lease_path(app, destination) {
-        let _ = std::fs::remove_file(path);
+    let Ok(path) = download_lease_path(app, destination) else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(lease) = serde_json::from_str::<DownloadScratchLease>(&raw) else {
+        return;
+    };
+    let expected_temp_path = download_temp_path(destination);
+    if lease.nonce != nonce
+        || lease.destination.as_str() != destination.to_string_lossy().as_ref()
+        || lease.temp_path.as_str() != expected_temp_path.to_string_lossy().as_ref()
+    {
+        return;
     }
+    let _ = std::fs::remove_file(path);
 }
 
 fn read_download_lease_json<R: tauri::Runtime>(
@@ -909,10 +1120,15 @@ fn remove_path_if_exists(
     path: String,
     destination: String,
     checkpoint_id: Option<String>,
+    recovery_session: Option<String>,
 ) -> Result<(), String> {
     let _storage_guard = lock_storage_meta()?;
     let checkpoint_authorized = if let Some(id) = checkpoint_id {
-        let json = load_transfer_checkpoint_json(&app, &id)?
+        require_transfer_recovery_session_unchecked(
+            &app,
+            recovery_session.as_deref().unwrap_or_default(),
+        )?;
+        let json = load_transfer_checkpoint_json_unchecked(&app, &id)?
             .ok_or_else(|| "Download checkpoint was not found".to_string())?;
         let scratch = checkpoint_scratch_path(&json)?
             .ok_or_else(|| "Download checkpoint has no scratch path".to_string())?;
@@ -950,27 +1166,34 @@ fn write_text_file(path: String, text: String, overwrite: bool) -> Result<(), St
     if parsed.exists() && !overwrite {
         return Err(format!("Destination already exists: {}", parsed.display()));
     }
-    atomic_write(&parsed, &text)
+    atomic_write_with_overwrite(&parsed, &text, overwrite)
 }
 
 #[tauri::command]
 fn transfer_checkpoint_load(
     app: tauri::AppHandle,
     checkpoint_id: String,
+    recovery_session: String,
 ) -> Result<Option<String>, String> {
-    let _storage_guard = lock_storage_meta()?;
-    load_transfer_checkpoint_json(&app, &checkpoint_id)
+    load_transfer_checkpoint_json(&app, &checkpoint_id, &recovery_session)
 }
 
 #[tauri::command]
-fn transfer_checkpoint_remove(app: tauri::AppHandle, checkpoint_id: String) -> Result<(), String> {
-    let _storage_guard = lock_storage_meta()?;
-    remove_transfer_checkpoint(&app, &checkpoint_id)
+fn transfer_checkpoint_remove(
+    app: tauri::AppHandle,
+    checkpoint_id: String,
+    recovery_session: String,
+) -> Result<(), String> {
+    remove_transfer_checkpoint(&app, &checkpoint_id, &recovery_session)
 }
 
 #[tauri::command]
-fn transfer_checkpoint_list(app: tauri::AppHandle) -> Result<Vec<TransferCheckpointEntry>, String> {
+fn transfer_checkpoint_list(
+    app: tauri::AppHandle,
+    recovery_session: String,
+) -> Result<Vec<TransferCheckpointEntry>, String> {
     let _storage_guard = lock_storage_meta()?;
+    require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
     let dir = transfer_checkpoint_dir(&app)?;
     let mut entries: Vec<TransferCheckpointEntry> = Vec::new();
 
@@ -1021,8 +1244,10 @@ fn transfer_checkpoint_gc(
     app: tauri::AppHandle,
     ttl_hours: u32,
     keep_checkpoint_ids: Option<Vec<String>>,
+    recovery_session: String,
 ) -> Result<u32, String> {
     let _storage_guard = lock_storage_meta()?;
+    require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
     let dir = transfer_checkpoint_dir(&app)?;
     let ttl_secs = (ttl_hours.max(1) as u64) * 3600;
     let now = std::time::SystemTime::now();
@@ -1223,37 +1448,79 @@ fn save_bookmarks_backup(app: tauri::AppHandle, json: String) -> Result<(), Stri
     write_protected_file(&path, &json, &security)
 }
 
+#[derive(serde::Serialize)]
+struct TransferManifestHydration {
+    recovery_session: String,
+    manifest_json: String,
+    legacy_import_allowed: bool,
+}
+
 #[tauri::command]
-fn load_transfer_manifest(app: tauri::AppHandle) -> Result<String, String> {
+fn load_transfer_manifest(app: tauri::AppHandle) -> Result<TransferManifestHydration, String> {
     let _storage_guard = lock_storage_meta()?;
+    let recovery_session = load_or_create_transfer_recovery_session_unchecked(&app)?;
     let path = transfer_manifest_path(&app)?;
     let security = load_security_config(&app)?;
     // Releases before this one wrote the manifest unprotected, so plaintext is
     // tolerated here until the adoption sweep has run.
-    security::read_protected_file_with_legacy(
+    let manifest_json = security::read_protected_file_with_legacy(
         &path,
         "",
         &security,
         security::LegacyPlaintext::Adopt,
-    )
+    )?;
+    let legacy_import_allowed = if manifest_json.trim().is_empty() {
+        transfer_legacy_import_allowed_unchecked(&app)?
+    } else {
+        // Existing native recovery state proves that ownership already moved out
+        // of browser storage. Persist that fact before exposing the hydration so
+        // a later empty/cleared manifest cannot resurrect stale localStorage.
+        close_transfer_legacy_import_unchecked(&app)?;
+        false
+    };
+    Ok(TransferManifestHydration {
+        recovery_session,
+        manifest_json,
+        legacy_import_allowed,
+    })
 }
 
 #[tauri::command]
-fn save_transfer_manifest(app: tauri::AppHandle, json: String) -> Result<(), String> {
+fn save_transfer_manifest(
+    app: tauri::AppHandle,
+    json: String,
+    recovery_session: String,
+    legacy_import: Option<bool>,
+) -> Result<(), String> {
     let _storage_guard = lock_storage_meta()?;
+    require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
+    if legacy_import.unwrap_or(false) && !transfer_legacy_import_allowed_unchecked(&app)? {
+        return Err(
+            "Legacy transfer import is closed; stale browser recovery state was not imported."
+                .to_string(),
+        );
+    }
     let path = transfer_manifest_path(&app)?;
     let security = load_security_config(&app)?;
-    write_protected_file(&path, &json, &security)
+    write_protected_file(&path, &json, &security)?;
+    // Every successful native save, including the one permitted legacy import,
+    // permanently transfers ownership away from browser storage.
+    close_transfer_legacy_import_unchecked(&app)
 }
 
 #[tauri::command]
-fn clear_transfer_manifest(app: tauri::AppHandle) -> Result<(), String> {
+fn clear_transfer_manifest(app: tauri::AppHandle, recovery_session: String) -> Result<(), String> {
     let _storage_guard = lock_storage_meta()?;
+    require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
+    // Close first: a crash between these operations may leave an old native
+    // manifest, but can never leave an empty backend with legacy import rearmed.
+    close_transfer_legacy_import_unchecked(&app)?;
     let path = transfer_manifest_path(&app)?;
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => fsync_parent(&path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
     }
-    Ok(())
 }
 pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
     let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1345,7 +1612,52 @@ pub(crate) fn fsync_parent(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), String> {
+pub(crate) fn publish_temp_file(
+    temp_path: &std::path::Path,
+    destination_path: &std::path::Path,
+    overwrite: bool,
+) -> Result<(), String> {
+    if overwrite {
+        if let Err(err) = std::fs::rename(temp_path, destination_path) {
+            let _ = std::fs::remove_file(temp_path);
+            return Err(err.to_string());
+        }
+        return fsync_parent(destination_path);
+    }
+
+    // Both paths are created in the same directory. A hard link publishes the
+    // fully synced inode only if the destination is still absent, closing the
+    // exists-then-rename race without relying on platform-specific rename flags.
+    if let Err(err) = std::fs::hard_link(temp_path, destination_path) {
+        let _ = std::fs::remove_file(temp_path);
+        return Err(format!(
+            "Destination was not published without overwrite: {}",
+            err
+        ));
+    }
+    if let Err(err) = fsync_parent(destination_path) {
+        let _ = std::fs::remove_file(destination_path);
+        let _ = std::fs::remove_file(temp_path);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::remove_file(temp_path) {
+        let rollback = std::fs::remove_file(destination_path);
+        return Err(match rollback {
+            Ok(()) => format!("Failed to remove temporary file after publication: {}", err),
+            Err(rollback_err) => format!(
+                "Destination was published, but temporary-file cleanup failed: {}; rollback also failed: {}",
+                err, rollback_err
+            ),
+        });
+    }
+    fsync_parent(destination_path)
+}
+
+fn atomic_write_with_overwrite(
+    path: &std::path::Path,
+    data: &str,
+    overwrite: bool,
+) -> Result<(), String> {
     let tmp_path = make_temp_path(path, "atomic");
     let mut options = std::fs::OpenOptions::new();
     options.create_new(true).write(true);
@@ -1354,17 +1666,19 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), Str
         options.mode(0o600);
     }
     let mut tmp_file = options.open(&tmp_path).map_err(|e| e.to_string())?;
-    tmp_file
+    let write_result = tmp_file
         .write_all(data.as_bytes())
-        .map_err(|e| e.to_string())?;
-    tmp_file.sync_all().map_err(|e| e.to_string())?;
+        .and_then(|()| tmp_file.sync_all());
     drop(tmp_file);
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
+    if let Err(err) = write_result {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(e.to_string());
+        return Err(err.to_string());
     }
-    fsync_parent(path)?;
-    Ok(())
+    publish_temp_file(&tmp_path, path, overwrite)
+}
+
+pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), String> {
+    atomic_write_with_overwrite(path, data, true)
 }
 
 fn is_owned_atomic_temp(path: &Path) -> bool {
@@ -1419,7 +1733,9 @@ fn main() {
             // Finish or reverse a vault migration before any protected command
             // runs. A failure is latched by the security module so protected I/O
             // fails closed, and journal-owned staging is deliberately retained.
-            let migration_recovered = match security::recover_interrupted_migration(app.handle()) {
+            let migration_recovered = match lock_storage_ops()
+                .and_then(|_storage_guard| security::recover_interrupted_migration(app.handle()))
+            {
                 Ok(()) => true,
                 Err(err) => {
                     eprintln!("Vault migration recovery failed: {}", err);

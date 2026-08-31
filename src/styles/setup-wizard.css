@@ -28,15 +28,19 @@
 
 .setup-wizard-card {
   width: min(460px, 92vw);
-  max-height: 100vh;
+  max-height: calc(
+    100dvh - max(24px, env(safe-area-inset-top)) -
+      max(24px, env(safe-area-inset-bottom))
+  );
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
-  overflow: hidden;
   animation: setup-card-in 0.35s ease;
 }
 

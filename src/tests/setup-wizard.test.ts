@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -197,5 +198,22 @@ describe("setup wizard", () => {
       mockInvoke.mock.calls.filter(([cmd]) => cmd === "initialize_security")
         .length,
     ).toBe(1);
+  });
+
+  it("keeps the wizard card vertically scrollable in constrained viewports", () => {
+    const style = document.createElement("style");
+    style.textContent = readFileSync("src/styles/setup-wizard.css", "utf8");
+    document.head.appendChild(style);
+    const card = document.createElement("div");
+    card.className = "setup-wizard-card";
+    document.body.appendChild(card);
+
+    const computed = getComputedStyle(card);
+    expect(computed.overflowX).toBe("hidden");
+    expect(computed.overflowY).toBe("auto");
+    expect(computed.overscrollBehavior).toBe("contain");
+    expect(computed.maxHeight).toContain("100dvh");
+
+    style.remove();
   });
 });

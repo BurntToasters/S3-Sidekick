@@ -32,7 +32,7 @@ try {
   const skipForced = allowSkipMirror();
   if (!skipBeta && !skipForced && !getAfterPackLocation()) {
     throw new Error(
-      `Stable release ${version} requires AFTER_PACK_LOC so artifacts are mirrored before git clean. Set AFTER_PACK_LOC or SKIP_RELEASE_MIRROR=1. Beta versions (X.Y.Z-beta.N) skip the mirror by default.`,
+      `Stable release ${version} requires AFTER_PACK_LOC so artifacts are mirrored outside the release staging directory. Set AFTER_PACK_LOC or SKIP_RELEASE_MIRROR=1. Beta versions (X.Y.Z-beta.N) skip the mirror by default.`,
     );
   }
   const result = finalizeReleaseAssets({ version });

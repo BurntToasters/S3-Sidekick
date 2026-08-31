@@ -140,7 +140,7 @@ describe("connection module", () => {
   });
 
   it("disconnect resets state fields", async () => {
-    mockInvoke.mockResolvedValueOnce(undefined);
+    mockInvoke.mockRejectedValueOnce(new Error("disconnect failed"));
 
     const connection = await import("../connection.ts");
     const { state } = await import("../state.ts");
@@ -166,7 +166,17 @@ describe("connection module", () => {
     state.continuationToken = "token";
     state.hasMore = true;
 
-    await connection.disconnect();
+    await expect(connection.disconnect()).rejects.toThrow("disconnect failed");
+    expect(state.connected).toBe(true);
+    expect(state.currentBucket).toBe("bucket-a");
+    expect(state.currentPrefix).toBe("nested/");
+    expect(state.objects.map((object) => object.key)).toEqual([
+      "nested/file.txt",
+    ]);
+    expect(state.selectedKeys).toEqual(new Set(["nested/file.txt"]));
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await expect(connection.disconnect()).resolves.toBe(true);
 
     expect(mockInvoke).toHaveBeenCalledWith("disconnect", {
       connectionId: "conn-1",
@@ -187,7 +197,7 @@ describe("connection module", () => {
   });
 
   it("disconnect does not clear a newer session", async () => {
-    mockInvoke.mockResolvedValueOnce(undefined);
+    mockInvoke.mockRejectedValueOnce(new Error("Connection changed"));
 
     const connection = await import("../connection.ts");
     const { state } = await import("../state.ts");
@@ -197,7 +207,10 @@ describe("connection module", () => {
     state.connectionIdentity = "ident-new";
     state.endpoint = "https://new.example.com";
 
-    await connection.disconnect("conn-old");
+    const pending = connection.disconnect("conn-old");
+    expect(state.connected).toBe(true);
+    expect(state.connectionId).toBe("conn-new");
+    await expect(pending).resolves.toBe(false);
 
     expect(mockInvoke).toHaveBeenCalledWith("disconnect", {
       connectionId: "conn-old",
@@ -305,7 +318,40 @@ describe("connection module", () => {
   });
 
   it("refreshObjects replaces listing state and clears selection", async () => {
-    mockInvoke.mockResolvedValueOnce({
+    let resolveListing: ((value: unknown) => void) | undefined;
+    mockInvoke.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveListing = resolve;
+        }),
+    );
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+    state.currentBucket = "bucket-old";
+    state.currentPrefix = "old/";
+    state.objects = [
+      {
+        key: "old/file.txt",
+        size: 1,
+        last_modified: "old",
+        is_folder: false,
+      },
+    ];
+    state.prefixes = ["old/"];
+    state.continuationToken = "old-token";
+    state.hasMore = true;
+    state.selectedKeys.add("old-key");
+
+    const pending = connection.refreshObjects("bucket-a", "docs/");
+    expect(state.currentBucket).toBe("bucket-old");
+    expect(state.currentPrefix).toBe("old/");
+    expect(state.objects.map((object) => object.key)).toEqual(["old/file.txt"]);
+    expect(state.selectedKeys).toEqual(new Set(["old-key"]));
+
+    resolveListing?.({
       objects: [
         {
           key: "docs/readme.txt",
@@ -318,14 +364,7 @@ describe("connection module", () => {
       truncated: true,
       next_continuation_token: "next-token",
     });
-    const connection = await import("../connection.ts");
-    const { state } = await import("../state.ts");
-    resetState(state);
-    state.connectionId = "conn-1";
-    state.connectionIdentity = "ident-1";
-    state.selectedKeys.add("old-key");
-
-    await connection.refreshObjects("bucket-a", "docs/");
+    await expect(pending).resolves.toBe(true);
 
     expect(mockInvoke).toHaveBeenCalledWith("list_objects", {
       bucket: "bucket-a",
@@ -438,8 +477,8 @@ describe("connection module", () => {
       truncated: false,
       next_continuation_token: "",
     });
-    await first;
-    expect(state.currentBucket).toBe("bucket-b");
+    await expect(first).resolves.toBe(false);
+    expect(state.currentBucket).toBe("");
     expect(state.objects).toEqual([]);
 
     resolveSecond?.({
@@ -455,7 +494,8 @@ describe("connection module", () => {
       truncated: false,
       next_continuation_token: "",
     });
-    await second;
+    await expect(second).resolves.toBe(true);
+    expect(state.currentBucket).toBe("bucket-b");
     expect(state.objects.map((object) => object.key)).toEqual(["new.txt"]);
   });
 
@@ -492,7 +532,7 @@ describe("connection module", () => {
     });
 
     await expect(connecting).rejects.toThrow("superseded");
-    await disconnecting;
+    await expect(disconnecting).resolves.toBe(true);
     expect(state.connected).toBe(false);
     expect(state.endpoint).toBe("");
   });

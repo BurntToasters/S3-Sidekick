@@ -34,7 +34,10 @@ import {
   setConnectionUI,
 } from "./app-connection.ts";
 import { wireEvents } from "./app-events.ts";
-import { recoverPendingTransfers } from "./transfers.ts";
+import {
+  prepareTransferRecovery,
+  recoverPendingTransfers,
+} from "./transfers.ts";
 import { initializeIcons } from "./icons.ts";
 import { wireTitlebar } from "./titlebar.ts";
 
@@ -145,11 +148,21 @@ async function recoverTransfersAfterSecurityReady(): Promise<void> {
 
 export async function init(): Promise<void> {
   initializeIcons();
-  wireEvents();
   setConnectionUI(false);
 
-  state.platformName = await invoke<string>("get_platform_info");
+  try {
+    state.platformName = await invoke<string>("get_platform_info");
+  } catch (err) {
+    state.platformName = "";
+    console.warn("Platform detection unavailable:", err);
+    logActivity(
+      "Platform-specific window styling and shortcut labels are unavailable this launch.",
+      "warning",
+    );
+  }
   applyPlatformClass();
+  prepareTransferRecovery();
+  wireEvents();
   wireTitlebar();
 
   let settingsValid = true;

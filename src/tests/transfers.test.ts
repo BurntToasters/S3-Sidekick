@@ -6,6 +6,12 @@ const mockListen =
   vi.fn<
     (event: string, callback: (event: unknown) => void) => Promise<() => void>
   >();
+const TEST_RECOVERY_SESSION = "a".repeat(64);
+const EMPTY_HYDRATION = {
+  recovery_session: TEST_RECOVERY_SESSION,
+  manifest_json: "",
+  legacy_import_allowed: false,
+};
 
 function renderFixture(): void {
   document.body.innerHTML = `
@@ -69,6 +75,8 @@ beforeEach(() => {
   vi.resetModules();
   mockInvoke.mockReset();
   mockInvoke.mockImplementation(async (cmd, payload) => {
+    if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
+    if (cmd === "transfer_checkpoint_gc") return 0;
     if (cmd === "object_exists" || cmd === "path_exists") return false;
     if (cmd === "download_object") return 1234;
     if (cmd === "head_object") {
@@ -314,6 +322,13 @@ describe("transfers queue UI", () => {
       }),
     );
 
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("activity-list") as HTMLDivElement)
+          .textContent,
+      ).toContain("Downloaded readme.txt");
+    });
+    await flushMicrotasks(4);
     transfers.clearCompletedTransfers();
     transfers.enqueuePaths(["C:\\tmp\\checksummed.txt"], "uploads/");
     await flushMicrotasks(12);
@@ -467,6 +482,8 @@ describe("transfers queue UI", () => {
     state.currentSettings.downloadPartSizeMb = 16;
 
     mockInvoke.mockImplementation(async (cmd, payload) => {
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
+      if (cmd === "transfer_checkpoint_gc") return 0;
       if (cmd === "path_exists") return false;
       if (cmd === "head_object") {
         const key =
@@ -483,6 +500,7 @@ describe("transfers queue UI", () => {
     });
 
     await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
     transfers.enqueueDownloads([
       {
         bucket: "bucket-a",
@@ -505,6 +523,7 @@ describe("transfers queue UI", () => {
     );
     expect(parallelCall).toBeTruthy();
     const payload = parallelCall?.[1] as Record<string, unknown>;
+    expect(payload.recoverySession).toBe(TEST_RECOVERY_SESSION);
     expect("resumeCompletedParts" in payload).toBe(false);
   });
 
@@ -690,6 +709,7 @@ describe("transfers queue UI", () => {
     state.currentSettings.maxConcurrentTransfers = 1;
     state.currentSettings.enableTransferResume = true;
     await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
 
     const events: string[] = [];
     let stopDownload = () => {};
@@ -746,6 +766,10 @@ describe("transfers queue UI", () => {
         "checkpoint-removed",
       ]);
     });
+    expect(mockInvoke).toHaveBeenCalledWith("transfer_checkpoint_remove", {
+      checkpointId: expect.any(String),
+      recoverySession: TEST_RECOVERY_SESSION,
+    });
     expect(
       (document.getElementById("transfer-list") as HTMLDivElement).textContent,
     ).toContain("Cancelled");
@@ -757,6 +781,7 @@ describe("transfers queue UI", () => {
     state.currentSettings.maxConcurrentTransfers = 1;
     state.currentSettings.enableTransferResume = true;
     await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
 
     let stopDownload = () => {};
     mockInvoke.mockImplementation(async (cmd) => {
@@ -804,8 +829,37 @@ describe("transfers queue UI", () => {
       "transfer_checkpoint_remove",
       expect.anything(),
     );
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(
+          ([cmd, payload]) =>
+            cmd === "save_transfer_manifest" &&
+            typeof payload === "object" &&
+            payload !== null &&
+            String((payload as { json?: unknown }).json).includes(
+              "retain-me.txt",
+            ),
+        ),
+      ).toBe(true);
+    });
+    const manifestSave = [...mockInvoke.mock.calls]
+      .reverse()
+      .find(
+        ([cmd, payload]) =>
+          cmd === "save_transfer_manifest" &&
+          typeof payload === "object" &&
+          payload !== null &&
+          String((payload as { json?: unknown }).json).includes(
+            "retain-me.txt",
+          ),
+      );
+    expect(manifestSave?.[1]).toEqual(
+      expect.objectContaining({ recoverySession: TEST_RECOVERY_SESSION }),
+    );
     const manifest = JSON.parse(
-      localStorage.getItem("s3-sidekick.transfer-manifest.v1") ?? "{}",
+      String(
+        (manifestSave?.[1] as { json?: unknown } | undefined)?.json ?? "{}",
+      ),
     ) as { items?: Array<{ paused?: boolean; destination?: string }> };
     expect(manifest.items).toEqual(
       expect.arrayContaining([
@@ -1064,7 +1118,7 @@ describe("transfers queue UI", () => {
     };
 
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
       if (cmd === "transfer_checkpoint_gc") return 0;
       if (cmd === "object_exists") return false;
       if (cmd === "copy_object_to") return receipt;
@@ -1119,6 +1173,9 @@ describe("transfers queue UI", () => {
       ([cmd]) => cmd === "delete_copied_objects",
     );
     expect(markerSaveIndex).toBeGreaterThanOrEqual(0);
+    expect(mockInvoke.mock.calls[markerSaveIndex]?.[1]).toEqual(
+      expect.objectContaining({ recoverySession: TEST_RECOVERY_SESSION }),
+    );
     expect(deleteIndex).toBeGreaterThan(markerSaveIndex);
   });
 
@@ -1136,7 +1193,7 @@ describe("transfers queue UI", () => {
     };
 
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
       if (cmd === "transfer_checkpoint_gc") return 0;
       if (cmd === "object_exists") return false;
       if (cmd === "copy_object_to") {
@@ -1204,7 +1261,7 @@ describe("transfers queue UI", () => {
     };
 
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
       if (cmd === "transfer_checkpoint_gc") return 0;
       if (cmd === "list_objects") {
         return {
@@ -1264,7 +1321,7 @@ describe("transfers queue UI", () => {
     state.currentSettings.maxConcurrentTransfers = 1;
 
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
       if (cmd === "transfer_checkpoint_gc") return 0;
       if (cmd === "list_objects") {
         return {
@@ -1311,7 +1368,7 @@ describe("transfers queue UI", () => {
     state.currentSettings.maxConcurrentTransfers = 0;
 
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
       if (cmd === "transfer_checkpoint_gc") return 0;
       if (cmd === "copy_object_to") {
         throw new Error("copy must not run against a different account");
@@ -1363,7 +1420,7 @@ describe("transfers queue UI", () => {
     };
 
     mockInvoke.mockImplementation(async (cmd, payload) => {
-      if (cmd === "load_transfer_manifest") return "";
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
       if (cmd === "transfer_checkpoint_gc") return 0;
       if (cmd === "object_exists") return false;
       if (cmd === "copy_object_to") return receipt;
@@ -1375,7 +1432,9 @@ describe("transfers queue UI", () => {
           '"movePhase":"copied"',
         )
       ) {
-        throw new Error("manifest disk full");
+        throw new Error(
+          "Transfer recovery session is stale or missing; reload the application.",
+        );
       }
       if (cmd === "delete_copied_objects") return 1;
       return undefined;
@@ -1398,7 +1457,7 @@ describe("transfers queue UI", () => {
       expect(
         (document.getElementById("transfer-list") as HTMLDivElement)
           .textContent,
-      ).toContain("manifest disk full");
+      ).toContain("reload the application");
     });
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "delete_copied_objects",

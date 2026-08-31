@@ -19,6 +19,48 @@ import {
 } from "./info-panel.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
 
+const OBJECT_ROW_HEIGHT = 36;
+const OBJECT_VIRTUALIZE_THRESHOLD = 250;
+const OBJECT_VIRTUAL_OVERSCAN = 8;
+const OBJECT_VIRTUAL_FALLBACK_VIEWPORT = 600;
+
+let lastInspectorSelectionSignature: string | null = null;
+
+function getInspectorSelectionSignature(): string {
+  const selectedKeys = Array.from(state.selectedKeys).sort();
+  const objectRevisions = new Map(
+    state.objects
+      .filter((object) => !object.is_folder)
+      .map(
+        (object) =>
+          [object.key, `${object.size}:${object.last_modified}`] as const,
+      ),
+  );
+  const selectedRevisions = selectedKeys.map((key) =>
+    key.startsWith("prefix:")
+      ? key
+      : `${key}:${objectRevisions.get(key) ?? "missing"}`,
+  );
+  return JSON.stringify([
+    state.connectionIdentity,
+    state.connectionId,
+    state.currentBucket,
+    state.currentPrefix,
+    selectedRevisions,
+  ]);
+}
+
+function syncInspectorForSemanticSelectionChange(): void {
+  const signature = getInspectorSelectionSignature();
+  if (signature === lastInspectorSelectionSignature) return;
+  lastInspectorSelectionSignature = signature;
+  void syncInspectorFromSelection(new Set(state.selectedKeys));
+}
+
+export function invalidateInspectorSelectionSync(): void {
+  lastInspectorSelectionSignature = null;
+}
+
 function hasAccelModifier(e: MouseEvent): boolean {
   if (state.platformName === "macos") {
     return e.metaKey && !e.ctrlKey;
@@ -78,8 +120,8 @@ export function clearSelection(): void {
   updateSelectionUI();
 }
 
-export function pruneStaleSelection(): void {
-  const valid = new Set(getVisibleSelectableKeys());
+export function pruneStaleSelection(validKeys?: readonly string[]): void {
+  const valid = new Set(validKeys ?? getVisibleSelectableKeys());
   for (const key of state.selectedKeys) {
     if (!valid.has(key)) {
       state.selectedKeys.delete(key);
@@ -96,7 +138,8 @@ function clearFilter(): void {
 }
 
 export function updateSelectionUI(): void {
-  pruneStaleSelection();
+  const allKeys = getVisibleSelectableKeys();
+  pruneStaleSelection(allKeys);
 
   const rows = dom.objectTbody.querySelectorAll<HTMLElement>(".object-row");
   for (const row of rows) {
@@ -106,17 +149,24 @@ export function updateSelectionUI(): void {
     row.classList.toggle("object-row--selected", selected);
     if (cb) cb.checked = selected;
   }
-  const allKeys = getVisibleSelectableKeys();
+
+  let visibleSelectedCount = 0;
+  for (const key of allKeys) {
+    if (state.selectedKeys.has(key)) visibleSelectedCount += 1;
+  }
   const selectAll = document.getElementById(
     "select-all",
   ) as HTMLInputElement | null;
   if (selectAll) {
     selectAll.checked =
-      allKeys.length > 0 && allKeys.every((k) => state.selectedKeys.has(k));
+      allKeys.length > 0 && visibleSelectedCount === allKeys.length;
     selectAll.indeterminate =
-      !selectAll.checked && allKeys.some((k) => state.selectedKeys.has(k));
+      visibleSelectedCount > 0 && visibleSelectedCount < allKeys.length;
   }
 
+  const selectedFileCount = getSelectedFileKeys().length;
+  const totalSelected = state.selectedKeys.size;
+  const selectedFolderCount = totalSelected - selectedFileCount;
   const batchToolbar = document.getElementById(
     "batch-toolbar",
   ) as HTMLDivElement | null;
@@ -124,13 +174,6 @@ export function updateSelectionUI(): void {
     "batch-count",
   ) as HTMLSpanElement | null;
   if (batchToolbar && batchCount) {
-    const selectedFileCount = Array.from(state.selectedKeys).filter(
-      (key) => !key.startsWith("prefix:"),
-    ).length;
-    const selectedFolderCount = Array.from(state.selectedKeys).filter((key) =>
-      key.startsWith("prefix:"),
-    ).length;
-    const totalSelected = selectedFileCount + selectedFolderCount;
     if (totalSelected >= 1) {
       const parts: string[] = [];
       if (selectedFileCount > 0)
@@ -171,9 +214,11 @@ export function updateSelectionUI(): void {
           : "Select files to download";
     }
     if (batchDelete) {
-      batchDelete.disabled = totalSelected === 0;
-      batchDelete.title =
-        totalSelected > 0
+      const deleteInFlight = batchDelete.dataset.operationInFlight === "true";
+      batchDelete.disabled = totalSelected === 0 || deleteInFlight;
+      batchDelete.title = deleteInFlight
+        ? "Delete in progress"
+        : totalSelected > 0
           ? `Delete ${totalSelected} selected item${totalSelected === 1 ? "" : "s"}`
           : "Select items to delete";
     }
@@ -196,17 +241,17 @@ export function updateSelectionUI(): void {
     "btn-download",
   ) as HTMLButtonElement | null;
   if (downloadBtn) {
-    downloadBtn.disabled = getSelectedFileKeys().length === 0;
+    downloadBtn.disabled = selectedFileCount === 0;
     downloadBtn.title =
-      getSelectedFileKeys().length > 0
-        ? `Download ${getSelectedFileKeys().length} selected file${getSelectedFileKeys().length === 1 ? "" : "s"}`
+      selectedFileCount > 0
+        ? `Download ${selectedFileCount} selected file${selectedFileCount === 1 ? "" : "s"}`
         : "Select files to download";
   }
 
-  if (state.selectedKeys.size > 0) {
+  if (totalSelected > 0) {
     markInspectorHasContent();
   }
-  void syncInspectorFromSelection(state.selectedKeys);
+  syncInspectorForSemanticSelectionChange();
 }
 
 let lastClickedKey: string | null = null;
@@ -408,60 +453,358 @@ function emptyFolderRowHtml(): string {
   );
 }
 
+interface ObjectTableEntry {
+  id: string;
+  kind: "file" | "folder";
+  key: string;
+  name: string;
+  size: number;
+  lastModified: string;
+}
+
+export interface ObjectVirtualRange {
+  start: number;
+  end: number;
+}
+
+export function calculateObjectVirtualRange(
+  total: number,
+  scrollTop: number,
+  viewportHeight: number,
+  rowHeight = OBJECT_ROW_HEIGHT,
+  overscan = OBJECT_VIRTUAL_OVERSCAN,
+): ObjectVirtualRange {
+  if (total <= 0) return { start: 0, end: 0 };
+  const safeRowHeight = Math.max(1, rowHeight);
+  const unclampedVisibleStart = Math.floor(
+    Math.max(0, scrollTop) / safeRowHeight,
+  );
+  const visibleCount = Math.max(1, Math.ceil(viewportHeight / safeRowHeight));
+  const visibleStart = Math.min(
+    unclampedVisibleStart,
+    Math.max(0, total - visibleCount),
+  );
+  const start = Math.max(0, visibleStart - overscan);
+  const end = Math.min(total, visibleStart + visibleCount + overscan);
+  return { start, end };
+}
+
+let renderedTableEntries: ObjectTableEntry[] = [];
+let renderedTableMaxSize = 0;
+let objectPanelListenerTarget: HTMLElement | null = null;
+let virtualRenderScheduled = false;
+
+function createObjectRow(): HTMLTableRowElement {
+  const row = document.createElement("tr");
+  row.innerHTML = `<td class="col-check"><input type="checkbox" class="row-check" /></td>
+    <td class="object-name"><span class="object-kind-icon"></span><span class="object-name__text"></span></td>
+    <td class="object-size"></td>
+    <td class="object-modified"></td>`;
+  return row;
+}
+
+function updateObjectRow(
+  row: HTMLTableRowElement,
+  entry: ObjectTableEntry,
+  maxSize: number,
+  logicalIndex: number,
+): void {
+  row.className = `object-row object-row--${entry.kind}`;
+  row.dataset.rowId = entry.id;
+  row.dataset.logicalIndex = String(logicalIndex);
+  row.setAttribute("aria-rowindex", String(logicalIndex + 2));
+  if (entry.kind === "folder") {
+    row.dataset.prefix = entry.key;
+    row.removeAttribute("data-key");
+  } else {
+    row.dataset.key = entry.key;
+    row.removeAttribute("data-prefix");
+  }
+
+  const checkbox = row.querySelector<HTMLInputElement>(".row-check");
+  const nameCell = row.querySelector<HTMLElement>(".object-name");
+  const nameText = row.querySelector<HTMLElement>(".object-name__text");
+  const icon = row.querySelector<HTMLElement>(".object-kind-icon");
+  const sizeCell = row.querySelector<HTMLElement>(".object-size");
+  const modifiedCell = row.querySelector<HTMLElement>(".object-modified");
+  const semanticKey =
+    entry.kind === "folder" ? `prefix:${entry.key}` : entry.key;
+
+  if (checkbox) {
+    checkbox.setAttribute("aria-label", `Select ${entry.kind} ${entry.name}`);
+    checkbox.checked = state.selectedKeys.has(semanticKey);
+  }
+  row.classList.toggle(
+    "object-row--selected",
+    state.selectedKeys.has(semanticKey),
+  );
+  if (nameCell) nameCell.title = entry.name;
+  if (nameText) nameText.textContent = entry.name;
+  if (icon) {
+    icon.className = `object-kind-icon icon-${entry.kind}`;
+    icon.innerHTML = getIconHtml(entry.kind === "folder" ? "folder" : "file", {
+      className: "lucide-icon lucide-icon--inline",
+      decorative: true,
+    });
+  }
+  if (sizeCell) {
+    sizeCell.className =
+      entry.kind === "folder"
+        ? "object-size object-size--folder"
+        : "object-size";
+    sizeCell.textContent =
+      entry.kind === "folder" ? "Folder" : formatSize(entry.size);
+    const barPct =
+      entry.kind === "file" && maxSize > 0
+        ? Math.round((entry.size / maxSize) * 100)
+        : 0;
+    sizeCell.style.background =
+      barPct > 0
+        ? `linear-gradient(to right, var(--glow-accent) ${barPct}%, transparent ${barPct}%)`
+        : "";
+  }
+  if (modifiedCell) {
+    modifiedCell.className =
+      entry.kind === "folder"
+        ? "object-modified object-modified--muted"
+        : "object-modified";
+    modifiedCell.textContent =
+      entry.kind === "folder" ? "\u2014" : formatDate(entry.lastModified);
+  }
+}
+
+function createVirtualSpacer(
+  height: number,
+  position: "top" | "bottom",
+): HTMLTableRowElement {
+  const row = document.createElement("tr");
+  row.className = `object-virtual-spacer object-virtual-spacer--${position}`;
+  row.setAttribute("aria-hidden", "true");
+  const cell = document.createElement("td");
+  cell.colSpan = 4;
+  cell.style.height = `${Math.max(0, height)}px`;
+  row.appendChild(cell);
+  return row;
+}
+
+function renderCurrentObjectWindow(): void {
+  const tbody = dom.objectTbody;
+  const entries = renderedTableEntries;
+  if (entries.length === 0) return;
+
+  const panel = dom.objectPanel;
+  const virtualized = entries.length >= OBJECT_VIRTUALIZE_THRESHOLD;
+  const viewportHeight =
+    panel.clientHeight > 0
+      ? panel.clientHeight
+      : OBJECT_VIRTUAL_FALLBACK_VIEWPORT;
+  const range = virtualized
+    ? calculateObjectVirtualRange(
+        entries.length,
+        panel.scrollTop,
+        viewportHeight,
+      )
+    : { start: 0, end: entries.length };
+
+  const activeRow =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement.closest<HTMLElement>(".object-row")
+      : null;
+  const activeRowId = activeRow?.dataset.rowId ?? null;
+  const rovingRow = tbody.querySelector<HTMLElement>(
+    '.object-row[tabindex="0"]',
+  );
+  const rovingRowId = activeRowId ?? rovingRow?.dataset.rowId ?? null;
+  const existingRows = new Map<string, HTMLTableRowElement>();
+  for (const row of tbody.querySelectorAll<HTMLTableRowElement>(
+    ".object-row[data-row-id]",
+  )) {
+    const id = row.dataset.rowId;
+    if (id) existingRows.set(id, row);
+  }
+
+  const fragment = document.createDocumentFragment();
+  if (virtualized && range.start > 0) {
+    fragment.appendChild(
+      createVirtualSpacer(range.start * OBJECT_ROW_HEIGHT, "top"),
+    );
+  }
+
+  let rovingAssigned = false;
+  for (let index = range.start; index < range.end; index += 1) {
+    const entry = entries[index];
+    const row = existingRows.get(entry.id) ?? createObjectRow();
+    updateObjectRow(row, entry, renderedTableMaxSize, index);
+    const isRoving = entry.id === rovingRowId;
+    row.tabIndex = isRoving ? 0 : -1;
+    rovingAssigned ||= isRoving;
+    fragment.appendChild(row);
+  }
+
+  if (virtualized && range.end < entries.length) {
+    fragment.appendChild(
+      createVirtualSpacer(
+        (entries.length - range.end) * OBJECT_ROW_HEIGHT,
+        "bottom",
+      ),
+    );
+  }
+
+  tbody.replaceChildren(fragment);
+  const mountedRows =
+    tbody.querySelectorAll<HTMLTableRowElement>(".object-row");
+  if (!rovingAssigned && mountedRows[0]) mountedRows[0].tabIndex = 0;
+  if (activeRowId) {
+    const restored = Array.from(mountedRows).find(
+      (row) => row.dataset.rowId === activeRowId,
+    );
+    const previousIndex = entries.findIndex(
+      (entry) => entry.id === activeRowId,
+    );
+    const nearestMounted =
+      previousIndex >= range.end
+        ? mountedRows[mountedRows.length - 1]
+        : mountedRows[0];
+    const focusTarget = restored ?? nearestMounted;
+    if (focusTarget) {
+      for (const row of mountedRows) row.tabIndex = -1;
+      focusTarget.tabIndex = 0;
+      focusTarget.focus({ preventScroll: true });
+    }
+  }
+}
+
+function scheduleVirtualWindowRender(): void {
+  if (
+    renderedTableEntries.length < OBJECT_VIRTUALIZE_THRESHOLD ||
+    virtualRenderScheduled
+  ) {
+    return;
+  }
+  virtualRenderScheduled = true;
+  const render = () => {
+    virtualRenderScheduled = false;
+    renderCurrentObjectWindow();
+  };
+  if (typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(render);
+  } else {
+    queueMicrotask(render);
+  }
+}
+
+function handleVirtualTableKeydown(event: KeyboardEvent): void {
+  if (renderedTableEntries.length < OBJECT_VIRTUALIZE_THRESHOLD) return;
+  if (
+    !(["ArrowDown", "ArrowUp", "Home", "End"] as string[]).includes(event.key)
+  ) {
+    return;
+  }
+  const target = event.target as HTMLElement;
+  if (target.closest(".row-check")) return;
+  const row = target.closest<HTMLElement>(".object-row");
+  if (!row) return;
+  const currentIndex = Number.parseInt(row.dataset.logicalIndex ?? "", 10);
+  if (!Number.isInteger(currentIndex)) return;
+
+  let nextIndex = currentIndex;
+  if (event.key === "ArrowDown") nextIndex += 1;
+  if (event.key === "ArrowUp") nextIndex -= 1;
+  if (event.key === "Home") nextIndex = 0;
+  if (event.key === "End") nextIndex = renderedTableEntries.length - 1;
+  nextIndex = Math.max(0, Math.min(renderedTableEntries.length - 1, nextIndex));
+  if (
+    nextIndex === currentIndex &&
+    (event.key === "ArrowDown" || event.key === "ArrowUp")
+  ) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const panel = dom.objectPanel;
+  const viewportHeight =
+    panel.clientHeight > 0
+      ? panel.clientHeight
+      : OBJECT_VIRTUAL_FALLBACK_VIEWPORT;
+  if (nextIndex * OBJECT_ROW_HEIGHT < panel.scrollTop) {
+    panel.scrollTop = nextIndex * OBJECT_ROW_HEIGHT;
+  } else if (
+    (nextIndex + 1) * OBJECT_ROW_HEIGHT >
+    panel.scrollTop + viewportHeight
+  ) {
+    panel.scrollTop = (nextIndex + 1) * OBJECT_ROW_HEIGHT - viewportHeight;
+  }
+  renderCurrentObjectWindow();
+  tbodyRowAtLogicalIndex(nextIndex)?.focus();
+}
+
+function tbodyRowAtLogicalIndex(index: number): HTMLElement | null {
+  return dom.objectTbody.querySelector<HTMLElement>(
+    `.object-row[data-logical-index="${index}"]`,
+  );
+}
+
+function ensureObjectPanelListeners(): void {
+  const panel = dom.objectPanel;
+  if (objectPanelListenerTarget === panel) return;
+  if (objectPanelListenerTarget) {
+    objectPanelListenerTarget.removeEventListener(
+      "scroll",
+      scheduleVirtualWindowRender,
+    );
+  }
+  objectPanelListenerTarget = panel;
+  panel.addEventListener("scroll", scheduleVirtualWindowRender, {
+    passive: true,
+  });
+  dom.objectTbody.addEventListener("keydown", handleVirtualTableKeydown, true);
+}
+
 export function renderObjectTable(): void {
   const tbody = dom.objectTbody;
-  const rows: string[] = [];
-
   const filter = state.filterText.toLowerCase();
-
   const sortedPrefixes = [...state.prefixes]
-    .filter((p) => !filter || basename(p).toLowerCase().includes(filter))
+    .filter(
+      (prefix) => !filter || basename(prefix).toLowerCase().includes(filter),
+    )
     .sort((a, b) => (state.sortAsc ? a.localeCompare(b) : b.localeCompare(a)));
-
-  for (const prefix of sortedPrefixes) {
-    const name = basename(prefix);
-    rows.push(
-      `<tr class="object-row object-row--folder" data-prefix="${escapeHtml(prefix)}" tabindex="0">
-        <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select folder ${escapeHtml(name)}" /></td>
-        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-folder">${getIconHtml("folder", { className: "lucide-icon lucide-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
-        <td class="object-size object-size--folder">Folder</td>
-        <td class="object-modified object-modified--muted">&mdash;</td>
-      </tr>`,
-    );
-  }
-
   const sortedFiles = getSortedObjects();
-  const maxSize = sortedFiles.reduce((m, o) => Math.max(m, o.size), 0);
-  for (const obj of sortedFiles) {
-    const name = basename(obj.key);
-    const barPct = maxSize > 0 ? Math.round((obj.size / maxSize) * 100) : 0;
-    const barStyle =
-      barPct > 0
-        ? ` style="background:linear-gradient(to right, var(--glow-accent) ${barPct}%, transparent ${barPct}%)"`
-        : "";
-    rows.push(
-      `<tr class="object-row object-row--file" data-key="${escapeHtml(obj.key)}" tabindex="0">
-        <td class="col-check"><input type="checkbox" class="row-check" aria-label="Select file ${escapeHtml(name)}" /></td>
-        <td class="object-name" title="${escapeHtml(name)}"><span class="icon-file">${getIconHtml("file", { className: "lucide-icon lucide-icon--inline", decorative: true })}</span><span class="object-name__text">${escapeHtml(name)}</span></td>
-        <td class="object-size"${barStyle}>${formatSize(obj.size)}</td>
-        <td class="object-modified">${formatDate(obj.last_modified)}</td>
-      </tr>`,
-    );
-  }
 
-  if (rows.length === 0) {
+  renderedTableEntries = [
+    ...sortedPrefixes.map((prefix): ObjectTableEntry => ({
+      id: `prefix:${prefix}`,
+      kind: "folder",
+      key: prefix,
+      name: basename(prefix),
+      size: 0,
+      lastModified: "",
+    })),
+    ...sortedFiles.map((object): ObjectTableEntry => ({
+      id: `file:${object.key}`,
+      kind: "file",
+      key: object.key,
+      name: basename(object.key),
+      size: object.size,
+      lastModified: object.last_modified,
+    })),
+  ];
+  renderedTableMaxSize = sortedFiles.reduce(
+    (max, object) => Math.max(max, object.size),
+    0,
+  );
+
+  const table = tbody.closest("table");
+  table?.setAttribute("aria-rowcount", String(renderedTableEntries.length + 1));
+  if (renderedTableEntries.length === 0) {
     tbody.innerHTML =
       filter.length > 0
         ? `<tr><td colspan="4" class="table-empty">No objects match filter</td></tr>`
         : emptyFolderRowHtml();
   } else {
-    tbody.innerHTML = rows.join("");
+    ensureObjectPanelListeners();
+    renderCurrentObjectWindow();
   }
-
-  const renderedRows = tbody.querySelectorAll<HTMLElement>(".object-row");
-  for (const row of renderedRows) row.tabIndex = -1;
-  const firstRow = renderedRows[0];
-  if (firstRow) firstRow.tabIndex = 0;
 
   dom.objectPanel.style.display = "";
   dom.objectPanel.setAttribute("aria-busy", "false");
@@ -471,6 +814,7 @@ export function renderObjectTable(): void {
   updateObjectCount();
   updateLoadMore();
   updateSortIndicators();
+  committedListingSnapshot = captureListingSnapshot();
 }
 
 function updateObjectCount(): void {
@@ -608,19 +952,53 @@ export async function navigateToLocationPath(raw: string): Promise<boolean> {
     return false;
   }
 
+  if (
+    parsed.bucket === state.currentBucket &&
+    parsed.prefix === state.currentPrefix
+  ) {
+    syncPathInput();
+    return true;
+  }
+  if (!(await confirmDiscardThenNavigate())) {
+    syncPathInput();
+    return false;
+  }
+
+  const request = ++navigationGeneration;
+  const snapshot = captureNavigationSnapshot();
+  const bucketChanged = parsed.bucket !== snapshot.currentBucket;
+  closeInspectorOnMobile();
+  clearFilter();
+  renderObjectTableSkeleton();
+
   try {
-    if (parsed.bucket !== state.currentBucket) {
-      await selectBucket(parsed.bucket);
+    const committed = await refreshObjects(parsed.bucket, parsed.prefix);
+    if (
+      !committed ||
+      request !== navigationGeneration ||
+      state.currentBucket !== parsed.bucket ||
+      state.currentPrefix !== parsed.prefix
+    ) {
+      if (request === navigationGeneration) {
+        renderBucketList();
+        renderObjectTable();
+        renderBreadcrumb();
+      }
+      return false;
     }
-    if (parsed.prefix !== state.currentPrefix) {
-      await navigateToFolder(parsed.prefix);
-    } else {
-      syncPathInput();
-    }
+    resetSelectionForListingChange();
+    pushNav(parsed.bucket, parsed.prefix, request);
+    if (bucketChanged) renderBucketList();
+    renderObjectTable();
+    renderBreadcrumb();
     return true;
   } catch (err) {
+    if (request !== navigationGeneration) return false;
+    restoreListingSnapshot(snapshot);
+    if (bucketChanged) renderBucketList();
+    renderObjectTable();
+    renderBreadcrumb();
     setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
-    syncPathInput();
     return false;
   }
 }
@@ -644,6 +1022,8 @@ interface ListingSnapshot {
   hasMore: boolean;
 }
 
+let committedListingSnapshot: ListingSnapshot | null = null;
+
 function captureListingSnapshot(): ListingSnapshot {
   return {
     currentBucket: state.currentBucket,
@@ -653,6 +1033,22 @@ function captureListingSnapshot(): ListingSnapshot {
     continuationToken: state.continuationToken,
     hasMore: state.hasMore,
   };
+}
+
+function captureNavigationSnapshot(): ListingSnapshot {
+  const current = captureListingSnapshot();
+  if (!committedListingSnapshot) return current;
+  const locationIsTransitional =
+    current.currentBucket !== committedListingSnapshot.currentBucket ||
+    current.currentPrefix !== committedListingSnapshot.currentPrefix;
+  const listingWasClearedForRequest =
+    current.objects.length === 0 &&
+    current.prefixes.length === 0 &&
+    (committedListingSnapshot.objects.length > 0 ||
+      committedListingSnapshot.prefixes.length > 0);
+  return locationIsTransitional || listingWasClearedForRequest
+    ? committedListingSnapshot
+    : current;
 }
 
 function restoreListingSnapshot(snapshot: ListingSnapshot): void {
@@ -697,6 +1093,7 @@ export function clearNavHistory(): void {
   navHistory = [];
   navIndex = -1;
   historySuppressRequest = 0;
+  committedListingSnapshot = null;
   updateNavButtons();
 }
 
@@ -707,30 +1104,41 @@ async function confirmDiscardThenNavigate(): Promise<boolean> {
 
 export async function navigateBack(): Promise<void> {
   if (navIndex <= 0) return;
+  const expectedGeneration = navigationGeneration;
+  const expectedIndex = navIndex;
   if (!(await confirmDiscardThenNavigate())) return;
+  if (
+    navigationGeneration !== expectedGeneration ||
+    navIndex !== expectedIndex ||
+    navIndex <= 0
+  ) {
+    return;
+  }
   const request = ++navigationGeneration;
-  const snapshot = captureListingSnapshot();
-  const prevIndex = navIndex;
-  navIndex--;
-  const entry = navHistory[navIndex];
+  const snapshot = captureNavigationSnapshot();
+  const targetIndex = navIndex - 1;
+  const entry = navHistory[targetIndex];
+  const bucketChanged = entry.bucket !== state.currentBucket;
   historySuppressRequest = request;
   clearFilter();
-  resetSelectionForListingChange();
   renderObjectTableSkeleton();
 
   try {
-    if (entry.bucket !== state.currentBucket) {
-      await refreshObjects(entry.bucket, entry.prefix);
-      renderBucketList();
-    } else {
-      await refreshObjects(entry.bucket, entry.prefix);
-    }
+    const committed = await refreshObjects(entry.bucket, entry.prefix);
     if (request !== navigationGeneration) return;
+    if (!committed) {
+      renderBucketList();
+      renderObjectTable();
+      renderBreadcrumb();
+      return;
+    }
+    navIndex = targetIndex;
+    resetSelectionForListingChange();
+    if (bucketChanged) renderBucketList();
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
     if (request !== navigationGeneration) return;
-    navIndex = prevIndex;
     restoreListingSnapshot(snapshot);
     renderBucketList();
     renderObjectTable();
@@ -746,30 +1154,41 @@ export async function navigateBack(): Promise<void> {
 
 export async function navigateForward(): Promise<void> {
   if (navIndex >= navHistory.length - 1) return;
+  const expectedGeneration = navigationGeneration;
+  const expectedIndex = navIndex;
   if (!(await confirmDiscardThenNavigate())) return;
+  if (
+    navigationGeneration !== expectedGeneration ||
+    navIndex !== expectedIndex ||
+    navIndex >= navHistory.length - 1
+  ) {
+    return;
+  }
   const request = ++navigationGeneration;
-  const snapshot = captureListingSnapshot();
-  const prevIndex = navIndex;
-  navIndex++;
-  const entry = navHistory[navIndex];
+  const snapshot = captureNavigationSnapshot();
+  const targetIndex = navIndex + 1;
+  const entry = navHistory[targetIndex];
+  const bucketChanged = entry.bucket !== state.currentBucket;
   historySuppressRequest = request;
   clearFilter();
-  resetSelectionForListingChange();
   renderObjectTableSkeleton();
 
   try {
-    if (entry.bucket !== state.currentBucket) {
-      await refreshObjects(entry.bucket, entry.prefix);
-      renderBucketList();
-    } else {
-      await refreshObjects(entry.bucket, entry.prefix);
-    }
+    const committed = await refreshObjects(entry.bucket, entry.prefix);
     if (request !== navigationGeneration) return;
+    if (!committed) {
+      renderBucketList();
+      renderObjectTable();
+      renderBreadcrumb();
+      return;
+    }
+    navIndex = targetIndex;
+    resetSelectionForListingChange();
+    if (bucketChanged) renderBucketList();
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
     if (request !== navigationGeneration) return;
-    navIndex = prevIndex;
     restoreListingSnapshot(snapshot);
     renderBucketList();
     renderObjectTable();
@@ -786,22 +1205,27 @@ export async function navigateForward(): Promise<void> {
 export async function navigateToFolder(prefix: string): Promise<void> {
   if (!(await confirmDiscardThenNavigate())) return;
   const request = ++navigationGeneration;
-  const snapshot = captureListingSnapshot();
+  const snapshot = captureNavigationSnapshot();
   const bucket = state.currentBucket;
   closeInspectorOnMobile();
   clearFilter();
-  resetSelectionForListingChange();
   renderObjectTableSkeleton();
   try {
-    await refreshObjects(state.currentBucket, prefix);
+    const committed = await refreshObjects(bucket, prefix);
     if (
+      !committed ||
       request !== navigationGeneration ||
       state.currentBucket !== bucket ||
       state.currentPrefix !== prefix
     ) {
+      if (request === navigationGeneration) {
+        renderObjectTable();
+        renderBreadcrumb();
+      }
       return;
     }
-    pushNav(state.currentBucket, prefix, request);
+    resetSelectionForListingChange();
+    pushNav(bucket, prefix, request);
     renderObjectTable();
     renderBreadcrumb();
   } catch (err) {
@@ -828,17 +1252,26 @@ export async function navigateUp(): Promise<void> {
 export async function selectBucket(name: string): Promise<void> {
   if (!(await confirmDiscardThenNavigate())) return;
   const request = ++navigationGeneration;
-  const snapshot = captureListingSnapshot();
+  const snapshot = captureNavigationSnapshot();
   closeInspectorOnMobile();
   clearFilter();
-  resetSelectionForListingChange();
-  state.currentPrefix = "";
   renderObjectTableSkeleton();
   try {
-    await refreshObjects(name, "");
-    if (request !== navigationGeneration || state.currentBucket !== name) {
+    const committed = await refreshObjects(name, "");
+    if (
+      !committed ||
+      request !== navigationGeneration ||
+      state.currentBucket !== name ||
+      state.currentPrefix !== ""
+    ) {
+      if (request === navigationGeneration) {
+        renderBucketList();
+        renderObjectTable();
+        renderBreadcrumb();
+      }
       return;
     }
+    resetSelectionForListingChange();
     pushNav(name, "", request);
     renderBucketList();
     renderObjectTable();
@@ -854,6 +1287,7 @@ export async function selectBucket(name: string): Promise<void> {
 }
 
 export function showEmptyState(): void {
+  committedListingSnapshot = null;
   dom.objectPanel.style.display = "none";
   dom.emptyState.style.display = "";
   dom.objectTbody.innerHTML = "";

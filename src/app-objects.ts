@@ -17,6 +17,7 @@ import {
   navigateToFolder,
   clearSelection,
   updateSelectionUI,
+  invalidateInspectorSelectionSync,
 } from "./browser.ts";
 import { showConfirm, showPrompt } from "./dialogs.ts";
 import { logActivity, exportActivityLogText } from "./activity-log.ts";
@@ -73,7 +74,56 @@ function deleteFailureSummary(result: DeleteResult): string | null {
   return parts.join("; ");
 }
 
-export async function handleDelete(): Promise<void> {
+let deleteOperation: Promise<void> | null = null;
+
+function setDeleteOperationBusy(busy: boolean): void {
+  const button = document.getElementById(
+    "batch-delete",
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  const label = button.querySelector<HTMLElement>(".batch-toolbar__label");
+  button.dataset.operationInFlight = String(busy);
+  button.setAttribute("aria-busy", String(busy));
+  if (label) label.textContent = busy ? "Deleting\u2026" : "Delete";
+  if (busy) {
+    button.disabled = true;
+    button.title = "Delete in progress";
+  } else {
+    const selectedCount =
+      getSelectedFileKeys().length + getSelectedPrefixes().length;
+    button.disabled = selectedCount === 0;
+    button.title =
+      selectedCount > 0
+        ? `Delete ${selectedCount} selected item${selectedCount === 1 ? "" : "s"}`
+        : "Select items to delete";
+  }
+}
+
+export function isDeleteInProgress(): boolean {
+  return deleteOperation !== null;
+}
+
+export function handleDelete(): Promise<void> {
+  if (deleteOperation) return deleteOperation;
+  if (
+    getSelectedFileKeys().length === 0 &&
+    getSelectedPrefixes().length === 0
+  ) {
+    return Promise.resolve();
+  }
+
+  setDeleteOperationBusy(true);
+  const operation = performDelete().finally(() => {
+    if (deleteOperation === operation) {
+      deleteOperation = null;
+      setDeleteOperationBusy(false);
+    }
+  });
+  deleteOperation = operation;
+  return operation;
+}
+
+async function performDelete(): Promise<void> {
   const keys = getSelectedFileKeys();
   const prefixes = getSelectedPrefixes();
 
@@ -174,8 +224,8 @@ export async function handleDelete(): Promise<void> {
     if (!connectionSnapshotChanged(target)) {
       clearSelection();
       try {
-        await refreshObjects(target.bucket, target.prefix);
-        if (!connectionSnapshotChanged(target)) {
+        const committed = await refreshObjects(target.bucket, target.prefix);
+        if (committed && !connectionSnapshotChanged(target)) {
           renderObjectTable();
           renderBreadcrumb();
         }
@@ -304,7 +354,6 @@ export async function handleCopyArn(): Promise<void> {
 export async function handleRename(): Promise<void> {
   const keys = getSelectedFileKeys();
   const prefixes = getSelectedPrefixes();
-
   let target: ConnectionSnapshot;
   try {
     target = captureConnectionSnapshot();
@@ -312,6 +361,13 @@ export async function handleRename(): Promise<void> {
     setStatus(`Rename cancelled: ${friendlyError(err)}`, 5000);
     return;
   }
+  const targetBucket = target.bucket;
+  const targetPrefix = target.prefix;
+  const targetLocationChanged = (): boolean =>
+    connectionSnapshotChanged(target) ||
+    !state.connected ||
+    state.currentBucket !== targetBucket ||
+    state.currentPrefix !== targetPrefix;
 
   if (keys.length === 1 && prefixes.length === 0) {
     const oldKey = keys[0];
@@ -320,8 +376,8 @@ export async function handleRename(): Promise<void> {
       inputDefault: oldName,
     });
     if (!newName || newName === oldName) return;
-    if (connectionSnapshotChanged(target)) {
-      setStatus("Rename cancelled because connection changed.", 5000);
+    if (targetLocationChanged()) {
+      setStatus("Rename cancelled because location changed.", 5000);
       return;
     }
 
@@ -332,15 +388,15 @@ export async function handleRename(): Promise<void> {
     const sourceSize =
       state.objects.find((object) => object.key === oldKey)?.size ?? undefined;
     const intent = await resolveObjectConflict(
-      target.bucket,
+      target.connectionId,
+      targetBucket,
       newKey,
       conflictSession,
       false,
-      target.connectionId,
       { operation: "copy", byteLength: sourceSize },
     );
-    if (connectionSnapshotChanged(target)) {
-      setStatus("Rename cancelled because connection changed.", 5000);
+    if (targetLocationChanged()) {
+      setStatus("Rename cancelled because location changed.", 5000);
       return;
     }
     if (intent === "skip") {
@@ -354,28 +410,31 @@ export async function handleRename(): Promise<void> {
       );
       return;
     }
+    if (targetLocationChanged()) {
+      setStatus("Rename cancelled because location changed.", 5000);
+      return;
+    }
 
     try {
       setStatus("Renaming...");
       await invokeS3For(target.connectionId, "rename_object", {
-        bucket: target.bucket,
+        bucket: targetBucket,
         oldKey,
         newKey,
         overwrite: intent.overwrite,
       });
-      if (connectionSnapshotChanged(target)) {
-        return;
-      }
+      if (targetLocationChanged()) return;
       setStatus(`Renamed to "${newName}".`, 5000);
       logActivity(`Renamed "${oldName}" to "${newName}".`, "success");
       clearSelection();
-      if (!connectionSnapshotChanged(target)) {
-        await refreshObjects(target.bucket, target.prefix);
-        if (!connectionSnapshotChanged(target)) {
+      if (!targetLocationChanged()) {
+        const committed = await refreshObjects(targetBucket, targetPrefix);
+        if (committed && !targetLocationChanged()) {
           renderObjectTable();
         }
       }
     } catch (err) {
+      if (targetLocationChanged()) return;
       setStatus(`Rename failed for "${oldName}": ${friendlyError(err)}`);
       logActivity(
         `Rename failed for "${oldName}": ${friendlyError(err)}`,
@@ -402,8 +461,8 @@ export async function handleRename(): Promise<void> {
       setStatus("Folder name cannot contain slashes.", 5000);
       return;
     }
-    if (connectionSnapshotChanged(target)) {
-      setStatus("Folder rename cancelled because connection changed.", 5000);
+    if (targetLocationChanged()) {
+      setStatus("Folder rename cancelled because location changed.", 5000);
       return;
     }
 
@@ -416,7 +475,7 @@ export async function handleRename(): Promise<void> {
         objects: Array<{ key: string }>;
         prefixes: string[];
       }>(target.connectionId, "list_objects", {
-        bucket: target.bucket,
+        bucket: targetBucket,
         prefix: newPrefix,
         delimiter: "",
         continuationToken: "",
@@ -426,14 +485,14 @@ export async function handleRename(): Promise<void> {
     } catch (err) {
       folderHasConflict = true;
       logActivity(
-        `Could not check whether ${target.bucket}/${newPrefix} exists (${friendlyError(err)}). ` +
+        `Could not check whether ${targetBucket}/${newPrefix} exists (${friendlyError(err)}). ` +
           "Treating it as a conflict.",
         "warning",
       );
     }
 
-    if (connectionSnapshotChanged(target)) {
-      setStatus("Folder rename cancelled because connection changed.", 5000);
+    if (targetLocationChanged()) {
+      setStatus("Folder rename cancelled because location changed.", 5000);
       return;
     }
 
@@ -448,13 +507,13 @@ export async function handleRename(): Promise<void> {
         return;
       } else {
         decision = await resolveConflictChoice(
-          `${target.bucket}/${newPrefix}`,
+          `${targetBucket}/${newPrefix}`,
           conflictSession,
           false,
         );
       }
-      if (connectionSnapshotChanged(target)) {
-        setStatus("Folder rename cancelled because connection changed.", 5000);
+      if (targetLocationChanged()) {
+        setStatus("Folder rename cancelled because location changed.", 5000);
         return;
       }
       if (decision === "skip") {
@@ -462,14 +521,16 @@ export async function handleRename(): Promise<void> {
         return;
       }
       overwrite = true;
+    } else if (state.currentSettings.conflictPolicy === "replace") {
+      overwrite = true;
     } else {
       const intent = await resolveAbsentObjectWriteIntent(
         conflictSession,
         false,
         { operation: "copy" },
       );
-      if (connectionSnapshotChanged(target)) {
-        setStatus("Folder rename cancelled because connection changed.", 5000);
+      if (targetLocationChanged()) {
+        setStatus("Folder rename cancelled because location changed.", 5000);
         return;
       }
       if (intent === "cancel") {
@@ -482,32 +543,31 @@ export async function handleRename(): Promise<void> {
       overwrite = intent.overwrite;
     }
 
-    if (connectionSnapshotChanged(target)) {
-      setStatus("Folder rename cancelled because connection changed.", 5000);
+    if (targetLocationChanged()) {
+      setStatus("Folder rename cancelled because location changed.", 5000);
       return;
     }
 
     try {
       setStatus(`Renaming folder "${folderName}"...`);
       await invokeS3For(target.connectionId, "rename_prefix", {
-        bucket: target.bucket,
+        bucket: targetBucket,
         oldPrefix,
         newPrefix,
         overwrite,
       });
-      if (connectionSnapshotChanged(target)) {
-        return;
-      }
+      if (targetLocationChanged()) return;
       setStatus(`Renamed folder to "${newName}".`, 5000);
       logActivity(`Renamed folder "${folderName}" to "${newName}".`, "success");
       clearSelection();
-      if (!connectionSnapshotChanged(target)) {
-        await refreshObjects(target.bucket, target.prefix);
-        if (!connectionSnapshotChanged(target)) {
+      if (!targetLocationChanged()) {
+        const committed = await refreshObjects(targetBucket, targetPrefix);
+        if (committed && !targetLocationChanged()) {
           renderObjectTable();
         }
       }
     } catch (err) {
+      if (targetLocationChanged()) return;
       setStatus(`Folder rename failed: ${friendlyError(err)}`);
       logActivity(`Folder rename failed: ${friendlyError(err)}`, "error");
     }
@@ -519,18 +579,26 @@ export async function handleCreateFolder(): Promise<void> {
     setStatus("Connect to a bucket first.");
     return;
   }
-  const targetBucket = state.currentBucket;
-  const targetPrefix = state.currentPrefix;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch (err) {
+    setStatus(`Folder creation cancelled: ${friendlyError(err)}`, 5000);
+    return;
+  }
+  const targetBucket = target.bucket;
+  const targetPrefix = target.prefix;
+  const targetLocationChanged = (): boolean =>
+    connectionSnapshotChanged(target) ||
+    !state.connected ||
+    state.currentBucket !== targetBucket ||
+    state.currentPrefix !== targetPrefix;
 
   const name = await showPrompt("New Folder", "Enter folder name:", {
     inputPlaceholder: "Folder name",
   });
   if (!name) return;
-  if (
-    !state.connected ||
-    state.currentBucket !== targetBucket ||
-    state.currentPrefix !== targetPrefix
-  ) {
+  if (targetLocationChanged()) {
     setStatus("Folder creation cancelled because location changed.", 5000);
     return;
   }
@@ -549,28 +617,19 @@ export async function handleCreateFolder(): Promise<void> {
 
   try {
     setStatus("Creating folder...");
-    await invokeS3("create_folder", {
+    await invokeS3For(target.connectionId, "create_folder", {
       bucket: targetBucket,
       key,
     });
-    if (
-      !state.connected ||
-      state.currentBucket !== targetBucket ||
-      state.currentPrefix !== targetPrefix
-    ) {
-      return;
-    }
+    if (targetLocationChanged()) return;
     setStatus(`Created folder "${trimmed}".`, 5000);
     logActivity(`Created folder ${trimmed}.`, "success");
-    if (
-      state.connected &&
-      state.currentBucket === targetBucket &&
-      state.currentPrefix === targetPrefix
-    ) {
-      await refreshObjects(targetBucket, targetPrefix);
-      renderObjectTable();
+    if (!targetLocationChanged()) {
+      const committed = await refreshObjects(targetBucket, targetPrefix);
+      if (committed && !targetLocationChanged()) renderObjectTable();
     }
   } catch (err) {
+    if (targetLocationChanged()) return;
     setStatus(`Failed to create folder: ${friendlyError(err)}`);
     logActivity(
       `Failed to create folder ${trimmed}: ${friendlyError(err)}`,
@@ -581,22 +640,25 @@ export async function handleCreateFolder(): Promise<void> {
 
 export async function handleRefresh(): Promise<void> {
   if (!state.connected || !state.currentBucket) return;
-  const targetBucket = state.currentBucket;
-  const targetPrefix = state.currentPrefix;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    return;
+  }
   setStatus("Refreshing...");
   try {
-    await refreshObjects(targetBucket, targetPrefix);
-    if (
-      state.connected &&
-      state.currentBucket === targetBucket &&
-      state.currentPrefix === targetPrefix
-    ) {
+    const committed = await refreshObjects(target.bucket, target.prefix);
+    if (committed && !connectionSnapshotChanged(target)) {
+      invalidateInspectorSelectionSync();
       renderObjectTable();
       renderBreadcrumb();
       setStatus("");
     }
   } catch (err) {
-    setStatus(`Refresh failed: ${friendlyError(err)}`);
+    if (!connectionSnapshotChanged(target)) {
+      setStatus(`Refresh failed: ${friendlyError(err)}`);
+    }
   }
 }
 

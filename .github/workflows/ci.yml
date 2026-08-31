@@ -14,8 +14,8 @@ concurrency:
 
 env:
   NODE_VERSION: "24.16.0"
-  NPM_VERSION: "12"
-  RUST_VERSION: "stable"
+  NPM_VERSION: "12.0.2"
+  RUST_VERSION: "1.98.0"
 
 jobs:
   verify:
@@ -36,7 +36,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
-      - name: Install latest npm 12
+      - name: Install pinned npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
 
       - name: Setup Rust
@@ -72,6 +72,23 @@ jobs:
 
       - name: Verify npm registry signatures
         run: npm audit signatures
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high --ignore-scripts
+
+      - name: Audit build and development dependencies
+        run: npm audit --audit-level=high --ignore-scripts
+
+      - name: Install pinned Cargo advisory scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit locked Cargo dependencies
+        run: cargo audit --file src-tauri/Cargo.lock
+
+      - name: Enforce dependency license and source policy
+        run: |
+          npm run licenses
+          node scripts/release-evidence.js --check-licenses
 
       - name: Run test suite and formatting checks
         run: npm run test:all

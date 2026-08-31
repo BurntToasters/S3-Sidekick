@@ -20,11 +20,11 @@ const mockMarkSupportPromptDismissed = vi.fn<() => Promise<void>>();
 const mockIsSupportPromptDismissed = vi.fn();
 
 const mockConnect = vi.fn<(...args: unknown[]) => Promise<string>>();
-const mockDisconnect = vi.fn<() => Promise<void>>();
+const mockDisconnect = vi.fn<() => Promise<boolean>>();
 const mockSaveConnection = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockLoadConnection = vi.fn<() => Promise<unknown>>();
 const mockRefreshBuckets = vi.fn<() => Promise<void>>();
-const mockRefreshObjects = vi.fn<(...args: unknown[]) => Promise<void>>();
+const mockRefreshObjects = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockLoadMoreObjects = vi.fn<() => Promise<void>>();
 const mockFinishConnecting = vi.fn<(generation: number) => void>();
 const mockCaptureConnectionSnapshot = vi.fn<() => ConnectionSnapshot>();
@@ -88,6 +88,7 @@ const mockClearCompletedTransfers = vi.fn();
 const mockEnqueuePaths = vi.fn();
 const mockSetTransferCompleteHandler = vi.fn();
 const mockInitTransferQueueUI = vi.fn<() => Promise<void>>();
+const mockPrepareTransferRecovery = vi.fn();
 const mockRecoverPendingTransfers = vi.fn<() => Promise<void>>();
 const mockEnqueueFiles = vi.fn();
 const mockDisposeTransferQueueUI = vi.fn<() => Promise<void>>();
@@ -235,6 +236,7 @@ vi.mock("../browser.ts", () => ({
   clearSelection: mockClearSelection,
   setLastClickedKey: vi.fn(),
   updateSelectionUI: mockUpdateSelectionUI,
+  invalidateInspectorSelectionSync: vi.fn(),
   getSelectableKeys: mockGetSelectableKeys,
   toggleSort: mockToggleSort,
   navigateUp: mockNavigateUp,
@@ -287,6 +289,7 @@ vi.mock("../transfers.ts", () => ({
   enqueuePaths: mockEnqueuePaths,
   setTransferCompleteHandler: mockSetTransferCompleteHandler,
   initTransferQueueUI: mockInitTransferQueueUI,
+  prepareTransferRecovery: mockPrepareTransferRecovery,
   recoverPendingTransfers: mockRecoverPendingTransfers,
   enqueueFiles: mockEnqueueFiles,
   disposeTransferQueueUI: mockDisposeTransferQueueUI,
@@ -482,6 +485,7 @@ describe("main integration", () => {
     mockEnqueuePaths.mockReset();
     mockSetTransferCompleteHandler.mockReset();
     mockInitTransferQueueUI.mockReset();
+    mockPrepareTransferRecovery.mockReset();
     mockRecoverPendingTransfers.mockReset();
     mockEnqueueFiles.mockReset();
     mockDisposeTransferQueueUI.mockReset();
@@ -552,7 +556,7 @@ describe("main integration", () => {
     mockMarkSupportPromptDismissed.mockResolvedValue(undefined);
     mockIsSupportPromptDismissed.mockReturnValue(false);
     mockConnect.mockResolvedValue("us-west-2");
-    mockDisconnect.mockResolvedValue(undefined);
+    mockDisconnect.mockResolvedValue(true);
     mockSaveConnection.mockResolvedValue(undefined);
     mockLoadConnection.mockResolvedValue({
       endpoint: "https://saved.example.com",
@@ -561,7 +565,7 @@ describe("main integration", () => {
       secret_key: "saved-secret",
     });
     mockRefreshBuckets.mockResolvedValue(undefined);
-    mockRefreshObjects.mockResolvedValue(undefined);
+    mockRefreshObjects.mockResolvedValue(true);
     mockLoadMoreObjects.mockResolvedValue(undefined);
     mockNavigateToFolder.mockResolvedValue(undefined);
     mockSelectBucket.mockResolvedValue(undefined);
@@ -831,10 +835,22 @@ describe("main integration", () => {
     await flushMicrotasks();
     expect(mockLoadMoreObjects).toHaveBeenCalledTimes(1);
 
+    const emptyStateCallsBefore = mockShowEmptyState.mock.calls.length;
+    mockDisconnect.mockResolvedValueOnce(false);
     (document.getElementById("disconnect-btn") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(mockDisconnect).toHaveBeenCalledTimes(1);
-    expect(mockShowEmptyState).toHaveBeenCalledTimes(1);
+    expect(mockShowEmptyState).toHaveBeenCalledTimes(emptyStateCallsBefore);
+    expect(state.connected).toBe(true);
+
+    mockDisconnect.mockImplementationOnce(async () => {
+      state.connected = false;
+      return true;
+    });
+    (document.getElementById("disconnect-btn") as HTMLButtonElement).click();
+    await flushMicrotasks();
+    expect(mockDisconnect).toHaveBeenCalledTimes(2);
+    expect(mockShowEmptyState).toHaveBeenCalledTimes(emptyStateCallsBefore + 1);
   });
 
   it("handles bookmark select callback and overlay close controls", async () => {
@@ -1768,7 +1784,9 @@ describe("main integration", () => {
     expect(mockRefreshObjects).not.toHaveBeenCalledWith("bucket-a", "docs/");
 
     await transferHandler?.({ hadUpload: true });
-    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
+    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
+      supersedePending: false,
+    });
     expect(mockPruneStaleSelection).toHaveBeenCalled();
     expect(mockRenderObjectTable).toHaveBeenCalled();
   });
@@ -1930,6 +1948,7 @@ describe("main integration", () => {
     (document.getElementById("drawer-clear") as HTMLButtonElement).click();
     expect(mockClearCompletedTransfers).toHaveBeenCalled();
 
+    state.connected = false;
     (document.getElementById("security-toggle") as HTMLButtonElement).click();
     (
       document.getElementById("security-change-password") as HTMLButtonElement
@@ -1941,7 +1960,9 @@ describe("main integration", () => {
     (document.getElementById("biometric-toggle") as HTMLButtonElement).click();
     expect(mockHandleSecurityToggle).toHaveBeenCalled();
     expect(mockHandleSecurityChangePassword).toHaveBeenCalled();
-    expect(mockHandleLockNow).toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(mockHandleLockNow).toHaveBeenCalled();
+    });
     expect(mockHandleLockTimeoutChange).toHaveBeenCalled();
     expect(mockHandleBiometricToggle).toHaveBeenCalled();
 
@@ -2479,7 +2500,7 @@ describe("main integration", () => {
     );
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("connection changed");
+    ).toContain("location changed");
 
     mockInvoke.mockClear();
     mockConnectionSnapshotChanged.mockImplementation(
@@ -2588,7 +2609,7 @@ describe("main integration", () => {
     );
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("connection changed");
+    ).toContain("location changed");
     state.currentSettings.conflictPolicy = "ask";
   });
 
@@ -2986,9 +3007,10 @@ describe("main integration", () => {
     });
     await import("../main.ts");
     await flushMicrotasks(6);
-    expect(
-      (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Initialization error:");
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      "Platform-specific window styling and shortcut labels are unavailable this launch.",
+      "warning",
+    );
   });
 
   it("covers additional modal focus trap, tab keyboard, and disconnected/drop guard branches", async () => {

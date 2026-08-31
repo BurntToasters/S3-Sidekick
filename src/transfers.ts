@@ -21,6 +21,8 @@ import { showToast } from "./toast.ts";
 import {
   lacksAtomicCreateForCopy,
   lacksAtomicCreateForUpload,
+  MULTIPART_COPY_THRESHOLD_BYTES,
+  MULTIPART_UPLOAD_THRESHOLD_BYTES,
 } from "./create-only-capabilities.ts";
 
 export interface CopyReceipt {
@@ -86,6 +88,8 @@ export interface TransferItem {
   connectionIdentity?: string;
   /** Explicit overwrite intent for S3 writes; not persisted in the manifest. */
   overwrite?: boolean;
+  /** Session/capability/operation scope for transient overwrite consent. */
+  overwriteScope?: string;
   /** Transient user intent; never written to the recovery manifest. */
   cancelRequested?: boolean;
 }
@@ -125,6 +129,12 @@ export interface TransferRunSummary {
   downloadCount: number;
   errorCount: number;
   skippedCount: number;
+}
+
+interface TransferManifestHydration {
+  recovery_session: string;
+  manifest_json: string;
+  legacy_import_allowed: boolean;
 }
 
 interface PersistedTransferManifest {
@@ -212,18 +222,23 @@ let onComplete: ((summary: TransferRunSummary) => void) | null = null;
 let progressUnlisten: UnlistenFn | null = null;
 let downloadProgressUnlisten: UnlistenFn | null = null;
 let renderQueued = false;
+let fullRenderQueued = false;
+const dirtyTransferIds = new Set<number>();
 let cancelClickHandler: ((e: Event) => void) | null = null;
 let recoveredQueue = false;
 let recoveryInFlight: Promise<void> | null = null;
 let conflictApplyAll: "skip" | "replace" | null = null;
-let unguardedWriteAuthorized = false;
+const unguardedWriteAuthorizations = new Set<string>();
 let conflictPromptQueue: Promise<void> = Promise.resolve();
 let selectedTransferId: number | null = null;
 let queuePaused = false;
 let manifestHydrated = false;
+let manifestRecoveryUnresolved = false;
+let recoverySession: string | null = null;
 let manifestWriteTail: Promise<void> = Promise.resolve();
 let normalManifestWritePending = false;
 let normalManifestClearRequested = false;
+let lastPersistedManifestJson: string | null | undefined;
 
 interface EffectiveTransferSettings {
   downloadParallelThresholdMb: number;
@@ -243,12 +258,83 @@ function resetConflictApplyAllWhenIdle(): void {
   );
   if (!hasActive) {
     conflictApplyAll = null;
-    unguardedWriteAuthorized = false;
+    unguardedWriteAuthorizations.clear();
   }
 }
 
-async function confirmUnguardedTransferWrite(): Promise<boolean> {
-  if (unguardedWriteAuthorized) return true;
+type UnguardedOperationClass =
+  | "upload-put"
+  | "upload-multipart"
+  | "upload-unknown"
+  | "copy-object"
+  | "copy-multipart"
+  | "copy-unknown";
+
+function transferByteLength(item: TransferItem): number | undefined {
+  if (item.operation === "upload") {
+    if (item.browserFile) return item.browserFile.size;
+    if (Number.isFinite(item.totalBytes) && item.totalBytes > 0) {
+      return item.totalBytes;
+    }
+    if (Number.isFinite(item.size) && item.size > 0) return item.size;
+    return undefined;
+  }
+  if (item.operation === "copy" || item.operation === "move") {
+    if (item.sourcePrefix) return undefined;
+    if (Number.isFinite(item.size) && item.size > 0) return item.size;
+  }
+  return undefined;
+}
+
+function unguardedOperationClass(
+  item: TransferItem,
+  byteLength: number | undefined,
+): UnguardedOperationClass | null {
+  if (item.operation === "upload") {
+    if (byteLength === undefined) return "upload-unknown";
+    return byteLength >= MULTIPART_UPLOAD_THRESHOLD_BYTES
+      ? "upload-multipart"
+      : "upload-put";
+  }
+  if (item.operation === "copy" || item.operation === "move") {
+    if (byteLength === undefined) return "copy-unknown";
+    return byteLength >= MULTIPART_COPY_THRESHOLD_BYTES
+      ? "copy-multipart"
+      : "copy-object";
+  }
+  return null;
+}
+
+function createOnlyCapabilityFingerprint(): string {
+  const caps = state.createOnlyCapabilities;
+  return `${Number(caps.put_object)}${Number(caps.complete_multipart)}${Number(caps.copy_object)}`;
+}
+
+function unguardedAuthorizationKey(
+  item: TransferItem,
+  connectionId: string,
+): string | null {
+  const operationClass = unguardedOperationClass(
+    item,
+    transferByteLength(item),
+  );
+  if (!operationClass || !item.connectionIdentity) return null;
+  return [
+    connectionId,
+    item.connectionIdentity,
+    createOnlyCapabilityFingerprint(),
+    operationClass,
+  ].join("\n");
+}
+
+async function confirmUnguardedTransferWrite(
+  item: TransferItem,
+  connectionId: string,
+): Promise<boolean> {
+  const authorizationKey = unguardedAuthorizationKey(item, connectionId);
+  if (authorizationKey && unguardedWriteAuthorizations.has(authorizationKey)) {
+    return true;
+  }
   const proceed = await showConfirm(
     "Unconditional Write",
     "This storage provider cannot enforce create-only writes. Another client could create the same key before this transfer finishes. Write anyway?",
@@ -256,7 +342,10 @@ async function confirmUnguardedTransferWrite(): Promise<boolean> {
   );
   if (!proceed) return false;
   const remaining = queue.filter(
-    (entry) => entry.status === "queued" || entry.status === "uploading",
+    (entry) =>
+      (entry.status === "queued" || entry.status === "uploading") &&
+      authorizationKey !== null &&
+      unguardedAuthorizationKey(entry, connectionId) === authorizationKey,
   ).length;
   if (remaining > 1) {
     const applyAll = await showConfirm(
@@ -264,15 +353,15 @@ async function confirmUnguardedTransferWrite(): Promise<boolean> {
       'Apply "Write anyway" to remaining new destinations on this provider?',
       { okLabel: "Apply to all", cancelLabel: "Only this one" },
     );
-    if (applyAll) {
-      unguardedWriteAuthorized = true;
+    if (applyAll && authorizationKey) {
+      unguardedWriteAuthorizations.add(authorizationKey);
     }
   }
   return true;
 }
 
 function lacksAtomicCreateForTransferItem(item: TransferItem): boolean {
-  const byteLength = item.totalBytes || item.size || undefined;
+  const byteLength = transferByteLength(item);
   if (item.operation === "upload") {
     return lacksAtomicCreateForUpload(state.createOnlyCapabilities, byteLength);
   }
@@ -556,21 +645,41 @@ function persistLegacyQueueManifest(forceClear = false): void {
   }
 }
 
-async function persistQueueManifestNow(forceClear = false): Promise<void> {
-  if (!manifestHydrated) {
+async function persistQueueManifestNow(
+  forceClear = false,
+  hydrated = manifestHydrated,
+  capturedRecoverySession = recoverySession,
+): Promise<void> {
+  if (!hydrated) {
     persistLegacyQueueManifest(forceClear);
     return;
   }
-  if (forceClear) {
-    await invoke("clear_transfer_manifest");
+  if (!capturedRecoverySession) {
+    throw new Error(
+      "Transfer recovery session is unavailable; reload the application.",
+    );
+  }
+
+  const json = forceClear ? null : buildQueueManifestJson();
+  if (
+    lastPersistedManifestJson !== undefined &&
+    json === lastPersistedManifestJson
+  ) {
     return;
   }
-  const json = buildQueueManifestJson();
+
   if (json) {
-    await invoke("save_transfer_manifest", { json });
+    await invoke("save_transfer_manifest", {
+      json,
+      recoverySession: capturedRecoverySession,
+    });
   } else {
-    await invoke("clear_transfer_manifest");
+    await invoke("clear_transfer_manifest", {
+      recoverySession: capturedRecoverySession,
+    });
   }
+  // Only deduplicate against a snapshot that reached durable storage.
+  lastPersistedManifestJson = json;
 }
 
 function enqueueQueueManifestOperation(
@@ -591,40 +700,59 @@ function logQueueManifestWriteError(err: unknown): void {
 }
 
 function scheduleQueueManifestWrite(forceClear = false): void {
+  // A valid backend hydration has exclusive ownership until recovery is either
+  // restored or discarded. Publishing an in-memory snapshot before that point
+  // could overwrite the retained manifest with a newly queued transfer.
+  if (manifestRecoveryUnresolved) return;
+
   if (forceClear) {
     normalManifestClearRequested = true;
   }
   if (normalManifestWritePending) return;
 
   normalManifestWritePending = true;
+  const hydrated = manifestHydrated;
+  const capturedRecoverySession = recoverySession;
   const write = enqueueQueueManifestOperation(() => {
     const shouldClear = normalManifestClearRequested;
     normalManifestClearRequested = false;
     // Calls made while this operation is in flight should schedule one trailing
     // write, while calls made before it starts can share this latest snapshot.
     normalManifestWritePending = false;
-    return persistQueueManifestNow(shouldClear);
+    return persistQueueManifestNow(
+      shouldClear,
+      hydrated,
+      capturedRecoverySession,
+    );
   });
   void write.catch(logQueueManifestWriteError);
 }
 
 function persistQueueManifestCritical(): Promise<void> {
-  if (!manifestHydrated) {
+  if (!manifestHydrated || !recoverySession) {
     return Promise.reject(
       new Error(
         "Secure transfer recovery storage is unavailable; source deletion was refused.",
       ),
     );
   }
-  return enqueueQueueManifestOperation(() => persistQueueManifestNow());
+  const capturedRecoverySession = recoverySession;
+  return enqueueQueueManifestOperation(() =>
+    persistQueueManifestNow(false, true, capturedRecoverySession),
+  );
 }
 
 function writeQueueManifest(): void {
   scheduleQueueManifestWrite();
 }
 
-function clearQueueManifest(): void {
-  scheduleQueueManifestWrite(true);
+function canMutateTransferQueue(): boolean {
+  if (!manifestRecoveryUnresolved) return true;
+  const message =
+    "Transfer recovery is unresolved; reload the application before starting new transfers.";
+  logActivity(message, "warning");
+  showToast(message, { type: "warning", duration: 0 });
+  return false;
 }
 
 function parseCopyReceipts(value: unknown): CopyReceipt[] | undefined {
@@ -820,6 +948,7 @@ async function discardTransferRecoveryState(
     PersistedTransferItem,
     "operation" | "destination" | "checkpointId"
   >,
+  hydratedRecoverySession: string | null = recoverySession,
 ): Promise<void> {
   // Scratch first. If it cannot be removed, retain its checkpoint/manifest so
   // next startup still has a durable path back to the file and can retry.
@@ -829,8 +958,14 @@ async function discardTransferRecoveryState(
     });
   }
   if (item.checkpointId) {
+    if (!hydratedRecoverySession) {
+      throw new Error(
+        "Transfer recovery session is unavailable; reload the application.",
+      );
+    }
     await invoke("transfer_checkpoint_remove", {
       checkpointId: item.checkpointId,
+      recoverySession: hydratedRecoverySession,
     });
   }
 }
@@ -895,37 +1030,73 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
   };
 }
 
+function completeRecoveryHydration(
+  hydratedRecoverySession: string,
+  persistedManifestJson: string | null | undefined,
+): void {
+  recoverySession = hydratedRecoverySession;
+  manifestHydrated = true;
+  manifestRecoveryUnresolved = false;
+  lastPersistedManifestJson = persistedManifestJson;
+  recoveredQueue = true;
+}
+
 async function recoverPendingQueueIfNeeded(): Promise<void> {
   if (recoveredQueue) return;
 
-  const manifestRaw = await invoke<string>("load_transfer_manifest");
-  const backendManifestAvailable = true;
-  const legacyManifestRaw = localStorage.getItem(LEGACY_QUEUE_MANIFEST_KEY);
-  let manifest = parseQueueManifest(
-    backendManifestAvailable ? manifestRaw : legacyManifestRaw,
+  // From this point until a terminal restore/discard result, the durable
+  // backend manifest remains authoritative. Queue entry points and normal
+  // manifest writes stay disabled so a failed hydration cannot be overwritten.
+  manifestRecoveryUnresolved = true;
+  const hydration = await invoke<TransferManifestHydration>(
+    "load_transfer_manifest",
   );
+  if (
+    !hydration ||
+    typeof hydration.recovery_session !== "string" ||
+    hydration.recovery_session.length === 0 ||
+    typeof hydration.manifest_json !== "string" ||
+    typeof hydration.legacy_import_allowed !== "boolean"
+  ) {
+    throw new Error(
+      "Transfer recovery hydration returned an invalid response; reload the application.",
+    );
+  }
+  const hydratedRecoverySession = hydration.recovery_session;
+  const manifestRaw = hydration.manifest_json;
+
+  // Browser storage is a one-time compatibility source. Once the backend closes
+  // its durable fence, do not even read stale local data; best-effort removal
+  // below is cleanup only and can never authorize an import.
+  const legacyManifestRaw = hydration.legacy_import_allowed
+    ? localStorage.getItem(LEGACY_QUEUE_MANIFEST_KEY)
+    : null;
+  let manifest = parseQueueManifest(manifestRaw);
   let legacyManifestMigrated = false;
-  if (!manifest) {
+  if (!manifest && hydration.legacy_import_allowed) {
     manifest = parseQueueManifest(legacyManifestRaw);
-    if (manifest && backendManifestAvailable) {
-      legacyManifestMigrated = await invoke("save_transfer_manifest", {
+    if (manifest) {
+      await invoke("save_transfer_manifest", {
         json: JSON.stringify(manifest),
-      })
-        .then(() => true)
-        .catch(() => false);
+        recoverySession: hydratedRecoverySession,
+        legacyImport: true,
+      });
+      legacyManifestMigrated = true;
     }
   }
-  if (backendManifestAvailable) {
-    const backendHasManifest = manifestRaw.trim().length > 0;
-    if (backendHasManifest || legacyManifestMigrated || !legacyManifestRaw) {
-      try {
-        persistLegacyQueueManifest(true);
-      } catch (err) {
-        logQueueManifestWriteError(err);
-      }
+  const backendHasManifest = manifestRaw.trim().length > 0;
+  if (
+    !hydration.legacy_import_allowed ||
+    backendHasManifest ||
+    legacyManifestMigrated ||
+    !legacyManifestRaw
+  ) {
+    try {
+      persistLegacyQueueManifest(true);
+    } catch (err) {
+      logQueueManifestWriteError(err);
     }
   }
-  manifestHydrated = backendManifestAvailable;
 
   // Collect the checkpoints the manifest still refers to *before* running the
   // collector. Running GC first (as this used to) let it delete the resume state
@@ -941,16 +1112,21 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
   await invoke("transfer_checkpoint_gc", {
     ttlHours: effective.transferCheckpointTtlHours,
     keepCheckpointIds: liveCheckpointIds,
+    recoverySession: hydratedRecoverySession,
   });
   if (!manifest || manifest.items.length === 0) {
-    clearQueueManifest();
-    recoveredQueue = true;
+    await invoke("clear_transfer_manifest", {
+      recoverySession: hydratedRecoverySession,
+    });
+    completeRecoveryHydration(hydratedRecoverySession, null);
     return;
   }
 
   if (!document.getElementById("dialog-overlay")) {
-    clearQueueManifest();
-    recoveredQueue = true;
+    await invoke("clear_transfer_manifest", {
+      recoverySession: hydratedRecoverySession,
+    });
+    completeRecoveryHydration(hydratedRecoverySession, null);
     return;
   }
 
@@ -972,7 +1148,7 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     const failures: string[] = [];
     for (const row of manifest.items) {
       try {
-        await discardTransferRecoveryState(row);
+        await discardTransferRecoveryState(row, hydratedRecoverySession);
       } catch (err) {
         failures.push(`${row.fileName}: ${normalizeError(err)}`);
       }
@@ -983,8 +1159,10 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
       showToast(message, { type: "error", duration: 0 });
       return;
     }
-    clearQueueManifest();
-    recoveredQueue = true;
+    await invoke("clear_transfer_manifest", {
+      recoverySession: hydratedRecoverySession,
+    });
+    completeRecoveryHydration(hydratedRecoverySession, null);
     return;
   }
 
@@ -993,8 +1171,8 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
   }
   renderQueue();
   showTransferQueue();
+  completeRecoveryHydration(hydratedRecoverySession, undefined);
   writeQueueManifest();
-  recoveredQueue = true;
 
   void processQueue().catch((err) =>
     logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
@@ -1021,15 +1199,28 @@ interface TransferProgressPayload {
   resumable?: boolean;
 }
 
-function applyProgressPayload(payload: TransferProgressPayload): void {
+interface ProgressUpdateResult {
+  item: TransferItem;
+  manifestChanged: boolean;
+}
+
+function applyProgressPayload(
+  payload: TransferProgressPayload,
+): ProgressUpdateResult | null {
   const item = queue.find((t) => t.id === payload.transfer_id);
-  if (!item) return;
+  if (!item) return null;
+
+  let manifestChanged = false;
   if (
     typeof payload.attempt === "number" &&
     Number.isInteger(payload.attempt) &&
     payload.attempt > 0
   ) {
-    item.attempt = Math.max(item.attempt, payload.attempt);
+    const nextAttempt = Math.max(item.attempt, payload.attempt);
+    if (item.attempt !== nextAttempt) {
+      item.attempt = nextAttempt;
+      manifestChanged = true;
+    }
   }
   if (
     payload.phase === "running" ||
@@ -1045,32 +1236,61 @@ function applyProgressPayload(payload: TransferProgressPayload): void {
     payload.total_bytes > 0
       ? (payload.bytes_sent / payload.total_bytes) * 100
       : 0;
-  item.totalBytes = payload.total_bytes;
+  if (item.totalBytes !== payload.total_bytes) {
+    item.totalBytes = payload.total_bytes;
+    manifestChanged = true;
+  }
   if (typeof payload.speed_bps === "number" && payload.speed_bps >= 0) {
     item.speedBps = payload.speed_bps;
   }
   if (typeof payload.eta_seconds === "number" && payload.eta_seconds >= 0) {
     item.etaSeconds = payload.eta_seconds;
-  } else if (payload.eta_seconds === 0) {
-    item.etaSeconds = 0;
   }
   if (
     typeof payload.completed_parts === "number" &&
-    Number.isInteger(payload.completed_parts)
+    Number.isInteger(payload.completed_parts) &&
+    item.completedParts !== payload.completed_parts
   ) {
     item.completedParts = payload.completed_parts;
+    manifestChanged = true;
   }
   if (
     typeof payload.total_parts === "number" &&
-    Number.isInteger(payload.total_parts)
+    Number.isInteger(payload.total_parts) &&
+    item.totalParts !== payload.total_parts
   ) {
     item.totalParts = payload.total_parts;
+    manifestChanged = true;
   }
-  if (typeof payload.checkpoint_id === "string" && payload.checkpoint_id) {
+  if (
+    typeof payload.checkpoint_id === "string" &&
+    payload.checkpoint_id &&
+    item.checkpointId !== payload.checkpoint_id
+  ) {
     item.checkpointId = payload.checkpoint_id;
+    manifestChanged = true;
   }
-  if (typeof payload.resumable === "boolean") {
+  if (
+    typeof payload.resumable === "boolean" &&
+    item.resumable !== payload.resumable
+  ) {
     item.resumable = payload.resumable;
+    manifestChanged = true;
+  }
+
+  return { item, manifestChanged };
+}
+
+function isIncludedInQueueManifest(item: TransferItem): boolean {
+  return (
+    (item.status === "queued" || item.status === "uploading") &&
+    !(item.operation === "upload" && item.status === "uploading")
+  );
+}
+
+export function prepareTransferRecovery(): void {
+  if (!recoveredQueue) {
+    manifestRecoveryUnresolved = true;
   }
 }
 
@@ -1089,18 +1309,24 @@ export async function initTransferQueueUI(): Promise<void> {
   progressUnlisten ??= await listen<TransferProgressPayload>(
     "upload-progress",
     (event) => {
-      applyProgressPayload(event.payload);
-      queueRender();
-      writeQueueManifest();
+      const update = applyProgressPayload(event.payload);
+      if (!update) return;
+      queueRender(update.item.id);
+      if (update.manifestChanged && isIncludedInQueueManifest(update.item)) {
+        writeQueueManifest();
+      }
     },
   );
 
   downloadProgressUnlisten ??= await listen<TransferProgressPayload>(
     "download-progress",
     (event) => {
-      applyProgressPayload(event.payload);
-      queueRender();
-      writeQueueManifest();
+      const update = applyProgressPayload(event.payload);
+      if (!update) return;
+      queueRender(update.item.id);
+      if (update.manifestChanged && isIncludedInQueueManifest(update.item)) {
+        writeQueueManifest();
+      }
     },
   );
 
@@ -1431,6 +1657,7 @@ export function enqueueFiles(
   targetPrefix: string,
   target?: TransferEnqueueTarget,
 ): void {
+  if (!canMutateTransferQueue()) return;
   const enqueueTarget = resolveEnqueueTarget(target);
   const bucket = enqueueTarget.bucket;
   const allFiles = Array.from(files);
@@ -1491,6 +1718,7 @@ export function enqueuePaths(
   targetPrefix: string,
   target?: TransferEnqueueTarget,
 ): void {
+  if (!canMutateTransferQueue()) return;
   const enqueueTarget = resolveEnqueueTarget(target);
   const bucket = enqueueTarget.bucket;
   const maxAttempts = maxAttemptsFromSettings();
@@ -1548,6 +1776,7 @@ export function enqueueFolderEntries(
   targetPrefix: string,
   target?: TransferEnqueueTarget,
 ): void {
+  if (!canMutateTransferQueue()) return;
   const enqueueTarget = resolveEnqueueTarget(target);
   const bucket = enqueueTarget.bucket;
   const maxAttempts = maxAttemptsFromSettings();
@@ -1605,6 +1834,7 @@ export function enqueueDownloads(
   entries: DownloadQueueEntry[],
   target?: TransferEnqueueTarget,
 ): void {
+  if (!canMutateTransferQueue()) return;
   const enqueueTarget = resolveEnqueueTarget(target);
   const maxAttempts = maxAttemptsFromSettings();
   const effective = getEffectiveTransferSettings();
@@ -1667,13 +1897,14 @@ export function enqueueCopyMoveEntries(
   entries: CopyMoveQueueEntry[],
   target?: TransferEnqueueTarget,
 ): void {
+  if (!canMutateTransferQueue()) return;
   const enqueueTarget = resolveEnqueueTarget(target);
   const maxAttempts = maxAttemptsFromSettings();
   for (const entry of entries) {
     const keyLike = entry.sourceKey ?? entry.sourcePrefix ?? "";
     const destinationLike =
       entry.destinationKey ?? entry.destinationPrefix ?? "";
-    queue.push({
+    const item: TransferItem = {
       id: allocateTransferId(),
       connectionId: enqueueTarget.connectionId,
       connectionIdentity: enqueueTarget.connectionIdentity,
@@ -1707,7 +1938,13 @@ export function enqueueCopyMoveEntries(
       resumable: false,
       completedParts: 0,
       totalParts: 0,
-    });
+    };
+    if (item.overwrite === true) {
+      item.overwriteScope =
+        unguardedAuthorizationKey(item, enqueueTarget.connectionId) ??
+        undefined;
+    }
+    queue.push(item);
   }
 
   if (entries.length > 0) {
@@ -1867,6 +2104,15 @@ function ensureTransferActive(item: TransferItem): void {
   }
 }
 
+function isReceiptBackedCopiedMove(item: TransferItem): boolean {
+  return (
+    item.operation === "move" &&
+    item.movePhase === "copied" &&
+    item.receipts !== undefined &&
+    item.receipts.length > 0
+  );
+}
+
 async function runItemWithRetry(item: TransferItem): Promise<boolean> {
   const maxAttempts = Math.max(1, item.maxAttempts, maxAttemptsFromSettings());
   item.maxAttempts = maxAttempts;
@@ -1886,11 +2132,19 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
 
     try {
       const connectionId = bindTransferConnection(item);
-      const conflictOutcome = await resolveConflict(item, connectionId);
+      // A receipt-backed copied move is already past the destination-write
+      // decision. Re-entering generic conflict handling would interpret the
+      // operation's own durable destination as a new conflict and could turn a
+      // safe deletion retry into "skipped", dropping the receipts from the
+      // recoverable manifest.
+      const conflictOutcome = isReceiptBackedCopiedMove(item)
+        ? { overwrite: false }
+        : await resolveConflict(item, connectionId);
       ensureTransferActive(item);
       if (conflictOutcome === "skip" || conflictOutcome === "cancel") {
         const cancelled = conflictOutcome === "cancel";
-        item.conflictResolution = "skip";
+        item.overwrite = undefined;
+        item.overwriteScope = undefined;
         item.status = "skipped";
         item.error = cancelled
           ? "Cancelled (unconditional write not authorized)"
@@ -1915,8 +2169,10 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
         );
         return false;
       }
-      item.conflictResolution = conflictOutcome.overwrite ? "replace" : "ask";
       item.overwrite = conflictOutcome.overwrite;
+      item.overwriteScope = conflictOutcome.overwrite
+        ? (unguardedAuthorizationKey(item, connectionId) ?? undefined)
+        : undefined;
 
       await executeTransfer(
         item,
@@ -1948,9 +2204,11 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
       } else {
         logActivity(`Moved ${item.fileName}.`, "success");
       }
-      if (item.checkpointId) {
+      if (item.checkpointId && recoverySession) {
+        const capturedRecoverySession = recoverySession;
         await invoke("transfer_checkpoint_remove", {
           checkpointId: item.checkpointId,
+          recoverySession: capturedRecoverySession,
         }).catch(() => undefined);
       }
       return true;
@@ -1989,6 +2247,7 @@ async function executeTransfer(
   connectionId: string,
 ): Promise<void> {
   const effective = getEffectiveTransferSettings();
+  const transferRecoverySession = recoverySession;
   ensureTransferActive(item);
 
   if (item.operation === "download") {
@@ -2039,7 +2298,11 @@ async function executeTransfer(
             partConcurrency: effective.downloadPartConcurrency,
             bandwidthLimitMbps: effective.bandwidthLimitMbps,
             checkpointId,
-            enableResume: item.resumable && effective.enableTransferResume,
+            recoverySession: transferRecoverySession ?? "",
+            enableResume:
+              Boolean(transferRecoverySession) &&
+              item.resumable &&
+              effective.enableTransferResume,
             checksumVerification: effective.enableTransferChecksumVerification,
           },
         );
@@ -2256,6 +2519,16 @@ async function resolveConflict(
   item: TransferItem,
   connectionId: string,
 ): Promise<"skip" | "cancel" | { overwrite: boolean }> {
+  const effectivePolicy =
+    item.conflictResolution === "replace" || item.conflictResolution === "skip"
+      ? item.conflictResolution
+      : state.currentSettings.conflictPolicy;
+  const authorizationKey = unguardedAuthorizationKey(item, connectionId);
+  const hasScopedOverwrite =
+    item.overwrite === true &&
+    authorizationKey !== null &&
+    item.overwriteScope === authorizationKey;
+
   let conflictExists: boolean;
   try {
     conflictExists = await checkConflictExists(item, connectionId);
@@ -2271,22 +2544,21 @@ async function resolveConflict(
     conflictExists = true;
   }
   if (!conflictExists) {
-    if (item.overwrite === true) return { overwrite: true };
+    if (hasScopedOverwrite || effectivePolicy === "replace") {
+      return { overwrite: true };
+    }
     if (lacksAtomicCreateForTransferItem(item)) {
       const authorized = await withConflictPromptLock(() =>
-        confirmUnguardedTransferWrite(),
+        confirmUnguardedTransferWrite(item, connectionId),
       );
       return authorized ? { overwrite: true } : "cancel";
     }
     return { overwrite: false };
   }
 
-  const effectivePolicy =
-    item.conflictResolution === "replace" || item.conflictResolution === "skip"
-      ? item.conflictResolution
-      : state.currentSettings.conflictPolicy;
-
-  if (effectivePolicy === "replace") return { overwrite: true };
+  if (hasScopedOverwrite || effectivePolicy === "replace") {
+    return { overwrite: true };
+  }
   if (effectivePolicy === "skip") return "skip";
 
   if (conflictApplyAll) {
@@ -2378,7 +2650,210 @@ async function checkConflictExists(
   });
 }
 
-function queueRender(): void {
+interface TransferRenderFocus {
+  id: number;
+  controlSelector: ".transfer-pause" | ".transfer-cancel";
+}
+
+function captureTransferRenderFocus(
+  list: HTMLElement,
+): TransferRenderFocus | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) || !list.contains(active)) return null;
+  const control = active.closest<HTMLElement>(
+    ".transfer-pause, .transfer-cancel",
+  );
+  const row = control?.closest<HTMLElement>(".transfer-item");
+  const id = Number(row?.dataset.id);
+  if (!control || !Number.isSafeInteger(id) || id <= 0) return null;
+  return {
+    id,
+    controlSelector: control.classList.contains("transfer-pause")
+      ? ".transfer-pause"
+      : ".transfer-cancel",
+  };
+}
+
+function restoreTransferRenderFocus(
+  list: HTMLElement,
+  focus: TransferRenderFocus | null,
+): void {
+  if (!focus) return;
+  const row = list.querySelector<HTMLElement>(
+    `.transfer-item[data-id="${focus.id}"]`,
+  );
+  const control = row?.querySelector<HTMLElement>(focus.controlSelector);
+  const target = control ?? row ?? list;
+  if (target === row || target === list) target.tabIndex = -1;
+  target.focus({ preventScroll: true });
+}
+
+function renderTransferRow(t: TransferItem): string {
+  let statusIcon = "";
+  let statusClass = "";
+  if (t.status === "queued") {
+    statusIcon = getIconHtml("clock", {
+      className: "lucide-icon transfer-icon-svg",
+      decorative: true,
+    });
+    statusClass = "transfer-status--queued";
+  } else if (t.status === "uploading") {
+    statusIcon = getIconHtml("refresh-cw", {
+      className: "lucide-icon transfer-icon-svg",
+      decorative: true,
+    });
+    statusClass = "transfer-status--active";
+  } else if (t.status === "done") {
+    statusIcon = getIconHtml("check-circle", {
+      className: "lucide-icon transfer-icon-svg",
+      decorative: true,
+    });
+    statusClass = "transfer-status--done";
+  } else if (t.status === "skipped") {
+    statusIcon = getIconHtml("skip-forward", {
+      className: "lucide-icon transfer-icon-svg",
+      decorative: true,
+    });
+    statusClass = "transfer-status--queued";
+  } else {
+    statusIcon = getIconHtml("alert-circle", {
+      className: "lucide-icon transfer-icon-svg",
+      decorative: true,
+    });
+    statusClass = "transfer-status--error";
+  }
+
+  const progressPct = Math.max(0, Math.min(100, Math.round(t.progress) || 0));
+  const showDeterminate =
+    t.totalBytes > 0 &&
+    (t.status === "uploading" ||
+      t.status === "queued" ||
+      (t.status === "error" && t.progress > 0));
+  const showIndeterminate =
+    !showDeterminate &&
+    (t.status === "uploading" ||
+      t.status === "queued" ||
+      t.operation === "copy" ||
+      t.operation === "move");
+  const progressBar = showDeterminate
+    ? `<div class="transfer-progress-wrap">` +
+      `<div class="transfer-progress" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressPct}"><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
+      `<span class="transfer-progress__label">${progressPct}%</span>` +
+      `</div>`
+    : showIndeterminate
+      ? `<div class="transfer-progress-wrap transfer-progress-wrap--indeterminate">` +
+        `<div class="transfer-progress transfer-progress--indeterminate" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-busy="true"><div class="transfer-progress__bar"></div></div>` +
+        `</div>`
+      : "";
+  const opLabel =
+    t.operation === "download"
+      ? "Download"
+      : t.operation === "copy"
+        ? "Copy"
+        : t.operation === "move"
+          ? "Move"
+          : "Upload";
+  const target =
+    t.operation === "download"
+      ? (t.destination ?? "")
+      : t.operation === "copy" || t.operation === "move"
+        ? `${t.destinationBucket ?? t.bucket}/${t.destinationKey ?? t.destinationPrefix ?? ""}`
+        : t.key;
+  const arrow =
+    t.operation === "download"
+      ? getIconHtml("arrow-left", {
+          className: "lucide-icon transfer-arrow-svg",
+          decorative: true,
+        })
+      : getIconHtml("arrow-right", {
+          className: "lucide-icon transfer-arrow-svg",
+          decorative: true,
+        });
+
+  const attemptLabel =
+    t.maxAttempts > 1
+      ? `<span class="transfer-attempt">Attempt ${t.attempt}/${t.maxAttempts}</span>`
+      : "";
+
+  const phaseLabel =
+    t.status === "uploading"
+      ? `<span class="transfer-phase">${
+          t.phase === "retry_wait"
+            ? "Retry wait"
+            : t.phase === "verifying"
+              ? "Verifying"
+              : t.phase === "paused"
+                ? "Paused"
+                : t.phase === "resuming"
+                  ? "Resuming"
+                  : t.phase === "finalizing"
+                    ? "Finalizing"
+                    : "Running"
+        }</span>`
+      : "";
+  const speedLabel =
+    t.status === "uploading" && t.speedBps > 0
+      ? `<span class="transfer-phase">${escapeHtml(formatSpeedBps(t.speedBps))}</span>`
+      : "";
+  const etaLabel =
+    t.status === "uploading" && t.etaSeconds !== null
+      ? `<span class="transfer-phase">ETA ${escapeHtml(formatEtaSeconds(t.etaSeconds))}</span>`
+      : "";
+  const partsLabel =
+    t.totalParts > 0
+      ? `<span class="transfer-phase">Parts ${Math.min(t.completedParts, t.totalParts)}/${t.totalParts}</span>`
+      : "";
+  const rowClass =
+    selectedTransferId === t.id
+      ? "transfer-item transfer-item--selected"
+      : "transfer-item";
+  // In-flight uploads would have to restart from zero if interrupted, so
+  // only expose pause for downloads or transfers not yet running.
+  const canPause =
+    !(t.operation === "upload" && t.status === "uploading" && !t.paused) &&
+    (t.status === "queued" || t.status === "uploading" || t.paused);
+  const pauseButton = canPause
+    ? `<button class="transfer-pause btn--ghost" title="${
+        t.paused ? "Resume" : "Pause"
+      }" aria-label="${t.paused ? "Resume" : "Pause"} transfer">${
+        t.paused ? "▶" : "Ⅱ"
+      }</button>`
+    : "";
+
+  return (
+    `<div class="${rowClass}" data-id="${t.id}">` +
+    `<span class="transfer-status ${statusClass}">${statusIcon}</span>` +
+    `<div class="transfer-main">` +
+    `<div class="transfer-main__row">` +
+    `<span class="transfer-op">${escapeHtml(opLabel)}</span>` +
+    `<span class="transfer-name">${escapeHtml(t.fileName)}</span>` +
+    (target
+      ? `<span class="transfer-arrow">${arrow}</span>` +
+        `<span class="transfer-key">${escapeHtml(target)}</span>`
+      : "") +
+    `</div>` +
+    (attemptLabel || phaseLabel || speedLabel || etaLabel || partsLabel
+      ? `<div class="transfer-meta">${attemptLabel}${phaseLabel}${speedLabel}${etaLabel}${partsLabel}</div>`
+      : "") +
+    progressBar +
+    (t.status === "error" || t.status === "skipped" || (t.paused && t.error)
+      ? `<span class="transfer-error" title="${escapeHtml(t.error ?? "")}">${escapeHtml(t.error ?? "Error")}</span>`
+      : "") +
+    `</div>` +
+    pauseButton +
+    (t.status === "queued" || t.status === "uploading"
+      ? `<button class="transfer-cancel btn--ghost" title="Cancel" aria-label="Cancel transfer">&times;</button>`
+      : "") +
+    `</div>`
+  );
+}
+
+function queueRender(dirtyTransferId?: number): void {
+  if (dirtyTransferId === undefined) {
+    fullRenderQueued = true;
+  } else {
+    dirtyTransferIds.add(dirtyTransferId);
+  }
   if (renderQueued) return;
   renderQueued = true;
   const scheduler =
@@ -2388,272 +2863,179 @@ function queueRender(): void {
       : (cb: FrameRequestCallback) => globalThis.setTimeout(() => cb(0), 16);
   scheduler(() => {
     renderQueued = false;
-    renderQueue();
+    const renderAll = fullRenderQueued;
+    const dirtyIds = Array.from(dirtyTransferIds);
+    fullRenderQueued = false;
+    dirtyTransferIds.clear();
+    if (renderAll || dirtyIds.length === 0) {
+      renderQueue();
+    } else {
+      renderTransferRows(dirtyIds);
+    }
   });
+}
+
+function renderTransferRows(ids: readonly number[]): void {
+  const list = document.getElementById("transfer-list");
+  if (!list) return;
+
+  const focus = captureTransferRenderFocus(list);
+  const replacements: Array<{
+    row: HTMLElement;
+    replacement: HTMLElement;
+  }> = [];
+  for (const id of ids) {
+    const item = queue.find((entry) => entry.id === id);
+    const row = list.querySelector<HTMLElement>(
+      `.transfer-item[data-id="${id}"]`,
+    );
+    if (!item || !row) {
+      renderQueue();
+      return;
+    }
+
+    const template = document.createElement("template");
+    template.innerHTML = renderTransferRow(item);
+    const replacement = template.content.firstElementChild;
+    if (!(replacement instanceof HTMLElement)) {
+      renderQueue();
+      return;
+    }
+    replacements.push({ row, replacement });
+  }
+
+  for (const { row, replacement } of replacements) {
+    row.replaceWith(replacement);
+  }
+  restoreTransferRenderFocus(list, focus);
+  updateQueueChrome();
 }
 
 function renderQueue(): void {
   const list = document.getElementById("transfer-list");
   if (!list) return;
 
+  const focus = captureTransferRenderFocus(list);
   if (queue.length === 0) {
     list.innerHTML =
       `<div class="transfer-empty">` +
       `${getIconHtml("download", { className: "lucide-icon empty-state__icon", decorative: true })}` +
       `<span>No transfers</span>` +
       `</div>`;
-    updateBadge();
-    updateTransferThroughput();
-    updateQueueSummary();
-    syncTransferVisibility();
-    writeQueueManifest();
-    return;
+  } else {
+    list.innerHTML = queue.map(renderTransferRow).join("");
   }
 
-  list.innerHTML = queue
-    .map((t) => {
-      let statusIcon = "";
-      let statusClass = "";
-      if (t.status === "queued") {
-        statusIcon = getIconHtml("clock", {
-          className: "lucide-icon transfer-icon-svg",
-          decorative: true,
-        });
-        statusClass = "transfer-status--queued";
-      } else if (t.status === "uploading") {
-        statusIcon = getIconHtml("refresh-cw", {
-          className: "lucide-icon transfer-icon-svg",
-          decorative: true,
-        });
-        statusClass = "transfer-status--active";
-      } else if (t.status === "done") {
-        statusIcon = getIconHtml("check-circle", {
-          className: "lucide-icon transfer-icon-svg",
-          decorative: true,
-        });
-        statusClass = "transfer-status--done";
-      } else if (t.status === "skipped") {
-        statusIcon = getIconHtml("skip-forward", {
-          className: "lucide-icon transfer-icon-svg",
-          decorative: true,
-        });
-        statusClass = "transfer-status--queued";
-      } else {
-        statusIcon = getIconHtml("alert-circle", {
-          className: "lucide-icon transfer-icon-svg",
-          decorative: true,
-        });
-        statusClass = "transfer-status--error";
-      }
-
-      const progressPct = Math.max(
-        0,
-        Math.min(100, Math.round(t.progress) || 0),
-      );
-      const showDeterminate =
-        t.totalBytes > 0 &&
-        (t.status === "uploading" ||
-          t.status === "queued" ||
-          (t.status === "error" && t.progress > 0));
-      const showIndeterminate =
-        !showDeterminate &&
-        (t.status === "uploading" ||
-          t.status === "queued" ||
-          t.operation === "copy" ||
-          t.operation === "move");
-      const progressBar = showDeterminate
-        ? `<div class="transfer-progress-wrap">` +
-          `<div class="transfer-progress" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressPct}"><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
-          `<span class="transfer-progress__label">${progressPct}%</span>` +
-          `</div>`
-        : showIndeterminate
-          ? `<div class="transfer-progress-wrap transfer-progress-wrap--indeterminate">` +
-            `<div class="transfer-progress transfer-progress--indeterminate" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-busy="true"><div class="transfer-progress__bar"></div></div>` +
-            `</div>`
-          : "";
-      const opLabel =
-        t.operation === "download"
-          ? "Download"
-          : t.operation === "copy"
-            ? "Copy"
-            : t.operation === "move"
-              ? "Move"
-              : "Upload";
-      const target =
-        t.operation === "download"
-          ? (t.destination ?? "")
-          : t.operation === "copy" || t.operation === "move"
-            ? `${t.destinationBucket ?? t.bucket}/${t.destinationKey ?? t.destinationPrefix ?? ""}`
-            : t.key;
-      const arrow =
-        t.operation === "download"
-          ? getIconHtml("arrow-left", {
-              className: "lucide-icon transfer-arrow-svg",
-              decorative: true,
-            })
-          : getIconHtml("arrow-right", {
-              className: "lucide-icon transfer-arrow-svg",
-              decorative: true,
-            });
-
-      const attemptLabel =
-        t.maxAttempts > 1
-          ? `<span class="transfer-attempt">Attempt ${t.attempt}/${t.maxAttempts}</span>`
-          : "";
-
-      const phaseLabel =
-        t.status === "uploading"
-          ? `<span class="transfer-phase">${
-              t.phase === "retry_wait"
-                ? "Retry wait"
-                : t.phase === "verifying"
-                  ? "Verifying"
-                  : t.phase === "paused"
-                    ? "Paused"
-                    : t.phase === "resuming"
-                      ? "Resuming"
-                      : t.phase === "finalizing"
-                        ? "Finalizing"
-                        : "Running"
-            }</span>`
-          : "";
-      const speedLabel =
-        t.status === "uploading" && t.speedBps > 0
-          ? `<span class="transfer-phase">${escapeHtml(formatSpeedBps(t.speedBps))}</span>`
-          : "";
-      const etaLabel =
-        t.status === "uploading" && t.etaSeconds !== null
-          ? `<span class="transfer-phase">ETA ${escapeHtml(formatEtaSeconds(t.etaSeconds))}</span>`
-          : "";
-      const partsLabel =
-        t.totalParts > 0
-          ? `<span class="transfer-phase">Parts ${Math.min(t.completedParts, t.totalParts)}/${t.totalParts}</span>`
-          : "";
-      const rowClass =
-        selectedTransferId === t.id
-          ? "transfer-item transfer-item--selected"
-          : "transfer-item";
-      // In-flight uploads would have to restart from zero if interrupted, so
-      // only expose pause for downloads or transfers not yet running.
-      const canPause =
-        !(t.operation === "upload" && t.status === "uploading" && !t.paused) &&
-        (t.status === "queued" || t.status === "uploading" || t.paused);
-      const pauseButton = canPause
-        ? `<button class="transfer-pause btn--ghost" title="${
-            t.paused ? "Resume" : "Pause"
-          }" aria-label="${t.paused ? "Resume" : "Pause"} transfer">${
-            t.paused ? "▶" : "Ⅱ"
-          }</button>`
-        : "";
-
-      return (
-        `<div class="${rowClass}" data-id="${t.id}">` +
-        `<span class="transfer-status ${statusClass}">${statusIcon}</span>` +
-        `<div class="transfer-main">` +
-        `<div class="transfer-main__row">` +
-        `<span class="transfer-op">${escapeHtml(opLabel)}</span>` +
-        `<span class="transfer-name">${escapeHtml(t.fileName)}</span>` +
-        (target
-          ? `<span class="transfer-arrow">${arrow}</span>` +
-            `<span class="transfer-key">${escapeHtml(target)}</span>`
-          : "") +
-        `</div>` +
-        (attemptLabel || phaseLabel || speedLabel || etaLabel || partsLabel
-          ? `<div class="transfer-meta">${attemptLabel}${phaseLabel}${speedLabel}${etaLabel}${partsLabel}</div>`
-          : "") +
-        progressBar +
-        (t.status === "error" || t.status === "skipped" || (t.paused && t.error)
-          ? `<span class="transfer-error" title="${escapeHtml(t.error ?? "")}">${escapeHtml(t.error ?? "Error")}</span>`
-          : "") +
-        `</div>` +
-        pauseButton +
-        (t.status === "queued" || t.status === "uploading"
-          ? `<button class="transfer-cancel btn--ghost" title="Cancel" aria-label="Cancel transfer">&times;</button>`
-          : "") +
-        `</div>`
-      );
-    })
-    .join("");
-
-  updateBadge();
-  updateTransferThroughput();
-  updateQueueSummary();
-  syncTransferVisibility();
-  writeQueueManifest();
+  restoreTransferRenderFocus(list, focus);
+  updateQueueChrome();
 }
 
-function updateQueueSummary(): void {
+interface QueueAggregates {
+  active: number;
+  failed: number;
+  skipped: number;
+  attention: number;
+  totalSpeed: number;
+}
+
+function computeQueueAggregates(): QueueAggregates {
+  const aggregates: QueueAggregates = {
+    active: 0,
+    failed: 0,
+    skipped: 0,
+    attention: 0,
+    totalSpeed: 0,
+  };
+
+  for (const item of queue) {
+    if (item.status === "queued" || item.status === "uploading") {
+      aggregates.active += 1;
+    }
+    if (item.status === "error") {
+      aggregates.failed += 1;
+      aggregates.attention += 1;
+    } else if (item.status === "skipped") {
+      aggregates.skipped += 1;
+      aggregates.attention += 1;
+    }
+    if (item.status === "uploading") {
+      aggregates.totalSpeed += Math.max(0, item.speedBps);
+    }
+  }
+
+  return aggregates;
+}
+
+function updateQueueChrome(): void {
+  const aggregates = computeQueueAggregates();
+  updateBadge(aggregates);
+  updateTransferThroughput(aggregates);
+  updateQueueSummary(aggregates);
+  syncTransferVisibility();
+}
+
+function updateQueueSummary(
+  aggregates: QueueAggregates = computeQueueAggregates(),
+): void {
   const el = document.getElementById("transfer-queue-summary");
   if (!el) return;
 
-  const active = queue.filter(
-    (t) => t.status === "queued" || t.status === "uploading",
-  ).length;
-  const failed = queue.filter((t) => t.status === "error").length;
-  const skipped = queue.filter((t) => t.status === "skipped").length;
-  const totalSpeed = queue
-    .filter((item) => item.status === "uploading")
-    .reduce((sum, item) => sum + Math.max(0, item.speedBps), 0);
-
   const parts: string[] = [];
-  if (active > 0) parts.push(`${active} active`);
-  if (failed > 0) parts.push(`${failed} failed`);
-  if (skipped > 0) parts.push(`${skipped} skipped`);
-  if (totalSpeed > 0) parts.push(formatSpeedBps(totalSpeed));
+  if (aggregates.active > 0) parts.push(`${aggregates.active} active`);
+  if (aggregates.failed > 0) parts.push(`${aggregates.failed} failed`);
+  if (aggregates.skipped > 0) parts.push(`${aggregates.skipped} skipped`);
+  if (aggregates.totalSpeed > 0) {
+    parts.push(formatSpeedBps(aggregates.totalSpeed));
+  }
   el.textContent = parts.length > 0 ? parts.join(" · ") : "No active transfers";
 }
 
-function updateBadge(): void {
-  const active = queue.filter(
-    (t) => t.status === "queued" || t.status === "uploading",
-  ).length;
-  const attention = queue.filter(
-    (t) => t.status === "error" || t.status === "skipped",
-  ).length;
-  const badgeText = active > 0 ? String(active) : attention > 0 ? "!" : "";
+function updateBadge(
+  aggregates: QueueAggregates = computeQueueAggregates(),
+): void {
+  const badgeText =
+    aggregates.active > 0
+      ? String(aggregates.active)
+      : aggregates.attention > 0
+        ? "!"
+        : "";
   const badge = document.getElementById("transfer-badge");
   if (badge) {
     badge.textContent = badgeText;
-    badge.style.display = active > 0 || attention > 0 ? "" : "none";
+    badge.style.display =
+      aggregates.active > 0 || aggregates.attention > 0 ? "" : "none";
     badge.classList.toggle(
       "transfer-badge--alert",
-      active === 0 && attention > 0,
+      aggregates.active === 0 && aggregates.attention > 0,
     );
   }
   const drawerBadge = document.getElementById("drawer-transfer-badge");
   if (drawerBadge) {
     drawerBadge.textContent = badgeText;
-    drawerBadge.style.display = active > 0 || attention > 0 ? "" : "none";
+    drawerBadge.style.display =
+      aggregates.active > 0 || aggregates.attention > 0 ? "" : "none";
     drawerBadge.classList.toggle(
       "drawer-badge--alert",
-      active === 0 && attention > 0,
+      aggregates.active === 0 && aggregates.attention > 0,
     );
   }
   const toggle = document.getElementById("transfer-toggle");
-  if (toggle && (active > 0 || attention > 0)) {
+  if (toggle && (aggregates.active > 0 || aggregates.attention > 0)) {
     const speedLabel =
-      queue
-        .filter((item) => item.status === "uploading")
-        .reduce((sum, item) => sum + Math.max(0, item.speedBps), 0) > 0
-        ? formatSpeedBps(
-            queue
-              .filter((item) => item.status === "uploading")
-              .reduce((sum, item) => sum + Math.max(0, item.speedBps), 0),
-          )
-        : "";
+      aggregates.totalSpeed > 0 ? formatSpeedBps(aggregates.totalSpeed) : "";
     toggle.title = speedLabel
-      ? `Transfers (${active} active, ${speedLabel})`
-      : `Transfers (${active} active)`;
+      ? `Transfers (${aggregates.active} active, ${speedLabel})`
+      : `Transfers (${aggregates.active} active)`;
   } else if (toggle) {
     toggle.title = "Transfers";
   }
 }
 
-function updateTransferThroughput(): void {
-  const totalSpeed = queue
-    .filter((item) => item.status === "uploading")
-    .reduce((sum, item) => sum + Math.max(0, item.speedBps), 0);
-  const label = totalSpeed > 0 ? formatSpeedBps(totalSpeed) : "";
+function updateTransferThroughput(
+  aggregates: QueueAggregates = computeQueueAggregates(),
+): void {
+  const label =
+    aggregates.totalSpeed > 0 ? formatSpeedBps(aggregates.totalSpeed) : "";
   const statusEl = document.getElementById("statusbar-throughput");
   if (statusEl) {
     statusEl.textContent = label ? `Transfers ${label}` : "";

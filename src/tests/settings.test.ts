@@ -124,6 +124,56 @@ describe("settings module", () => {
     });
   });
 
+  it("serializes overlapping saves and persists each immutable snapshot", async () => {
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    mockInvoke
+      .mockImplementationOnce(async () => firstGate)
+      .mockResolvedValueOnce(undefined);
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+
+    state.currentSettings.theme = "light";
+    const firstSave = settings.saveSettings();
+    state.currentSettings.theme = "dark";
+    const secondSave = settings.saveSettings();
+    await flushMicrotasks();
+
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke.mock.calls[0]?.[1]).toEqual({
+      json: expect.stringContaining('"theme": "light"'),
+    });
+    releaseFirst?.();
+    await firstSave;
+    await flushMicrotasks();
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke.mock.calls[1]?.[1]).toEqual({
+      json: expect.stringContaining('"theme": "dark"'),
+    });
+    await secondSave;
+    expect(state.lastPersistedSettings.theme).toBe("dark");
+  });
+
+  it("continues the settings save queue after a failed snapshot", async () => {
+    mockInvoke
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockResolvedValueOnce(undefined);
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+
+    state.currentSettings.theme = "light";
+    const failedSave = settings.saveSettings();
+    state.currentSettings.theme = "dark";
+    const recoverySave = settings.saveSettings();
+
+    await expect(failedSave).rejects.toThrow("disk full");
+    await expect(recoverySave).resolves.toBeUndefined();
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(state.lastPersistedSettings.theme).toBe("dark");
+  });
+
   it("applies and switches theme correctly", async () => {
     const settings = await import("../settings.ts");
     settings.applyTheme("dark");
@@ -204,6 +254,7 @@ describe("settings module", () => {
     document.body.innerHTML = `
       <div id="status"></div>
       <div id="settings-overlay" class="modal-overlay"></div>
+      <button id="settings-save">Save</button>
       <select id="setting-theme"><option value="light" selected>light</option></select>
       <input id="setting-updates" type="checkbox" checked />
       <select id="setting-update-channel"><option value="release" selected>release</option></select>
@@ -239,11 +290,27 @@ describe("settings module", () => {
     ) as HTMLDivElement;
     overlay.classList.add("active");
 
-    mockInvoke.mockResolvedValueOnce(undefined);
+    let resolveSave: (() => void) | undefined;
+    const saveGate = new Promise<void>((resolve) => {
+      resolveSave = resolve;
+    });
+    mockInvoke.mockImplementationOnce(async () => saveGate);
     settings.openSettingsModal();
     expect(overlay.classList.contains("active")).toBe(true);
-    await settings.closeSettingsModal(true);
+    const firstClose = settings.closeSettingsModal(true);
+    const duplicateClose = settings.closeSettingsModal(true);
+    expect(duplicateClose).toBe(firstClose);
+    expect(
+      (document.getElementById("settings-save") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    await flushMicrotasks();
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    resolveSave?.();
+    await firstClose;
     expect(overlay.classList.contains("active")).toBe(false);
+    expect(
+      (document.getElementById("settings-save") as HTMLButtonElement).disabled,
+    ).toBe(false);
 
     overlay.classList.add("active");
     state.lastPersistedSettings = {
@@ -265,6 +332,64 @@ describe("settings module", () => {
       (document.getElementById("status") as HTMLDivElement).textContent,
     ).toContain("Failed to save settings");
     expect(overlay.classList.contains("active")).toBe(true);
+  });
+
+  it("isolates a failed modal draft from a queued window-size save", async () => {
+    document.body.innerHTML = `
+      <div id="status"></div>
+      <div id="settings-overlay" class="modal-overlay active"></div>
+      <button id="settings-save">Save</button>
+      <select id="setting-theme">
+        <option value="light">light</option>
+        <option value="dark" selected>dark</option>
+      </select>
+      <input id="setting-updates" type="checkbox" checked />
+      <select id="setting-update-channel"><option value="release" selected>release</option></select>
+      <select id="setting-presigned-expiration"><option value="3600" selected>3600</option></select>
+      <select id="setting-max-concurrent"><option value="3" selected>3</option></select>
+    `;
+    let rejectModalSave: ((error: Error) => void) | undefined;
+    const modalSaveGate = new Promise<void>((_resolve, reject) => {
+      rejectModalSave = reject;
+    });
+    mockInvoke
+      .mockImplementationOnce(async () => modalSaveGate)
+      .mockResolvedValueOnce(undefined);
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.lastPersistedSettings = {
+      ...SETTING_DEFAULTS,
+      theme: "light",
+      windowWidth: 800,
+      windowHeight: 600,
+    };
+    state.currentSettings = { ...state.lastPersistedSettings };
+
+    const modalSave = settings.closeSettingsModal(true);
+    state.currentSettings.windowWidth = 1440;
+    state.currentSettings.windowHeight = 900;
+    const resizeSave = settings.saveSettings();
+    await flushMicrotasks();
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+
+    rejectModalSave?.(new Error("modal save failed"));
+    await modalSave;
+    await resizeSave;
+
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke.mock.calls[1]?.[1]).toEqual({
+      json: expect.stringContaining('"theme": "light"'),
+    });
+    expect(mockInvoke.mock.calls[1]?.[1]).toEqual({
+      json: expect.stringContaining('"windowWidth": 1440'),
+    });
+    expect(state.currentSettings.theme).toBe("light");
+    expect(state.currentSettings.windowWidth).toBe(1440);
+    expect(state.lastPersistedSettings.theme).toBe("light");
+    expect(state.lastPersistedSettings.windowWidth).toBe(1440);
+    expect(
+      document.getElementById("settings-overlay")?.classList.contains("active"),
+    ).toBe(true);
   });
 
   it("tracks support prompt flags in settings extras", async () => {

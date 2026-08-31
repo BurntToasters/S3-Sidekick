@@ -19,6 +19,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 export const MINIMUM_NPM_VERSION = "12.0.1";
+export const NPM_UPDATE_QUARANTINE_DAYS = 3;
 export const SUPPORTED_NODE_VERSIONS = "^22.22.2 || ^24.15.0 || >=26.0.0";
 export const STABLE_RUST_CHANNEL = "stable";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -64,7 +65,7 @@ export function npmUpdateArguments(cachePath) {
     "update",
     "--package-lock-only",
     "--ignore-scripts",
-    "--min-release-age=3",
+    `--min-release-age=${NPM_UPDATE_QUARANTINE_DAYS}`,
     `--cache=${cachePath}`,
   ];
 }
@@ -202,7 +203,7 @@ function main() {
       ...process.env,
       npm_config_cache: cachePath,
       npm_config_ignore_scripts: "true",
-      npm_config_min_release_age: "3",
+      npm_config_min_release_age: String(NPM_UPDATE_QUARANTINE_DAYS),
     };
 
     try {

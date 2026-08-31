@@ -10,6 +10,7 @@ interface PromptOptions {
   inputType?: "text" | "password";
   inputPlaceholder?: string;
   inputDefault?: string;
+  validationMessage?: string;
   validate?: (value: string) => Promise<boolean>;
 }
 
@@ -28,6 +29,7 @@ interface DialogConfig {
   inputType: "text" | "password";
   inputPlaceholder: string;
   inputDefault: string;
+  validationMessage?: string;
   validate?: (value: string) => Promise<boolean>;
 }
 
@@ -48,6 +50,9 @@ function els() {
       "dialog-input-label",
     ) as HTMLElement | null,
     input: document.getElementById("dialog-input") as HTMLInputElement,
+    validationError: document.getElementById(
+      "dialog-validation-error",
+    ) as HTMLElement | null,
     reveal: document.getElementById("dialog-input-reveal") as HTMLButtonElement,
     cancel: document.getElementById("dialog-cancel") as HTMLButtonElement,
     ok: document.getElementById("dialog-ok") as HTMLButtonElement,
@@ -55,6 +60,12 @@ function els() {
 }
 
 function shakeDialogBox(box: HTMLElement) {
+  if (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  ) {
+    return;
+  }
   box.animate(
     [
       { transform: "translateX(0)" },
@@ -81,6 +92,28 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.input.type = config.inputType;
     el.input.placeholder = config.inputPlaceholder;
     el.input.value = config.inputDefault;
+
+    function clearValidationError() {
+      el.input.removeAttribute("aria-invalid");
+      el.input.removeAttribute("aria-errormessage");
+      if (el.validationError) {
+        el.validationError.textContent = "";
+        el.validationError.hidden = true;
+      }
+    }
+
+    function showValidationError(message: string) {
+      el.input.setAttribute("aria-invalid", "true");
+      if (el.validationError) {
+        el.input.setAttribute("aria-errormessage", el.validationError.id);
+        el.validationError.textContent = message;
+        el.validationError.hidden = false;
+      }
+      shakeDialogBox(el.box);
+      el.input.focus();
+    }
+
+    clearValidationError();
 
     const isPassword = config.inputType === "password";
     const inputLabel = isPassword ? "Password" : "Value";
@@ -168,7 +201,9 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       el.cancel.removeEventListener("click", onCancel);
       el.ok.removeEventListener("click", onOk);
       el.input.removeEventListener("keydown", onInputKey);
+      el.input.removeEventListener("input", clearValidationError);
       el.reveal.removeEventListener("click", onReveal);
+      clearValidationError();
       el.input.type = "text";
       el.reveal.hidden = true;
       el.ok.disabled = false;
@@ -211,14 +246,17 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
           const ok = await config.validate(el.input.value);
           if (generation !== validateGeneration) return;
           if (!ok) {
-            shakeDialogBox(el.box);
             el.input.value = "";
-            el.input.focus();
+            showValidationError(
+              config.validationMessage ?? "Please enter a valid value.",
+            );
             return;
           }
         } catch {
           if (generation !== validateGeneration) return;
-          shakeDialogBox(el.box);
+          showValidationError(
+            "Validation could not be completed. Please try again.",
+          );
           return;
         } finally {
           if (generation === validateGeneration) {
@@ -254,6 +292,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.ok.addEventListener("click", onOk);
     if (config.showInput) {
       el.input.addEventListener("keydown", onInputKey);
+      el.input.addEventListener("input", clearValidationError);
     }
     document.addEventListener("keydown", onEscape, true);
     document.addEventListener("keydown", onTrapFocus, true);
@@ -309,6 +348,7 @@ export function showPrompt(
         inputType: options?.inputType ?? "text",
         inputPlaceholder: options?.inputPlaceholder ?? "",
         inputDefault: options?.inputDefault ?? "",
+        validationMessage: options?.validationMessage,
         validate: options?.validate,
       }) as Promise<string | null>,
   );

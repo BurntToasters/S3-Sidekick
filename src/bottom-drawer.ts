@@ -1,5 +1,6 @@
 import { $ } from "./utils.ts";
 import { markActivitySeen } from "./activity-log.ts";
+import { handleTabListArrowKey } from "./app-layout.ts";
 
 export type DrawerTab = "activity" | "transfers";
 
@@ -24,12 +25,17 @@ export function initDrawer(): void {
 
   drawer.style.height = `${drawerHeight}px`;
 
-  $("drawer-tab-activity").addEventListener("click", () =>
-    switchDrawerTab("activity"),
-  );
-  $("drawer-tab-transfers").addEventListener("click", () =>
-    switchDrawerTab("transfers"),
-  );
+  const activityTab = $("drawer-tab-activity");
+  const transfersTab = $("drawer-tab-transfers");
+  activityTab.addEventListener("click", () => switchDrawerTab("activity"));
+  transfersTab.addEventListener("click", () => switchDrawerTab("transfers"));
+  drawer
+    .querySelector<HTMLElement>(".bottom-drawer__tabs")
+    ?.addEventListener("keydown", (event) => {
+      handleTabListArrowKey(event, [activityTab, transfersTab], (tab) =>
+        switchDrawerTab(tab === activityTab ? "activity" : "transfers"),
+      );
+    });
   $("drawer-close").addEventListener("click", closeDrawer);
   $("drawer-minimize").addEventListener("click", toggleMinimized);
 

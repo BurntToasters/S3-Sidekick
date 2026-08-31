@@ -25,6 +25,8 @@ import { showConfirm, showAlert } from "./dialogs.ts";
 import { friendlyError } from "./utils.ts";
 
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
+let settingsSaveTail: Promise<void> = Promise.resolve();
+let settingsModalSaveOperation: Promise<void> | null = null;
 
 export function setBookmarkSelectHandler(handler: (b: Bookmark) => void): void {
   onBookmarkSelect = handler;
@@ -105,13 +107,28 @@ export async function loadSettings(): Promise<boolean> {
   return !result.malformed;
 }
 
-export async function saveSettings(): Promise<void> {
-  const payload = mergeSettingsPayload(
-    state.currentSettings,
-    state.settingsExtras,
+function enqueueSettingsSnapshot(
+  settingsSnapshot: UserSettings,
+  extrasSnapshot: typeof state.settingsExtras,
+): Promise<void> {
+  const payload = mergeSettingsPayload(settingsSnapshot, extrasSnapshot);
+  const persistSnapshot = async () => {
+    await invoke("save_settings", { json: payload });
+    state.lastPersistedSettings = { ...settingsSnapshot };
+  };
+  const result = settingsSaveTail.then(persistSnapshot);
+  settingsSaveTail = result.catch(() => undefined);
+  return result;
+}
+
+export function saveSettings(): Promise<void> {
+  if (settingsModalSaveOperation) {
+    return settingsModalSaveOperation.then(() => saveSettings());
+  }
+  return enqueueSettingsSnapshot(
+    { ...state.currentSettings },
+    { ...state.settingsExtras },
   );
-  await invoke("save_settings", { json: payload });
-  state.lastPersistedSettings = { ...state.currentSettings };
 }
 
 export function switchSettingsTab(tab: string): void {
@@ -737,27 +754,71 @@ export function openSettingsModal(): void {
   if (overlay) overlay.classList.add("active");
 }
 
-export async function closeSettingsModal(save: boolean): Promise<void> {
-  if (save) {
-    readSettingsModal();
-    applyTheme(state.currentSettings.theme);
-    try {
-      await saveSettings();
-    } catch (err) {
-      applyTheme(state.lastPersistedSettings.theme);
-      state.currentSettings = { ...state.lastPersistedSettings };
-      setUpdateChannel(state.lastPersistedSettings.updateChannel);
-      const statusEl = document.getElementById("status");
-      if (statusEl)
-        statusEl.textContent = `Failed to save settings: ${String(err)}`;
-      return;
+function setSettingsSaveBusy(busy: boolean): void {
+  const button = document.getElementById(
+    "settings-save",
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  button.disabled = busy;
+  button.setAttribute("aria-busy", String(busy));
+  button.textContent = busy ? "Saving\u2026" : "Save";
+}
+
+function settingsMatchSnapshotExceptWindowSize(
+  snapshot: UserSettings,
+): boolean {
+  const current = { ...state.currentSettings };
+  current.windowWidth = snapshot.windowWidth;
+  current.windowHeight = snapshot.windowHeight;
+  return JSON.stringify(current) === JSON.stringify(snapshot);
+}
+
+async function saveAndCloseSettingsModal(): Promise<void> {
+  readSettingsModal();
+  const attemptedSettings = { ...state.currentSettings };
+  const attemptedExtras = { ...state.settingsExtras };
+  applyTheme(attemptedSettings.theme);
+  setSettingsSaveBusy(true);
+  try {
+    await enqueueSettingsSnapshot(attemptedSettings, attemptedExtras);
+  } catch (err) {
+    if (settingsMatchSnapshotExceptWindowSize(attemptedSettings)) {
+      const latestWindowWidth = state.currentSettings.windowWidth;
+      const latestWindowHeight = state.currentSettings.windowHeight;
+      const rollback = {
+        ...state.lastPersistedSettings,
+        windowWidth: latestWindowWidth,
+        windowHeight: latestWindowHeight,
+      };
+      applyTheme(rollback.theme);
+      state.currentSettings = rollback;
+      setUpdateChannel(rollback.updateChannel);
     }
-  } else {
+    const statusEl = document.getElementById("status");
+    if (statusEl)
+      statusEl.textContent = `Failed to save settings: ${String(err)}`;
+    return;
+  }
+  document.getElementById("settings-overlay")?.classList.remove("active");
+}
+
+export function closeSettingsModal(save: boolean): Promise<void> {
+  if (settingsModalSaveOperation) return settingsModalSaveOperation;
+  if (!save) {
     applyTheme(state.lastPersistedSettings.theme);
     state.currentSettings = { ...state.lastPersistedSettings };
+    document.getElementById("settings-overlay")?.classList.remove("active");
+    return Promise.resolve();
   }
-  const overlay = document.getElementById("settings-overlay");
-  if (overlay) overlay.classList.remove("active");
+
+  const operation = saveAndCloseSettingsModal().finally(() => {
+    if (settingsModalSaveOperation === operation) {
+      settingsModalSaveOperation = null;
+      setSettingsSaveBusy(false);
+    }
+  });
+  settingsModalSaveOperation = operation;
+  return operation;
 }
 
 export async function resetSettings(): Promise<void> {
@@ -789,12 +850,19 @@ export async function resetSettings(): Promise<void> {
     const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
     try {
       await invoke("factory_reset", { settingsJson: defaults });
-      // Remove the legacy plaintext transfer fallback and all other app-local
-      // webview state only after the backend transaction succeeds.
-      localStorage.clear();
     } catch (err) {
       await showAlert("Factory Reset Failed", friendlyError(err));
       return;
+    }
+
+    // The backend transaction is the commit point. Browser storage cleanup is
+    // best-effort only: a disabled/unavailable localStorage implementation must
+    // not misreport a completed destructive reset as failed or suppress relaunch.
+    try {
+      localStorage.clear();
+    } catch {
+      // Reads will generally be unavailable under the same policy; the backend
+      // remains authoritative and the relaunch below must still happen.
     }
   } else {
     const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {

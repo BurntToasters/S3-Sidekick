@@ -3,22 +3,38 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import { execSync, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import { verifyReleaseSession } from "./release-session.js";
+import { generateReleaseEvidence } from "./release-evidence.js";
 import githubCli from "./github-cli.cjs";
 
-const { assertGitHubCliAuthenticated, githubApi, uploadReleaseAsset } = githubCli;
-
-// CommonJS so `ensure-draft-release.cjs` can share the exact same titling rules.
-const { formatReleaseTitle } = createRequire(import.meta.url)(
-  "./release-title.cjs",
-);
+const { assertGitHubCliAuthenticated, githubApi, uploadReleaseAssetById } =
+  githubCli;
+const {
+  DESCRIPTOR_NAME,
+  DESCRIPTOR_SIGNATURE_NAME,
+  RELEASE_ASSET_INDEX_NAME,
+  canonicalMacosArtifactName,
+  classifyImmutableAsset,
+  installSmokeReportName,
+  isInstallSmokeReportName,
+  listAllReleaseAssets,
+  readReleaseDescriptor,
+  validateDescriptorForCheckout,
+  validateMutableRelease,
+  verifyDescriptorSignature,
+} = createRequire(import.meta.url)("./release-integrity.cjs");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const releaseDir = path.join(root, "release");
+const descriptorPath = path.join(releaseDir, DESCRIPTOR_NAME);
+const descriptorSignaturePath = path.join(
+  releaseDir,
+  DESCRIPTOR_SIGNATURE_NAME,
+);
 const pkg = JSON.parse(
   fs.readFileSync(path.join(root, "package.json"), "utf-8"),
 );
@@ -32,6 +48,7 @@ const IS_PRERELEASE = /-(?:beta|alpha)\./i.test(VERSION);
 
 const GPG_KEY_ID = process.env.GPG_KEY_ID;
 const GPG_PASSPHRASE = process.env.GPG_PASSPHRASE;
+let signatureEpoch = null;
 const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
 const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
 const TAG_DOWNLOAD_BASE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${encodeURIComponent(TAG)}`;
@@ -72,6 +89,7 @@ const ARTIFACT_RULES = [
   rx(/\.appimage\.tar\.gz$/i),
   rx(/\.(?:exe|msi|dmg|deb|rpm|flatpak|appimage|zip)\.sig$/i),
   rx(/\.tar\.gz\.sig$/i),
+  rx(/^release-(?:attestation|package-smoke|provenance|sbom)-.+\.json$/i),
   isPerTargetManifest,
 ];
 
@@ -87,6 +105,9 @@ const SIGN_RULES = [
   rx(/\.nsis\.zip$/i),
   rx(/\.app\.tar\.gz$/i),
   rx(/\.appimage\.tar\.gz$/i),
+  rx(/^release-(?:attestation|package-smoke|provenance|sbom)-.+\.json$/i),
+  isInstallSmokeReportName,
+  isPerTargetManifest,
 ];
 
 const isArtifact = (name) => ARTIFACT_RULES.some((r) => r(name));
@@ -134,7 +155,7 @@ function clearReleaseStaging() {
     } catch {
       continue;
     }
-    if (!isFile) continue;
+    if (!isFile || name === DESCRIPTOR_SIGNATURE_NAME) continue;
     if (isArtifact(name) || name.endsWith(".asc") || isChecksumTextName(name)) {
       fs.rmSync(fullPath, { force: true });
     }
@@ -196,14 +217,10 @@ function walk(dir, results = []) {
 }
 
 function cleanArtifactBaseName(name) {
-  if (/\.app\.tar\.gz$/i.test(name)) {
-    return "S3-Sidekick-macOS.app.tar.gz";
-  }
+  const macosName = canonicalMacosArtifactName(name);
+  if (macosName) return macosName;
   if (/\.nsis\.zip$/i.test(name)) return name;
   if (/\.tar\.gz$/i.test(name)) return name;
-
-  if (/\.dmg$/i.test(name)) return "S3-Sidekick-macOS.dmg";
-  if (/^S3(?:[ ._-])Sidekick\.zip$/i.test(name)) return "S3-Sidekick-macOS.zip";
 
   if (/x64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-x64.exe";
   if (/arm64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-arm64.exe";
@@ -230,7 +247,12 @@ function cleanArtifactName(name) {
 }
 
 function shouldUploadReleaseEntry(name) {
-  return isArtifact(name) || name.endsWith(".asc") || isChecksumTextName(name);
+  return (
+    isArtifact(name) ||
+    isInstallSmokeReportName(name) ||
+    name.endsWith(".asc") ||
+    isChecksumTextName(name)
+  );
 }
 
 const FALLBACK_INSTALLER_PRIORITY = {
@@ -442,10 +464,7 @@ function parseMinisignSignature(text, filePath) {
   ) {
     throw new Error(`Minisign signature is malformed: ${filePath}`);
   }
-  const signed = decodeBase64(
-    lines[1],
-    `Minisign signature ${filePath}`,
-  );
+  const signed = decodeBase64(lines[1], `Minisign signature ${filePath}`);
   const global = decodeBase64(
     lines[3],
     `Minisign global signature ${filePath}`,
@@ -469,13 +488,18 @@ function parseMinisignSignature(text, filePath) {
 function parseMinisignPublicKey(publicKeyValue) {
   const text = String(publicKeyValue ?? "").includes("untrusted comment:")
     ? String(publicKeyValue).trim()
-    : decodeBase64(publicKeyValue, "Tauri updater public key").toString("utf8").trim();
+    : decodeBase64(publicKeyValue, "Tauri updater public key")
+        .toString("utf8")
+        .trim();
   const lines = text.split(/\r?\n/);
   if (lines.length < 2 || !lines[0].startsWith("untrusted comment: ")) {
     throw new Error("Tauri updater public key is malformed.");
   }
   const decoded = decodeBase64(lines[1], "Tauri updater public key");
-  if (decoded.length !== 42 || !decoded.subarray(0, 2).equals(Buffer.from("Ed"))) {
+  if (
+    decoded.length !== 42 ||
+    !decoded.subarray(0, 2).equals(Buffer.from("Ed"))
+  ) {
     throw new Error("Tauri updater public key has an unsupported format.");
   }
   return {
@@ -484,7 +508,11 @@ function parseMinisignPublicKey(publicKeyValue) {
   };
 }
 
-function verifyUpdaterSignature(filePath, sigPath, publicKeyValue = UPDATER_PUBLIC_KEY) {
+function verifyUpdaterSignature(
+  filePath,
+  sigPath,
+  publicKeyValue = UPDATER_PUBLIC_KEY,
+) {
   const signatureText = readMinisignText(sigPath);
   const signature = parseMinisignSignature(signatureText.text, sigPath);
   const publicKey = parseMinisignPublicKey(publicKeyValue);
@@ -515,7 +543,14 @@ function verifyUpdaterSignature(filePath, sigPath, publicKeyValue = UPDATER_PUBL
     signature.signature,
     Buffer.from(signature.trustedComment, "utf8"),
   ]);
-  if (!crypto.verify(null, globalMessage, publicKeyObject, signature.globalSignature)) {
+  if (
+    !crypto.verify(
+      null,
+      globalMessage,
+      publicKeyObject,
+      signature.globalSignature,
+    )
+  ) {
     throw new Error(
       `Updater trusted-comment signature verification failed: ${path.basename(filePath)}`,
     );
@@ -526,7 +561,9 @@ function verifyUpdaterSignature(filePath, sigPath, publicKeyValue = UPDATER_PUBL
 function normalizeUpdaterSignature(sigPath) {
   const { text, encoded } = readMinisignText(sigPath);
   parseMinisignSignature(text, sigPath);
-  return encoded ? fs.readFileSync(sigPath, "utf8").trim() : Buffer.from(text).toString("base64");
+  return encoded
+    ? fs.readFileSync(sigPath, "utf8").trim()
+    : Buffer.from(text).toString("base64");
 }
 
 function generateUpdaterManifests(files) {
@@ -685,8 +722,18 @@ function parseManifestTargetKey(name) {
   return `${m[1].toLowerCase()}-${m[2].toLowerCase()}`;
 }
 
-function targetKeysForArtifactName(name) {
+function buildTargetKeyForManifestName(name) {
   const manifestKey = parseManifestTargetKey(name);
+  return manifestKey
+    ? manifestKey.replace(/-beta-([a-z0-9_]+)$/i, "-$1")
+    : null;
+}
+
+function targetKeysForArtifactName(name) {
+  if (isInstallSmokeReportName(name)) {
+    return [name.slice("release-install-smoke-".length, -".json".length)];
+  }
+  const manifestKey = buildTargetKeyForManifestName(name);
   if (manifestKey) return [manifestKey];
 
   const baseName = name.endsWith(".sig") ? name.slice(0, -4) : name;
@@ -808,6 +855,38 @@ function collectArtifacts() {
   return Array.from(new Set([...normalizedStaged, ...manifests]));
 }
 
+function collectInstallSmokeReports(session = readBuildSession()) {
+  if (!fs.existsSync(releaseDir)) return [];
+  const candidates = fs
+    .readdirSync(releaseDir)
+    .filter(
+      (name) =>
+        name.startsWith("release-install-smoke-") && name.endsWith(".json"),
+    );
+  const malformed = candidates.filter(
+    (name) => !isInstallSmokeReportName(name),
+  );
+  if (malformed.length > 0) {
+    throw new Error(
+      `Malformed install-smoke report name(s): ${malformed.sort().join(", ")}.`,
+    );
+  }
+  const reports = candidates
+    .map((name) => path.join(releaseDir, name))
+    .filter((filePath) => fs.statSync(filePath).isFile());
+  const stale = reports.filter(
+    (filePath) => !wasBuiltInSession(filePath, session),
+  );
+  if (stale.length > 0) {
+    throw new Error(
+      `Install-smoke report(s) predate this release session: ${stale.map((filePath) => path.basename(filePath)).join(", ")}.`,
+    );
+  }
+  return reports.sort((left, right) =>
+    path.basename(left).localeCompare(path.basename(right)),
+  );
+}
+
 function sha256(filePath) {
   return crypto
     .createHash("sha256")
@@ -824,7 +903,7 @@ function generateChecksums(files) {
   const manifestTargetKeys = Array.from(
     new Set(
       candidates
-        .map((f) => parseManifestTargetKey(path.basename(f)))
+        .map((f) => buildTargetKeyForManifestName(path.basename(f)))
         .filter(Boolean),
     ),
   );
@@ -866,6 +945,21 @@ function generateChecksums(files) {
   return outputs;
 }
 
+function runGpg(args, { environment = process.env, execute = spawnSync } = {}) {
+  const result = execute("gpg", args, {
+    encoding: "utf8",
+    env: { ...environment },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(
+      `GPG command failed: ${String(result.stderr || result.stdout || "unknown error").trim()}`,
+    );
+  }
+  return result;
+}
+
 function signFile(filePath) {
   const asc = `${filePath}.asc`;
   const args = ["--batch", "--yes", "--armor", "--detach-sign"];
@@ -875,15 +969,12 @@ function signFile(filePath) {
   if (GPG_PASSPHRASE) {
     args.push("--pinentry-mode", "loopback", "--passphrase", GPG_PASSPHRASE);
   }
+  if (Number.isSafeInteger(signatureEpoch)) {
+    args.push("--faked-system-time", `${signatureEpoch}!`);
+  }
   args.push("--output", asc, filePath);
 
-  const result = spawnSync("gpg", args, { stdio: "pipe" });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(
-      `GPG signing failed: ${result.stderr?.toString() || "unknown error"}`,
-    );
-  }
+  runGpg(args);
   return asc;
 }
 
@@ -902,175 +993,223 @@ function ghRequest(method, endpoint, body) {
   return Promise.resolve(githubApi(method, endpoint, body));
 }
 
-async function getOrCreateRelease() {
-  try {
-    return await ghRequest(
-      "GET",
-      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${TAG}`,
-    );
-  } catch (error) {
-    if (error?.statusCode !== 404) throw error;
-  }
-
-  try {
-    const releases = await ghRequest(
-      "GET",
-      `/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=30`,
-    );
-    const draft = releases.find((r) => r.draft && r.tag_name === TAG);
-    if (draft) return draft;
-  } catch (error) {
-    if (error?.statusCode !== 404) throw error;
-  }
-
-  return await ghRequest("POST", `/repos/${REPO_OWNER}/${REPO_NAME}/releases`, {
-    tag_name: TAG,
-    name: formatReleaseTitle(VERSION),
-    draft: true,
-    prerelease: VERSION.includes("beta") || VERSION.includes("alpha"),
+async function getBoundDraftRelease(descriptor) {
+  const release = await ghRequest(
+    "GET",
+    `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${descriptor.release.id}`,
+  );
+  validateMutableRelease(release, {
+    expectedId: descriptor.release.id,
+    expectedPrerelease: descriptor.release.prerelease,
+    expectedTag: descriptor.release.tag,
+    expectedTargetCommitish: descriptor.source.commit,
   });
+  validateDescriptorForCheckout(descriptor, { root, release });
+  return release;
 }
 
 async function listReleaseAssets(releaseId) {
-  const assets = await ghRequest(
-    "GET",
-    `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${releaseId}/assets?per_page=100`,
-  );
-  return Array.isArray(assets) ? assets : [];
-}
-
-async function uploadAssetWithReplace(release, filePath) {
-  const releaseTag = release.tag_name || TAG;
-  try {
-    uploadReleaseAsset(`${REPO_OWNER}/${REPO_NAME}`, releaseTag, filePath);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (err?.statusCode !== 422 && !/already[_ ]exists/i.test(message)) {
-      throw err;
-    }
-
-    const fileName = path.basename(filePath);
-    const assets = await listReleaseAssets(release.id);
-    const existing = assets.find(
-      (asset) =>
-        asset &&
-        typeof asset === "object" &&
-        asset.name === fileName &&
-        typeof asset.id === "number",
-    );
-    if (!existing) {
-      throw err;
-    }
-
-    uploadReleaseAsset(`${REPO_OWNER}/${REPO_NAME}`, releaseTag, filePath, { clobber: true });
-  }
-}
-
-function isBetaManifestName(name) {
-  return /^latest-[a-z0-9]+-beta-[a-z0-9_]+\.json$/i.test(name);
-}
-
-async function syncBetaManifestsToLatestStable(
-  uploadedFiles,
-  currentReleaseId,
-) {
-  const betaManifests = uploadedFiles.filter((filePath) =>
-    isBetaManifestName(path.basename(filePath)),
-  );
-  if (betaManifests.length === 0) return;
-
-  let latestStable;
-  try {
-    latestStable = await ghRequest(
+  return listAllReleaseAssets((page, perPage) =>
+    ghRequest(
       "GET",
-      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest`,
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${releaseId}/assets?per_page=${perPage}&page=${page}`,
+    ),
+  );
+}
+
+function classifyDraftAssetUpload(assets, fileName, filePath) {
+  if (assets.some((asset) => asset?.name === RELEASE_ASSET_INDEX_NAME)) {
+    throw new Error(
+      `Draft asset set is frozen by ${RELEASE_ASSET_INDEX_NAME}; no further host uploads are permitted.`,
     );
-  } catch (err) {
-    console.warn(
-      `  ! Could not load latest stable release for beta manifest sync: ${err instanceof Error ? err.message : String(err)}`,
+  }
+  const matches = assets.filter((asset) => asset?.name === fileName);
+  if (matches.length > 1) {
+    throw new Error(
+      `Draft has duplicate assets named ${fileName}; refusing an ambiguous upload.`,
     );
-    return;
+  }
+  return classifyImmutableAsset(matches[0], filePath);
+}
+
+async function uploadImmutableDraftAsset(
+  release,
+  filePath,
+  {
+    listAssets = listReleaseAssets,
+    request = ghRequest,
+    uploadAsset = (releaseId, uploadPath) =>
+      uploadReleaseAssetById(
+        `${REPO_OWNER}/${REPO_NAME}`,
+        releaseId,
+        uploadPath,
+      ),
+  } = {},
+) {
+  const validateDraft = async () => {
+    const latest = await request(
+      "GET",
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${release.id}`,
+    );
+    validateMutableRelease(latest, {
+      expectedId: release.id,
+      expectedPrerelease: IS_PRERELEASE,
+      expectedTag: TAG,
+      expectedTargetCommitish: release.target_commitish,
+    });
+  };
+
+  await validateDraft();
+  const fileName = path.basename(filePath);
+  const initialAction = classifyDraftAssetUpload(
+    await listAssets(release.id),
+    fileName,
+    filePath,
+  );
+  if (initialAction === "skip") {
+    console.log(`  = ${fileName} (identical remote digest)`);
+    return "skip";
   }
 
-  if (
-    !latestStable ||
-    typeof latestStable !== "object" ||
-    typeof latestStable.id !== "number" ||
-    typeof latestStable.upload_url !== "string"
-  ) {
-    console.warn(
-      "  ! Latest stable release metadata is invalid; skipping beta manifest sync.",
-    );
-    return;
-  }
-  if (latestStable.id === currentReleaseId) {
-    return;
+  await validateDraft();
+  const preUploadAction = classifyDraftAssetUpload(
+    await listAssets(release.id),
+    fileName,
+    filePath,
+  );
+  if (preUploadAction === "skip") {
+    console.log(`  = ${fileName} (identical remote digest)`);
+    return "skip";
   }
 
-  for (const filePath of betaManifests) {
-    await uploadAssetWithReplace(latestStable, filePath);
-    console.log(
-      `  ~ synced ${path.basename(filePath)} to latest stable release`,
+  await Promise.resolve(uploadAsset(release.id, filePath));
+  await validateDraft();
+  const postUploadAction = classifyDraftAssetUpload(
+    await listAssets(release.id),
+    fileName,
+    filePath,
+  );
+  if (postUploadAction !== "skip") {
+    throw new Error(
+      `Uploaded draft asset ${fileName} was not visible with the expected immutable digest.`,
     );
   }
+  return "upload";
+}
+
+function orderHostUploadFiles(files, attestationPath) {
+  const attestation = path.resolve(attestationPath);
+  const signature = `${attestation}.asc`;
+  const normalized = new Map(
+    files.map((filePath) => [path.resolve(filePath), filePath]),
+  );
+  if (!normalized.has(attestation) || !normalized.has(signature)) {
+    throw new Error(
+      "Host upload handoff requires the attestation and its detached signature.",
+    );
+  }
+  return [
+    ...Array.from(normalized.entries())
+      .filter(
+        ([identity]) => identity !== attestation && identity !== signature,
+      )
+      .map(([, filePath]) => filePath)
+      .sort((left, right) =>
+        path.basename(left).localeCompare(path.basename(right)),
+      ),
+    normalized.get(attestation),
+    normalized.get(signature),
+  ];
 }
 
 async function main() {
-  console.log(`\nS3 Sidekick ${VERSION} — release pipeline\n`);
+  console.log(`\nS3 Sidekick ${VERSION} — immutable draft upload\n`);
   assertGitHubCliAuthenticated();
 
-  console.log("[1/5] Checking GPG...");
-  if (!GPG_KEY_ID) {
-    console.error(
-      "GPG_KEY_ID is required. Set it in your environment or .env file.",
+  console.log("[1/6] Verifying GPG and canonical descriptor...");
+  if (!GPG_KEY_ID || !GPG_PASSPHRASE) {
+    throw new Error(
+      "GPG_KEY_ID and GPG_PASSPHRASE are required for release evidence signing.",
     );
-    process.exit(1);
   }
-  if (!GPG_PASSPHRASE) {
-    console.error(
-      "GPG_PASSPHRASE is required. Set it in your environment or .env file.",
+  runGpg(["--version"]);
+  verifyDescriptorSignature(descriptorPath, descriptorSignaturePath);
+  const descriptor = readReleaseDescriptor(descriptorPath);
+  signatureEpoch = Math.floor(Date.parse(descriptor.source.committedAt) / 1000);
+  if (!Number.isSafeInteger(signatureEpoch)) {
+    throw new Error(
+      "Release descriptor has no valid committedAt timestamp for deterministic signatures.",
     );
-    process.exit(1);
   }
-  try {
-    execSync("gpg --version", { stdio: "pipe" });
-  } catch {
-    console.error("gpg not found. Install GnuPG and try again.");
-    process.exit(1);
-  }
+  const release = await getBoundDraftRelease(descriptor);
+  console.log(
+    `  Descriptor-bound draft: ${release.html_url || TAG} (id ${release.id})`,
+  );
 
-  console.log("[2/5] Collecting artifacts...");
+  console.log("[2/6] Collecting artifacts and install-smoke reports...");
   const artifacts = collectArtifacts();
+  const installSmokeFiles = collectInstallSmokeReports();
+  const targets = Array.from(
+    new Set(
+      artifacts.flatMap((filePath) =>
+        targetKeysForArtifactName(path.basename(filePath)),
+      ),
+    ),
+  ).sort();
+  if (targets.length === 0) {
+    throw new Error(
+      "No updater target could be derived from this host's artifacts.",
+    );
+  }
 
-  console.log("[3/5] Generating checksums...");
-  const checksumFiles = generateChecksums(artifacts);
+  console.log(
+    "[3/6] Generating SBOM, provenance, package-smoke, and host attestation...",
+  );
+  const evidenceFiles = generateReleaseEvidence({
+    artifactFiles: artifacts,
+    descriptor,
+    descriptorPath,
+    releaseDir,
+    targets,
+  });
+  const attestedFiles = [...artifacts, ...evidenceFiles];
+  const signedFiles = [...attestedFiles, ...installSmokeFiles];
 
-  console.log("[4/5] Signing...");
-  const ascFiles = signArtifacts(artifacts);
+  console.log("[4/6] Generating checksums...");
+  const checksumFiles = generateChecksums(signedFiles);
+
+  console.log("[5/6] Signing artifacts and evidence...");
+  const ascFiles = signArtifacts(signedFiles);
   for (const checksumFile of checksumFiles) {
     ascFiles.push(signFile(checksumFile));
     console.log(`  + ${path.basename(checksumFile)}.asc`);
   }
 
-  console.log("[5/5] Uploading to GitHub...");
-  const release = await getOrCreateRelease();
-  console.log(`  Release: ${release.html_url || TAG}`);
-
-  const everything = fs
-    .readdirSync(releaseDir)
-    .filter((name) => shouldUploadReleaseEntry(name))
-    .map((n) => path.join(releaseDir, n));
-  for (const f of everything) {
-    await uploadAssetWithReplace(release, f);
-    console.log(`  ^ ${path.basename(f)}`);
+  console.log(
+    "[6/6] Uploading immutable assets to the descriptor release id...",
+  );
+  const attestationPath = evidenceFiles.find((filePath) =>
+    /^release-attestation-.+\.json$/.test(path.basename(filePath)),
+  );
+  if (!attestationPath) {
+    throw new Error(
+      "Host evidence did not produce a final attestation marker.",
+    );
   }
-
-  if (IS_PRERELEASE) {
-    await syncBetaManifestsToLatestStable(everything, release.id);
+  const everything = orderHostUploadFiles(
+    fs
+      .readdirSync(releaseDir)
+      .filter((name) => shouldUploadReleaseEntry(name))
+      .map((name) => path.join(releaseDir, name)),
+    attestationPath,
+  );
+  for (const filePath of everything) {
+    const action = await uploadImmutableDraftAsset(release, filePath);
+    if (action === "upload") console.log(`  ^ ${path.basename(filePath)}`);
   }
 
   console.log(
-    `\nDone — ${TAG} uploaded as ${release.draft ? "draft" : "published"}.\n`,
+    `\nDone — ${TAG} remains an unpublished descriptor-bound draft. Run release:publish only after every expected target has uploaded evidence.\n`,
   );
 }
 
@@ -1086,8 +1225,15 @@ if (
 
 export {
   assertLinuxX64PackageSet,
+  buildTargetKeyForManifestName,
+  collectInstallSmokeReports,
   generateUpdaterManifests,
+  getBoundDraftRelease,
   normalizeUpdaterSignature,
+  orderHostUploadFiles,
   parseMinisignSignature,
+  runGpg,
+  targetKeysForArtifactName,
+  uploadImmutableDraftAsset,
   verifyUpdaterSignature,
 };

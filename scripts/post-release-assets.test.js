@@ -249,7 +249,7 @@ test("rejects a mirror inside the release directory", () => {
   );
 });
 
-test("release finalization runs the observable mirror command first", () => {
+test("release finalization mirrors without implicit checkout cleanup", () => {
   const packageJson = JSON.parse(
     fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   );
@@ -259,10 +259,18 @@ test("release finalization runs the observable mirror command first", () => {
     packageJson.scripts["release:mirror"],
     /scripts\/finalize-release-assets\.js/,
   );
-  assert.match(
+  assert.equal(
     packageJson.scripts["release:finalize"],
-    /^npm run release:mirror &&/,
+    "npm run release:mirror",
   );
+  assert.match(
+    packageJson.scripts["release:cleanup:checkout"],
+    /git fetch origin && git reset --hard @\{u\} && git clean -fd/,
+  );
+  for (const [name, command] of Object.entries(packageJson.scripts)) {
+    if (name === "release:cleanup:checkout") continue;
+    assert.doesNotMatch(command, /release:cleanup:checkout/);
+  }
   assert.match(packageJson.scripts["release:win"], /release:win:continue/);
   assert.match(packageJson.scripts["release:mac"], /release:mac:continue/);
   assert.match(

@@ -747,6 +747,8 @@ struct FactoryResetJournal {
     settings_json: String,
     entries: Vec<ManagedDataId>,
     checkpoint_scratch_paths: Vec<crate::CheckpointScratchPath>,
+    #[serde(default)]
+    target_recovery_session: Option<String>,
 }
 
 fn factory_reset_journal_path<R: tauri::Runtime, M: tauri::Manager<R>>(
@@ -1737,7 +1739,7 @@ fn recover_interrupted_factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<
             err
         )
     })?;
-    let journal: FactoryResetJournal = serde_json::from_str(&raw).map_err(|err| {
+    let mut journal: FactoryResetJournal = serde_json::from_str(&raw).map_err(|err| {
         format!(
             "Factory-reset journal '{}' is invalid and was retained: {}",
             journal_path.display(),
@@ -1751,6 +1753,38 @@ fn recover_interrupted_factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<
         ));
     }
     validate_factory_settings(&journal.settings_json)?;
+
+    // Previous releases committed v1 journals without a recovery-session
+    // target. Choose it once, then durably add it to the journal before any
+    // replay action so every retry rotates to the same value.
+    if journal.target_recovery_session.is_none() {
+        journal.target_recovery_session = Some(crate::mint_transfer_recovery_session());
+        let upgraded = serde_json::to_string_pretty(&journal).map_err(|err| err.to_string())?;
+        atomic_write(&journal_path, &upgraded)?;
+    }
+    let target_recovery_session = journal.target_recovery_session.as_deref().ok_or_else(|| {
+        "Factory-reset journal has no recovery session; journal retained".to_string()
+    })?;
+    // Rotation is the first replay action. Old webviews blocked behind the
+    // metadata mutex will fail their next manifest/checkpoint mutation instead
+    // of recreating state after cleanup.
+    crate::set_transfer_recovery_session_unchecked(app, target_recovery_session).map_err(
+        |err| {
+            format!(
+                "Factory-reset recovery session is invalid; journal retained: {}",
+                err
+            )
+        },
+    )?;
+    // This fence is deliberately outside managed data, so reset cleanup cannot
+    // rearm a one-time browser manifest import. Close it immediately after
+    // session rotation while replay is still protected by the storage lock.
+    crate::close_transfer_legacy_import_unchecked(app).map_err(|err| {
+        format!(
+            "Factory-reset legacy transfer-import fence could not be closed; journal retained: {}",
+            err
+        )
+    })?;
 
     // Security and settings are both replayed from the durable journal. If a
     // crash lands between them, protected I/O stays latched until this function
@@ -1784,6 +1818,7 @@ fn recover_interrupted_factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<
 #[tauri::command]
 pub(crate) async fn factory_reset(
     app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
     settings_json: String,
 ) -> Result<SecurityStatus, String> {
     if let Err(err) = crate::s3::stop_all_transfers_for_reset().await {
@@ -1803,7 +1838,18 @@ pub(crate) async fn factory_reset(
         if !reset_pending {
             crate::s3::resume_transfers_after_failed_reset();
         }
+        return result;
     }
+
+    // A native relaunch normally follows, but the frontend deliberately falls
+    // back to reloading the webview if relaunch is unavailable. Restore backend
+    // runtime invariants here so that fallback cannot inherit a live S3 session
+    // or a permanently disabled transfer registry.
+    let invalidation = crate::lock_s3_state(&state).map(|mut s3| {
+        crate::s3::invalidate_connection_session(&mut s3);
+    });
+    crate::s3::resume_transfers_after_failed_reset();
+    invalidation?;
     result
 }
 
@@ -1866,6 +1912,7 @@ fn factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
         settings_json: settings_json.to_string(),
         entries: managed.iter().map(|(id, _, _)| *id).collect(),
         checkpoint_scratch_paths,
+        target_recovery_session: Some(crate::mint_transfer_recovery_session()),
     };
     let journal_json = serde_json::to_string_pretty(&journal).map_err(|err| err.to_string())?;
     let journal_path = factory_reset_journal_path(app)?;
@@ -3215,8 +3262,8 @@ mod tests {
         set_unlocked_key(None, 0).unwrap();
         initialize_security_inner(&handle, false, None).unwrap();
 
-        crate::save_transfer_checkpoint_json(&handle, "empty-checkpoint", "").unwrap();
-        let err = crate::load_transfer_checkpoint_json(&handle, "empty-checkpoint")
+        crate::save_transfer_checkpoint_json_unchecked(&handle, "empty-checkpoint", "").unwrap();
+        let err = crate::load_transfer_checkpoint_json_unchecked(&handle, "empty-checkpoint")
             .expect_err("an existing empty checkpoint must fail closed");
         assert!(
             err.contains("exists but is empty"),
@@ -3238,6 +3285,8 @@ mod tests {
         let handle = app.handle().clone();
         set_unlocked_key(None, 0).unwrap();
         initialize_security_inner(&handle, false, None).unwrap();
+        let recovery_session_before_reset =
+            crate::load_or_create_transfer_recovery_session_unchecked(&handle).unwrap();
         let seeded = seed_managed_files(&handle);
 
         let destination = crate::resolved_app_data_dir(&handle)
@@ -3251,9 +3300,24 @@ mod tests {
             "updated_at_ms": 1
         })
         .to_string();
-        crate::save_transfer_checkpoint_json(&handle, "factory-reset", &checkpoint).unwrap();
+        crate::save_transfer_checkpoint_json_unchecked(&handle, "factory-reset", &checkpoint)
+            .unwrap();
 
         let status = factory_reset_inner(&handle, "{\"theme\":\"system\"}").unwrap();
+        let recovery_session_after_reset =
+            crate::load_or_create_transfer_recovery_session_unchecked(&handle).unwrap();
+        assert_ne!(
+            recovery_session_after_reset, recovery_session_before_reset,
+            "factory reset must rotate the recovery session"
+        );
+        let stale_error = crate::save_transfer_checkpoint_json(
+            &handle,
+            "factory-reset",
+            "{}",
+            &recovery_session_before_reset,
+        )
+        .expect_err("a pre-reset page must not recreate checkpoint state");
+        assert!(stale_error.contains("reload the application"));
         assert!(!status.initialized);
         assert!(!status.encryption_enabled);
         assert!(!scratch.exists(), "owned scratch file should be removed");
@@ -3265,7 +3329,7 @@ mod tests {
             "{\"theme\":\"system\"}"
         );
         assert!(
-            crate::load_transfer_checkpoint_json(&handle, "factory-reset")
+            crate::load_transfer_checkpoint_json_unchecked(&handle, "factory-reset")
                 .unwrap()
                 .is_none()
         );
@@ -3287,7 +3351,9 @@ mod tests {
         )
         .unwrap();
 
-        let journal = FactoryResetJournal {
+        let recovery_session_before_replay =
+            crate::load_or_create_transfer_recovery_session_unchecked(&handle).unwrap();
+        let mut journal = FactoryResetJournal {
             v: 1,
             settings_json: "{\"theme\":\"system\"}".to_string(),
             entries: managed_data_files(&handle)
@@ -3296,8 +3362,28 @@ mod tests {
                 .map(|(id, _, _)| *id)
                 .collect(),
             checkpoint_scratch_paths: Vec::new(),
+            target_recovery_session: Some("malformed".to_string()),
         };
         let journal_path = factory_reset_journal_path(&handle).unwrap();
+        atomic_write(
+            &journal_path,
+            &serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            recover_interrupted_migration(&handle).is_err(),
+            "a malformed journal session must fail closed"
+        );
+        assert!(journal_path.exists(), "malformed journal must be retained");
+        assert_eq!(
+            crate::load_or_create_transfer_recovery_session_unchecked(&handle).unwrap(),
+            recovery_session_before_replay,
+            "malformed replay must not rotate the current session"
+        );
+
+        // Rewrite the durable record in the exact legacy shape (no target
+        // session). Replay must mint and persist a target before cleanup.
+        journal.target_recovery_session = None;
         atomic_write(
             &journal_path,
             &serde_json::to_string_pretty(&journal).unwrap(),
@@ -3311,6 +3397,11 @@ mod tests {
 
         recover_interrupted_migration(&handle).unwrap();
 
+        assert_ne!(
+            crate::load_or_create_transfer_recovery_session_unchecked(&handle).unwrap(),
+            recovery_session_before_replay,
+            "legacy committed reset replay must rotate the recovery session"
+        );
         assert!(
             !journal_path.exists(),
             "recovery must clear the reset journal"
