@@ -126,8 +126,7 @@ describe("copy/move chooser account binding", () => {
     expect(mockEnqueueCopyMoveEntries).not.toHaveBeenCalled();
   });
 
-  it("warns once before a destructive move", async () => {
-    mockShowConfirm.mockResolvedValue(true);
+  it("queues moves without offering an unversioned deletion override", async () => {
     const { openCopyMoveDialog } = await import("../app-copy-move.ts");
     openCopyMoveDialog();
     (document.getElementById("copy-move-path") as HTMLInputElement).value =
@@ -137,15 +136,14 @@ describe("copy/move chooser account binding", () => {
     ).click();
 
     await vi.waitFor(() => {
-      expect(mockEnqueueCopyMoveEntries).toHaveBeenCalled();
+      expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith(
+        [expect.objectContaining({ operation: "move" })],
+        expect.anything(),
+      );
     });
-    expect(mockShowConfirm).toHaveBeenCalledWith(
-      "Move may permanently delete sources",
-      expect.stringContaining("without versioning"),
-      expect.objectContaining({ okDanger: true }),
-    );
+    expect(mockShowConfirm).not.toHaveBeenCalled();
     expect(
       localStorage.getItem("s3-sidekick.move-unversioned-warning.v1"),
-    ).toBe("1");
+    ).toBeNull();
   });
 });

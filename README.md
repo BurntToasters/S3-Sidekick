@@ -14,7 +14,7 @@ S3 Sidekick is your buddy for quick GUI S3-compatible storage management! I made
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
-See [architecture and security notes](docs/ARCHITECTURE.md), [settings glossary](docs/SETTINGS_GLOSSARY.md), and [support channels](docs/SUPPORT.md).
+See [architecture and security notes](docs/ARCHITECTURE.md), [release runbook](docs/RELEASE.md), [settings glossary](docs/SETTINGS_GLOSSARY.md), and [support channels](docs/SUPPORT.md).
 
 ## Privacy
 I dont collect your information from this app. There is no automatic crash reports, no telemetry, no B.S. Your device, your data.

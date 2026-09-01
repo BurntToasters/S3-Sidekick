@@ -239,17 +239,17 @@ fn reject_reserved_backup_key(key: &str, label: &str) -> Result<(), String> {
 /// Now an entry exists only while a transfer is actually running (created by
 /// `TransferGuard`, removed on drop), so cancelling an unknown id is a no-op.
 #[derive(Default)]
-struct CancelFlag {
+pub(crate) struct CancelFlag {
     cancelled: std::sync::atomic::AtomicBool,
     notify: tokio::sync::Notify,
 }
 
 impl CancelFlag {
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         if !self.cancelled.swap(true, Ordering::AcqRel) {
             self.notify.notify_waiters();
         }
@@ -257,7 +257,7 @@ impl CancelFlag {
 
     /// Resolve immediately when cancellation has already happened, or register
     /// a race-free waiter for the next cancellation signal.
-    async fn cancelled(&self) {
+    pub(crate) async fn cancelled(&self) {
         if self.is_cancelled() {
             return;
         }
@@ -280,7 +280,7 @@ impl CancelFlag {
     }
 }
 
-type CancelToken = Arc<CancelFlag>;
+pub(crate) type CancelToken = Arc<CancelFlag>;
 
 struct ActiveTransfer {
     transfer_id: Option<u32>,
@@ -1615,32 +1615,138 @@ fn acls_are_unavailable(message: &str) -> bool {
             .contains("accesscontrollistnotsupported")
 }
 
-async fn infer_canned_acl_for_object(
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CanonicalAclGrant {
+    permission: String,
+    grantee_type: String,
+    grantee_id: String,
+    grantee_uri: String,
+    grantee_email: String,
+}
+
+struct SourceAclState {
+    canned_acl: Option<ObjectCannedAcl>,
+    fingerprint: String,
+}
+
+struct SourceTagState {
+    encoded: Option<String>,
+    fingerprint: String,
+}
+
+fn unsupported_attribute_fingerprint(attribute: &'static str) -> String {
+    hash_generation_fields(vec![
+        ("attribute", attribute.to_string()),
+        ("support", "unsupported".to_string()),
+    ])
+}
+
+fn canonical_acl_fingerprint(owner_id: &str, grants: &[CanonicalAclGrant]) -> String {
+    let mut fields = vec![
+        ("attribute", "acl".to_string()),
+        ("support", "supported".to_string()),
+        ("owner_id", owner_id.to_string()),
+    ];
+    let mut grants = grants.to_vec();
+    grants.sort();
+    for grant in grants {
+        fields.extend([
+            ("grant_permission", grant.permission),
+            ("grant_grantee_type", grant.grantee_type),
+            ("grant_grantee_id", grant.grantee_id),
+            ("grant_grantee_uri", grant.grantee_uri),
+            ("grant_grantee_email", grant.grantee_email),
+        ]);
+    }
+    hash_generation_fields(fields)
+}
+
+fn canonical_tag_fingerprint(tags: &[(String, String)]) -> String {
+    let mut fields = vec![
+        ("attribute", "tags".to_string()),
+        ("support", "supported".to_string()),
+    ];
+    let mut tags = tags.to_vec();
+    tags.sort();
+    for (key, value) in tags {
+        fields.extend([("tag_key", key), ("tag_value", value)]);
+    }
+    hash_generation_fields(fields)
+}
+
+async fn get_object_acl_output(
     client: &Client,
     bucket: &str,
     key: &str,
     version_id: Option<&str>,
-) -> Result<Option<ObjectCannedAcl>, String> {
+) -> Result<Option<aws_sdk_s3::operation::get_object_acl::GetObjectAclOutput>, String> {
     let mut request = client.get_object_acl().bucket(bucket).key(key);
     if let Some(version_id) = version_id {
         request = request.version_id(version_id);
     }
-    let output = match request.send().await {
-        Ok(output) => output,
+    match request.send().await {
+        Ok(output) => Ok(Some(output)),
         Err(err) => {
             let message = format!("{:?}", err);
             if acls_are_unavailable(&message) {
                 return Ok(None);
             }
-            return Err(format!(
-                "Failed to read the ACL for '{}' before copy; refusing to continue without \
-                 confirmed ACL preservation. A copy does not carry the ACL, so preserving it \
-                 needs the 's3:GetObjectAcl' permission: {}",
+            Err(format!(
+                "Failed to read the ACL for '{}'; refusing to continue without confirmed ACL \
+                 identity. This operation needs the 's3:GetObjectAcl' permission: {}",
                 key, err
-            ));
+            ))
         }
-    };
+    }
+}
 
+fn acl_fingerprint_from_output(
+    output: Option<&aws_sdk_s3::operation::get_object_acl::GetObjectAclOutput>,
+    key: &str,
+) -> Result<String, String> {
+    let Some(output) = output else {
+        return Ok(unsupported_attribute_fingerprint("acl"));
+    };
+    let owner_id = output
+        .owner()
+        .and_then(|owner| owner.id())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("Object '{}' ACL has no owner identity", key))?;
+    let grants = output
+        .grants()
+        .iter()
+        .map(|grant| {
+            let grantee = grant.grantee();
+            CanonicalAclGrant {
+                permission: grant
+                    .permission()
+                    .map(|value| value.as_str().to_string())
+                    .unwrap_or_default(),
+                grantee_type: grantee
+                    .map(|value| value.r#type().as_str().to_string())
+                    .unwrap_or_default(),
+                grantee_id: grantee
+                    .and_then(|value| value.id())
+                    .unwrap_or_default()
+                    .to_string(),
+                grantee_uri: grantee
+                    .and_then(|value| value.uri())
+                    .unwrap_or_default()
+                    .to_string(),
+                grantee_email: grantee
+                    .and_then(|value| value.email_address())
+                    .unwrap_or_default()
+                    .to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(canonical_acl_fingerprint(owner_id, &grants))
+}
+
+fn infer_canned_acl_from_output(
+    output: &aws_sdk_s3::operation::get_object_acl::GetObjectAclOutput,
+    key: &str,
+) -> Result<ObjectCannedAcl, String> {
     let owner_id = output
         .owner()
         .and_then(|owner| owner.id())
@@ -1694,10 +1800,10 @@ async fn infer_canned_acl_for_object(
     }
 
     match (public_read, public_write, authenticated_read) {
-        (0, 0, 0) => Ok(Some(ObjectCannedAcl::Private)),
-        (1, 0, 0) => Ok(Some(ObjectCannedAcl::PublicRead)),
-        (1, 1, 0) => Ok(Some(ObjectCannedAcl::PublicReadWrite)),
-        (0, 0, 1) => Ok(Some(ObjectCannedAcl::AuthenticatedRead)),
+        (0, 0, 0) => Ok(ObjectCannedAcl::Private),
+        (1, 0, 0) => Ok(ObjectCannedAcl::PublicRead),
+        (1, 1, 0) => Ok(ObjectCannedAcl::PublicReadWrite),
+        (0, 0, 1) => Ok(ObjectCannedAcl::AuthenticatedRead),
         _ => Err(format!(
             "Object '{}' ACL grant combination does not exactly match a supported canned ACL",
             key
@@ -1705,12 +1811,40 @@ async fn infer_canned_acl_for_object(
     }
 }
 
-async fn encoded_tagging_for_object(
+async fn source_acl_state_for_object(
     client: &Client,
     bucket: &str,
     key: &str,
     version_id: Option<&str>,
-) -> Result<Option<String>, String> {
+) -> Result<SourceAclState, String> {
+    let output = get_object_acl_output(client, bucket, key, version_id).await?;
+    let fingerprint = acl_fingerprint_from_output(output.as_ref(), key)?;
+    let canned_acl = output
+        .as_ref()
+        .map(|output| infer_canned_acl_from_output(output, key))
+        .transpose()?;
+    Ok(SourceAclState {
+        canned_acl,
+        fingerprint,
+    })
+}
+
+async fn acl_fingerprint_for_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+) -> Result<String, String> {
+    let output = get_object_acl_output(client, bucket, key, version_id).await?;
+    acl_fingerprint_from_output(output.as_ref(), key)
+}
+
+async fn source_tag_state_for_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+) -> Result<SourceTagState, String> {
     let mut request = client.get_object_tagging().bucket(bucket).key(key);
     if let Some(version_id) = version_id {
         request = request.version_id(version_id);
@@ -1718,40 +1852,45 @@ async fn encoded_tagging_for_object(
     let output = match request.send().await {
         Ok(output) => output,
         Err(err) => {
-            // A provider that never implemented object tagging has no tags to
-            // preserve, so the copy loses nothing by proceeding. Every other
-            // failure still fails closed: tags may exist and simply be unreadable.
+            // A provider that never implemented object tagging has no tag state
+            // to preserve. Keep that state distinct from a supported empty set.
             if feature_is_unimplemented(&format!("{:?}", err)) {
-                return Ok(None);
+                return Ok(SourceTagState {
+                    encoded: None,
+                    fingerprint: unsupported_attribute_fingerprint("tags"),
+                });
             }
             return Err(format!(
-                "Failed to read tags for '{}' before copy; refusing to continue without confirmed \
-                 tag preservation. Objects at or above 5 GiB are copied in parts, which requires \
-                 restating their tags, so this operation needs the 's3:GetObjectTagging' \
-                 permission: {}",
+                "Failed to read tags for '{}'; refusing to continue without confirmed tag \
+                 identity. This operation needs the 's3:GetObjectTagging' permission: {}",
                 key, err
             ));
         }
     };
 
-    if output.tag_set().is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(
-        output
-            .tag_set()
-            .iter()
-            .map(|tag| {
+    let mut tags = output
+        .tag_set()
+        .iter()
+        .map(|tag| (tag.key().to_string(), tag.value().to_string()))
+        .collect::<Vec<_>>();
+    tags.sort();
+    let fingerprint = canonical_tag_fingerprint(&tags);
+    let encoded = (!tags.is_empty()).then(|| {
+        tags.iter()
+            .map(|(key, value)| {
                 format!(
                     "{}={}",
-                    urlencoding::encode(tag.key()),
-                    urlencoding::encode(tag.value())
+                    urlencoding::encode(key),
+                    urlencoding::encode(value)
                 )
             })
             .collect::<Vec<_>>()
-            .join("&"),
-    ))
+            .join("&")
+    });
+    Ok(SourceTagState {
+        encoded,
+        fingerprint,
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -2298,6 +2437,12 @@ pub(crate) async fn update_metadata(
 ) -> Result<(), String> {
     let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_key(&key, "Object key")?;
+    let _mutation_guard = crate::acquire_s3_mutation(vec![crate::S3MutationScope::key(
+        &connection_id,
+        &bucket,
+        &key,
+    )])
+    .await?;
     let client = require_client(&state, &connection_id, None)?;
     let provider = client.provider();
     let cancel = client.token();
@@ -2427,6 +2572,15 @@ pub(crate) async fn delete_objects(
     for key in &keys {
         validate_deletable_key(key, "Object key")?;
     }
+    if keys.is_empty() {
+        return Ok(DeleteResult::default());
+    }
+    let _mutation_guard = crate::acquire_s3_mutation(
+        keys.iter()
+            .map(|key| crate::S3MutationScope::key(&connection_id, &bucket, key))
+            .collect(),
+    )
+    .await?;
     let client = require_client(&state, &connection_id, None)?;
     let cancel = client.token();
 
@@ -2536,10 +2690,14 @@ pub(crate) async fn upload_object(
     let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
-
     let client = require_client(&state, &connection_id, Some(transfer_id))?;
     let provider = client.provider();
     let cancel = client.token();
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![crate::S3MutationScope::key(&connection_id, &bucket, &key)],
+        &cancel,
+    )
+    .await?;
 
     let file_size = tokio::fs::metadata(&upload_path)
         .await
@@ -3114,6 +3272,11 @@ pub(crate) async fn upload_object_bytes(
     let client = require_client(&state, &connection_id, Some(transfer_id))?;
     let provider = client.provider();
     let cancel = client.token();
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![crate::S3MutationScope::key(&connection_id, &bucket, &key)],
+        &cancel,
+    )
+    .await?;
 
     let total = bytes.len() as u64;
     let attempt = normalize_attempt(attempt);
@@ -3270,6 +3433,12 @@ pub(crate) async fn set_object_acl(
 ) -> Result<(), String> {
     let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_key(&key, "Object key")?;
+    let _mutation_guard = crate::acquire_s3_mutation(vec![crate::S3MutationScope::key(
+        &connection_id,
+        &bucket,
+        &key,
+    )])
+    .await?;
     let client = require_client(&state, &connection_id, None)?;
     let cancel = client.token();
 
@@ -3336,39 +3505,49 @@ pub(crate) async fn download_object(
         return Err(cancelled_error());
     }
 
-    let checksum_head = if checksum_enabled {
-        let head_request = client.head_object().bucket(&bucket).key(&key).send();
-        Some(tokio::select! {
-            _ = cancel.cancelled() => return Err(cancelled_error()),
-            result = head_request => {
-                result.map_err(|e| {
-                    structured_transfer_sdk_error(
-                        "Failed to read object metadata",
-                        &e,
-                        "download_head",
-                        true,
-                    )
-                })?
-            }
-        })
+    let head_request = client.head_object().bucket(&bucket).key(&key).send();
+    let generation_head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = head_request => {
+            result.map_err(|e| {
+                structured_transfer_sdk_error(
+                    "Failed to read object metadata",
+                    &e,
+                    "download_head",
+                    true,
+                )
+            })?
+        }
+    };
+    let object_etag = generation_head
+        .e_tag()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            encode_transfer_error(
+                "generation_unavailable",
+                false,
+                None,
+                "Sequential download is unsafe because the provider returned no ETag.".to_string(),
+            )
+        })?
+        .to_string();
+    let object_version_id = generation_head
+        .version_id()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let expected_checksum = if checksum_enabled {
+        Some(expected_download_checksum(&client, &bucket, &key, &generation_head, &cancel).await?)
     } else {
         None
     };
-    let expected_checksum = match checksum_head.as_ref() {
-        Some(head) => {
-            Some(expected_download_checksum(&client, &bucket, &key, head, &cancel).await?)
-        }
-        None => None,
-    };
 
     let mut download_request = client.get_object().bucket(&bucket).key(&key);
-    if let Some(etag) = checksum_head
-        .as_ref()
-        .and_then(|head| head.e_tag())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        download_request = download_request.if_match(etag);
+    if let Some(version_id) = object_version_id.as_deref() {
+        download_request = download_request.version_id(version_id);
+    } else {
+        download_request = download_request.if_match(&object_etag);
     }
     let download_request = download_request.send();
     let output = tokio::select! {
@@ -3435,7 +3614,43 @@ pub(crate) async fn download_object(
         }
     }
 
-    finalize_download_file(&temp_path, &destination_path, overwrite)?;
+    if let Err(err) = sync_completed_download_file(&temp_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    let still_current = match current_identity_matches(
+        &client,
+        &bucket,
+        &key,
+        &object_etag,
+        None,
+        object_version_id.as_deref(),
+        None,
+        &cancel,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(err);
+        }
+    };
+    if still_current != Some(true) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(encode_transfer_error(
+            "stale_object",
+            false,
+            None,
+            format!(
+                "'{}' changed while it was being downloaded, so stale bytes were not published over '{}'.",
+                key,
+                destination_path.display()
+            ),
+        ));
+    }
+
+    publish_completed_download_file(&temp_path, &destination_path, overwrite)?;
     crate::release_download_scratch_lease(&app, &destination_path, &download_lease_nonce);
 
     emit_transfer_progress(
@@ -3548,15 +3763,7 @@ async fn stream_body_to_temp(
 /// process in between left the user with no file at the destination and an
 /// opaque `.download-backup.<pid>.<n>.tmp` beside it that nothing would ever
 /// clean up (the startup sweep only covers the app data directory).
-fn finalize_download_file(
-    temp_path: &Path,
-    destination_path: &Path,
-    overwrite: bool,
-) -> Result<(), String> {
-    // Publish only bytes that have reached stable storage. The parallel workers
-    // sync each completed range before checkpointing, and this final whole-file
-    // sync closes the window between the last checkpoint and the atomic rename.
-    //
+fn sync_completed_download_file(temp_path: &Path) -> Result<(), String> {
     // Windows FlushFileBuffers requires GENERIC_WRITE; a read-only handle
     // returns ERROR_ACCESS_DENIED, so open with write as well.
     std::fs::OpenOptions::new()
@@ -3564,10 +3771,29 @@ fn finalize_download_file(
         .write(true)
         .open(temp_path)
         .and_then(|file| file.sync_all())
-        .map_err(|e| format!("Failed to sync completed download: {}", e))?;
+        .map_err(|e| format!("Failed to sync completed download: {}", e))
+}
 
+fn publish_completed_download_file(
+    temp_path: &Path,
+    destination_path: &Path,
+    overwrite: bool,
+) -> Result<(), String> {
     crate::publish_temp_file(temp_path, destination_path, overwrite)
         .map_err(|err| format!("Failed to finalize download: {}", err))
+}
+
+#[cfg(test)]
+fn finalize_download_file(
+    temp_path: &Path,
+    destination_path: &Path,
+    overwrite: bool,
+) -> Result<(), String> {
+    // Publish only bytes that have reached stable storage. Keeping the sync as
+    // a separate step lets network downloads perform their final remote
+    // generation check after disk flush and immediately before publication.
+    sync_completed_download_file(temp_path)?;
+    publish_completed_download_file(temp_path, destination_path, overwrite)
 }
 
 /// Confirm a response actually honoured the byte range that was requested.
@@ -4203,6 +4429,13 @@ pub(crate) async fn download_object_parallel(
         }
     }
 
+    if let Err(err) = sync_completed_download_file(&temp_path) {
+        if !checkpoint_enabled {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        return Err(err);
+    }
+
     // Pinning every range to one generation guarantees the assembled bytes are
     // self-consistent, but it says nothing about whether that generation is still
     // the object. A resumed download can span an arbitrary amount of wall clock,
@@ -4258,7 +4491,7 @@ pub(crate) async fn download_object_parallel(
         ));
     }
 
-    finalize_download_file(&temp_path, &destination_path, overwrite)?;
+    publish_completed_download_file(&temp_path, &destination_path, overwrite)?;
     crate::release_download_scratch_lease(&app, &destination_path, &download_lease_nonce);
 
     emit_transfer_progress(
@@ -4302,9 +4535,6 @@ pub(crate) async fn create_folder(
     key: String,
 ) -> Result<(), String> {
     let _storage_guard = crate::acquire_transfer_storage().await?;
-    let client = require_client(&state, &connection_id, None)?;
-    let cancel = client.token();
-
     validate_mutating_key(&key, "Object key")?;
     if key.contains("//") {
         return Err("Object key must not contain consecutive slashes".to_string());
@@ -4315,6 +4545,14 @@ pub(crate) async fn create_folder(
     } else {
         format!("{}/", key)
     };
+    let _mutation_guard = crate::acquire_s3_mutation(vec![crate::S3MutationScope::key(
+        &connection_id,
+        &bucket,
+        &folder_key,
+    )])
+    .await?;
+    let client = require_client(&state, &connection_id, None)?;
+    let cancel = client.token();
 
     let request = client
         .put_object()
@@ -4342,9 +4580,19 @@ pub(crate) struct CopyReceipt {
     source_etag: String,
     #[serde(default)]
     source_fingerprint: String,
+    #[serde(default)]
+    source_acl_fingerprint: String,
+    #[serde(default)]
+    source_tag_fingerprint: String,
     source_version_id: Option<String>,
     destination_key: String,
     destination_etag: String,
+    #[serde(default)]
+    destination_fingerprint: String,
+    #[serde(default)]
+    destination_acl_fingerprint: String,
+    #[serde(default)]
+    destination_tag_fingerprint: String,
     destination_version_id: Option<String>,
 }
 
@@ -4366,7 +4614,9 @@ struct SourceObjectInfo {
     bucket_key_enabled: Option<bool>,
     metadata: Option<HashMap<String, String>>,
     acl: Option<ObjectCannedAcl>,
+    acl_fingerprint: String,
     tagging: Option<String>,
+    tag_fingerprint: String,
 }
 
 struct DestinationIdentity {
@@ -4383,6 +4633,70 @@ fn hash_generation_fields(fields: Vec<(&str, String)>) -> String {
         hasher.update([0]);
     }
     format!("{:x}", hasher.finalize())
+}
+
+fn is_canonical_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn immutable_version_id(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|version_id| !version_id.is_empty() && !version_id.eq_ignore_ascii_case("null"))
+}
+
+fn require_immutable_move_version(value: Option<&str>, key: &str) -> Result<String, String> {
+    immutable_version_id(value)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "Source '{}' has no immutable non-null version ID. Automatic move requires object versioning; no destination was changed.",
+                key
+            )
+        })
+}
+
+async fn preflight_immutable_source_version(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    cancel: &CancelToken,
+) -> Result<String, String> {
+    let request = client.head_object().bucket(bucket).key(key).send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result.map_err(|err| {
+            format!("Failed to verify move source '{}': {}", key, err)
+        })?,
+    };
+    require_immutable_move_version(head.version_id(), key)
+}
+
+fn validate_receipt_fingerprints(receipts: &[CopyReceipt]) -> Result<(), String> {
+    for receipt in receipts {
+        if !is_canonical_fingerprint(&receipt.source_fingerprint)
+            || !is_canonical_fingerprint(&receipt.source_acl_fingerprint)
+            || !is_canonical_fingerprint(&receipt.source_tag_fingerprint)
+            || !is_canonical_fingerprint(&receipt.destination_fingerprint)
+            || !is_canonical_fingerprint(&receipt.destination_acl_fingerprint)
+            || !is_canonical_fingerprint(&receipt.destination_tag_fingerprint)
+        {
+            return Err(format!(
+                "Copy receipt for source '{}' is missing canonical source or destination HEAD, ACL, or tag fingerprints; source deletion was refused.",
+                receipt.source_key
+            ));
+        }
+        if immutable_version_id(receipt.source_version_id.as_deref()).is_none() {
+            return Err(format!(
+                "Source '{}' has no immutable non-null version ID. Automatic move deletion requires bucket versioning; the copied destination was retained and the source was not deleted.",
+                receipt.source_key
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn head_generation_fingerprint(
@@ -4619,8 +4933,64 @@ fn source_info_from_head(
         bucket_key_enabled: head.bucket_key_enabled(),
         metadata: head.metadata().cloned(),
         acl: None,
+        acl_fingerprint: String::new(),
         tagging: None,
+        tag_fingerprint: String::new(),
     }
+}
+
+async fn describe_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    requested_version_id: Option<&str>,
+    cancel: &CancelToken,
+) -> Result<SourceObjectInfo, String> {
+    let mut head_request = client.head_object().bucket(bucket).key(key);
+    if let Some(version_id) = requested_version_id {
+        head_request = head_request.version_id(version_id);
+    }
+    let head_request = head_request.send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = head_request => {
+            result.map_err(|e| format!("Failed to get object info for '{}': {}", key, e))?
+        }
+    };
+    let mut info = source_info_from_head(&head);
+    if let Some(expected_version_id) = requested_version_id {
+        if info.version_id.as_deref() != Some(expected_version_id) {
+            return Err(format!(
+                "Object '{}' did not confirm requested version '{}'.",
+                key, expected_version_id
+            ));
+        }
+    }
+
+    // Receipt-producing copies bind deletion authority to all object state that
+    // can change independently of the ETag: HEAD metadata, ACL grants and raw
+    // tags. Read ACLs and tags for small copies too, even though CopyObject can
+    // preserve tags server-side, because a later move deletion must prove they
+    // still match. Unsupported features receive explicit, distinct fingerprints;
+    // ordinary read failures remain fail-closed.
+    let version_id = info.version_id.clone();
+    let properties = async {
+        tokio::join!(
+            source_acl_state_for_object(client, bucket, key, version_id.as_deref()),
+            source_tag_state_for_object(client, bucket, key, version_id.as_deref())
+        )
+    };
+    let (acl, tagging) = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = properties => result,
+    };
+    let acl = acl?;
+    let tagging = tagging?;
+    info.acl = acl.canned_acl;
+    info.acl_fingerprint = acl.fingerprint;
+    info.tagging = tagging.encoded;
+    info.tag_fingerprint = tagging.fingerprint;
+    Ok(info)
 }
 
 async fn describe_source(
@@ -4629,47 +4999,17 @@ async fn describe_source(
     key: &str,
     cancel: &CancelToken,
 ) -> Result<SourceObjectInfo, String> {
-    let head_request = client.head_object().bucket(bucket).key(key).send();
-    let head = tokio::select! {
-        _ = cancel.cancelled() => return Err(cancelled_error()),
-        result = head_request => {
-            result.map_err(|e| format!("Failed to get object info for '{}': {}", key, e))?
-        }
-    };
-    let mut info = source_info_from_head(&head);
+    describe_object(client, bucket, key, None, cancel).await
+}
 
-    // A copy/move is allowed only once the attributes it has to restate have
-    // been read successfully. Treating an unexpected error as "no attributes"
-    // can silently reset ACLs or drop tags, and a move would then delete the
-    // only correctly attributed source object. `CopyObject` does not carry the
-    // ACL, so that read is always required ('s3:GetObjectAcl'); tags are carried
-    // server-side except for multipart copies, which is why the tag read below
-    // is conditional.
-    let version_id = info.version_id.clone();
-    // Only a multipart copy has to restate tags: `CopyObject` defaults its
-    // tagging directive to COPY, so S3 carries them server-side. Reading them
-    // anyway would make `s3:GetObjectTagging` a new requirement for every copy,
-    // move and metadata edit, breaking credentials that never needed it.
-    let needs_explicit_tagging = info.size >= MULTIPART_COPY_THRESHOLD;
-    let properties = async {
-        tokio::join!(
-            infer_canned_acl_for_object(client, bucket, key, version_id.as_deref()),
-            async {
-                if needs_explicit_tagging {
-                    encoded_tagging_for_object(client, bucket, key, version_id.as_deref()).await
-                } else {
-                    Ok(None)
-                }
-            }
-        )
-    };
-    let (acl, tagging) = tokio::select! {
-        _ = cancel.cancelled() => return Err(cancelled_error()),
-        result = properties => result,
-    };
-    info.acl = acl?;
-    info.tagging = tagging?;
-    Ok(info)
+async fn describe_immutable_move_source(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    cancel: &CancelToken,
+) -> Result<SourceObjectInfo, String> {
+    let version_id = preflight_immutable_source_version(client, bucket, key, cancel).await?;
+    describe_object(client, bucket, key, Some(&version_id), cancel).await
 }
 
 /// Copy a single object, preserving metadata and picking the right mechanism
@@ -5041,6 +5381,17 @@ async fn copy_with_receipt(
         .ok_or_else(|| format!("Source '{}' did not return an ETag", src_key))?
         .to_string();
     let source_fingerprint = source_generation_fingerprint(&info);
+    if !is_canonical_fingerprint(&source_fingerprint)
+        || !is_canonical_fingerprint(&info.acl_fingerprint)
+        || !is_canonical_fingerprint(&info.tag_fingerprint)
+    {
+        return Err(format!(
+            "Source '{}' did not produce complete canonical HEAD, ACL, and tag fingerprints",
+            src_key
+        ));
+    }
+    let source_acl_fingerprint = info.acl_fingerprint.clone();
+    let source_tag_fingerprint = info.tag_fingerprint.clone();
 
     let destination = copy_one(
         client,
@@ -5054,15 +5405,50 @@ async fn copy_with_receipt(
         cancel,
     )
     .await?;
+    let destination_info = describe_object(
+        client,
+        dst_bucket,
+        dst_key,
+        destination.version_id.as_deref(),
+        cancel,
+    )
+    .await
+    .map_err(|err| {
+        format!(
+            "Copy to '{}' completed, but destination preservation state could not be bound: {}. The destination was retained.",
+            dst_key, err
+        )
+    })?;
+    if destination_info.etag.as_deref() != Some(destination.etag.as_str()) {
+        return Err(format!(
+            "Copy to '{}' completed, but destination ETag changed before preservation state was recorded. The destination was retained.",
+            dst_key
+        ));
+    }
+    let destination_fingerprint = source_generation_fingerprint(&destination_info);
+    if !is_canonical_fingerprint(&destination_fingerprint)
+        || !is_canonical_fingerprint(&destination_info.acl_fingerprint)
+        || !is_canonical_fingerprint(&destination_info.tag_fingerprint)
+    {
+        return Err(format!(
+            "Copy to '{}' completed, but destination HEAD, ACL, and tag fingerprints were incomplete. The destination was retained.",
+            dst_key
+        ));
+    }
 
     Ok(CopyReceipt {
         source_key: src_key.to_string(),
         source_etag,
         source_fingerprint,
+        source_acl_fingerprint,
+        source_tag_fingerprint,
         source_version_id: info.version_id,
         destination_key: dst_key.to_string(),
         destination_etag: destination.etag,
-        destination_version_id: destination.version_id,
+        destination_fingerprint,
+        destination_acl_fingerprint: destination_info.acl_fingerprint,
+        destination_tag_fingerprint: destination_info.tag_fingerprint,
+        destination_version_id: destination.version_id.or(destination_info.version_id),
     })
 }
 
@@ -5085,6 +5471,14 @@ pub(crate) async fn rename_object(
     let client = require_client(&state, &connection_id, transfer_id)?;
     let provider = client.provider();
     let cancel = client.token();
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![
+            crate::S3MutationScope::key(&connection_id, &bucket, &old_key),
+            crate::S3MutationScope::key(&connection_id, &bucket, &new_key),
+        ],
+        &cancel,
+    )
+    .await?;
 
     if !overwrite && destination_object_exists(&client, &bucket, &new_key, &cancel).await? {
         return Err(format!(
@@ -5093,8 +5487,17 @@ pub(crate) async fn rename_object(
         ));
     }
 
+    let source_info = describe_immutable_move_source(&client, &bucket, &old_key, &cancel).await?;
     let receipt = copy_with_receipt(
-        &client, &bucket, &old_key, &bucket, &new_key, None, overwrite, provider, &cancel,
+        &client,
+        &bucket,
+        &old_key,
+        &bucket,
+        &new_key,
+        Some(source_info),
+        overwrite,
+        provider,
+        &cancel,
     )
     .await?;
     delete_receipts_checked(&client, &bucket, &bucket, &[receipt], &cancel).await?;
@@ -5120,6 +5523,93 @@ fn next_page_token(
         );
     }
     Ok(Some(token))
+}
+
+struct PrefixCopySource {
+    source_key: String,
+    destination_key: String,
+    immutable_version_id: Option<String>,
+}
+
+async fn preflight_prefix_copy_sources(
+    client: &Client,
+    src_bucket: &str,
+    src_prefix: &str,
+    dst_bucket: &str,
+    dst_prefix: &str,
+    require_immutable_versions: bool,
+    cancel: &CancelToken,
+) -> Result<Vec<PrefixCopySource>, String> {
+    let mut sources = Vec::new();
+    let mut continuation_token: Option<String> = None;
+    let mut seen_tokens = HashSet::new();
+    let mut seen_keys = HashSet::new();
+
+    loop {
+        let mut request = client
+            .list_objects_v2()
+            .bucket(src_bucket)
+            .prefix(src_prefix);
+        if let Some(token) = continuation_token.as_deref() {
+            request = request.continuation_token(token);
+        }
+        let output = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = request.send() => result.map_err(|err| {
+                format!("Failed to preflight prefix sources: {}", err)
+            })?,
+        };
+
+        for object in output.contents() {
+            let Some(key) = object.key() else {
+                continue;
+            };
+            if sources.len() >= MAX_PREFIX_TRANSACTION_OBJECTS {
+                return Err(format!(
+                    "Prefix operation exceeds the {}-object transaction limit; no destination was changed",
+                    MAX_PREFIX_TRANSACTION_OBJECTS
+                ));
+            }
+            if !seen_keys.insert(key.to_string()) {
+                return Err(format!(
+                    "S3 listing repeated source key '{}'; no destination was changed",
+                    key
+                ));
+            }
+            let suffix = key.strip_prefix(src_prefix).ok_or_else(|| {
+                format!("Key '{}' does not start with prefix '{}'", key, src_prefix)
+            })?;
+            let destination_key = format!("{}{}", dst_prefix, suffix);
+            validate_key(&destination_key, "Destination key")?;
+            if src_bucket == dst_bucket && destination_key == key {
+                return Err(format!(
+                    "Source and destination resolve to the same object ('{}'). Refusing to copy a prefix onto itself.",
+                    key
+                ));
+            }
+            let immutable_version_id = if require_immutable_versions {
+                Some(preflight_immutable_source_version(client, src_bucket, key, cancel).await?)
+            } else {
+                None
+            };
+            sources.push(PrefixCopySource {
+                source_key: key.to_string(),
+                destination_key,
+                immutable_version_id,
+            });
+        }
+
+        match next_page_token(
+            output.is_truncated().unwrap_or(false),
+            output.next_continuation_token(),
+            &mut seen_tokens,
+        )? {
+            Some(token) => continuation_token = Some(token),
+            None => break,
+        }
+    }
+
+    Ok(sources)
 }
 
 /// List rollback keys defensively (no delimiter, recursive, paginated).
@@ -5180,6 +5670,12 @@ pub(crate) async fn delete_prefix(
 ) -> Result<DeleteResult, String> {
     let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_mutating_prefix(&prefix, "Prefix")?;
+    let _mutation_guard = crate::acquire_s3_mutation(vec![crate::S3MutationScope::prefix(
+        &connection_id,
+        &bucket,
+        &prefix,
+    )])
+    .await?;
     let client = require_client(&state, &connection_id, None)?;
     let cancel = client.token();
 
@@ -5339,7 +5835,12 @@ pub(crate) async fn delete_prefix(
 struct DestinationBackup {
     destination_key: String,
     backup_key: String,
+    /// Identity and metadata of the original destination before replacement.
+    original_info: SourceObjectInfo,
+    /// Identity of the separately copied rollback object.
     source_info: SourceObjectInfo,
+    /// Response-owned identity of the replacement written by this transaction.
+    replacement: Option<CopyReceipt>,
 }
 
 const ROLLBACK_BACKUP_PREFIX: &str = ".s3-sidekick-rollback/";
@@ -5496,31 +5997,159 @@ async fn rollback_prefix_copy_unbounded(
     let rollback_cancel = Arc::new(CancelFlag::default());
     let mut failures = Vec::new();
 
-    // Restore overwritten objects first. A backup is deleted only after its
-    // original destination has definitely been recreated.
+    // Restore overwritten objects first. Automatic rollback is allowed only
+    // when the destination still has the response-owned identity written by
+    // this transaction. Ambiguous writes or concurrent replacements retain the
+    // backup for manual recovery instead of overwriting somebody else's data.
     for backup in backups.iter().rev() {
-        match copy_one(
+        let Some(replacement) = backup.replacement.as_ref() else {
+            failures.push(format!(
+                "could not safely restore '{}' because the replacement write has no response-owned identity; retained backup '{}'",
+                backup.destination_key, backup.backup_key
+            ));
+            continue;
+        };
+        match current_source_identity_matches(
             client,
             bucket,
-            &backup.backup_key,
-            bucket,
             &backup.destination_key,
-            Some(backup.source_info.clone()),
-            true,
-            provider,
+            &replacement.destination_etag,
+            None,
+            replacement.destination_version_id.as_deref(),
+            &replacement.destination_fingerprint,
+            &replacement.destination_acl_fingerprint,
+            &replacement.destination_tag_fingerprint,
             &rollback_cancel,
         )
         .await
         {
+            Ok(Some(true)) => {}
             Ok(_) => {
-                if let Err(err) = remove_backup_object(client, bucket, backup).await {
-                    failures.push(format!("restored '{}' but {}", backup.destination_key, err));
+                failures.push(format!(
+                    "did not restore '{}' because it was replaced concurrently; retained backup '{}'",
+                    backup.destination_key, backup.backup_key
+                ));
+                continue;
+            }
+            Err(err) => {
+                failures.push(format!(
+                    "could not verify replacement '{}' before rollback: {}; retained backup '{}'",
+                    backup.destination_key, err, backup.backup_key
+                ));
+                continue;
+            }
+        }
+
+        if let Some(version_id) = replacement.destination_version_id.as_deref() {
+            let result = client
+                .delete_object()
+                .bucket(bucket)
+                .key(&backup.destination_key)
+                .version_id(version_id)
+                .if_match(&replacement.destination_etag)
+                .send()
+                .await;
+            if let Err(err) = result {
+                failures.push(format!(
+                    "could not remove transaction version '{}' of '{}': {}; retained backup '{}'",
+                    version_id, backup.destination_key, err, backup.backup_key
+                ));
+                continue;
+            }
+            let Some(original_etag) = backup
+                .original_info
+                .etag
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                failures.push(format!(
+                    "removed transaction version of '{}', but the original identity was incomplete; retained backup '{}'",
+                    backup.destination_key, backup.backup_key
+                ));
+                continue;
+            };
+            let original_fingerprint = source_generation_fingerprint(&backup.original_info);
+            match current_source_identity_matches(
+                client,
+                bucket,
+                &backup.destination_key,
+                original_etag,
+                None,
+                backup.original_info.version_id.as_deref(),
+                &original_fingerprint,
+                &backup.original_info.acl_fingerprint,
+                &backup.original_info.tag_fingerprint,
+                &rollback_cancel,
+            )
+            .await
+            {
+                Ok(Some(true)) => {}
+                Ok(_) => {
+                    failures.push(format!(
+                        "transaction version of '{}' was removed, but the original did not become current; retained backup '{}'",
+                        backup.destination_key, backup.backup_key
+                    ));
+                    continue;
+                }
+                Err(err) => {
+                    failures.push(format!(
+                        "could not verify restored version of '{}': {}; retained backup '{}'",
+                        backup.destination_key, err, backup.backup_key
+                    ));
+                    continue;
                 }
             }
-            Err(err) => failures.push(format!(
-                "could not restore '{}' from retained backup '{}': {}",
-                backup.destination_key, backup.backup_key, err
-            )),
+        } else {
+            let create_only_supported = if backup.source_info.size >= MULTIPART_COPY_THRESHOLD {
+                require_complete_multipart_create_only_support(provider, &backup.destination_key)
+            } else {
+                require_copy_create_only_strategy(provider, &backup.destination_key).map(|_| ())
+            };
+            if let Err(err) = create_only_supported {
+                failures.push(format!(
+                    "could not safely restore unversioned destination '{}': {}; retained backup '{}'",
+                    backup.destination_key, err, backup.backup_key
+                ));
+                continue;
+            }
+            let delete_result = client
+                .delete_object()
+                .bucket(bucket)
+                .key(&backup.destination_key)
+                .if_match(&replacement.destination_etag)
+                .send()
+                .await;
+            if let Err(err) = delete_result {
+                failures.push(format!(
+                    "could not conditionally remove transaction replacement '{}': {}; retained backup '{}'",
+                    backup.destination_key, err, backup.backup_key
+                ));
+                continue;
+            }
+            if let Err(err) = copy_one(
+                client,
+                bucket,
+                &backup.backup_key,
+                bucket,
+                &backup.destination_key,
+                Some(backup.source_info.clone()),
+                false,
+                provider,
+                &rollback_cancel,
+            )
+            .await
+            {
+                failures.push(format!(
+                    "could not recreate '{}' without overwriting a concurrent writer: {}; retained backup '{}'",
+                    backup.destination_key, err, backup.backup_key
+                ));
+                continue;
+            }
+        }
+
+        if let Err(err) = remove_backup_object(client, bucket, backup).await {
+            failures.push(format!("restored '{}' but {}", backup.destination_key, err));
         }
     }
 
@@ -5529,6 +6158,37 @@ async fn rollback_prefix_copy_unbounded(
     // the original absence check and rollback; a versioned delete removes only
     // the exact version created by this operation.
     for receipt in created_destinations.iter().rev() {
+        let request_version_id = receipt.destination_version_id.as_deref();
+        match current_source_identity_matches(
+            client,
+            bucket,
+            &receipt.destination_key,
+            &receipt.destination_etag,
+            request_version_id,
+            request_version_id,
+            &receipt.destination_fingerprint,
+            &receipt.destination_acl_fingerprint,
+            &receipt.destination_tag_fingerprint,
+            &rollback_cancel,
+        )
+        .await
+        {
+            Ok(Some(true)) => {}
+            Ok(_) => {
+                failures.push(format!(
+                    "did not remove newly created destination '{}' because its preservation state changed",
+                    receipt.destination_key
+                ));
+                continue;
+            }
+            Err(err) => {
+                failures.push(format!(
+                    "could not verify newly created destination '{}' before rollback: {}",
+                    receipt.destination_key, err
+                ));
+                continue;
+            }
+        }
         let mut request = client
             .delete_object()
             .bucket(bucket)
@@ -5573,55 +6233,50 @@ async fn copy_prefix_objects(
     cancel: &CancelToken,
 ) -> Result<Vec<CopyReceipt>, String> {
     ensure_no_orphaned_rollback_backups(client, dst_bucket, cancel).await?;
+    let source_plan = preflight_prefix_copy_sources(
+        client,
+        src_bucket,
+        src_prefix,
+        dst_bucket,
+        dst_prefix,
+        collect_receipts,
+        cancel,
+    )
+    .await?;
 
     let namespace_guard = RollbackNamespaceGuard::new();
     let namespace = namespace_guard.namespace.clone();
     let mut created_destinations = Vec::new();
     let mut backups = Vec::new();
     let mut receipts = Vec::new();
-    let mut continuation_token: Option<String> = None;
-    let mut seen_tokens = HashSet::new();
-    let mut operation_index = 0usize;
 
-    loop {
-        let mut list_request = client
-            .list_objects_v2()
-            .bucket(src_bucket)
-            .prefix(src_prefix);
-        if let Some(token) = continuation_token.as_deref() {
-            list_request = list_request.continuation_token(token);
+    for (index, source) in source_plan.into_iter().enumerate() {
+        let key = source.source_key;
+        let new_key = source.destination_key;
+        let immutable_version_id = source.immutable_version_id;
+        if cancel.is_cancelled() {
+            let failures = rollback_prefix_copy(
+                client,
+                dst_bucket,
+                &created_destinations,
+                &backups,
+                provider,
+            )
+            .await;
+            return Err(rollback_error(cancelled_error(), failures));
         }
-        let list_output = tokio::select! {
+
+        let destination_head_request = client.head_object().bucket(dst_bucket).key(&new_key).send();
+        let destination_head = tokio::select! {
             _ = cancel.cancelled() => {
                 let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups, provider).await;
                 return Err(rollback_error(cancelled_error(), failures));
             }
-            result = list_request.send() => match result {
-                Ok(output) => output,
-                Err(e) => {
-                    let failures = rollback_prefix_copy(
-                        client,
-                        dst_bucket,
-                        &created_destinations,
-                        &backups,
-                        provider,
-                    )
-                    .await;
-                    return Err(rollback_error(
-                        format!("Failed to list objects: {}", e),
-                        failures,
-                    ));
-                }
-            },
+            result = destination_head_request => result,
         };
-        let keys: Vec<String> = list_output
-            .contents()
-            .iter()
-            .filter_map(|object| object.key().map(str::to_string))
-            .collect();
 
-        for key in &keys {
-            if operation_index >= MAX_PREFIX_TRANSACTION_OBJECTS {
+        let destination_was_absent = match destination_head {
+            Ok(_) if !overwrite => {
                 let failures = rollback_prefix_copy(
                     client,
                     dst_bucket,
@@ -5632,15 +6287,123 @@ async fn copy_prefix_objects(
                 .await;
                 return Err(rollback_error(
                     format!(
-                        "Prefix operation exceeds the {}-object transaction limit; no source was deleted",
-                        MAX_PREFIX_TRANSACTION_OBJECTS
+                        "Destination '{}' now exists and overwrite was not authorized.",
+                        new_key
                     ),
                     failures,
                 ));
             }
-            let index = operation_index;
-            operation_index += 1;
-            if cancel.is_cancelled() {
+            Ok(_) => {
+                let destination_info =
+                    match describe_source(client, dst_bucket, &new_key, cancel).await {
+                        Ok(info) => info,
+                        Err(err) => {
+                            let failures = rollback_prefix_copy(
+                                client,
+                                dst_bucket,
+                                &created_destinations,
+                                &backups,
+                                provider,
+                            )
+                            .await;
+                            return Err(rollback_error(err, failures));
+                        }
+                    };
+                let backup_key = format!("{}{}/{}", ROLLBACK_BACKUP_PREFIX, namespace, index);
+                let backup_probe = client
+                    .head_object()
+                    .bucket(dst_bucket)
+                    .key(&backup_key)
+                    .send();
+                let backup_probe_result = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups, provider).await;
+                        return Err(rollback_error(cancelled_error(), failures));
+                    }
+                    result = backup_probe => result,
+                };
+                match backup_probe_result {
+                    Ok(_) => {
+                        let failures = rollback_prefix_copy(
+                            client,
+                            dst_bucket,
+                            &created_destinations,
+                            &backups,
+                            provider,
+                        )
+                        .await;
+                        return Err(rollback_error(
+                            format!("Rollback backup key '{}' already exists", backup_key),
+                            failures,
+                        ));
+                    }
+                    Err(err) if is_not_found(&err) => {}
+                    Err(err) => {
+                        let failures = rollback_prefix_copy(
+                            client,
+                            dst_bucket,
+                            &created_destinations,
+                            &backups,
+                            provider,
+                        )
+                        .await;
+                        return Err(rollback_error(
+                            format!(
+                                "Failed to reserve rollback backup '{}': {}",
+                                backup_key, err
+                            ),
+                            failures,
+                        ));
+                    }
+                }
+
+                let backup_receipt = match copy_with_receipt(
+                    client,
+                    dst_bucket,
+                    &new_key,
+                    dst_bucket,
+                    &backup_key,
+                    Some(destination_info.clone()),
+                    true,
+                    provider,
+                    cancel,
+                )
+                .await
+                {
+                    Ok(receipt) => receipt,
+                    Err(err) => {
+                        // The backup copy may already have committed. Without
+                        // an operation-owned identity, deleting this key could
+                        // remove the only recoverable copy or a concurrent
+                        // writer, so retain it and report the ambiguity.
+                        let failures = rollback_prefix_copy(
+                            client,
+                            dst_bucket,
+                            &created_destinations,
+                            &backups,
+                            provider,
+                        )
+                        .await;
+                        return Err(rollback_error(
+                            format!("Failed to back up destination '{}': {}", new_key, err),
+                            failures,
+                        ));
+                    }
+                };
+                let mut backup_info = destination_info.clone();
+                backup_info.etag = Some(backup_receipt.destination_etag);
+                backup_info.version_id = backup_receipt.destination_version_id;
+                backups.push(DestinationBackup {
+                    destination_key: new_key.clone(),
+                    backup_key,
+                    original_info: destination_info,
+                    source_info: backup_info,
+                    replacement: None,
+                });
+                false
+            }
+            Err(err) if is_not_found(&err) => true,
+            Err(err) => {
                 let failures = rollback_prefix_copy(
                     client,
                     dst_bucket,
@@ -5649,31 +6412,22 @@ async fn copy_prefix_objects(
                     provider,
                 )
                 .await;
-                return Err(rollback_error(cancelled_error(), failures));
+                return Err(rollback_error(
+                    format!("Failed to check destination '{}': {}", new_key, err),
+                    failures,
+                ));
             }
+        };
 
-            // Key-shape rejections must unwind like any other failure. Returning
-            // straight out of the loop would abandon destinations this call already
-            // created and backups it already took.
-            let suffix = match key.strip_prefix(src_prefix) {
-                Some(suffix) => suffix,
-                None => {
-                    let failures = rollback_prefix_copy(
-                        client,
-                        dst_bucket,
-                        &created_destinations,
-                        &backups,
-                        provider,
-                    )
-                    .await;
-                    return Err(rollback_error(
-                        format!("Key '{}' does not start with prefix '{}'", key, src_prefix),
-                        failures,
-                    ));
-                }
-            };
-            let new_key = format!("{}{}", dst_prefix, suffix);
-            if let Err(err) = validate_key(&new_key, "Destination key") {
+        let source_info_result = match immutable_version_id.as_deref() {
+            Some(version_id) => {
+                describe_object(client, src_bucket, &key, Some(version_id), cancel).await
+            }
+            None => describe_source(client, src_bucket, &key, cancel).await,
+        };
+        let source_info = match source_info_result {
+            Ok(info) => info,
+            Err(err) => {
                 let failures = rollback_prefix_copy(
                     client,
                     dst_bucket,
@@ -5684,247 +6438,32 @@ async fn copy_prefix_objects(
                 .await;
                 return Err(rollback_error(err, failures));
             }
-
-            if src_bucket == dst_bucket && &new_key == key {
-                let failures = rollback_prefix_copy(
-                    client,
-                    dst_bucket,
-                    &created_destinations,
-                    &backups,
-                    provider,
-                )
-                .await;
-                return Err(rollback_error(
-                format!(
-                    "Source and destination resolve to the same object ('{}'). Refusing to copy a prefix onto itself.",
-                    key
-                ),
-                failures,
-            ));
-            }
-
-            let destination_head_request =
-                client.head_object().bucket(dst_bucket).key(&new_key).send();
-            let destination_head = tokio::select! {
-                _ = cancel.cancelled() => {
-                    let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups, provider).await;
-                    return Err(rollback_error(cancelled_error(), failures));
-                }
-                result = destination_head_request => result,
-            };
-
-            let destination_was_absent = match destination_head {
-                Ok(_) if !overwrite => {
-                    let failures = rollback_prefix_copy(
-                        client,
-                        dst_bucket,
-                        &created_destinations,
-                        &backups,
-                        provider,
-                    )
-                    .await;
-                    return Err(rollback_error(
-                        format!(
-                            "Destination '{}' now exists and overwrite was not authorized.",
-                            new_key
-                        ),
-                        failures,
-                    ));
-                }
-                Ok(_) => {
-                    if !overwrite {
-                        let failures = rollback_prefix_copy(
-                            client,
-                            dst_bucket,
-                            &created_destinations,
-                            &backups,
-                            provider,
-                        )
-                        .await;
-                        return Err(rollback_error(
-                            destination_conflict_error(&new_key),
-                            failures,
-                        ));
-                    }
-                    let destination_info =
-                        match describe_source(client, dst_bucket, &new_key, cancel).await {
-                            Ok(info) => info,
-                            Err(err) => {
-                                let failures = rollback_prefix_copy(
-                                    client,
-                                    dst_bucket,
-                                    &created_destinations,
-                                    &backups,
-                                    provider,
-                                )
-                                .await;
-                                return Err(rollback_error(err, failures));
-                            }
-                        };
-                    let backup_key = format!("{}{}/{}", ROLLBACK_BACKUP_PREFIX, namespace, index);
-                    let backup_probe = client
-                        .head_object()
-                        .bucket(dst_bucket)
-                        .key(&backup_key)
-                        .send();
-                    let backup_probe_result = tokio::select! {
-                        _ = cancel.cancelled() => {
-                            let failures = rollback_prefix_copy(client, dst_bucket, &created_destinations, &backups, provider).await;
-                            return Err(rollback_error(cancelled_error(), failures));
-                        }
-                        result = backup_probe => result,
-                    };
-                    match backup_probe_result {
-                        Ok(_) => {
-                            let failures = rollback_prefix_copy(
-                                client,
-                                dst_bucket,
-                                &created_destinations,
-                                &backups,
-                                provider,
-                            )
-                            .await;
-                            return Err(rollback_error(
-                                format!("Rollback backup key '{}' already exists", backup_key),
-                                failures,
-                            ));
-                        }
-                        Err(err) if is_not_found(&err) => {}
-                        Err(err) => {
-                            let failures = rollback_prefix_copy(
-                                client,
-                                dst_bucket,
-                                &created_destinations,
-                                &backups,
-                                provider,
-                            )
-                            .await;
-                            return Err(rollback_error(
-                                format!(
-                                    "Failed to reserve rollback backup '{}': {}",
-                                    backup_key, err
-                                ),
-                                failures,
-                            ));
-                        }
-                    }
-
-                    let backup_receipt = match copy_with_receipt(
-                        client,
-                        dst_bucket,
-                        &new_key,
-                        dst_bucket,
-                        &backup_key,
-                        Some(destination_info.clone()),
-                        true,
-                        provider,
-                        cancel,
-                    )
-                    .await
-                    {
-                        Ok(receipt) => receipt,
-                        Err(err) => {
-                            // The backup copy may already have committed. Without
-                            // an operation-owned identity, deleting this key could
-                            // remove the only recoverable copy or a concurrent
-                            // writer, so retain it and report the ambiguity.
-                            let failures = rollback_prefix_copy(
-                                client,
-                                dst_bucket,
-                                &created_destinations,
-                                &backups,
-                                provider,
-                            )
-                            .await;
-                            return Err(rollback_error(
-                                format!("Failed to back up destination '{}': {}", new_key, err),
-                                failures,
-                            ));
-                        }
-                    };
-                    let mut backup_info = destination_info;
-                    backup_info.etag = Some(backup_receipt.destination_etag);
-                    backup_info.version_id = backup_receipt.destination_version_id;
-                    backups.push(DestinationBackup {
-                        destination_key: new_key.clone(),
-                        backup_key,
-                        source_info: backup_info,
-                    });
-                    false
-                }
-                Err(err) if is_not_found(&err) => true,
-                Err(err) => {
-                    let failures = rollback_prefix_copy(
-                        client,
-                        dst_bucket,
-                        &created_destinations,
-                        &backups,
-                        provider,
-                    )
-                    .await;
-                    return Err(rollback_error(
-                        format!("Failed to check destination '{}': {}", new_key, err),
-                        failures,
-                    ));
-                }
-            };
-
-            let source_info = match describe_source(client, src_bucket, key, cancel).await {
-                Ok(info) => info,
-                Err(err) => {
-                    let failures = rollback_prefix_copy(
-                        client,
-                        dst_bucket,
-                        &created_destinations,
-                        &backups,
-                        provider,
-                    )
-                    .await;
-                    return Err(rollback_error(err, failures));
-                }
-            };
-            match copy_with_receipt(
-                client,
-                src_bucket,
-                key,
-                dst_bucket,
-                &new_key,
-                Some(source_info),
-                overwrite,
-                provider,
-                cancel,
-            )
-            .await
-            {
-                Ok(receipt) => {
-                    if destination_was_absent {
-                        created_destinations.push(receipt.clone());
-                    }
-                    if collect_receipts {
-                        receipts.push(receipt);
+        };
+        match copy_with_receipt(
+            client,
+            src_bucket,
+            &key,
+            dst_bucket,
+            &new_key,
+            Some(source_info),
+            overwrite,
+            provider,
+            cancel,
+        )
+        .await
+        {
+            Ok(receipt) => {
+                if destination_was_absent {
+                    created_destinations.push(receipt.clone());
+                } else if let Some(backup) = backups.last_mut() {
+                    if backup.destination_key == new_key {
+                        backup.replacement = Some(receipt.clone());
                     }
                 }
-                Err(err) => {
-                    let failures = rollback_prefix_copy(
-                        client,
-                        dst_bucket,
-                        &created_destinations,
-                        &backups,
-                        provider,
-                    )
-                    .await;
-                    return Err(rollback_error(err, failures));
+                if collect_receipts {
+                    receipts.push(receipt);
                 }
             }
-        }
-
-        match next_page_token(
-            list_output.is_truncated().unwrap_or(false),
-            list_output.next_continuation_token(),
-            &mut seen_tokens,
-        ) {
-            Ok(Some(token)) => continuation_token = Some(token),
-            Ok(None) => break,
             Err(err) => {
                 let failures = rollback_prefix_copy(
                     client,
@@ -6000,6 +6539,64 @@ async fn current_identity_matches(
     }
 }
 
+async fn current_source_identity_matches(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    expected_etag: &str,
+    request_version_id: Option<&str>,
+    expected_version_id: Option<&str>,
+    expected_head_fingerprint: &str,
+    expected_acl_fingerprint: &str,
+    expected_tag_fingerprint: &str,
+    cancel: &CancelToken,
+) -> Result<Option<bool>, String> {
+    let mut request = client.head_object().bucket(bucket).key(key);
+    if let Some(version_id) = request_version_id {
+        request = request.version_id(version_id);
+    }
+    let request = request.send();
+    let result = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    };
+
+    let head = match result {
+        Ok(head) => head,
+        Err(err) if is_not_found(&err) => return Ok(None),
+        Err(err) => return Err(format!("Failed to verify '{}': {}", key, err)),
+    };
+    let head_matches = head.e_tag() == Some(expected_etag)
+        && expected_version_id
+            .map(|expected| head.version_id() == Some(expected))
+            .unwrap_or(true)
+        && head_generation_fingerprint(&head) == expected_head_fingerprint;
+    if !head_matches {
+        return Ok(Some(false));
+    }
+
+    // Pin attribute reads to the generation returned by HEAD whenever the
+    // provider exposes one. On unversioned buckets these reads remain protected
+    // from app-local mutations by the caller's mutation lease.
+    let attribute_version_id = request_version_id
+        .map(str::to_string)
+        .or_else(|| head.version_id().map(str::to_string));
+    let attributes = async {
+        tokio::join!(
+            acl_fingerprint_for_object(client, bucket, key, attribute_version_id.as_deref()),
+            source_tag_state_for_object(client, bucket, key, attribute_version_id.as_deref())
+        )
+    };
+    let (acl_fingerprint, tag_state) = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = attributes => result,
+    };
+    Ok(Some(
+        acl_fingerprint? == expected_acl_fingerprint
+            && tag_state?.fingerprint == expected_tag_fingerprint,
+    ))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceDeleteDecision {
     AlreadyDeleted,
@@ -6034,6 +6631,52 @@ fn classify_versioned_source_for_delete(
     }
 }
 
+async fn classify_receipt_source_for_delete(
+    client: &Client,
+    bucket: &str,
+    receipt: &CopyReceipt,
+    cancel: &CancelToken,
+) -> Result<SourceDeleteDecision, String> {
+    let version_id =
+        immutable_version_id(receipt.source_version_id.as_deref()).ok_or_else(|| {
+            format!(
+                "Source '{}' has no immutable non-null version ID; source deletion was refused.",
+                receipt.source_key
+            )
+        })?;
+    let exact = current_source_identity_matches(
+        client,
+        bucket,
+        &receipt.source_key,
+        &receipt.source_etag,
+        Some(version_id),
+        Some(version_id),
+        &receipt.source_fingerprint,
+        &receipt.source_acl_fingerprint,
+        &receipt.source_tag_fingerprint,
+        cancel,
+    )
+    .await?;
+    let current = if exact == Some(true) {
+        current_source_identity_matches(
+            client,
+            bucket,
+            &receipt.source_key,
+            &receipt.source_etag,
+            None,
+            Some(version_id),
+            &receipt.source_fingerprint,
+            &receipt.source_acl_fingerprint,
+            &receipt.source_tag_fingerprint,
+            cancel,
+        )
+        .await?
+    } else {
+        None
+    };
+    Ok(classify_versioned_source_for_delete(exact, current))
+}
+
 async fn delete_receipts_checked(
     client: &Client,
     src_bucket: &str,
@@ -6041,17 +6684,24 @@ async fn delete_receipts_checked(
     receipts: &[CopyReceipt],
     cancel: &CancelToken,
 ) -> Result<u32, String> {
+    // This runs only after the caller has acquired the full source/destination
+    // mutation lease. Legacy or malformed receipts must not authorize even the
+    // first remote identity read, much less a source deletion.
+    validate_receipt_fingerprints(receipts)?;
+
     // Validate every destination before deleting any source. A stale manifest
     // or a destination replaced after the copy must fail closed.
     for receipt in receipts {
-        match current_identity_matches(
+        match current_source_identity_matches(
             client,
             dst_bucket,
             &receipt.destination_key,
             &receipt.destination_etag,
             None,
             receipt.destination_version_id.as_deref(),
-            None,
+            &receipt.destination_fingerprint,
+            &receipt.destination_acl_fingerprint,
+            &receipt.destination_tag_fingerprint,
             cancel,
         )
         .await?
@@ -6072,75 +6722,20 @@ async fn delete_receipts_checked(
         }
     }
 
-    // Check all source identities before the first deletion. For versioned
-    // receipts, inspect both the exact copied version and whatever is current:
-    // together they say whether this receipt is still outstanding, was already
-    // retired by an earlier attempt, or has been overtaken by another write.
-    // See `classify_versioned_source_for_delete` for the exact mapping.
+    // Check the complete receipt set before the first deletion so a conflict
+    // cannot leave a preventable partial move. Every receipt must bind an exact
+    // immutable source version; unversioned and "null" versions fail closed.
     let mut present = Vec::with_capacity(receipts.len());
     for receipt in receipts {
-        if let Some(version_id) = receipt.source_version_id.as_deref() {
-            let exact = current_identity_matches(
-                client,
-                src_bucket,
-                &receipt.source_key,
-                &receipt.source_etag,
-                Some(version_id),
-                Some(version_id),
-                (!receipt.source_fingerprint.is_empty())
-                    .then_some(receipt.source_fingerprint.as_str()),
-                cancel,
-            )
-            .await?;
-            let current = if exact == Some(true) {
-                current_identity_matches(
-                    client,
-                    src_bucket,
-                    &receipt.source_key,
-                    &receipt.source_etag,
-                    None,
-                    Some(version_id),
-                    (!receipt.source_fingerprint.is_empty())
-                        .then_some(receipt.source_fingerprint.as_str()),
-                    cancel,
-                )
-                .await?
-            } else {
-                None
-            };
-            match classify_versioned_source_for_delete(exact, current) {
-                SourceDeleteDecision::AlreadyDeleted => present.push(false),
-                SourceDeleteDecision::Delete => present.push(true),
-                SourceDeleteDecision::Changed => {
-                    return Err(format!(
-                        "Source '{}' changed after it was copied; deletion was refused.",
-                        receipt.source_key
-                    ));
-                }
-            }
-            continue;
-        }
-
-        match current_identity_matches(
-            client,
-            src_bucket,
-            &receipt.source_key,
-            &receipt.source_etag,
-            None,
-            None,
-            (!receipt.source_fingerprint.is_empty()).then_some(receipt.source_fingerprint.as_str()),
-            cancel,
-        )
-        .await?
-        {
-            Some(true) => present.push(true),
-            Some(false) => {
+        match classify_receipt_source_for_delete(client, src_bucket, receipt, cancel).await? {
+            SourceDeleteDecision::AlreadyDeleted => present.push(false),
+            SourceDeleteDecision::Delete => present.push(true),
+            SourceDeleteDecision::Changed => {
                 return Err(format!(
                     "Source '{}' changed after it was copied; deletion was refused.",
                     receipt.source_key
                 ));
             }
-            None => present.push(false),
         }
     }
 
@@ -6149,13 +6744,52 @@ async fn delete_receipts_checked(
         if !exists {
             continue;
         }
+        // Revalidate the paired destination at the last possible point. The
+        // app-owned keyspace lease prevents another local writer from changing
+        // it after this check; an external change observed here fails closed.
+        match current_source_identity_matches(
+            client,
+            dst_bucket,
+            &receipt.destination_key,
+            &receipt.destination_etag,
+            None,
+            receipt.destination_version_id.as_deref(),
+            &receipt.destination_fingerprint,
+            &receipt.destination_acl_fingerprint,
+            &receipt.destination_tag_fingerprint,
+            cancel,
+        )
+        .await?
+        {
+            Some(true) => {}
+            Some(false) => {
+                return Err(format!(
+                    "Destination '{}' changed before source deletion; deletion was refused.",
+                    receipt.destination_key
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "Destination '{}' disappeared before source deletion; deletion was refused.",
+                    receipt.destination_key
+                ));
+            }
+        }
+        match classify_receipt_source_for_delete(client, src_bucket, receipt, cancel).await? {
+            SourceDeleteDecision::Delete => {}
+            SourceDeleteDecision::AlreadyDeleted => continue,
+            SourceDeleteDecision::Changed => {
+                return Err(format!(
+                    "Source '{}' changed immediately before deletion; deletion was refused.",
+                    receipt.source_key
+                ));
+            }
+        }
         // Delete the key, not the copied version ID. Version-targeted deletion is
-        // permanent, while If-Match compares ETags and cannot prove that version
-        // is still current after the earlier check. Deleting the key keeps
-        // If-Match meaningful and, on versioned buckets, creates a recoverable
-        // delete marker. Unversioned buckets retain the old behavior, but tags,
-        // ACLs, and metadata are outside the ETag; only versioning closes those
-        // races safely.
+        // permanent, while deleting the key creates a recoverable delete marker.
+        // The exact immutable version and current-key state were both rechecked
+        // immediately above; unversioned and null-version receipts never reach
+        // this point.
         let request = client
             .delete_object()
             .bucket(src_bucket)
@@ -6207,8 +6841,18 @@ pub(crate) async fn delete_copied_objects(
         }
     }
 
+    let mutation_scopes = receipts
+        .iter()
+        .flat_map(|receipt| {
+            [
+                crate::S3MutationScope::key(&connection_id, &src_bucket, &receipt.source_key),
+                crate::S3MutationScope::key(&connection_id, &dst_bucket, &receipt.destination_key),
+            ]
+        })
+        .collect();
     let client = require_client(&state, &connection_id, transfer_id)?;
     let cancel = client.token();
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(mutation_scopes, &cancel).await?;
     delete_receipts_checked(&client, &src_bucket, &dst_bucket, &receipts, &cancel).await
 }
 
@@ -6231,6 +6875,14 @@ pub(crate) async fn rename_prefix(
     let client = require_client(&state, &connection_id, transfer_id)?;
     let provider = client.provider();
     let cancel = client.token();
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![
+            crate::S3MutationScope::prefix(&connection_id, &bucket, &old_prefix),
+            crate::S3MutationScope::prefix(&connection_id, &bucket, &new_prefix),
+        ],
+        &cancel,
+    )
+    .await?;
 
     if !overwrite && prefix_has_content(&client, &bucket, &new_prefix, &cancel).await? {
         return Err(format!(
@@ -6266,6 +6918,7 @@ pub(crate) async fn copy_object_to(
     dst_key: String,
     overwrite: Option<bool>,
     transfer_id: Option<u32>,
+    require_immutable_source_version: Option<bool>,
 ) -> Result<CopyReceipt, String> {
     let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_readable_key(&src_key, "Source key")?;
@@ -6275,6 +6928,14 @@ pub(crate) async fn copy_object_to(
     let client = require_client(&state, &connection_id, transfer_id)?;
     let provider = client.provider();
     let cancel = client.token();
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![
+            crate::S3MutationScope::key(&connection_id, &src_bucket, &src_key),
+            crate::S3MutationScope::key(&connection_id, &dst_bucket, &dst_key),
+        ],
+        &cancel,
+    )
+    .await?;
     let overwrite = overwrite.unwrap_or(false);
 
     if !overwrite && destination_object_exists(&client, &dst_bucket, &dst_key, &cancel).await? {
@@ -6284,13 +6945,18 @@ pub(crate) async fn copy_object_to(
         ));
     }
 
+    let source_info = if require_immutable_source_version.unwrap_or(false) {
+        Some(describe_immutable_move_source(&client, &src_bucket, &src_key, &cancel).await?)
+    } else {
+        None
+    };
     copy_with_receipt(
         &client,
         &src_bucket,
         &src_key,
         &dst_bucket,
         &dst_key,
-        None,
+        source_info,
         overwrite,
         provider,
         &cancel,
@@ -6321,6 +6987,14 @@ pub(crate) async fn copy_prefix_to(
     let client = require_client(&state, &connection_id, transfer_id)?;
     let provider = client.provider();
     let cancel = client.token();
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![
+            crate::S3MutationScope::prefix(&connection_id, &src_bucket, &src_prefix),
+            crate::S3MutationScope::prefix(&connection_id, &dst_bucket, &dst_prefix),
+        ],
+        &cancel,
+    )
+    .await?;
     let overwrite = overwrite.unwrap_or(false);
 
     copy_prefix_objects(
@@ -7172,6 +7846,119 @@ mod tests {
         );
         assert!(verify_upload_checksum_response(Some(&checksum.base64), &checksum, "test").is_ok());
         assert!(verify_upload_checksum_response(None, &checksum, "test").is_err());
+    }
+
+    fn complete_test_copy_receipt() -> CopyReceipt {
+        CopyReceipt {
+            source_key: "source/key".to_string(),
+            source_etag: "\"source\"".to_string(),
+            source_fingerprint: "1".repeat(64),
+            source_acl_fingerprint: "2".repeat(64),
+            source_tag_fingerprint: "3".repeat(64),
+            source_version_id: Some("source-version-1".to_string()),
+            destination_key: "destination/key".to_string(),
+            destination_etag: "\"destination\"".to_string(),
+            destination_fingerprint: "4".repeat(64),
+            destination_acl_fingerprint: "5".repeat(64),
+            destination_tag_fingerprint: "6".repeat(64),
+            destination_version_id: Some("destination-version-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn acl_fingerprint_is_canonical_across_grant_order() {
+        let owner = CanonicalAclGrant {
+            permission: "FULL_CONTROL".to_string(),
+            grantee_type: "CanonicalUser".to_string(),
+            grantee_id: "owner-id".to_string(),
+            grantee_uri: String::new(),
+            grantee_email: String::new(),
+        };
+        let public = CanonicalAclGrant {
+            permission: "READ".to_string(),
+            grantee_type: "Group".to_string(),
+            grantee_id: String::new(),
+            grantee_uri: "http://acs.amazonaws.com/groups/global/AllUsers".to_string(),
+            grantee_email: String::new(),
+        };
+
+        let first = canonical_acl_fingerprint("owner-id", &[owner.clone(), public.clone()]);
+        let reordered = canonical_acl_fingerprint("owner-id", &[public, owner]);
+        assert_eq!(first, reordered);
+        assert!(is_canonical_fingerprint(&first));
+        assert_ne!(
+            canonical_acl_fingerprint("owner-id", &[]),
+            unsupported_attribute_fingerprint("acl")
+        );
+    }
+
+    #[test]
+    fn tag_fingerprint_sorts_raw_pairs_and_distinguishes_unsupported() {
+        let first = vec![
+            ("space key".to_string(), "raw&value".to_string()),
+            ("alpha".to_string(), "raw=value".to_string()),
+        ];
+        let reordered = vec![first[1].clone(), first[0].clone()];
+        assert_eq!(
+            canonical_tag_fingerprint(&first),
+            canonical_tag_fingerprint(&reordered)
+        );
+        assert_ne!(
+            canonical_tag_fingerprint(&[]),
+            unsupported_attribute_fingerprint("tags")
+        );
+    }
+
+    #[test]
+    fn immutable_move_version_preflight_rejects_mutable_versions() {
+        assert_eq!(
+            require_immutable_move_version(Some(" version-1 "), "source/key")
+                .expect("trimmed immutable version should be accepted"),
+            "version-1"
+        );
+        for mutable_version in [None, Some(""), Some("  "), Some("null"), Some("NULL")] {
+            let err = require_immutable_move_version(mutable_version, "source/key")
+                .expect_err("mutable source identity must be rejected before copy");
+            assert!(err.contains("requires object versioning"), "{err}");
+            assert!(err.contains("no destination was changed"), "{err}");
+        }
+    }
+
+    #[test]
+    fn incomplete_or_mutable_receipt_set_is_rejected_before_delete_authority() {
+        let valid = complete_test_copy_receipt();
+        assert!(validate_receipt_fingerprints(std::slice::from_ref(&valid)).is_ok());
+
+        for missing in [
+            "source-head",
+            "source-acl",
+            "source-tags",
+            "destination-head",
+            "destination-acl",
+            "destination-tags",
+        ] {
+            let mut invalid = valid.clone();
+            match missing {
+                "source-head" => invalid.source_fingerprint.clear(),
+                "source-acl" => invalid.source_acl_fingerprint.clear(),
+                "source-tags" => invalid.source_tag_fingerprint.clear(),
+                "destination-head" => invalid.destination_fingerprint.clear(),
+                "destination-acl" => invalid.destination_acl_fingerprint.clear(),
+                "destination-tags" => invalid.destination_tag_fingerprint.clear(),
+                _ => unreachable!(),
+            }
+            let err = validate_receipt_fingerprints(&[valid.clone(), invalid])
+                .expect_err("one incomplete receipt must refuse the full set");
+            assert!(err.contains("source deletion was refused"), "{err}");
+        }
+
+        for mutable_version in [None, Some(String::new()), Some("null".to_string())] {
+            let mut invalid = valid.clone();
+            invalid.source_version_id = mutable_version;
+            let err = validate_receipt_fingerprints(&[invalid])
+                .expect_err("mutable source identity must not authorize durable deletion");
+            assert!(err.contains("requires bucket versioning"), "{err}");
+        }
     }
 
     #[test]

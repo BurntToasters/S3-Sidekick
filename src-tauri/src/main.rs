@@ -22,8 +22,143 @@ use security::{load_security_config, read_protected_file, write_protected_file};
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static STORAGE_OP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static STORAGE_ACTIVITY: OnceLock<StorageActivity> = OnceLock::new();
+static S3_MUTATION_LEASES: OnceLock<S3MutationLeases> = OnceLock::new();
+static S3_MUTATION_LEASE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static OWNED_DOWNLOAD_TEMPS: OnceLock<Mutex<std::collections::HashMap<PathBuf, PathBuf>>> =
     OnceLock::new();
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct S3MutationScope {
+    connection_id: String,
+    bucket: String,
+    path: String,
+    prefix: bool,
+}
+
+impl S3MutationScope {
+    pub(crate) fn key(connection_id: &str, bucket: &str, key: &str) -> Self {
+        Self {
+            connection_id: connection_id.to_string(),
+            bucket: bucket.to_string(),
+            path: key.to_string(),
+            prefix: false,
+        }
+    }
+
+    pub(crate) fn prefix(connection_id: &str, bucket: &str, prefix: &str) -> Self {
+        Self {
+            connection_id: connection_id.to_string(),
+            bucket: bucket.to_string(),
+            path: prefix.to_string(),
+            prefix: true,
+        }
+    }
+}
+
+fn s3_mutation_scopes_overlap(left: &S3MutationScope, right: &S3MutationScope) -> bool {
+    if left.connection_id != right.connection_id || left.bucket != right.bucket {
+        return false;
+    }
+    match (left.prefix, right.prefix) {
+        (false, false) => left.path == right.path,
+        (true, false) => right.path.starts_with(&left.path),
+        (false, true) => left.path.starts_with(&right.path),
+        (true, true) => left.path.starts_with(&right.path) || right.path.starts_with(&left.path),
+    }
+}
+
+struct S3MutationLeases {
+    active: Mutex<Vec<(u64, S3MutationScope)>>,
+    changed: tokio::sync::Notify,
+}
+
+fn s3_mutation_leases() -> &'static S3MutationLeases {
+    S3_MUTATION_LEASES.get_or_init(|| S3MutationLeases {
+        active: Mutex::new(Vec::new()),
+        changed: tokio::sync::Notify::new(),
+    })
+}
+
+pub(crate) struct S3MutationGuard {
+    id: u64,
+    leases: &'static S3MutationLeases,
+}
+
+impl Drop for S3MutationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.leases.active.lock() {
+            active.retain(|(id, _)| *id != self.id);
+        }
+        self.leases.changed.notify_waiters();
+    }
+}
+
+async fn acquire_s3_mutation_inner(
+    mut scopes: Vec<S3MutationScope>,
+    cancel: Option<&s3::CancelToken>,
+) -> Result<S3MutationGuard, String> {
+    scopes.sort_by(|left, right| {
+        (&left.connection_id, &left.bucket, &left.path, left.prefix).cmp(&(
+            &right.connection_id,
+            &right.bucket,
+            &right.path,
+            right.prefix,
+        ))
+    });
+    scopes.dedup();
+    if scopes.is_empty() {
+        return Err("S3 mutation requires at least one key or prefix scope.".to_string());
+    }
+    let leases = s3_mutation_leases();
+    loop {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Err("Transfer cancelled".to_string());
+        }
+        // Register interest before checking so a release between the check and
+        // await cannot be missed.
+        let changed = leases.changed.notified();
+        {
+            let mut active = leases
+                .active
+                .lock()
+                .map_err(|_| "S3 mutation lease state is unavailable".to_string())?;
+            let conflicts = scopes.iter().any(|requested| {
+                active
+                    .iter()
+                    .any(|(_, held)| s3_mutation_scopes_overlap(requested, held))
+            });
+            if !conflicts {
+                if cancel.is_some_and(|token| token.is_cancelled()) {
+                    return Err("Transfer cancelled".to_string());
+                }
+                let id = S3_MUTATION_LEASE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                active.extend(scopes.iter().cloned().map(|scope| (id, scope)));
+                return Ok(S3MutationGuard { id, leases });
+            }
+        }
+        if let Some(token) = cancel {
+            tokio::select! {
+                _ = changed => {}
+                _ = token.cancelled() => return Err("Transfer cancelled".to_string()),
+            }
+        } else {
+            changed.await;
+        }
+    }
+}
+
+pub(crate) async fn acquire_s3_mutation(
+    scopes: Vec<S3MutationScope>,
+) -> Result<S3MutationGuard, String> {
+    acquire_s3_mutation_inner(scopes, None).await
+}
+
+pub(crate) async fn acquire_s3_mutation_cancellable(
+    scopes: Vec<S3MutationScope>,
+    cancel: &s3::CancelToken,
+) -> Result<S3MutationGuard, String> {
+    acquire_s3_mutation_inner(scopes, Some(cancel)).await
+}
 
 struct StorageActivityState {
     active_transfers: usize,
@@ -1861,6 +1996,57 @@ fn main() {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn s3_mutation_scopes_conflict_only_for_overlapping_keyspaces() {
+        let key = S3MutationScope::key("connection", "bucket", "photos/2026/a.jpg");
+        let same_key = S3MutationScope::key("connection", "bucket", "photos/2026/a.jpg");
+        let parent = S3MutationScope::prefix("connection", "bucket", "photos/");
+        let child = S3MutationScope::prefix("connection", "bucket", "photos/2026/");
+        let sibling = S3MutationScope::prefix("connection", "bucket", "documents/");
+        let other_bucket = S3MutationScope::prefix("connection", "other-bucket", "photos/");
+        let other_connection = S3MutationScope::prefix("other-connection", "bucket", "photos/");
+
+        assert!(s3_mutation_scopes_overlap(&key, &same_key));
+        assert!(s3_mutation_scopes_overlap(&key, &parent));
+        assert!(s3_mutation_scopes_overlap(&parent, &child));
+        assert!(!s3_mutation_scopes_overlap(&key, &sibling));
+        assert!(!s3_mutation_scopes_overlap(&key, &other_bucket));
+        assert!(!s3_mutation_scopes_overlap(&key, &other_connection));
+    }
+
+    #[tokio::test]
+    async fn queued_s3_mutation_lease_observes_cancellation() {
+        let scope = S3MutationScope::key(
+            "cancellation-test-connection",
+            "cancellation-test-bucket",
+            "cancellation-test-key",
+        );
+        let held = acquire_s3_mutation(vec![scope.clone()])
+            .await
+            .expect("first lease should acquire");
+        let token: s3::CancelToken = std::sync::Arc::new(s3::CancelFlag::default());
+        let waiter_token = std::sync::Arc::clone(&token);
+        let waiter_scope = scope.clone();
+        let waiter = tokio::spawn(async move {
+            acquire_s3_mutation_cancellable(vec![waiter_scope], &waiter_token).await
+        });
+        tokio::task::yield_now().await;
+        token.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("cancelled waiter should wake")
+            .expect("waiter task should not panic");
+        let error = match result {
+            Ok(_) => panic!("cancelled waiter must not acquire"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "Transfer cancelled");
+        drop(held);
+        acquire_s3_mutation(vec![scope])
+            .await
+            .expect("cancelled waiter must not retain the lease");
+    }
 
     #[test]
     fn make_temp_path_includes_purpose() {

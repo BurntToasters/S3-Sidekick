@@ -21,7 +21,6 @@ import {
   resolveConflictChoice,
   type ConflictPromptSession,
 } from "./app-conflicts.ts";
-import { showConfirm } from "./dialogs.ts";
 import type { ConflictPolicy } from "./settings-model.ts";
 
 interface RecentCopyMoveDestination {
@@ -31,7 +30,6 @@ interface RecentCopyMoveDestination {
 
 const RECENT_COPY_MOVE_DESTS_STORAGE_KEY =
   "s3-sidekick.recent-copy-move-destinations.v1";
-const MOVE_UNVERSIONED_WARNING_KEY = "s3-sidekick.move-unversioned-warning.v1";
 const RECENT_DESTINATION_LIMIT = 8;
 let copyMoveDialogGeneration = 0;
 
@@ -389,40 +387,6 @@ export function openCopyMoveDialog(): void {
       setStatus("Destination path is required.", 5000);
       pathInput.focus();
       return;
-    }
-    if (move) {
-      let warned = false;
-      try {
-        warned = localStorage.getItem(MOVE_UNVERSIONED_WARNING_KEY) === "1";
-      } catch {
-        warned = false;
-      }
-      if (!warned) {
-        const proceed = await showConfirm(
-          "Move may permanently delete sources",
-          "On buckets without versioning, a move copies objects and then permanently deletes the sources. Overwrites cannot be undone. Continue?",
-          {
-            okLabel: "Move anyway",
-            cancelLabel: "Cancel",
-            okDanger: true,
-          },
-        );
-        if (!runIsCurrent(runGeneration)) return;
-        if (!proceed) return;
-        try {
-          localStorage.setItem(MOVE_UNVERSIONED_WARNING_KEY, "1");
-        } catch {
-          // best effort
-        }
-        if (sourceChanged()) {
-          setStatus(
-            "Move cancelled because connection or selection changed.",
-            5000,
-          );
-          closeFn();
-          return;
-        }
-      }
     }
     const action = move ? "move" : "copy";
     operationInFlight = true;

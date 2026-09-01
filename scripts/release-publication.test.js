@@ -8,21 +8,29 @@ import test from "node:test";
 import {
   BETA_CHANNEL_ROLLOVER_NAME,
   BETA_CHANNEL_ROLLOVER_SIGNATURE_NAME,
+  LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+  LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+  LEGACY_UNSIGNED_BETA_POINTER_NAMES,
   STABLE_ROLLOVER_RECEIPT_NAME,
   STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
   createBetaChannelRollover,
+  createBetaChannelTransaction,
   createStableRolloverReceipt,
   permanentBetaChannelAssetNames,
 } from "./release-channel.js";
 import {
   abortStableRolloverDraft,
+  bootstrapLegacyLatestCarrier,
   clearStableRolloverReceiptOwnership,
+  createLegacyStableCarrierDescriptor,
   deleteOwnedStableDraftChannelAssets,
   loadStableRolloverReceiptOwnership,
   persistStableRolloverReceiptOwnership,
+  resolveRemotePublicationOwnerEvidence,
   runPublication,
   settlePublishedStableRolloverReceipt,
   uploadStableDraftChannelAsset,
+  verifyLegacyStableCarrierAssetSet,
 } from "./release-publication.js";
 
 const successorDescriptorSha256 = "c".repeat(64);
@@ -235,6 +243,819 @@ function publicationOrchestrationFixture({
   };
 }
 
+function legacyBootstrapFixture() {
+  const predecessorCommit = "cabdce4f9466c3a7dd1123b8a4403e97e27f16c4";
+  const descriptorSha256 = "7".repeat(64);
+  const descriptor = {
+    schemaVersion: 2,
+    repository: { owner: "BurntToasters", name: "S3-Sidekick" },
+    expectedTargets: [
+      "darwin-aarch64",
+      "darwin-x86_64",
+      "linux-aarch64",
+      "linux-x86_64",
+      "windows-aarch64",
+      "windows-x86_64",
+    ],
+    release: {
+      id: 400,
+      prerelease: true,
+      signingKeyFingerprint: "A".repeat(40),
+      tag: "v0.11.0-beta.5",
+      version: "0.11.0-beta.5",
+    },
+    source: {
+      commit: "9a4420b26c3279ae5c7d11ce56164032b423fe32",
+      committedAt: "2026-08-29T12:00:00.000Z",
+    },
+    legacyLatestBootstrap: {
+      schemaVersion: 1,
+      releaseId: 354185192,
+      tag: "v0.10.2",
+      sourceCommit: predecessorCommit,
+    },
+  };
+  const publicationOwner = {
+    schemaVersion: 1,
+    descriptorSha256,
+    releaseId: descriptor.release.id,
+    sessionId: "723e4567-e89b-42d3-a456-426614174000",
+    sourceCommit: descriptor.source.commit,
+  };
+  const latest = {
+    id: descriptor.legacyLatestBootstrap.releaseId,
+    draft: false,
+    prerelease: false,
+    tag_name: descriptor.legacyLatestBootstrap.tag,
+    target_commitish: "main",
+  };
+  const assets = new Map();
+  const addAsset = (name, bytes, id = 100 + assets.size) => {
+    const value = Buffer.from(bytes);
+    const asset = {
+      id,
+      name,
+      digest: `sha256:${sha256(value)}`,
+      bytes: value,
+    };
+    assets.set(name, asset);
+    return asset;
+  };
+  addAsset("S3-Sidekick_0.10.2_x64_en-US.msi", "legacy msi", 101);
+  addAsset("S3-Sidekick_0.10.2_x64-setup.exe", "legacy exe", 102);
+  LEGACY_UNSIGNED_BETA_POINTER_NAMES.forEach((name, index) =>
+    addAsset(name, `unsigned legacy pointer:${name}`, 110 + index),
+  );
+  const state = {
+    deletions: [],
+    latestCalls: 0,
+    tagCalls: 0,
+    uploads: [],
+    verifyCalls: 0,
+  };
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-bootstrap-test-"),
+  );
+  const services = {
+    createPrivateDirectory: () => directory,
+    deleteAsset: async (assetId) => {
+      const current = Array.from(assets.values()).find(
+        (asset) => asset.id === assetId,
+      );
+      assert.ok(current, `missing bootstrap delete id ${assetId}`);
+      state.deletions.push(current.name);
+      assets.delete(current.name);
+    },
+    downloadAssets: async (downloadedAssets, destination) => {
+      for (const asset of downloadedAssets) {
+        const current = assets.get(asset.name);
+        assert.ok(current);
+        fs.writeFileSync(path.join(destination, asset.name), current.bytes);
+      }
+    },
+    listAssets: async (releaseId) => {
+      assert.equal(releaseId, latest.id);
+      return Array.from(
+        assets.values(),
+        ({ bytes: _bytes, ...asset }) => asset,
+      );
+    },
+    removeDirectory: () => {},
+    request: async (_method, endpoint) => {
+      if (endpoint.endsWith("/releases/latest")) {
+        state.latestCalls += 1;
+        return latest;
+      }
+      if (endpoint.endsWith(`/releases/${latest.id}`)) {
+        return latest;
+      }
+      if (endpoint.includes("/git/ref/tags/")) {
+        state.tagCalls += 1;
+        return { object: { type: "commit", sha: predecessorCommit } };
+      }
+      throw new Error(`Unexpected bootstrap endpoint ${endpoint}.`);
+    },
+    signFile: (filePath, signaturePath) => {
+      fs.writeFileSync(
+        signaturePath,
+        `signed:${path.basename(filePath)}:${sha256(fs.readFileSync(filePath))}\n`,
+      );
+    },
+    uploadAsset: async (releaseId, filePath) => {
+      assert.equal(releaseId, latest.id);
+      const name = path.basename(filePath);
+      state.uploads.push(name);
+      addAsset(name, fs.readFileSync(filePath), 200 + assets.size);
+    },
+    verifyCarrier: async () => {
+      state.verifyCalls += 1;
+      const carrierDescriptor = JSON.parse(
+        assets.get("release-descriptor.json").bytes.toString("utf8"),
+      );
+      const permanentStateComplete = permanentBetaChannelAssetNames(
+        carrierDescriptor.expectedTargets,
+      ).every((name) => assets.has(name));
+      if (!permanentStateComplete) {
+        assert.equal(
+          LEGACY_UNSIGNED_BETA_POINTER_NAMES.some((name) => assets.has(name)),
+          false,
+        );
+      }
+      assert.equal(assets.has(LEGACY_BETA_CHANNEL_MIGRATION_NAME), true);
+      assert.equal(
+        assets.has(LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME),
+        true,
+      );
+      return {
+        carrier: latest,
+        carrierDescriptor,
+        dispose() {},
+      };
+    },
+    verifySignature: () => true,
+  };
+  return {
+    assets,
+    descriptor,
+    descriptorSha256,
+    directory,
+    latest,
+    predecessorCommit,
+    publicationOwner,
+    services,
+    state,
+  };
+}
+
+function disposeLegacyBootstrapFixture(fixture) {
+  fs.rmSync(fixture.directory, { force: true, recursive: true });
+}
+
+test("legacy Latest bootstrap creates an exact signed delete-to-empty carrier", async () => {
+  const fixture = legacyBootstrapFixture();
+  try {
+    const verified = await bootstrapLegacyLatestCarrier(
+      fixture.descriptor,
+      fixture.publicationOwner,
+      fixture.services,
+    );
+    assert.equal(verified.carrier, fixture.latest);
+    assert.deepEqual(fixture.state.uploads, [
+      "release-descriptor.json",
+      "release-descriptor.json.asc",
+      "release-assets.json",
+      "release-assets.json.asc",
+      LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+      LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+    ]);
+    assert.deepEqual(
+      fixture.state.deletions,
+      LEGACY_UNSIGNED_BETA_POINTER_NAMES,
+    );
+    assert.equal(fixture.state.verifyCalls, 1);
+    const carrierDescriptor = JSON.parse(
+      fixture.assets.get("release-descriptor.json").bytes,
+    );
+    assert.deepEqual(carrierDescriptor, {
+      schemaVersion: 1,
+      descriptorType: "legacy-stable-carrier-bootstrap",
+      repository: fixture.descriptor.repository,
+      release: {
+        channel: "stable",
+        id: fixture.latest.id,
+        prerelease: false,
+        signingKeyFingerprint: fixture.descriptor.release.signingKeyFingerprint,
+        tag: "v0.10.2",
+        version: "0.10.2",
+      },
+      source: { commit: fixture.predecessorCommit },
+      expectedTargets: fixture.descriptor.expectedTargets,
+      authorization: {
+        prereleaseDescriptorSha256: fixture.descriptorSha256,
+      },
+    });
+    const index = JSON.parse(fixture.assets.get("release-assets.json").bytes);
+    const migration = JSON.parse(
+      fixture.assets.get(LEGACY_BETA_CHANNEL_MIGRATION_NAME).bytes,
+    );
+    assert.equal(migration.desiredState, "empty");
+    assert.deepEqual(
+      migration.legacyPointers.map(({ id, name }) => ({ id, name })),
+      LEGACY_UNSIGNED_BETA_POINTER_NAMES.map((name, index) => ({
+        id: 110 + index,
+        name,
+      })),
+    );
+    assert.deepEqual(
+      migration.baseAssets.map((record) => record.name),
+      ["S3-Sidekick_0.10.2_x64_en-US.msi", "S3-Sidekick_0.10.2_x64-setup.exe"],
+    );
+    assert.deepEqual(
+      index.assets.map((record) => record.name),
+      [
+        "S3-Sidekick_0.10.2_x64_en-US.msi",
+        "S3-Sidekick_0.10.2_x64-setup.exe",
+        "release-descriptor.json",
+        "release-descriptor.json.asc",
+      ].sort((left, right) => left.localeCompare(right)),
+    );
+    assert.equal(
+      index.assets.some((record) => record.name === "release-assets.json"),
+      false,
+    );
+    for (const asset of fixture.assets.values()) {
+      fs.writeFileSync(path.join(fixture.directory, asset.name), asset.bytes);
+    }
+    const strictVerification = verifyLegacyStableCarrierAssetSet({
+      assets: Array.from(
+        fixture.assets.values(),
+        ({ bytes: _bytes, ...asset }) => asset,
+      ),
+      descriptor: carrierDescriptor,
+      directory: fixture.directory,
+      verifySignature: () => true,
+    });
+    assert.deepEqual(
+      Array.from(strictVerification.assetsByName.keys()).sort(),
+      Array.from(fixture.assets.keys())
+        .filter(
+          (name) =>
+            name !== LEGACY_BETA_CHANNEL_MIGRATION_NAME &&
+            name !== LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+        )
+        .sort(),
+    );
+    assert.equal(strictVerification.legacyMigration.desiredState, "empty");
+  } finally {
+    disposeLegacyBootstrapFixture(fixture);
+  }
+});
+
+test("legacy carrier remains retryable after permanent beta channel installation", async () => {
+  const fixture = legacyBootstrapFixture();
+  try {
+    await bootstrapLegacyLatestCarrier(
+      fixture.descriptor,
+      fixture.publicationOwner,
+      fixture.services,
+    );
+    const carrierDescriptor = JSON.parse(
+      fixture.assets.get("release-descriptor.json").bytes,
+    );
+    let nextId = 10_000;
+    for (const name of permanentBetaChannelAssetNames(
+      carrierDescriptor.expectedTargets,
+    )) {
+      const bytes = Buffer.from(`permanent:${name}\n`);
+      fixture.assets.set(name, {
+        id: nextId,
+        name,
+        digest: `sha256:${sha256(bytes)}`,
+        bytes,
+      });
+      nextId += 1;
+    }
+
+    const retryDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "s3-sidekick-bootstrap-channel-retry-"),
+    );
+    fs.rmSync(fixture.directory, { force: true, recursive: true });
+    fixture.directory = retryDirectory;
+    fixture.services.createPrivateDirectory = () => retryDirectory;
+    fixture.state.uploads.length = 0;
+    fixture.state.deletions.length = 0;
+    await bootstrapLegacyLatestCarrier(
+      fixture.descriptor,
+      fixture.publicationOwner,
+      fixture.services,
+    );
+    assert.deepEqual(fixture.state.uploads, []);
+    assert.deepEqual(fixture.state.deletions, []);
+
+    for (const asset of fixture.assets.values()) {
+      fs.writeFileSync(path.join(retryDirectory, asset.name), asset.bytes);
+    }
+    const verified = verifyLegacyStableCarrierAssetSet({
+      assets: Array.from(
+        fixture.assets.values(),
+        ({ bytes: _bytes, ...asset }) => asset,
+      ),
+      descriptor: carrierDescriptor,
+      directory: retryDirectory,
+      verifySignature: () => true,
+    });
+    assert.deepEqual(
+      Array.from(verified.channelAssetsByName.keys()).sort(),
+      [
+        LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+        LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+        ...permanentBetaChannelAssetNames(carrierDescriptor.expectedTargets),
+      ].sort(),
+    );
+    assert.equal(
+      permanentBetaChannelAssetNames(carrierDescriptor.expectedTargets).some(
+        (name) => verified.assetsByName.has(name),
+      ),
+      false,
+    );
+  } finally {
+    disposeLegacyBootstrapFixture(fixture);
+  }
+});
+
+test("strict legacy verification rejects a changed partial legacy pointer overlay", async () => {
+  const fixture = legacyBootstrapFixture();
+  try {
+    await bootstrapLegacyLatestCarrier(
+      fixture.descriptor,
+      fixture.publicationOwner,
+      fixture.services,
+    );
+    const carrierDescriptor = JSON.parse(
+      fixture.assets.get("release-descriptor.json").bytes,
+    );
+    const name = LEGACY_UNSIGNED_BETA_POINTER_NAMES[0];
+    const bytes = Buffer.from("changed partial legacy pointer\n");
+    fixture.assets.set(name, {
+      id: 10_000,
+      name,
+      digest: `sha256:${sha256(bytes)}`,
+      bytes,
+    });
+    for (const asset of fixture.assets.values()) {
+      fs.writeFileSync(path.join(fixture.directory, asset.name), asset.bytes);
+    }
+
+    assert.throws(
+      () =>
+        verifyLegacyStableCarrierAssetSet({
+          assets: Array.from(
+            fixture.assets.values(),
+            ({ bytes: _bytes, ...asset }) => asset,
+          ),
+          descriptor: carrierDescriptor,
+          directory: fixture.directory,
+          verifySignature: () => true,
+        }),
+      /legacy beta pointer changed/i,
+    );
+  } finally {
+    disposeLegacyBootstrapFixture(fixture);
+  }
+});
+
+test("legacy Latest bootstrap resumes immutable carrier controls before signing migration authority", async () => {
+  const fixture = legacyBootstrapFixture();
+  const upload = fixture.services.uploadAsset;
+  let injected = false;
+  fixture.services.uploadAsset = async (releaseId, filePath) => {
+    await upload(releaseId, filePath);
+    if (!injected && path.basename(filePath) === "release-assets.json") {
+      injected = true;
+      throw new Error("injected partial carrier upload");
+    }
+  };
+  try {
+    await assert.rejects(
+      () =>
+        bootstrapLegacyLatestCarrier(
+          fixture.descriptor,
+          fixture.publicationOwner,
+          fixture.services,
+        ),
+      /injected partial carrier upload/i,
+    );
+    assert.deepEqual(fixture.state.uploads, [
+      "release-descriptor.json",
+      "release-descriptor.json.asc",
+      "release-assets.json",
+    ]);
+    assert.equal(fixture.assets.has(LEGACY_BETA_CHANNEL_MIGRATION_NAME), false);
+    assert.deepEqual(fixture.state.deletions, []);
+
+    const freshDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "s3-sidekick-bootstrap-controls-retry-"),
+    );
+    fs.rmSync(fixture.directory, { force: true, recursive: true });
+    fixture.directory = freshDirectory;
+    fixture.services.createPrivateDirectory = () => freshDirectory;
+    fixture.services.uploadAsset = upload;
+    fixture.state.uploads.length = 0;
+    await bootstrapLegacyLatestCarrier(
+      fixture.descriptor,
+      fixture.publicationOwner,
+      fixture.services,
+    );
+    assert.deepEqual(fixture.state.uploads, [
+      "release-assets.json.asc",
+      LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+      LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+    ]);
+    assert.equal(fixture.state.verifyCalls, 1);
+  } finally {
+    disposeLegacyBootstrapFixture(fixture);
+  }
+});
+
+test("legacy beta migration resumes a matching signature singleton only before deletion", async () => {
+  const fixture = legacyBootstrapFixture();
+  const upload = fixture.services.uploadAsset;
+  let injected = false;
+  fixture.services.uploadAsset = async (releaseId, filePath) => {
+    await upload(releaseId, filePath);
+    if (
+      !injected &&
+      path.basename(filePath) === LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME
+    ) {
+      injected = true;
+      throw new Error("injected migration signature upload");
+    }
+  };
+  try {
+    await assert.rejects(
+      () =>
+        bootstrapLegacyLatestCarrier(
+          fixture.descriptor,
+          fixture.publicationOwner,
+          fixture.services,
+        ),
+      /injected migration signature upload/i,
+    );
+    assert.equal(
+      fixture.assets.has(LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME),
+      true,
+    );
+    assert.equal(fixture.assets.has(LEGACY_BETA_CHANNEL_MIGRATION_NAME), false);
+    assert.deepEqual(fixture.state.deletions, []);
+
+    const freshDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "s3-sidekick-bootstrap-journal-retry-"),
+    );
+    fs.rmSync(fixture.directory, { force: true, recursive: true });
+    fixture.directory = freshDirectory;
+    fixture.services.createPrivateDirectory = () => freshDirectory;
+    fixture.services.uploadAsset = upload;
+    fixture.state.uploads.length = 0;
+    await bootstrapLegacyLatestCarrier(
+      fixture.descriptor,
+      fixture.publicationOwner,
+      fixture.services,
+    );
+    assert.deepEqual(fixture.state.uploads, [
+      LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+    ]);
+    assert.deepEqual(
+      fixture.state.deletions,
+      LEGACY_UNSIGNED_BETA_POINTER_NAMES,
+    );
+  } finally {
+    disposeLegacyBootstrapFixture(fixture);
+  }
+});
+
+test("legacy Latest bootstrap rejects control collisions without mutation", async () => {
+  const fixture = legacyBootstrapFixture();
+  try {
+    fixture.assets.set("release-descriptor.json", {
+      id: 150,
+      name: "release-descriptor.json",
+      digest: `sha256:${"0".repeat(64)}`,
+      bytes: Buffer.from("foreign descriptor"),
+    });
+    await assert.rejects(
+      () =>
+        bootstrapLegacyLatestCarrier(
+          fixture.descriptor,
+          fixture.publicationOwner,
+          fixture.services,
+        ),
+      /control collision/i,
+    );
+    assert.deepEqual(fixture.state.uploads, []);
+    assert.equal(fixture.state.verifyCalls, 0);
+  } finally {
+    disposeLegacyBootstrapFixture(fixture);
+  }
+});
+
+test("legacy Latest bootstrap stops when Latest, tag, or the base asset snapshot changes", async (t) => {
+  await t.test("Latest changes", async () => {
+    const fixture = legacyBootstrapFixture();
+    const request = fixture.services.request;
+    fixture.services.request = async (method, endpoint) => {
+      const value = await request(method, endpoint);
+      if (
+        endpoint.endsWith("/releases/latest") &&
+        fixture.state.uploads.length > 0
+      ) {
+        return { ...value, id: value.id + 1 };
+      }
+      return value;
+    };
+    try {
+      await assert.rejects(
+        () =>
+          bootstrapLegacyLatestCarrier(
+            fixture.descriptor,
+            fixture.publicationOwner,
+            fixture.services,
+          ),
+        /release id|descriptor release id/i,
+      );
+      assert.deepEqual(fixture.state.uploads, ["release-descriptor.json"]);
+    } finally {
+      disposeLegacyBootstrapFixture(fixture);
+    }
+  });
+
+  await t.test("release by id changes", async () => {
+    const fixture = legacyBootstrapFixture();
+    const request = fixture.services.request;
+    fixture.services.request = async (method, endpoint) => {
+      const value = await request(method, endpoint);
+      if (
+        endpoint.endsWith(`/releases/${fixture.latest.id}`) &&
+        fixture.state.uploads.length > 0
+      ) {
+        return { ...value, id: value.id + 1 };
+      }
+      return value;
+    };
+    try {
+      await assert.rejects(
+        () =>
+          bootstrapLegacyLatestCarrier(
+            fixture.descriptor,
+            fixture.publicationOwner,
+            fixture.services,
+          ),
+        /release id|descriptor release id/i,
+      );
+      assert.deepEqual(fixture.state.uploads, ["release-descriptor.json"]);
+      assert.deepEqual(fixture.state.deletions, []);
+    } finally {
+      disposeLegacyBootstrapFixture(fixture);
+    }
+  });
+
+  await t.test("tag changes", async () => {
+    const fixture = legacyBootstrapFixture();
+    const request = fixture.services.request;
+    fixture.services.request = async (method, endpoint) => {
+      const value = await request(method, endpoint);
+      if (endpoint.includes("/git/ref/tags/") && fixture.state.tagCalls > 1) {
+        return { object: { type: "commit", sha: "0".repeat(40) } };
+      }
+      return value;
+    };
+    try {
+      await assert.rejects(
+        () =>
+          bootstrapLegacyLatestCarrier(
+            fixture.descriptor,
+            fixture.publicationOwner,
+            fixture.services,
+          ),
+        /not descriptor source commit/i,
+      );
+      assert.deepEqual(fixture.state.uploads, []);
+    } finally {
+      disposeLegacyBootstrapFixture(fixture);
+    }
+  });
+
+  await t.test("base asset changes", async () => {
+    const fixture = legacyBootstrapFixture();
+    const uploadAsset = fixture.services.uploadAsset;
+    fixture.services.uploadAsset = async (releaseId, filePath) => {
+      await uploadAsset(releaseId, filePath);
+      const base = fixture.assets.get("S3-Sidekick_0.10.2_x64_en-US.msi");
+      fixture.assets.set(base.name, {
+        ...base,
+        digest: `sha256:${"f".repeat(64)}`,
+      });
+    };
+    try {
+      await assert.rejects(
+        () =>
+          bootstrapLegacyLatestCarrier(
+            fixture.descriptor,
+            fixture.publicationOwner,
+            fixture.services,
+          ),
+        /base asset changed/i,
+      );
+      assert.deepEqual(fixture.state.uploads, ["release-descriptor.json"]);
+    } finally {
+      disposeLegacyBootstrapFixture(fixture);
+    }
+  });
+});
+
+test("legacy beta migration resumes monotonically after every pointer deletion from a fresh directory", async (t) => {
+  for (
+    let failureIndex = 0;
+    failureIndex < LEGACY_UNSIGNED_BETA_POINTER_NAMES.length;
+    failureIndex += 1
+  ) {
+    await t.test(`after deletion ${failureIndex + 1}`, async () => {
+      const fixture = legacyBootstrapFixture();
+      const originalDelete = fixture.services.deleteAsset;
+      let injected = false;
+      fixture.services.deleteAsset = async (assetId) => {
+        await originalDelete(assetId);
+        if (!injected && fixture.state.deletions.length === failureIndex + 1) {
+          injected = true;
+          throw new Error(`injected deletion ${failureIndex + 1}`);
+        }
+      };
+      try {
+        await assert.rejects(
+          () =>
+            bootstrapLegacyLatestCarrier(
+              fixture.descriptor,
+              fixture.publicationOwner,
+              fixture.services,
+            ),
+          new RegExp(`injected deletion ${failureIndex + 1}`),
+        );
+        assert.equal(
+          fixture.assets.has(LEGACY_BETA_CHANNEL_MIGRATION_NAME),
+          true,
+        );
+        assert.equal(
+          fixture.assets.has(LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME),
+          true,
+        );
+        for (let index = 0; index <= failureIndex; index += 1) {
+          assert.equal(
+            fixture.assets.has(LEGACY_UNSIGNED_BETA_POINTER_NAMES[index]),
+            false,
+          );
+        }
+
+        const freshDirectory = fs.mkdtempSync(
+          path.join(os.tmpdir(), "s3-sidekick-bootstrap-retry-test-"),
+        );
+        fs.rmSync(fixture.directory, { force: true, recursive: true });
+        fixture.directory = freshDirectory;
+        fixture.services.createPrivateDirectory = () => freshDirectory;
+        fixture.services.deleteAsset = originalDelete;
+        await bootstrapLegacyLatestCarrier(
+          fixture.descriptor,
+          fixture.publicationOwner,
+          fixture.services,
+        );
+        assert.equal(
+          LEGACY_UNSIGNED_BETA_POINTER_NAMES.some((name) =>
+            fixture.assets.has(name),
+          ),
+          false,
+        );
+        assert.equal(
+          fixture.assets.has(LEGACY_BETA_CHANNEL_MIGRATION_NAME),
+          true,
+        );
+      } finally {
+        disposeLegacyBootstrapFixture(fixture);
+      }
+    });
+  }
+});
+
+test("legacy beta migration fails closed on pointer races and unauthorized overlays", async (t) => {
+  for (const changedField of ["id", "digest"]) {
+    await t.test(`pointer ${changedField} race`, async () => {
+      const fixture = legacyBootstrapFixture();
+      const upload = fixture.services.uploadAsset;
+      fixture.services.uploadAsset = async (releaseId, filePath) => {
+        await upload(releaseId, filePath);
+        if (path.basename(filePath) === LEGACY_BETA_CHANNEL_MIGRATION_NAME) {
+          const name = LEGACY_UNSIGNED_BETA_POINTER_NAMES[0];
+          const pointer = fixture.assets.get(name);
+          fixture.assets.set(name, {
+            ...pointer,
+            ...(changedField === "id"
+              ? { id: pointer.id + 1000 }
+              : { digest: `sha256:${"0".repeat(64)}` }),
+          });
+        }
+      };
+      try {
+        await assert.rejects(
+          () =>
+            bootstrapLegacyLatestCarrier(
+              fixture.descriptor,
+              fixture.publicationOwner,
+              fixture.services,
+            ),
+          /legacy beta pointer changed/i,
+        );
+        assert.deepEqual(fixture.state.deletions, []);
+      } finally {
+        disposeLegacyBootstrapFixture(fixture);
+      }
+    });
+  }
+
+  await t.test("missing pre-journal pointer", async () => {
+    const fixture = legacyBootstrapFixture();
+    fixture.assets.delete(LEGACY_UNSIGNED_BETA_POINTER_NAMES[0]);
+    try {
+      await assert.rejects(
+        () =>
+          bootstrapLegacyLatestCarrier(
+            fixture.descriptor,
+            fixture.publicationOwner,
+            fixture.services,
+          ),
+        /exact authorized five-pointer snapshot/i,
+      );
+      assert.deepEqual(fixture.state.uploads, []);
+      assert.deepEqual(fixture.state.deletions, []);
+    } finally {
+      disposeLegacyBootstrapFixture(fixture);
+    }
+  });
+
+  for (const unexpectedName of [
+    "latest-linux-beta-aarch64.json",
+    "latest-linux-beta-x86.json",
+  ]) {
+    await t.test(`unexpected ${unexpectedName}`, async () => {
+      const fixture = legacyBootstrapFixture();
+      fixture.assets.set(unexpectedName, {
+        id: 999,
+        name: unexpectedName,
+        digest: `sha256:${"9".repeat(64)}`,
+        bytes: Buffer.from("unexpected pointer"),
+      });
+      try {
+        await assert.rejects(
+          () =>
+            bootstrapLegacyLatestCarrier(
+              fixture.descriptor,
+              fixture.publicationOwner,
+              fixture.services,
+            ),
+          /unexpected channel assets/i,
+        );
+        assert.deepEqual(fixture.state.uploads, []);
+        assert.deepEqual(fixture.state.deletions, []);
+      } finally {
+        disposeLegacyBootstrapFixture(fixture);
+      }
+    });
+  }
+});
+
+test("legacy carrier descriptor creation is prerelease-only and requires explicit authorization", () => {
+  const fixture = legacyBootstrapFixture();
+  try {
+    assert.throws(
+      () =>
+        createLegacyStableCarrierDescriptor(
+          {
+            ...fixture.descriptor,
+            release: { ...fixture.descriptor.release, prerelease: false },
+          },
+          fixture.descriptorSha256,
+        ),
+      /only a prerelease descriptor/i,
+    );
+    assert.throws(
+      () =>
+        createLegacyStableCarrierDescriptor(
+          { ...fixture.descriptor, legacyLatestBootstrap: undefined },
+          fixture.descriptorSha256,
+        ),
+      /no legacy Latest bootstrap authorization/i,
+    );
+  } finally {
+    disposeLegacyBootstrapFixture(fixture);
+  }
+});
+
 test("prerelease publication behavior preflights stable Latest, publishes non-Latest, verifies, then promotes", async () => {
   const fixture = publicationOrchestrationFixture({ prerelease: true });
   const result = await runPublication(
@@ -266,6 +1087,133 @@ test("prerelease publication behavior preflights stable Latest, publishes non-La
     "recheck-frozen",
     "assert-existing-tag",
     "patch",
+    "assert-published-tag",
+    "wait-public",
+    "promote",
+    "remove:/virtual/public",
+  ]);
+});
+
+test("signed prerelease bootstrap authorization replaces the normal Latest preflight", async () => {
+  const fixture = publicationOrchestrationFixture({ prerelease: true });
+  fixture.descriptor.legacyLatestBootstrap = {
+    schemaVersion: 1,
+    releaseId: 354185192,
+    tag: "v0.10.2",
+    sourceCommit: "c".repeat(40),
+  };
+  fixture.services.bootstrapLegacyCarrier = async (
+    descriptor,
+    publicationOwner,
+  ) => {
+    assert.equal(descriptor, fixture.descriptor);
+    assert.equal(publicationOwner, fixture.publicationOwner);
+    fixture.events.push("bootstrap-legacy-carrier");
+    return fixture.preflightContext;
+  };
+  fixture.services.verifyLatestCarrier = async () => {
+    throw new Error("normal preflight must not run");
+  };
+  await runPublication(
+    fixture.descriptor,
+    fixture.publicationOwner,
+    fixture.services,
+  );
+  assert.deepEqual(fixture.events, [
+    "get-release",
+    "list-assets",
+    "create-private",
+    "download",
+    "verify-downloaded",
+    "freeze",
+    "remove:/virtual/private",
+    "recheck-frozen",
+    "assert-existing-tag",
+    "bootstrap-legacy-carrier",
+    "preflight:dispose",
+    "recheck-frozen",
+    "patch",
+    "assert-published-tag",
+    "wait-public",
+    "promote",
+    "remove:/virtual/public",
+  ]);
+});
+
+test("legacy bootstrap never mutates the carrier before candidate readiness", async (t) => {
+  for (const stage of ["verifyDownloaded", "freezeAssets"]) {
+    await t.test(`${stage} failure`, async () => {
+      const fixture = publicationOrchestrationFixture({ prerelease: true });
+      fixture.descriptor.legacyLatestBootstrap = {
+        schemaVersion: 1,
+        releaseId: 354185192,
+        tag: "v0.10.2",
+        sourceCommit: "c".repeat(40),
+      };
+      let bootstrapCalls = 0;
+      fixture.services.bootstrapLegacyCarrier = async () => {
+        bootstrapCalls += 1;
+        fixture.events.push("bootstrap-legacy-carrier");
+        return fixture.preflightContext;
+      };
+      fixture.services.verifyLatestCarrier = async () => {
+        throw new Error("normal preflight must not run");
+      };
+      const original = fixture.services[stage];
+      fixture.services[stage] = async (...args) => {
+        await original(...args);
+        throw new Error(`injected ${stage} failure`);
+      };
+
+      await assert.rejects(
+        () =>
+          runPublication(
+            fixture.descriptor,
+            fixture.publicationOwner,
+            fixture.services,
+          ),
+        new RegExp(`injected ${stage} failure`),
+      );
+      assert.equal(bootstrapCalls, 0);
+      assert.equal(fixture.events.includes("bootstrap-legacy-carrier"), false);
+      assert.equal(fixture.events.at(-1), "remove:/virtual/private");
+      for (const forbidden of [
+        "patch",
+        "assert-published-tag",
+        "wait-public",
+        "promote",
+      ]) {
+        assert.equal(fixture.events.includes(forbidden), false);
+      }
+    });
+  }
+});
+
+test("published authorized prerelease retries never bootstrap the legacy carrier", async () => {
+  const fixture = publicationOrchestrationFixture({
+    draft: false,
+    prerelease: true,
+  });
+  fixture.descriptor.legacyLatestBootstrap = {
+    schemaVersion: 1,
+    releaseId: 354185192,
+    tag: "v0.10.2",
+    sourceCommit: "c".repeat(40),
+  };
+  fixture.services.bootstrapLegacyCarrier = async () => {
+    throw new Error("published retry must not bootstrap");
+  };
+  fixture.services.verifyLatestCarrier = async () => {
+    throw new Error("published retry must not preflight Latest");
+  };
+
+  await runPublication(
+    fixture.descriptor,
+    fixture.publicationOwner,
+    fixture.services,
+  );
+  assert.deepEqual(fixture.events, [
+    "get-release",
     "assert-published-tag",
     "wait-public",
     "promote",
@@ -628,7 +1576,172 @@ function settlementServices(fixture, context, events) {
   };
 }
 
-test("published stable retries settle full, partial, and already-removed predecessor leases before deleting the receipt", async (t) => {
+test("remote takeover evidence accepts only complete signed controls bound to the descriptor", async (t) => {
+  await t.test("beta transaction owner", async () => {
+    const descriptorSha256 = "c".repeat(64);
+    const descriptor = {
+      expectedTargets: ["linux-x86_64"],
+      release: {
+        id: 84,
+        prerelease: true,
+        tag: "v1.2.4-beta.1",
+        version: "1.2.4-beta.1",
+      },
+      source: { commit: "d".repeat(40) },
+    };
+    const owner = {
+      schemaVersion: 1,
+      descriptorSha256,
+      releaseId: descriptor.release.id,
+      sessionId: "123e4567-e89b-42d3-a456-426614174000",
+      sourceCommit: descriptor.source.commit,
+    };
+    const carrier = { id: 42, tag_name: "v1.2.3" };
+    const names = permanentBetaChannelAssetNames(descriptor.expectedTargets);
+    const desired = new Map(
+      names.map((name, index) => [name, String(index + 1).repeat(64)]),
+    );
+    const transaction = createBetaChannelTransaction({
+      carrier,
+      carrierDescriptorSha256: "a".repeat(64),
+      desiredRecords: desired,
+      owner,
+      previousRecords: new Map(),
+      productIndexSha256: "b".repeat(64),
+      sourceCommit: descriptor.source.commit,
+      sourceDescriptorSha256: descriptorSha256,
+      sourceReleaseId: descriptor.release.id,
+      sourceTag: descriptor.release.tag,
+      sourceVersion: descriptor.release.version,
+    });
+    const transactionAssets = new Map([
+      [
+        "beta-channel-transaction.json",
+        {
+          id: 700,
+          name: "beta-channel-transaction.json",
+          digest: `sha256:${"7".repeat(64)}`,
+        },
+      ],
+      [
+        "beta-channel-transaction.json.asc",
+        {
+          id: 701,
+          name: "beta-channel-transaction.json.asc",
+          digest: `sha256:${"8".repeat(64)}`,
+        },
+      ],
+    ]);
+    let disposed = 0;
+    const context = {
+      carrier,
+      carrierDescriptor: {
+        expectedTargets: descriptor.expectedTargets,
+      },
+      carrierDescriptorSha256: "a".repeat(64),
+      productIndexSha256: "b".repeat(64),
+      transaction,
+      transactionAssets,
+      dispose() {
+        disposed += 1;
+      },
+    };
+    const release = {
+      id: descriptor.release.id,
+      draft: false,
+      prerelease: true,
+      tag_name: descriptor.release.tag,
+      target_commitish: descriptor.source.commit,
+    };
+    const resolved = await resolveRemotePublicationOwnerEvidence(
+      descriptor,
+      descriptorSha256,
+      {
+        getRelease: async () => release,
+        listReleaseAssets: async () => [],
+        verifyCarrier: async () => context,
+      },
+    );
+    assert.deepEqual(resolved.owner, owner);
+    assert.equal(resolved.evidence[0].kind, "beta-transaction");
+    assert.equal(disposed, 1);
+
+    await assert.rejects(
+      () =>
+        resolveRemotePublicationOwnerEvidence(descriptor, descriptorSha256, {
+          getRelease: async () => release,
+          listReleaseAssets: async () => [],
+          verifyCarrier: async () => ({
+            ...context,
+            incompleteControl: {
+              expectedAsset: transactionAssets.values().next().value,
+              kind: "transaction",
+            },
+            transaction: null,
+            transactionAssets: new Map([
+              transactionAssets.entries().next().value,
+            ]),
+          }),
+        }),
+      /no complete signed remote owner evidence/i,
+    );
+  });
+
+  await t.test(
+    "matching stable lease and permanent receipt owner",
+    async () => {
+      const fixture = rolloverFixture();
+      const context = predecessorContext(fixture, "full");
+      context.carrierDescriptor = fixture.carrierDescriptor;
+      const resolved = await resolveRemotePublicationOwnerEvidence(
+        fixture.successorDescriptor,
+        successorDescriptorSha256,
+        {
+          getRelease: async () => fixture.latest,
+          listReleaseAssets: async () => fixture.successorAssets,
+          loadReceipt: async () => ({
+            assets: fixture.receiptAssets,
+            receipt: fixture.receipt,
+          }),
+          verifyCarrier: async () => context,
+        },
+      );
+      assert.deepEqual(resolved.owner, fixture.receipt.owner);
+      assert.deepEqual(
+        resolved.evidence.map(({ kind }) => kind),
+        ["stable-receipt", "stable-rollover"],
+      );
+
+      const conflictingReceipt = structuredClone(fixture.receipt);
+      conflictingReceipt.owner.sessionId =
+        "223e4567-e89b-42d3-a456-426614174000";
+      await assert.rejects(
+        () =>
+          resolveRemotePublicationOwnerEvidence(
+            fixture.successorDescriptor,
+            successorDescriptorSha256,
+            {
+              getRelease: async () => fixture.latest,
+              listReleaseAssets: async () => fixture.successorAssets,
+              loadReceipt: async () => ({
+                assets: fixture.receiptAssets,
+                receipt: conflictingReceipt,
+              }),
+              verifyCarrier: async () => {
+                const conflictingContext = predecessorContext(fixture, "full");
+                conflictingContext.carrierDescriptor =
+                  fixture.carrierDescriptor;
+                return conflictingContext;
+              },
+            },
+          ),
+        /conflicting owners/i,
+      );
+    },
+  );
+});
+
+test("published stable retries settle full, partial, and already-removed predecessor leases while retaining the receipt", async (t) => {
   for (const state of ["full", "partial", "absent"]) {
     await t.test(state, async () => {
       const fixture = rolloverFixture();
@@ -640,9 +1753,9 @@ test("published stable retries settle full, partial, and already-removed predece
           fixture.successorDescriptor,
           settlementServices(fixture, context, events),
         ),
-        "cleaned",
+        "settled",
       );
-      assert.deepEqual(events, ["predecessor", "receipt"]);
+      assert.deepEqual(events, ["predecessor"]);
     });
   }
 });
@@ -672,100 +1785,46 @@ test("published stable retry refuses changed predecessor lease identity", async 
   }
 });
 
-test("published stable retry handles only protocol-reachable receipt singleton states", async () => {
+test("published stable retry rejects every receipt singleton and never deletes permanent history", async () => {
   const fixture = rolloverFixture();
   const indexAsset = fixture.successorAssets[0];
-  const signatureAsset = fixture.receiptAssets.get(
-    STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
-  );
-  const singletonEvents = [];
+  for (const singleton of fixture.receiptAssets.values()) {
+    await assert.rejects(
+      () =>
+        settlePublishedStableRolloverReceipt(
+          fixture.latest,
+          fixture.successorDescriptor,
+          {
+            clearReceiptOwnership: async () =>
+              assert.fail("singleton cleared local ownership"),
+            deleteSuccessorReceipt: async () =>
+              assert.fail("permanent receipt singleton was deleted"),
+            getLatestRelease: async () => fixture.latest,
+            listReleaseAssets: async () => [indexAsset, singleton],
+            successorDescriptorSha256,
+          },
+        ),
+      /signature pair is incomplete.*cannot be repaired/i,
+    );
+  }
+
+  let cleared = false;
   assert.equal(
     await settlePublishedStableRolloverReceipt(
       fixture.latest,
       fixture.successorDescriptor,
       {
-        deleteSuccessorReceipt: async (
-          release,
-          descriptor,
-          assets,
-          options,
-        ) => {
-          assert.equal(release, fixture.latest);
-          assert.equal(descriptor, fixture.successorDescriptor);
-          assert.deepEqual(
-            assets,
-            new Map([[STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME, signatureAsset]]),
-          );
-          assert.deepEqual(options, { requireDraft: false });
-          singletonEvents.push("signature");
+        clearReceiptOwnership: async () => {
+          cleared = true;
         },
-        clearReceiptOwnership: async () => {},
-        getLatestRelease: async () => fixture.latest,
-        listReleaseAssets: async () => [indexAsset, signatureAsset],
-        loadReceiptOwnership: async () => ({
-          assets: fixture.receiptAssets,
-          owner: fixture.receipt.owner,
-        }),
-        successorDescriptorSha256,
-      },
-    ),
-    "cleaned-receipt",
-  );
-  assert.deepEqual(singletonEvents, ["signature"]);
-
-  const replacedSignature = {
-    ...signatureAsset,
-    id: signatureAsset.id + 1,
-    digest: `sha256:${"0".repeat(64)}`,
-  };
-  await assert.rejects(
-    () =>
-      settlePublishedStableRolloverReceipt(
-        fixture.latest,
-        fixture.successorDescriptor,
-        {
-          deleteSuccessorReceipt: async () =>
-            assert.fail("replaced receipt signature was deleted"),
-          getLatestRelease: async () => fixture.latest,
-          listReleaseAssets: async () => [indexAsset, replacedSignature],
-          loadReceiptOwnership: async () => ({
-            assets: fixture.receiptAssets,
-            owner: fixture.receipt.owner,
-          }),
-          successorDescriptorSha256,
-        },
-      ),
-    /signature singleton is not owned/i,
-  );
-
-  const jsonAsset = fixture.receiptAssets.get(STABLE_ROLLOVER_RECEIPT_NAME);
-  await assert.rejects(
-    () =>
-      settlePublishedStableRolloverReceipt(
-        fixture.latest,
-        fixture.successorDescriptor,
-        {
-          getLatestRelease: async () => fixture.latest,
-          listReleaseAssets: async () => [indexAsset, jsonAsset],
-          loadReceiptOwnership: async () => null,
-          successorDescriptorSha256,
-        },
-      ),
-    /missing its signature/i,
-  );
-  assert.equal(
-    await settlePublishedStableRolloverReceipt(
-      fixture.latest,
-      fixture.successorDescriptor,
-      {
         getLatestRelease: async () => fixture.latest,
         listReleaseAssets: async () => [indexAsset],
-        loadReceiptOwnership: async () => null,
         successorDescriptorSha256,
       },
     ),
     "none",
   );
+  assert.equal(cleared, true);
 });
 test("stable draft abort removes exact carried assets before receipt and lease release", async () => {
   const fixture = rolloverFixture();
@@ -1062,4 +2121,151 @@ test("receipt ownership state persists exact asset identity per descriptor and r
   } finally {
     fs.rmSync(stateDirectory, { recursive: true, force: true });
   }
+});
+
+function canonicalFixtureJson(value) {
+  const sort = (current) => {
+    if (Array.isArray(current)) return current.map(sort);
+    if (!current || typeof current !== "object") return current;
+    return Object.fromEntries(
+      Object.keys(current)
+        .sort()
+        .map((key) => [key, sort(current[key])]),
+    );
+  };
+  return `${JSON.stringify(sort(value), null, 2)}\n`;
+}
+
+test("anonymous stable-channel verification authenticates retained receipt history while rejecting live controls", async () => {
+  const { verifyPublishedStableChannel } =
+    await import("./release-publication.js");
+  const fixture = rolloverFixture();
+  const descriptor = structuredClone(fixture.successorDescriptor);
+  descriptor.release.signingKeyFingerprint = "A".repeat(40);
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-public-stable-channel-"),
+  );
+  try {
+    const receiptPath = path.join(directory, STABLE_ROLLOVER_RECEIPT_NAME);
+    const signaturePath = path.join(
+      directory,
+      STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
+    );
+    fs.writeFileSync(receiptPath, canonicalFixtureJson(fixture.receipt));
+    fs.writeFileSync(signaturePath, "signed receipt");
+    let signatureChecks = 0;
+    const verified = verifyPublishedStableChannel({
+      carrier: fixture.latest,
+      carrierDescriptor: descriptor,
+      carrierDescriptorSha256: successorDescriptorSha256,
+      channelAssetsByName: new Map(fixture.receiptAssets),
+      digestByName: new Map(),
+      directory,
+      productIndexSha256: successorProductIndexSha256,
+      verifySignature: (actualReceipt, actualSignature, fingerprint) => {
+        assert.equal(actualReceipt, receiptPath);
+        assert.equal(actualSignature, signaturePath);
+        assert.equal(fingerprint, descriptor.release.signingKeyFingerprint);
+        signatureChecks += 1;
+      },
+    });
+    assert.equal(signatureChecks, 1);
+    assert.equal(verified.channelState, null);
+    assert.deepEqual(verified.stableReceipt, fixture.receipt);
+
+    const singleton = new Map(fixture.receiptAssets);
+    singleton.delete(STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME);
+    assert.throws(
+      () =>
+        verifyPublishedStableChannel({
+          carrier: fixture.latest,
+          carrierDescriptor: descriptor,
+          carrierDescriptorSha256: successorDescriptorSha256,
+          channelAssetsByName: singleton,
+          digestByName: new Map(),
+          directory,
+          productIndexSha256: successorProductIndexSha256,
+          verifySignature: () => true,
+        }),
+      /receipt signature pair is incomplete/i,
+    );
+
+    const operational = new Map(fixture.receiptAssets);
+    operational.set("beta-channel-transaction.json", {
+      id: 999,
+      name: "beta-channel-transaction.json",
+      digest: `sha256:${"0".repeat(64)}`,
+    });
+    assert.throws(
+      () =>
+        verifyPublishedStableChannel({
+          carrier: fixture.latest,
+          carrierDescriptor: descriptor,
+          carrierDescriptorSha256: successorDescriptorSha256,
+          channelAssetsByName: operational,
+          digestByName: new Map(),
+          directory,
+          productIndexSha256: successorProductIndexSha256,
+          verifySignature: () => true,
+        }),
+      /unfinished channel control assets/i,
+    );
+
+    const foreignMigration = new Map([
+      [
+        LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+        {
+          id: 1000,
+          name: LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+          digest: `sha256:${"1".repeat(64)}`,
+        },
+      ],
+      [
+        LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+        {
+          id: 1001,
+          name: LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+          digest: `sha256:${"2".repeat(64)}`,
+        },
+      ],
+    ]);
+    assert.throws(
+      () =>
+        verifyPublishedStableChannel({
+          carrier: fixture.latest,
+          carrierDescriptor: descriptor,
+          carrierDescriptorSha256: successorDescriptorSha256,
+          channelAssetsByName: foreignMigration,
+          digestByName: new Map(),
+          directory,
+          productIndexSha256: successorProductIndexSha256,
+          verifySignature: () => true,
+        }),
+      /valid only on their signed legacy stable carrier/i,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("retained receipt history does not block the next stable rollover acquisition", async () => {
+  const { assertRolloverAcquisitionState } =
+    await import("./release-publication.js");
+  const fixture = rolloverFixture();
+  const retainedAssets = new Map(fixture.receiptAssets);
+  let carrierChecks = 0;
+  const channelAssets = await assertRolloverAcquisitionState(
+    {
+      assertCarrier: async (assets) => {
+        assert.deepEqual(assets, Array.from(retainedAssets.values()));
+        carrierChecks += 1;
+      },
+      carrierDescriptor: fixture.successorDescriptor,
+      verification: { channelAssetsByName: retainedAssets },
+    },
+    Array.from(retainedAssets.values()),
+    new Map(),
+  );
+  assert.equal(carrierChecks, 1);
+  assert.deepEqual(channelAssets, retainedAssets);
 });

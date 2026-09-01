@@ -68,6 +68,70 @@ function canonicalMacosArtifactName(name) {
   return null;
 }
 
+// Final package ownership is deliberately stricter than updater eligibility.
+// Only canonical staged package names are classified; updater payloads,
+// signatures, evidence, and malformed package-looking names fail closed.
+function finalPackageTargetKeysForArtifactName(name) {
+  const baseName = String(name || "");
+  if (
+    !baseName ||
+    baseName.trim() !== baseName ||
+    path.basename(baseName) !== baseName ||
+    /[\\/]/.test(baseName)
+  ) {
+    return [];
+  }
+
+  if (
+    /^(?:S3-Sidekick-macOS\.app\.tar\.gz|S3-Sidekick-macOS\.(?:dmg|zip))$/.test(
+      baseName,
+    )
+  ) {
+    return ["darwin-aarch64", "darwin-x86_64"];
+  }
+
+  const linux = baseName.match(
+    /^S3-Sidekick-Linux-(x64|arm64)\.(?:AppImage|deb|rpm|flatpak)$/,
+  );
+  if (linux) {
+    return [`linux-${linux[1] === "arm64" ? "aarch64" : "x86_64"}`];
+  }
+
+  const windows = baseName.match(
+    /^S3-Sidekick-Windows-(x64|arm64)\.(?:exe|msi)$/,
+  );
+  if (windows) {
+    return [`windows-${windows[1] === "arm64" ? "aarch64" : "x86_64"}`];
+  }
+
+  return [];
+}
+
+function requiredFinalPackageNamesForTarget(target) {
+  if (/^darwin-(?:aarch64|x86_64)$/.test(target)) {
+    return [
+      "S3-Sidekick-macOS.app.tar.gz",
+      "S3-Sidekick-macOS.dmg",
+      "S3-Sidekick-macOS.zip",
+    ];
+  }
+  const linux = String(target || "").match(/^linux-(aarch64|x86_64)$/);
+  if (linux) {
+    const architecture = linux[1] === "aarch64" ? "arm64" : "x64";
+    return ["AppImage", "deb", "flatpak", "rpm"].map(
+      (extension) => `S3-Sidekick-Linux-${architecture}.${extension}`,
+    );
+  }
+  const windows = String(target || "").match(/^windows-(aarch64|x86_64)$/);
+  if (windows) {
+    const architecture = windows[1] === "aarch64" ? "arm64" : "x64";
+    return ["exe", "msi"].map(
+      (extension) => `S3-Sidekick-Windows-${architecture}.${extension}`,
+    );
+  }
+  return [];
+}
+
 function normalizeGitHubRepository(repository) {
   const owner = repository?.owner;
   const name = repository?.name;
@@ -325,9 +389,36 @@ function compareSemanticVersions(left, right) {
   return compareStrictSemVer(parsedLeft, parsedRight);
 }
 
+function exactInstallSmokePreviousVersion(
+  releaseVersion,
+  value,
+  label = "RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION",
+) {
+  const current = parseStrictSemVer(releaseVersion);
+  const previousValue = String(value || "").trim();
+  const previous = parseStrictSemVer(previousValue);
+  if (
+    !current ||
+    !previous ||
+    compareStrictSemVer(previous, current) >= 0
+  ) {
+    throw new Error(
+      `${label} must be one exact strict semantic version lower than ${releaseVersion}.`,
+    );
+  }
+  return previousValue;
+}
+
 function validateInstallSmokeReport(
   report,
-  { allowedArtifactNames, descriptor, descriptorSha256, digestByName, target },
+  {
+    allowedArtifactNames,
+    descriptor,
+    descriptorSha256,
+    digestByName,
+    expectedArtifactNames = allowedArtifactNames,
+    target,
+  },
 ) {
   const expectedName = installSmokeReportName(target);
   if (
@@ -371,24 +462,19 @@ function validateInstallSmokeReport(
       `Install/update smoke report metadata is incomplete for ${target}.`,
     );
   }
-  const currentVersion = parseStrictSemVer(descriptor.release.version);
-  if (!currentVersion) {
+  const expectedPreviousVersion = exactInstallSmokePreviousVersion(
+    descriptor.release.version,
+    descriptor.installSmokePreviousVersion,
+    "Signed descriptor installSmokePreviousVersion",
+  );
+  if (report.previousVersion !== expectedPreviousVersion) {
     throw new Error(
-      `Descriptor release version is not strict semantic version for ${target}.`,
-    );
-  }
-  const previousVersion = parseStrictSemVer(report.previousVersion);
-  if (
-    !previousVersion ||
-    compareStrictSemVer(previousVersion, currentVersion) >= 0
-  ) {
-    throw new Error(
-      `Install/update smoke report previousVersion must be valid semantic version strictly lower than ${descriptor.release.version} for ${target}.`,
+      `Install/update smoke report previousVersion must exactly match signed descriptor predecessor ${expectedPreviousVersion} for ${target}.`,
     );
   }
   if (
-    !(allowedArtifactNames instanceof Set) ||
-    allowedArtifactNames.size === 0
+    !(expectedArtifactNames instanceof Set) ||
+    expectedArtifactNames.size === 0
   ) {
     throw new Error(
       `Target attestation has no installable artifacts for ${target}.`,
@@ -399,7 +485,7 @@ function validateInstallSmokeReport(
     if (
       typeof artifact?.name !== "string" ||
       artifactNames.has(artifact.name) ||
-      !allowedArtifactNames.has(artifact.name) ||
+      !expectedArtifactNames.has(artifact.name) ||
       !/^[a-f0-9]{64}$/.test(artifact?.sha256 || "") ||
       digestByName.get(artifact.name) !== artifact.sha256
     ) {
@@ -409,10 +495,24 @@ function validateInstallSmokeReport(
     }
     artifactNames.add(artifact.name);
   }
+  const missingArtifactNames = Array.from(expectedArtifactNames)
+    .filter((name) => !artifactNames.has(name))
+    .sort();
+  if (
+    artifactNames.size !== expectedArtifactNames.size ||
+    missingArtifactNames.length > 0
+  ) {
+    throw new Error(
+      `Install/update smoke report does not exactly cover the expected package closure for ${target} (missing: ${missingArtifactNames.join(", ") || "none"}).`,
+    );
+  }
   return true;
 }
 
-function resolveGpgFingerprint(environment = process.env) {
+function resolveGpgFingerprint(
+  environment = process.env,
+  { execute = spawnSync } = {},
+) {
   const configured = String(environment.RELEASE_GPG_FINGERPRINT || "")
     .replace(/\s/g, "")
     .toUpperCase();
@@ -423,12 +523,12 @@ function resolveGpgFingerprint(environment = process.env) {
       "GPG_KEY_ID or RELEASE_GPG_FINGERPRINT is required to pin release signatures.",
     );
   }
-  const result = spawnSync(
+  const result = execute(
     "gpg",
     ["--batch", "--with-colons", "--fingerprint", keyId],
     {
       encoding: "utf8",
-      env: { ...environment },
+      env: withoutGpgSecrets(environment),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -593,6 +693,47 @@ function normalizeFlatpakInputsByArchitecture(value, expectedRefs) {
     );
   }
   return normalized;
+}
+
+function normalizeLegacyLatestBootstrap(value) {
+  if (value === undefined || value === null || value === "") return null;
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch (error) {
+      throw new Error(
+        `RELEASE_LEGACY_LATEST_BOOTSTRAP is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    parsed.schemaVersion !== 1 ||
+    !Number.isSafeInteger(parsed.releaseId) ||
+    parsed.releaseId <= 0 ||
+    typeof parsed.tag !== "string" ||
+    !/^v\d+\.\d+\.\d+$/.test(parsed.tag) ||
+    typeof parsed.sourceCommit !== "string" ||
+    !/^[a-f0-9]{40,64}$/i.test(parsed.sourceCommit) ||
+    Object.keys(parsed).length !== 4 ||
+    Object.keys(parsed).some(
+      (key) =>
+        !["schemaVersion", "releaseId", "tag", "sourceCommit"].includes(key),
+    )
+  ) {
+    throw new Error(
+      "RELEASE_LEGACY_LATEST_BOOTSTRAP must be exact JSON with schemaVersion 1, a positive releaseId, a v-prefixed stable tag, and a full sourceCommit.",
+    );
+  }
+  return {
+    schemaVersion: 1,
+    releaseId: parsed.releaseId,
+    tag: parsed.tag,
+    sourceCommit: parsed.sourceCommit.toLowerCase(),
+  };
 }
 
 function expectedTargets(environment = process.env) {
@@ -847,6 +988,7 @@ function createReleaseDescriptor({
   packageJson,
   environment = process.env,
   flatpakInputsByArchitecture,
+  legacyLatestBootstrap,
   repository,
 }) {
   const commit = assertCleanSource(root, { environment });
@@ -859,6 +1001,14 @@ function createReleaseDescriptor({
   const version = String(resolvedPackageJson.version || "");
   const tag = `v${version}`;
   const prerelease = /-(?:alpha|beta|rc)\./i.test(version);
+  const resolvedLegacyLatestBootstrap = normalizeLegacyLatestBootstrap(
+    legacyLatestBootstrap ?? environment.RELEASE_LEGACY_LATEST_BOOTSTRAP,
+  );
+  if (resolvedLegacyLatestBootstrap && !prerelease) {
+    throw new Error(
+      "Legacy GitHub Latest bootstrap authorization is allowed only on a prerelease descriptor.",
+    );
+  }
   validateMutableRelease(release, {
     expectedId: release.id,
     expectedPrerelease: prerelease,
@@ -891,6 +1041,10 @@ function createReleaseDescriptor({
       tag,
       version,
     },
+    installSmokePreviousVersion: exactInstallSmokePreviousVersion(
+      version,
+      environment.RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION,
+    ),
     source: {
       archiveSha256: sourceArchiveSha256(root, environment, commit),
       cargoLockSha256: sha256File(path.join(root, "src-tauri", "Cargo.lock")),
@@ -911,6 +1065,9 @@ function createReleaseDescriptor({
     },
     expectedTargets: expectedTargets(environment),
     requiredEvidence: [...REQUIRED_EVIDENCE_KINDS],
+    ...(resolvedLegacyLatestBootstrap
+      ? { legacyLatestBootstrap: resolvedLegacyLatestBootstrap }
+      : {}),
   };
   assertCleanSource(root, { environment, expectedCommit: commit });
   return descriptor;
@@ -940,6 +1097,19 @@ function readReleaseDescriptor(filePath) {
   ) {
     throw new Error("Release descriptor has no expected targets.");
   }
+  const legacyLatestBootstrap = normalizeLegacyLatestBootstrap(
+    descriptor.legacyLatestBootstrap,
+  );
+  if (legacyLatestBootstrap && descriptor.release?.prerelease !== true) {
+    throw new Error(
+      "Legacy GitHub Latest bootstrap authorization is allowed only on a prerelease descriptor.",
+    );
+  }
+  exactInstallSmokePreviousVersion(
+    descriptor.release?.version,
+    descriptor.installSmokePreviousVersion,
+    "Release descriptor installSmokePreviousVersion",
+  );
   return descriptor;
 }
 
@@ -962,6 +1132,7 @@ function validateDescriptorForCheckout(
     release,
     flatpakInputsByArchitecture:
       descriptor.toolchains?.flatpak?.inputsByArchitecture,
+    legacyLatestBootstrap: descriptor.legacyLatestBootstrap,
     repository: descriptor.repository,
   });
   if (canonicalJson(descriptor) !== canonicalJson(expected)) {
@@ -1052,20 +1223,21 @@ function verifyDescriptorSignature(
   signaturePath,
   expectedFingerprint,
   environment = process.env,
+  { execute = spawnSync } = {},
 ) {
-  const configuredFingerprint = resolveGpgFingerprint(environment);
+  const configuredFingerprint = resolveGpgFingerprint(environment, { execute });
   const requiredFingerprint = expectedFingerprint || configuredFingerprint;
   if (String(requiredFingerprint).toUpperCase() !== configuredFingerprint) {
     throw new Error(
       "Descriptor signing fingerprint does not match the configured release key.",
     );
   }
-  const result = spawnSync(
+  const result = execute(
     "gpg",
     ["--batch", "--status-fd", "1", "--verify", signaturePath, filePath],
     {
       encoding: "utf8",
-      env: { ...environment },
+      env: withoutGpgSecrets(environment),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -1142,15 +1314,18 @@ module.exports = {
   createReleaseDescriptor,
   descriptorReleaseAssetUrl,
   expectedTargets,
+  finalPackageTargetKeysForArtifactName,
   githubAssetSha256,
   installSmokeReportName,
   isInstallSmokeReportName,
   listAllReleaseAssets,
   normalizeFlatpakInputsByArchitecture,
   normalizeGitHubRepository,
+  normalizeLegacyLatestBootstrap,
   parseExactRustVersion,
   parseFlatpakInputs,
   readReleaseDescriptor,
+  requiredFinalPackageNamesForTarget,
   resolveGpgFingerprint,
   resolveGitHubTagCommit,
   selectUniqueTaggedRelease,

@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -14,14 +14,19 @@ import {
   BETA_CHANNEL_STATE_SIGNATURE_NAME,
   BETA_CHANNEL_TRANSACTION_NAME,
   BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+  LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+  LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+  LEGACY_UNSIGNED_BETA_POINTER_NAMES,
   STABLE_ROLLOVER_RECEIPT_NAME,
   STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
   createBetaChannelRollover,
   createBetaChannelState,
   createBetaChannelTransaction,
+  createLegacyBetaChannelMigration,
   createStableRolloverReceipt,
   expectedBetaChannelAssetNames,
   extractBetaChannelSource,
+  historicalBetaChannelAssetNames,
   operationalBetaChannelAssetNames,
   permanentBetaChannelAssetNames,
   promoteBetaChannelAssets,
@@ -30,6 +35,7 @@ import {
   splitStableReleaseAssets,
   validateBetaChannelRollover,
   validateBetaChannelTransaction,
+  validateLegacyBetaChannelMigration,
   validatePublicationOwner,
   validateStableRolloverReceipt,
   verifyBetaChannelOverlay,
@@ -54,11 +60,14 @@ const {
   canonicalJson,
   classifyImmutableAsset,
   compareSemanticVersions,
+  finalPackageTargetKeysForArtifactName,
   githubAssetSha256,
   installSmokeReportName,
   isInstallSmokeReportName,
   listAllReleaseAssets,
+  normalizeLegacyLatestBootstrap,
   readReleaseDescriptor,
+  requiredFinalPackageNamesForTarget,
   sha256File,
   signDescriptor,
   validateInstallSmokeReport,
@@ -84,6 +93,26 @@ const descriptorSignaturePath = path.join(
 const owner = process.env.GH_REPO_OWNER || "BurntToasters";
 const repositoryName = process.env.GH_REPO_NAME || "S3-Sidekick";
 const repository = `${owner}/${repositoryName}`;
+const LEGACY_STABLE_CARRIER_DESCRIPTOR_TYPE = "legacy-stable-carrier-bootstrap";
+const LEGACY_STABLE_CARRIER_CONTROL_NAMES = Object.freeze([
+  DESCRIPTOR_NAME,
+  DESCRIPTOR_SIGNATURE_NAME,
+  RELEASE_ASSET_INDEX_NAME,
+  RELEASE_ASSET_INDEX_SIGNATURE_NAME,
+]);
+const LEGACY_STABLE_CARRIER_CONTROL_NAME_SET = new Set(
+  LEGACY_STABLE_CARRIER_CONTROL_NAMES,
+);
+const LEGACY_MIGRATION_CONTROL_NAMES = Object.freeze([
+  LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+  LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+]);
+const LEGACY_MIGRATION_CONTROL_NAME_SET = new Set(
+  LEGACY_MIGRATION_CONTROL_NAMES,
+);
+const LEGACY_UNSIGNED_BETA_POINTER_NAME_SET = new Set(
+  LEGACY_UNSIGNED_BETA_POINTER_NAMES,
+);
 
 function processStartToken(
   pid,
@@ -205,11 +234,11 @@ function atomicWritePrivateJson(filePath, value) {
   }
 }
 
-function installPublicationLock(lockPath, value) {
-  const candidatePath = `${lockPath}.candidate-${randomUUID()}`;
+function installPrivateJsonCas(filePath, value) {
+  const candidatePath = `${filePath}.candidate-${randomUUID()}`;
   atomicWritePrivateJson(candidatePath, value);
   try {
-    fs.linkSync(candidatePath, lockPath);
+    fs.linkSync(candidatePath, filePath);
     return true;
   } catch (error) {
     if (error?.code === "EEXIST") return false;
@@ -217,6 +246,10 @@ function installPublicationLock(lockPath, value) {
   } finally {
     fs.rmSync(candidatePath, { force: true });
   }
+}
+
+function installPublicationLock(lockPath, value) {
+  return installPrivateJsonCas(lockPath, value);
 }
 
 function processIsAlive(pid) {
@@ -250,6 +283,7 @@ function acquirePublicationSession(
   descriptorSha256,
   {
     afterLockInstalled = () => {},
+    deferOwnerCreation = false,
     lockIdFactory = randomUUID,
     processIdentity = processStartToken,
     processLiveness = processIsAlive,
@@ -349,25 +383,80 @@ function acquirePublicationSession(
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
-    if (!publicationOwner) {
-      publicationOwner = {
+    if (!publicationOwner && !deferOwnerCreation) {
+      const generatedOwner = {
         schemaVersion: 1,
         descriptorSha256,
         releaseId: descriptor.release.id,
         sessionId: sessionIdFactory(),
         sourceCommit: descriptor.source.commit,
       };
-      validatePublicationOwner(publicationOwner);
-      atomicWritePrivateJson(ownerPath, publicationOwner);
+      validatePublicationOwner(generatedOwner);
+      if (installPrivateJsonCas(ownerPath, generatedOwner)) {
+        publicationOwner = generatedOwner;
+      } else {
+        const existing = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+        validatePublicationOwner(existing);
+        if (
+          existing.releaseId !== descriptor.release.id ||
+          existing.sourceCommit !== descriptor.source.commit ||
+          existing.descriptorSha256 !== descriptorSha256
+        ) {
+          throw new Error(
+            "Publication owner compare-and-swap found a different descriptor identity.",
+          );
+        }
+        publicationOwner = existing;
+      }
     }
   } catch (error) {
     releaseLock();
     throw error;
   }
 
+  const installOwner = (candidate) => {
+    validatePublicationOwner(candidate);
+    if (
+      candidate.releaseId !== descriptor.release.id ||
+      candidate.sourceCommit !== descriptor.source.commit ||
+      candidate.descriptorSha256 !== descriptorSha256
+    ) {
+      throw new Error(
+        "Takeover publication owner does not match its descriptor identity.",
+      );
+    }
+    if (publicationOwner) {
+      if (canonicalJson(publicationOwner) !== canonicalJson(candidate)) {
+        throw new Error(
+          "Persistent publication owner conflicts with verified remote takeover evidence.",
+        );
+      }
+      return publicationOwner;
+    }
+    if (installPrivateJsonCas(ownerPath, candidate)) {
+      publicationOwner = candidate;
+      return publicationOwner;
+    }
+    const existing = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+    validatePublicationOwner(existing);
+    if (canonicalJson(existing) !== canonicalJson(candidate)) {
+      throw new Error(
+        "Publication owner compare-and-swap lost to a conflicting owner.",
+      );
+    }
+    publicationOwner = existing;
+    return publicationOwner;
+  };
+
   let released = false;
   return {
-    owner: publicationOwner,
+    get owner() {
+      if (!publicationOwner) {
+        throw new Error("Publication owner has not been installed.");
+      }
+      return publicationOwner;
+    },
+    installOwner,
     release() {
       if (released) return;
       releaseLock();
@@ -632,11 +721,394 @@ function gpgSignedArtifact(name) {
   );
 }
 
+function releaseArtifactRecordMap(
+  records,
+  label,
+  { requireSize = false } = {},
+) {
+  if (!Array.isArray(records)) {
+    throw new Error(`${label} must contain artifact records.`);
+  }
+  const byName = new Map();
+  for (const record of records) {
+    if (
+      typeof record?.name !== "string" ||
+      record.name.length === 0 ||
+      record.name.trim() !== record.name ||
+      path.basename(record.name) !== record.name ||
+      /[\\/]/.test(record.name) ||
+      !/^[a-f0-9]{64}$/.test(record.sha256 || "") ||
+      (requireSize &&
+        (!Number.isSafeInteger(record.size) || record.size < 0)) ||
+      byName.has(record.name)
+    ) {
+      throw new Error(`${label} contains a malformed or duplicate record.`);
+    }
+    byName.set(record.name, record);
+  }
+  return byName;
+}
+
+function expectedPackageSmokeChecks(platform, packages) {
+  if (platform === "darwin") {
+    return [
+      "universal-mach-o",
+      "codesign-deep-strict",
+      "gatekeeper",
+      "notary-accepted",
+      "quarantine-gatekeeper",
+      "stapler-validate",
+    ];
+  }
+  if (platform === "win32") {
+    return [
+      "authenticode-valid",
+      "installer-outer-signature",
+      "installer-runtime-extracted-signature",
+      "publisher-match",
+      "timestamp-valid",
+    ];
+  }
+  if (platform === "linux") {
+    return packages
+      .flatMap((record) => {
+        if (/\.appimage$/i.test(record.name))
+          return [`appimage-elf:${record.name}`];
+        if (/\.deb$/i.test(record.name)) return [`deb-metadata:${record.name}`];
+        if (/\.rpm$/i.test(record.name)) return [`rpm-metadata:${record.name}`];
+        if (/\.flatpak$/i.test(record.name))
+          return [`flatpak-bundle:${record.name}`];
+        return [];
+      })
+      .sort();
+  }
+  throw new Error(`Unsupported evidence host platform: ${platform}.`);
+}
+
+function authenticatedPackagesByTarget(attestation) {
+  const targets = Array.isArray(attestation?.targets)
+    ? [...attestation.targets]
+    : [];
+  const sortedTargets = [...targets].sort();
+  if (
+    targets.length === 0 ||
+    new Set(targets).size !== targets.length ||
+    canonicalJson(targets) !== canonicalJson(sortedTargets) ||
+    targets.some(
+      (target) =>
+        typeof target !== "string" ||
+        !/^(?:darwin|linux|windows)-(?:aarch64|x86_64)$/.test(target),
+    )
+  ) {
+    throw new Error("Host attestation package target set is malformed.");
+  }
+  const packagesByTarget = attestation.packagesByTarget;
+  if (
+    !packagesByTarget ||
+    typeof packagesByTarget !== "object" ||
+    Array.isArray(packagesByTarget) ||
+    canonicalJson(Object.keys(packagesByTarget).sort()) !==
+      canonicalJson(sortedTargets)
+  ) {
+    throw new Error(
+      "Host attestation packagesByTarget does not exactly match its target set.",
+    );
+  }
+
+  const targetSet = new Set(targets);
+  const artifactRecords = releaseArtifactRecordMap(
+    attestation.artifacts,
+    "Host attestation package artifacts",
+    { requireSize: true },
+  );
+  const expectedPackages = new Map(
+    Array.from(artifactRecords).filter(([, record]) => {
+      const owners = finalPackageTargetKeysForArtifactName(record.name);
+      if (owners.length === 0) return false;
+      if (owners.some((target) => !targetSet.has(target))) {
+        throw new Error(
+          `Final package ${record.name} has cross-target ownership outside its host attestation.`,
+        );
+      }
+      return true;
+    }),
+  );
+  if (expectedPackages.size === 0) {
+    throw new Error("Host attestation has no canonical final packages.");
+  }
+
+  const normalized = new Map();
+  const union = new Map();
+  for (const target of sortedTargets) {
+    const records = releaseArtifactRecordMap(
+      packagesByTarget[target],
+      `Host attestation package closure for ${target}`,
+      { requireSize: true },
+    );
+    const sortedRecords = Array.from(records.values()).sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+    if (
+      canonicalJson(packagesByTarget[target]) !== canonicalJson(sortedRecords)
+    ) {
+      throw new Error(
+        `Host attestation package closure for ${target} is not canonical.`,
+      );
+    }
+    const requiredNames = requiredFinalPackageNamesForTarget(target);
+    const missingRequired = requiredNames.filter((name) => !records.has(name));
+    if (requiredNames.length === 0 || missingRequired.length > 0) {
+      throw new Error(
+        `Host attestation package closure is incomplete for ${target} (missing: ${missingRequired.join(", ") || "unsupported target profile"}).`,
+      );
+    }
+    for (const record of records.values()) {
+      if (
+        !finalPackageTargetKeysForArtifactName(record.name).includes(target) ||
+        canonicalJson(expectedPackages.get(record.name)) !==
+          canonicalJson(record)
+      ) {
+        throw new Error(
+          `Host attestation package ${record.name} has wrong digest, metadata, or target ownership for ${target}.`,
+        );
+      }
+      const previous = union.get(record.name);
+      if (previous && canonicalJson(previous) !== canonicalJson(record)) {
+        throw new Error(
+          `Host attestation package closure conflicts for ${record.name}.`,
+        );
+      }
+      union.set(record.name, record);
+    }
+    normalized.set(target, records);
+  }
+
+  const sorted = (records) =>
+    Array.from(records.values()).sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+  if (
+    canonicalJson(sorted(union)) !== canonicalJson(sorted(expectedPackages))
+  ) {
+    throw new Error(
+      "Host attestation packagesByTarget does not exactly equal its final package artifacts.",
+    );
+  }
+  return normalized;
+}
+
+function assertSemanticEvidence({
+  attestation,
+  authenticatedPackages = authenticatedPackagesByTarget(attestation),
+  descriptor,
+  descriptorSha256,
+  evidenceByName,
+  suffix,
+}) {
+  if (!(evidenceByName instanceof Map)) {
+    throw new Error("Parsed semantic release evidence is missing.");
+  }
+  const artifactRecords = releaseArtifactRecordMap(
+    attestation.artifacts,
+    `Host attestation ${suffix} artifacts`,
+    { requireSize: true },
+  );
+  const evidenceRecords = releaseArtifactRecordMap(
+    attestation.evidence,
+    `Host attestation ${suffix} evidence`,
+    { requireSize: true },
+  );
+  const expectedEvidenceNames = [
+    `release-package-smoke-${suffix}.json`,
+    `release-provenance-${suffix}.json`,
+    `release-sbom-${suffix}.spdx.json`,
+  ];
+  if (
+    canonicalJson(Array.from(evidenceRecords.keys()).sort()) !==
+    canonicalJson(expectedEvidenceNames.sort())
+  ) {
+    throw new Error(
+      `Host attestation ${suffix} does not exactly bind its semantic evidence set.`,
+    );
+  }
+  const document = (name) => {
+    const value = evidenceByName.get(name);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(
+        `Parsed semantic evidence is missing or invalid: ${name}.`,
+      );
+    }
+    return value;
+  };
+
+  const packageSmokeName = `release-package-smoke-${suffix}.json`;
+  const packageSmoke = document(packageSmokeName);
+  const packageRecords = Array.from(
+    new Map(
+      Array.from(authenticatedPackages.values()).flatMap((records) =>
+        Array.from(records, ([name, record]) => [name, record]),
+      ),
+    ).values(),
+  ).sort((left, right) => left.name.localeCompare(right.name));
+  const actualPackages = releaseArtifactRecordMap(
+    packageSmoke.packages,
+    `Package-smoke ${suffix} packages`,
+    { requireSize: true },
+  );
+  if (
+    packageSmoke.schemaVersion !== 1 ||
+    packageSmoke.descriptorSha256 !== descriptorSha256 ||
+    packageSmoke.status !== "passed" ||
+    canonicalJson(packageSmoke.targets) !==
+      canonicalJson([...attestation.targets].sort()) ||
+    canonicalJson(
+      Array.from(actualPackages.values()).sort((left, right) =>
+        left.name.localeCompare(right.name),
+      ),
+    ) !== canonicalJson(packageRecords) ||
+    canonicalJson(packageSmoke.checks) !==
+      canonicalJson(
+        expectedPackageSmokeChecks(attestation.host?.platform, packageRecords),
+      )
+  ) {
+    throw new Error(
+      `Package-smoke evidence does not exactly match attested artifacts for ${suffix}.`,
+    );
+  }
+
+  const provenance = document(`release-provenance-${suffix}.json`);
+  const expectedSubjects = Array.from(artifactRecords.values())
+    .map((record) => ({
+      name: record.name,
+      digest: { sha256: record.sha256 },
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  const actualSubjects = Array.isArray(provenance.subject)
+    ? [...provenance.subject].sort((left, right) =>
+        String(left?.name).localeCompare(String(right?.name)),
+      )
+    : null;
+  const externalParameters =
+    provenance.predicate?.buildDefinition?.externalParameters;
+  const expectedDependencies = [
+    {
+      uri: `git+https://github.com/${descriptor.repository.owner}/${descriptor.repository.name}@${descriptor.source.commit}`,
+      digest: { sha256: descriptor.source.archiveSha256 },
+    },
+    {
+      uri: "package-lock.json",
+      digest: { sha256: descriptor.source.packageLockSha256 },
+    },
+    {
+      uri: "src-tauri/Cargo.lock",
+      digest: { sha256: descriptor.source.cargoLockSha256 },
+    },
+  ];
+  const expectedInvocationId = createHash("sha256")
+    .update(
+      canonicalJson({
+        artifacts: Array.from(artifactRecords.values()).sort((left, right) =>
+          left.name.localeCompare(right.name),
+        ),
+        descriptorSha256,
+        host: suffix,
+        targets: [...attestation.targets].sort(),
+      }),
+    )
+    .digest("hex");
+  if (
+    provenance._type !== "https://in-toto.io/Statement/v1" ||
+    provenance.predicateType !== "https://slsa.dev/provenance/v1" ||
+    canonicalJson(actualSubjects) !== canonicalJson(expectedSubjects) ||
+    provenance.predicate?.buildDefinition?.buildType !==
+      "https://github.com/BurntToasters/S3-Sidekick/release-build/v1" ||
+    externalParameters?.descriptorSha256 !== descriptorSha256 ||
+    externalParameters?.releaseId !== descriptor.release.id ||
+    canonicalJson(externalParameters?.targets) !==
+      canonicalJson([...attestation.targets].sort()) ||
+    canonicalJson(externalParameters?.platformInputs) !==
+      canonicalJson(attestation.platformInputs ?? null) ||
+    canonicalJson(
+      provenance.predicate?.buildDefinition?.resolvedDependencies,
+    ) !== canonicalJson(expectedDependencies) ||
+    provenance.predicate?.runDetails?.builder?.id !==
+      `local-release-host:${suffix}` ||
+    provenance.predicate?.runDetails?.metadata?.invocationId !==
+      expectedInvocationId
+  ) {
+    throw new Error(
+      `Provenance evidence does not exactly bind release inputs and artifacts for ${suffix}.`,
+    );
+  }
+
+  const sbom = document(`release-sbom-${suffix}.spdx.json`);
+  const expectedSbomFiles = Array.from(artifactRecords.values())
+    .map((record) => ({
+      fileName: record.name,
+      sha256: record.sha256,
+    }))
+    .sort((left, right) => left.fileName.localeCompare(right.fileName));
+  const actualSbomFiles = Array.isArray(sbom.files)
+    ? sbom.files
+        .map((record) => {
+          const checksums = Array.isArray(record?.checksums)
+            ? record.checksums.filter(
+                (checksum) => checksum?.algorithm === "SHA256",
+              )
+            : [];
+          return {
+            fileName: record?.fileName,
+            sha256: checksums.length === 1 ? checksums[0].checksumValue : null,
+          };
+        })
+        .sort((left, right) =>
+          String(left.fileName).localeCompare(String(right.fileName)),
+        )
+    : null;
+  const packageIds = Array.isArray(sbom.packages)
+    ? sbom.packages.map((entry) => entry?.SPDXID)
+    : [];
+  const relationshipIds = Array.isArray(sbom.relationships)
+    ? sbom.relationships
+        .filter(
+          (entry) =>
+            entry?.spdxElementId === "SPDXRef-DOCUMENT" &&
+            entry?.relationshipType === "DESCRIBES",
+        )
+        .map((entry) => entry.relatedSpdxElement)
+    : [];
+  if (
+    sbom.spdxVersion !== "SPDX-2.3" ||
+    sbom.SPDXID !== "SPDXRef-DOCUMENT" ||
+    sbom.dataLicense !== "CC0-1.0" ||
+    sbom.name !== `S3 Sidekick ${descriptor.release.version} release SBOM` ||
+    sbom.documentNamespace !==
+      `https://github.com/BurntToasters/S3-Sidekick/releases/${descriptor.release.tag}/sbom/${descriptorSha256}` ||
+    sbom.creationInfo?.created !== descriptor.source.committedAt ||
+    !sbom.creationInfo?.creators?.includes(
+      "Tool: S3-Sidekick-release-evidence",
+    ) ||
+    canonicalJson(actualSbomFiles) !== canonicalJson(expectedSbomFiles) ||
+    packageIds.some(
+      (id) => typeof id !== "string" || !id.startsWith("SPDXRef-"),
+    ) ||
+    new Set(packageIds).size !== packageIds.length ||
+    canonicalJson([...relationshipIds].sort()) !==
+      canonicalJson([...packageIds].sort())
+  ) {
+    throw new Error(
+      `SPDX SBOM evidence does not exactly bind release artifacts for ${suffix}.`,
+    );
+  }
+  return true;
+}
+
 function assertCompleteEvidence({
   descriptor,
   assetsByName,
   attestations,
   digestByName,
+  evidenceByName,
   installSmokeReports = new Map(),
   descriptorSha256 = sha256File(descriptorPath),
 }) {
@@ -658,6 +1130,8 @@ function assertCompleteEvidence({
     expectedAssetNames.add(RELEASE_ASSET_INDEX_SIGNATURE_NAME);
   }
   const targetOwners = new Map();
+  const targetPackages = new Map();
+  const authenticatedPackages = new Map();
   for (const attestation of attestations) {
     if (attestation.schemaVersion !== 1)
       throw new Error("Unsupported host attestation schema.");
@@ -701,10 +1175,13 @@ function assertCompleteEvidence({
         );
       }
     }
+    const packagesForAttestation = authenticatedPackagesByTarget(attestation);
+    authenticatedPackages.set(attestation, packagesForAttestation);
     for (const target of attestation.targets || []) {
       if (targetOwners.has(target))
         throw new Error(`Duplicate host attestations claim target ${target}.`);
       targetOwners.set(target, attestation);
+      targetPackages.set(target, packagesForAttestation.get(target));
     }
     for (const record of [
       ...(attestation.artifacts || []),
@@ -772,32 +1249,19 @@ function assertCompleteEvidence({
           `Install/update smoke report could not be parsed for ${target}.`,
         );
       }
-      const owningAttestation = targetOwners.get(target);
-      const allowedArtifactNames = new Set(
-        (Array.isArray(owningAttestation?.artifacts)
-          ? owningAttestation.artifacts
-          : []
-        )
-          .filter(
-            (record) =>
-              typeof record?.name === "string" &&
-              /(?:\.app\.tar\.gz|\.appimage|\.deb|\.exe|\.msi|\.rpm)$/i.test(
-                record.name,
-              ) &&
-              targetKeysForArtifactName(record.name).includes(target),
-          )
-          .map((record) => record.name),
-      );
-      if (allowedArtifactNames.size === 0) {
+      const expectedPackages = targetPackages.get(target);
+      const expectedArtifactNames = new Set(expectedPackages?.keys() || []);
+      if (expectedArtifactNames.size === 0) {
         throw new Error(
-          `Target attestation has no installable artifacts for ${target}.`,
+          `Target attestation has no authenticated final packages for ${target}.`,
         );
       }
       validateInstallSmokeReport(installSmokeReport, {
-        allowedArtifactNames,
+        allowedArtifactNames: expectedArtifactNames,
         descriptor,
         descriptorSha256,
         digestByName,
+        expectedArtifactNames,
         target,
       });
     }
@@ -819,6 +1283,16 @@ function assertCompleteEvidence({
       !assetsByName.has(`${attestationName}.asc`)
     ) {
       throw new Error(`Signed host attestation is missing for ${suffix}.`);
+    }
+    if (evidenceByName !== undefined) {
+      assertSemanticEvidence({
+        attestation,
+        authenticatedPackages: authenticatedPackages.get(attestation),
+        descriptor,
+        descriptorSha256,
+        evidenceByName,
+        suffix,
+      });
     }
     const evidenceNamesByKind = {
       attestation: attestationName,
@@ -1003,12 +1477,79 @@ function verifyReleaseAssetIndex({
   return index;
 }
 
-function verifyChecksumFiles(directory, assetsByName, digestByName) {
+function checksumClosureByTarget(descriptor, attestations) {
+  const owners = new Map();
+  for (const attestation of attestations) {
+    for (const target of attestation.targets || []) {
+      if (owners.has(target)) {
+        throw new Error(`Duplicate checksum owner for target ${target}.`);
+      }
+      owners.set(target, attestation);
+    }
+  }
+  const closure = new Map();
+  for (const target of descriptor.expectedTargets) {
+    const attestation = owners.get(target);
+    if (!attestation) {
+      throw new Error(`Checksum closure has no attestation for ${target}.`);
+    }
+    const names = new Set();
+    for (const record of [
+      ...(attestation.artifacts || []),
+      ...(attestation.evidence || []),
+    ]) {
+      const targetKeys = targetKeysForArtifactName(record.name);
+      if (targetKeys.length === 0 || targetKeys.includes(target)) {
+        names.add(record.name);
+      }
+    }
+    const platform =
+      attestation.host?.platform === "win32"
+        ? "windows"
+        : attestation.host?.platform;
+    const arch =
+      attestation.host?.arch === "arm64"
+        ? "aarch64"
+        : attestation.host?.arch === "x64"
+          ? "x86_64"
+          : attestation.host?.arch;
+    names.add(`release-attestation-${platform}-${arch}.json`);
+    if (descriptor.requiredEvidence.includes("install-smoke")) {
+      names.add(installSmokeReportName(target));
+    }
+    closure.set(target, names);
+  }
+  return closure;
+}
+
+function verifyChecksumFiles(
+  directory,
+  assetsByName,
+  digestByName,
+  { attestations = null, descriptor = null } = {},
+) {
   const checksumNames = Array.from(assetsByName.keys()).filter((name) =>
     /^SHA256SUMS(?:-[a-z0-9_-]+)?\.txt$/i.test(name),
   );
   if (checksumNames.length === 0)
     throw new Error("Release contains no checksum manifests.");
+  const expectedClosure =
+    descriptor && Array.isArray(attestations)
+      ? checksumClosureByTarget(descriptor, attestations)
+      : null;
+  if (expectedClosure) {
+    const expectedChecksumNames = descriptor.expectedTargets
+      .map((target) => `SHA256SUMS-${target}.txt`)
+      .sort();
+    if (
+      canonicalJson([...checksumNames].sort()) !==
+      canonicalJson(expectedChecksumNames)
+    ) {
+      throw new Error(
+        "Checksum manifest set does not exactly match descriptor targets.",
+      );
+    }
+  }
   for (const checksumName of checksumNames) {
     if (!assetsByName.has(`${checksumName}.asc`)) {
       throw new Error(`Checksum signature is missing: ${checksumName}.asc.`);
@@ -1020,13 +1561,34 @@ function verifyChecksumFiles(directory, assetsByName, digestByName) {
       .filter(Boolean);
     if (lines.length === 0)
       throw new Error(`Checksum manifest is empty: ${checksumName}.`);
+    const records = new Map();
     for (const line of lines) {
-      const match = line.match(/^([a-f0-9]{64})  (.+)$/i);
-      if (!match)
+      const match = line.match(/^([a-f0-9]{64})  ([^\\/]+)$/i);
+      if (!match || path.basename(match[2]) !== match[2]) {
         throw new Error(`Malformed checksum line in ${checksumName}.`);
-      if (digestByName.get(match[2]) !== match[1].toLowerCase()) {
+      }
+      if (records.has(match[2])) {
+        throw new Error(
+          `Duplicate checksum entry for ${match[2]} in ${checksumName}.`,
+        );
+      }
+      records.set(match[2], match[1].toLowerCase());
+      if (
+        !assetsByName.has(match[2]) ||
+        digestByName.get(match[2]) !== match[1].toLowerCase()
+      ) {
         throw new Error(
           `Checksum mismatch for ${match[2]} in ${checksumName}.`,
+        );
+      }
+    }
+    if (expectedClosure) {
+      const target = checksumName.slice("SHA256SUMS-".length, -".txt".length);
+      const expectedNames = [...(expectedClosure.get(target) || [])].sort();
+      const actualNames = [...records.keys()].sort();
+      if (canonicalJson(actualNames) !== canonicalJson(expectedNames)) {
+        throw new Error(
+          `Checksum manifest ${checksumName} does not exactly cover its target attestation.`,
         );
       }
     }
@@ -1131,7 +1693,6 @@ function verifyDownloadedAssetSet({
     }
   }
 
-  verifyChecksumFiles(directory, assetsByName, digestByName);
   verifyUpdaterManifests(directory, assetsByName, descriptor);
 
   const installSmokeReports = new Map();
@@ -1143,16 +1704,31 @@ function verifyDownloadedAssetSet({
       JSON.parse(fs.readFileSync(path.join(directory, name), "utf8")),
     );
   }
+  const evidenceByName = new Map(
+    Array.from(assetsByName.keys())
+      .filter((name) =>
+        ["package-smoke", "provenance", "sbom"].includes(evidenceKind(name)),
+      )
+      .map((name) => [
+        name,
+        JSON.parse(fs.readFileSync(path.join(directory, name), "utf8")),
+      ]),
+  );
   const attestations = Array.from(assetsByName.keys())
     .filter((name) => evidenceKind(name) === "attestation")
     .map((name) =>
       JSON.parse(fs.readFileSync(path.join(directory, name), "utf8")),
     );
+  verifyChecksumFiles(directory, assetsByName, digestByName, {
+    attestations,
+    descriptor,
+  });
   assertCompleteEvidence({
     descriptor,
     assetsByName,
     attestations,
     digestByName,
+    evidenceByName,
     installSmokeReports,
   });
   const assetIndex = verifyReleaseAssetIndex({
@@ -1331,6 +1907,81 @@ async function publicGitHubRequest(method, endpoint) {
   return response.json();
 }
 
+function verifyPublishedStableChannel({
+  carrier,
+  carrierDescriptor,
+  carrierDescriptorSha256,
+  channelAssetsByName,
+  digestByName,
+  directory,
+  productIndexSha256,
+  verifySignature = verifyDescriptorSignature,
+}) {
+  if (carrierDescriptor.release.prerelease !== false) {
+    throw new Error(
+      "Published stable channel verification requires a stable descriptor.",
+    );
+  }
+  const operationalNames = operationalBetaChannelAssetNames(
+    carrierDescriptor.expectedTargets,
+  ).filter((name) => channelAssetsByName.has(name));
+  if (operationalNames.length > 0) {
+    throw new Error(
+      `Beta channel has unfinished channel control assets: ${operationalNames.sort().join(", ")}.`,
+    );
+  }
+  const migrationNames = [
+    LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+    LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+  ].filter((name) => channelAssetsByName.has(name));
+  if (migrationNames.length > 0) {
+    throw new Error(
+      "Legacy beta migration controls are valid only on their signed legacy stable carrier.",
+    );
+  }
+  const receiptAssets = new Map(
+    [STABLE_ROLLOVER_RECEIPT_NAME, STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME]
+      .filter((name) => channelAssetsByName.has(name))
+      .map((name) => [name, channelAssetsByName.get(name)]),
+  );
+  if (receiptAssets.size === 1) {
+    throw new Error("Stable rollover receipt signature pair is incomplete.");
+  }
+  let stableReceipt = null;
+  if (receiptAssets.size === 2) {
+    const receiptPath = path.join(directory, STABLE_ROLLOVER_RECEIPT_NAME);
+    verifySignature(
+      receiptPath,
+      path.join(directory, STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME),
+      carrierDescriptor.release.signingKeyFingerprint,
+    );
+    stableReceipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    if (fs.readFileSync(receiptPath, "utf8") !== canonicalJson(stableReceipt)) {
+      throw new Error("Stable rollover receipt is not canonical JSON.");
+    }
+    validateStableRolloverReceipt(stableReceipt, {
+      expectedOwner: null,
+      successor: carrier,
+      successorDescriptor: carrierDescriptor,
+      successorDescriptorSha256: carrierDescriptorSha256,
+      successorProductIndexSha256: productIndexSha256,
+    });
+  }
+  const channelState = verifyBetaChannelOverlay({
+    carrier,
+    carrierDescriptor,
+    carrierDescriptorSha256,
+    channelAssetsByName: permanentChannelAssetMap(
+      carrierDescriptor,
+      channelAssetsByName,
+    ),
+    digestByName,
+    directory,
+    productIndexSha256,
+  });
+  return { channelState, stableReceipt };
+}
+
 async function waitForPublicVerification(descriptor, attempts = 12) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -1360,29 +2011,41 @@ async function waitForPublicVerification(descriptor, attempts = 12) {
         requireAssetIndex: true,
       });
       const confirmedPublicAssets = await listPublicAssets(release.id);
+      const confirmedAssetsByName = assetMap(confirmedPublicAssets);
       assertReleaseAssetIndexEntries(
         verification.assetIndex,
-        assetMap(confirmedPublicAssets),
+        confirmedAssetsByName,
         verification.digestByName,
         descriptor,
       );
-      const channelState =
-        descriptor.release.prerelease === false
-          ? verifyBetaChannelOverlay({
-              carrier: release,
-              carrierDescriptor: descriptor,
-              carrierDescriptorSha256:
-                verification.digestByName.get(DESCRIPTOR_NAME),
-              channelAssetsByName: verification.channelAssetsByName,
-              digestByName: verification.digestByName,
-              directory,
-              productIndexSha256: verification.digestByName.get(
-                RELEASE_ASSET_INDEX_NAME,
-              ),
-            })
-          : null;
+      let channelState = null;
+      let stableReceipt = null;
+      if (descriptor.release.prerelease === false) {
+        const confirmedChannelAssets = splitStableReleaseAssets(
+          descriptor,
+          confirmedAssetsByName,
+        ).channelAssetsByName;
+        assertRemoteAssetSnapshot(
+          verification.channelAssetsByName,
+          confirmedChannelAssets,
+          "Published stable channel",
+        );
+        ({ channelState, stableReceipt } = verifyPublishedStableChannel({
+          carrier: release,
+          carrierDescriptor: descriptor,
+          carrierDescriptorSha256:
+            verification.digestByName.get(DESCRIPTOR_NAME),
+          channelAssetsByName: verification.channelAssetsByName,
+          digestByName: verification.digestByName,
+          directory,
+          productIndexSha256: verification.digestByName.get(
+            RELEASE_ASSET_INDEX_NAME,
+          ),
+        }));
+      }
       return {
         channelState,
+        stableReceipt,
         release,
         publicAssets: confirmedPublicAssets,
         directory,
@@ -1400,6 +2063,330 @@ async function waitForPublicVerification(descriptor, attempts = 12) {
   );
 }
 
+function exactObjectKeys(value, expectedKeys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} is malformed.`);
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  if (canonicalJson(actual) !== canonicalJson(expected)) {
+    throw new Error(`${label} has unexpected or missing fields.`);
+  }
+}
+
+function validateLegacyStableCarrierDescriptor(descriptor) {
+  exactObjectKeys(
+    descriptor,
+    [
+      "authorization",
+      "descriptorType",
+      "expectedTargets",
+      "release",
+      "repository",
+      "schemaVersion",
+      "source",
+    ],
+    "Legacy stable carrier descriptor",
+  );
+  if (
+    descriptor.schemaVersion !== 1 ||
+    descriptor.descriptorType !== LEGACY_STABLE_CARRIER_DESCRIPTOR_TYPE
+  ) {
+    throw new Error("Unsupported legacy stable carrier descriptor schema.");
+  }
+  exactObjectKeys(
+    descriptor.repository,
+    ["name", "owner"],
+    "Legacy stable carrier repository",
+  );
+  assertDescriptorRepository(descriptor, descriptor.repository);
+  exactObjectKeys(
+    descriptor.release,
+    ["channel", "id", "prerelease", "signingKeyFingerprint", "tag", "version"],
+    "Legacy stable carrier release",
+  );
+  const release = descriptor.release;
+  if (
+    release.channel !== "stable" ||
+    release.prerelease !== false ||
+    !Number.isSafeInteger(release.id) ||
+    release.id <= 0 ||
+    typeof release.version !== "string" ||
+    !/^\d+\.\d+\.\d+$/.test(release.version) ||
+    release.tag !== `v${release.version}` ||
+    typeof release.signingKeyFingerprint !== "string" ||
+    !/^[A-F0-9]{40,64}$/.test(release.signingKeyFingerprint)
+  ) {
+    throw new Error("Legacy stable carrier release identity is malformed.");
+  }
+  exactObjectKeys(
+    descriptor.source,
+    ["commit"],
+    "Legacy stable carrier source",
+  );
+  if (!/^[a-f0-9]{40,64}$/.test(descriptor.source.commit || "")) {
+    throw new Error("Legacy stable carrier source commit is malformed.");
+  }
+  if (
+    !Array.isArray(descriptor.expectedTargets) ||
+    descriptor.expectedTargets.length === 0 ||
+    descriptor.expectedTargets.some(
+      (target) =>
+        typeof target !== "string" ||
+        !/^(?:darwin|linux|windows)-(?:aarch64|x86_64)$/.test(target),
+    ) ||
+    canonicalJson(descriptor.expectedTargets) !==
+      canonicalJson([...new Set(descriptor.expectedTargets)].sort())
+  ) {
+    throw new Error("Legacy stable carrier target set is malformed.");
+  }
+  exactObjectKeys(
+    descriptor.authorization,
+    ["prereleaseDescriptorSha256"],
+    "Legacy stable carrier authorization",
+  );
+  if (
+    !/^[a-f0-9]{64}$/.test(
+      descriptor.authorization.prereleaseDescriptorSha256 || "",
+    )
+  ) {
+    throw new Error(
+      "Legacy stable carrier authorizing descriptor digest is malformed.",
+    );
+  }
+  return descriptor;
+}
+
+function createLegacyStableCarrierDescriptor(
+  authorizingDescriptor,
+  prereleaseDescriptorSha256,
+) {
+  if (authorizingDescriptor?.release?.prerelease !== true) {
+    throw new Error(
+      "Only a prerelease descriptor may authorize a legacy Latest bootstrap.",
+    );
+  }
+  const authorization = normalizeLegacyLatestBootstrap(
+    authorizingDescriptor.legacyLatestBootstrap,
+  );
+  if (!authorization) {
+    throw new Error(
+      "Prerelease descriptor has no legacy Latest bootstrap authorization.",
+    );
+  }
+  if (!/^[a-f0-9]{64}$/.test(prereleaseDescriptorSha256 || "")) {
+    throw new Error("Authorizing prerelease descriptor digest is malformed.");
+  }
+  assertDescriptorRepository(authorizingDescriptor, {
+    name: repositoryName,
+    owner,
+  });
+  const expectedTargets = Array.isArray(authorizingDescriptor.expectedTargets)
+    ? [...authorizingDescriptor.expectedTargets].sort()
+    : [];
+  return validateLegacyStableCarrierDescriptor({
+    schemaVersion: 1,
+    descriptorType: LEGACY_STABLE_CARRIER_DESCRIPTOR_TYPE,
+    repository: { ...authorizingDescriptor.repository },
+    release: {
+      channel: "stable",
+      id: authorization.releaseId,
+      prerelease: false,
+      signingKeyFingerprint:
+        authorizingDescriptor.release.signingKeyFingerprint,
+      tag: authorization.tag,
+      version: authorization.tag.slice(1),
+    },
+    source: { commit: authorization.sourceCommit },
+    expectedTargets,
+    authorization: { prereleaseDescriptorSha256 },
+  });
+}
+
+function readStableCarrierDescriptor(filePath) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Stable carrier descriptor is missing or invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (parsed?.descriptorType === LEGACY_STABLE_CARRIER_DESCRIPTOR_TYPE) {
+    validateLegacyStableCarrierDescriptor(parsed);
+    if (fs.readFileSync(filePath, "utf8") !== canonicalJson(parsed)) {
+      throw new Error(
+        "Legacy stable carrier descriptor is not canonical JSON.",
+      );
+    }
+    return { carrierDescriptor: parsed, legacyBootstrap: true };
+  }
+  return {
+    carrierDescriptor: readReleaseDescriptor(filePath),
+    legacyBootstrap: false,
+  };
+}
+
+function legacyStableCarrierBaseAssets(assetsByName, descriptor) {
+  const { channelAssetsByName } = splitStableReleaseAssets(
+    descriptor,
+    assetsByName,
+  );
+  return new Map(
+    Array.from(assetsByName).filter(
+      ([name]) =>
+        !channelAssetsByName.has(name) &&
+        !LEGACY_STABLE_CARRIER_CONTROL_NAME_SET.has(name) &&
+        !LEGACY_MIGRATION_CONTROL_NAME_SET.has(name) &&
+        !LEGACY_UNSIGNED_BETA_POINTER_NAME_SET.has(name),
+    ),
+  );
+}
+
+function legacyStableCarrierBaseRecords(assetsByName, descriptor) {
+  const baseAssets = legacyStableCarrierBaseAssets(assetsByName, descriptor);
+  if (baseAssets.size === 0) {
+    throw new Error("Legacy stable carrier has no preexisting product assets.");
+  }
+  return Array.from(baseAssets, ([name, asset]) => {
+    const sha256 = githubAssetSha256(asset);
+    if (!sha256) {
+      throw new Error(
+        `Legacy stable carrier asset ${name} has no GitHub SHA-256 digest.`,
+      );
+    }
+    return { name, sha256 };
+  }).sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function verifyLegacyStableCarrierAssetSet({
+  assets,
+  descriptor,
+  directory,
+  verifySignature = verifyDescriptorSignature,
+}) {
+  validateLegacyStableCarrierDescriptor(descriptor);
+  const allAssetsByName = assetMap(assets);
+  const digestByName = new Map();
+  for (const [name, asset] of allAssetsByName) {
+    const filePath = path.join(directory, name);
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Downloaded legacy carrier asset is missing: ${name}.`);
+    }
+    const digest = sha256File(filePath);
+    const apiDigest = githubAssetSha256(asset);
+    if (!apiDigest || apiDigest !== digest) {
+      throw new Error(
+        `GitHub digest mismatch for legacy carrier asset ${name}.`,
+      );
+    }
+    digestByName.set(name, digest);
+  }
+  const descriptorFilePath = path.join(directory, DESCRIPTOR_NAME);
+  const descriptorSignatureFilePath = path.join(
+    directory,
+    DESCRIPTOR_SIGNATURE_NAME,
+  );
+  verifySignature(
+    descriptorFilePath,
+    descriptorSignatureFilePath,
+    descriptor.release.signingKeyFingerprint,
+  );
+  const { channelAssetsByName, productAssetsByName } = splitStableReleaseAssets(
+    descriptor,
+    allAssetsByName,
+  );
+  const indexPath = path.join(directory, RELEASE_ASSET_INDEX_NAME);
+  const indexSignaturePath = path.join(
+    directory,
+    RELEASE_ASSET_INDEX_SIGNATURE_NAME,
+  );
+  verifySignature(
+    indexPath,
+    indexSignaturePath,
+    descriptor.release.signingKeyFingerprint,
+  );
+  const assetIndex = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+  if (fs.readFileSync(indexPath, "utf8") !== canonicalJson(assetIndex)) {
+    throw new Error("Legacy stable carrier asset index is not canonical JSON.");
+  }
+  if (
+    assetIndex.schemaVersion !== 1 ||
+    assetIndex.descriptorSha256 !== digestByName.get(DESCRIPTOR_NAME) ||
+    assetIndex.releaseId !== descriptor.release.id ||
+    assetIndex.sourceCommit !== descriptor.source.commit ||
+    assetIndex.tag !== descriptor.release.tag ||
+    !Array.isArray(assetIndex.assets)
+  ) {
+    throw new Error(
+      "Legacy stable carrier asset index identity does not match its descriptor.",
+    );
+  }
+  assertReleaseAssetIndexEntries(
+    assetIndex,
+    allAssetsByName,
+    digestByName,
+    descriptor,
+  );
+  const migrationAssets = legacyMigrationControlAssets(allAssetsByName);
+  if (migrationAssets.size !== LEGACY_MIGRATION_CONTROL_NAMES.length) {
+    throw new Error(
+      "Legacy stable carrier migration signature pair is incomplete.",
+    );
+  }
+  const migrationPath = path.join(
+    directory,
+    LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+  );
+  verifySignature(
+    migrationPath,
+    path.join(directory, LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME),
+    descriptor.release.signingKeyFingerprint,
+  );
+  const legacyMigration = JSON.parse(fs.readFileSync(migrationPath, "utf8"));
+  if (
+    fs.readFileSync(migrationPath, "utf8") !== canonicalJson(legacyMigration)
+  ) {
+    throw new Error("Legacy beta migration is not canonical JSON.");
+  }
+  const migrationRecords = validateLegacyBetaChannelMigration(legacyMigration, {
+    authorizationDescriptorSha256:
+      descriptor.authorization.prereleaseDescriptorSha256,
+    carrier: {
+      id: descriptor.release.id,
+      tag_name: descriptor.release.tag,
+    },
+    carrierControls: legacyCarrierControlAssets(allAssetsByName),
+    carrierDescriptorSha256: digestByName.get(DESCRIPTOR_NAME),
+    carrierSourceCommit: descriptor.source.commit,
+    expectedTargets: descriptor.expectedTargets,
+  });
+  const remainingLegacyPointers = legacyPointersRemaining(
+    allAssetsByName,
+    migrationRecords.legacyPointers,
+    descriptor,
+  );
+  if (remainingLegacyPointers.size !== 0) {
+    throw new Error(
+      "Legacy stable carrier still contains unsigned beta pointers.",
+    );
+  }
+  assertRemoteAssetSnapshot(
+    remoteAssetMapFromRecords(migrationRecords.baseAssets),
+    legacyStableCarrierBaseAssets(allAssetsByName, descriptor),
+    "Legacy stable carrier signed base",
+  );
+  return {
+    allAssetsByName,
+    assetIndex,
+    assetsByName: productAssetsByName,
+    attestations: [],
+    channelAssetsByName,
+    digestByName,
+    legacyMigration,
+  };
+}
+
 function assertRemoteAssetSnapshot(expected, actual, label) {
   if (expected.size !== actual.size) {
     throw new Error(`${label} asset set changed during verification.`);
@@ -1414,6 +2401,517 @@ function assertRemoteAssetSnapshot(expected, actual, label) {
     ) {
       throw new Error(`${label} asset changed during verification: ${name}.`);
     }
+  }
+}
+
+function remoteAssetMapFromRecords(records) {
+  return new Map(
+    Array.from(records, ([name, record]) => [
+      name,
+      { id: record.id, name, digest: `sha256:${record.sha256}` },
+    ]),
+  );
+}
+
+function legacyPointerAssets(assetsByName) {
+  return new Map(
+    LEGACY_UNSIGNED_BETA_POINTER_NAMES.filter((name) =>
+      assetsByName.has(name),
+    ).map((name) => [name, assetsByName.get(name)]),
+  );
+}
+
+function legacyMigrationControlAssets(assetsByName) {
+  return new Map(
+    LEGACY_MIGRATION_CONTROL_NAMES.filter((name) => assetsByName.has(name)).map(
+      (name) => [name, assetsByName.get(name)],
+    ),
+  );
+}
+
+function legacyCarrierControlAssets(assetsByName) {
+  return new Map(
+    LEGACY_STABLE_CARRIER_CONTROL_NAMES.filter((name) =>
+      assetsByName.has(name),
+    ).map((name) => [name, assetsByName.get(name)]),
+  );
+}
+
+function assertLegacyMigrationAssetNames(carrierDescriptor, assetsByName) {
+  const channelAssets = splitStableReleaseAssets(
+    carrierDescriptor,
+    assetsByName,
+  ).channelAssetsByName;
+  const migrationPairComplete =
+    legacyMigrationControlAssets(assetsByName).size ===
+    LEGACY_MIGRATION_CONTROL_NAMES.length;
+  const unauthorizedChannelAssets = migrationPairComplete
+    ? []
+    : Array.from(channelAssets.keys()).filter(
+        (name) =>
+          !LEGACY_MIGRATION_CONTROL_NAME_SET.has(name) &&
+          !LEGACY_UNSIGNED_BETA_POINTER_NAME_SET.has(name),
+      );
+  const betaLike = Array.from(assetsByName.keys()).filter(
+    (name) =>
+      /^latest-.*-beta-.*\.json(?:\.asc)?$/i.test(name) &&
+      !LEGACY_UNSIGNED_BETA_POINTER_NAME_SET.has(name) &&
+      !channelAssets.has(name),
+  );
+  const unexpected = [
+    ...new Set([...unauthorizedChannelAssets, ...betaLike]),
+  ].sort();
+  if (unexpected.length > 0) {
+    throw new Error(
+      `Legacy beta migration found unexpected channel assets: ${unexpected.join(", ")}.`,
+    );
+  }
+}
+
+function legacyPointersRemaining(
+  assetsByName,
+  signedPointers,
+  carrierDescriptor,
+) {
+  const permanentStateComplete = permanentBetaChannelAssetNames(
+    carrierDescriptor.expectedTargets,
+  ).every((name) => assetsByName.has(name));
+  if (permanentStateComplete) return new Map();
+
+  const currentPointers = legacyPointerAssets(assetsByName);
+  for (const [name, current] of currentPointers) {
+    const expected = signedPointers.get(name);
+    if (
+      !expected ||
+      current.id !== expected.id ||
+      githubAssetSha256(current) !== expected.sha256
+    ) {
+      throw new Error(`Legacy beta pointer changed during migration: ${name}.`);
+    }
+  }
+  return currentPointers;
+}
+
+function assertLegacyCarrierControls(currentAssets, controlPaths) {
+  for (const [name, filePath] of controlPaths) {
+    const current = currentAssets.get(name);
+    if (current && githubAssetSha256(current) !== sha256File(filePath)) {
+      throw new Error(`Legacy stable carrier control collision for ${name}.`);
+    }
+  }
+}
+
+async function bootstrapLegacyLatestCarrier(
+  authorizingDescriptor,
+  publicationOwner,
+  {
+    createPrivateDirectory = () =>
+      fs.mkdtempSync(path.join(os.tmpdir(), "s3-sidekick-carrier-bootstrap-")),
+    deleteAsset = (assetId) =>
+      Promise.resolve(deleteReleaseAssetById(repository, assetId)),
+    downloadAssets = downloadDraftAssets,
+    environment = process.env,
+    listAssets = listAuthenticatedAssets,
+    removeDirectory = (directory) =>
+      fs.rmSync(directory, { force: true, recursive: true }),
+    request = (method, endpoint, body) =>
+      Promise.resolve(githubApi(method, endpoint, body)),
+    signFile = (filePath, signaturePath, signingEnvironment) =>
+      signDescriptor(filePath, signaturePath, signingEnvironment),
+    uploadAsset = (releaseId, filePath) =>
+      Promise.resolve(uploadReleaseAssetById(repository, releaseId, filePath)),
+    verifyCarrier = (options) => verifyLatestStableCarrier(options),
+    verifySignature = verifyDescriptorSignature,
+  } = {},
+) {
+  validatePublicationOwner(publicationOwner);
+  if (
+    publicationOwner.releaseId !== authorizingDescriptor?.release?.id ||
+    publicationOwner.sourceCommit !== authorizingDescriptor?.source?.commit
+  ) {
+    throw new Error(
+      "Legacy carrier bootstrap owner does not match the authorizing prerelease descriptor.",
+    );
+  }
+  const carrierDescriptor = createLegacyStableCarrierDescriptor(
+    authorizingDescriptor,
+    publicationOwner.descriptorSha256,
+  );
+  const authorization = normalizeLegacyLatestBootstrap(
+    authorizingDescriptor.legacyLatestBootstrap,
+  );
+  const initialLatest = await request(
+    "GET",
+    `/repos/${owner}/${repositoryName}/releases/latest`,
+  );
+  validateMutableRelease(initialLatest, {
+    expectedId: authorization.releaseId,
+    expectedPrerelease: false,
+    expectedTag: authorization.tag,
+    requireDraft: false,
+  });
+  const initialById = await request(
+    "GET",
+    `/repos/${owner}/${repositoryName}/releases/${authorization.releaseId}`,
+  );
+  validateMutableRelease(initialById, {
+    expectedId: authorization.releaseId,
+    expectedPrerelease: false,
+    expectedTag: authorization.tag,
+    requireDraft: false,
+  });
+  await assertGitHubTagCommit(request, {
+    expectedCommit: authorization.sourceCommit,
+    owner,
+    repository: repositoryName,
+    tag: authorization.tag,
+  });
+  const initialAssetsByName = assetMap(
+    await listAssets(authorization.releaseId),
+  );
+  assertLegacyMigrationAssetNames(carrierDescriptor, initialAssetsByName);
+  const initialBaseAssets = legacyStableCarrierBaseAssets(
+    initialAssetsByName,
+    carrierDescriptor,
+  );
+  const baseRecords = legacyStableCarrierBaseRecords(
+    initialAssetsByName,
+    carrierDescriptor,
+  );
+  const directory = createPrivateDirectory();
+  try {
+    const carrierDescriptorPath = path.join(directory, DESCRIPTOR_NAME);
+    const carrierDescriptorSignaturePath = path.join(
+      directory,
+      DESCRIPTOR_SIGNATURE_NAME,
+    );
+    const assetIndexPath = path.join(directory, RELEASE_ASSET_INDEX_NAME);
+    const assetIndexSignaturePath = path.join(
+      directory,
+      RELEASE_ASSET_INDEX_SIGNATURE_NAME,
+    );
+    fs.writeFileSync(carrierDescriptorPath, canonicalJson(carrierDescriptor), {
+      mode: 0o600,
+    });
+    const committedAt = Date.parse(authorizingDescriptor.source?.committedAt);
+    const signingEnvironment = {
+      ...environment,
+      ...(Number.isFinite(committedAt)
+        ? { SOURCE_DATE_EPOCH: String(Math.floor(committedAt / 1000)) }
+        : {}),
+    };
+    await Promise.resolve(
+      signFile(
+        carrierDescriptorPath,
+        carrierDescriptorSignaturePath,
+        signingEnvironment,
+      ),
+    );
+    const assetIndex = {
+      schemaVersion: 1,
+      descriptorSha256: sha256File(carrierDescriptorPath),
+      releaseId: carrierDescriptor.release.id,
+      sourceCommit: carrierDescriptor.source.commit,
+      tag: carrierDescriptor.release.tag,
+      assets: [
+        ...baseRecords,
+        {
+          name: DESCRIPTOR_NAME,
+          sha256: sha256File(carrierDescriptorPath),
+        },
+        {
+          name: DESCRIPTOR_SIGNATURE_NAME,
+          sha256: sha256File(carrierDescriptorSignaturePath),
+        },
+      ].sort((left, right) => left.name.localeCompare(right.name)),
+    };
+    fs.writeFileSync(assetIndexPath, canonicalJson(assetIndex), {
+      mode: 0o600,
+    });
+    await Promise.resolve(
+      signFile(assetIndexPath, assetIndexSignaturePath, signingEnvironment),
+    );
+
+    const controlPaths = new Map([
+      [DESCRIPTOR_NAME, carrierDescriptorPath],
+      [DESCRIPTOR_SIGNATURE_NAME, carrierDescriptorSignaturePath],
+      [RELEASE_ASSET_INDEX_NAME, assetIndexPath],
+      [RELEASE_ASSET_INDEX_SIGNATURE_NAME, assetIndexSignaturePath],
+    ]);
+    const migrationPath = path.join(
+      directory,
+      LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+    );
+    const migrationSignaturePath = path.join(
+      directory,
+      LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+    );
+    const migrationPaths = new Map([
+      [LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME, migrationSignaturePath],
+      [LEGACY_BETA_CHANNEL_MIGRATION_NAME, migrationPath],
+    ]);
+
+    const recheckReleaseIdentity = async () => {
+      const latest = await request(
+        "GET",
+        `/repos/${owner}/${repositoryName}/releases/latest`,
+      );
+      validateMutableRelease(latest, {
+        expectedId: authorization.releaseId,
+        expectedPrerelease: false,
+        expectedTag: authorization.tag,
+        requireDraft: false,
+      });
+      const byId = await request(
+        "GET",
+        `/repos/${owner}/${repositoryName}/releases/${authorization.releaseId}`,
+      );
+      validateMutableRelease(byId, {
+        expectedId: authorization.releaseId,
+        expectedPrerelease: false,
+        expectedTag: authorization.tag,
+        requireDraft: false,
+      });
+      await assertGitHubTagCommit(request, {
+        expectedCommit: authorization.sourceCommit,
+        owner,
+        repository: repositoryName,
+        tag: authorization.tag,
+      });
+    };
+
+    let currentAssetsByName = initialAssetsByName;
+    let migrationAssets = legacyMigrationControlAssets(currentAssetsByName);
+    let migration;
+    if (migrationAssets.size === 2) {
+      await Promise.resolve(
+        downloadAssets(Array.from(migrationAssets.values()), directory),
+      );
+      verifySignature(
+        migrationPath,
+        migrationSignaturePath,
+        carrierDescriptor.release.signingKeyFingerprint,
+      );
+      migration = JSON.parse(fs.readFileSync(migrationPath, "utf8"));
+      if (fs.readFileSync(migrationPath, "utf8") !== canonicalJson(migration)) {
+        throw new Error("Legacy beta migration is not canonical JSON.");
+      }
+    } else {
+      const initialPointers = legacyPointerAssets(currentAssetsByName);
+      if (initialPointers.size !== LEGACY_UNSIGNED_BETA_POINTER_NAMES.length) {
+        throw new Error(
+          "Unsigned legacy beta pointer set is not the exact authorized five-pointer snapshot.",
+        );
+      }
+      if (
+        migrationAssets.has(LEGACY_BETA_CHANNEL_MIGRATION_NAME) &&
+        !migrationAssets.has(LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME)
+      ) {
+        throw new Error(
+          "Legacy beta migration JSON exists without its signature.",
+        );
+      }
+      for (const [name, filePath] of controlPaths) {
+        await recheckReleaseIdentity();
+        currentAssetsByName = assetMap(
+          await listAssets(authorization.releaseId),
+        );
+        assertLegacyMigrationAssetNames(carrierDescriptor, currentAssetsByName);
+        assertRemoteAssetSnapshot(
+          initialBaseAssets,
+          legacyStableCarrierBaseAssets(currentAssetsByName, carrierDescriptor),
+          "Legacy stable carrier base",
+        );
+        assertRemoteAssetSnapshot(
+          initialPointers,
+          legacyPointerAssets(currentAssetsByName),
+          "Unsigned legacy beta pointers",
+        );
+        assertLegacyCarrierControls(currentAssetsByName, controlPaths);
+        const action = classifyImmutableAsset(
+          currentAssetsByName.get(name),
+          filePath,
+        );
+        if (action === "upload") {
+          await Promise.resolve(uploadAsset(authorization.releaseId, filePath));
+        }
+      }
+      await recheckReleaseIdentity();
+      currentAssetsByName = assetMap(await listAssets(authorization.releaseId));
+      const carrierControlAssets =
+        legacyCarrierControlAssets(currentAssetsByName);
+      if (carrierControlAssets.size !== controlPaths.size) {
+        throw new Error(
+          "Legacy stable carrier control snapshot is incomplete.",
+        );
+      }
+      migration = createLegacyBetaChannelMigration({
+        authorizationDescriptorSha256: publicationOwner.descriptorSha256,
+        baseAssets: initialBaseAssets,
+        carrier: initialLatest,
+        carrierControls: carrierControlAssets,
+        carrierDescriptorSha256: sha256File(carrierDescriptorPath),
+        carrierSourceCommit: authorization.sourceCommit,
+        expectedTargets: carrierDescriptor.expectedTargets,
+        legacyPointers: initialPointers,
+      });
+      fs.writeFileSync(migrationPath, canonicalJson(migration), {
+        mode: 0o600,
+      });
+      await Promise.resolve(
+        signFile(migrationPath, migrationSignaturePath, signingEnvironment),
+      );
+      for (const [name, filePath] of migrationPaths) {
+        await recheckReleaseIdentity();
+        currentAssetsByName = assetMap(
+          await listAssets(authorization.releaseId),
+        );
+        assertLegacyMigrationAssetNames(carrierDescriptor, currentAssetsByName);
+        assertRemoteAssetSnapshot(
+          initialBaseAssets,
+          legacyStableCarrierBaseAssets(currentAssetsByName, carrierDescriptor),
+          "Legacy stable carrier base",
+        );
+        assertRemoteAssetSnapshot(
+          initialPointers,
+          legacyPointerAssets(currentAssetsByName),
+          "Unsigned legacy beta pointers",
+        );
+        assertLegacyCarrierControls(currentAssetsByName, controlPaths);
+        assertRemoteAssetSnapshot(
+          carrierControlAssets,
+          legacyCarrierControlAssets(currentAssetsByName),
+          "Legacy stable carrier controls",
+        );
+        const currentMigrationAssets =
+          legacyMigrationControlAssets(currentAssetsByName);
+        for (const [currentName, currentAsset] of currentMigrationAssets) {
+          const expectedPath = migrationPaths.get(currentName);
+          if (
+            !expectedPath ||
+            githubAssetSha256(currentAsset) !== sha256File(expectedPath)
+          ) {
+            throw new Error(
+              `Legacy beta migration control collision for ${currentName}.`,
+            );
+          }
+        }
+        const action = classifyImmutableAsset(
+          currentAssetsByName.get(name),
+          filePath,
+        );
+        if (action === "upload") {
+          await Promise.resolve(uploadAsset(authorization.releaseId, filePath));
+        }
+      }
+      await recheckReleaseIdentity();
+      currentAssetsByName = assetMap(await listAssets(authorization.releaseId));
+      migrationAssets = legacyMigrationControlAssets(currentAssetsByName);
+      if (migrationAssets.size !== 2) {
+        throw new Error("Legacy beta migration signature pair is incomplete.");
+      }
+    }
+
+    const currentCarrierControls =
+      legacyCarrierControlAssets(currentAssetsByName);
+    if (currentCarrierControls.size !== controlPaths.size) {
+      throw new Error("Legacy stable carrier control snapshot is incomplete.");
+    }
+    const migrationRecords = validateLegacyBetaChannelMigration(migration, {
+      authorizationDescriptorSha256: publicationOwner.descriptorSha256,
+      carrier: initialLatest,
+      carrierControls: currentCarrierControls,
+      carrierDescriptorSha256: sha256File(carrierDescriptorPath),
+      carrierSourceCommit: authorization.sourceCommit,
+      expectedTargets: carrierDescriptor.expectedTargets,
+    });
+    const signedBaseAssets = remoteAssetMapFromRecords(
+      migrationRecords.baseAssets,
+    );
+    const signedCarrierControls = remoteAssetMapFromRecords(
+      migrationRecords.carrierControls,
+    );
+    const signedPointers = migrationRecords.legacyPointers;
+    assertRemoteAssetSnapshot(
+      signedBaseAssets,
+      legacyStableCarrierBaseAssets(currentAssetsByName, carrierDescriptor),
+      "Signed legacy stable carrier base",
+    );
+    legacyPointersRemaining(
+      currentAssetsByName,
+      signedPointers,
+      carrierDescriptor,
+    );
+    const expectedMigrationAssets = new Map(migrationAssets);
+
+    const recheck = async () => {
+      await recheckReleaseIdentity();
+      const current = assetMap(await listAssets(authorization.releaseId));
+      assertLegacyMigrationAssetNames(carrierDescriptor, current);
+      assertRemoteAssetSnapshot(
+        signedBaseAssets,
+        legacyStableCarrierBaseAssets(current, carrierDescriptor),
+        "Signed legacy stable carrier base",
+      );
+      assertRemoteAssetSnapshot(
+        expectedMigrationAssets,
+        legacyMigrationControlAssets(current),
+        "Signed legacy beta migration controls",
+      );
+      const pointers = legacyPointersRemaining(
+        current,
+        signedPointers,
+        carrierDescriptor,
+      );
+      assertRemoteAssetSnapshot(
+        signedCarrierControls,
+        legacyCarrierControlAssets(current),
+        "Signed legacy stable carrier controls",
+      );
+      return { pointers };
+    };
+
+    for (const name of LEGACY_UNSIGNED_BETA_POINTER_NAMES) {
+      const before = await recheck();
+      const current = before.pointers.get(name);
+      if (!current) continue;
+      const expected = signedPointers.get(name);
+      if (
+        current.id !== expected.id ||
+        githubAssetSha256(current) !== expected.sha256
+      ) {
+        throw new Error(
+          `Refusing to delete changed legacy beta pointer ${name}.`,
+        );
+      }
+      await Promise.resolve(deleteAsset(expected.id));
+      await recheck();
+    }
+
+    const finalSnapshot = await recheck();
+    if (finalSnapshot.pointers.size !== 0) {
+      throw new Error("Legacy beta migration did not converge to empty.");
+    }
+    const verified = await verifyCarrier();
+    try {
+      if (
+        verified?.carrier?.id !== authorization.releaseId ||
+        verified?.carrierDescriptor?.descriptorType !==
+          LEGACY_STABLE_CARRIER_DESCRIPTOR_TYPE ||
+        verified.carrierDescriptor.authorization?.prereleaseDescriptorSha256 !==
+          publicationOwner.descriptorSha256
+      ) {
+        throw new Error(
+          "Strict post-bootstrap verification returned the wrong stable carrier.",
+        );
+      }
+      return verified;
+    } catch (error) {
+      await disposePublicationContext(verified);
+      throw error;
+    }
+  } finally {
+    await Promise.resolve(removeDirectory(directory));
   }
 }
 
@@ -1468,24 +2966,27 @@ async function verifyLatestStableCarrier({
       directory,
       DESCRIPTOR_SIGNATURE_NAME,
     );
-    const carrierDescriptor = readReleaseDescriptor(carrierDescriptorPath);
+    const { carrierDescriptor, legacyBootstrap: legacyCarrierBootstrap } =
+      readStableCarrierDescriptor(carrierDescriptorPath);
     assertDescriptorRepository(carrierDescriptor, {
       name: repositoryName,
       owner,
     });
-    verifyDescriptorSignature(carrierDescriptorPath, carrierSignaturePath);
     verifyDescriptorSignature(
       carrierDescriptorPath,
       carrierSignaturePath,
       carrierDescriptor.release.signingKeyFingerprint,
     );
-    validateMutableRelease(carrier, {
+    const carrierReleaseOptions = {
       expectedId: carrierDescriptor.release.id,
       expectedPrerelease: false,
       expectedTag: carrierDescriptor.release.tag,
-      expectedTargetCommitish: carrierDescriptor.source.commit,
+      ...(legacyCarrierBootstrap
+        ? {}
+        : { expectedTargetCommitish: carrierDescriptor.source.commit }),
       requireDraft: false,
-    });
+    };
+    validateMutableRelease(carrier, carrierReleaseOptions);
     await assertGitHubTagCommit(request, {
       expectedCommit: carrierDescriptor.source.commit,
       owner,
@@ -1494,13 +2995,19 @@ async function verifyLatestStableCarrier({
     });
 
     const carrierDescriptorSha256 = sha256File(carrierDescriptorPath);
-    const verification = verifyDownloadedAssetSet({
-      assets,
-      descriptor: carrierDescriptor,
-      directory,
-      expectedDescriptorSha256: carrierDescriptorSha256,
-      requireAssetIndex: true,
-    });
+    const verification = legacyCarrierBootstrap
+      ? verifyLegacyStableCarrierAssetSet({
+          assets,
+          descriptor: carrierDescriptor,
+          directory,
+        })
+      : verifyDownloadedAssetSet({
+          assets,
+          descriptor: carrierDescriptor,
+          directory,
+          expectedDescriptorSha256: carrierDescriptorSha256,
+          requireAssetIndex: true,
+        });
     const confirmedAssets = await listAssets(carrier.id);
     const confirmedByName = assetMap(confirmedAssets);
     assertReleaseAssetIndexEntries(
@@ -1544,6 +3051,40 @@ async function verifyLatestStableCarrier({
         .filter((name) => channelAssets.has(name))
         .map((name) => [name, channelAssets.get(name)]),
     );
+    const stableReceiptAssets = new Map(
+      [STABLE_ROLLOVER_RECEIPT_NAME, STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME]
+        .filter((name) => channelAssets.has(name))
+        .map((name) => [name, channelAssets.get(name)]),
+    );
+    if (stableReceiptAssets.size === 1) {
+      throw new Error("Stable rollover receipt signature pair is incomplete.");
+    }
+    let stableReceipt = null;
+    if (stableReceiptAssets.size === 2) {
+      const stableReceiptPath = path.join(
+        directory,
+        STABLE_ROLLOVER_RECEIPT_NAME,
+      );
+      verifyDescriptorSignature(
+        stableReceiptPath,
+        path.join(directory, STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME),
+        carrierDescriptor.release.signingKeyFingerprint,
+      );
+      stableReceipt = JSON.parse(fs.readFileSync(stableReceiptPath, "utf8"));
+      if (
+        fs.readFileSync(stableReceiptPath, "utf8") !==
+        canonicalJson(stableReceipt)
+      ) {
+        throw new Error("Stable rollover receipt is not canonical JSON.");
+      }
+      validateStableRolloverReceipt(stableReceipt, {
+        expectedOwner: null,
+        successor: carrier,
+        successorDescriptor: carrierDescriptor,
+        successorDescriptorSha256: carrierDescriptorSha256,
+        successorProductIndexSha256: productIndexSha256,
+      });
+    }
     const stageOrBackupNames = operationalBetaChannelAssetNames(
       carrierDescriptor.expectedTargets,
     ).filter(
@@ -1704,13 +3245,7 @@ async function verifyLatestStableCarrier({
         "GET",
         `/repos/${owner}/${repositoryName}/releases/${carrier.id}`,
       );
-      validateMutableRelease(byId, {
-        expectedId: carrier.id,
-        expectedPrerelease: false,
-        expectedTag: carrier.tag_name,
-        expectedTargetCommitish: carrierDescriptor.source.commit,
-        requireDraft: false,
-      });
+      validateMutableRelease(byId, carrierReleaseOptions);
       const listed = currentAssets ?? (await listAssets(carrier.id));
       return assertProductSnapshot(listed);
     };
@@ -1720,13 +3255,7 @@ async function verifyLatestStableCarrier({
         "GET",
         `/repos/${owner}/${repositoryName}/releases/latest`,
       );
-      validateMutableRelease(latest, {
-        expectedId: carrier.id,
-        expectedPrerelease: false,
-        expectedTag: carrier.tag_name,
-        expectedTargetCommitish: carrierDescriptor.source.commit,
-        requireDraft: false,
-      });
+      validateMutableRelease(latest, carrierReleaseOptions);
       return assertCarrierById(currentAssets);
     };
 
@@ -1746,6 +3275,8 @@ async function verifyLatestStableCarrier({
       productSnapshot,
       rollover,
       rolloverAssets,
+      stableReceipt,
+      stableReceiptAssets,
       transaction,
       transactionAssets,
       verification,
@@ -1966,6 +3497,15 @@ async function promoteBetaChannel(
     allowTransaction: true,
   });
   try {
+    if (carrierContext.incompleteControl) {
+      await repairIncompleteChannelControl(carrierContext, {
+        fetchLatestAsset,
+      });
+      carrierContext.dispose();
+      carrierContext = await verifyLatestStableCarrier({
+        allowTransaction: true,
+      });
+    }
     if (carrierContext.transaction) {
       const transactionRecords = validateBetaChannelTransaction(
         carrierContext.transaction,
@@ -2437,9 +3977,11 @@ async function assertRolloverAcquisitionState(
       carrierContext.carrierDescriptor.expectedTargets,
     ),
   );
+  const historicalNames = new Set(historicalBetaChannelAssetNames());
   const unexpected = Array.from(channelAssets.keys()).filter(
     (name) =>
       !permanentNames.has(name) &&
+      !historicalNames.has(name) &&
       !ownedRolloverAssets.has(name) &&
       name !== pendingName,
   );
@@ -3098,11 +4640,19 @@ async function releaseStableRolloverLease(release, descriptor, carrierContext) {
     carrierContext.rolloverAssets,
     { requireLatest: false },
   );
-  await deleteOwnedSuccessorReceiptAssets(
+  const retainedReceipt = await loadStableRolloverReceipt(
     release,
     descriptor,
-    carrierContext.receiptAssets,
+    carrierContext.receipt?.owner || null,
     { requireDraft: false },
+  );
+  if (!retainedReceipt) {
+    throw new Error("Published stable rollover receipt was not retained.");
+  }
+  assertRemoteAssetSnapshot(
+    carrierContext.receiptAssets,
+    retainedReceipt.assets,
+    "Permanent stable rollover receipt",
   );
   clearStableRolloverReceiptOwnership(sha256File(descriptorPath));
   const confirmedLatest = await Promise.resolve(
@@ -3165,27 +4715,12 @@ async function settlePublishedStableRolloverReceipt(
     clearReceiptOwnership = (descriptorSha256) =>
       clearStableRolloverReceiptOwnership(descriptorSha256),
     deletePredecessorLease = deleteOwnedRolloverAssets,
-    deleteSuccessorReceipt = deleteOwnedSuccessorReceiptAssets,
     getLatestRelease = () =>
       Promise.resolve(
         githubApi("GET", `/repos/${owner}/${repositoryName}/releases/latest`),
       ),
     listReleaseAssets = listAuthenticatedAssets,
     loadReceipt = loadStableRolloverReceipt,
-    loadReceiptOwnership = (currentDescriptor, descriptorSha256) =>
-      loadStableRolloverReceiptOwnership(currentDescriptor, descriptorSha256),
-    persistReceiptOwnership = (
-      currentDescriptor,
-      descriptorSha256,
-      publicationOwner,
-      receiptAssets,
-    ) =>
-      persistStableRolloverReceiptOwnership(
-        currentDescriptor,
-        descriptorSha256,
-        publicationOwner,
-        receiptAssets,
-      ),
     successorDescriptorSha256 = null,
     verifyPredecessor = (options) => verifyLatestStableCarrier(options),
   } = {},
@@ -3205,40 +4740,13 @@ async function settlePublishedStableRolloverReceipt(
   const receiptSignatureAsset = successorByName.get(
     STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
   );
-  const receiptOwnership = await loadReceiptOwnership(
-    descriptor,
-    descriptorSha256,
-  );
-  if (!receiptAsset && receiptSignatureAsset) {
-    const expectedSignature = receiptOwnership?.assets.get(
-      STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
-    );
-    if (
-      !expectedSignature ||
-      receiptSignatureAsset.id !== expectedSignature.id ||
-      githubAssetSha256(receiptSignatureAsset) !==
-        githubAssetSha256(expectedSignature)
-    ) {
-      throw new Error(
-        "Published rollover receipt signature singleton is not owned by this descriptor.",
-      );
-    }
-    await deleteSuccessorReceipt(
-      latest,
-      descriptor,
-      new Map([[STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME, expectedSignature]]),
-      { requireDraft: false },
-    );
-    await clearReceiptOwnership(descriptorSha256);
-    return "cleaned-receipt";
-  }
-  if (receiptAsset && !receiptSignatureAsset) {
+  if (Boolean(receiptAsset) !== Boolean(receiptSignatureAsset)) {
     throw new Error(
-      "Published stable rollover receipt is missing its signature; predecessor cleanup cannot be proven.",
+      "Published stable rollover receipt signature pair is incomplete; permanent history cannot be repaired from a singleton.",
     );
   }
   if (!receiptAsset) {
-    if (receiptOwnership) await clearReceiptOwnership(descriptorSha256);
+    await clearReceiptOwnership(descriptorSha256);
     return "none";
   }
 
@@ -3299,23 +4807,261 @@ async function settlePublishedStableRolloverReceipt(
         throw new Error("Incomplete predecessor rollover lease changed.");
       }
     }
-    await persistReceiptOwnership(
-      descriptor,
-      descriptorSha256,
-      receiptContext.receipt.owner,
-      receiptContext.assets,
-    );
     await deletePredecessorLease(predecessorContext, expectedLeaseAssets, {
       requireLatest: false,
     });
-    await deleteSuccessorReceipt(latest, descriptor, receiptContext.assets, {
-      requireDraft: false,
-    });
+    const retainedAssets = assetMap(await listReleaseAssets(release.id));
+    assertRemoteAssetSnapshot(
+      receiptContext.assets,
+      new Map(
+        [STABLE_ROLLOVER_RECEIPT_NAME, STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME]
+          .filter((name) => retainedAssets.has(name))
+          .map((name) => [name, retainedAssets.get(name)]),
+      ),
+      "Permanent stable rollover receipt",
+    );
     await clearReceiptOwnership(descriptorSha256);
-    return "cleaned";
+    return "settled";
   } finally {
     predecessorContext.dispose();
   }
+}
+
+async function resolveRemotePublicationOwnerEvidence(
+  descriptor,
+  descriptorSha256,
+  {
+    getRelease = (releaseId) =>
+      Promise.resolve(
+        githubApi(
+          "GET",
+          `/repos/${owner}/${repositoryName}/releases/${releaseId}`,
+        ),
+      ),
+    listReleaseAssets = listAuthenticatedAssets,
+    loadReceipt = loadStableRolloverReceipt,
+    verifyCarrier = (options) => verifyLatestStableCarrier(options),
+  } = {},
+) {
+  if (!/^[a-f0-9]{64}$/.test(descriptorSha256 || "")) {
+    throw new Error("Takeover descriptor digest is malformed.");
+  }
+  const release = await getRelease(descriptor.release.id);
+  validatePublicationRelease(release, descriptor);
+  const releaseAssets = await listReleaseAssets(release.id);
+  const releaseAssetsByName = assetMap(releaseAssets);
+  const productIndexSha256 = githubAssetSha256(
+    releaseAssetsByName.get(RELEASE_ASSET_INDEX_NAME),
+  );
+  const evidence = [];
+  const remoteAssetRecords = (assets, expectedNames, label) => {
+    if (!(assets instanceof Map) || assets.size !== expectedNames.length) {
+      throw new Error(`${label} signature pair is incomplete.`);
+    }
+    return expectedNames
+      .map((name) => {
+        const asset = assets.get(name);
+        const sha256 = githubAssetSha256(asset);
+        if (!Number.isSafeInteger(asset?.id) || !sha256) {
+          throw new Error(`${label} asset identity is malformed.`);
+        }
+        return { id: asset.id, name, sha256 };
+      })
+      .sort((left, right) => left.name.localeCompare(right.name));
+  };
+
+  if (descriptor.release.prerelease) {
+    const carrierContext = await verifyCarrier({
+      allowIncompleteControl: true,
+      allowTransaction: true,
+    });
+    try {
+      if (carrierContext.transaction) {
+        validateBetaChannelTransaction(carrierContext.transaction, {
+          carrier: carrierContext.carrier,
+          carrierDescriptorSha256: carrierContext.carrierDescriptorSha256,
+          expectedNames: permanentBetaChannelAssetNames(
+            carrierContext.carrierDescriptor.expectedTargets,
+          ),
+          productIndexSha256: carrierContext.productIndexSha256,
+        });
+        if (
+          carrierContext.transaction.source.descriptorSha256 !==
+            descriptorSha256 ||
+          carrierContext.transaction.source.id !== descriptor.release.id ||
+          carrierContext.transaction.source.tag !== descriptor.release.tag ||
+          carrierContext.transaction.source.sourceCommit !==
+            descriptor.source.commit
+        ) {
+          throw new Error(
+            "Signed beta transaction does not match the takeover descriptor.",
+          );
+        }
+        evidence.push({
+          assets: remoteAssetRecords(
+            carrierContext.transactionAssets,
+            [
+              BETA_CHANNEL_TRANSACTION_NAME,
+              BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+            ],
+            "Takeover beta transaction",
+          ),
+          kind: "beta-transaction",
+          operationId: carrierContext.transaction.transactionId,
+          owner: carrierContext.transaction.owner,
+        });
+      }
+    } finally {
+      await disposePublicationContext(carrierContext);
+    }
+  } else {
+    if (!productIndexSha256) {
+      throw new Error(
+        "Takeover stable release product index digest is missing.",
+      );
+    }
+    const carrierContext = await verifyCarrier({
+      allowIncompleteControl: true,
+      allowRollover: true,
+    });
+    try {
+      if (carrierContext.rollover) {
+        validateBetaChannelRollover(carrierContext.rollover, {
+          carrier: carrierContext.carrier,
+          carrierDescriptorSha256: carrierContext.carrierDescriptorSha256,
+          carrierVersion: carrierContext.carrierDescriptor.release.version,
+          expectedTargets: carrierContext.carrierDescriptor.expectedTargets,
+          productIndexSha256: carrierContext.productIndexSha256,
+          successor: release,
+          successorDescriptor: descriptor,
+          successorDescriptorSha256: descriptorSha256,
+          successorProductIndexSha256: productIndexSha256,
+        });
+        evidence.push({
+          assets: remoteAssetRecords(
+            carrierContext.rolloverAssets,
+            [BETA_CHANNEL_ROLLOVER_NAME, BETA_CHANNEL_ROLLOVER_SIGNATURE_NAME],
+            "Takeover stable rollover",
+          ),
+          kind: "stable-rollover",
+          operationId: carrierContext.rollover.rolloverId,
+          owner: carrierContext.rollover.owner,
+        });
+      }
+    } finally {
+      await disposePublicationContext(carrierContext);
+    }
+
+    const receiptContext = await loadReceipt(release, descriptor, null, {
+      assets: releaseAssets,
+      requireDraft: release.draft === true,
+    });
+    if (receiptContext) {
+      evidence.push({
+        assets: remoteAssetRecords(
+          receiptContext.assets,
+          [
+            STABLE_ROLLOVER_RECEIPT_NAME,
+            STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
+          ],
+          "Takeover stable receipt",
+        ),
+        kind: "stable-receipt",
+        operationId: receiptContext.receipt.receiptId,
+        owner: receiptContext.receipt.owner,
+      });
+    }
+  }
+
+  if (evidence.length === 0) {
+    throw new Error(
+      "Explicit publication-owner takeover found no complete signed remote owner evidence.",
+    );
+  }
+  const publicationOwner = evidence[0].owner;
+  validatePublicationOwner(publicationOwner);
+  if (
+    publicationOwner.releaseId !== descriptor.release.id ||
+    publicationOwner.sourceCommit !== descriptor.source.commit ||
+    publicationOwner.descriptorSha256 !== descriptorSha256
+  ) {
+    throw new Error("Remote takeover owner does not match the descriptor.");
+  }
+  for (const record of evidence.slice(1)) {
+    if (canonicalJson(record.owner) !== canonicalJson(publicationOwner)) {
+      throw new Error(
+        "Signed remote takeover controls have conflicting owners.",
+      );
+    }
+  }
+  return {
+    descriptorSha256,
+    evidence: evidence
+      .map(({ owner: _owner, ...record }) => record)
+      .sort((left, right) => left.kind.localeCompare(right.kind)),
+    owner: publicationOwner,
+    releaseId: descriptor.release.id,
+    sourceCommit: descriptor.source.commit,
+  };
+}
+
+async function acquirePublicationSessionWithTakeover(
+  descriptor,
+  descriptorSha256,
+  {
+    resolveTakeoverEvidence = resolveRemotePublicationOwnerEvidence,
+    takeover = false,
+    ...sessionOptions
+  } = {},
+) {
+  if (!takeover) {
+    return acquirePublicationSession(
+      descriptor,
+      descriptorSha256,
+      sessionOptions,
+    );
+  }
+  const session = acquirePublicationSession(descriptor, descriptorSha256, {
+    ...sessionOptions,
+    deferOwnerCreation: true,
+  });
+  try {
+    const first = await resolveTakeoverEvidence(descriptor, descriptorSha256);
+    const second = await resolveTakeoverEvidence(descriptor, descriptorSha256);
+    if (canonicalJson(first) !== canonicalJson(second)) {
+      throw new Error(
+        "Signed remote publication-owner evidence changed during takeover.",
+      );
+    }
+    session.installOwner(first.owner);
+    return Object.assign(session, { takeoverEvidence: first });
+  } catch (error) {
+    session.release();
+    throw error;
+  }
+}
+
+function publicationTakeoverRequested(
+  args = process.argv.slice(2),
+  environment = process.env,
+) {
+  const flag = "--takeover-publication-owner";
+  const unexpected = args.filter((argument) => argument !== flag);
+  if (
+    unexpected.length > 0 ||
+    args.filter((argument) => argument === flag).length > 1
+  ) {
+    throw new Error(
+      `release-publication accepts only one optional ${flag} flag.`,
+    );
+  }
+  const configured = String(
+    environment.RELEASE_PUBLICATION_TAKEOVER || "",
+  ).trim();
+  if (configured && configured !== "0" && configured !== "1") {
+    throw new Error("RELEASE_PUBLICATION_TAKEOVER must be exactly 0 or 1.");
+  }
+  return args.includes(flag) || configured === "1";
 }
 
 function betaManifestName(name) {
@@ -3392,6 +5138,7 @@ function defaultPublicationServices() {
           tag: descriptor.release.tag,
         },
       ),
+    bootstrapLegacyCarrier: bootstrapLegacyLatestCarrier,
     carryChannel: carryBetaChannelToStableDraft,
     createPrivateDirectory: () =>
       fs.mkdtempSync(path.join(os.tmpdir(), "s3-sidekick-draft-release-")),
@@ -3442,10 +5189,14 @@ async function runPublication(descriptor, publicationOwner, services = {}) {
   let release = await operations.getRelease(descriptor.release.id);
   validatePublicationRelease(release, descriptor);
 
+  const shouldBootstrapLegacyCarrier = Boolean(
+    descriptor.release.prerelease && descriptor.legacyLatestBootstrap,
+  );
+
   if (release.draft) {
     let carriedChannel = null;
     let draftError;
-    if (descriptor.release.prerelease) {
+    if (descriptor.release.prerelease && !shouldBootstrapLegacyCarrier) {
       const stablePreflight = await operations.verifyLatestCarrier();
       await disposePublicationContext(stablePreflight);
     }
@@ -3493,6 +5244,14 @@ async function runPublication(descriptor, publicationOwner, services = {}) {
       );
       await operations.recheckFrozen({ descriptor, frozen, release });
       await operations.assertExistingTag(descriptor);
+      if (shouldBootstrapLegacyCarrier) {
+        const stablePreflight = await operations.bootstrapLegacyCarrier(
+          descriptor,
+          publicationOwner,
+        );
+        await disposePublicationContext(stablePreflight);
+        await operations.recheckFrozen({ descriptor, frozen, release });
+      }
       if (carriedChannel) {
         const previousCarrier = carriedChannel;
         const freshCarrier = await operations.recheckRollover(
@@ -3602,9 +5361,10 @@ async function main() {
     descriptorSignaturePath,
     descriptor.release.signingKeyFingerprint,
   );
-  const publicationSession = acquirePublicationSession(
+  const publicationSession = await acquirePublicationSessionWithTakeover(
     descriptor,
     sha256File(descriptorPath),
+    { takeover: publicationTakeoverRequested() },
   );
   try {
     await runPublication(descriptor, publicationSession.owner);
@@ -3628,16 +5388,21 @@ if (
 export {
   abortStableRolloverDraft,
   acquirePublicationSession,
+  acquirePublicationSessionWithTakeover,
   assertBetaPromotionOrder,
   assertChannelTransitionSupported,
   assertCompleteEvidence,
   assertReleaseAssetIndexEntries,
+  assertRolloverAcquisitionState,
   assertStableRolloverOrder,
   assetMap,
+  authenticatedPackagesByTarget,
   betaManifestName,
+  bootstrapLegacyLatestCarrier,
   carryBetaChannelToStableDraft,
   channelTransitionPolicy,
   clearStableRolloverReceiptOwnership,
+  createLegacyStableCarrierDescriptor,
   createReleaseAssetIndex,
   deleteOwnedStableDraftChannelAssets,
   evidenceKind,
@@ -3647,16 +5412,21 @@ export {
   persistStableRolloverReceiptOwnership,
   processStartToken,
   promoteBetaChannel,
+  publicationTakeoverRequested,
   recheckFrozenReleaseAssetSet,
+  resolveRemotePublicationOwnerEvidence,
   runPublication,
   settlePublishedStableRolloverReceipt,
   stableManifestName,
   uploadStableDraftChannelAsset,
+  validateLegacyStableCarrierDescriptor,
   validatePublicationRelease,
   verifyChecksumFiles,
   verifyDownloadedAssetSet,
   verifyLatestChannelRecords,
   verifyLatestStableCarrier,
+  verifyLegacyStableCarrierAssetSet,
+  verifyPublishedStableChannel,
   verifyReleaseAssetIndex,
   verifyUpdaterManifests,
   waitForPublicVerification,

@@ -12,6 +12,8 @@ import {
   BETA_CHANNEL_STATE_SIGNATURE_NAME,
   BETA_CHANNEL_TRANSACTION_NAME,
   BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+  LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+  LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
   STABLE_ROLLOVER_RECEIPT_NAME,
   STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
   backupName,
@@ -119,6 +121,9 @@ function makeRemote(initialRecords) {
   let failRenameTo = null;
   let failUploadName = null;
   let failUploadAfterWrite = false;
+  let failDeleteName = null;
+  let failDeleteAfterWrite = false;
+  let failDeleteOnce = false;
   let failed = false;
   const listAssets = async () =>
     Array.from(assets.values(), (asset) => ({ ...asset }));
@@ -142,8 +147,24 @@ function makeRemote(initialRecords) {
     if (asset.name === "stable-product.zip") {
       throw new Error("attempted stable product deletion");
     }
+    if (
+      asset.name === failDeleteName &&
+      !failDeleteAfterWrite &&
+      !failDeleteOnce
+    ) {
+      failDeleteOnce = true;
+      throw new Error(`injected delete failure for ${asset.name}`);
+    }
     assets.delete(asset.name);
     mutations.push({ type: "delete", name: asset.name });
+    if (
+      asset.name === failDeleteName &&
+      failDeleteAfterWrite &&
+      !failDeleteOnce
+    ) {
+      failDeleteOnce = true;
+      throw new Error(`injected post-write delete failure for ${asset.name}`);
+    }
   };
   const renameAsset = async (assetId, name) => {
     const asset = Array.from(assets.values()).find(({ id }) => id === assetId);
@@ -166,6 +187,11 @@ function makeRemote(initialRecords) {
     listAssets,
     mutations,
     renameAsset,
+    setDeleteFailure(name, { afterWrite = false } = {}) {
+      failDeleteName = name;
+      failDeleteAfterWrite = afterWrite;
+      failDeleteOnce = false;
+    },
     setFailure(name) {
       failRenameTo = name;
     },
@@ -216,9 +242,25 @@ test("beta channel names are exact, descriptor-derived, and separate from stable
     ["stable-product.zip", { id: 1, name: "stable-product.zip" }],
     [exactChannelName, { id: 2, name: exactChannelName }],
     [nearMiss, { id: 3, name: nearMiss }],
+    [
+      LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+      { id: 4, name: LEGACY_BETA_CHANNEL_MIGRATION_NAME },
+    ],
+    [
+      LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+      { id: 5, name: LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME },
+    ],
   ]);
   const split = splitStableReleaseAssets(descriptor, assets);
   assert.equal(split.channelAssetsByName.has(exactChannelName), true);
+  assert.equal(
+    split.channelAssetsByName.has(LEGACY_BETA_CHANNEL_MIGRATION_NAME),
+    true,
+  );
+  assert.equal(
+    split.channelAssetsByName.has(LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME),
+    true,
+  );
   assert.equal(split.productAssetsByName.has("stable-product.zip"), true);
   assert.equal(split.productAssetsByName.has(nearMiss), true);
   assert.equal(
@@ -511,6 +553,129 @@ test("beta promotion swaps only channel assets, verifies JSON last, and retries 
       "unchanged",
     );
     assert.equal(remote.mutations.length, mutationCount);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("transaction-pair deletion faults converge in normal commit and explicit recovery", async () => {
+  const descriptor = fixtureDescriptor(false);
+  const carrier = { id: 42, tag_name: "v1.2.3" };
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-channel-delete-fault-"),
+  );
+  try {
+    const desiredFiles = new Map();
+    for (const name of permanentBetaChannelAssetNames(
+      descriptor.expectedTargets,
+    )) {
+      const filePath = path.join(directory, name);
+      fs.writeFileSync(filePath, `desired:${name}`);
+      desiredFiles.set(name, filePath);
+    }
+    const desired = recordsFromFiles(desiredFiles);
+    const previous = new Map(
+      Array.from(desired.keys(), (name) => [name, sha256(`previous:${name}`)]),
+    );
+    const transaction = createBetaChannelTransaction({
+      carrier,
+      carrierDescriptorSha256: "a".repeat(64),
+      desiredRecords: desired,
+      previousRecords: previous,
+      productIndexSha256: "b".repeat(64),
+      sourceDescriptorSha256: "c".repeat(64),
+      sourceReleaseId: 84,
+      sourceTag: "v1.2.4-beta.1",
+    });
+    const transactionPath = path.join(directory, BETA_CHANNEL_TRANSACTION_NAME);
+    const transactionSignaturePath = path.join(
+      directory,
+      BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+    );
+    fs.writeFileSync(transactionPath, JSON.stringify(transaction));
+    fs.writeFileSync(transactionSignaturePath, "transaction signature");
+
+    for (const failedName of [
+      BETA_CHANNEL_TRANSACTION_NAME,
+      BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+    ]) {
+      const remote = makeRemote(previous);
+      remote.setDeleteFailure(failedName, { afterWrite: true });
+      assert.equal(
+        await promoteBetaChannelAssets({
+          assertCarrier: async () => true,
+          deleteAsset: remote.deleteAsset,
+          descriptor,
+          desiredFilesByName: desiredFiles,
+          listAssets: remote.listAssets,
+          publicationOwner: transaction.owner,
+          releaseId: carrier.id,
+          renameAsset: remote.renameAsset,
+          transaction,
+          transactionFiles: [transactionPath, transactionSignaturePath],
+          uploadAsset: remote.uploadAsset,
+          verifyDesired: async () => assertRemoteRecords(remote, desired),
+          verifyPrevious: async () => assertRemoteRecords(remote, previous),
+        }),
+        "promoted",
+      );
+      assertRemoteRecords(remote, desired);
+      assert.equal(remote.assets.has(BETA_CHANNEL_TRANSACTION_NAME), false);
+      assert.equal(
+        remote.assets.has(BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME),
+        false,
+      );
+    }
+
+    for (const failedName of [
+      BETA_CHANNEL_TRANSACTION_NAME,
+      BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+    ]) {
+      const remote = makeRemote(desired);
+      remote.assets.set(BETA_CHANNEL_TRANSACTION_NAME, {
+        id: 900,
+        name: BETA_CHANNEL_TRANSACTION_NAME,
+        digest: `sha256:${sha256("transaction")}`,
+      });
+      remote.assets.set(BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME, {
+        id: 901,
+        name: BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+        digest: `sha256:${sha256("signature")}`,
+      });
+      const transactionAssets = new Map([
+        [
+          BETA_CHANNEL_TRANSACTION_NAME,
+          remote.assets.get(BETA_CHANNEL_TRANSACTION_NAME),
+        ],
+        [
+          BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+          remote.assets.get(BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME),
+        ],
+      ]);
+      remote.setDeleteFailure(failedName, { afterWrite: true });
+      const recover = () =>
+        recoverBetaChannelTransaction({
+          assertCarrier: async () => true,
+          deleteAsset: remote.deleteAsset,
+          descriptor,
+          expectedOwner: transaction.owner,
+          listAssets: remote.listAssets,
+          releaseId: carrier.id,
+          renameAsset: remote.renameAsset,
+          transaction,
+          transactionAssets,
+          verifyDesired: async () => assertRemoteRecords(remote, desired),
+          verifyPrevious: async () => assertRemoteRecords(remote, previous),
+        });
+      await assert.rejects(recover, /injected post-write delete failure/i);
+      assert.equal(await recover(), "committed");
+      assert.equal(transactionAssets.size, 0);
+      assert.equal(remote.assets.has(BETA_CHANNEL_TRANSACTION_NAME), false);
+      assert.equal(
+        remote.assets.has(BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME),
+        false,
+      );
+    }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -1312,4 +1477,121 @@ test("transaction recovery stops before pointer mutation when exact journal owne
   assert.equal(remote.mutations.length, 0);
   assertRemoteRecords(remote, previous);
   assert.equal(remote.assets.has(stagedName), true);
+});
+
+test("historical channel controls are exact and never operational or permanent", async () => {
+  const { historicalBetaChannelAssetNames, operationalBetaChannelAssetNames } =
+    await import("./release-channel.js");
+  const descriptor = fixtureDescriptor(false);
+  const historical = historicalBetaChannelAssetNames();
+  assert.deepEqual(historical, [
+    STABLE_ROLLOVER_RECEIPT_NAME,
+    STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
+    LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+    LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+  ]);
+  const operational = new Set(
+    operationalBetaChannelAssetNames(descriptor.expectedTargets),
+  );
+  const permanent = new Set(
+    permanentBetaChannelAssetNames(descriptor.expectedTargets),
+  );
+  const stable = stableChannelAssetNames(descriptor);
+  for (const name of historical) {
+    assert.equal(operational.has(name), false, `${name} is not operational`);
+    assert.equal(permanent.has(name), false, `${name} is not permanent state`);
+    assert.equal(stable.has(name), true, `${name} is stable channel history`);
+  }
+});
+
+test("retained stable receipt history survives a later beta promotion unchanged", async () => {
+  const descriptor = fixtureDescriptor(false);
+  const carrier = { id: 42, tag_name: "v1.2.3" };
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-retained-receipt-promotion-"),
+  );
+  try {
+    const desiredFiles = new Map();
+    for (const name of permanentBetaChannelAssetNames(
+      descriptor.expectedTargets,
+    )) {
+      const filePath = path.join(directory, name);
+      fs.writeFileSync(filePath, `desired:${name}`);
+      desiredFiles.set(name, filePath);
+    }
+    const desired = recordsFromFiles(desiredFiles);
+    const previous = new Map(
+      Array.from(desired.keys(), (name) => [name, sha256(`previous:${name}`)]),
+    );
+    const remote = makeRemote(previous);
+    const retainedReceiptAssets = new Map([
+      [
+        STABLE_ROLLOVER_RECEIPT_NAME,
+        {
+          id: 900,
+          name: STABLE_ROLLOVER_RECEIPT_NAME,
+          digest: `sha256:${sha256("retained receipt")}`,
+        },
+      ],
+      [
+        STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
+        {
+          id: 901,
+          name: STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
+          digest: `sha256:${sha256("retained receipt signature")}`,
+        },
+      ],
+    ]);
+    for (const [name, asset] of retainedReceiptAssets) {
+      remote.assets.set(name, { ...asset });
+    }
+    const transaction = createBetaChannelTransaction({
+      carrier,
+      carrierDescriptorSha256: "a".repeat(64),
+      desiredRecords: desired,
+      previousRecords: previous,
+      productIndexSha256: "b".repeat(64),
+      sourceDescriptorSha256: "c".repeat(64),
+      sourceReleaseId: 84,
+      sourceTag: "v1.2.4-beta.1",
+    });
+    const transactionPath = path.join(directory, BETA_CHANNEL_TRANSACTION_NAME);
+    const transactionSignaturePath = path.join(
+      directory,
+      BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+    );
+    fs.writeFileSync(transactionPath, JSON.stringify(transaction));
+    fs.writeFileSync(transactionSignaturePath, "transaction signature");
+
+    assert.equal(
+      await promoteBetaChannelAssets({
+        assertCarrier: async () => true,
+        deleteAsset: remote.deleteAsset,
+        descriptor,
+        desiredFilesByName: desiredFiles,
+        listAssets: remote.listAssets,
+        releaseId: carrier.id,
+        renameAsset: remote.renameAsset,
+        publicationOwner: transaction.owner,
+        transaction,
+        transactionFiles: [transactionPath, transactionSignaturePath],
+        uploadAsset: remote.uploadAsset,
+        verifyDesired: async () => assertRemoteRecords(remote, desired),
+        verifyPrevious: async () => assertRemoteRecords(remote, previous),
+      }),
+      "promoted",
+    );
+    assertRemoteRecords(remote, desired);
+    for (const [name, expected] of retainedReceiptAssets) {
+      assert.deepEqual(remote.assets.get(name), expected);
+      assert.equal(
+        remote.mutations.some((mutation) =>
+          [mutation.name, mutation.from].includes(name),
+        ),
+        false,
+      );
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

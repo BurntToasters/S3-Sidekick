@@ -28,6 +28,10 @@ import { setStatus } from "./app-status.ts";
 import { clearFilterInputDebounce, setSidebarOpen } from "./app-layout.ts";
 import { setInspectorOpen } from "./inspector.ts";
 import { showConfirm } from "./dialogs.ts";
+import {
+  recoverPendingTransfers,
+  resumeRecoveredTransfersAfterConnect,
+} from "./transfers.ts";
 
 export function awsRegionalEndpoint(region: string): string {
   const trimmed = region.trim() || "us-east-1";
@@ -345,6 +349,14 @@ export async function handleConnect(): Promise<void> {
     setConnectionUI(true);
     setStatus(saveWarning ?? "Connected.", 5000);
     logActivity(`Connected to ${endpoint}.`, "success");
+    try {
+      await recoverPendingTransfers();
+      await resumeRecoveredTransfersAfterConnect();
+    } catch (recoveryError) {
+      const message = `Connected, but transfer recovery is still pending: ${friendlyError(recoveryError)}`;
+      setStatus(message, 8000);
+      logActivity(message, "warning");
+    }
   } catch (e) {
     const stillOwnSession =
       Boolean(establishedConnectionId) &&

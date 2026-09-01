@@ -19,6 +19,7 @@ const {
   canonicalMacosArtifactName,
   classifyImmutableAsset,
   descriptorReleaseAssetUrl,
+  finalPackageTargetKeysForArtifactName,
   installSmokeReportName,
   isInstallSmokeReportName,
   listAllReleaseAssets,
@@ -223,6 +224,8 @@ function cleanArtifactBaseName(name) {
 
   if (/x64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-x64.exe";
   if (/arm64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-arm64.exe";
+  if (/_x64_en-US\.msi$/i.test(name)) return "S3-Sidekick-Windows-x64.msi";
+  if (/_arm64_en-US\.msi$/i.test(name)) return "S3-Sidekick-Windows-arm64.msi";
 
   if (/amd64\.AppImage$/i.test(name)) return "S3-Sidekick-Linux-x64.AppImage";
   if (/aarch64\.AppImage$/i.test(name))
@@ -338,30 +341,30 @@ function assertLinuxX64PackageSet(byName) {
     return;
   }
 
-  const installers = new Set();
+  const installersByArchitecture = new Map();
   for (const [name] of byName) {
     if (name.endsWith(".sig")) continue;
     const targets = resolveUpdaterTargets(name);
     for (const target of targets) {
-      if (target.os === "linux" && target.arch === "x86_64") {
-        installers.add(target.installer);
+      if (target.os !== "linux") continue;
+      if (!installersByArchitecture.has(target.arch)) {
+        installersByArchitecture.set(target.arch, new Set());
       }
+      installersByArchitecture.get(target.arch).add(target.installer);
     }
   }
 
-  if (installers.size === 0) {
-    return;
-  }
-
   const requiredInstallers = ["appimage", "deb", "rpm"];
-  const missing = requiredInstallers.filter(
-    (installer) => !installers.has(installer),
-  );
-  if (missing.length > 0) {
-    throw new Error(
-      `Incomplete Linux x86_64 bundle set: missing ${missing.join(", ")} artifact(s). ` +
-        "Expected AppImage, deb, and rpm artifacts before signing.",
+  for (const [architecture, installers] of installersByArchitecture) {
+    const missing = requiredInstallers.filter(
+      (installer) => !installers.has(installer),
     );
+    if (missing.length > 0) {
+      throw new Error(
+        `Incomplete Linux ${architecture} bundle set: missing ${missing.join(", ")} artifact(s). ` +
+          "Expected AppImage, deb, and rpm artifacts before signing.",
+      );
+    }
   }
 }
 
@@ -561,7 +564,15 @@ function normalizeUpdaterSignature(sigPath) {
     : Buffer.from(text).toString("base64");
 }
 
-function generateUpdaterManifests(files, descriptor) {
+function generateUpdaterManifests(
+  files,
+  descriptor,
+  {
+    normalizeSignature = normalizeUpdaterSignature,
+    outputDirectory = releaseDir,
+    verifySignature = verifyUpdaterSignature,
+  } = {},
+) {
   const byName = new Map();
   for (const filePath of files) {
     byName.set(path.basename(filePath), filePath);
@@ -585,9 +596,21 @@ function generateUpdaterManifests(files, descriptor) {
   const expectedLinuxTargetKeys = requiredLinuxTargetKeys(channelVariants);
   const generatedLinuxAppImageTargets = new Set();
   const missingSignatures = [];
-  for (const [name] of byName) {
+  for (const [name, filePath] of byName) {
     if (name.endsWith(".sig")) continue;
-    const targets = resolveUpdaterTargets(name);
+    // DEB, RPM, and MSI remain final release packages (GPG-signed,
+    // attested, and included in per-target checksums), but they are not
+    // Tauri updater payloads. Only AppImage and NSIS participate in updater
+    // manifests for those platforms and need Minisign `.sig` files from
+    // updater-sign.js.
+    const targets = resolveUpdaterTargets(name).filter(
+      (target) =>
+        !(
+          (target.os === "linux" &&
+            (target.installer === "deb" || target.installer === "rpm")) ||
+          (target.os === "windows" && target.installer === "msi")
+        ),
+    );
     if (targets.length === 0) continue;
     for (const target of targets) {
       for (const channel of channelVariants) {
@@ -603,8 +626,8 @@ function generateUpdaterManifests(files, descriptor) {
       continue;
     }
 
-    verifyUpdaterSignature(filePath, sigPath);
-    const signature = normalizeUpdaterSignature(sigPath);
+    verifySignature(filePath, sigPath);
+    const signature = normalizeSignature(sigPath);
     for (const target of targets) {
       for (const channel of channelVariants) {
         const targetName = `${target.os}${channel.targetSuffix}`;
@@ -672,7 +695,7 @@ function generateUpdaterManifests(files, descriptor) {
     if (manifest.notes) {
       output.notes = manifest.notes;
     }
-    const dest = path.join(releaseDir, manifestName);
+    const dest = path.join(outputDirectory, manifestName);
     fs.writeFileSync(dest, JSON.stringify(output, null, 2) + "\n");
     console.log(
       `  + ${manifestName} (${Object.keys(output.platforms).length} platform entries)`,
@@ -727,9 +750,7 @@ function targetKeysForArtifactName(name) {
   if (manifestKey) return [manifestKey];
 
   const baseName = name.endsWith(".sig") ? name.slice(0, -4) : name;
-  return Array.from(
-    new Set(resolveUpdaterTargets(baseName).map((t) => `${t.os}-${t.arch}`)),
-  );
+  return finalPackageTargetKeysForArtifactName(baseName);
 }
 
 function normalizePreStagedArtifacts(staged) {
@@ -1142,13 +1163,13 @@ async function main() {
   const targets = Array.from(
     new Set(
       artifacts.flatMap((filePath) =>
-        targetKeysForArtifactName(path.basename(filePath)),
+        finalPackageTargetKeysForArtifactName(path.basename(filePath)),
       ),
     ),
   ).sort();
   if (targets.length === 0) {
     throw new Error(
-      "No updater target could be derived from this host's artifacts.",
+      "No final-package target could be derived from this host's artifacts.",
     );
   }
 
@@ -1159,6 +1180,7 @@ async function main() {
     artifactFiles: artifacts,
     descriptor,
     descriptorPath,
+    installSmokeFiles,
     releaseDir,
     targets,
   });
@@ -1216,6 +1238,8 @@ if (
 export {
   assertLinuxX64PackageSet,
   buildTargetKeyForManifestName,
+  cleanArtifactBaseName,
+  collectArtifacts,
   collectInstallSmokeReports,
   generateUpdaterManifests,
   getBoundDraftRelease,

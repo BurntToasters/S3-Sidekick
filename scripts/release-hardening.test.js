@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,7 +13,10 @@ import {
   shouldStage,
   verifyFlatpakInputs,
 } from "./flatpak-bundle.js";
-import { requiredMacEnvironment } from "./macos-release.js";
+import {
+  assertUniversalMachO,
+  requiredMacEnvironment,
+} from "./macos-release.js";
 import {
   artifactRecords,
   buildSpdxSbom,
@@ -27,6 +31,7 @@ import {
 } from "./release-env.js";
 import {
   acquirePublicationSession,
+  acquirePublicationSessionWithTakeover,
   assertBetaPromotionOrder,
   assertChannelTransitionSupported,
   assertCompleteEvidence,
@@ -36,6 +41,7 @@ import {
   channelTransitionPolicy,
   createReleaseAssetIndex,
   processStartToken,
+  publicationTakeoverRequested,
   recheckFrozenReleaseAssetSet,
   stableManifestName,
   validatePublicationRelease,
@@ -51,6 +57,169 @@ import integrity from "./release-integrity.cjs";
 
 const { canonicalMacosArtifactName, compareSemanticVersions } = integrity;
 const root = path.resolve(new URL("..", import.meta.url).pathname);
+
+function semanticEvidenceFixture(descriptor, attestation, descriptorSha256) {
+  descriptor.repository ??= {
+    owner: "BurntToasters",
+    name: "S3-Sidekick",
+  };
+  descriptor.release.version ??= String(descriptor.release.tag || "").replace(
+    /^v/,
+    "",
+  );
+  descriptor.installSmokePreviousVersion ??= "1.2.2";
+  descriptor.source.committedAt ??= "2026-01-01T00:00:00.000Z";
+  descriptor.source.archiveSha256 ??= "1".repeat(64);
+  descriptor.source.packageLockSha256 ??= "2".repeat(64);
+  descriptor.source.cargoLockSha256 ??= "3".repeat(64);
+  for (const record of [
+    ...(attestation.artifacts || []),
+    ...(attestation.evidence || []),
+  ]) {
+    record.size ??= 1;
+  }
+  const platform = attestation.host.platform;
+  const osName = platform === "win32" ? "windows" : platform;
+  const archName =
+    attestation.host.arch === "arm64"
+      ? "aarch64"
+      : attestation.host.arch === "x64"
+        ? "x86_64"
+        : attestation.host.arch;
+  const suffix = `${osName}-${archName}`;
+  const artifacts = [...attestation.artifacts].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
+  const packages = artifacts.filter((record) =>
+    platform === "darwin"
+      ? /\.app\.tar\.gz$/i.test(record.name) ||
+        /\.(?:dmg|zip)$/i.test(record.name)
+      : /\.(?:appimage|deb|dmg|exe|flatpak|msi|rpm|zip)$/i.test(record.name),
+  );
+  const checks =
+    platform === "linux"
+      ? packages
+          .flatMap((record) => {
+            if (/\.appimage$/i.test(record.name))
+              return [`appimage-elf:${record.name}`];
+            if (/\.deb$/i.test(record.name))
+              return [`deb-metadata:${record.name}`];
+            if (/\.rpm$/i.test(record.name))
+              return [`rpm-metadata:${record.name}`];
+            if (/\.flatpak$/i.test(record.name))
+              return [`flatpak-bundle:${record.name}`];
+            return [];
+          })
+          .sort()
+      : platform === "darwin"
+        ? [
+            "universal-mach-o",
+            "codesign-deep-strict",
+            "gatekeeper",
+            "notary-accepted",
+            "quarantine-gatekeeper",
+            "stapler-validate",
+          ]
+        : [
+            "authenticode-valid",
+            "installer-outer-signature",
+            "installer-runtime-extracted-signature",
+            "publisher-match",
+            "timestamp-valid",
+          ];
+  const targets = [...attestation.targets].sort();
+  const invocationId = createHash("sha256")
+    .update(
+      integrity.canonicalJson({
+        artifacts,
+        descriptorSha256,
+        host: suffix,
+        targets,
+      }),
+    )
+    .digest("hex");
+  const packageId = "SPDXRef-test-package";
+  return new Map([
+    [
+      `release-package-smoke-${suffix}.json`,
+      {
+        schemaVersion: 1,
+        descriptorSha256,
+        targets,
+        checks,
+        packages,
+        status: "passed",
+      },
+    ],
+    [
+      `release-provenance-${suffix}.json`,
+      {
+        _type: "https://in-toto.io/Statement/v1",
+        predicateType: "https://slsa.dev/provenance/v1",
+        subject: artifacts.map((record) => ({
+          name: record.name,
+          digest: { sha256: record.sha256 },
+        })),
+        predicate: {
+          buildDefinition: {
+            buildType:
+              "https://github.com/BurntToasters/S3-Sidekick/release-build/v1",
+            externalParameters: {
+              descriptorSha256,
+              platformInputs: attestation.platformInputs ?? null,
+              releaseId: descriptor.release.id,
+              targets,
+            },
+            resolvedDependencies: [
+              {
+                uri: `git+https://github.com/${descriptor.repository.owner}/${descriptor.repository.name}@${descriptor.source.commit}`,
+                digest: { sha256: descriptor.source.archiveSha256 },
+              },
+              {
+                uri: "package-lock.json",
+                digest: { sha256: descriptor.source.packageLockSha256 },
+              },
+              {
+                uri: "src-tauri/Cargo.lock",
+                digest: { sha256: descriptor.source.cargoLockSha256 },
+              },
+            ],
+          },
+          runDetails: {
+            builder: { id: `local-release-host:${suffix}` },
+            metadata: { invocationId },
+          },
+        },
+      },
+    ],
+    [
+      `release-sbom-${suffix}.spdx.json`,
+      {
+        SPDXID: "SPDXRef-DOCUMENT",
+        creationInfo: {
+          created: descriptor.source.committedAt,
+          creators: ["Tool: S3-Sidekick-release-evidence"],
+        },
+        dataLicense: "CC0-1.0",
+        documentNamespace: `https://github.com/BurntToasters/S3-Sidekick/releases/${descriptor.release.tag}/sbom/${descriptorSha256}`,
+        files: artifacts.map((record) => ({
+          fileName: record.name,
+          checksums: [{ algorithm: "SHA256", checksumValue: record.sha256 }],
+        })),
+        name: `S3 Sidekick ${descriptor.release.version} release SBOM`,
+        packages: [{ SPDXID: packageId }],
+        relationships: [
+          {
+            spdxElementId: "SPDXRef-DOCUMENT",
+            relationshipType: "DESCRIBES",
+            relatedSpdxElement: packageId,
+          },
+        ],
+        spdxVersion: "SPDX-2.3",
+      },
+    ],
+  ]);
+}
 
 test("dependency-executing builds receive no aggregate release secrets", () => {
   const inherited = {
@@ -277,7 +446,17 @@ test("release input policy pins bootstrap tools and runs Flatpak without build n
   assert.match(manifest, /release-ref: org\.gnome\.Platform\/\/49/);
   assert.match(
     manifest,
-    /release-ref: org\.freedesktop\.Sdk\.Extension\.node22\/\/25\.08/,
+    /release-ref: org\.freedesktop\.Sdk\.Extension\.node24\/\/25\.08/,
+  );
+  assert.match(manifest, /test "\$\(node --version\)" = "v24\.20\.0"/);
+  assert.match(manifest, /test "\$\(npm --version\)" = "12\.0\.2"/);
+  assert.match(
+    packageJson.scripts["build:win:x64:prepared"],
+    /--bundles nsis,msi/,
+  );
+  assert.match(
+    packageJson.scripts["build:win:arm64:prepared"],
+    /--bundles nsis,msi/,
   );
   assert.match(manifest, /- \.env\.\*/);
   assert.match(
@@ -289,6 +468,12 @@ test("release input policy pins bootstrap tools and runs Flatpak without build n
     /path\.join\(root, "src-tauri", "Cargo\.toml"\)/,
   );
   assert.match(workflow, /RUST_VERSION: "\d+\.\d+\.\d+"/);
+  assert.match(
+    workflow,
+    new RegExp(
+      `NODE_VERSION: "${packageJson.releaseToolchain.node.replaceAll(".", "\\.")}"`,
+    ),
+  );
   assert.match(
     workflow,
     /cargo install cargo-audit --version 0\.22\.2 --locked/,
@@ -347,6 +532,58 @@ test("macOS release mode requires Developer ID/notary inputs and forbids ad-hoc 
   }
 });
 
+test("macOS release rejects every shipped Mach-O missing either universal slice", () => {
+  const appPath = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-universal.app-"),
+  );
+  const executable = path.join(appPath, "Contents", "MacOS", "S3 Sidekick");
+  const library = path.join(appPath, "Contents", "Frameworks", "helper.dylib");
+  fs.mkdirSync(path.dirname(executable), { recursive: true });
+  fs.mkdirSync(path.dirname(library), { recursive: true });
+  fs.writeFileSync(executable, "main");
+  fs.writeFileSync(library, "helper");
+  try {
+    const execute = (command, args) => ({
+      status: 0,
+      stdout:
+        command === "file"
+          ? "Mach-O universal binary"
+          : args[1] === library
+            ? "x86_64 arm64\n"
+            : "arm64 x86_64\n",
+      stderr: "",
+    });
+    assert.deepEqual(assertUniversalMachO(appPath, { execute }), [
+      {
+        architectures: ["arm64", "x86_64"],
+        path: path.join("Contents", "Frameworks", "helper.dylib"),
+      },
+      {
+        architectures: ["arm64", "x86_64"],
+        path: path.join("Contents", "MacOS", "S3 Sidekick"),
+      },
+    ]);
+    assert.throws(
+      () =>
+        assertUniversalMachO(appPath, {
+          execute(command, args) {
+            if (command === "file") {
+              return { status: 0, stdout: "Mach-O 64-bit", stderr: "" };
+            }
+            return {
+              status: 0,
+              stdout: args[1] === library ? "arm64\n" : "arm64 x86_64\n",
+              stderr: "",
+            };
+          },
+        }),
+      /not exact arm64\+x86_64 universal/i,
+    );
+  } finally {
+    fs.rmSync(appPath, { recursive: true, force: true });
+  }
+});
+
 test("macOS package evidence requires exact unique trust-report package names and digests", () => {
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), "s3-sidekick-macos-trust-"),
@@ -376,15 +613,30 @@ test("macOS package evidence requires exact unique trust-report package names an
     ({ name, sha256 }) => ({ name, sha256 }),
   );
   const requiredChecks = [
+    "universal-mach-o",
     "codesign-deep-strict",
     "notary-accepted",
     "stapler-validate",
     "gatekeeper",
     "quarantine-gatekeeper",
   ];
+  const architectures = [
+    {
+      path: path.join("Contents", "MacOS", "S3 Sidekick"),
+      architectures: ["arm64", "x86_64"],
+    },
+  ];
   const trustPath = path.join(directory, "macos-trust.json");
-  const writeTrust = (artifacts, includeArtifacts = true) => {
-    const trust = { schemaVersion: 1, checks: requiredChecks };
+  const writeTrust = (
+    artifacts,
+    includeArtifacts = true,
+    architectureInventory = architectures,
+  ) => {
+    const trust = {
+      schemaVersion: 1,
+      checks: requiredChecks,
+      architectures: architectureInventory,
+    };
     if (includeArtifacts) trust.artifacts = artifacts;
     fs.writeFileSync(trustPath, `${JSON.stringify(trust)}\n`);
   };
@@ -410,6 +662,12 @@ test("macOS package evidence requires exact unique trust-report package names an
 
     writeTrust(undefined, false);
     assert.throws(verify, /artifacts must be an array/i);
+    writeTrust(trustedArtifacts, true, []);
+    assert.throws(verify, /no universal Mach-O inventory/i);
+    writeTrust(trustedArtifacts, true, [
+      { path: "Contents/MacOS/S3 Sidekick", architectures: ["arm64"] },
+    ]);
+    assert.throws(verify, /universal Mach-O inventory is invalid/i);
     reject([]);
     reject(trustedArtifacts.slice(0, -1), /does not exactly cover/i);
     reject([...trustedArtifacts, trustedArtifacts[0]], /duplicate artifact/i);
@@ -457,7 +715,33 @@ test("macOS package evidence requires exact unique trust-report package names an
 });
 
 test("updater signing is isolated after dependency builds", () => {
+  assert.deepEqual(
+    childEnvironment(
+      "publish",
+      { PATH: "/bin", RELEASE_PUBLICATION_TAKEOVER: "1" },
+      {},
+    ),
+    { PATH: "/bin", RELEASE_PUBLICATION_TAKEOVER: "1" },
+  );
+  assert.equal(
+    isUpdaterArtifact("S3-Sidekick_0.11.0-beta.5_x64-setup.exe"),
+    true,
+  );
+  assert.equal(
+    isUpdaterArtifact("S3-Sidekick_0.11.0-beta.5_arm64-setup.exe"),
+    true,
+  );
+  assert.equal(
+    isUpdaterArtifact("S3-Sidekick_0.11.0-beta.5_x64_en-US.msi"),
+    false,
+  );
+  assert.equal(
+    isUpdaterArtifact("S3-Sidekick_0.11.0-beta.5_arm64_en-US.msi"),
+    false,
+  );
   assert.equal(isUpdaterArtifact("S3-Sidekick-Linux-x64.AppImage"), true);
+  assert.equal(isUpdaterArtifact("S3-Sidekick-Linux-x64.deb"), false);
+  assert.equal(isUpdaterArtifact("S3-Sidekick-Linux-x64.rpm"), false);
   assert.equal(isUpdaterArtifact("S3-Sidekick.app.tar.gz"), true);
   assert.equal(isUpdaterArtifact("artifact.sig"), false);
   const packageJson = JSON.parse(
@@ -490,8 +774,17 @@ test("updater signing is isolated after dependency builds", () => {
     );
     assert.ok(
       command.indexOf("release:sign:updater") <
-        command.indexOf("release:sign:gpg"),
+        command.indexOf("release:stage"),
     );
+    assert.equal(command.includes("release:sign:gpg"), false);
+  }
+  for (const name of [
+    "release:win:finalize",
+    "release:mac:finalize",
+    "release:linux:x64:finalize",
+    "release:linux:arm64:finalize",
+  ]) {
+    assert.match(packageJson.scripts[name], /release:sign:gpg/);
   }
 });
 
@@ -650,6 +943,11 @@ test("license/source policy and SPDX generation fail closed", () => {
     cargoLicenses: {},
   });
   assert.equal(sbom.spdxVersion, "SPDX-2.3");
+  assert.equal(
+    sbom.documentNamespace,
+    `https://github.com/BurntToasters/S3-Sidekick/releases/v1.0.0/sbom/${"d".repeat(64)}`,
+  );
+  assert.equal("descriptorSha256" in sbom, false);
   assert.equal(sbom.files[0].checksums[0].algorithm, "SHA256");
 });
 
@@ -660,14 +958,25 @@ test("publication requires complete non-overlapping target evidence", () => {
     expectedTargets: ["linux-x86_64"],
     requiredEvidence: ["attestation", "package-smoke", "provenance", "sbom"],
   };
+  const packageRecords = [
+    ["S3-Sidekick-Linux-x64.AppImage", "a"],
+    ["S3-Sidekick-Linux-x64.deb", "4"],
+    ["S3-Sidekick-Linux-x64.flatpak", "5"],
+    ["S3-Sidekick-Linux-x64.rpm", "6"],
+  ].map(([name, digit], index) => ({
+    name,
+    sha256: digit.repeat(64),
+    size: 10 + index,
+  }));
   const attestation = {
     schemaVersion: 1,
     descriptorSha256: "d".repeat(64),
     releaseId: 42,
     sourceCommit: "commit",
     targets: ["linux-x86_64"],
+    packagesByTarget: { "linux-x86_64": packageRecords },
     host: { platform: "linux", arch: "x64" },
-    artifacts: [{ name: "app.AppImage", sha256: "a".repeat(64) }],
+    artifacts: packageRecords,
     evidence: [
       {
         name: "release-package-smoke-linux-x86_64.json",
@@ -680,9 +989,8 @@ test("publication requires complete non-overlapping target evidence", () => {
   const names = [
     "release-descriptor.json",
     "release-descriptor.json.asc",
-    "app.AppImage",
-    "app.AppImage.asc",
-    "app.AppImage.sig",
+    ...packageRecords.flatMap((record) => [record.name, `${record.name}.asc`]),
+    "S3-Sidekick-Linux-x64.AppImage.sig",
     "SHA256SUMS-linux-x86_64.txt",
     "SHA256SUMS-linux-x86_64.txt.asc",
     "release-attestation-linux-x86_64.json",
@@ -696,7 +1004,7 @@ test("publication requires complete non-overlapping target evidence", () => {
   ];
   const assetsByName = new Map(names.map((name, id) => [name, { id, name }]));
   const digestByName = new Map([
-    ["app.AppImage", "a".repeat(64)],
+    ...packageRecords.map((record) => [record.name, record.sha256]),
     ["release-package-smoke-linux-x86_64.json", "b".repeat(64)],
     ["release-provenance-linux-x86_64.json", "c".repeat(64)],
     ["release-sbom-linux-x86_64.spdx.json", "e".repeat(64)],
@@ -832,27 +1140,27 @@ test("publication requires complete non-overlapping target evidence", () => {
     true,
   );
   const replacedAssets = new Map(indexedAssetsByName);
-  replacedAssets.set("app.AppImage", {
-    ...replacedAssets.get("app.AppImage"),
+  replacedAssets.set("S3-Sidekick-Linux-x64.AppImage", {
+    ...replacedAssets.get("S3-Sidekick-Linux-x64.AppImage"),
     digest: `sha256:${"f".repeat(64)}`,
   });
   assert.throws(
     () => assertReleaseAssetIndexEntries(index, replacedAssets, frozenDigests),
-    /GitHub digest does not match the signed release asset index for app\.AppImage/i,
+    /GitHub digest does not match the signed release asset index for S3-Sidekick-Linux-x64\.AppImage/i,
   );
   const missingRemoteDigest = new Map(indexedAssetsByName);
-  missingRemoteDigest.set("app.AppImage", {
-    id: missingRemoteDigest.get("app.AppImage").id,
-    name: "app.AppImage",
+  missingRemoteDigest.set("S3-Sidekick-Linux-x64.AppImage", {
+    id: missingRemoteDigest.get("S3-Sidekick-Linux-x64.AppImage").id,
+    name: "S3-Sidekick-Linux-x64.AppImage",
   });
   assert.throws(
     () =>
       assertReleaseAssetIndexEntries(index, missingRemoteDigest, frozenDigests),
-    /app\.AppImage has no GitHub SHA-256 digest/i,
+    /S3-Sidekick-Linux-x64\.AppImage has no GitHub SHA-256 digest/i,
   );
   const malformedRemoteDigest = new Map(indexedAssetsByName);
-  malformedRemoteDigest.set("app.AppImage", {
-    ...malformedRemoteDigest.get("app.AppImage"),
+  malformedRemoteDigest.set("S3-Sidekick-Linux-x64.AppImage", {
+    ...malformedRemoteDigest.get("S3-Sidekick-Linux-x64.AppImage"),
     digest: "sha256:not-a-digest",
   });
   assert.throws(
@@ -862,7 +1170,7 @@ test("publication requires complete non-overlapping target evidence", () => {
         malformedRemoteDigest,
         frozenDigests,
       ),
-    /app\.AppImage has no GitHub SHA-256 digest/i,
+    /S3-Sidekick-Linux-x64\.AppImage has no GitHub SHA-256 digest/i,
   );
   for (const pairName of indexPairDigests.keys()) {
     const missingPairMember = new Map(indexedAssetsByName);
@@ -921,6 +1229,143 @@ test("publication requires complete non-overlapping target evidence", () => {
   );
 });
 
+test("semantic package-smoke, provenance, and SBOM bodies are descriptor-bound", () => {
+  const descriptorSha256 = "d".repeat(64);
+  const descriptor = {
+    repository: { owner: "BurntToasters", name: "S3-Sidekick" },
+    release: {
+      id: 42,
+      prerelease: true,
+      tag: "v1.2.3-beta.1",
+      version: "1.2.3-beta.1",
+    },
+    source: {
+      commit: "c".repeat(40),
+      committedAt: "2026-01-01T00:00:00.000Z",
+      archiveSha256: "1".repeat(64),
+      packageLockSha256: "2".repeat(64),
+      cargoLockSha256: "3".repeat(64),
+    },
+    expectedTargets: ["linux-x86_64"],
+    requiredEvidence: ["attestation", "package-smoke", "provenance", "sbom"],
+  };
+  const packageRecords = [
+    ["S3-Sidekick-Linux-x64.AppImage", "a"],
+    ["S3-Sidekick-Linux-x64.deb", "4"],
+    ["S3-Sidekick-Linux-x64.flatpak", "5"],
+    ["S3-Sidekick-Linux-x64.rpm", "6"],
+  ].map(([name, digit], index) => ({
+    name,
+    sha256: digit.repeat(64),
+    size: 10 + index,
+  }));
+  const evidenceNames = [
+    "release-package-smoke-linux-x86_64.json",
+    "release-provenance-linux-x86_64.json",
+    "release-sbom-linux-x86_64.spdx.json",
+  ];
+  const attestation = {
+    schemaVersion: 1,
+    descriptorSha256,
+    releaseId: descriptor.release.id,
+    sourceCommit: descriptor.source.commit,
+    targets: ["linux-x86_64"],
+    packagesByTarget: { "linux-x86_64": packageRecords },
+    host: { platform: "linux", arch: "x64" },
+    platformInputs: null,
+    artifacts: packageRecords,
+    evidence: evidenceNames.map((name, index) => ({
+      name,
+      sha256: String(index + 4).repeat(64),
+      size: 20 + index,
+    })),
+  };
+  const names = [
+    "release-descriptor.json",
+    "release-descriptor.json.asc",
+    ...packageRecords.flatMap((record) => [record.name, `${record.name}.asc`]),
+    "S3-Sidekick-Linux-x64.AppImage.sig",
+    "SHA256SUMS-linux-x86_64.txt",
+    "SHA256SUMS-linux-x86_64.txt.asc",
+    "release-attestation-linux-x86_64.json",
+    "release-attestation-linux-x86_64.json.asc",
+    ...evidenceNames.flatMap((name) => [name, `${name}.asc`]),
+  ];
+  const assetsByName = new Map(names.map((name, id) => [name, { id, name }]));
+  const digestByName = new Map([
+    ...packageRecords.map((record) => [record.name, record.sha256]),
+    ...attestation.evidence.map((record) => [record.name, record.sha256]),
+  ]);
+  const evidenceByName = semanticEvidenceFixture(
+    descriptor,
+    attestation,
+    descriptorSha256,
+  );
+  const options = {
+    assetsByName,
+    attestations: [attestation],
+    descriptor,
+    descriptorSha256,
+    digestByName,
+  };
+  assert.equal(assertCompleteEvidence({ ...options, evidenceByName }), true);
+
+  const packageTamper = structuredClone(
+    evidenceByName.get("release-package-smoke-linux-x86_64.json"),
+  );
+  packageTamper.status = "failed";
+  assert.throws(
+    () =>
+      assertCompleteEvidence({
+        ...options,
+        evidenceByName: new Map(evidenceByName).set(
+          "release-package-smoke-linux-x86_64.json",
+          packageTamper,
+        ),
+      }),
+    /package-smoke evidence/i,
+  );
+
+  const provenanceTamper = structuredClone(
+    evidenceByName.get("release-provenance-linux-x86_64.json"),
+  );
+  provenanceTamper.subject[0].digest.sha256 = "0".repeat(64);
+  assert.throws(
+    () =>
+      assertCompleteEvidence({
+        ...options,
+        evidenceByName: new Map(evidenceByName).set(
+          "release-provenance-linux-x86_64.json",
+          provenanceTamper,
+        ),
+      }),
+    /provenance evidence/i,
+  );
+
+  const sbomTamper = structuredClone(
+    evidenceByName.get("release-sbom-linux-x86_64.spdx.json"),
+  );
+  sbomTamper.files[0].checksums[0].checksumValue = "0".repeat(64);
+  assert.throws(
+    () =>
+      assertCompleteEvidence({
+        ...options,
+        evidenceByName: new Map(evidenceByName).set(
+          "release-sbom-linux-x86_64.spdx.json",
+          sbomTamper,
+        ),
+      }),
+    /SPDX SBOM evidence/i,
+  );
+
+  const omitted = new Map(evidenceByName);
+  omitted.delete("release-package-smoke-linux-x86_64.json");
+  assert.throws(
+    () => assertCompleteEvidence({ ...options, evidenceByName: omitted }),
+    /semantic evidence is missing/i,
+  );
+});
+
 test("public checksum verification rejects missing or changed bytes", () => {
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), "s3-sidekick-checksums-"),
@@ -934,6 +1379,7 @@ test("public checksum verification rejects missing or changed bytes", () => {
       `${digest}  ${artifactName}\n`,
     );
     const assetsByName = new Map([
+      [artifactName, { name: artifactName }],
       [checksumName, { name: checksumName }],
       [`${checksumName}.asc`, { name: `${checksumName}.asc` }],
     ]);
@@ -952,6 +1398,118 @@ test("public checksum verification rejects missing or changed bytes", () => {
           new Map([[artifactName, "b".repeat(64)]]),
         ),
       /checksum mismatch/i,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("checksum manifests have duplicate-free exact per-target attestation closure", () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-checksum-closure-"),
+  );
+  const targets = ["linux-x86_64", "windows-x86_64"];
+  const descriptor = {
+    expectedTargets: targets,
+    requiredEvidence: ["attestation", "package-smoke", "provenance", "sbom"],
+  };
+  const makeAttestation = (platform, hostPlatform, artifactName, digit) => ({
+    targets: [`${platform}-x86_64`],
+    host: { platform: hostPlatform, arch: "x64" },
+    artifacts: [{ name: artifactName, sha256: digit.repeat(64) }],
+    evidence: [
+      `release-package-smoke-${platform}-x86_64.json`,
+      `release-provenance-${platform}-x86_64.json`,
+      `release-sbom-${platform}-x86_64.spdx.json`,
+    ].map((name, index) => ({
+      name,
+      sha256: String(Number(digit) + index + 1).repeat(64),
+    })),
+  });
+  const attestations = [
+    makeAttestation("linux", "linux", "app.AppImage", "1"),
+    makeAttestation("windows", "win32", "app-setup.exe", "5"),
+  ];
+  const digestByName = new Map();
+  const assetsByName = new Map();
+  const expectedByTarget = new Map();
+  for (const attestation of attestations) {
+    const target = attestation.targets[0];
+    const platform = target.split("-")[0];
+    const attestationName = `release-attestation-${platform}-x86_64.json`;
+    const records = [
+      ...attestation.artifacts,
+      ...attestation.evidence,
+      { name: attestationName, sha256: "9".repeat(64) },
+    ];
+    expectedByTarget.set(target, records);
+    for (const record of records) {
+      assetsByName.set(record.name, { name: record.name });
+      digestByName.set(record.name, record.sha256);
+    }
+    const checksumName = `SHA256SUMS-${target}.txt`;
+    assetsByName.set(checksumName, { name: checksumName });
+    assetsByName.set(`${checksumName}.asc`, { name: `${checksumName}.asc` });
+    fs.writeFileSync(
+      path.join(directory, checksumName),
+      `${records.map((record) => `${record.sha256}  ${record.name}`).join("\n")}\n`,
+    );
+  }
+  try {
+    assert.doesNotThrow(() =>
+      verifyChecksumFiles(directory, assetsByName, digestByName, {
+        attestations,
+        descriptor,
+      }),
+    );
+
+    const linuxName = "SHA256SUMS-linux-x86_64.txt";
+    const linuxRecords = expectedByTarget.get("linux-x86_64");
+    fs.writeFileSync(
+      path.join(directory, linuxName),
+      `${linuxRecords
+        .slice(1)
+        .map((record) => `${record.sha256}  ${record.name}`)
+        .join("\n")}\n`,
+    );
+    assert.throws(
+      () =>
+        verifyChecksumFiles(directory, assetsByName, digestByName, {
+          attestations,
+          descriptor,
+        }),
+      /does not exactly cover/i,
+    );
+
+    fs.writeFileSync(
+      path.join(directory, linuxName),
+      `${linuxRecords
+        .map((record) => `${record.sha256}  ${record.name}`)
+        .join("\n")}\n${linuxRecords[0].sha256}  ${linuxRecords[0].name}\n`,
+    );
+    assert.throws(
+      () =>
+        verifyChecksumFiles(directory, assetsByName, digestByName, {
+          attestations,
+          descriptor,
+        }),
+      /duplicate checksum entry/i,
+    );
+
+    const windowsArtifact = attestations[1].artifacts[0];
+    fs.writeFileSync(
+      path.join(directory, linuxName),
+      `${linuxRecords
+        .map((record) => `${record.sha256}  ${record.name}`)
+        .join("\n")}\n${windowsArtifact.sha256}  ${windowsArtifact.name}\n`,
+    );
+    assert.throws(
+      () =>
+        verifyChecksumFiles(directory, assetsByName, digestByName, {
+          attestations,
+          descriptor,
+        }),
+      /does not exactly cover/i,
     );
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -1140,6 +1698,7 @@ test("publication requires one semantically valid install-smoke report per targe
   const descriptorSha256 = "d".repeat(64);
   const descriptor = {
     release: { id: 42, prerelease: false, tag: "v1.2.3", version: "1.2.3" },
+    installSmokePreviousVersion: "1.2.2",
     source: { commit: "c".repeat(40) },
     expectedTargets: [target],
     requiredEvidence: [
@@ -1150,19 +1709,26 @@ test("publication requires one semantically valid install-smoke report per targe
       "sbom",
     ],
   };
-  const artifactName = "S3-Sidekick-Linux-x64.AppImage";
-  const crossTargetArtifactName = "S3-Sidekick-Windows-x64-setup.exe";
+  const packageRecords = [
+    ["S3-Sidekick-Linux-x64.AppImage", "a"],
+    ["S3-Sidekick-Linux-x64.deb", "4"],
+    ["S3-Sidekick-Linux-x64.flatpak", "5"],
+    ["S3-Sidekick-Linux-x64.rpm", "6"],
+  ].map(([name, digit], index) => ({
+    name,
+    sha256: digit.repeat(64),
+    size: 10 + index,
+  }));
+  const crossTargetArtifactName = "S3-Sidekick-Windows-x64.exe";
   const attestation = {
     schemaVersion: 1,
     descriptorSha256,
     releaseId: 42,
     sourceCommit: descriptor.source.commit,
     targets: [target],
+    packagesByTarget: { [target]: packageRecords },
     host: { platform: "linux", arch: "x64" },
-    artifacts: [
-      { name: artifactName, sha256: "a".repeat(64) },
-      { name: crossTargetArtifactName, sha256: "9".repeat(64) },
-    ],
+    artifacts: packageRecords,
     evidence: [
       {
         name: "release-package-smoke-linux-x86_64.json",
@@ -1182,12 +1748,8 @@ test("publication requires one semantically valid install-smoke report per targe
   const names = [
     "release-descriptor.json",
     "release-descriptor.json.asc",
-    artifactName,
-    `${artifactName}.asc`,
-    `${artifactName}.sig`,
-    crossTargetArtifactName,
-    `${crossTargetArtifactName}.asc`,
-    `${crossTargetArtifactName}.sig`,
+    ...packageRecords.flatMap((record) => [record.name, `${record.name}.asc`]),
+    "S3-Sidekick-Linux-x64.AppImage.sig",
     "SHA256SUMS-linux-x86_64.txt",
     "SHA256SUMS-linux-x86_64.txt.asc",
     "release-attestation-linux-x86_64.json",
@@ -1203,8 +1765,7 @@ test("publication requires one semantically valid install-smoke report per targe
   ];
   const assetsByName = new Map(names.map((name, id) => [name, { id, name }]));
   const digestByName = new Map([
-    [artifactName, "a".repeat(64)],
-    [crossTargetArtifactName, "9".repeat(64)],
+    ...packageRecords.map((record) => [record.name, record.sha256]),
     ["release-package-smoke-linux-x86_64.json", "b".repeat(64)],
     ["release-provenance-linux-x86_64.json", "c".repeat(64)],
     ["release-sbom-linux-x86_64.spdx.json", "e".repeat(64)],
@@ -1220,7 +1781,7 @@ test("publication requires one semantically valid install-smoke report per targe
     checks: ["clean-install", "launch", "previous-version-update"],
     previousVersion: "1.2.2",
     runner: { image: "ubuntu-24.04", runId: "1234" },
-    artifacts: [{ name: artifactName, sha256: "a".repeat(64) }],
+    artifacts: packageRecords.map(({ name, sha256 }) => ({ name, sha256 })),
   };
   const options = {
     assetsByName,
@@ -1258,18 +1819,85 @@ test("publication requires one semantically valid install-smoke report per targe
       }),
     /artifact mismatch/i,
   );
-  const attestationWithoutTargetArtifact = {
+  const attestationWithCrossTargetPackage = {
     ...attestation,
-    artifacts: [{ name: crossTargetArtifactName, sha256: "9".repeat(64) }],
+    artifacts: [
+      ...packageRecords,
+      {
+        name: crossTargetArtifactName,
+        sha256: "9".repeat(64),
+        size: 99,
+      },
+    ],
   };
   assert.throws(
     () =>
       assertCompleteEvidence({
         ...options,
-        attestations: [attestationWithoutTargetArtifact],
+        attestations: [attestationWithCrossTargetPackage],
         installSmokeReports: new Map([[target, report]]),
       }),
-    /no installable artifacts for linux-x86_64/i,
+    /cross-target ownership/i,
+  );
+  assert.throws(
+    () =>
+      assertCompleteEvidence({
+        ...options,
+        installSmokeReports: new Map([
+          [
+            target,
+            {
+              ...report,
+              artifacts: report.artifacts.filter(
+                ({ name }) => !name.endsWith(".flatpak"),
+              ),
+            },
+          ],
+        ]),
+      }),
+    /does not exactly cover the expected package closure/i,
+  );
+  const duplicateClosure = structuredClone(attestation);
+  duplicateClosure.packagesByTarget[target].push(
+    duplicateClosure.packagesByTarget[target][0],
+  );
+  assert.throws(
+    () =>
+      assertCompleteEvidence({
+        ...options,
+        attestations: [duplicateClosure],
+        installSmokeReports: new Map([[target, report]]),
+      }),
+    /malformed or duplicate record/i,
+  );
+  const wrongDigestClosure = structuredClone(attestation);
+  wrongDigestClosure.packagesByTarget[target] =
+    wrongDigestClosure.packagesByTarget[target].map((record, index) => ({
+      ...record,
+      ...(index === 0 ? { sha256: "0".repeat(64) } : {}),
+    }));
+  assert.throws(
+    () =>
+      assertCompleteEvidence({
+        ...options,
+        attestations: [wrongDigestClosure],
+        installSmokeReports: new Map([[target, report]]),
+      }),
+    /wrong digest, metadata, or target ownership/i,
+  );
+  const incompleteClosure = structuredClone(attestation);
+  incompleteClosure.packagesByTarget[target] =
+    incompleteClosure.packagesByTarget[target].filter(
+      ({ name }) => !name.endsWith(".rpm"),
+    );
+  assert.throws(
+    () =>
+      assertCompleteEvidence({
+        ...options,
+        attestations: [incompleteClosure],
+        installSmokeReports: new Map([[target, report]]),
+      }),
+    /package closure is incomplete.*\.rpm/i,
   );
   assert.throws(
     () =>
@@ -1291,6 +1919,100 @@ test("publication requires one semantically valid install-smoke report per targe
         installSmokeReports: new Map([[target, report]]),
       }),
     /install\/update smoke report is missing/i,
+  );
+});
+
+test("publication requires the universal macOS package trio for both Darwin targets", () => {
+  const targets = ["darwin-aarch64", "darwin-x86_64"];
+  const descriptorSha256 = "7".repeat(64);
+  const descriptor = {
+    release: { id: 43, prerelease: false, tag: "v1.2.3", version: "1.2.3" },
+    installSmokePreviousVersion: "1.2.2",
+    source: { commit: "8".repeat(40) },
+    expectedTargets: targets,
+    requiredEvidence: ["install-smoke"],
+  };
+  const packageRecords = [
+    ["S3-Sidekick-macOS.app.tar.gz", "1"],
+    ["S3-Sidekick-macOS.dmg", "2"],
+    ["S3-Sidekick-macOS.zip", "3"],
+  ].map(([name, digit], index) => ({
+    name,
+    sha256: digit.repeat(64),
+    size: 20 + index,
+  }));
+  const attestation = {
+    schemaVersion: 1,
+    descriptorSha256,
+    releaseId: descriptor.release.id,
+    sourceCommit: descriptor.source.commit,
+    targets,
+    packagesByTarget: Object.fromEntries(
+      targets.map((target) => [target, packageRecords]),
+    ),
+    host: { platform: "darwin", arch: "x64" },
+    artifacts: packageRecords,
+    evidence: [],
+  };
+  const reportFor = (target) => ({
+    schemaVersion: 1,
+    descriptorSha256,
+    releaseId: descriptor.release.id,
+    sourceCommit: descriptor.source.commit,
+    target,
+    status: "passed",
+    checks: ["clean-install", "launch", "previous-version-update"],
+    previousVersion: "1.2.2",
+    runner: { image: "macos-15", runId: `run-${target}` },
+    artifacts: packageRecords.map(({ name, sha256 }) => ({ name, sha256 })),
+  });
+  const reportNames = targets.map(
+    (target) => `release-install-smoke-${target}.json`,
+  );
+  const names = [
+    "release-descriptor.json",
+    "release-descriptor.json.asc",
+    ...packageRecords.flatMap((record) => [record.name, `${record.name}.asc`]),
+    "S3-Sidekick-macOS.app.tar.gz.sig",
+    ...targets.flatMap((target) => [
+      `SHA256SUMS-${target}.txt`,
+      `SHA256SUMS-${target}.txt.asc`,
+    ]),
+    "release-attestation-darwin-x86_64.json",
+    "release-attestation-darwin-x86_64.json.asc",
+    ...reportNames.flatMap((name) => [name, `${name}.asc`]),
+  ];
+  const assetsByName = new Map(names.map((name, id) => [name, { id, name }]));
+  const digestByName = new Map(
+    packageRecords.map((record) => [record.name, record.sha256]),
+  );
+  const reports = new Map(targets.map((target) => [target, reportFor(target)]));
+  const options = {
+    assetsByName,
+    attestations: [attestation],
+    descriptor,
+    descriptorSha256,
+    digestByName,
+  };
+  assert.equal(
+    assertCompleteEvidence({
+      ...options,
+      installSmokeReports: reports,
+    }),
+    true,
+  );
+  const incomplete = new Map(reports);
+  incomplete.set("darwin-aarch64", {
+    ...reportFor("darwin-aarch64"),
+    artifacts: reportFor("darwin-aarch64").artifacts.slice(0, -1),
+  });
+  assert.throws(
+    () =>
+      assertCompleteEvidence({
+        ...options,
+        installSmokeReports: incomplete,
+      }),
+    /does not exactly cover the expected package closure/i,
   );
 });
 
@@ -1777,6 +2499,174 @@ test("publication sessions serialize locally and retain descriptor-scoped owners
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("explicit cross-host takeover adopts only stable remote owner evidence under lock and CAS", async () => {
+  const workspace = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-owner-takeover-"),
+  );
+  const descriptor = {
+    release: { id: 84 },
+    source: { commit: "c".repeat(40) },
+  };
+  const descriptorSha256 = "d".repeat(64);
+  const remoteOwner = {
+    schemaVersion: 1,
+    descriptorSha256,
+    releaseId: descriptor.release.id,
+    sessionId: "123e4567-e89b-42d3-a456-426614174000",
+    sourceCommit: descriptor.source.commit,
+  };
+  const evidence = {
+    descriptorSha256,
+    evidence: [
+      {
+        assets: [
+          {
+            id: 700,
+            name: "beta-channel-transaction.json",
+            sha256: "a".repeat(64),
+          },
+          {
+            id: 701,
+            name: "beta-channel-transaction.json.asc",
+            sha256: "b".repeat(64),
+          },
+        ],
+        kind: "beta-transaction",
+        operationId: "e".repeat(64),
+      },
+    ],
+    owner: remoteOwner,
+    releaseId: descriptor.release.id,
+    sourceCommit: descriptor.source.commit,
+  };
+  try {
+    assert.equal(publicationTakeoverRequested([], {}), false);
+    assert.equal(
+      publicationTakeoverRequested(["--takeover-publication-owner"], {}),
+      true,
+    );
+    assert.equal(
+      publicationTakeoverRequested([], { RELEASE_PUBLICATION_TAKEOVER: "1" }),
+      true,
+    );
+    assert.throws(
+      () =>
+        publicationTakeoverRequested([], {
+          RELEASE_PUBLICATION_TAKEOVER: "true",
+        }),
+      /exactly 0 or 1/i,
+    );
+
+    const takeoverState = path.join(workspace, "takeover-state");
+    let resolutions = 0;
+    let lockObserved = false;
+    const takeover = await acquirePublicationSessionWithTakeover(
+      descriptor,
+      descriptorSha256,
+      {
+        resolveTakeoverEvidence: async () => {
+          resolutions += 1;
+          if (!lockObserved) {
+            lockObserved = true;
+            assert.throws(
+              () =>
+                acquirePublicationSession(descriptor, descriptorSha256, {
+                  stateDirectory: takeoverState,
+                }),
+              /another release publication process owns/i,
+            );
+          }
+          return structuredClone(evidence);
+        },
+        stateDirectory: takeoverState,
+        takeover: true,
+      },
+    );
+    assert.equal(resolutions, 2);
+    assert.equal(lockObserved, true);
+    assert.deepEqual(takeover.owner, remoteOwner);
+    assert.deepEqual(takeover.takeoverEvidence, evidence);
+    takeover.release();
+    const installedOwnerPath = path.join(
+      takeoverState,
+      "owners",
+      `${descriptorSha256}.json`,
+    );
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(installedOwnerPath, "utf8")),
+      remoteOwner,
+    );
+    assert.equal(fs.statSync(installedOwnerPath).mode & 0o777, 0o600);
+
+    const changingState = path.join(workspace, "changing-state");
+    let changingCalls = 0;
+    await assert.rejects(
+      () =>
+        acquirePublicationSessionWithTakeover(descriptor, descriptorSha256, {
+          resolveTakeoverEvidence: async () => {
+            changingCalls += 1;
+            const value = structuredClone(evidence);
+            if (changingCalls === 2) {
+              value.evidence[0].operationId = "f".repeat(64);
+            }
+            return value;
+          },
+          stateDirectory: changingState,
+          takeover: true,
+        }),
+      /evidence changed during takeover/i,
+    );
+    assert.equal(
+      fs.existsSync(
+        path.join(changingState, "owners", `${descriptorSha256}.json`),
+      ),
+      false,
+    );
+
+    const casState = path.join(workspace, "cas-state");
+    let casCalls = 0;
+    await assert.rejects(
+      () =>
+        acquirePublicationSessionWithTakeover(descriptor, descriptorSha256, {
+          resolveTakeoverEvidence: async () => {
+            casCalls += 1;
+            if (casCalls === 2) {
+              const ownerDirectory = path.join(casState, "owners");
+              fs.mkdirSync(ownerDirectory, { recursive: true });
+              fs.writeFileSync(
+                path.join(ownerDirectory, `${descriptorSha256}.json`),
+                JSON.stringify({
+                  ...remoteOwner,
+                  sessionId: "223e4567-e89b-42d3-a456-426614174000",
+                }),
+                { mode: 0o600 },
+              );
+            }
+            return structuredClone(evidence);
+          },
+          stateDirectory: casState,
+          takeover: true,
+        }),
+      /compare-and-swap lost to a conflicting owner/i,
+    );
+
+    await assert.rejects(
+      () =>
+        acquirePublicationSessionWithTakeover(descriptor, descriptorSha256, {
+          resolveTakeoverEvidence: async () => {
+            throw new Error("no complete signed remote owner evidence");
+          },
+          stateDirectory: path.join(workspace, "singleton-state"),
+          takeover: true,
+        }),
+      /no complete signed remote owner evidence/i,
+    );
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("stable product closure excludes only exact signed channel controls and receipts", () => {
   const descriptor = {
     expectedTargets: ["linux-x86_64"],

@@ -7,6 +7,12 @@ const mockListen =
     (event: string, callback: (event: unknown) => void) => Promise<() => void>
   >();
 const TEST_RECOVERY_SESSION = "a".repeat(64);
+const TEST_SOURCE_FINGERPRINT = "1".repeat(64);
+const TEST_SOURCE_ACL_FINGERPRINT = "2".repeat(64);
+const TEST_SOURCE_TAG_FINGERPRINT = "3".repeat(64);
+const TEST_DESTINATION_FINGERPRINT = "4".repeat(64);
+const TEST_DESTINATION_ACL_FINGERPRINT = "5".repeat(64);
+const TEST_DESTINATION_TAG_FINGERPRINT = "6".repeat(64);
 const EMPTY_HYDRATION = {
   recovery_session: TEST_RECOVERY_SESSION,
   manifest_json: "",
@@ -251,6 +257,7 @@ describe("transfers queue UI", () => {
           srcKey: "old.txt",
           dstKey: "new.txt",
           overwrite: true,
+          requireImmutableSourceVersion: false,
         }),
       );
     });
@@ -375,7 +382,11 @@ describe("transfers queue UI", () => {
 
     const raw = localStorage.getItem("s3-sidekick.transfer-manifest.v1");
     expect(raw).toBeTruthy();
-    const parsed = JSON.parse(raw ?? "{}") as { items?: unknown[] };
+    const parsed = JSON.parse(raw ?? "{}") as {
+      version?: unknown;
+      items?: unknown[];
+    };
+    expect(parsed.version).toBe(6);
     expect(Array.isArray(parsed.items)).toBe(true);
     expect((parsed.items ?? []).length).toBeGreaterThan(0);
 
@@ -1111,9 +1122,15 @@ describe("transfers queue UI", () => {
     const receipt = {
       source_key: "source/file.txt",
       source_etag: '"source-etag"',
-      source_version_id: null,
+      source_fingerprint: TEST_SOURCE_FINGERPRINT,
+      source_acl_fingerprint: TEST_SOURCE_ACL_FINGERPRINT,
+      source_tag_fingerprint: TEST_SOURCE_TAG_FINGERPRINT,
+      source_version_id: "source-version-1",
       destination_key: "archive/file.txt",
       destination_etag: '"destination-etag"',
+      destination_fingerprint: TEST_DESTINATION_FINGERPRINT,
+      destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
+      destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
       destination_version_id: null,
     };
 
@@ -1148,7 +1165,10 @@ describe("transfers queue UI", () => {
 
     expect(mockInvoke).toHaveBeenCalledWith(
       "copy_object_to",
-      expect.objectContaining({ transferId: expect.any(Number) }),
+      expect.objectContaining({
+        transferId: expect.any(Number),
+        requireImmutableSourceVersion: true,
+      }),
     );
     expect(mockInvoke).toHaveBeenCalledWith("delete_copied_objects", {
       srcBucket: "source-bucket",
@@ -1176,7 +1196,148 @@ describe("transfers queue UI", () => {
     expect(mockInvoke.mock.calls[markerSaveIndex]?.[1]).toEqual(
       expect.objectContaining({ recoverySession: TEST_RECOVERY_SESSION }),
     );
+    const markerPayload = mockInvoke.mock.calls[markerSaveIndex]?.[1] as {
+      json: string;
+    };
+    const markerManifest = JSON.parse(markerPayload.json) as {
+      version: number;
+      items: Array<{ receipts?: Array<Record<string, unknown>> }>;
+    };
+    expect(markerManifest.version).toBe(6);
+    expect(markerManifest.items[0]?.receipts?.[0]).toEqual(
+      expect.objectContaining({
+        source_fingerprint: TEST_SOURCE_FINGERPRINT,
+        source_acl_fingerprint: TEST_SOURCE_ACL_FINGERPRINT,
+        source_tag_fingerprint: TEST_SOURCE_TAG_FINGERPRINT,
+        destination_fingerprint: TEST_DESTINATION_FINGERPRINT,
+        destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
+        destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
+      }),
+    );
     expect(deleteIndex).toBeGreaterThan(markerSaveIndex);
+  });
+
+  it("refuses malformed fresh receipts before persistence or deletion", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    const malformedReceipt = {
+      source_key: "source/file.txt",
+      source_etag: '"source-etag"',
+      source_fingerprint: TEST_SOURCE_FINGERPRINT,
+      source_acl_fingerprint: TEST_SOURCE_ACL_FINGERPRINT,
+      source_version_id: "source-version-1",
+      destination_key: "archive/file.txt",
+      destination_etag: '"destination-etag"',
+      destination_fingerprint: TEST_DESTINATION_FINGERPRINT,
+      destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
+      destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
+      destination_version_id: null,
+    };
+
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "object_exists") return false;
+      if (cmd === "copy_object_to") return malformedReceipt;
+      if (cmd === "save_transfer_manifest") return undefined;
+      if (cmd === "delete_copied_objects") return 1;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "move",
+        sourceBucket: "source-bucket",
+        sourceKey: malformedReceipt.source_key,
+        fileName: "file.txt",
+        destinationBucket: "destination-bucket",
+        destinationKey: malformedReceipt.destination_key,
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("transfer-list") as HTMLDivElement)
+          .textContent,
+      ).toContain("incomplete source/destination safety fingerprints");
+    });
+    expect(
+      mockInvoke.mock.calls.some(
+        ([cmd, payload]) =>
+          cmd === "save_transfer_manifest" &&
+          typeof payload === "object" &&
+          payload !== null &&
+          String((payload as { json?: unknown }).json).includes(
+            '"movePhase":"copied"',
+          ),
+      ),
+    ).toBe(false);
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "delete_copied_objects",
+      expect.anything(),
+    );
+  });
+
+  it("surfaces move versioning preflight refusal without persisting copied authority", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "object_exists") return false;
+      if (cmd === "copy_object_to") {
+        throw new Error(
+          "Automatic move requires object versioning; no destination was changed.",
+        );
+      }
+      if (cmd === "save_transfer_manifest") return undefined;
+      if (cmd === "delete_copied_objects") return 1;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "move",
+        sourceBucket: "source-bucket",
+        sourceKey: "source/file.txt",
+        fileName: "file.txt",
+        destinationBucket: "destination-bucket",
+        destinationKey: "archive/file.txt",
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(
+        (document.getElementById("transfer-list") as HTMLDivElement)
+          .textContent,
+      ).toContain("requires object versioning");
+    });
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "copy_object_to",
+      expect.objectContaining({ requireImmutableSourceVersion: true }),
+    );
+    expect(
+      mockInvoke.mock.calls.some(
+        ([cmd, payload]) =>
+          cmd === "save_transfer_manifest" &&
+          typeof payload === "object" &&
+          payload !== null &&
+          String((payload as { json?: unknown }).json).includes(
+            '"movePhase":"copied"',
+          ),
+      ),
+    ).toBe(false);
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "delete_copied_objects",
+      expect.anything(),
+    );
   });
 
   it("keeps the bound session for source deletion after a mid-move reconnect", async () => {
@@ -1186,9 +1347,15 @@ describe("transfers queue UI", () => {
     const receipt = {
       source_key: "source/file.txt",
       source_etag: '"source-etag"',
-      source_version_id: null,
+      source_fingerprint: TEST_SOURCE_FINGERPRINT,
+      source_acl_fingerprint: TEST_SOURCE_ACL_FINGERPRINT,
+      source_tag_fingerprint: TEST_SOURCE_TAG_FINGERPRINT,
+      source_version_id: "source-version-1",
       destination_key: "archive/file.txt",
       destination_etag: '"destination-etag"',
+      destination_fingerprint: TEST_DESTINATION_FINGERPRINT,
+      destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
+      destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
       destination_version_id: null,
     };
 
@@ -1232,6 +1399,7 @@ describe("transfers queue UI", () => {
       dstKey: receipt.destination_key,
       overwrite: false,
       transferId: expect.any(Number),
+      requireImmutableSourceVersion: true,
       connectionId: "test-connection",
     });
     expect(mockInvoke).toHaveBeenCalledWith("delete_copied_objects", {
@@ -1254,9 +1422,15 @@ describe("transfers queue UI", () => {
     const receipt = {
       source_key: "docs/folder/file.txt",
       source_etag: '"source-etag"',
-      source_version_id: null,
+      source_fingerprint: TEST_SOURCE_FINGERPRINT,
+      source_acl_fingerprint: TEST_SOURCE_ACL_FINGERPRINT,
+      source_tag_fingerprint: TEST_SOURCE_TAG_FINGERPRINT,
+      source_version_id: "source-version-1",
       destination_key: "archive/folder/file.txt",
       destination_etag: '"destination-etag"',
+      destination_fingerprint: TEST_DESTINATION_FINGERPRINT,
+      destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
+      destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
       destination_version_id: null,
     };
 
@@ -1413,9 +1587,15 @@ describe("transfers queue UI", () => {
     const receipt = {
       source_key: "source/file.txt",
       source_etag: '"source-etag"',
-      source_version_id: null,
+      source_fingerprint: TEST_SOURCE_FINGERPRINT,
+      source_acl_fingerprint: TEST_SOURCE_ACL_FINGERPRINT,
+      source_tag_fingerprint: TEST_SOURCE_TAG_FINGERPRINT,
+      source_version_id: "source-version-1",
       destination_key: "archive/file.txt",
       destination_etag: '"destination-etag"',
+      destination_fingerprint: TEST_DESTINATION_FINGERPRINT,
+      destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
+      destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
       destination_version_id: null,
     };
 
@@ -1544,5 +1724,390 @@ describe("transfers queue UI", () => {
         ),
       ).toBe(true);
     });
+  });
+});
+
+describe("transfer recovery ownership", () => {
+  const recoveredDownload = (
+    version: 3 | 4 | 5 | 6,
+    withIdentity: boolean,
+  ) => ({
+    version,
+    items: [
+      {
+        operation: "download",
+        bucket: "bucket-a",
+        fileName: "recovered.txt",
+        filePath: "",
+        key: "docs/recovered.txt",
+        destination: "C:\\tmp\\recovered.txt",
+        size: 5,
+        totalBytes: 5,
+        attempt: 1,
+        maxAttempts: 3,
+        conflictResolution: "replace",
+        ...(withIdentity
+          ? {
+              connectionId: "previous-session",
+              connectionIdentity: "test-identity",
+            }
+          : {}),
+      },
+    ],
+  });
+
+  const recoveredReceipt = {
+    source_key: "source/recovered.txt",
+    source_etag: '"source-old"',
+    source_fingerprint: TEST_SOURCE_FINGERPRINT,
+    source_acl_fingerprint: TEST_SOURCE_ACL_FINGERPRINT,
+    source_tag_fingerprint: TEST_SOURCE_TAG_FINGERPRINT,
+    source_version_id: "source-version-1",
+    destination_key: "archive/recovered.txt",
+    destination_etag: '"destination-old"',
+    destination_fingerprint: TEST_DESTINATION_FINGERPRINT,
+    destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
+    destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
+    destination_version_id: null,
+  };
+
+  const recoveredMove = (version: 1 | 2 | 3 | 4 | 5 | 6, receipt: object) => ({
+    version,
+    items: [
+      {
+        operation: "move",
+        bucket: "source-bucket",
+        fileName: "recovered.txt",
+        filePath: "",
+        key: recoveredReceipt.source_key,
+        sourceBucket: "source-bucket",
+        sourceKey: recoveredReceipt.source_key,
+        destinationBucket: "destination-bucket",
+        destinationKey: recoveredReceipt.destination_key,
+        size: 5,
+        totalBytes: 5,
+        attempt: 1,
+        maxAttempts: 1,
+        conflictResolution: "replace",
+        movePhase: "copied",
+        receipts: [receipt],
+        connectionId: "previous-session",
+        connectionIdentity: "test-identity",
+      },
+    ],
+  });
+
+  it("hydrates while disconnected without running or clearing recovered work", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.connected = false;
+    state.connectionId = "";
+    state.connectionIdentity = "";
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<div id="dialog-overlay"></div>',
+    );
+    mockShowConfirm.mockResolvedValue(true);
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        return {
+          ...EMPTY_HYDRATION,
+          manifest_json: JSON.stringify(recoveredDownload(5, true)),
+        };
+      }
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "discard_download_scratch") return undefined;
+      if (cmd === "path_exists") return false;
+      if (cmd === "head_object") return { content_length: 5 };
+      if (cmd === "download_object") return 5;
+      return undefined;
+    });
+
+    await transfers.recoverPendingTransfers();
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "download_object",
+      expect.anything(),
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "clear_transfer_manifest",
+      expect.anything(),
+    );
+
+    state.connected = true;
+    state.connectionId = "new-session";
+    state.connectionIdentity = "test-identity";
+    await transfers.resumeRecoveredTransfersAfterConnect();
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "download_object",
+        expect.objectContaining({
+          connectionId: "new-session",
+          key: "docs/recovered.txt",
+        }),
+      );
+    });
+  });
+
+  it.each([1, 2, 3, 4, 5] as const)(
+    "drops copied deletion authority from v%s manifests and recopies",
+    async (version) => {
+      const transfers = await loadTransfersModule();
+      document.body.insertAdjacentHTML(
+        "beforeend",
+        '<div id="dialog-overlay"></div>',
+      );
+      mockShowConfirm.mockResolvedValue(true);
+      const freshReceipt = {
+        ...recoveredReceipt,
+        source_etag: '"source-fresh"',
+        source_fingerprint: "4".repeat(64),
+        source_acl_fingerprint: "5".repeat(64),
+        source_tag_fingerprint: "6".repeat(64),
+        destination_etag: '"destination-fresh"',
+      };
+      mockInvoke.mockImplementation(async (cmd) => {
+        if (cmd === "load_transfer_manifest") {
+          return {
+            ...EMPTY_HYDRATION,
+            manifest_json: JSON.stringify(
+              recoveredMove(version, recoveredReceipt),
+            ),
+          };
+        }
+        if (cmd === "transfer_checkpoint_gc") return 0;
+        if (cmd === "object_exists") return false;
+        if (cmd === "copy_object_to") return freshReceipt;
+        if (cmd === "save_transfer_manifest") return undefined;
+        if (cmd === "delete_copied_objects") return 1;
+        return undefined;
+      });
+
+      await transfers.recoverPendingTransfers();
+      await vi.waitFor(() => {
+        expect(
+          mockInvoke.mock.calls.some(
+            ([cmd]) => cmd === "delete_copied_objects",
+          ),
+        ).toBe(true);
+      });
+
+      const copyIndex = mockInvoke.mock.calls.findIndex(
+        ([cmd]) => cmd === "copy_object_to",
+      );
+      const deleteIndex = mockInvoke.mock.calls.findIndex(
+        ([cmd]) => cmd === "delete_copied_objects",
+      );
+      expect(copyIndex).toBeGreaterThanOrEqual(0);
+      expect(deleteIndex).toBeGreaterThan(copyIndex);
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "delete_copied_objects",
+        expect.objectContaining({ receipts: [freshReceipt] }),
+      );
+    },
+  );
+
+  it("resumes a copied move from a complete v6 receipt without recopying", async () => {
+    const transfers = await loadTransfersModule();
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<div id="dialog-overlay"></div>',
+    );
+    mockShowConfirm.mockResolvedValue(true);
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        return {
+          ...EMPTY_HYDRATION,
+          manifest_json: JSON.stringify(recoveredMove(6, recoveredReceipt)),
+        };
+      }
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "delete_copied_objects") return 1;
+      return undefined;
+    });
+
+    await transfers.recoverPendingTransfers();
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "delete_copied_objects"),
+      ).toBe(true);
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "copy_object_to",
+      expect.anything(),
+    );
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "delete_copied_objects",
+      expect.objectContaining({ receipts: [recoveredReceipt] }),
+    );
+  });
+
+  it.each([
+    [
+      "missing destination tag fingerprint",
+      (({ destination_tag_fingerprint: _missing, ...receipt }) => receipt)(
+        recoveredReceipt,
+      ),
+    ],
+    ["null source version", { ...recoveredReceipt, source_version_id: "null" }],
+  ] as const)(
+    "drops malformed v6 copied authority (%s) before source deletion",
+    async (_case, malformedReceipt) => {
+      const transfers = await loadTransfersModule();
+      document.body.insertAdjacentHTML(
+        "beforeend",
+        '<div id="dialog-overlay"></div>',
+      );
+      mockShowConfirm.mockResolvedValue(true);
+      const freshReceipt = {
+        ...recoveredReceipt,
+        source_etag: '"source-fresh"',
+        destination_etag: '"destination-fresh"',
+      };
+      mockInvoke.mockImplementation(async (cmd) => {
+        if (cmd === "load_transfer_manifest") {
+          return {
+            ...EMPTY_HYDRATION,
+            manifest_json: JSON.stringify(recoveredMove(6, malformedReceipt)),
+          };
+        }
+        if (cmd === "transfer_checkpoint_gc") return 0;
+        if (cmd === "object_exists") return false;
+        if (cmd === "copy_object_to") return freshReceipt;
+        if (cmd === "save_transfer_manifest") return undefined;
+        if (cmd === "delete_copied_objects") return 1;
+        return undefined;
+      });
+
+      await transfers.recoverPendingTransfers();
+      await vi.waitFor(() => {
+        expect(
+          mockInvoke.mock.calls.some(
+            ([cmd]) => cmd === "delete_copied_objects",
+          ),
+        ).toBe(true);
+      });
+      const copyIndex = mockInvoke.mock.calls.findIndex(
+        ([cmd]) => cmd === "copy_object_to",
+      );
+      const deleteIndex = mockInvoke.mock.calls.findIndex(
+        ([cmd]) => cmd === "delete_copied_objects",
+      );
+      expect(copyIndex).toBeGreaterThanOrEqual(0);
+      expect(deleteIndex).toBeGreaterThan(copyIndex);
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "delete_copied_objects",
+        expect.objectContaining({ receipts: [freshReceipt] }),
+      );
+    },
+  );
+
+  it("requires explicit durable account binding before a beta.4 manifest runs", async () => {
+    const transfers = await loadTransfersModule();
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<div id="dialog-overlay"></div>',
+    );
+    mockShowConfirm.mockResolvedValue(true);
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        return {
+          ...EMPTY_HYDRATION,
+          manifest_json: JSON.stringify(recoveredDownload(3, false)),
+        };
+      }
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "discard_download_scratch") return undefined;
+      if (cmd === "path_exists") return false;
+      if (cmd === "head_object") return { content_length: 5 };
+      if (cmd === "download_object") return 5;
+      return undefined;
+    });
+
+    await transfers.recoverPendingTransfers();
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "download_object"),
+      ).toBe(true);
+    });
+    expect(mockShowConfirm).toHaveBeenCalledTimes(2);
+    const bindingSaveIndex = mockInvoke.mock.calls.findIndex(
+      ([cmd, payload]) =>
+        cmd === "save_transfer_manifest" &&
+        typeof payload === "object" &&
+        payload !== null &&
+        String((payload as { json?: unknown }).json).includes(
+          '"connectionIdentity":"test-identity"',
+        ),
+    );
+    const downloadIndex = mockInvoke.mock.calls.findIndex(
+      ([cmd]) => cmd === "download_object",
+    );
+    expect(bindingSaveIndex).toBeGreaterThanOrEqual(0);
+    expect(downloadIndex).toBeGreaterThan(bindingSaveIndex);
+  });
+
+  it("keeps terminal failures in the durable manifest", async () => {
+    const transfers = await loadTransfersModule();
+    await transfers.recoverPendingTransfers();
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") return false;
+      if (cmd === "upload_object") throw new Error("provider unavailable");
+      return undefined;
+    });
+
+    transfers.enqueuePaths(["C:\\tmp\\failed.txt"], "uploads/");
+    await vi.waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.some(
+          ([cmd, payload]) =>
+            cmd === "save_transfer_manifest" &&
+            typeof payload === "object" &&
+            payload !== null &&
+            String((payload as { json?: unknown }).json).includes(
+              '"failed":true',
+            ) &&
+            String((payload as { json?: unknown }).json).includes("failed.txt"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it("retries hydration after a transient failure", async () => {
+    const transfers = await loadTransfersModule();
+    let loads = 0;
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        loads += 1;
+        if (loads === 1) throw new Error("vault temporarily locked");
+        return EMPTY_HYDRATION;
+      }
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      return undefined;
+    });
+
+    transfers.prepareTransferRecovery();
+    await expect(transfers.recoverPendingTransfers()).rejects.toThrow(
+      "vault temporarily locked",
+    );
+    await expect(transfers.recoverPendingTransfers()).resolves.toBeUndefined();
+    expect(loads).toBe(2);
+  });
+
+  it("retains malformed native recovery data instead of clearing it", async () => {
+    const transfers = await loadTransfersModule();
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        return { ...EMPTY_HYDRATION, manifest_json: "{malformed" };
+      }
+      return undefined;
+    });
+
+    await expect(transfers.recoverPendingTransfers()).rejects.toThrow(
+      /malformed or from an unsupported future version/i,
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "clear_transfer_manifest",
+      expect.anything(),
+    );
   });
 });

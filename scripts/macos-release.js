@@ -89,6 +89,53 @@ function requiredMacEnvironment(environment = process.env) {
   };
 }
 
+function machOFiles(appPath, { execute = spawnSync } = {}) {
+  return walk(appPath)
+    .filter((value) => fs.existsSync(value) && fs.statSync(value).isFile())
+    .filter((value) => {
+      const result = execute("file", ["-b", value], { encoding: "utf8" });
+      return result.status === 0 && /Mach-O/.test(result.stdout || "");
+    })
+    .sort(
+      (left, right) =>
+        right.split(path.sep).length - left.split(path.sep).length,
+    );
+}
+
+function assertUniversalMachO(appPath, { execute = spawnSync } = {}) {
+  const files = machOFiles(appPath, { execute });
+  if (files.length === 0) {
+    throw new Error(`No Mach-O objects found in ${appPath}.`);
+  }
+  return files
+    .map((filePath) => {
+      const result = execute("lipo", ["-archs", filePath], {
+        encoding: "utf8",
+      });
+      if (result.error) throw result.error;
+      const architectures = String(result.stdout || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .sort();
+      if (
+        result.status !== 0 ||
+        architectures.length !== 2 ||
+        architectures[0] !== "arm64" ||
+        architectures[1] !== "x86_64"
+      ) {
+        throw new Error(
+          `Shipped Mach-O object is not exact arm64+x86_64 universal binary: ${filePath} (${architectures.join(", ") || "unknown"}).`,
+        );
+      }
+      return {
+        architectures,
+        path: path.relative(appPath, filePath),
+      };
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
 function signingCandidates(appPath) {
   const nestedBundles = walk(appPath)
     .filter((value) => /\.(?:app|appex|framework|plugin|xpc)$/i.test(value))
@@ -96,17 +143,7 @@ function signingCandidates(appPath) {
       (left, right) =>
         right.split(path.sep).length - left.split(path.sep).length,
     );
-  const machoFiles = walk(appPath)
-    .filter((value) => fs.existsSync(value) && fs.statSync(value).isFile())
-    .filter((value) => {
-      const result = spawnSync("file", ["-b", value], { encoding: "utf8" });
-      return result.status === 0 && /Mach-O/.test(result.stdout || "");
-    })
-    .sort(
-      (left, right) =>
-        right.split(path.sep).length - left.split(path.sep).length,
-    );
-  return Array.from(new Set([...machoFiles, ...nestedBundles]));
+  return Array.from(new Set([...machOFiles(appPath), ...nestedBundles]));
 }
 
 function signApp(appPath, identity) {
@@ -304,6 +341,7 @@ function finalizeMacRelease(
       os.tmpdir(),
       `s3-sidekick-notary-${process.pid}.zip`,
     );
+    const architectureChecks = assertUniversalMachO(appPath);
 
     signApp(appPath, identity);
     verifyCodeSignature(appPath, identity, teamId);
@@ -338,6 +376,7 @@ function finalizeMacRelease(
             dmg: dmgNotarization,
             zip: zipNotarization,
           },
+          architectures: architectureChecks,
           artifacts: [zipPath, updaterArchivePath, dmgPath]
             .map((filePath) => {
               const name = canonicalMacosArtifactName(path.basename(filePath));
@@ -350,6 +389,7 @@ function finalizeMacRelease(
             })
             .sort((left, right) => left.name.localeCompare(right.name)),
           checks: [
+            "universal-mach-o",
             "codesign-deep-strict",
             "notary-accepted",
             "stapler-validate",
@@ -384,9 +424,11 @@ if (
 }
 
 export {
+  assertUniversalMachO,
   finalizeMacRelease,
   findBundles,
   gatekeeperAssess,
+  machOFiles,
   requiredMacEnvironment,
   signingCandidates,
   verifyCodeSignature,

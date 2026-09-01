@@ -54,7 +54,20 @@ foreach ($rawPath in $rawInstallerPaths) {
   $installers += $installer
 }
 
-$sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
+$expectedSevenZipVersion = '26.02'
+$sevenZipCandidates = @()
+$sevenZipCommand = Get-Command 7z.exe -ErrorAction SilentlyContinue
+if ($sevenZipCommand) { $sevenZipCandidates += $sevenZipCommand.Source }
+if ($env:ProgramFiles) { $sevenZipCandidates += (Join-Path $env:ProgramFiles '7-Zip\7z.exe') }
+$sevenZipPath = $null
+foreach ($candidate in ($sevenZipCandidates | Select-Object -Unique)) {
+  if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+  $banner = (& $candidate i 2>&1 | Out-String)
+  if ($LASTEXITCODE -eq 0 -and $banner -match ("(?m)^7-Zip " + [regex]::Escape($expectedSevenZipVersion) + "(?:\s|$)")) {
+    $sevenZipPath = (Resolve-Path -LiteralPath $candidate).Path
+    break
+  }
+}
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("s3-sidekick-authenticode-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 try {
@@ -66,8 +79,8 @@ try {
       $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/a', $installer.FullName, '/qn', "TARGETDIR=$extractDir") -Wait -PassThru
       if ($process.ExitCode -ne 0) { throw "MSI extraction failed for $($installer.FullName): exit $($process.ExitCode)" }
     } else {
-      if (-not $sevenZip) { throw '7z.exe is required to inspect signed NSIS installer payloads.' }
-      & $sevenZip.Source x '-y' "-o$extractDir" $installer.FullName | Out-Null
+      if (-not $sevenZipPath) { throw "Pinned 7z.exe $expectedSevenZipVersion is required to inspect signed NSIS installer payloads. Run npm run setup:win:7zip." }
+      & $sevenZipPath x '-y' "-o$extractDir" $installer.FullName | Out-Null
       if ($LASTEXITCODE -ne 0) { throw "NSIS extraction failed for $($installer.FullName): exit $LASTEXITCODE" }
     }
     $embedded = @(Get-ChildItem -LiteralPath $extractDir -File -Recurse -Filter 's3-sidekick.exe')

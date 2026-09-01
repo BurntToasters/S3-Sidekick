@@ -28,10 +28,15 @@ import {
 export interface CopyReceipt {
   source_key: string;
   source_etag: string;
-  source_fingerprint?: string;
-  source_version_id: string | null;
+  source_fingerprint: string;
+  source_acl_fingerprint: string;
+  source_tag_fingerprint: string;
+  source_version_id: string;
   destination_key: string;
   destination_etag: string;
+  destination_fingerprint: string;
+  destination_acl_fingerprint: string;
+  destination_tag_fingerprint: string;
   destination_version_id: string | null;
 }
 
@@ -86,6 +91,8 @@ export interface TransferItem {
   receipts?: CopyReceipt[];
   connectionId?: string;
   connectionIdentity?: string;
+  /** Set only while beta.4-or-earlier recovery awaits explicit account binding. */
+  legacyConnectionUnbound?: boolean;
   /** Explicit overwrite intent for S3 writes; not persisted in the manifest. */
   overwrite?: boolean;
   /** Session/capability/operation scope for transient overwrite consent. */
@@ -138,7 +145,7 @@ interface TransferManifestHydration {
 }
 
 interface PersistedTransferManifest {
-  version: 4;
+  version: 6;
   items: PersistedTransferItem[];
 }
 
@@ -170,6 +177,11 @@ interface PersistedTransferItem {
   receipts?: CopyReceipt[];
   connectionId?: string;
   connectionIdentity?: string;
+  /** Persist terminal failures so recovery ownership survives a restart. */
+  failed?: boolean;
+  error?: string;
+  /** In-memory marker for manifests from beta.4 and earlier with no account binding. */
+  legacyConnectionUnbound?: boolean;
 }
 
 interface HeadObjectSummary {
@@ -612,21 +624,27 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
     receipts: item.receipts,
     connectionId: item.connectionId,
     connectionIdentity: item.connectionIdentity,
+    failed: item.status === "error",
+    error: item.status === "error" ? item.error : undefined,
   };
 }
 
 function buildQueueManifestJson(): string | null {
   // Uploads are not resumable, so an in-flight upload that survives an app kill
   // would restart from byte 0. We drop active uploads from the manifest; queued
-  // uploads that never started are still safe to persist.
+  // uploads that never started are still safe to persist. Terminal failures stay
+  // durable so a transient connection or provider error cannot erase recovery
+  // ownership before the user retries or explicitly clears the row.
   const pending = queue.filter(
     (item) =>
-      (item.status === "queued" || item.status === "uploading") &&
+      (item.status === "queued" ||
+        item.status === "uploading" ||
+        item.status === "error") &&
       !(item.operation === "upload" && item.status === "uploading"),
   );
   if (pending.length === 0) return null;
   const payload: PersistedTransferManifest = {
-    version: 4,
+    version: 6,
     items: pending.map(serializeManifestItem),
   };
   return JSON.stringify(payload);
@@ -755,10 +773,16 @@ function canMutateTransferQueue(): boolean {
   return false;
 }
 
+function isCanonicalFingerprint(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
 function parseCopyReceipts(value: unknown): CopyReceipt[] | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined;
 
   const receipts: CopyReceipt[] = [];
+  const sourceKeys = new Set<string>();
+  const destinationKeys = new Set<string>();
   for (const valueItem of value) {
     if (
       !valueItem ||
@@ -770,28 +794,56 @@ function parseCopyReceipts(value: unknown): CopyReceipt[] | undefined {
     const receipt = valueItem as Record<string, unknown>;
     if (
       typeof receipt.source_key !== "string" ||
+      receipt.source_key.length === 0 ||
       typeof receipt.source_etag !== "string" ||
-      (receipt.source_version_id !== null &&
-        typeof receipt.source_version_id !== "string") ||
+      receipt.source_etag.length === 0 ||
+      !isCanonicalFingerprint(receipt.source_fingerprint) ||
+      !isCanonicalFingerprint(receipt.source_acl_fingerprint) ||
+      !isCanonicalFingerprint(receipt.source_tag_fingerprint) ||
+      typeof receipt.source_version_id !== "string" ||
+      receipt.source_version_id.trim().length === 0 ||
+      receipt.source_version_id.trim().toLowerCase() === "null" ||
       typeof receipt.destination_key !== "string" ||
+      receipt.destination_key.length === 0 ||
       typeof receipt.destination_etag !== "string" ||
+      receipt.destination_etag.length === 0 ||
+      !isCanonicalFingerprint(receipt.destination_fingerprint) ||
+      !isCanonicalFingerprint(receipt.destination_acl_fingerprint) ||
+      !isCanonicalFingerprint(receipt.destination_tag_fingerprint) ||
       (receipt.destination_version_id !== null &&
-        typeof receipt.destination_version_id !== "string")
+        typeof receipt.destination_version_id !== "string") ||
+      sourceKeys.has(receipt.source_key) ||
+      destinationKeys.has(receipt.destination_key)
     ) {
       return undefined;
     }
+    sourceKeys.add(receipt.source_key);
+    destinationKeys.add(receipt.destination_key);
     receipts.push({
       source_key: receipt.source_key,
       source_etag: receipt.source_etag,
-      source_fingerprint:
-        typeof receipt.source_fingerprint === "string"
-          ? receipt.source_fingerprint
-          : "",
+      source_fingerprint: receipt.source_fingerprint,
+      source_acl_fingerprint: receipt.source_acl_fingerprint,
+      source_tag_fingerprint: receipt.source_tag_fingerprint,
       source_version_id: receipt.source_version_id,
       destination_key: receipt.destination_key,
       destination_etag: receipt.destination_etag,
+      destination_fingerprint: receipt.destination_fingerprint,
+      destination_acl_fingerprint: receipt.destination_acl_fingerprint,
+      destination_tag_fingerprint: receipt.destination_tag_fingerprint,
       destination_version_id: receipt.destination_version_id,
     });
+  }
+  return receipts;
+}
+
+function validateFreshCopyReceipts(value: unknown): CopyReceipt[] {
+  if (Array.isArray(value) && value.length === 0) return [];
+  const receipts = parseCopyReceipts(value);
+  if (!receipts) {
+    throw new Error(
+      "Copy returned incomplete source/destination safety fingerprints or no immutable source version; source deletion was refused.",
+    );
   }
   return receipts;
 }
@@ -806,7 +858,12 @@ function parseQueueManifest(
     const version = (parsed as { version?: unknown }).version;
     const items = (parsed as { items?: unknown }).items;
     if (
-      (version !== 1 && version !== 2 && version !== 3 && version !== 4) ||
+      (version !== 1 &&
+        version !== 2 &&
+        version !== 3 &&
+        version !== 4 &&
+        version !== 5 &&
+        version !== 6) ||
       !Array.isArray(items)
     ) {
       return null;
@@ -830,8 +887,14 @@ function parseQueueManifest(
       ) {
         continue;
       }
-      const receipts = parseCopyReceipts(row.receipts);
+      // Only v6 receipts carry complete source and destination HEAD/ACL/tag
+      // authority plus a non-null immutable source version. Older manifests and
+      // malformed v6 receipts keep the row but lose the copied marker so
+      // recovery recopies rather than authorizing deletion from weaker evidence.
+      const receipts =
+        version === 6 ? parseCopyReceipts(row.receipts) : undefined;
       const movePhase =
+        version === 6 &&
         row.operation === "move" &&
         row.movePhase === "copied" &&
         receipts !== undefined
@@ -908,10 +971,18 @@ function parseQueueManifest(
           row.connectionIdentity.length > 0
             ? row.connectionIdentity
             : undefined,
+        failed: row.failed === true,
+        error: typeof row.error === "string" ? row.error : undefined,
+        legacyConnectionUnbound:
+          version < 4 &&
+          !(
+            typeof row.connectionIdentity === "string" &&
+            row.connectionIdentity.length > 0
+          ),
       });
     }
 
-    return { version: 4, items: valid };
+    return { version: 6, items: valid };
   } catch {
     return null;
   }
@@ -998,14 +1069,17 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
     destinationKey: item.destinationKey,
     destinationPrefix: item.destinationPrefix,
     size: item.size,
-    status: "queued",
+    status: item.failed ? "error" : "queued",
+    error: item.failed
+      ? item.error || "Transfer failed before the previous session ended."
+      : undefined,
     progress: 0,
     totalBytes: item.totalBytes,
     attempt: 1,
     maxAttempts: Math.max(maxAttemptsFromSettings(), item.maxAttempts),
     verified: false,
     conflictResolution: item.conflictResolution,
-    phase: item.paused ? "paused" : "running",
+    phase: item.failed || item.paused ? "paused" : "running",
     tempPath: item.tempPath,
     speedBps: 0,
     etaSeconds: null,
@@ -1027,6 +1101,7 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
     receipts: item.receipts,
     connectionId: item.connectionId,
     connectionIdentity: item.connectionIdentity,
+    legacyConnectionUnbound: item.legacyConnectionUnbound,
   };
 }
 
@@ -1072,9 +1147,20 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     ? localStorage.getItem(LEGACY_QUEUE_MANIFEST_KEY)
     : null;
   let manifest = parseQueueManifest(manifestRaw);
+  const backendHasManifest = manifestRaw.trim().length > 0;
+  if (backendHasManifest && !manifest) {
+    throw new Error(
+      "Stored transfer recovery data is malformed or from an unsupported future version; it was retained for repair.",
+    );
+  }
   let legacyManifestMigrated = false;
   if (!manifest && hydration.legacy_import_allowed) {
     manifest = parseQueueManifest(legacyManifestRaw);
+    if (legacyManifestRaw?.trim() && !manifest) {
+      throw new Error(
+        "Legacy transfer recovery data is malformed; it was retained for repair.",
+      );
+    }
     if (manifest) {
       await invoke("save_transfer_manifest", {
         json: JSON.stringify(manifest),
@@ -1084,7 +1170,6 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
       legacyManifestMigrated = true;
     }
   }
-  const backendHasManifest = manifestRaw.trim().length > 0;
   if (
     !hydration.legacy_import_allowed ||
     backendHasManifest ||
@@ -1135,7 +1220,7 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     const message = `Could not clean ${tempCleanupFailures.length} interrupted download(s); recovery state was retained.`;
     logActivity(`${message} ${tempCleanupFailures.join("; ")}`, "error");
     showToast(message, { type: "error", duration: 0 });
-    return;
+    throw new Error(message);
   }
 
   const shouldResume = await showConfirm(
@@ -1157,7 +1242,7 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
       const message = `Could not discard ${failures.length} transfer(s); recovery state was retained.`;
       logActivity(`${message} ${failures.join("; ")}`, "error");
       showToast(message, { type: "error", duration: 0 });
-      return;
+      throw new Error(message);
     }
     await invoke("clear_transfer_manifest", {
       recoverySession: hydratedRecoverySession,
@@ -1171,12 +1256,8 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
   }
   renderQueue();
   showTransferQueue();
-  completeRecoveryHydration(hydratedRecoverySession, undefined);
-  writeQueueManifest();
-
-  void processQueue().catch((err) =>
-    logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
-  );
+  completeRecoveryHydration(hydratedRecoverySession, manifestRaw);
+  await resumeRecoveredTransfersAfterConnect();
 }
 
 interface TransferProgressPayload {
@@ -1283,7 +1364,9 @@ function applyProgressPayload(
 
 function isIncludedInQueueManifest(item: TransferItem): boolean {
   return (
-    (item.status === "queued" || item.status === "uploading") &&
+    (item.status === "queued" ||
+      item.status === "uploading" ||
+      item.status === "error") &&
     !(item.operation === "upload" && item.status === "uploading")
   );
 }
@@ -1300,6 +1383,96 @@ export function recoverPendingTransfers(): Promise<void> {
     recoveryInFlight = null;
   });
   return recoveryInFlight;
+}
+
+/**
+ * Resume hydrated recovery only after native connection establishment has
+ * published a trustworthy account identity. Legacy beta.4 manifests did not
+ * record that identity, so they require explicit account binding and a durable
+ * v5 rewrite before any S3 command is allowed to run.
+ */
+export async function resumeRecoveredTransfersAfterConnect(): Promise<void> {
+  if (
+    !recoveredQueue ||
+    !state.connected ||
+    !state.connectionId ||
+    !state.connectionIdentity
+  ) {
+    return;
+  }
+
+  const legacyItems = queue.filter((item) => item.legacyConnectionUnbound);
+  if (legacyItems.length > 0) {
+    const buckets = Array.from(
+      new Set(
+        legacyItems.flatMap((item) =>
+          [item.sourceBucket ?? item.bucket, item.destinationBucket].filter(
+            (bucket): bucket is string => Boolean(bucket),
+          ),
+        ),
+      ),
+    )
+      .sort()
+      .join(", ");
+    const includesMove = legacyItems.some((item) => item.operation === "move");
+    const warning = includesMove
+      ? " Some recovered moves may delete their source objects after verifying the copied destination."
+      : "";
+    const confirmed = await showConfirm(
+      "Bind Recovered Transfers",
+      `Beta.4 did not record which account owned these ${legacyItems.length} transfer(s). Bind them to the currently connected endpoint ${state.endpoint} for bucket(s) ${buckets || "unknown"}?${warning}`,
+      {
+        okLabel: "Bind to this account",
+        cancelLabel: "Keep for later",
+        okDanger: includesMove,
+      },
+    );
+    if (!confirmed) return;
+
+    const previous = legacyItems.map((item) => ({
+      item,
+      connectionId: item.connectionId,
+      connectionIdentity: item.connectionIdentity,
+      legacyConnectionUnbound: item.legacyConnectionUnbound,
+    }));
+    for (const item of legacyItems) {
+      item.connectionId = state.connectionId;
+      item.connectionIdentity = state.connectionIdentity;
+      item.legacyConnectionUnbound = false;
+    }
+    try {
+      await persistQueueManifestCritical();
+    } catch (error) {
+      for (const saved of previous) {
+        saved.item.connectionId = saved.connectionId;
+        saved.item.connectionIdentity = saved.connectionIdentity;
+        saved.item.legacyConnectionUnbound = saved.legacyConnectionUnbound;
+      }
+      throw new Error(
+        `Recovered transfers were not bound because the durable manifest update failed: ${normalizeError(error)}`,
+      );
+    }
+  }
+
+  let mismatched = 0;
+  for (const item of queue) {
+    if (item.status !== "queued" || item.paused) continue;
+    if (item.connectionIdentity !== state.connectionIdentity) {
+      item.paused = true;
+      item.phase = "paused";
+      mismatched += 1;
+      continue;
+    }
+    item.connectionId = state.connectionId;
+  }
+  if (mismatched > 0) {
+    const message = `${mismatched} recovered transfer(s) belong to a different account and were kept paused.`;
+    logActivity(message, "warning");
+    showToast(message, { type: "warning", duration: 0 });
+    writeQueueManifest();
+  }
+
+  await processQueue();
 }
 
 export async function initTransferQueueUI(): Promise<void> {
@@ -2373,6 +2546,7 @@ async function executeTransfer(
             dstKey: item.destinationKey,
             overwrite,
             transferId: item.id,
+            requireImmutableSourceVersion: item.operation === "move",
           },
         );
         receipts = [receipt];
@@ -2399,6 +2573,10 @@ async function executeTransfer(
         return;
       }
 
+      // Tauri's generic annotation is compile-time only. Treat the backend
+      // response as untrusted at runtime and refuse to persist or delete from
+      // receipts without all canonical source identities.
+      receipts = validateFreshCopyReceipts(receipts);
       if (receipts.length === 0) {
         item.progress = 100;
         return;
@@ -2418,8 +2596,13 @@ async function executeTransfer(
       }
     }
 
-    const receipts = item.receipts;
-    if (!receipts) {
+    if (!item.receipts) {
+      throw new Error("Move copy receipts are unavailable.");
+    }
+    // Revalidate immediately before deletion as well as before persistence so
+    // no malformed in-memory or recovered value can regain copied authority.
+    const receipts = validateFreshCopyReceipts(item.receipts);
+    if (receipts.length === 0) {
       throw new Error("Move copy receipts are unavailable.");
     }
     // Pause/cancel can arrive while the copy or manifest write is in flight.

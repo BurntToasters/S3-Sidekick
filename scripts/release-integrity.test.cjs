@@ -15,12 +15,16 @@ const {
   classifyImmutableAsset,
   createReleaseDescriptor,
   descriptorReleaseAssetUrl,
+  finalPackageTargetKeysForArtifactName,
   installSmokeReportName,
   isInstallSmokeReportName,
   listAllReleaseAssets,
   normalizeFlatpakInputsByArchitecture,
+  normalizeLegacyLatestBootstrap,
   parseExactRustVersion,
   parseFlatpakInputs,
+  readReleaseDescriptor,
+  resolveGpgFingerprint,
   resolveGitHubTagCommit,
   assertGitHubTagCommit,
   selectUniqueTaggedRelease,
@@ -31,6 +35,7 @@ const {
   validateDescriptorForCheckout,
   validateInstallSmokeReport,
   validateMutableRelease,
+  verifyDescriptorSignature,
   withoutGpgSecrets,
   writeReleaseDescriptor,
 } = require("./release-integrity.cjs");
@@ -47,7 +52,7 @@ const options = {
   expectedTag: "v1.2.3-beta.1",
 };
 const flatpakRefs = [
-  "org.freedesktop.Sdk.Extension.node22//25.08",
+  "org.freedesktop.Sdk.Extension.node24//25.08",
   "org.freedesktop.Sdk.Extension.rust-stable//25.08",
   "org.gnome.Platform//49",
   "org.gnome.Sdk//49",
@@ -221,10 +226,10 @@ test("toolchain and Flatpak descriptor parsing rejects floating inputs", () => {
     /exact Rust version/i,
   );
   const manifest =
-    "runtime: org.gnome.Platform\nruntime-version: '49'\nsdk: org.gnome.Sdk\nsdk-extensions:\n  - org.freedesktop.Sdk.Extension.node22\n  - org.freedesktop.Sdk.Extension.rust-stable\n# release-ref: org.gnome.Platform//49\n# release-ref: org.gnome.Sdk//49\n# release-ref: org.freedesktop.Sdk.Extension.node22//25.08\n# release-ref: org.freedesktop.Sdk.Extension.rust-stable//25.08\n";
+    "runtime: org.gnome.Platform\nruntime-version: '49'\nsdk: org.gnome.Sdk\nsdk-extensions:\n  - org.freedesktop.Sdk.Extension.node24\n  - org.freedesktop.Sdk.Extension.rust-stable\n# release-ref: org.gnome.Platform//49\n# release-ref: org.gnome.Sdk//49\n# release-ref: org.freedesktop.Sdk.Extension.node24//25.08\n# release-ref: org.freedesktop.Sdk.Extension.rust-stable//25.08\n";
   assert.deepEqual(parseFlatpakInputs(manifest), {
     extensions: [
-      "org.freedesktop.Sdk.Extension.node22",
+      "org.freedesktop.Sdk.Extension.node24",
       "org.freedesktop.Sdk.Extension.rust-stable",
     ],
     refs: flatpakRefs,
@@ -242,6 +247,62 @@ test("toolchain and Flatpak descriptor parsing rejects floating inputs", () => {
     () => normalizeFlatpakInputsByArchitecture(changed, flatpakRefs),
     /exactly pin/i,
   );
+});
+
+test("legacy Latest bootstrap authorization is exact, stable-only predecessor metadata", () => {
+  const authorization = {
+    schemaVersion: 1,
+    releaseId: 354185192,
+    tag: "v0.10.2",
+    sourceCommit: "A".repeat(40),
+  };
+  assert.deepEqual(normalizeLegacyLatestBootstrap(authorization), {
+    ...authorization,
+    sourceCommit: "a".repeat(40),
+  });
+  assert.deepEqual(
+    normalizeLegacyLatestBootstrap(JSON.stringify(authorization)),
+    {
+      ...authorization,
+      sourceCommit: "a".repeat(40),
+    },
+  );
+  for (const invalid of [
+    { ...authorization, extra: true },
+    { ...authorization, releaseId: 0 },
+    { ...authorization, releaseId: 1.5 },
+    { ...authorization, tag: "0.10.2" },
+    { ...authorization, tag: "v0.10.2-beta.1" },
+    { ...authorization, sourceCommit: "a".repeat(39) },
+  ]) {
+    assert.throws(
+      () => normalizeLegacyLatestBootstrap(invalid),
+      /legacy_latest_bootstrap|Legacy GitHub Latest bootstrap|exact JSON/i,
+    );
+  }
+
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-bootstrap-descriptor-"),
+  );
+  try {
+    const filePath = path.join(directory, "release-descriptor.json");
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 2,
+        repository: { owner: "Test-Owner", name: "Test.Repository" },
+        expectedTargets: ["linux-x86_64"],
+        release: { prerelease: false },
+        legacyLatestBootstrap: authorization,
+      }),
+    );
+    assert.throws(
+      () => readReleaseDescriptor(filePath),
+      /allowed only on a prerelease descriptor/i,
+    );
+  } finally {
+    fs.rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 test("asset pagination reads beyond GitHub's first 100 results", async () => {
@@ -519,7 +580,7 @@ function descriptorFixture() {
   );
   fs.writeFileSync(
     path.join(root, "run.rosie.s3-sidekick.yml"),
-    "runtime: org.gnome.Platform\nruntime-version: '49'\nsdk: org.gnome.Sdk\nsdk-extensions:\n  - org.freedesktop.Sdk.Extension.node22\n  - org.freedesktop.Sdk.Extension.rust-stable\n# release-ref: org.gnome.Platform//49\n# release-ref: org.gnome.Sdk//49\n# release-ref: org.freedesktop.Sdk.Extension.node22//25.08\n# release-ref: org.freedesktop.Sdk.Extension.rust-stable//25.08\n",
+    "runtime: org.gnome.Platform\nruntime-version: '49'\nsdk: org.gnome.Sdk\nsdk-extensions:\n  - org.freedesktop.Sdk.Extension.node24\n  - org.freedesktop.Sdk.Extension.rust-stable\n# release-ref: org.gnome.Platform//49\n# release-ref: org.gnome.Sdk//49\n# release-ref: org.freedesktop.Sdk.Extension.node24//25.08\n# release-ref: org.freedesktop.Sdk.Extension.rust-stable//25.08\n",
   );
   fs.writeFileSync(path.join(root, "source.txt"), "canonical source\n");
   fs.writeFileSync(path.join(root, ".gitignore"), "release/\n");
@@ -582,20 +643,87 @@ test("clean release source rejects every Git-visible worktree state and permits 
   }
 });
 
-test("one canonical descriptor binds release id, source archive, locks, toolchains, and targets", () => {
+test("GPG fingerprint and verification subprocesses strip signing secrets", () => {
+  const fingerprint = "A".repeat(40);
+  const environment = {
+    PATH: "/bin",
+    GPG_KEY_ID: "release-key",
+    GPG_PASSPHRASE: "canary-secret",
+    gpg_passphrase: "case-insensitive-canary",
+  };
+  const calls = [];
+  assert.equal(
+    resolveGpgFingerprint(environment, {
+      execute(command, args, options) {
+        calls.push({ command, args, options });
+        return {
+          status: 0,
+          stdout: `fpr:::::::::${fingerprint}:\n`,
+          stderr: "",
+        };
+      },
+    }),
+    fingerprint,
+  );
+  const verifyEnvironment = {
+    ...environment,
+    RELEASE_GPG_FINGERPRINT: fingerprint,
+  };
+  assert.equal(
+    verifyDescriptorSignature(
+      "descriptor.json",
+      "descriptor.json.asc",
+      fingerprint,
+      verifyEnvironment,
+      {
+        execute(command, args, options) {
+          calls.push({ command, args, options });
+          return {
+            status: 0,
+            stdout: `[GNUPG:] VALIDSIG ${fingerprint} 2026-01-01 0 0 0 0 0 0 0 ${fingerprint}\n`,
+            stderr: "",
+          };
+        },
+      },
+    ),
+    true,
+  );
+  assert.equal(calls.length, 2);
+  for (const { options } of calls) {
+    assert.equal(options.env.PATH, "/bin");
+    assert.equal(
+      Object.keys(options.env).some((name) =>
+        ["GPG_KEY_ID", "GPG_PASSPHRASE"].includes(name.toUpperCase()),
+      ),
+      false,
+    );
+  }
+});
+
+test("one canonical descriptor binds release id, source archive, locks, toolchains, targets, and install predecessor", () => {
   const root = descriptorFixture();
   const previousTargets = process.env.RELEASE_EXPECTED_TARGETS;
   const previousFingerprint = process.env.RELEASE_GPG_FINGERPRINT;
+  const previousInstallVersion =
+    process.env.RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION;
   delete process.env.RELEASE_EXPECTED_TARGETS;
   process.env.RELEASE_GPG_FINGERPRINT = "A".repeat(40);
+  process.env.RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION = "1.2.2";
   try {
     const commit = run(root, "git", ["rev-parse", "HEAD"]);
     const release = { ...draft, target_commitish: commit };
     const repository = { owner: "Test-Owner", name: "Test.Repository" };
+    const legacyLatestBootstrap = {
+      schemaVersion: 1,
+      releaseId: 354185192,
+      tag: "v0.10.2",
+      sourceCommit: "c".repeat(40),
+    };
     const descriptor = createReleaseDescriptor({
       root,
       release,
       flatpakInputsByArchitecture: flatpakPins(),
+      legacyLatestBootstrap,
       repository,
     });
     const descriptorPath = path.join(
@@ -607,7 +735,9 @@ test("one canonical descriptor binds release id, source archive, locks, toolchai
     assert.equal(descriptor.schemaVersion, 2);
     assert.deepEqual(descriptor.repository, repository);
     assert.equal(descriptor.release.id, 42);
+    assert.equal(descriptor.installSmokePreviousVersion, "1.2.2");
     assert.equal(descriptor.release.signingKeyFingerprint, "A".repeat(40));
+    assert.deepEqual(descriptor.legacyLatestBootstrap, legacyLatestBootstrap);
     assert.equal(descriptor.source.archiveSha256.length, 64);
     assert.deepEqual(descriptor.requiredEvidence, [
       "attestation",
@@ -652,7 +782,69 @@ test("one canonical descriptor binds release id, source archive, locks, toolchai
     if (previousFingerprint === undefined)
       delete process.env.RELEASE_GPG_FINGERPRINT;
     else process.env.RELEASE_GPG_FINGERPRINT = previousFingerprint;
+    if (previousInstallVersion === undefined)
+      delete process.env.RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION;
+    else
+      process.env.RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION =
+        previousInstallVersion;
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("canonical final packages have explicit target ownership independent of updater eligibility", () => {
+  for (const name of [
+    "S3-Sidekick-macOS.app.tar.gz",
+    "S3-Sidekick-macOS.dmg",
+    "S3-Sidekick-macOS.zip",
+  ]) {
+    assert.deepEqual(finalPackageTargetKeysForArtifactName(name), [
+      "darwin-aarch64",
+      "darwin-x86_64",
+    ]);
+  }
+
+  for (const extension of ["AppImage", "deb", "rpm", "flatpak"]) {
+    assert.deepEqual(
+      finalPackageTargetKeysForArtifactName(
+        `S3-Sidekick-Linux-x64.${extension}`,
+      ),
+      ["linux-x86_64"],
+    );
+    assert.deepEqual(
+      finalPackageTargetKeysForArtifactName(
+        `S3-Sidekick-Linux-arm64.${extension}`,
+      ),
+      ["linux-aarch64"],
+    );
+  }
+
+  for (const extension of ["exe", "msi"]) {
+    assert.deepEqual(
+      finalPackageTargetKeysForArtifactName(
+        `S3-Sidekick-Windows-x64.${extension}`,
+      ),
+      ["windows-x86_64"],
+    );
+    assert.deepEqual(
+      finalPackageTargetKeysForArtifactName(
+        `S3-Sidekick-Windows-arm64.${extension}`,
+      ),
+      ["windows-aarch64"],
+    );
+  }
+
+  for (const name of [
+    "latest-linux-x86_64.json",
+    "release-package-smoke-linux-x86_64.json",
+    "S3-Sidekick-Linux-x64.AppImage.sig",
+    "S3-Sidekick-Windows-x64.exe.asc",
+    "S3-Sidekick-Windows-x86.exe",
+    "S3-Sidekick-Linux-x64.zip",
+    "S3-Sidekick-macOS-arm64.dmg",
+    "S3-Sidekick_0.11.0_x64.nsis.zip",
+    "nested/S3-Sidekick-Linux-x64.deb",
+  ]) {
+    assert.deepEqual(finalPackageTargetKeysForArtifactName(name), [], name);
   }
 });
 
@@ -665,6 +857,7 @@ test("install-smoke reports use canonical target names and bind semantic results
   const descriptorSha256 = "d".repeat(64);
   const descriptor = {
     release: { id: 42, version: "1.2.3" },
+    installSmokePreviousVersion: "1.2.2",
     source: { commit: "c".repeat(40) },
   };
   const report = {
@@ -701,7 +894,21 @@ test("install-smoke reports use canonical target names and bind semantic results
   );
   assert.throws(() => installSmokeReportName("linux-amd64"), /invalid/i);
   assert.equal(validateInstallSmokeReport(report, options), true);
+  const omittedArtifactName = "S3-Sidekick-Linux-x64.flatpak";
+  assert.throws(
+    () =>
+      validateInstallSmokeReport(report, {
+        ...options,
+        digestByName: new Map([
+          ...options.digestByName,
+          [omittedArtifactName, "e".repeat(64)],
+        ]),
+        expectedArtifactNames: new Set([artifactName, omittedArtifactName]),
+      }),
+    /does not exactly cover.*package closure.*missing.*flatpak/i,
+  );
   for (const previousVersion of [
+    "1.2.1",
     "not-a-version",
     "v1.2.2",
     "1.2",
@@ -715,7 +922,7 @@ test("install-smoke reports use canonical target names and bind semantic results
   ]) {
     assert.throws(
       () => validateInstallSmokeReport({ ...report, previousVersion }, options),
-      /previousVersion must be valid semantic version strictly lower/i,
+      /previousVersion must exactly match signed descriptor predecessor/i,
       previousVersion,
     );
   }
@@ -740,6 +947,7 @@ test("install-smoke reports use canonical target names and bind semantic results
     descriptor: {
       ...descriptor,
       release: { ...descriptor.release, version: "1.2.3-beta.2" },
+      installSmokePreviousVersion: "1.2.3-beta.1",
     },
   };
   assert.equal(
@@ -756,7 +964,7 @@ test("install-smoke reports use canonical target names and bind semantic results
           { ...report, previousVersion },
           prereleaseOptions,
         ),
-      /previousVersion must be valid semantic version strictly lower/i,
+      /previousVersion must exactly match signed descriptor predecessor/i,
       previousVersion,
     );
   }

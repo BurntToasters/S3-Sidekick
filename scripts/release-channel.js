@@ -7,8 +7,12 @@ const require = createRequire(import.meta.url);
 const {
   artifactNameFromDescriptorReleaseUrl,
   canonicalJson,
+  DESCRIPTOR_NAME,
+  DESCRIPTOR_SIGNATURE_NAME,
   githubAssetSha256,
   normalizeGitHubRepository,
+  RELEASE_ASSET_INDEX_NAME,
+  RELEASE_ASSET_INDEX_SIGNATURE_NAME,
   sha256Buffer,
   sha256File,
   verifyDescriptorSignature,
@@ -22,6 +26,21 @@ const BETA_CHANNEL_ROLLOVER_NAME = "beta-channel-rollover.json";
 const BETA_CHANNEL_ROLLOVER_SIGNATURE_NAME = `${BETA_CHANNEL_ROLLOVER_NAME}.asc`;
 const STABLE_ROLLOVER_RECEIPT_NAME = "stable-rollover-receipt.json";
 const STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME = `${STABLE_ROLLOVER_RECEIPT_NAME}.asc`;
+const LEGACY_BETA_CHANNEL_MIGRATION_NAME = "legacy-beta-channel-migration.json";
+const LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME = `${LEGACY_BETA_CHANNEL_MIGRATION_NAME}.asc`;
+const LEGACY_UNSIGNED_BETA_POINTER_NAMES = Object.freeze([
+  "latest-darwin-beta-aarch64.json",
+  "latest-darwin-beta-x86_64.json",
+  "latest-linux-beta-x86_64.json",
+  "latest-windows-beta-aarch64.json",
+  "latest-windows-beta-x86_64.json",
+]);
+const LEGACY_CARRIER_CONTROL_NAMES = Object.freeze([
+  DESCRIPTOR_NAME,
+  DESCRIPTOR_SIGNATURE_NAME,
+  RELEASE_ASSET_INDEX_NAME,
+  RELEASE_ASSET_INDEX_SIGNATURE_NAME,
+]);
 const STAGE_PREFIX = "beta-channel-stage--";
 const BACKUP_PREFIX = "beta-channel-backup--";
 const TARGET_PATTERN = /^(darwin|linux|windows)-(aarch64|x86_64)$/;
@@ -79,10 +98,17 @@ function operationalBetaChannelAssetNames(expectedTargets) {
     BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
     BETA_CHANNEL_ROLLOVER_NAME,
     BETA_CHANNEL_ROLLOVER_SIGNATURE_NAME,
-    STABLE_ROLLOVER_RECEIPT_NAME,
-    STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
     ...permanent.map(stageName),
     ...permanent.map(backupName),
+  ];
+}
+
+function historicalBetaChannelAssetNames() {
+  return [
+    STABLE_ROLLOVER_RECEIPT_NAME,
+    STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
+    LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+    LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
   ];
 }
 
@@ -97,6 +123,7 @@ function stableChannelAssetNames(descriptor) {
   return new Set([
     ...permanentBetaChannelAssetNames(descriptor.expectedTargets),
     ...operationalBetaChannelAssetNames(descriptor.expectedTargets),
+    ...historicalBetaChannelAssetNames(),
   ]);
 }
 
@@ -735,6 +762,215 @@ function strictRemoteAssetRecords(records, allowedNames, label) {
   return values;
 }
 
+function exactKeys(value, expectedKeys, label) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    canonicalJson(Object.keys(value).sort()) !==
+      canonicalJson([...expectedKeys].sort())
+  ) {
+    throw new Error(`${label} has unexpected or missing fields.`);
+  }
+}
+
+function sortedRemoteAssetRecords(assets, allowedNames, label) {
+  const allowed = new Set(allowedNames);
+  if (!(assets instanceof Map) || assets.size !== allowed.size) {
+    throw new Error(`${label} remote asset set is incomplete.`);
+  }
+  return Array.from(assets, ([name, asset]) => {
+    const sha256 = githubAssetSha256(asset);
+    if (
+      !allowed.has(name) ||
+      asset?.name !== name ||
+      !Number.isSafeInteger(asset?.id) ||
+      !sha256
+    ) {
+      throw new Error(`${label} contains a malformed remote asset.`);
+    }
+    return { id: asset.id, name, sha256 };
+  }).sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function createLegacyBetaChannelMigration({
+  authorizationDescriptorSha256,
+  baseAssets,
+  carrier,
+  carrierControls,
+  carrierDescriptorSha256,
+  carrierSourceCommit,
+  expectedTargets,
+  legacyPointers,
+}) {
+  const targets = normalizedTargets(expectedTargets);
+  if (
+    !/^[a-f0-9]{64}$/.test(authorizationDescriptorSha256 || "") ||
+    !Number.isSafeInteger(carrier?.id) ||
+    typeof carrier?.tag_name !== "string" ||
+    !/^[a-f0-9]{64}$/.test(carrierDescriptorSha256 || "") ||
+    !/^[a-f0-9]{40,64}$/.test(carrierSourceCommit || "")
+  ) {
+    throw new Error("Legacy beta migration identity is malformed.");
+  }
+  const controlRecords = sortedRemoteAssetRecords(
+    carrierControls,
+    LEGACY_CARRIER_CONTROL_NAMES,
+    "Legacy beta migration carrier controls",
+  );
+  const body = {
+    schemaVersion: 1,
+    operation: "legacy-beta-channel-delete-to-empty",
+    authorizationDescriptorSha256,
+    carrier: {
+      descriptorSha256: carrierDescriptorSha256,
+      id: carrier.id,
+      sourceCommit: carrierSourceCommit,
+      tag: carrier.tag_name,
+    },
+    expectedTargets: targets,
+    desiredState: "empty",
+    baseAssets: sortedRemoteAssetRecords(
+      baseAssets,
+      Array.from(baseAssets?.keys?.() || []),
+      "Legacy beta migration base",
+    ),
+    carrierControls: controlRecords,
+    legacyPointers: sortedRemoteAssetRecords(
+      legacyPointers,
+      LEGACY_UNSIGNED_BETA_POINTER_NAMES,
+      "Legacy beta migration pointers",
+    ),
+  };
+  if (body.baseAssets.length === 0) {
+    throw new Error("Legacy beta migration base asset set is empty.");
+  }
+  return {
+    ...body,
+    migrationId: sha256Buffer(canonicalJson(body)),
+  };
+}
+
+function validateLegacyBetaChannelMigration(
+  migration,
+  {
+    authorizationDescriptorSha256,
+    carrier,
+    carrierControls,
+    carrierDescriptorSha256,
+    carrierSourceCommit,
+    expectedTargets,
+  },
+) {
+  exactKeys(
+    migration,
+    [
+      "authorizationDescriptorSha256",
+      "baseAssets",
+      "carrier",
+      "carrierControls",
+      "desiredState",
+      "expectedTargets",
+      "legacyPointers",
+      "migrationId",
+      "operation",
+      "schemaVersion",
+    ],
+    "Legacy beta migration",
+  );
+  exactKeys(
+    migration.carrier,
+    ["descriptorSha256", "id", "sourceCommit", "tag"],
+    "Legacy beta migration carrier",
+  );
+  if (
+    migration.schemaVersion !== 1 ||
+    migration.operation !== "legacy-beta-channel-delete-to-empty" ||
+    migration.desiredState !== "empty" ||
+    migration.authorizationDescriptorSha256 !== authorizationDescriptorSha256 ||
+    migration.carrier.id !== carrier?.id ||
+    migration.carrier.tag !== carrier?.tag_name ||
+    migration.carrier.descriptorSha256 !== carrierDescriptorSha256 ||
+    migration.carrier.sourceCommit !== carrierSourceCommit
+  ) {
+    throw new Error("Legacy beta migration identity is malformed or stale.");
+  }
+  assertSameTargets(
+    migration.expectedTargets,
+    expectedTargets,
+    "Legacy beta migration",
+  );
+  const controls = strictRemoteAssetRecords(
+    migration.carrierControls,
+    LEGACY_CARRIER_CONTROL_NAMES,
+    "Legacy beta migration carrier controls",
+  );
+  const expectedControls = new Map(
+    sortedRemoteAssetRecords(
+      carrierControls,
+      LEGACY_CARRIER_CONTROL_NAMES,
+      "Expected legacy beta migration carrier controls",
+    ).map((record) => [record.name, record]),
+  );
+  if (
+    canonicalJson(Array.from(controls.values())) !==
+    canonicalJson(Array.from(expectedControls.values()))
+  ) {
+    throw new Error("Legacy beta migration carrier controls are stale.");
+  }
+  const pointers = strictRemoteAssetRecords(
+    migration.legacyPointers,
+    LEGACY_UNSIGNED_BETA_POINTER_NAMES,
+    "Legacy beta migration pointers",
+  );
+  const reservedNames = new Set([
+    ...LEGACY_CARRIER_CONTROL_NAMES,
+    ...LEGACY_UNSIGNED_BETA_POINTER_NAMES,
+    LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+    LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+  ]);
+  const baseNames = (migration.baseAssets || []).map((record) => record?.name);
+  if (
+    baseNames.length === 0 ||
+    baseNames.some(
+      (name) =>
+        typeof name !== "string" ||
+        path.basename(name) !== name ||
+        reservedNames.has(name),
+    )
+  ) {
+    throw new Error("Legacy beta migration base asset set is malformed.");
+  }
+  const base = strictRemoteAssetRecords(
+    migration.baseAssets,
+    baseNames,
+    "Legacy beta migration base",
+  );
+  for (const [label, records] of [
+    ["base", migration.baseAssets],
+    ["carrier controls", migration.carrierControls],
+    ["pointers", migration.legacyPointers],
+  ]) {
+    if (
+      canonicalJson(records) !==
+      canonicalJson(
+        [...records].sort((left, right) => left.name.localeCompare(right.name)),
+      )
+    ) {
+      throw new Error(`Legacy beta migration ${label} are not canonical.`);
+    }
+  }
+  const { migrationId, ...body } = migration;
+  if (migrationId !== sha256Buffer(canonicalJson(body))) {
+    throw new Error("Legacy beta migration id is invalid.");
+  }
+  return {
+    baseAssets: base,
+    carrierControls: controls,
+    legacyPointers: pointers,
+  };
+}
+
 function createStableRolloverReceipt({
   carrier,
   carrierDescriptorSha256,
@@ -914,14 +1150,35 @@ async function deleteNames(
 ) {
   for (const name of names) {
     const asset = strictAssetMap(await listAssets(releaseId)).get(name);
-    if (!asset) continue;
+    if (!asset) {
+      expectedAssets?.delete(name);
+      continue;
+    }
     const expected = expectedAssets?.get(name);
     if (expectedAssets && (!expected || !sameRemoteAsset(asset, expected))) {
       throw new Error(
         `Refusing to delete changed channel control asset ${name}.`,
       );
     }
-    await deleteAsset(asset.id);
+    let deletionError = null;
+    try {
+      await deleteAsset(asset.id);
+    } catch (error) {
+      deletionError = error;
+    }
+    const after = strictAssetMap(await listAssets(releaseId)).get(name);
+    if (after) {
+      if (!sameRemoteAsset(after, asset)) {
+        throw new AggregateError(
+          deletionError ? [deletionError] : [],
+          `Channel control asset ${name} changed during deletion.`,
+        );
+      }
+      if (deletionError) throw deletionError;
+      throw new Error(`Channel control asset ${name} deletion did not converge.`);
+    }
+    expectedAssets?.delete(name);
+    if (deletionError) throw deletionError;
   }
 }
 
@@ -1041,11 +1298,7 @@ async function recoverBetaChannelTransaction({
   };
 
   let assets = await assertRecoveryCarrier();
-  const transactionAssets = new Map(
-    transactionNames
-      .filter((name) => assets.has(name))
-      .map((name) => [name, ownedTransactionAssets.get(name)]),
-  );
+  const transactionAssets = ownedTransactionAssets;
   const desiredComplete = expectedNames.every((name) =>
     assetHasDigest(assets.get(name), desired.get(name)),
   );
@@ -1236,14 +1489,6 @@ async function promoteBetaChannelAssets({
   };
 
   const initial = strictAssetMap(await listAssets(releaseId));
-  if (
-    expectedNames.every((name) =>
-      assetHasDigest(initial.get(name), transactionRecords.desired.get(name)),
-    )
-  ) {
-    await verifyDesired();
-    return "unchanged";
-  }
   const dirtyOperational = operationalBetaChannelAssetNames(
     descriptor.expectedTargets,
   ).filter((name) => initial.has(name));
@@ -1251,6 +1496,14 @@ async function promoteBetaChannelAssets({
     throw new Error(
       `Beta channel has unfinished channel control assets: ${dirtyOperational.sort().join(", ")}.`,
     );
+  }
+  if (
+    expectedNames.every((name) =>
+      assetHasDigest(initial.get(name), transactionRecords.desired.get(name)),
+    )
+  ) {
+    await verifyDesired();
+    return "unchanged";
   }
 
   const temporaryDirectory = fs.mkdtempSync(
@@ -1438,6 +1691,9 @@ export {
   BETA_CHANNEL_STATE_SIGNATURE_NAME,
   BETA_CHANNEL_TRANSACTION_NAME,
   BETA_CHANNEL_TRANSACTION_SIGNATURE_NAME,
+  LEGACY_BETA_CHANNEL_MIGRATION_NAME,
+  LEGACY_BETA_CHANNEL_MIGRATION_SIGNATURE_NAME,
+  LEGACY_UNSIGNED_BETA_POINTER_NAMES,
   STABLE_ROLLOVER_RECEIPT_NAME,
   STABLE_ROLLOVER_RECEIPT_SIGNATURE_NAME,
   STAGE_PREFIX,
@@ -1445,10 +1701,12 @@ export {
   createBetaChannelRollover,
   createBetaChannelState,
   createBetaChannelTransaction,
+  createLegacyBetaChannelMigration,
   createStableRolloverReceipt,
   expectedBetaChannelAssetNames,
   expectedBetaManifestNames,
   extractBetaChannelSource,
+  historicalBetaChannelAssetNames,
   isStableChannelAssetName,
   operationalBetaChannelAssetNames,
   permanentBetaChannelAssetNames,
@@ -1461,6 +1719,7 @@ export {
   validateBetaChannelRollover,
   validateBetaChannelState,
   validateBetaChannelTransaction,
+  validateLegacyBetaChannelMigration,
   validatePublicationOwner,
   validateStableRolloverReceipt,
   verifyBetaChannelOverlay,

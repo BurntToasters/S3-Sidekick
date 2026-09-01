@@ -90,6 +90,7 @@ const mockSetTransferCompleteHandler = vi.fn();
 const mockInitTransferQueueUI = vi.fn<() => Promise<void>>();
 const mockPrepareTransferRecovery = vi.fn();
 const mockRecoverPendingTransfers = vi.fn<() => Promise<void>>();
+const mockResumeRecoveredTransfersAfterConnect = vi.fn<() => Promise<void>>();
 const mockEnqueueFiles = vi.fn();
 const mockDisposeTransferQueueUI = vi.fn<() => Promise<void>>();
 const mockEnqueueDownloads = vi.fn();
@@ -291,6 +292,8 @@ vi.mock("../transfers.ts", () => ({
   initTransferQueueUI: mockInitTransferQueueUI,
   prepareTransferRecovery: mockPrepareTransferRecovery,
   recoverPendingTransfers: mockRecoverPendingTransfers,
+  resumeRecoveredTransfersAfterConnect:
+    mockResumeRecoveredTransfersAfterConnect,
   enqueueFiles: mockEnqueueFiles,
   disposeTransferQueueUI: mockDisposeTransferQueueUI,
   enqueueDownloads: mockEnqueueDownloads,
@@ -487,6 +490,7 @@ describe("main integration", () => {
     mockInitTransferQueueUI.mockReset();
     mockPrepareTransferRecovery.mockReset();
     mockRecoverPendingTransfers.mockReset();
+    mockResumeRecoveredTransfersAfterConnect.mockReset();
     mockEnqueueFiles.mockReset();
     mockDisposeTransferQueueUI.mockReset();
     mockEnqueueDownloads.mockReset();
@@ -580,6 +584,7 @@ describe("main integration", () => {
     mockLoadBookmarks.mockResolvedValue(undefined);
     mockInitTransferQueueUI.mockResolvedValue(undefined);
     mockRecoverPendingTransfers.mockResolvedValue(undefined);
+    mockResumeRecoveredTransfersAfterConnect.mockResolvedValue(undefined);
     mockDisposeTransferQueueUI.mockResolvedValue(undefined);
     mockCanPreview.mockReturnValue(true);
     mockOpenPreview.mockResolvedValue(undefined);
