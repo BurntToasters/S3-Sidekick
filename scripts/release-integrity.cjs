@@ -314,6 +314,17 @@ function compareStrictSemVer(left, right) {
   return left.prerelease.length < right.prerelease.length ? -1 : 1;
 }
 
+function compareSemanticVersions(left, right) {
+  const parsedLeft = parseStrictSemVer(left);
+  const parsedRight = parseStrictSemVer(right);
+  if (!parsedLeft || !parsedRight) {
+    throw new Error(
+      `Cannot compare non-strict semantic versions ${JSON.stringify(left)} and ${JSON.stringify(right)}.`,
+    );
+  }
+  return compareStrictSemVer(parsedLeft, parsedRight);
+}
+
 function validateInstallSmokeReport(
   report,
   { allowedArtifactNames, descriptor, descriptorSha256, digestByName, target },
@@ -962,17 +973,64 @@ function validateDescriptorForCheckout(
   return descriptor;
 }
 
-function gpgArguments(filePath, signaturePath, environment = process.env) {
-  const args = ["--batch", "--yes", "--armor", "--detach-sign"];
-  if (environment.GPG_KEY_ID) args.push("--local-user", environment.GPG_KEY_ID);
-  if (environment.GPG_PASSPHRASE) {
-    args.push(
-      "--pinentry-mode",
-      "loopback",
-      "--passphrase",
-      environment.GPG_PASSPHRASE,
+function signDetachedFile(
+  filePath,
+  signaturePath,
+  { environment = process.env, epoch = Number.NaN, execute = spawnSync } = {},
+) {
+  const keyId = environment.GPG_KEY_ID;
+  const passphrase = environment.GPG_PASSPHRASE;
+  if (typeof keyId !== "string" || !keyId.trim()) {
+    throw new Error("GPG_KEY_ID is required for detached signing.");
+  }
+  if (typeof passphrase !== "string" || !passphrase.trim()) {
+    throw new Error("GPG_PASSPHRASE is required for detached signing.");
+  }
+  if (/[\r\n]/.test(passphrase)) {
+    throw new Error(
+      "GPG_PASSPHRASE must not contain line breaks when supplied through a protected file descriptor.",
     );
   }
+
+  const args = [
+    "--batch",
+    "--yes",
+    "--armor",
+    "--pinentry-mode",
+    "loopback",
+    "--passphrase-fd",
+    "0",
+    "--detach-sign",
+    "--local-user",
+    keyId,
+  ];
+  if (Number.isSafeInteger(epoch)) {
+    args.push("--faked-system-time", `${epoch}!`);
+  }
+  args.push("--output", signaturePath, filePath);
+
+  const result = execute("gpg", args, {
+    encoding: "utf8",
+    env: withoutGpgSecrets(environment),
+    input: Buffer.from(`${passphrase}\n`, "utf8"),
+    shell: false,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(
+      `GPG detached signing failed: ${String(result.stderr || result.stdout || "unknown error").trim()}`,
+    );
+  }
+  return signaturePath;
+}
+
+function signDescriptor(
+  filePath,
+  signaturePath,
+  environment = process.env,
+  { execute = spawnSync } = {},
+) {
   let epoch = Number.parseInt(environment.SOURCE_DATE_EPOCH || "", 10);
   if (!Number.isSafeInteger(epoch)) {
     try {
@@ -982,34 +1040,11 @@ function gpgArguments(filePath, signaturePath, environment = process.env) {
       epoch = Number.NaN;
     }
   }
-  if (Number.isSafeInteger(epoch)) {
-    args.push("--faked-system-time", `${epoch}!`);
-  }
-  args.push("--output", signaturePath, filePath);
-  return args;
-}
-
-function signDescriptor(filePath, signaturePath, environment = process.env) {
-  if (!environment.GPG_KEY_ID?.trim() || !environment.GPG_PASSPHRASE?.trim()) {
-    throw new Error(
-      "GPG_KEY_ID and GPG_PASSPHRASE are required to sign the canonical release descriptor.",
-    );
-  }
-  const result = spawnSync(
-    "gpg",
-    gpgArguments(filePath, signaturePath, environment),
-    {
-      encoding: "utf8",
-      env: { ...environment },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  if (result.error) throw result.error;
-  if (result.status !== 0)
-    throw new Error(
-      `GPG descriptor signing failed: ${String(result.stderr || "").trim()}`,
-    );
-  return signaturePath;
+  return signDetachedFile(filePath, signaturePath, {
+    environment,
+    epoch,
+    execute,
+  });
 }
 
 function verifyDescriptorSignature(
@@ -1103,6 +1138,7 @@ module.exports = {
   canonicalJson,
   canonicalMacosArtifactName,
   classifyImmutableAsset,
+  compareSemanticVersions,
   createReleaseDescriptor,
   descriptorReleaseAssetUrl,
   expectedTargets,
@@ -1121,6 +1157,7 @@ module.exports = {
   sha256Buffer,
   sha256File,
   signDescriptor,
+  signDetachedFile,
   sourceArchiveSha256,
   sourceCommit,
   validateDescriptorForCheckout,

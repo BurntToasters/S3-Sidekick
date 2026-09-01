@@ -39,6 +39,7 @@ src-tauri/.cargo/
 # Build outputs
 dist/
 release/
+.release-state/
 flatpak-build/
 flatpak-repo/
 

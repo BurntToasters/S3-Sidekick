@@ -8,10 +8,13 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   assertCleanSource,
+  assertDescriptorRepository,
   assertExistingGitHubTagCommit,
+  artifactNameFromDescriptorReleaseUrl,
   canonicalJson,
   classifyImmutableAsset,
   createReleaseDescriptor,
+  descriptorReleaseAssetUrl,
   installSmokeReportName,
   isInstallSmokeReportName,
   listAllReleaseAssets,
@@ -22,6 +25,8 @@ const {
   assertGitHubTagCommit,
   selectUniqueTaggedRelease,
   sha256File,
+  signDescriptor,
+  signDetachedFile,
   assertValidSignatureStatus,
   validateDescriptorForCheckout,
   validateInstallSmokeReport,
@@ -60,6 +65,88 @@ function flatpakPins() {
     })),
   };
 }
+
+test("updater artifact URLs are canonical and descriptor-bound", () => {
+  const descriptor = {
+    repository: { owner: "Burnt-Toasters", name: "S3.Sidekick" },
+    release: { tag: "v1.2.3-beta.5/rc" },
+  };
+  const artifactName = "S3 Sidekick #1.AppImage";
+  const canonical =
+    "https://github.com/Burnt-Toasters/S3.Sidekick/releases/download/v1.2.3-beta.5%2Frc/S3%20Sidekick%20%231.AppImage";
+
+  assert.equal(descriptorReleaseAssetUrl(descriptor, artifactName), canonical);
+  assert.equal(
+    artifactNameFromDescriptorReleaseUrl(descriptor, canonical),
+    artifactName,
+  );
+  assert.deepEqual(
+    assertDescriptorRepository(descriptor, {
+      owner: "Burnt-Toasters",
+      name: "S3.Sidekick",
+    }),
+    descriptor.repository,
+  );
+  assert.throws(
+    () =>
+      assertDescriptorRepository(descriptor, {
+        owner: "Burnt-Toasters",
+        name: "Other-Repository",
+      }),
+    /does not match active repository/i,
+  );
+
+  const simpleDescriptor = {
+    repository: { owner: "Owner", name: "Repository" },
+    release: { tag: "v1.2.3-beta.5" },
+  };
+  const simpleName = "Artifact.AppImage";
+  const invalidUrls = [
+    "https://github.com/Other/Repository/releases/download/v1.2.3-beta.5/Artifact.AppImage",
+    "https://github.com/Owner/Other/releases/download/v1.2.3-beta.5/Artifact.AppImage",
+    "https://github.com/Owner/Repository/releases/download/v1.2.3-beta.4/Artifact.AppImage",
+    "https://github.com/Owner/Repository/releases/latest/download/Artifact.AppImage",
+    "http://github.com/Owner/Repository/releases/download/v1.2.3-beta.5/Artifact.AppImage",
+    "https://github.com.evil.example/Owner/Repository/releases/download/v1.2.3-beta.5/Artifact.AppImage",
+    "https://user:secret@github.com/Owner/Repository/releases/download/v1.2.3-beta.5/Artifact.AppImage",
+    "https://github.com:444/Owner/Repository/releases/download/v1.2.3-beta.5/Artifact.AppImage",
+    "https://github.com/Owner/Repository/releases/download/v1.2.3-beta.5/Artifact.AppImage?download=1",
+    "https://github.com/Owner/Repository/releases/download/v1.2.3-beta.5/Artifact.AppImage#fragment",
+    "https://github.com/Owner/Repository/releases/download/v1.2.3-beta.5/extra/Artifact.AppImage",
+    "https://github.com/Owner//Repository/releases/download/v1.2.3-beta.5/Artifact.AppImage",
+    "https://github.com/Owner/Repository/releases/download/v1.2.3-beta.5/%41rtifact.AppImage",
+    "https://github.com/Owner/Repository/releases/download/v1.2.3-beta.5/Artifact%ZZ.AppImage",
+    "https://github.com/Owner/Repository/releases/download/v1.2.3-beta.5/Artifact%2FAppImage",
+    "https://github.com/Owner/Repository/releases/download/v1.2.3-beta.5/Artifact%5CAppImage",
+    "https://github.com/Owner/Repository/releases/download/v1.2.3-beta.5/",
+  ];
+  for (const invalidUrl of invalidUrls) {
+    assert.throws(
+      () => artifactNameFromDescriptorReleaseUrl(simpleDescriptor, invalidUrl),
+      /updater release URL|release artifact name/i,
+      invalidUrl,
+    );
+  }
+  for (const invalidName of [
+    "",
+    ".",
+    "..",
+    "nested/artifact",
+    "nested\\artifact",
+  ]) {
+    assert.throws(
+      () => descriptorReleaseAssetUrl(simpleDescriptor, invalidName),
+      /release artifact name/i,
+    );
+  }
+  assert.equal(
+    artifactNameFromDescriptorReleaseUrl(
+      simpleDescriptor,
+      descriptorReleaseAssetUrl(simpleDescriptor, simpleName),
+    ),
+    simpleName,
+  );
+});
 
 test("release selection accepts one exact draft and rejects published, duplicate, or mismatched records", () => {
   assert.equal(validateMutableRelease(draft, options), draft);
@@ -280,6 +367,128 @@ test("GPG status must identify exactly the pinned release fingerprint", () => {
   );
 });
 
+test("descriptor and asset-index signing keep passphrases out of argv and environment", () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-gpg-signing-"),
+  );
+  const passphrase = "canary passphrase --output=attacker";
+  const keyId = "release-key";
+  const calls = [];
+  const execute = (command, args, options) => {
+    calls.push({ command, args, options });
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const assertProtectedCall = (call, filePath, signaturePath, epoch) => {
+    assert.equal(call.command, "gpg");
+    assert.equal(call.args.includes("--passphrase"), false);
+    assert.equal(
+      call.args.some((argument) => String(argument).includes(passphrase)),
+      false,
+    );
+    const passphraseFd = call.args.indexOf("--passphrase-fd");
+    assert.ok(passphraseFd >= 0);
+    assert.equal(call.args[passphraseFd + 1], "0");
+    assert.equal(call.args.includes("--detach-sign"), true);
+    assert.equal(call.args[call.args.indexOf("--local-user") + 1], keyId);
+    assert.equal(
+      call.args[call.args.indexOf("--faked-system-time") + 1],
+      `${epoch}!`,
+    );
+    assert.equal(call.args[call.args.indexOf("--output") + 1], signaturePath);
+    assert.equal(call.args.at(-1), filePath);
+    assert.equal(call.options.shell, false);
+    assert.deepEqual(call.options.stdio, ["pipe", "pipe", "pipe"]);
+    assert.equal(
+      call.options.input.equals(Buffer.from(`${passphrase}\n`, "utf8")),
+      true,
+    );
+    assert.equal(call.options.env.PATH, "/bin");
+    assert.equal(
+      Object.keys(call.options.env).some(
+        (name) => name.toUpperCase() === "GPG_PASSPHRASE",
+      ),
+      false,
+    );
+    assert.equal(
+      Object.keys(call.options.env).some(
+        (name) => name.toUpperCase() === "GPG_KEY_ID",
+      ),
+      false,
+    );
+  };
+
+  try {
+    const committedAt = "2026-08-29T12:34:56.000Z";
+    const descriptorPath = path.join(directory, "release-descriptor.json");
+    const descriptorSignature = `${descriptorPath}.asc`;
+    fs.writeFileSync(
+      descriptorPath,
+      `${JSON.stringify({ source: { committedAt } })}\n`,
+    );
+    const descriptorEpoch = Math.floor(Date.parse(committedAt) / 1000);
+    assert.equal(
+      signDescriptor(
+        descriptorPath,
+        descriptorSignature,
+        {
+          PATH: "/bin",
+          GPG_KEY_ID: keyId,
+          GPG_PASSPHRASE: passphrase,
+          gpg_passphrase: "case-insensitive-environment-canary",
+        },
+        { execute },
+      ),
+      descriptorSignature,
+    );
+    assertProtectedCall(
+      calls.at(-1),
+      descriptorPath,
+      descriptorSignature,
+      descriptorEpoch,
+    );
+
+    const indexPath = path.join(directory, "release-assets.json");
+    const indexSignature = `${indexPath}.asc`;
+    fs.writeFileSync(indexPath, '{"schemaVersion":1}\n');
+    assert.equal(
+      signDescriptor(
+        indexPath,
+        indexSignature,
+        {
+          PATH: "/bin",
+          GPG_KEY_ID: keyId,
+          GPG_PASSPHRASE: passphrase,
+          SOURCE_DATE_EPOCH: "1234567890",
+        },
+        { execute },
+      ),
+      indexSignature,
+    );
+    assertProtectedCall(calls.at(-1), indexPath, indexSignature, 1234567890);
+
+    let invalidExecutions = 0;
+    for (const invalidPassphrase of ["", "   ", "line one\nline two", "a\rb"]) {
+      assert.throws(
+        () =>
+          signDetachedFile("artifact", "artifact.asc", {
+            environment: {
+              GPG_KEY_ID: keyId,
+              GPG_PASSPHRASE: invalidPassphrase,
+            },
+            execute() {
+              invalidExecutions += 1;
+              return { status: 0 };
+            },
+          }),
+        /GPG_PASSPHRASE|required|line breaks/i,
+      );
+    }
+    assert.equal(invalidExecutions, 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function run(root, command, args) {
   const result = spawnSync(command, args, { cwd: root, encoding: "utf8" });
   if (result.error || result.status !== 0) {
@@ -382,10 +591,12 @@ test("one canonical descriptor binds release id, source archive, locks, toolchai
   try {
     const commit = run(root, "git", ["rev-parse", "HEAD"]);
     const release = { ...draft, target_commitish: commit };
+    const repository = { owner: "Test-Owner", name: "Test.Repository" };
     const descriptor = createReleaseDescriptor({
       root,
       release,
       flatpakInputsByArchitecture: flatpakPins(),
+      repository,
     });
     const descriptorPath = path.join(
       root,
@@ -393,6 +604,8 @@ test("one canonical descriptor binds release id, source archive, locks, toolchai
       "release-descriptor.json",
     );
     writeReleaseDescriptor(descriptorPath, descriptor);
+    assert.equal(descriptor.schemaVersion, 2);
+    assert.deepEqual(descriptor.repository, repository);
     assert.equal(descriptor.release.id, 42);
     assert.equal(descriptor.release.signingKeyFingerprint, "A".repeat(40));
     assert.equal(descriptor.source.archiveSha256.length, 64);
@@ -404,7 +617,20 @@ test("one canonical descriptor binds release id, source archive, locks, toolchai
       "sbom",
     ]);
     assert.doesNotThrow(() =>
-      validateDescriptorForCheckout(descriptor, { root, release }),
+      validateDescriptorForCheckout(descriptor, {
+        root,
+        release,
+        repository,
+      }),
+    );
+    assert.throws(
+      () =>
+        validateDescriptorForCheckout(descriptor, {
+          root,
+          release,
+          repository: { ...repository, name: "Wrong.Repository" },
+        }),
+      /does not match active repository/i,
     );
     assert.equal(
       canonicalJson(descriptor),

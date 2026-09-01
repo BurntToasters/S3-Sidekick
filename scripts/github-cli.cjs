@@ -52,6 +52,15 @@ function releaseAssetDownloadArgs(repository, assetId) {
   ];
 }
 
+function releaseAssetDeleteArgs(repository, assetId) {
+  return [
+    "api",
+    "--method",
+    "DELETE",
+    `/repos/${repository}/releases/assets/${assetId}`,
+  ];
+}
+
 function runGitHub(args, { input, allowFailure = false } = {}) {
   const result = spawnSync("gh", args, {
     encoding: "utf8",
@@ -109,6 +118,10 @@ function uploadReleaseAssetById(repository, releaseId, filePath) {
   runGitHub(releaseAssetUploadArgs(repository, releaseId, filePath));
 }
 
+function deleteReleaseAssetById(repository, assetId) {
+  runGitHub(releaseAssetDeleteArgs(repository, assetId));
+}
+
 function downloadReleaseAsset(repository, assetId, filePath) {
   const args = releaseAssetDownloadArgs(repository, assetId);
   const result = spawnSync("gh", args, {
@@ -132,11 +145,13 @@ function downloadReleaseAsset(repository, assetId, filePath) {
 
 module.exports = {
   assertGitHubCliAuthenticated,
+  deleteReleaseAssetById,
   downloadReleaseAsset,
   githubApi,
   githubApiArgs,
   githubCliEnvironment,
   githubStatusCode,
+  releaseAssetDeleteArgs,
   releaseAssetDownloadArgs,
   releaseAssetUploadArgs,
   releaseUploadArgs,

@@ -10,6 +10,7 @@ import {
   normalizeUpdaterSignature,
   orderHostUploadFiles,
   runGpg,
+  signFile,
   uploadImmutableDraftAsset,
   verifyUpdaterSignature,
 } from "./gpg-sign.js";
@@ -105,7 +106,7 @@ test("requires complete Linux x86_64 package set", () => {
   );
 });
 
-test("direct GPG execution receives an explicit secret-bearing environment without a shell", () => {
+test("generic GPG execution scrubs signing credentials and never uses a shell", () => {
   const calls = [];
   const result = runGpg(["--version"], {
     environment: {
@@ -122,9 +123,76 @@ test("direct GPG execution receives an explicit secret-bearing environment witho
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "gpg");
   assert.deepEqual(calls[0].args, ["--version"]);
-  assert.equal(calls[0].options.shell, undefined);
-  assert.equal(calls[0].options.env.GPG_KEY_ID, "release-key");
-  assert.equal(calls[0].options.env.GPG_PASSPHRASE, "release-secret");
+  assert.equal(calls[0].options.shell, false);
+  assert.equal(calls[0].options.env.PATH, "/bin");
+  assert.equal("GPG_KEY_ID" in calls[0].options.env, false);
+  assert.equal("GPG_PASSPHRASE" in calls[0].options.env, false);
+});
+
+test("artifact, checksum, and evidence signing use protected passphrase stdin", () => {
+  const passphrase = "artifact canary --status-fd=attacker";
+  const environment = {
+    PATH: "/bin",
+    GPG_KEY_ID: "release-key",
+    GPG_PASSPHRASE: passphrase,
+  };
+  const files = [
+    "S3-Sidekick-Linux-x64.AppImage",
+    "SHA256SUMS-linux-x86_64.txt",
+    "release-attestation-linux-x86_64.json",
+    "release-package-smoke-linux-x86_64.json",
+    "release-provenance-linux-x86_64.json",
+    "release-sbom-linux-x86_64.spdx.json",
+    "release-install-smoke-linux-x86_64.json",
+  ];
+  const calls = [];
+  for (const filePath of files) {
+    assert.equal(
+      signFile(filePath, {
+        environment,
+        epoch: 1234567890,
+        execute(command, args, options) {
+          calls.push({ args, command, options });
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      }),
+      `${filePath}.asc`,
+    );
+  }
+
+  assert.equal(calls.length, files.length);
+  for (const [index, call] of calls.entries()) {
+    assert.equal(call.command, "gpg");
+    assert.equal(call.args.includes("--passphrase"), false);
+    assert.equal(
+      call.args.some((argument) => String(argument).includes(passphrase)),
+      false,
+    );
+    const passphraseFd = call.args.indexOf("--passphrase-fd");
+    assert.ok(passphraseFd >= 0);
+    assert.equal(call.args[passphraseFd + 1], "0");
+    assert.equal(
+      call.args[call.args.indexOf("--local-user") + 1],
+      "release-key",
+    );
+    assert.equal(
+      call.args[call.args.indexOf("--faked-system-time") + 1],
+      "1234567890!",
+    );
+    assert.equal(
+      call.args[call.args.indexOf("--output") + 1],
+      `${files[index]}.asc`,
+    );
+    assert.equal(call.args.at(-1), files[index]);
+    assert.equal(call.options.shell, false);
+    assert.deepEqual(call.options.stdio, ["pipe", "pipe", "pipe"]);
+    assert.equal(
+      call.options.input.equals(Buffer.from(`${passphrase}\n`, "utf8")),
+      true,
+    );
+    assert.equal("GPG_KEY_ID" in call.options.env, false);
+    assert.equal("GPG_PASSPHRASE" in call.options.env, false);
+  }
 });
 
 test("host upload handoff puts the attestation signature last", () => {

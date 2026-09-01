@@ -6,6 +6,7 @@ const {
   githubApiArgs,
   githubCliEnvironment,
   githubStatusCode,
+  releaseAssetDeleteArgs,
   releaseAssetDownloadArgs,
   releaseAssetUploadArgs,
   releaseUploadArgs,
@@ -66,6 +67,12 @@ test("normal release uploads never request clobber and can bind directly to a re
     "api",
     "-H",
     "Accept: application/octet-stream",
+    "/repos/o/r/releases/assets/99",
+  ]);
+  assert.deepEqual(releaseAssetDeleteArgs("o/r", 99), [
+    "api",
+    "--method",
+    "DELETE",
     "/repos/o/r/releases/assets/99",
   ]);
 });

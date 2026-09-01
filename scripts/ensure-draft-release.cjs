@@ -236,7 +236,11 @@ async function downloadAndValidateDescriptor(
   );
   verifyDescriptorSignature(DESCRIPTOR_PATH, DESCRIPTOR_SIGNATURE_PATH);
   const descriptor = readReleaseDescriptor(DESCRIPTOR_PATH);
-  validateDescriptorForCheckout(descriptor, { root: REPOSITORY_ROOT, release });
+  validateDescriptorForCheckout(descriptor, {
+    root: REPOSITORY_ROOT,
+    release,
+    repository: { name: REPO_NAME, owner: REPO_OWNER },
+  });
   return descriptor;
 }
 
@@ -270,6 +274,7 @@ async function ensureCanonicalDescriptor(release, { waitOnly = false } = {}) {
     validateDescriptorForCheckout(descriptor, {
       root: REPOSITORY_ROOT,
       release,
+      repository: { name: REPO_NAME, owner: REPO_OWNER },
     });
   } else {
     const descriptor = createReleaseDescriptor({

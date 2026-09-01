@@ -18,13 +18,16 @@ const {
   RELEASE_ASSET_INDEX_NAME,
   canonicalMacosArtifactName,
   classifyImmutableAsset,
+  descriptorReleaseAssetUrl,
   installSmokeReportName,
   isInstallSmokeReportName,
   listAllReleaseAssets,
   readReleaseDescriptor,
+  signDetachedFile,
   validateDescriptorForCheckout,
   validateMutableRelease,
   verifyDescriptorSignature,
+  withoutGpgSecrets,
 } = createRequire(import.meta.url)("./release-integrity.cjs");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -51,10 +54,6 @@ const GPG_PASSPHRASE = process.env.GPG_PASSPHRASE;
 let signatureEpoch = null;
 const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
 const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
-const TAG_DOWNLOAD_BASE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${encodeURIComponent(TAG)}`;
-const RELEASE_DOWNLOAD_BASE_URL = (
-  process.env.RELEASE_DOWNLOAD_BASE_URL || TAG_DOWNLOAD_BASE_URL
-).replace(/\/+$/, "");
 const RELEASE_NOTES = process.env.RELEASE_NOTES || "";
 const RELEASE_PUB_DATE =
   process.env.RELEASE_PUB_DATE || new Date().toISOString();
@@ -415,10 +414,6 @@ function resolveUpdaterTargets(name) {
   return targets;
 }
 
-function releaseAssetUrl(fileName, baseUrl = RELEASE_DOWNLOAD_BASE_URL) {
-  return `${baseUrl}/${encodeURIComponent(fileName)}`;
-}
-
 function decodeBase64(value, label) {
   const compact = String(value).replace(/\s/g, "");
   if (
@@ -566,7 +561,7 @@ function normalizeUpdaterSignature(sigPath) {
     : Buffer.from(text).toString("base64");
 }
 
-function generateUpdaterManifests(files) {
+function generateUpdaterManifests(files, descriptor) {
   const byName = new Map();
   for (const filePath of files) {
     byName.set(path.basename(filePath), filePath);
@@ -583,14 +578,9 @@ function generateUpdaterManifests(files) {
 
   const manifests = new Map();
   const requiredTargetKeys = new Set();
-  const channelVariants = [
-    { targetSuffix: "", baseUrl: RELEASE_DOWNLOAD_BASE_URL },
-  ];
+  const channelVariants = [{ targetSuffix: "" }];
   if (IS_PRERELEASE) {
-    channelVariants.push({
-      targetSuffix: "-beta",
-      baseUrl: TAG_DOWNLOAD_BASE_URL,
-    });
+    channelVariants.push({ targetSuffix: "-beta" });
   }
   const expectedLinuxTargetKeys = requiredLinuxTargetKeys(channelVariants);
   const generatedLinuxAppImageTargets = new Set();
@@ -630,7 +620,7 @@ function generateUpdaterManifests(files) {
         }
 
         const manifest = manifests.get(manifestName);
-        const url = releaseAssetUrl(name, channel.baseUrl);
+        const url = descriptorReleaseAssetUrl(descriptor, name);
         const installerKey = `${targetName}-${target.arch}-${target.installer}`;
         const fallbackKey = `${targetName}-${target.arch}`;
         manifest.platforms[installerKey] = { url, signature };
@@ -786,7 +776,7 @@ function normalizePreStagedArtifacts(staged) {
     .map((name) => path.join(releaseDir, name));
 }
 
-function collectArtifacts() {
+function collectArtifacts(descriptor) {
   fs.mkdirSync(releaseDir, { recursive: true });
   const buildSession = readBuildSession();
 
@@ -818,7 +808,7 @@ function collectArtifacts() {
       }
       collected.push(dest);
     }
-    const manifests = generateUpdaterManifests(collected);
+    const manifests = generateUpdaterManifests(collected, descriptor);
     return [...collected, ...manifests];
   }
 
@@ -851,7 +841,7 @@ function collectArtifacts() {
     `  Found ${currentStaged.length} pre-staged artifact(s) in release/`,
   );
   const normalizedStaged = normalizePreStagedArtifacts(currentStaged);
-  const manifests = generateUpdaterManifests(normalizedStaged);
+  const manifests = generateUpdaterManifests(normalizedStaged, descriptor);
   return Array.from(new Set([...normalizedStaged, ...manifests]));
 }
 
@@ -948,7 +938,8 @@ function generateChecksums(files) {
 function runGpg(args, { environment = process.env, execute = spawnSync } = {}) {
   const result = execute("gpg", args, {
     encoding: "utf8",
-    env: { ...environment },
+    env: withoutGpgSecrets(environment),
+    shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (result.error) throw result.error;
@@ -960,21 +951,16 @@ function runGpg(args, { environment = process.env, execute = spawnSync } = {}) {
   return result;
 }
 
-function signFile(filePath) {
+function signFile(
+  filePath,
+  {
+    environment = process.env,
+    epoch = signatureEpoch,
+    execute = spawnSync,
+  } = {},
+) {
   const asc = `${filePath}.asc`;
-  const args = ["--batch", "--yes", "--armor", "--detach-sign"];
-  if (GPG_KEY_ID) {
-    args.push("--local-user", GPG_KEY_ID);
-  }
-  if (GPG_PASSPHRASE) {
-    args.push("--pinentry-mode", "loopback", "--passphrase", GPG_PASSPHRASE);
-  }
-  if (Number.isSafeInteger(signatureEpoch)) {
-    args.push("--faked-system-time", `${signatureEpoch}!`);
-  }
-  args.push("--output", asc, filePath);
-
-  runGpg(args);
+  signDetachedFile(filePath, asc, { environment, epoch, execute });
   return asc;
 }
 
@@ -1004,7 +990,11 @@ async function getBoundDraftRelease(descriptor) {
     expectedTag: descriptor.release.tag,
     expectedTargetCommitish: descriptor.source.commit,
   });
-  validateDescriptorForCheckout(descriptor, { root, release });
+  validateDescriptorForCheckout(descriptor, {
+    root,
+    release,
+    repository: { name: REPO_NAME, owner: REPO_OWNER },
+  });
   return release;
 }
 
@@ -1147,7 +1137,7 @@ async function main() {
   );
 
   console.log("[2/6] Collecting artifacts and install-smoke reports...");
-  const artifacts = collectArtifacts();
+  const artifacts = collectArtifacts(descriptor);
   const installSmokeFiles = collectInstallSmokeReports();
   const targets = Array.from(
     new Set(
@@ -1233,6 +1223,7 @@ export {
   orderHostUploadFiles,
   parseMinisignSignature,
   runGpg,
+  signFile,
   targetKeysForArtifactName,
   uploadImmutableDraftAsset,
   verifyUpdaterSignature,

@@ -26,16 +26,21 @@ import {
   runReleaseCommand,
 } from "./release-env.js";
 import {
+  acquirePublicationSession,
+  assertBetaPromotionOrder,
   assertChannelTransitionSupported,
   assertCompleteEvidence,
   assertReleaseAssetIndexEntries,
+  assertStableRolloverOrder,
   betaManifestName,
   channelTransitionPolicy,
   createReleaseAssetIndex,
+  processStartToken,
   recheckFrozenReleaseAssetSet,
   stableManifestName,
   validatePublicationRelease,
   verifyChecksumFiles,
+  verifyUpdaterManifests,
 } from "./release-publication.js";
 import {
   runWindowsBuild,
@@ -44,7 +49,7 @@ import {
 import { isUpdaterArtifact } from "./updater-sign.js";
 import integrity from "./release-integrity.cjs";
 
-const { canonicalMacosArtifactName } = integrity;
+const { canonicalMacosArtifactName, compareSemanticVersions } = integrity;
 const root = path.resolve(new URL("..", import.meta.url).pathname);
 
 test("dependency-executing builds receive no aggregate release secrets", () => {
@@ -59,6 +64,8 @@ test("dependency-executing builds receive no aggregate release secrets", () => {
     NPM_TOKEN: "unknown-npm-secret",
     SENTRY_AUTH_TOKEN: "unknown-sentry-secret",
     UNRECOGNIZED_RELEASE_SECRET: "unknown-canary-secret",
+    RELEASE_DOWNLOAD_BASE_URL:
+      "https://attacker.invalid/releases/download/mutable",
   };
   assert.deepEqual(childEnvironment("build", inherited, {}), {
     PATH: "/bin",
@@ -951,6 +958,96 @@ test("public checksum verification rejects missing or changed bytes", () => {
   }
 });
 
+test("updater manifests require descriptor-tagged artifacts and exact signatures", () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-updater-manifest-"),
+  );
+  try {
+    const descriptor = {
+      repository: { owner: "BurntToasters", name: "S3-Sidekick" },
+      release: { tag: "v0.11.0-beta.5" },
+    };
+    const manifestName = "latest-linux-beta-x86_64.json";
+    const artifactName = "S3-Sidekick-Linux-x64.AppImage";
+    const signatureName = `${artifactName}.sig`;
+    const signatureText = [
+      "untrusted comment: updater signature fixture",
+      Buffer.concat([Buffer.from("ED"), Buffer.alloc(72)]).toString("base64"),
+      "trusted comment: timestamp:1\tfile:artifact",
+      Buffer.alloc(64).toString("base64"),
+    ].join("\n");
+    const embeddedSignature = Buffer.from(signatureText).toString("base64");
+    const canonicalUrl = integrity.descriptorReleaseAssetUrl(
+      descriptor,
+      artifactName,
+    );
+    const assetsByName = new Map(
+      [manifestName, artifactName, signatureName].map((name) => [
+        name,
+        { name },
+      ]),
+    );
+    fs.writeFileSync(path.join(directory, artifactName), "artifact");
+    fs.writeFileSync(path.join(directory, signatureName), signatureText);
+
+    const writeManifest = (url, signature = embeddedSignature) => {
+      const manifest = {
+        platforms: { "linux-beta-x86_64": { url, signature } },
+      };
+      fs.writeFileSync(
+        path.join(directory, manifestName),
+        `${JSON.stringify(manifest, null, 2)}\n`,
+      );
+    };
+
+    writeManifest(canonicalUrl);
+    assert.doesNotThrow(() =>
+      verifyUpdaterManifests(directory, assetsByName, descriptor),
+    );
+
+    for (const invalidUrl of [
+      canonicalUrl.replace("v0.11.0-beta.5", "v0.11.0-beta.4"),
+      canonicalUrl.replace(
+        "releases/download/v0.11.0-beta.5",
+        "releases/latest/download",
+      ),
+    ]) {
+      writeManifest(invalidUrl);
+      assert.throws(
+        () => verifyUpdaterManifests(directory, assetsByName, descriptor),
+        /does not match the signed descriptor/i,
+      );
+    }
+
+    writeManifest(canonicalUrl);
+    assert.throws(
+      () =>
+        verifyUpdaterManifests(
+          directory,
+          new Map([...assetsByName].filter(([name]) => name !== artifactName)),
+          descriptor,
+        ),
+      /missing artifact\/signature/i,
+    );
+    assert.throws(
+      () =>
+        verifyUpdaterManifests(
+          directory,
+          new Map([...assetsByName].filter(([name]) => name !== signatureName)),
+          descriptor,
+        ),
+      /missing artifact\/signature/i,
+    );
+    writeManifest(canonicalUrl, "wrong-signature");
+    assert.throws(
+      () => verifyUpdaterManifests(directory, assetsByName, descriptor),
+      /embeds the wrong signature/i,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("beta-to-stable transition reserves GitHub Latest for product stable releases", async () => {
   const commit = "a".repeat(40);
   const descriptor = {
@@ -974,23 +1071,25 @@ test("beta-to-stable transition reserves GitHub Latest for product stable releas
   assert.equal(stableManifestName("latest-darwin-beta-aarch64.json"), false);
   assert.deepEqual(channelTransitionPolicy(descriptor), {
     makeLatest: "false",
-    supported: false,
-    reason:
-      "The shipped /releases/latest updater endpoint cannot select immutable prerelease tags without an application/config endpoint migration.",
+    promoteBeta: true,
+    supported: true,
   });
   const stableDescriptor = {
     release: { id: 43, prerelease: false, tag: "v1.2.3" },
     source: { commit },
   };
   assert.deepEqual(channelTransitionPolicy(stableDescriptor), {
+    carryBeta: true,
     makeLatest: "true",
     supported: true,
   });
-  assert.throws(
-    () => assertChannelTransitionSupported(descriptor),
-    /disabled before any release mutation.*Latest remains reserved for stable/i,
-  );
+  assert.deepEqual(assertChannelTransitionSupported(descriptor), {
+    makeLatest: "false",
+    promoteBeta: true,
+    supported: true,
+  });
   assert.deepEqual(assertChannelTransitionSupported(stableDescriptor), {
+    carryBeta: true,
     makeLatest: "true",
     supported: true,
   });
@@ -1015,43 +1114,25 @@ test("beta-to-stable transition reserves GitHub Latest for product stable releas
     publicationSource,
     /make_latest:\s*transitionPolicy\.makeLatest/,
   );
-  assert.doesNotMatch(publicationSource, /updater-channel-/);
-  assert.doesNotMatch(publicationSource, /githubApi\([^\n]*releases\/latest/);
+  assert.match(
+    publicationSource,
+    /\/releases\/latest["`]|releases\/latest\/download/,
+  );
   assert.doesNotMatch(publicationSource, /BETA_CHANNEL_DIRECTORY/);
+  assert.doesNotMatch(publicationSource, /--clobber/);
   assert.doesNotMatch(
     signingSource,
     /syncBetaManifestsToLatestStable|releases\/latest/,
   );
-  const preflightIndex = publicationSource.indexOf(
-    "const transitionPolicy = assertChannelTransitionSupported(descriptor)",
+  assert.match(signingSource, /descriptorReleaseAssetUrl\(descriptor, name\)/);
+  assert.doesNotMatch(
+    signingSource,
+    /RELEASE_DOWNLOAD_BASE_URL|TAG_DOWNLOAD_BASE_URL|function releaseAssetUrl/,
   );
-  assert.ok(preflightIndex >= 0);
-  const freezeIndex = publicationSource.indexOf(
-    "freezeReleaseAssetSet({",
-    preflightIndex,
+  assert.match(
+    publicationSource,
+    /artifactNameFromDescriptorReleaseUrl\(\s*descriptor,\s*entry\?\.url/s,
   );
-  const finalRecheckIndex = publicationSource.indexOf(
-    "await recheckFrozenReleaseAssetSet",
-    freezeIndex,
-  );
-  const prePublicationTagIndex = publicationSource.indexOf(
-    "await assertExistingGitHubTagCommit",
-    finalRecheckIndex,
-  );
-  const publicationPatchIndex = publicationSource.indexOf(
-    'githubApi(\n        "PATCH"',
-    prePublicationTagIndex,
-  );
-  const strictPostPublicationTagIndex = publicationSource.indexOf(
-    "await assertGitHubTagCommit",
-    publicationPatchIndex,
-  );
-  assert.ok(preflightIndex < freezeIndex);
-  assert.ok(freezeIndex < finalRecheckIndex);
-  assert.ok(finalRecheckIndex < prePublicationTagIndex);
-  assert.ok(prePublicationTagIndex < publicationPatchIndex);
-  assert.ok(publicationPatchIndex < strictPostPublicationTagIndex);
-  assert.doesNotMatch(publicationSource, /promoteBetaChannel/);
 });
 
 test("publication requires one semantically valid install-smoke report per target", () => {
@@ -1311,6 +1392,7 @@ test("coordinator rejects late or replaced assets while the frozen release is st
   const descriptor = {
     release: { id: 42, prerelease: false, tag: "v1.2.3" },
     source: { commit: "c".repeat(40) },
+    expectedTargets: ["linux-x86_64"],
   };
   const release = {
     id: 42,
@@ -1410,6 +1492,378 @@ test("coordinator rejects late or replaced assets while the frozen release is st
         release,
         request: async () => release,
       }),
+    /do not exactly match the signed index/i,
+  );
+});
+test("release channel progression uses strict SemVer precedence and preserves exact retries", () => {
+  assert.equal(compareSemanticVersions("1.2.3-beta.10", "1.2.3-beta.2"), 1);
+  assert.equal(compareSemanticVersions("1.2.3+build.2", "1.2.3+build.1"), 0);
+  assert.equal(compareSemanticVersions("1.2.3", "1.2.3-rc.1"), 1);
+  assert.throws(
+    () => compareSemanticVersions("1.2.03", "1.2.3"),
+    /non-strict semantic versions/i,
+  );
+
+  const sourceDescriptor = {
+    release: {
+      id: 84,
+      prerelease: true,
+      tag: "v1.2.4-beta.10",
+      version: "1.2.4-beta.10",
+    },
+    source: { commit: "c".repeat(40) },
+  };
+  const sourceDescriptorSha256 = "a".repeat(64);
+  const carrierContext = {
+    carrierDescriptor: { release: { version: "1.2.3" } },
+    channelState: {
+      source: {
+        descriptorSha256: "b".repeat(64),
+        id: 83,
+        sourceCommit: "b".repeat(40),
+        tag: "v1.2.4-beta.2",
+        version: "1.2.4-beta.2",
+      },
+    },
+  };
+  assert.equal(
+    assertBetaPromotionOrder(
+      sourceDescriptor,
+      sourceDescriptorSha256,
+      carrierContext,
+    ),
+    "advance",
+  );
+  assert.throws(
+    () =>
+      assertBetaPromotionOrder(
+        {
+          ...sourceDescriptor,
+          release: {
+            ...sourceDescriptor.release,
+            tag: "v1.2.4-beta.1",
+            version: "1.2.4-beta.1",
+          },
+        },
+        "d".repeat(64),
+        carrierContext,
+      ),
+    /does not advance installed beta/i,
+  );
+  assert.throws(
+    () =>
+      assertBetaPromotionOrder(
+        {
+          ...sourceDescriptor,
+          release: {
+            ...sourceDescriptor.release,
+            tag: "v1.2.3+candidate",
+            version: "1.2.3+candidate",
+          },
+        },
+        "d".repeat(64),
+        carrierContext,
+      ),
+    /does not advance stable carrier/i,
+  );
+
+  const exactRetryContext = {
+    carrierDescriptor: { release: { version: "1.2.4" } },
+    channelState: {
+      source: {
+        descriptorSha256: sourceDescriptorSha256,
+        id: sourceDescriptor.release.id,
+        sourceCommit: sourceDescriptor.source.commit,
+        tag: sourceDescriptor.release.tag,
+        version: sourceDescriptor.release.version,
+      },
+    },
+  };
+  assert.equal(
+    assertBetaPromotionOrder(
+      sourceDescriptor,
+      sourceDescriptorSha256,
+      exactRetryContext,
+    ),
+    "unchanged",
+  );
+  assert.throws(
+    () =>
+      assertBetaPromotionOrder(
+        {
+          ...sourceDescriptor,
+          release: { ...sourceDescriptor.release, id: 999 },
+        },
+        sourceDescriptorSha256,
+        exactRetryContext,
+      ),
+    /source identity is inconsistent/i,
+  );
+
+  assert.equal(
+    assertStableRolloverOrder(
+      { release: { version: "1.2.4" } },
+      { release: { version: "1.2.3" } },
+    ),
+    true,
+  );
+  for (const version of ["1.2.3", "1.2.3+rebuilt", "1.2.2", "1.2.3-rc.1"]) {
+    assert.throws(
+      () =>
+        assertStableRolloverOrder(
+          { release: { version } },
+          { release: { version: "1.2.3" } },
+        ),
+      /does not advance GitHub Latest/i,
+    );
+  }
+});
+test("publication process identity uses native subsecond or boot-relative start tokens", () => {
+  const first = processStartToken(process.pid);
+  const second = processStartToken(process.pid);
+  assert.match(first || "", /^(?:darwin|linux|windows):/);
+  assert.equal(second, first);
+
+  const resolveDarwinToken = (microseconds) =>
+    processStartToken(4242, {
+      platform: "darwin",
+      spawn: (command, arguments_, options) => {
+        assert.equal(command, "/usr/bin/xcrun");
+        assert.equal(arguments_[0], "swift");
+        assert.match(arguments_[2], /proc_pidinfo\(4242,/);
+        assert.equal(options.shell, false);
+        return { status: 0, stdout: `1788220648:${microseconds}\n` };
+      },
+    });
+  assert.notEqual(resolveDarwinToken(100), resolveDarwinToken(200));
+});
+
+test("publication sessions serialize locally and retain descriptor-scoped owners across cleanup and interleaving", () => {
+  const workspace = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-publication-session-"),
+  );
+  const stateDirectory = path.join(workspace, ".release-state");
+  const descriptor = {
+    release: { id: 84 },
+    source: { commit: "c".repeat(40) },
+  };
+  const descriptorSha256 = "d".repeat(64);
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  try {
+    const first = acquirePublicationSession(descriptor, descriptorSha256, {
+      sessionIdFactory: () => sessionId,
+      stateDirectory,
+    });
+    assert.equal(first.owner.sessionId, sessionId);
+    assert.throws(
+      () =>
+        acquirePublicationSession(descriptor, descriptorSha256, {
+          stateDirectory,
+        }),
+      /another release publication process owns/i,
+    );
+    first.release();
+    first.release();
+
+    const releaseDirectory = path.join(workspace, "release");
+    fs.mkdirSync(releaseDirectory);
+    fs.writeFileSync(path.join(releaseDirectory, "artifact"), "temporary");
+    fs.rmSync(releaseDirectory, { recursive: true });
+
+    const otherDescriptor = {
+      release: { id: 85 },
+      source: { commit: "e".repeat(40) },
+    };
+    const otherDescriptorSha256 = "f".repeat(64);
+    const other = acquirePublicationSession(
+      otherDescriptor,
+      otherDescriptorSha256,
+      {
+        sessionIdFactory: () => "223e4567-e89b-42d3-a456-426614174000",
+        stateDirectory,
+      },
+    );
+    assert.notEqual(other.owner.sessionId, first.owner.sessionId);
+    other.release();
+
+    const retry = acquirePublicationSession(descriptor, descriptorSha256, {
+      sessionIdFactory: () => "323e4567-e89b-42d3-a456-426614174000",
+      stateDirectory,
+    });
+    assert.deepEqual(retry.owner, first.owner);
+    retry.release();
+    assert.equal(fs.readdirSync(path.join(stateDirectory, "owners")).length, 2);
+
+    const lockDirectory = path.join(
+      stateDirectory,
+      "release-publication-locks",
+    );
+    const staleLockPath = path.join(
+      lockDirectory,
+      "423e4567-e89b-42d3-a456-426614174000.json",
+    );
+    fs.writeFileSync(
+      staleLockPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        descriptorSha256,
+        lockId: "423e4567-e89b-42d3-a456-426614174000",
+        pid: process.pid,
+        processStartToken: "stale-process-instance",
+      }),
+      { mode: 0o600 },
+    );
+    const recovered = acquirePublicationSession(descriptor, descriptorSha256, {
+      lockIdFactory: () => "523e4567-e89b-42d3-a456-426614174000",
+      processIdentity: () => "current-process-instance",
+      stateDirectory,
+    });
+    assert.deepEqual(recovered.owner, first.owner);
+    recovered.release();
+    assert.equal(fs.existsSync(staleLockPath), true);
+
+    const malformedLockPath = path.join(lockDirectory, "crash-residue.json");
+    fs.writeFileSync(malformedLockPath, "incomplete crash residue", {
+      mode: 0o600,
+    });
+    const ownerlessRecovery = acquirePublicationSession(
+      descriptor,
+      descriptorSha256,
+      {
+        lockIdFactory: () => "623e4567-e89b-42d3-a456-426614174000",
+        processIdentity: () => "current-process-instance",
+        stateDirectory,
+      },
+    );
+    assert.deepEqual(ownerlessRecovery.owner, first.owner);
+    ownerlessRecovery.release();
+    assert.equal(fs.existsSync(malformedLockPath), true);
+
+    let interleavedAttempted = false;
+    const interleaved = acquirePublicationSession(
+      descriptor,
+      descriptorSha256,
+      {
+        afterLockInstalled: () => {
+          interleavedAttempted = true;
+          assert.throws(
+            () =>
+              acquirePublicationSession(descriptor, descriptorSha256, {
+                lockIdFactory: () => "823e4567-e89b-42d3-a456-426614174000",
+                processIdentity: () => "current-process-instance",
+                stateDirectory,
+              }),
+            /another release publication process owns/i,
+          );
+        },
+        lockIdFactory: () => "723e4567-e89b-42d3-a456-426614174000",
+        processIdentity: () => "current-process-instance",
+        stateDirectory,
+      },
+    );
+    assert.equal(interleavedAttempted, true);
+    interleaved.release();
+    assert.deepEqual(fs.readdirSync(lockDirectory).sort(), [
+      "423e4567-e89b-42d3-a456-426614174000.json",
+      "crash-residue.json",
+    ]);
+    assert.equal(
+      fs.statSync(
+        path.join(stateDirectory, "owners", `${descriptorSha256}.json`),
+      ).mode & 0o777,
+      0o600,
+    );
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+test("stable product closure excludes only exact signed channel controls and receipts", () => {
+  const descriptor = {
+    expectedTargets: ["linux-x86_64"],
+    release: { prerelease: false },
+  };
+  const productDigest = "a".repeat(64);
+  const indexDigest = "b".repeat(64);
+  const signatureDigest = "c".repeat(64);
+  const index = {
+    assets: [{ name: "stable-product.zip", sha256: productDigest }],
+  };
+  const assets = new Map([
+    [
+      "stable-product.zip",
+      {
+        id: 1,
+        name: "stable-product.zip",
+        digest: `sha256:${productDigest}`,
+      },
+    ],
+    [
+      "release-assets.json",
+      {
+        id: 2,
+        name: "release-assets.json",
+        digest: `sha256:${indexDigest}`,
+      },
+    ],
+    [
+      "release-assets.json.asc",
+      {
+        id: 3,
+        name: "release-assets.json.asc",
+        digest: `sha256:${signatureDigest}`,
+      },
+    ],
+    [
+      "beta-channel-rollover.json",
+      {
+        id: 4,
+        name: "beta-channel-rollover.json",
+        digest: `sha256:${"d".repeat(64)}`,
+      },
+    ],
+    [
+      "beta-channel-rollover.json.asc",
+      {
+        id: 5,
+        name: "beta-channel-rollover.json.asc",
+        digest: `sha256:${"e".repeat(64)}`,
+      },
+    ],
+    [
+      "stable-rollover-receipt.json",
+      {
+        id: 6,
+        name: "stable-rollover-receipt.json",
+        digest: `sha256:${"f".repeat(64)}`,
+      },
+    ],
+    [
+      "stable-rollover-receipt.json.asc",
+      {
+        id: 7,
+        name: "stable-rollover-receipt.json.asc",
+        digest: `sha256:${"1".repeat(64)}`,
+      },
+    ],
+  ]);
+  const digests = new Map([
+    ["stable-product.zip", productDigest],
+    ["release-assets.json", indexDigest],
+    ["release-assets.json.asc", signatureDigest],
+  ]);
+  assert.equal(
+    assertReleaseAssetIndexEntries(index, assets, digests, descriptor),
+    true,
+  );
+
+  const nearMatch = new Map(assets);
+  nearMatch.set("stable-rollover-receipt.json.backup", {
+    id: 8,
+    name: "stable-rollover-receipt.json.backup",
+    digest: `sha256:${"2".repeat(64)}`,
+  });
+  assert.throws(
+    () => assertReleaseAssetIndexEntries(index, nearMatch, digests, descriptor),
     /do not exactly match the signed index/i,
   );
 });
