@@ -3,6 +3,23 @@ use std::collections::HashMap;
 
 const MAX_LOCAL_SCAN_FILES: usize = 20_000;
 const MAX_LOCAL_SCAN_DEPTH: usize = 64;
+const MAX_LOCAL_SCAN_ENTRIES: usize = 100_000;
+const MAX_LOCAL_SCAN_WARNING_SAMPLES: usize = 3;
+
+#[derive(Default)]
+struct ScanWarnings {
+    total: usize,
+    samples: Vec<String>,
+}
+
+impl ScanWarnings {
+    fn push(&mut self, warning: String) {
+        self.total = self.total.saturating_add(1);
+        if self.samples.len() < MAX_LOCAL_SCAN_WARNING_SAMPLES {
+            self.samples.push(warning);
+        }
+    }
+}
 
 #[derive(serde::Serialize)]
 pub(crate) struct LocalFileEntry {
@@ -48,9 +65,10 @@ fn collect_local_files_from_root(
     root: &std::path::Path,
     label: &str,
     entries: &mut Vec<LocalFileEntry>,
-    warnings: &mut Vec<String>,
+    warnings: &mut ScanWarnings,
+    visited_entries: &mut usize,
 ) {
-    let root_meta = match std::fs::metadata(root) {
+    let root_meta = match std::fs::symlink_metadata(root) {
         Ok(meta) => meta,
         Err(err) => {
             warnings.push(format!(
@@ -61,6 +79,13 @@ fn collect_local_files_from_root(
             return;
         }
     };
+    if root_meta.file_type().is_symlink() {
+        warnings.push(format!(
+            "Skipping selected root '{}' because it is a symbolic link.",
+            root.to_string_lossy()
+        ));
+        return;
+    }
 
     if root_meta.is_file() {
         if entries.len() >= MAX_LOCAL_SCAN_FILES {
@@ -96,6 +121,15 @@ fn collect_local_files_from_root(
         };
 
         for entry_result in iter {
+            if *visited_entries >= MAX_LOCAL_SCAN_ENTRIES {
+                warnings.push(format!(
+                    "Stopped scanning after visiting {} directory entries.",
+                    MAX_LOCAL_SCAN_ENTRIES
+                ));
+                return;
+            }
+            *visited_entries += 1;
+
             let entry = match entry_result {
                 Ok(entry) => entry,
                 Err(err) => {
@@ -187,10 +221,7 @@ fn collect_local_files_from_root(
     }
 }
 
-#[tauri::command]
-pub(crate) fn list_local_files_recursive(
-    roots: Vec<String>,
-) -> Result<Vec<LocalFileEntry>, String> {
+fn list_local_files_recursive_inner(roots: Vec<String>) -> Result<Vec<LocalFileEntry>, String> {
     let mut normalized_roots = Vec::new();
     for root in roots {
         let trimmed = root.trim();
@@ -212,9 +243,13 @@ pub(crate) fn list_local_files_recursive(
 
     let mut duplicate_positions: HashMap<String, usize> = HashMap::new();
     let mut entries = Vec::new();
-    let mut warnings = Vec::new();
+    let mut warnings = ScanWarnings::default();
+    let mut visited_entries = 0usize;
 
     for root in &normalized_roots {
+        if visited_entries >= MAX_LOCAL_SCAN_ENTRIES {
+            break;
+        }
         let base = root_label(root);
         let total = *base_counts.get(&base).unwrap_or(&1);
         let label = if total > 1 {
@@ -224,7 +259,13 @@ pub(crate) fn list_local_files_recursive(
         } else {
             base
         };
-        collect_local_files_from_root(root, &label, &mut entries, &mut warnings);
+        collect_local_files_from_root(
+            root,
+            &label,
+            &mut entries,
+            &mut warnings,
+            &mut visited_entries,
+        );
     }
 
     entries.sort_by(|a, b| {
@@ -233,28 +274,31 @@ pub(crate) fn list_local_files_recursive(
             .then(a.file_path.cmp(&b.file_path))
     });
 
-    if !warnings.is_empty() {
-        let sample = warnings
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" | ");
+    if warnings.total > 0 {
         eprintln!(
             "list_local_files_recursive skipped {} path(s). Sample: {}",
-            warnings.len(),
-            sample
+            warnings.total,
+            warnings.samples.join(" | ")
         );
     }
 
-    if entries.is_empty() && !warnings.is_empty() {
+    if entries.is_empty() && warnings.total > 0 {
         return Err(format!(
             "No readable files were found. {} additional path error(s) occurred.",
-            warnings.len()
+            warnings.total
         ));
     }
 
     Ok(entries)
+}
+
+#[tauri::command]
+pub(crate) async fn list_local_files_recursive(
+    roots: Vec<String>,
+) -> Result<Vec<LocalFileEntry>, String> {
+    tokio::task::spawn_blocking(move || list_local_files_recursive_inner(roots))
+        .await
+        .map_err(|err| format!("Local file scan task failed: {}", err))?
 }
 
 #[cfg(test)]

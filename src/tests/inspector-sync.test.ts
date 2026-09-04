@@ -76,6 +76,8 @@ describe("syncInspectorFromSelection", () => {
 
     const { state } = await import("../state.ts");
     state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.selectedKeys.clear();
     state.selectedKeys.add("config/app.json");
 
@@ -98,6 +100,8 @@ describe("syncInspectorFromSelection", () => {
 
     const { state } = await import("../state.ts");
     state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.selectedKeys.clear();
     state.selectedKeys.add("bin/release.exe");
 
@@ -132,6 +136,8 @@ describe("syncInspectorFromSelection", () => {
 
     const { state } = await import("../state.ts");
     state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.selectedKeys.clear();
     state.selectedKeys.add("bin/release.exe");
 
@@ -175,6 +181,8 @@ describe("syncInspectorFromSelection", () => {
 
     const { state } = await import("../state.ts");
     state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.selectedKeys.clear();
     state.selectedKeys.add("config/app.json");
 
@@ -203,6 +211,8 @@ describe("syncInspectorFromSelection", () => {
 
     const { state } = await import("../state.ts");
     state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.selectedKeys.clear();
     state.selectedKeys.add("prefix:folder/");
 

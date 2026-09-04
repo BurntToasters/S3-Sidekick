@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const connectMock = vi.fn(async () => "us-east-1");
-const disconnectMock = vi.fn(async () => undefined);
+const disconnectMock = vi.fn(async () => true);
 const saveConnectionMock = vi.fn(async () => undefined);
 const refreshBucketsMock = vi.fn(async () => undefined);
 const selectBucketMock = vi.fn(async () => undefined);
@@ -18,12 +18,15 @@ const removeBookmarkMock = vi.fn(async () => undefined);
 const logActivityMock = vi.fn();
 const setStatusMock = vi.fn();
 const clearFilterInputDebounceMock = vi.fn();
+const showConfirmMock = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 
 vi.mock("../connection.ts", () => ({
   connect: connectMock,
   disconnect: disconnectMock,
   saveConnection: saveConnectionMock,
   refreshBuckets: refreshBucketsMock,
+  currentConnectionGeneration: () => 1,
+  finishConnecting: vi.fn(),
 }));
 
 vi.mock("../browser.ts", () => ({
@@ -55,6 +58,10 @@ vi.mock("../app-layout.ts", () => ({
   clearFilterInputDebounce: clearFilterInputDebounceMock,
 }));
 
+vi.mock("../dialogs.ts", () => ({
+  showConfirm: showConfirmMock,
+}));
+
 function renderFixture(): void {
   document.body.innerHTML = `
     <span id="connection-status" class="connection-badge"></span>
@@ -78,7 +85,7 @@ describe("connection UX polish", () => {
   beforeEach(async () => {
     vi.resetModules();
     connectMock.mockReset().mockResolvedValue("us-east-1");
-    disconnectMock.mockReset().mockResolvedValue(undefined);
+    disconnectMock.mockReset().mockResolvedValue(true);
     saveConnectionMock.mockReset().mockResolvedValue(undefined);
     refreshBucketsMock.mockReset().mockResolvedValue(undefined);
     selectBucketMock.mockReset().mockResolvedValue(undefined);
@@ -92,6 +99,7 @@ describe("connection UX polish", () => {
     logActivityMock.mockReset();
     setStatusMock.mockReset();
     clearFilterInputDebounceMock.mockReset();
+    showConfirmMock.mockReset().mockResolvedValue(true);
     renderFixture();
 
     const { state } = await import("../state.ts");
@@ -184,5 +192,25 @@ describe("connection UX polish", () => {
 
     expect(btn.disabled).toBe(false);
     expect(btn.textContent).toBe("Connect");
+  });
+
+  it("requires confirmation for non-local cleartext HTTP", async () => {
+    const app = await import("../app-connection.ts");
+    (document.getElementById("conn-endpoint") as HTMLInputElement).value =
+      "http://storage.example.com";
+    (document.getElementById("conn-access-key") as HTMLInputElement).value =
+      "AKIA";
+    (document.getElementById("conn-secret-key") as HTMLInputElement).value =
+      "secret";
+
+    showConfirmMock.mockResolvedValueOnce(false);
+    await app.handleConnect();
+
+    expect(showConfirmMock).toHaveBeenCalledWith(
+      "Insecure connection",
+      expect.stringContaining("storage.example.com"),
+      expect.objectContaining({ okDanger: true }),
+    );
+    expect(connectMock).not.toHaveBeenCalled();
   });
 });

@@ -68,6 +68,11 @@
   background: var(--accent);
 }
 
+.bottom-drawer__resize-handle:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
+}
+
 .bottom-drawer__header {
   display: flex;
   align-items: center;

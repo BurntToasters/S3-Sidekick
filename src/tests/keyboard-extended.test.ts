@@ -19,6 +19,7 @@ const mockNavigateUp = vi.fn<() => Promise<void>>();
 const mockNavigateBack = vi.fn<() => Promise<void>>();
 const mockNavigateForward = vi.fn<() => Promise<void>>();
 const mockGetSelectableKeys = vi.fn();
+const mockHandleSelectAll = vi.fn();
 const mockUpdateSelectionUI = vi.fn();
 
 vi.mock("../context-menu.ts", () => ({
@@ -62,6 +63,7 @@ vi.mock("../browser.ts", () => ({
   navigateBack: mockNavigateBack,
   navigateForward: mockNavigateForward,
   getSelectableKeys: mockGetSelectableKeys,
+  handleSelectAll: mockHandleSelectAll,
   updateSelectionUI: mockUpdateSelectionUI,
 }));
 
@@ -115,6 +117,7 @@ describe("keyboard shortcuts extended", () => {
     mockNavigateBack.mockReset();
     mockNavigateForward.mockReset();
     mockGetSelectableKeys.mockReset();
+    mockHandleSelectAll.mockReset();
     mockUpdateSelectionUI.mockReset();
 
     mockIsDialogActive.mockReturnValue(false);
@@ -226,9 +229,7 @@ describe("keyboard shortcuts extended", () => {
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "a", ctrlKey: true }),
     );
-    expect(state.selectedKeys.has("file-a.txt")).toBe(true);
-    expect(state.selectedKeys.has("file-b.txt")).toBe(true);
-    expect(mockUpdateSelectionUI).toHaveBeenCalled();
+    expect(mockHandleSelectAll).toHaveBeenCalledWith(true);
 
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "u", ctrlKey: true }),

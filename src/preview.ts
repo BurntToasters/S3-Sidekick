@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeS3 } from "./connection.ts";
 import { escapeHtml, formatSize, basename, friendlyError } from "./utils.ts";
 import { state } from "./state.ts";
 import {
@@ -8,6 +8,11 @@ import {
   hidePreviewOverlay,
   shouldUseInspectorMount,
 } from "./inspector-mount.ts";
+import {
+  ensureInspectorOpenForPane,
+  focusInspectorPreviewPane,
+  markInspectorHasContent,
+} from "./inspector.ts";
 
 interface PreviewResponse {
   content_type: string;
@@ -85,12 +90,11 @@ function clearActivePreviewObjectUrl(): void {
   }
 }
 
+function mediaType(contentType: string): string {
+  return contentType.split(";", 1)[0].trim().toLowerCase();
+}
+
 export async function openPreview(key: string): Promise<void> {
-  const {
-    ensureInspectorOpenForPane,
-    focusInspectorPreviewPane,
-    markInspectorHasContent,
-  } = await import("./inspector.ts");
   ensureInspectorOpenForPane("preview");
   if (shouldUseInspectorMount()) {
     focusInspectorPreviewPane();
@@ -100,6 +104,7 @@ export async function openPreview(key: string): Promise<void> {
   const title = getPreviewTitleEl();
   const body = getPreviewBodyEl();
   const seq = ++previewSeq;
+  const bucket = state.currentBucket;
 
   clearActivePreviewObjectUrl();
   title.textContent = basename(key);
@@ -107,23 +112,24 @@ export async function openPreview(key: string): Promise<void> {
   body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading preview&#8230;</div>`;
 
   try {
-    const resp = await invoke<PreviewResponse>("preview_object", {
-      bucket: state.currentBucket,
+    const resp = await invokeS3<PreviewResponse>("preview_object", {
+      bucket,
       key,
     });
 
-    if (seq !== previewSeq) return;
+    if (seq !== previewSeq || state.currentBucket !== bucket) return;
 
     let html = "";
+    const type = mediaType(resp.content_type);
 
-    if (PREVIEWABLE_IMAGE_TYPES.has(resp.content_type)) {
-      if (resp.content_type === "image/svg+xml") {
+    if (PREVIEWABLE_IMAGE_TYPES.has(type)) {
+      if (type === "image/svg+xml") {
         const blob = new Blob([resp.data], { type: "image/svg+xml" });
         const url = URL.createObjectURL(blob);
         activePreviewObjectUrl = url;
         html += `<div class="preview-image"><img src="${url}" alt="${escapeHtml(basename(key))}" /></div>`;
       } else {
-        html += `<div class="preview-image"><img src="data:${resp.content_type};base64,${resp.data}" alt="${escapeHtml(basename(key))}" /></div>`;
+        html += `<div class="preview-image"><img src="data:${type};base64,${resp.data}" alt="${escapeHtml(basename(key))}" /></div>`;
       }
     } else if (resp.is_text) {
       html += `<pre class="preview-text">${escapeHtml(resp.data)}</pre>`;
@@ -137,11 +143,13 @@ export async function openPreview(key: string): Promise<void> {
 
     body.innerHTML = html;
   } catch (err) {
+    if (seq !== previewSeq || state.currentBucket !== bucket) return;
     body.innerHTML = `<div class="metadata-loading">Failed to load preview: ${escapeHtml(friendlyError(err))}</div>`;
   }
 }
 
 export function closePreview(): void {
+  previewSeq += 1;
   clearActivePreviewObjectUrl();
   for (const id of ["inspector-preview-body", "preview-body"]) {
     document.getElementById(id)?.replaceChildren();

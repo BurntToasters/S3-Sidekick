@@ -83,7 +83,8 @@
   color: var(--accent);
   cursor: pointer;
   font: inherit;
-  padding: 1px 3px;
+  min-height: 24px;
+  padding: 3px 6px;
   border-radius: var(--radius);
 }
 

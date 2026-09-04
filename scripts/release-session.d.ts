@@ -7,6 +7,7 @@ export interface ReleaseIdentity {
   rustc: string;
   packageLockSha256: string;
   cargoLockSha256: string;
+  sourceTreeSha256: string;
 }
 
 export interface ReleaseSession extends ReleaseIdentity {
@@ -24,6 +25,7 @@ export const RELEASE_SESSION_RELATIVE_PATH: string;
 export const RELEASE_BOOTSTRAP_PATHS: Set<string>;
 
 export function currentReleaseIdentity(root?: string): ReleaseIdentity;
+export function sha256WorkingTree(root?: string): string;
 export function createReleaseSession(root?: string): ReleaseSession;
 export function startReleaseSession(root?: string): ReleaseSession;
 export function clearQualityGateProof(root?: string): void;

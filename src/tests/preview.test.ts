@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 describe("preview module", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     mockInvoke.mockReset();
     document.body.innerHTML = `
@@ -16,6 +16,10 @@ describe("preview module", () => {
         <div id="preview-body"></div>
       </div>
     `;
+    const { state } = await import("../state.ts");
+    state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
   });
 
   it("canPreview handles supported and unsupported extensions", async () => {
@@ -56,6 +60,7 @@ describe("preview module", () => {
     expect(mockInvoke).toHaveBeenCalledWith("preview_object", {
       bucket: "bucket-a",
       key: "notes/readme.txt",
+      connectionId: "test-connection",
     });
   });
 

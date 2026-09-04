@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main, beta]
   pull_request:
     branches: [main, beta]
 
@@ -14,8 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: "22"
-  RUST_VERSION: "1.97.1"
+  NODE_VERSION: "24.20.0"
+  NPM_VERSION: "12.0.2"
+  RUST_VERSION: "1.98.0"
 
 jobs:
   verify:
@@ -26,22 +26,27 @@ jobs:
       matrix:
         os: [ubuntu-22.04, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
+      - name: Install pinned npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: |
             src-tauri -> target
@@ -63,13 +68,37 @@ jobs:
             libdbus-1-dev
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      - name: Verify npm registry signatures
+        run: npm audit signatures
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high --ignore-scripts
+
+      - name: Audit build and development dependencies
+        run: npm audit --audit-level=high --ignore-scripts
+
+      - name: Install pinned Cargo advisory scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit locked Cargo dependencies
+        run: cargo audit --file src-tauri/Cargo.lock
+
+      - name: Enforce dependency license and source policy
+        run: |
+          npm run licenses
+          node scripts/release-evidence.js --check-licenses
 
       - name: Run test suite and formatting checks
         run: npm run test:all
 
+      - name: Show generated schema drift
+        if: failure()
+        run: git diff -- src-tauri/gen/schemas
+
       - name: Clippy (deny warnings)
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build frontend
         run: npm run build

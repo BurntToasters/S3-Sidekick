@@ -10,6 +10,7 @@ interface PromptOptions {
   inputType?: "text" | "password";
   inputPlaceholder?: string;
   inputDefault?: string;
+  validationMessage?: string;
   validate?: (value: string) => Promise<boolean>;
 }
 
@@ -28,6 +29,7 @@ interface DialogConfig {
   inputType: "text" | "password";
   inputPlaceholder: string;
   inputDefault: string;
+  validationMessage?: string;
   validate?: (value: string) => Promise<boolean>;
 }
 
@@ -44,7 +46,13 @@ function els() {
       ".dialog-input-wrapper",
     ) as HTMLElement,
     inputIcon: document.getElementById("dialog-input-icon") as HTMLElement,
+    inputLabel: document.getElementById(
+      "dialog-input-label",
+    ) as HTMLElement | null,
     input: document.getElementById("dialog-input") as HTMLInputElement,
+    validationError: document.getElementById(
+      "dialog-validation-error",
+    ) as HTMLElement | null,
     reveal: document.getElementById("dialog-input-reveal") as HTMLButtonElement,
     cancel: document.getElementById("dialog-cancel") as HTMLButtonElement,
     ok: document.getElementById("dialog-ok") as HTMLButtonElement,
@@ -52,6 +60,12 @@ function els() {
 }
 
 function shakeDialogBox(box: HTMLElement) {
+  if (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  ) {
+    return;
+  }
   box.animate(
     [
       { transform: "translateX(0)" },
@@ -79,9 +93,35 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.input.placeholder = config.inputPlaceholder;
     el.input.value = config.inputDefault;
 
+    function clearValidationError() {
+      el.input.removeAttribute("aria-invalid");
+      el.input.removeAttribute("aria-errormessage");
+      if (el.validationError) {
+        el.validationError.textContent = "";
+        el.validationError.hidden = true;
+      }
+    }
+
+    function showValidationError(message: string) {
+      el.input.setAttribute("aria-invalid", "true");
+      if (el.validationError) {
+        el.input.setAttribute("aria-errormessage", el.validationError.id);
+        el.validationError.textContent = message;
+        el.validationError.hidden = false;
+      }
+      shakeDialogBox(el.box);
+      el.input.focus();
+    }
+
+    clearValidationError();
+
     const isPassword = config.inputType === "password";
+    const inputLabel = isPassword ? "Password" : "Value";
+    el.input.setAttribute("aria-label", inputLabel);
+    if (el.inputLabel) el.inputLabel.textContent = inputLabel;
     el.inputWrapper.classList.toggle("dialog-input-wrapper--icon", isPassword);
     el.reveal.hidden = !isPassword;
+    el.reveal.tabIndex = isPassword ? 0 : -1;
     if (isPassword) {
       el.reveal.textContent = "Show";
       el.reveal.setAttribute("aria-label", "Show password");
@@ -91,6 +131,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.cancel.textContent = config.cancelLabel;
     el.ok.textContent = config.okLabel;
     el.ok.className = config.okDanger ? "btn btn--danger" : "btn btn--primary";
+    el.ok.disabled = false;
 
     el.overlay.classList.add("active");
     active = true;
@@ -112,6 +153,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       // so it is deliberately excluded here to match native Tab behavior.
       const candidates: (HTMLElement | null)[] = [
         config.showInput ? el.input : null,
+        config.showInput && isPassword ? el.reveal : null,
         config.showCancel ? el.cancel : null,
         el.ok,
       ];
@@ -159,37 +201,68 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       el.cancel.removeEventListener("click", onCancel);
       el.ok.removeEventListener("click", onOk);
       el.input.removeEventListener("keydown", onInputKey);
+      el.input.removeEventListener("input", clearValidationError);
       el.reveal.removeEventListener("click", onReveal);
+      clearValidationError();
       el.input.type = "text";
       el.reveal.hidden = true;
+      el.ok.disabled = false;
       document.removeEventListener("keydown", onEscape, true);
       document.removeEventListener("keydown", onTrapFocus, true);
-      active = false;
       // Restore focus to whatever was focused before the dialog opened, unless
       // another dialog is about to take over from the queue.
       if (queue.length > 0) {
+        // Reserve active state until scheduled dialog starts. Promise
+        // continuations may enqueue follow-up dialogs before next timer fires;
+        // letting them present immediately would overlap handlers and reorder
+        // user consent.
+        active = true;
         const next = queue.shift();
         if (next) setTimeout(next, 0);
-      } else if (previouslyFocused?.isConnected) {
-        previouslyFocused.focus();
+      } else {
+        active = false;
+        if (previouslyFocused?.isConnected) previouslyFocused.focus();
       }
     }
 
+    let validating = false;
+    let validateGeneration = 0;
+
     function onCancel() {
+      validateGeneration += 1;
+      validating = false;
+      el.ok.disabled = false;
       cleanup();
       resolve(config.showInput ? null : false);
     }
 
     async function onOk() {
+      if (validating) return;
       if (config.validate) {
+        const generation = ++validateGeneration;
+        validating = true;
         el.ok.disabled = true;
-        const ok = await config.validate(el.input.value);
-        el.ok.disabled = false;
-        if (!ok) {
-          shakeDialogBox(el.box);
-          el.input.value = "";
-          el.input.focus();
+        try {
+          const ok = await config.validate(el.input.value);
+          if (generation !== validateGeneration) return;
+          if (!ok) {
+            el.input.value = "";
+            showValidationError(
+              config.validationMessage ?? "Please enter a valid value.",
+            );
+            return;
+          }
+        } catch {
+          if (generation !== validateGeneration) return;
+          showValidationError(
+            "Validation could not be completed. Please try again.",
+          );
           return;
+        } finally {
+          if (generation === validateGeneration) {
+            validating = false;
+            el.ok.disabled = false;
+          }
         }
       }
       cleanup();
@@ -219,6 +292,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.ok.addEventListener("click", onOk);
     if (config.showInput) {
       el.input.addEventListener("keydown", onInputKey);
+      el.input.addEventListener("input", clearValidationError);
     }
     document.addEventListener("keydown", onEscape, true);
     document.addEventListener("keydown", onTrapFocus, true);
@@ -274,6 +348,7 @@ export function showPrompt(
         inputType: options?.inputType ?? "text",
         inputPlaceholder: options?.inputPlaceholder ?? "",
         inputDefault: options?.inputDefault ?? "",
+        validationMessage: options?.validationMessage,
         validate: options?.validate,
       }) as Promise<string | null>,
   );

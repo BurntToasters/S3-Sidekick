@@ -1,306 +1,402 @@
-// For some reason, I needed to make this script because GitHub started to split my releases into two drafts.
-// make ONE machine the single creator (win), this script has two modes:
-//   (default)  create-or-reuse the single draft. Run by the Windows machine only.
-//   --wait     poll until that draft exists; NEVER create. Run by mac/linux so
-//              they only ever reuse the draft Windows created (no duplicates).
+// One machine (Windows by convention) creates the canonical draft and descriptor.
+// Other release hosts use --wait and consume that exact signed descriptor.
 
-const https = require('https');
+"use strict";
 
-require('dotenv').config();
+const fs = require("node:fs");
+const path = require("node:path");
 
-const GH_TOKEN = process.env.GH_TOKEN;
-const REPO_OWNER = 'BurntToasters';
-const REPO_NAME = 's3-sidekick';
-const GH_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.GH_REQUEST_TIMEOUT_MS || '30000', 10);
-const GH_REQUEST_RETRIES = Number.parseInt(process.env.GH_REQUEST_RETRIES || '3', 10);
-const GH_REQUEST_RETRY_DELAY_MS = Number.parseInt(
-  process.env.GH_REQUEST_RETRY_DELAY_MS || '1500',
-  10
+const {
+  assertGitHubCliAuthenticated,
+  downloadReleaseAsset,
+  githubApi,
+  uploadReleaseAssetById,
+} = require("./github-cli.cjs");
+const {
+  DESCRIPTOR_NAME,
+  DESCRIPTOR_SIGNATURE_NAME,
+  assertCleanSource,
+  assertExistingGitHubTagCommit,
+  classifyImmutableAsset,
+  createReleaseDescriptor,
+  listAllReleaseAssets,
+  readReleaseDescriptor,
+  selectUniqueTaggedRelease,
+  signDescriptor,
+  sourceCommit,
+  validateDescriptorForCheckout,
+  validateMutableRelease,
+  verifyDescriptorSignature,
+  writeReleaseDescriptor,
+} = require("./release-integrity.cjs");
+const { formatReleaseTitle } = require("./release-title.cjs");
+const packageJson = require("../package.json");
+
+const REPOSITORY_ROOT = path.resolve(__dirname, "..");
+const RELEASE_DIR = path.join(REPOSITORY_ROOT, "release");
+const CHANGELOG_PATH = path.join(REPOSITORY_ROOT, "CHANGELOG.md");
+const DESCRIPTOR_PATH = path.join(RELEASE_DIR, DESCRIPTOR_NAME);
+const DESCRIPTOR_SIGNATURE_PATH = path.join(
+  RELEASE_DIR,
+  DESCRIPTOR_SIGNATURE_NAME,
 );
-
-// --wait mode: how long mac/linux will wait for the Windows machine to create
-// the draft before giving up (defaults to 30 minutes, polling every 15s).
-const WAIT_MODE = process.argv.slice(2).includes('--wait');
-const WAIT_TIMEOUT_MS = Number.parseInt(process.env.RELEASE_DRAFT_WAIT_TIMEOUT_MS || '1800000', 10);
-const WAIT_POLL_INTERVAL_MS = Number.parseInt(
-  process.env.RELEASE_DRAFT_WAIT_POLL_MS || '15000',
-  10
-);
-
-const packageJson = require('../package.json');
-const { formatReleaseTitle } = require('./release-title.cjs');
+const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
+const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
+const REPOSITORY = `${REPO_OWNER}/${REPO_NAME}`;
 const VERSION = packageJson.version;
-const TAG_NAME = 'v' + VERSION;
-const IS_PRERELEASE = VERSION.includes('beta') || VERSION.includes('alpha');
+const TAG_NAME = `v${VERSION}`;
+const IS_PRERELEASE = /-(?:alpha|beta|rc)\./i.test(VERSION);
+const SOURCE_COMMIT = sourceCommit(REPOSITORY_ROOT);
+const GH_REQUEST_RETRIES = Number.parseInt(
+  process.env.GH_REQUEST_RETRIES || "3",
+  10,
+);
+const GH_REQUEST_RETRY_DELAY_MS = Number.parseInt(
+  process.env.GH_REQUEST_RETRY_DELAY_MS || "1500",
+  10,
+);
+const WAIT_MODE = process.argv.slice(2).includes("--wait");
+const WAIT_TIMEOUT_MS = Number.parseInt(
+  process.env.RELEASE_DRAFT_WAIT_TIMEOUT_MS || "1800000",
+  10,
+);
+const WAIT_POLL_INTERVAL_MS = Number.parseInt(
+  process.env.RELEASE_DRAFT_WAIT_POLL_MS || "15000",
+  10,
+);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readChangelogReleaseBody(changelogPath = CHANGELOG_PATH) {
+  let body;
+  try {
+    body = fs.readFileSync(changelogPath, "utf8");
+  } catch (error) {
+    throw new Error(
+      `CHANGELOG.md is required for GitHub release notes: ${error && error.message ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  if (!body.trim())
+    throw new Error(
+      "CHANGELOG.md is empty; refusing to set blank release notes.",
+    );
+  return body;
+}
+
 function isRetryableGithubError(error) {
   if (!error) return false;
-
-  const retryableStatusCodes = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
-  const retryableCodes = new Set([
-    'ETIMEDOUT',
-    'ECONNRESET',
-    'ENOTFOUND',
-    'EAI_AGAIN',
-    'ECONNREFUSED',
-    'EPIPE',
+  const retryableStatusCodes = new Set([
+    408, 409, 425, 429, 500, 502, 503, 504,
   ]);
-
-  if (typeof error.statusCode === 'number' && retryableStatusCodes.has(error.statusCode)) {
+  const retryableCodes = new Set([
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "ECONNREFUSED",
+    "EPIPE",
+  ]);
+  if (
+    typeof error.statusCode === "number" &&
+    retryableStatusCodes.has(error.statusCode)
+  )
     return true;
-  }
-  if (typeof error.code === 'string' && retryableCodes.has(error.code)) {
+  if (typeof error.code === "string" && retryableCodes.has(error.code))
     return true;
-  }
-
-  const msg = String(error.message || '').toLowerCase();
-  return msg.includes('timeout') || msg.includes('socket hang up') || msg.includes('aborted');
+  const message = String(error.message || "").toLowerCase();
+  return (
+    message.includes("timeout") ||
+    message.includes("socket hang up") ||
+    message.includes("aborted")
+  );
 }
 
 function githubRequest(method, endpoint, body) {
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'api.github.com',
-      path: endpoint,
-      method: method,
-      headers: {
-        Authorization: 'Bearer ' + GH_TOKEN,
-        'User-Agent': 'S3-Sidekick-Release-Script',
-        Accept: 'application/vnd.github.v3+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    };
-
-    if (body) {
-      options.headers['Content-Type'] = 'application/json';
-    }
-
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => (data += chunk));
-      res.on('aborted', () => {
-        const err = new Error('GitHub API response aborted for ' + method + ' ' + endpoint);
-        err.code = 'ECONNRESET';
-        reject(err);
-      });
-      res.on('end', () => {
-        const statusCode = res.statusCode || 0;
-        try {
-          if (statusCode >= 200 && statusCode < 300) {
-            resolve(data ? JSON.parse(data) : {});
-          } else {
-            const json = data ? JSON.parse(data) : {};
-            const err = new Error(
-              'GitHub API error ' +
-                statusCode +
-                ' for ' +
-                method +
-                ' ' +
-                endpoint +
-                ': ' +
-                (json.message || data || 'unknown error')
-            );
-            err.statusCode = statusCode;
-            reject(err);
-          }
-        } catch (e) {
-          const err = new Error(
-            'GitHub API invalid JSON for ' + method + ' ' + endpoint + ': ' + e.message
-          );
-          err.statusCode = statusCode;
-          reject(err);
-        }
-      });
-    });
-
-    req.setTimeout(GH_REQUEST_TIMEOUT_MS, () => {
-      const err = new Error(
-        'GitHub API timeout after ' + GH_REQUEST_TIMEOUT_MS + 'ms for ' + method + ' ' + endpoint
-      );
-      err.code = 'ETIMEDOUT';
-      req.destroy(err);
-    });
-
-    req.on('error', reject);
-
-    if (body) {
-      req.write(JSON.stringify(body));
-    }
-    req.end();
-  });
+  return Promise.resolve(githubApi(method, endpoint, body));
 }
 
 async function githubRequestWithRetry(method, endpoint, body) {
   const attempts = Math.max(1, GH_REQUEST_RETRIES);
-
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return await githubRequest(method, endpoint, body);
     } catch (error) {
-      const canRetry = attempt < attempts && isRetryableGithubError(error);
-      if (!canRetry) {
-        throw error;
-      }
-
+      if (attempt >= attempts || !isRetryableGithubError(error)) throw error;
       const backoffMs = GH_REQUEST_RETRY_DELAY_MS * attempt;
       console.log(
-        '   Retry ' +
-          attempt +
-          '/' +
-          (attempts - 1) +
-          ' in ' +
-          backoffMs +
-          'ms (' +
-          error.message +
-          ')'
+        `   Retry ${attempt}/${attempts - 1} in ${backoffMs}ms (${error.message})`,
       );
       await sleep(backoffMs);
     }
   }
+  throw new Error("GitHub retry loop exhausted unexpectedly.");
+}
+
+function releaseValidationOptions(expectedId) {
+  return {
+    expectedId,
+    expectedPrerelease: IS_PRERELEASE,
+    expectedTag: TAG_NAME,
+    expectedTargetCommitish: SOURCE_COMMIT,
+  };
+}
+
+async function assertExistingTagMatchesSource(
+  request = githubRequestWithRetry,
+) {
+  return assertExistingGitHubTagCommit(request, {
+    expectedCommit: SOURCE_COMMIT,
+    owner: REPO_OWNER,
+    repository: REPO_NAME,
+    tag: TAG_NAME,
+  });
 }
 
 async function findExistingRelease() {
-  // Draft releases are not returned by the "get release by tag" endpoint
-  // (no git tag exists yet), so we list and match on tag_name.
-  const releases = await githubRequestWithRetry(
-    'GET',
-    '/repos/' + REPO_OWNER + '/' + REPO_NAME + '/releases?per_page=100'
+  const releases = await listAllReleaseAssets((page, perPage) =>
+    githubRequestWithRetry(
+      "GET",
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=${perPage}&page=${page}`,
+    ),
   );
-
-  if (!Array.isArray(releases)) {
-    throw new Error('Unexpected releases payload type');
-  }
-
-  const matching = releases.filter((r) => r.tag_name === TAG_NAME);
-  if (matching.length === 0) {
-    return null;
-  }
-
-  // Prefer a draft (electron-builder publishes into drafts); fall back to any.
-  const draft = matching.find((r) => r.draft);
-  return draft || matching[0];
+  return selectUniqueTaggedRelease(releases, releaseValidationOptions());
 }
 
-async function ensureDraftRelease() {
-  console.log('Ensuring draft release exists for ' + TAG_NAME + '...');
-
-  const existing = await findExistingRelease();
-  if (existing) {
-    console.log(
-      '   Draft already exists: ' +
-        (existing.name || TAG_NAME) +
-        ' (id ' +
-        existing.id +
-        ', ' +
-        (existing.assets ? existing.assets.length : 0) +
-        ' assets) - skipping create.'
-    );
-    return existing;
-  }
-
-  console.log('   No release found. Creating draft...');
-  try {
-    const release = await githubRequestWithRetry(
-      'POST',
-      '/repos/' + REPO_OWNER + '/' + REPO_NAME + '/releases',
-      {
-        // Tag stays machine-readable ("v" + version) so the updater and asset
-        // URLs keep working; the title is the BCLS human-facing form.
-        tag_name: TAG_NAME,
-        name: formatReleaseTitle(VERSION),
-        draft: true,
-        prerelease: IS_PRERELEASE,
-      }
-    );
-    console.log('   Created draft release: ' + (release.name || TAG_NAME) + ' (id ' + release.id + ')');
-    return release;
-  } catch (error) {
-    // Another concurrent run may have created it (422 already_exists) - re-fetch.
-    if (error.statusCode === 422) {
-      console.log('   Create returned 422; re-checking for existing draft...');
-      await sleep(2000);
-      const afterRetry = await findExistingRelease();
-      if (afterRetry) {
-        console.log('   Found existing draft after retry: id ' + afterRetry.id);
-        return afterRetry;
-      }
-    }
-    throw error;
-  }
+async function loadReleaseById(releaseId) {
+  const release = await githubRequestWithRetry(
+    "GET",
+    `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${releaseId}`,
+  );
+  return validateMutableRelease(release, releaseValidationOptions(releaseId));
 }
 
-async function waitForDraftRelease() {
-  const deadline = Date.now() + WAIT_TIMEOUT_MS;
+async function syncReleaseNotesBody(release, body) {
+  validateMutableRelease(release, releaseValidationOptions(release.id));
+  await loadReleaseById(release.id);
+  const updated = await githubRequestWithRetry(
+    "PATCH",
+    `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${release.id}`,
+    { name: formatReleaseTitle(VERSION), body },
+  );
+  validateMutableRelease(updated, releaseValidationOptions(release.id));
   console.log(
-    'Waiting for draft release ' +
-      TAG_NAME +
-      ' (created by the Windows machine); will NOT create it here...'
+    `   Synced CHANGELOG.md into draft ${TAG_NAME} (${body.length} chars).`,
   );
+  return updated;
+}
 
-  let attempt = 0;
-  for (;;) {
-    attempt += 1;
-    const existing = await findExistingRelease();
-    if (existing) {
-      console.log(
-        '   Found draft: ' +
-          (existing.name || TAG_NAME) +
-          ' (id ' +
-          existing.id +
-          ', ' +
-          (existing.assets ? existing.assets.length : 0) +
-          ' assets). Proceeding.'
-      );
-      return existing;
-    }
+async function listReleaseAssets(releaseId) {
+  return listAllReleaseAssets((page, perPage) =>
+    githubRequestWithRetry(
+      "GET",
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${releaseId}/assets?per_page=${perPage}&page=${page}`,
+    ),
+  );
+}
 
-    if (Date.now() >= deadline) {
-      throw new Error(
-        'Timed out after ' +
-          Math.round(WAIT_TIMEOUT_MS / 1000) +
-          's waiting for draft ' +
-          TAG_NAME +
-          '. Run "npm run release:draft" on the Windows machine first (or run it here once), then retry.'
-      );
-    }
+async function uploadImmutableDraftAsset(release, filePath) {
+  await loadReleaseById(release.id);
+  const assets = await listReleaseAssets(release.id);
+  const name = path.basename(filePath);
+  const matches = assets.filter((asset) => asset?.name === name);
+  if (matches.length > 1)
+    throw new Error(`Draft has duplicate assets named ${name}.`);
+  const action = classifyImmutableAsset(matches[0], filePath);
+  if (action === "skip") {
+    console.log(`   Descriptor asset already matches: ${name}`);
+    return;
+  }
+  await loadReleaseById(release.id);
+  uploadReleaseAssetById(REPOSITORY, release.id, filePath);
+  console.log(`   Uploaded immutable descriptor asset: ${name}`);
+}
 
-    console.log(
-      '   Draft not found yet (attempt ' +
-        attempt +
-        '); re-checking in ' +
-        Math.round(WAIT_POLL_INTERVAL_MS / 1000) +
-        's...'
+function descriptorAssets(assets) {
+  const byName = new Map(assets.map((asset) => [asset?.name, asset]));
+  return {
+    descriptor: byName.get(DESCRIPTOR_NAME),
+    signature: byName.get(DESCRIPTOR_SIGNATURE_NAME),
+  };
+}
+
+async function downloadAndValidateDescriptor(
+  release,
+  descriptorAsset,
+  signatureAsset,
+) {
+  fs.mkdirSync(RELEASE_DIR, { recursive: true });
+  downloadReleaseAsset(REPOSITORY, descriptorAsset.id, DESCRIPTOR_PATH);
+  downloadReleaseAsset(
+    REPOSITORY,
+    signatureAsset.id,
+    DESCRIPTOR_SIGNATURE_PATH,
+  );
+  verifyDescriptorSignature(DESCRIPTOR_PATH, DESCRIPTOR_SIGNATURE_PATH);
+  const descriptor = readReleaseDescriptor(DESCRIPTOR_PATH);
+  validateDescriptorForCheckout(descriptor, {
+    root: REPOSITORY_ROOT,
+    release,
+    repository: { name: REPO_NAME, owner: REPO_OWNER },
+  });
+  return descriptor;
+}
+
+async function ensureCanonicalDescriptor(release, { waitOnly = false } = {}) {
+  await assertExistingTagMatchesSource();
+  const assets = await listReleaseAssets(release.id);
+  const { descriptor: descriptorAsset, signature: signatureAsset } =
+    descriptorAssets(assets);
+  if (descriptorAsset && signatureAsset) {
+    await downloadAndValidateDescriptor(
+      release,
+      descriptorAsset,
+      signatureAsset,
     );
-    await sleep(WAIT_POLL_INTERVAL_MS);
+    console.log(
+      `   Consumed signed descriptor bound to release id ${release.id}.`,
+    );
+    return true;
+  }
+  if (waitOnly) return false;
+  if (signatureAsset && !descriptorAsset) {
+    throw new Error(
+      "Draft contains a descriptor signature without its descriptor; refusing repair by replacement.",
+    );
+  }
+
+  fs.mkdirSync(RELEASE_DIR, { recursive: true });
+  if (descriptorAsset) {
+    downloadReleaseAsset(REPOSITORY, descriptorAsset.id, DESCRIPTOR_PATH);
+    const descriptor = readReleaseDescriptor(DESCRIPTOR_PATH);
+    validateDescriptorForCheckout(descriptor, {
+      root: REPOSITORY_ROOT,
+      release,
+      repository: { name: REPO_NAME, owner: REPO_OWNER },
+    });
+  } else {
+    const descriptor = createReleaseDescriptor({
+      root: REPOSITORY_ROOT,
+      release,
+    });
+    writeReleaseDescriptor(DESCRIPTOR_PATH, descriptor);
+    await uploadImmutableDraftAsset(release, DESCRIPTOR_PATH);
+  }
+  signDescriptor(DESCRIPTOR_PATH, DESCRIPTOR_SIGNATURE_PATH);
+  await uploadImmutableDraftAsset(release, DESCRIPTOR_SIGNATURE_PATH);
+  verifyDescriptorSignature(DESCRIPTOR_PATH, DESCRIPTOR_SIGNATURE_PATH);
+  console.log(
+    `   Canonical signed descriptor is ready for release id ${release.id}.`,
+  );
+  return true;
+}
+
+async function ensureDraftRelease({ assertSource = assertCleanSource } = {}) {
+  const checkedCommit = assertSource(REPOSITORY_ROOT, {
+    expectedCommit: SOURCE_COMMIT,
+  });
+  try {
+    console.log(`Ensuring immutable draft release exists for ${TAG_NAME}...`);
+    const body = readChangelogReleaseBody();
+    let release = await findExistingRelease();
+    if (release) {
+      release = await syncReleaseNotesBody(release, body);
+    } else {
+      console.log("   No release found. Creating draft...");
+      try {
+        release = await githubRequestWithRetry(
+          "POST",
+          `/repos/${REPO_OWNER}/${REPO_NAME}/releases`,
+          {
+            tag_name: TAG_NAME,
+            name: formatReleaseTitle(VERSION),
+            body,
+            draft: true,
+            prerelease: IS_PRERELEASE,
+            target_commitish: SOURCE_COMMIT,
+          },
+        );
+        validateMutableRelease(release, releaseValidationOptions(release.id));
+      } catch (error) {
+        if (error.statusCode !== 422) throw error;
+        await sleep(2000);
+        release = await findExistingRelease();
+        if (!release) throw error;
+        release = await syncReleaseNotesBody(release, body);
+      }
+    }
+    await ensureCanonicalDescriptor(release);
+    return release;
+  } finally {
+    assertSource(REPOSITORY_ROOT, { expectedCommit: checkedCommit });
+  }
+}
+
+async function waitForDraftRelease({ assertSource = assertCleanSource } = {}) {
+  const checkedCommit = assertSource(REPOSITORY_ROOT, {
+    expectedCommit: SOURCE_COMMIT,
+  });
+  try {
+    const deadline = Date.now() + WAIT_TIMEOUT_MS;
+    console.log(
+      `Waiting for canonical draft ${TAG_NAME}; this host will never create or patch it...`,
+    );
+    let attempt = 0;
+    for (;;) {
+      attempt += 1;
+      const release = await findExistingRelease();
+      if (
+        release &&
+        (await ensureCanonicalDescriptor(release, { waitOnly: true }))
+      ) {
+        console.log(
+          `   Found descriptor-bound draft id ${release.id}. Proceeding.`,
+        );
+        return release;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for signed descriptor on draft ${TAG_NAME}. Run release:draft on the coordinator first.`,
+        );
+      }
+      console.log(
+        `   Draft/descriptor not ready (attempt ${attempt}); retrying in ${Math.round(WAIT_POLL_INTERVAL_MS / 1000)}s...`,
+      );
+      await sleep(WAIT_POLL_INTERVAL_MS);
+    }
+  } finally {
+    assertSource(REPOSITORY_ROOT, { expectedCommit: checkedCommit });
   }
 }
 
 async function main() {
-  if (!GH_TOKEN) {
-    if (WAIT_MODE) {
-      console.warn('⚠ WARN: GH_TOKEN not set - cannot check for the draft release. Skipping wait.');
-    } else {
-      console.warn('⚠ WARN: GH_TOKEN not set - cannot pre-create draft release. Skipping.');
-      console.warn('   (electron-builder will create the draft itself, but the duplicate-draft');
-      console.warn('    race may reoccur without a pre-created draft.)');
-    }
-    return;
-  }
-
-  if (WAIT_MODE) {
-    await waitForDraftRelease();
-  } else {
-    await ensureDraftRelease();
-  }
+  assertGitHubCliAuthenticated();
+  if (WAIT_MODE) await waitForDraftRelease();
+  else await ensureDraftRelease();
 }
 
-main().catch((error) => {
-  const message = error && error.message ? error.message : String(error);
-  console.error('✗ ERROR: Failed to ensure draft release: ' + message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(
+      `✗ ERROR: Failed to prepare canonical draft: ${error && error.message ? error.message : String(error)}`,
+    );
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  SOURCE_COMMIT,
+  assertExistingTagMatchesSource,
+  descriptorAssets,
+  ensureCanonicalDescriptor,
+  ensureDraftRelease,
+  findExistingRelease,
+  isRetryableGithubError,
+  readChangelogReleaseBody,
+  releaseValidationOptions,
+  syncReleaseNotesBody,
+  uploadImmutableDraftAsset,
+  waitForDraftRelease,
+};

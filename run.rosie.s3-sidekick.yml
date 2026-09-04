@@ -1,10 +1,16 @@
 app-id: run.rosie.s3-sidekick
 runtime: org.gnome.Platform
-runtime-version: '49'
+runtime-version: "49"
 sdk: org.gnome.Sdk
 sdk-extensions:
-  - org.freedesktop.Sdk.Extension.node22
+  - org.freedesktop.Sdk.Extension.node24
   - org.freedesktop.Sdk.Extension.rust-stable
+# Branch refs are signed into the release descriptor together with coordinator-
+# supplied x64/arm64 commits; Linux hosts must match them before building.
+# release-ref: org.gnome.Platform//49
+# release-ref: org.gnome.Sdk//49
+# release-ref: org.freedesktop.Sdk.Extension.node24//25.08
+# release-ref: org.freedesktop.Sdk.Extension.rust-stable//25.08
 command: s3-sidekick
 separate-locales: false
 
@@ -23,21 +29,24 @@ modules:
   - name: s3-sidekick
     buildsystem: simple
     build-options:
-      build-args:
-        - --share=network
-      append-path: /run/build/s3-sidekick/cargo/bin:/usr/lib/sdk/node22/bin:/usr/lib/sdk/rust-stable/bin
+      # flatpak-builder runs with downloads disabled. The release wrapper
+      # reconstructs lockfile-verified node_modules with a disposable cache and
+      # final offline npm ci, then stages Cargo vendor sources without secrets.
+      append-path: /usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
       env:
-        CARGO_HOME: /run/build/s3-sidekick/cargo
-        RUSTUP_HOME: /run/build/s3-sidekick/rustup
-        npm_config_cache: /run/build/s3-sidekick/npm-cache
-        HUSKY: '0'
+        CARGO_NET_OFFLINE: "true"
+        HUSKY: "0"
+        npm_config_ignore_scripts: "true"
+        npm_config_offline: "true"
     build-commands:
-      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-      - npm ci
+      - test "$(node --version)" = "v24.20.0"
+      - test "$(npm --version)" = "12.0.2"
+      - test "$(rustc --version | cut -d' ' -f2)" = "1.98.0"
+      - test ! -e .env && test ! -e .env.local && test ! -e .env.production
       - npm run sync-version
       - npm run licenses
       - npm run build
-      - unset CFLAGS CXXFLAGS CFLAGS_x86_64_unknown_linux_gnu && npx tauri build --no-bundle
+      - unset CFLAGS CXXFLAGS CFLAGS_x86_64_unknown_linux_gnu && npx --no-install tauri build --no-bundle -- --locked
       - install -Dm755 src-tauri/target/release/s3-sidekick /app/bin/s3-sidekick
       - install -Dm644 run.rosie.s3-sidekick.desktop /app/share/applications/run.rosie.s3-sidekick.desktop
       - install -Dm644 run.rosie.s3-sidekick.metainfo.xml /app/share/metainfo/run.rosie.s3-sidekick.metainfo.xml
@@ -46,11 +55,12 @@ modules:
       - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/run.rosie.s3-sidekick.png
     sources:
       - type: dir
-        path: .
+        path: .flatpak-source
         skip:
+          - .env
+          - .env.*
           - .git
           - .github
-          - node_modules
           - release
           - release-artifacts
           - dist

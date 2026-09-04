@@ -23,7 +23,6 @@ import {
   clearSelection,
   setLastClickedKey,
   updateSelectionUI,
-  getSelectableKeys,
   toggleSort,
   navigateBack,
   navigateForward,
@@ -90,6 +89,7 @@ import {
   refreshBookmarkBar,
   updateBookmarkBtn,
   handleNewConnection,
+  awsRegionalEndpoint,
 } from "./app-connection.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
 import {
@@ -115,6 +115,8 @@ import {
   handleContextMenu,
   handleBucketContextMenu,
 } from "./app-context-menu.ts";
+
+let dragDropUnlisten: (() => void) | null = null;
 
 export function wireEvents(): void {
   dom.connectBtn.addEventListener("click", handleConnect);
@@ -168,8 +170,9 @@ export function wireEvents(): void {
       ) as HTMLInputElement | null;
       const preset = providerPreset.value;
       if (preset === "aws") {
-        if (endpointInput) endpointInput.value = "";
-        if (regionInput) regionInput.value = "us-east-1";
+        const region = "us-east-1";
+        if (endpointInput) endpointInput.value = awsRegionalEndpoint(region);
+        if (regionInput) regionInput.value = region;
       } else if (preset === "do") {
         if (endpointInput)
           endpointInput.value = "https://nyc3.digitaloceanspaces.com";
@@ -332,6 +335,8 @@ export function wireEvents(): void {
   window.addEventListener("beforeunload", () => {
     disposeFilterInputDebounce();
     disposeModalLayerObserver();
+    dragDropUnlisten?.();
+    dragDropUnlisten = null;
     void disposeTransferQueueUI();
   });
 
@@ -398,9 +403,11 @@ export function wireEvents(): void {
     .getElementById("security-lock-btn")!
     .addEventListener("click", () => {
       void (async () => {
+        // Disconnect first so the backend cancels and drains operations that
+        // already cloned the S3 client before encrypted credentials are locked.
+        if (state.connected && !(await handleDisconnect())) return;
         const locked = await handleLockNow(setStatus);
         if (locked) {
-          if (state.connected) await handleDisconnect();
           setConnectionInputs("", "", "", "");
           clearBookmarks();
           refreshBookmarkBar();
@@ -539,7 +546,12 @@ export function wireEvents(): void {
       !target.closest(".col-check")
     ) {
       const prefix = row.dataset.prefix;
-      if (prefix !== undefined) void navigateToFolder(prefix);
+      if (prefix !== undefined) {
+        void navigateToFolder(prefix).catch((err) => {
+          setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+          logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
+        });
+      }
       return;
     }
 
@@ -590,12 +602,34 @@ export function wireEvents(): void {
       return;
     }
 
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const rows = Array.from(
+        dom.objectTbody.querySelectorAll<HTMLElement>(".object-row"),
+      );
+      const currentIndex = rows.indexOf(row);
+      const nextIndex =
+        e.key === "ArrowDown" ? currentIndex + 1 : currentIndex - 1;
+      rows[nextIndex]?.focus();
+      return;
+    }
+    if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      const rows = Array.from(
+        dom.objectTbody.querySelectorAll<HTMLElement>(".object-row"),
+      );
+      (e.key === "Home" ? rows[0] : rows[rows.length - 1])?.focus();
+      return;
+    }
+
     if (e.key === "Enter") {
       e.preventDefault();
       if (row.classList.contains("object-row--folder")) {
         const prefix = row.dataset.prefix;
         if (prefix !== undefined) {
-          void navigateToFolder(prefix);
+          void navigateToFolder(prefix).catch((err) => {
+            setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+          });
         }
         return;
       }
@@ -614,8 +648,6 @@ export function wireEvents(): void {
     const row = (e.target as HTMLElement).closest<HTMLElement>(".object-row");
     if (!row) return;
     if (row.classList.contains("object-row--folder")) {
-      const prefix = row.dataset.prefix;
-      if (prefix !== undefined) void navigateToFolder(prefix);
       return;
     }
     const key = row.dataset.key;
@@ -657,7 +689,11 @@ export function wireEvents(): void {
     );
     if (!seg) return;
     const prefix = seg.dataset.prefix;
-    if (prefix !== undefined) void navigateToFolder(prefix);
+    if (prefix !== undefined) {
+      void navigateToFolder(prefix).catch((err) => {
+        setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+      });
+    }
   });
 
   const objectPanel = dom.objectPanel;
@@ -677,39 +713,78 @@ export function wireEvents(): void {
   objectPanel.addEventListener("drop", suppressDrag);
   dropOverlay.addEventListener("drop", suppressDrag);
 
-  void getCurrentWebview().onDragDropEvent((event) => {
-    if (event.payload.type === "enter") {
-      if (state.connected && state.currentBucket) {
-        dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
-        dropOverlay.hidden = false;
-      }
-      objectPanel.classList.add("object-panel--dragover");
-    } else if (event.payload.type === "leave") {
-      objectPanel.classList.remove("object-panel--dragover");
-      dropOverlay.hidden = true;
-    } else if (event.payload.type === "drop") {
-      objectPanel.classList.remove("object-panel--dragover");
-      dropOverlay.hidden = true;
+  void getCurrentWebview()
+    .onDragDropEvent((event) => {
+      if (event.payload.type === "enter") {
+        if (state.connected && state.currentBucket) {
+          dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
+          dropOverlay.hidden = false;
+        }
+        objectPanel.classList.add("object-panel--dragover");
+      } else if (event.payload.type === "leave") {
+        objectPanel.classList.remove("object-panel--dragover");
+        dropOverlay.hidden = true;
+      } else if (event.payload.type === "drop") {
+        objectPanel.classList.remove("object-panel--dragover");
+        dropOverlay.hidden = true;
 
-      if (!state.connected || !state.currentBucket) {
-        setStatus("Connect to a bucket first.");
-        return;
-      }
+        if (!state.connected || !state.currentBucket) {
+          setStatus("Connect to a bucket first.");
+          return;
+        }
 
-      const paths = event.payload.paths;
-      if (paths.length > 0) {
-        void queueDroppedPaths(paths, state.currentPrefix);
-      } else {
-        setStatus("No dropped files detected. Try Upload Files instead.", 5000);
+        const paths = event.payload.paths;
+        if (paths.length > 0) {
+          void queueDroppedPaths(paths, state.currentPrefix);
+        } else {
+          setStatus(
+            "No dropped files detected. Try Upload Files instead.",
+            5000,
+          );
+        }
       }
-    }
-  });
+    })
+    .then((unlisten) => {
+      dragDropUnlisten?.();
+      dragDropUnlisten = unlisten;
+    })
+    .catch((err) => {
+      console.error("Failed to register native drag and drop:", err);
+      logActivity(
+        `Native drag and drop unavailable: ${friendlyError(err)}`,
+        "warning",
+      );
+    });
 
   setTransferCompleteHandler(async (summary) => {
     if (summary.hadUpload && state.connected && state.currentBucket) {
-      await refreshObjects(state.currentBucket, state.currentPrefix);
-      pruneStaleSelection();
-      renderObjectTable();
+      const connectionId = state.connectionId;
+      const bucket = state.currentBucket;
+      const prefix = state.currentPrefix;
+      try {
+        const committed = await refreshObjects(bucket, prefix, {
+          supersedePending: false,
+        });
+        if (
+          committed &&
+          state.connected &&
+          state.connectionId === connectionId &&
+          state.currentBucket === bucket &&
+          state.currentPrefix === prefix
+        ) {
+          pruneStaleSelection();
+          renderObjectTable();
+        }
+      } catch (err) {
+        setStatus(
+          `Transfer completed, but listing refresh failed: ${friendlyError(err)}`,
+          5000,
+        );
+        logActivity(
+          `Transfer completed, but listing refresh failed: ${friendlyError(err)}`,
+          "warning",
+        );
+      }
     }
 
     const parts: string[] = [];
@@ -733,6 +808,12 @@ export function wireEvents(): void {
         {
           type: "error",
         },
+      );
+    }
+    if (summary.skippedCount > 0) {
+      showToast(
+        `${summary.skippedCount} transfer${summary.skippedCount === 1 ? "" : "s"} skipped`,
+        { type: "warning" },
       );
     }
   });
@@ -797,9 +878,7 @@ export function wireEvents(): void {
       icon: "check-square",
       shortcut: `${accelLabel}A`,
       action: () => {
-        const keys = getSelectableKeys();
-        keys.forEach((k) => state.selectedKeys.add(k));
-        updateSelectionUI();
+        handleSelectAll(true);
       },
       available: () => state.connected,
     },

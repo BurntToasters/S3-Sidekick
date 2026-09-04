@@ -1,17 +1,16 @@
 #!/usr/bin/env node
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import {
-  isDirectExecution as isModuleDirectExecution,
-  pathsEqual,
-} from "./direct-execution.js";
+import { pathsEqual } from "./direct-execution.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const RELEASE_DIR = path.join(__dirname, "..", "release");
+const REPOSITORY_ROOT = path.join(__dirname, "..");
+const RELEASE_DIR = path.join(REPOSITORY_ROOT, "release");
 
 const BUILD_ONLY_DIRECTORIES = [
   "app",
@@ -53,9 +52,35 @@ function getAfterPackLocation(env = process.env) {
   return value.trim();
 }
 
+function isBetaReleaseVersion(version) {
+  const numeric = "(?:0|[1-9]\\d*)";
+  return new RegExp(
+    `^${numeric}\\.${numeric}\\.${numeric}-beta\\.${numeric}$`,
+  ).test(String(version ?? ""));
+}
+
+function readPackageVersion(repositoryRoot = REPOSITORY_ROOT) {
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf8"),
+  );
+  return typeof packageJson.version === "string" ? packageJson.version : "";
+}
+
+function shouldSkipBetaMirror(env = process.env, version) {
+  if (!isBetaReleaseVersion(version)) {
+    return false;
+  }
+  return String(env.OVERRIDE_BETA_MIRROR_SKIP ?? "").trim() !== "1";
+}
+
 function isDirectExecution(argv = process.argv, platform = process.platform) {
   if (argv.includes(CLI_FLAG)) return true;
-  return isModuleDirectExecution(import.meta.url, argv, platform);
+  const entry = argv[1];
+  if (!entry) return false;
+  // Basename only: argv vs import.meta.url mismatches on Windows ESM
+  // (case, slashes, mapped drives) and previously caused a silent no-op.
+  const basename = (platform === "win32" ? path.win32 : path).basename(entry);
+  return basename.toLowerCase() === "post-release-assets.js";
 }
 
 function getReleaseEntries(releaseDir) {
@@ -66,6 +91,10 @@ function getReleaseEntries(releaseDir) {
   if (entries.length === 0)
     throw new Error(`release directory is empty: ${releaseDir}`);
   return entries;
+}
+
+function sha256File(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
 function verifyCopiedPath(sourcePath, destinationPath) {
@@ -84,6 +113,9 @@ function verifyCopiedPath(sourcePath, destinationPath) {
       `mirrored file size differs: ${destinationPath} (${destination.size} bytes; expected ${source.size})`,
     );
   }
+  if (source.isFile() && sha256File(sourcePath) !== sha256File(destinationPath)) {
+    throw new Error(`mirrored file hash differs: ${destinationPath}`);
+  }
   if (source.isDirectory()) {
     for (const entry of fs.readdirSync(sourcePath)) {
       verifyCopiedPath(
@@ -91,6 +123,22 @@ function verifyCopiedPath(sourcePath, destinationPath) {
         path.join(destinationPath, entry),
       );
     }
+  }
+}
+
+function removeDestinationExtras(sourcePath, destinationPath) {
+  if (!fs.statSync(sourcePath).isDirectory()) return;
+  const sourceEntries = new Set(fs.readdirSync(sourcePath));
+  for (const entry of fs.readdirSync(destinationPath)) {
+    if (!sourceEntries.has(entry)) {
+      removePath(path.join(destinationPath, entry));
+    }
+  }
+  for (const entry of sourceEntries) {
+    removeDestinationExtras(
+      path.join(sourcePath, entry),
+      path.join(destinationPath, entry),
+    );
   }
 }
 
@@ -128,15 +176,29 @@ function copyReleaseAssets(releaseDir = RELEASE_DIR, destination) {
     });
     verifyCopiedPath(sourcePath, destinationPath);
   }
+  removeDestinationExtras(resolvedReleaseDir, resolvedDestination);
   return entries.length;
 }
 
-function run({ releaseDir = RELEASE_DIR, env = process.env } = {}) {
+function run({
+  releaseDir = RELEASE_DIR,
+  env = process.env,
+  version = readPackageVersion(),
+} = {}) {
   cleanReleaseArtifacts(releaseDir);
+
+  let skippedBetaMirror = false;
+  if (shouldSkipBetaMirror(env, version)) {
+    skippedBetaMirror = true;
+    console.warn(
+      `beta version ${version}; skipping AFTER_PACK_LOC mirror (set OVERRIDE_BETA_MIRROR_SKIP=1 to force).`,
+    );
+    return { mirrored: false, destination: null, skippedBetaMirror };
+  }
 
   const destination = getAfterPackLocation(env);
   if (!destination) {
-    return { mirrored: false, destination: null };
+    return { mirrored: false, destination: null, skippedBetaMirror };
   }
 
   const copiedEntries = copyReleaseAssets(releaseDir, destination);
@@ -144,21 +206,35 @@ function run({ releaseDir = RELEASE_DIR, env = process.env } = {}) {
     mirrored: true,
     destination: path.resolve(destination),
     copiedEntries,
+    skippedBetaMirror: false,
   };
+}
+
+function finalizeReleaseAssets({
+  releaseDir = RELEASE_DIR,
+  env = process.env,
+  version = readPackageVersion(),
+} = {}) {
+  const result = run({ releaseDir, env, version });
+  if (result.mirrored) {
+    console.log(
+      `Mirrored and verified ${result.copiedEntries} cleaned release entries to: ${result.destination}`,
+    );
+  } else if (result.skippedBetaMirror) {
+    console.warn(
+      `WARNING: Cleaned release assets without mirroring (beta version ${version}; set OVERRIDE_BETA_MIRROR_SKIP=1 to force).`,
+    );
+  } else {
+    console.warn(
+      "WARNING: Cleaned release assets, but AFTER_PACK_LOC is not set; mirror intentionally skipped.",
+    );
+  }
+  return result;
 }
 
 if (isDirectExecution()) {
   try {
-    const result = run();
-    if (result.mirrored) {
-      console.log(
-        `Mirrored and verified ${result.copiedEntries} cleaned release entries to: ${result.destination}`,
-      );
-    } else {
-      console.warn(
-        "WARNING: Cleaned release assets, but AFTER_PACK_LOC is not set; mirror intentionally skipped.",
-      );
-    }
+    finalizeReleaseAssets();
   } catch (error) {
     const message =
       error && typeof error === "object" && "message" in error
@@ -173,7 +249,7 @@ if (isDirectExecution()) {
       `Platform: ${process.platform}; Node: ${process.version}; cwd: ${process.cwd()}`,
     );
     console.error(
-      "The following git reset/clean was blocked. Correct the problem and rerun npm run release:finalize.",
+      "Release asset finalization stopped. Correct the problem and rerun npm run release:finalize.",
     );
     process.exit(1);
   }
@@ -186,10 +262,14 @@ export {
   CLI_FLAG,
   cleanReleaseArtifacts,
   getAfterPackLocation,
+  isBetaReleaseVersion,
+  readPackageVersion,
+  shouldSkipBetaMirror,
   pathsEqual,
   isDirectExecution,
   getReleaseEntries,
   verifyCopiedPath,
   copyReleaseAssets,
   run,
+  finalizeReleaseAssets,
 };

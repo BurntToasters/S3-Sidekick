@@ -8,36 +8,117 @@ use crate::security::{
 };
 use crate::{atomic_write, fsync_parent, lock_storage_ops, security_journal_path};
 
-// ─── Security limitation ───────────────────────────────────────────────────────
-// The biometric unlock flow uses a two-step approach:
-//   1. The AES key is stored in an OS credential store (macOS Keychain /
-//      Windows Credential Manager).
-//   2. A separate biometric prompt (LAContext on macOS, UserConsentVerifier on
-//      Windows) gates the UI before the key is read.
-//
-// However, the stored key is NOT cryptographically bound to the biometric.
-// On macOS, the Keychain item uses kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-// but does NOT use SecAccessControl with .biometryCurrentSet, so any process
-// running as the same user can read it without passing Touch ID.
-// On Windows, the key is a plain GenericCredential (CRED_PERSIST_ENTERPRISE);
-// UserConsentVerifier is a UI-only gate, not a TPM/NGC-bound operation.
-//
-// Mitigation paths (future work):
-//   macOS: Create the Keychain item with SecAccessControlCreateWithFlags(
-//          ..., .biometryCurrentSet | .privateKeyUsage, ...) and pass
-//          kSecUseAuthenticationContext so the key never leaves the Secure Enclave
-//          without a live biometric check.
-//   Windows: Wrap the key using KeyCredentialManager (NGC/TPM-backed) or
-//          DPAPI-NG with a Windows Hello credential, instead of a plain
-//          GenericCredential.
-//
-// Until then, the biometric gate provides defence-in-depth (requires physical
-// presence at the machine) but should not be considered equivalent to hardware-
-// bound key protection.
-// ────────────────────────────────────────────────────────────────────────────────
+// Security limitation: biometric prompts gate the UI before the AES key is read
+// from the OS credential store, but the key is not cryptographically bound to
+// biometrics. On macOS, the Keychain item lacks biometric SecAccessControl, so
+// same-user processes can read it without Touch ID. On Windows, the stored
+// GenericCredential is protected only by the UserConsentVerifier UI gate.
+// Treat this as defense-in-depth, not hardware-bound protection. A stronger
+// implementation should use Secure Enclave access control on macOS and
+// KeyCredentialManager or DPAPI-NG with Windows Hello on Windows.
 
 pub fn is_available() -> bool {
-    platform::is_available()
+    #[cfg(test)]
+    {
+        test_backend::is_available()
+    }
+    #[cfg(not(test))]
+    {
+        platform::is_available()
+    }
+}
+
+#[cfg(test)]
+mod test_backend {
+    use super::KEY_LEN;
+    use std::sync::{Mutex, OnceLock};
+    use zeroize::Zeroizing;
+
+    static STORED_KEY: OnceLock<Mutex<Option<Zeroizing<[u8; KEY_LEN]>>>> = OnceLock::new();
+
+    fn stored_key() -> &'static Mutex<Option<Zeroizing<[u8; KEY_LEN]>>> {
+        STORED_KEY.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn is_available() -> bool {
+        true
+    }
+
+    pub fn store_key(key: &[u8; KEY_LEN]) -> Result<(), String> {
+        let mut stored = stored_key()
+            .lock()
+            .map_err(|_| "Test biometric backend is unavailable".to_string())?;
+        *stored = Some(Zeroizing::new(*key));
+        Ok(())
+    }
+
+    pub fn retrieve_key() -> Result<[u8; KEY_LEN], String> {
+        let stored = stored_key()
+            .lock()
+            .map_err(|_| "Test biometric backend is unavailable".to_string())?;
+        stored
+            .as_ref()
+            .map(|key| **key)
+            .ok_or_else(|| "No test biometric credential found".to_string())
+    }
+
+    pub fn remove_key() {
+        if let Ok(mut stored) = stored_key().lock() {
+            *stored = None;
+        }
+    }
+
+    pub fn has_stored_key() -> Result<bool, String> {
+        let stored = stored_key()
+            .lock()
+            .map_err(|_| "Test biometric backend is unavailable".to_string())?;
+        Ok(stored.is_some())
+    }
+}
+
+fn store_key(key: &[u8; KEY_LEN]) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        test_backend::store_key(key)
+    }
+    #[cfg(not(test))]
+    {
+        platform::store_key(key)
+    }
+}
+
+fn retrieve_key(window: Option<&tauri::Window>) -> Result<[u8; KEY_LEN], String> {
+    #[cfg(test)]
+    {
+        let _ = window;
+        test_backend::retrieve_key()
+    }
+    #[cfg(not(test))]
+    {
+        platform::retrieve_key(window)
+    }
+}
+
+fn remove_key() {
+    #[cfg(test)]
+    {
+        test_backend::remove_key();
+    }
+    #[cfg(not(test))]
+    {
+        platform::remove_key();
+    }
+}
+
+fn has_stored_key() -> Result<bool, String> {
+    #[cfg(test)]
+    {
+        test_backend::has_stored_key()
+    }
+    #[cfg(not(test))]
+    {
+        platform::has_stored_key()
+    }
 }
 
 /// Remove the biometric key and prove it is no longer present.
@@ -46,8 +127,8 @@ pub fn is_available() -> bool {
 /// Keychain is unavailable). Destructive security operations must not report
 /// success until a non-prompting presence check confirms the key is gone.
 pub fn clear_stored_key_verified() -> Result<(), String> {
-    platform::remove_key();
-    if platform::has_stored_key()? {
+    remove_key();
+    if has_stored_key()? {
         Err(
             "The stored biometric key could not be removed from the system credential store. \
              Remove it manually before using this device again."
@@ -217,7 +298,7 @@ pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecuritySt
     // committed config says enrolled, recovery knows the enrollment succeeded.
     let key = require_unlocked_key()?;
     write_biometric_cleanup_journal(&app, BiometricCleanupMode::ClearUnlessEnrolled)?;
-    if let Err(store_error) = platform::store_key(&key) {
+    if let Err(store_error) = store_key(&key) {
         let cleanup = crate::security::recover_interrupted_migration(&app);
         return match cleanup {
             Ok(()) => Err(store_error),
@@ -272,7 +353,7 @@ pub(crate) async fn unlock_biometric(
         );
     }
 
-    let key = Zeroizing::new(match platform::retrieve_key(Some(&window)) {
+    let key = Zeroizing::new(match retrieve_key(Some(&window)) {
         Ok(k) => k,
         Err(err) => {
             let is_not_found = err.contains("0x80070490")
@@ -326,7 +407,7 @@ pub(crate) async fn unlock_biometric(
 // ---------------------------------------------------------------------------
 // macOS: Keychain with biometric access control + LAContext availability check
 // ---------------------------------------------------------------------------
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 mod platform {
     use super::KEY_LEN;
     use core_foundation::base::{kCFAllocatorDefault, CFRelease, TCFType};
@@ -346,6 +427,7 @@ mod platform {
         static kSecAttrAccount: *const c_void;
         static kSecValueData: *const c_void;
         static kSecReturnData: *const c_void;
+        static kSecReturnAttributes: *const c_void;
         static kSecMatchLimit: *const c_void;
         static kSecMatchLimitOne: *const c_void;
         static kSecAttrAccessible: *const c_void;
@@ -372,26 +454,14 @@ mod platform {
     const SERVICE: &str = "run.rosie.s3-sidekick";
     const ACCOUNT: &str = "biometric-encryption-key";
 
-    // -----------------------------------------------------------------------
-    // Touch ID via LAContext (avoids keychain-access-groups entitlement)
-    // -----------------------------------------------------------------------
-    //
-    // Two correctness hazards had to be handled here.
-    //
-    // 1. Block lifetime. The reply block used to be a stack local tagged as a
-    //    *global* block. `Block_copy` is a no-op for global blocks, so
-    //    LocalAuthentication retained a pointer straight into the caller's stack
-    //    frame. When the 120-second wait timed out, that frame was destroyed
-    //    while the framework still held the pointer; a late callback would then
-    //    read `block->invoke` out of reclaimed stack memory. Blocks are now heap
-    //    allocated and never freed while the framework might still hold them.
-    //
-    // 2. Reply attribution. The callback wrote its result into a single global
-    //    slot with no notion of which request it belonged to, so a reply from a
-    //    prompt that had already timed out could satisfy a *later* unlock
-    //    attempt — a stale `true` would open the vault. Every request now carries
-    //    its own generation number inside the block, and a waiter only accepts a
-    //    result stamped with its own generation.
+    // Touch ID via LAContext avoids the keychain-access-groups entitlement.
+    // Two correctness hazards are handled here:
+    // 1. The reply block was wrongly tagged global, making Block_copy a no-op and
+    //    leaving LocalAuthentication with a stack pointer after timeout. Blocks
+    //    are now heap allocated and retained while the framework may call them.
+    // 2. A single untagged result slot let a timed-out prompt satisfy a later
+    //    unlock. Requests and replies now carry generations, and waiters accept
+    //    only their own generation.
 
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -681,8 +751,13 @@ mod platform {
         unsafe {
             let dict = new_dict();
             set_base_attrs(dict);
+            CFDictionarySetValue(dict, kSecReturnAttributes, kCFBooleanTrue);
             CFDictionarySetValue(dict, kSecMatchLimit, kSecMatchLimitOne);
-            let status = SecItemCopyMatching(dict, ptr::null_mut());
+            let mut result: *const c_void = ptr::null();
+            let status = SecItemCopyMatching(dict, &mut result);
+            if !result.is_null() {
+                CFRelease(result);
+            }
             CFRelease(dict);
             if status == errSecSuccess {
                 Ok(true)
@@ -701,7 +776,7 @@ mod platform {
 // ---------------------------------------------------------------------------
 // Windows: UserConsentVerifier + Win32 Credential Manager
 // ---------------------------------------------------------------------------
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(test)))]
 mod platform {
     use super::KEY_LEN;
     use std::ptr;
@@ -945,7 +1020,7 @@ mod platform {
 // ---------------------------------------------------------------------------
 // Linux / other: biometric not supported
 // ---------------------------------------------------------------------------
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(not(test), not(any(target_os = "macos", target_os = "windows"))))]
 mod platform {
     use super::KEY_LEN;
 

@@ -1,6 +1,6 @@
 import { state } from "./state.ts";
 import { hideContextMenu } from "./context-menu.ts";
-import { renderObjectTable } from "./browser.ts";
+import { pruneStaleSelection, renderObjectTable } from "./browser.ts";
 
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 420;
@@ -13,6 +13,8 @@ let filterInputDebounce: ReturnType<typeof setTimeout> | undefined;
 let modalLayerObserver: MutationObserver | null = null;
 let modalLayerActive = false;
 let focusBeforeModal: HTMLElement | null = null;
+let focusBeforeSidebar: HTMLElement | null = null;
+const sidebarBackgroundInert = new Map<HTMLElement, boolean>();
 
 export function clearFilterInputDebounce(): void {
   if (filterInputDebounce !== undefined) {
@@ -31,6 +33,7 @@ export function wireObjectFilterInput(): void {
   ) as HTMLInputElement;
   filterInput.addEventListener("input", () => {
     state.filterText = filterInput.value;
+    pruneStaleSelection();
     clearFilterInputDebounce();
     filterInputDebounce = setTimeout(() => {
       renderObjectTable();
@@ -82,15 +85,113 @@ function isMobileSidebarMode(): boolean {
   return window.matchMedia("(max-width: 900px)").matches;
 }
 
+function setElementInert(element: HTMLElement, inert: boolean): void {
+  if ("inert" in element) {
+    (element as HTMLElement & { inert: boolean }).inert = inert;
+  }
+}
+
+function getSidebarBackgroundTargets(
+  layout: HTMLElement,
+  sidebar: HTMLElement,
+  backdrop: HTMLElement,
+): HTMLElement[] {
+  const targets = Array.from(layout.children).filter(
+    (child): child is HTMLElement =>
+      child instanceof HTMLElement && child !== sidebar && child !== backdrop,
+  );
+  const parent = layout.parentElement;
+  if (parent) {
+    for (const sibling of parent.children) {
+      if (sibling instanceof HTMLElement && sibling !== layout) {
+        targets.push(sibling);
+      }
+    }
+  }
+  return targets;
+}
+
+function setSidebarBackgroundInert(
+  layout: HTMLElement,
+  sidebar: HTMLElement,
+  backdrop: HTMLElement,
+  inert: boolean,
+): void {
+  if (inert) {
+    if (sidebarBackgroundInert.size > 0) return;
+    for (const target of getSidebarBackgroundTargets(
+      layout,
+      sidebar,
+      backdrop,
+    )) {
+      const wasInert =
+        "inert" in target
+          ? (target as HTMLElement & { inert: boolean }).inert
+          : false;
+      sidebarBackgroundInert.set(target, wasInert);
+      setElementInert(target, true);
+    }
+    return;
+  }
+
+  for (const [target, wasInert] of sidebarBackgroundInert) {
+    setElementInert(target, wasInert);
+  }
+  sidebarBackgroundInert.clear();
+}
+
 export function setSidebarOpen(open: boolean): void {
   const layout = document.getElementById("main-layout");
+  const sidebar = document.getElementById("bucket-panel");
+  const toggle = document.getElementById("sidebar-toggle");
   const backdrop = document.getElementById(
     "sidebar-backdrop",
   ) as HTMLButtonElement | null;
-  if (!layout || !backdrop) return;
+  if (!layout || !sidebar || !backdrop) return;
+
+  const mobile = isMobileSidebarMode();
+  const wasOpen = layout.classList.contains("main-layout--sidebar-open");
+  if (mobile && open && !wasOpen) {
+    const active = document.activeElement;
+    focusBeforeSidebar =
+      active instanceof HTMLElement && !sidebar.contains(active)
+        ? active
+        : toggle;
+  }
 
   layout.classList.toggle("main-layout--sidebar-open", open);
   backdrop.hidden = !open;
+  toggle?.setAttribute("aria-expanded", String(mobile && open));
+
+  if (mobile) {
+    if (open) {
+      sidebar.removeAttribute("aria-hidden");
+    } else {
+      sidebar.setAttribute("aria-hidden", "true");
+    }
+    setElementInert(sidebar, !open);
+    setSidebarBackgroundInert(layout, sidebar, backdrop, open);
+  } else {
+    sidebar.removeAttribute("aria-hidden");
+    setElementInert(sidebar, false);
+    setSidebarBackgroundInert(layout, sidebar, backdrop, false);
+  }
+
+  if (mobile && open) {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !sidebar.contains(active)) {
+      const filter = sidebar.querySelector<HTMLInputElement>(
+        "#bucket-filter-input",
+      );
+      (filter ?? sidebar).focus();
+    }
+  } else if (!open && wasOpen) {
+    const restore = focusBeforeSidebar;
+    focusBeforeSidebar = null;
+    if (restore && document.contains(restore)) {
+      restore.focus();
+    }
+  }
 }
 
 function toggleSidebar(): void {
@@ -116,10 +217,17 @@ function applySidebarWidth(width: number): void {
 }
 
 export function getActiveModalOverlay(): HTMLElement | null {
-  const overlays = document.querySelectorAll<HTMLElement>(
-    ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden]), .setup-wizard-overlay:not([hidden]), #palette-overlay:not([hidden])",
+  const overlays = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden]), .setup-wizard-overlay:not([hidden]), #palette-overlay:not([hidden])",
+    ),
   );
-  return overlays.length > 0 ? overlays[overlays.length - 1] : null;
+  if (overlays.length === 0) return null;
+  return overlays.reduce((top, overlay) => {
+    const topZ = Number.parseInt(getComputedStyle(top).zIndex, 10) || 0;
+    const overlayZ = Number.parseInt(getComputedStyle(overlay).zIndex, 10) || 0;
+    return overlayZ >= topZ ? overlay : top;
+  });
 }
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {
@@ -397,7 +505,11 @@ export function wireLayoutControls(): void {
   }
 
   const syncSidebarMode = () => {
-    if (!isMobileSidebarMode()) {
+    const layout = document.getElementById("main-layout");
+    if (!layout) return;
+    if (isMobileSidebarMode()) {
+      setSidebarOpen(layout.classList.contains("main-layout--sidebar-open"));
+    } else {
       setSidebarOpen(false);
     }
   };

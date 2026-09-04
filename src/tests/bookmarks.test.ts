@@ -243,6 +243,9 @@ describe("bookmark import/export/list rendering", () => {
     await bookmarks.loadBookmarks();
 
     expect(JSON.parse(bookmarks.exportBookmarksJson())).toEqual([
+      { ...alphaBookmark, secret_key: "" },
+    ]);
+    expect(JSON.parse(bookmarks.exportBookmarksJson(true))).toEqual([
       alphaBookmark,
     ]);
 
@@ -277,6 +280,82 @@ describe("bookmark import/export/list rendering", () => {
     });
     expect(bookmarks.getBookmarks()).toEqual([alphaBookmark, betaBookmark]);
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("imports a redacted export that has empty secrets", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const redacted = JSON.stringify([{ ...alphaBookmark, secret_key: "" }]);
+    await expect(bookmarks.importBookmarksJson(redacted)).resolves.toEqual({
+      imported: 1,
+      skipped: 0,
+    });
+    expect(bookmarks.getBookmarks()).toEqual([
+      { ...alphaBookmark, secret_key: "" },
+    ]);
+  });
+
+  it("rolls memory back when addBookmark persist fails", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "save_bookmarks") throw new Error("disk full");
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+
+    await expect(bookmarks.addBookmark(alphaBookmark)).rejects.toThrow(
+      "disk full",
+    );
+    expect(bookmarks.getBookmarks()).toEqual([]);
+  });
+
+  it("rolls memory back when removeBookmark persist fails", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "save_bookmarks") throw new Error("disk full");
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+
+    await expect(bookmarks.removeBookmark(0)).rejects.toThrow("disk full");
+    expect(bookmarks.getBookmarks()).toEqual([alphaBookmark]);
+  });
+
+  it("does not roll a later mutation back when an earlier persist fails", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    let releaseFirstSave: (() => void) | undefined;
+    const firstSaveGate = new Promise<void>((resolve) => {
+      releaseFirstSave = resolve;
+    });
+    let saveCalls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "save_bookmarks") {
+        saveCalls += 1;
+        if (saveCalls === 1) {
+          await firstSaveGate;
+          throw new Error("disk full");
+        }
+        return undefined;
+      }
+      if (command === "save_bookmarks_backup") return undefined;
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+
+    const first = bookmarks.addBookmark(alphaBookmark);
+    await Promise.resolve();
+    await Promise.resolve();
+    const second = bookmarks.addBookmark(betaBookmark);
+    releaseFirstSave?.();
+    await expect(first).rejects.toThrow("disk full");
+    await second;
+    expect(bookmarks.getBookmarks()).toEqual([betaBookmark]);
   });
 
   it("renders bookmark list and routes select/delete callbacks", async () => {

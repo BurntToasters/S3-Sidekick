@@ -20,6 +20,17 @@ const DEFAULT_STATE = {
   hasMore: false,
 };
 
+const CONNECT_RESULT = {
+  region: "us-west-2",
+  connection_id: "conn-1",
+  connection_identity: "ident-1",
+  create_only_capabilities: {
+    put_object: true,
+    complete_multipart: false,
+    copy_object: true,
+  },
+};
+
 describe("connection module", () => {
   beforeEach(async () => {
     vi.resetModules();
@@ -31,6 +42,8 @@ describe("connection module", () => {
     state.connecting = DEFAULT_STATE.connecting;
     state.endpoint = DEFAULT_STATE.endpoint;
     state.region = DEFAULT_STATE.region;
+    state.connectionId = "";
+    state.connectionIdentity = "";
     state.currentBucket = DEFAULT_STATE.currentBucket;
     state.currentPrefix = DEFAULT_STATE.currentPrefix;
     state.buckets = [];
@@ -42,7 +55,7 @@ describe("connection module", () => {
   }
 
   it("connect sets state and returns resolved region", async () => {
-    mockInvoke.mockResolvedValueOnce("us-west-2");
+    mockInvoke.mockResolvedValueOnce(CONNECT_RESULT);
 
     const connection = await import("../connection.ts");
     const { state } = await import("../state.ts");
@@ -63,9 +76,53 @@ describe("connection module", () => {
       secretKey: "secret",
     });
     expect(state.connected).toBe(true);
+    expect(state.connecting).toBe(true);
+    connection.finishConnecting(connection.currentConnectionGeneration());
     expect(state.connecting).toBe(false);
     expect(state.endpoint).toBe("https://s3.example.com");
     expect(state.region).toBe("us-west-2");
+    expect(state.connectionId).toBe("conn-1");
+    expect(state.connectionIdentity).toBe("ident-1");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: true,
+      complete_multipart: false,
+      copy_object: true,
+    });
+  });
+
+  it("connect treats missing or malformed capability metadata as unsupported", async () => {
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+
+    mockInvoke.mockResolvedValueOnce({
+      region: "us-west-2",
+      connection_id: "conn-missing",
+      connection_identity: "ident-missing",
+    });
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    });
+
+    mockInvoke.mockResolvedValueOnce({
+      region: "us-west-2",
+      connection_id: "conn-malformed",
+      connection_identity: "ident-malformed",
+      create_only_capabilities: {
+        put_object: true,
+        complete_multipart: "yes",
+        copy_object: true,
+      },
+    });
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    });
   });
 
   it("connect clears connecting flag on failure", async () => {
@@ -83,7 +140,7 @@ describe("connection module", () => {
   });
 
   it("disconnect resets state fields", async () => {
-    mockInvoke.mockResolvedValueOnce(undefined);
+    mockInvoke.mockRejectedValueOnce(new Error("disconnect failed"));
 
     const connection = await import("../connection.ts");
     const { state } = await import("../state.ts");
@@ -91,6 +148,8 @@ describe("connection module", () => {
     state.connected = true;
     state.endpoint = "https://s3.example.com";
     state.region = "us-east-1";
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "nested/";
     state.buckets = [{ name: "bucket-a", creation_date: "today" }];
@@ -107,12 +166,26 @@ describe("connection module", () => {
     state.continuationToken = "token";
     state.hasMore = true;
 
-    await connection.disconnect();
+    await expect(connection.disconnect()).rejects.toThrow("disconnect failed");
+    expect(state.connected).toBe(true);
+    expect(state.currentBucket).toBe("bucket-a");
+    expect(state.currentPrefix).toBe("nested/");
+    expect(state.objects.map((object) => object.key)).toEqual([
+      "nested/file.txt",
+    ]);
+    expect(state.selectedKeys).toEqual(new Set(["nested/file.txt"]));
 
-    expect(mockInvoke).toHaveBeenCalledWith("disconnect");
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await expect(connection.disconnect()).resolves.toBe(true);
+
+    expect(mockInvoke).toHaveBeenCalledWith("disconnect", {
+      connectionId: "conn-1",
+    });
     expect(state.connected).toBe(false);
     expect(state.endpoint).toBe("");
     expect(state.region).toBe("");
+    expect(state.connectionId).toBe("");
+    expect(state.connectionIdentity).toBe("");
     expect(state.currentBucket).toBe("");
     expect(state.currentPrefix).toBe("");
     expect(state.buckets).toEqual([]);
@@ -123,10 +196,55 @@ describe("connection module", () => {
     expect(state.hasMore).toBe(false);
   });
 
+  it("disconnect does not clear a newer session", async () => {
+    mockInvoke.mockRejectedValueOnce(new Error("Connection changed"));
+
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connected = true;
+    state.connectionId = "conn-new";
+    state.connectionIdentity = "ident-new";
+    state.endpoint = "https://new.example.com";
+
+    const pending = connection.disconnect("conn-old");
+    expect(state.connected).toBe(true);
+    expect(state.connectionId).toBe("conn-new");
+    await expect(pending).resolves.toBe(false);
+
+    expect(mockInvoke).toHaveBeenCalledWith("disconnect", {
+      connectionId: "conn-old",
+    });
+    expect(state.connected).toBe(true);
+    expect(state.connectionId).toBe("conn-new");
+    expect(state.connectionIdentity).toBe("ident-new");
+  });
+
+  it("invokeS3For injects the supplied connection id", async () => {
+    mockInvoke.mockResolvedValueOnce([]);
+
+    const connection = await import("../connection.ts");
+    await connection.invokeS3For("frozen-id", "list_buckets", { extra: 1 });
+
+    expect(mockInvoke).toHaveBeenCalledWith("list_buckets", {
+      extra: 1,
+      connectionId: "frozen-id",
+    });
+  });
+
+  it("invokeS3For rejects an empty connection id", async () => {
+    const connection = await import("../connection.ts");
+    expect(() => connection.invokeS3For("", "list_buckets")).toThrow(
+      "Connection id is required",
+    );
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
   it("saveConnection serializes data for backend", async () => {
     mockInvoke.mockResolvedValueOnce(undefined);
     const connection = await import("../connection.ts");
     await connection.saveConnection(
+      "conn-1",
       "https://s3.example.com",
       "us-east-1",
       "AKIA1",
@@ -134,6 +252,7 @@ describe("connection module", () => {
     );
 
     expect(mockInvoke).toHaveBeenCalledWith("save_connection", {
+      connectionId: "conn-1",
       json: JSON.stringify({
         endpoint: "https://s3.example.com",
         region: "us-east-1",
@@ -184,10 +303,14 @@ describe("connection module", () => {
     const connection = await import("../connection.ts");
     const { state } = await import("../state.ts");
     resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
 
     await connection.refreshBuckets();
 
-    expect(mockInvoke).toHaveBeenCalledWith("list_buckets");
+    expect(mockInvoke).toHaveBeenCalledWith("list_buckets", {
+      connectionId: "conn-1",
+    });
     expect(state.buckets).toEqual([
       { name: "bucket-a", creation_date: "2024-01-01" },
       { name: "bucket-b", creation_date: "2024-01-02" },
@@ -195,7 +318,40 @@ describe("connection module", () => {
   });
 
   it("refreshObjects replaces listing state and clears selection", async () => {
-    mockInvoke.mockResolvedValueOnce({
+    let resolveListing: ((value: unknown) => void) | undefined;
+    mockInvoke.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveListing = resolve;
+        }),
+    );
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+    state.currentBucket = "bucket-old";
+    state.currentPrefix = "old/";
+    state.objects = [
+      {
+        key: "old/file.txt",
+        size: 1,
+        last_modified: "old",
+        is_folder: false,
+      },
+    ];
+    state.prefixes = ["old/"];
+    state.continuationToken = "old-token";
+    state.hasMore = true;
+    state.selectedKeys.add("old-key");
+
+    const pending = connection.refreshObjects("bucket-a", "docs/");
+    expect(state.currentBucket).toBe("bucket-old");
+    expect(state.currentPrefix).toBe("old/");
+    expect(state.objects.map((object) => object.key)).toEqual(["old/file.txt"]);
+    expect(state.selectedKeys).toEqual(new Set(["old-key"]));
+
+    resolveListing?.({
       objects: [
         {
           key: "docs/readme.txt",
@@ -208,18 +364,14 @@ describe("connection module", () => {
       truncated: true,
       next_continuation_token: "next-token",
     });
-    const connection = await import("../connection.ts");
-    const { state } = await import("../state.ts");
-    resetState(state);
-    state.selectedKeys.add("old-key");
-
-    await connection.refreshObjects("bucket-a", "docs/");
+    await expect(pending).resolves.toBe(true);
 
     expect(mockInvoke).toHaveBeenCalledWith("list_objects", {
       bucket: "bucket-a",
       prefix: "docs/",
       delimiter: "/",
       continuationToken: "",
+      connectionId: "conn-1",
     });
     expect(state.currentBucket).toBe("bucket-a");
     expect(state.currentPrefix).toBe("docs/");
@@ -258,6 +410,8 @@ describe("connection module", () => {
     const connection = await import("../connection.ts");
     const { state } = await import("../state.ts");
     resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     state.objects = [
@@ -279,6 +433,7 @@ describe("connection module", () => {
       prefix: "docs/",
       delimiter: "/",
       continuationToken: "token-1",
+      connectionId: "conn-1",
     });
     expect(state.objects.map((o) => o.key)).toEqual([
       "docs/file-1.txt",
@@ -287,5 +442,98 @@ describe("connection module", () => {
     expect(state.prefixes).toEqual(["docs/", "images/"]);
     expect(state.hasMore).toBe(false);
     expect(state.continuationToken).toBe("");
+  });
+
+  it("ignores stale object responses after navigation", async () => {
+    let resolveFirst: ((value: unknown) => void) | undefined;
+    let resolveSecond: ((value: unknown) => void) | undefined;
+    mockInvoke.mockImplementation(async (command, payload) => {
+      if (command !== "list_objects") return undefined;
+      const bucket = (payload as { bucket: string }).bucket;
+      return new Promise((resolve) => {
+        if (bucket === "bucket-a") resolveFirst = resolve;
+        else resolveSecond = resolve;
+      });
+    });
+
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+    const first = connection.refreshObjects("bucket-a", "");
+    const second = connection.refreshObjects("bucket-b", "");
+
+    resolveFirst?.({
+      objects: [
+        {
+          key: "old.txt",
+          size: 1,
+          last_modified: "",
+          is_folder: false,
+        },
+      ],
+      prefixes: [],
+      truncated: false,
+      next_continuation_token: "",
+    });
+    await expect(first).resolves.toBe(false);
+    expect(state.currentBucket).toBe("");
+    expect(state.objects).toEqual([]);
+
+    resolveSecond?.({
+      objects: [
+        {
+          key: "new.txt",
+          size: 2,
+          last_modified: "",
+          is_folder: false,
+        },
+      ],
+      prefixes: [],
+      truncated: false,
+      next_continuation_token: "",
+    });
+    await expect(second).resolves.toBe(true);
+    expect(state.currentBucket).toBe("bucket-b");
+    expect(state.objects.map((object) => object.key)).toEqual(["new.txt"]);
+  });
+
+  it("does not let a superseded connect overwrite disconnect state", async () => {
+    let resolveConnect: ((value: typeof CONNECT_RESULT) => void) | undefined;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "connect") {
+        return new Promise((resolve) => {
+          resolveConnect = resolve;
+        });
+      }
+      return undefined;
+    });
+
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    const connecting = connection.connect(
+      "https://slow.example.com",
+      "us-east-1",
+      "key",
+      "secret",
+    );
+    const disconnecting = connection.disconnect();
+    resolveConnect?.({
+      region: "us-east-1",
+      connection_id: "stale",
+      connection_identity: "stale-ident",
+      create_only_capabilities: {
+        put_object: true,
+        complete_multipart: true,
+        copy_object: true,
+      },
+    });
+
+    await expect(connecting).rejects.toThrow("superseded");
+    await expect(disconnecting).resolves.toBe(true);
+    expect(state.connected).toBe(false);
+    expect(state.endpoint).toBe("");
   });
 });

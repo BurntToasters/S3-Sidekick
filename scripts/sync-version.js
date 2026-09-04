@@ -8,7 +8,9 @@ import { fileURLToPath } from "url";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const require = createRequire(import.meta.url);
 const { formatReleaseTitle } = require("./release-title.cjs");
-const version = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8")).version;
+const version = JSON.parse(
+  fs.readFileSync(path.join(root, "package.json"), "utf-8"),
+).version;
 
 const tauriConf = path.join(root, "src-tauri", "tauri.conf.json");
 const conf = JSON.parse(fs.readFileSync(tauriConf, "utf-8"));
@@ -60,7 +62,11 @@ if (fs.existsSync(cargoLockPath)) {
 
 // Keep the shipped-version release-title assertion aligned with package.json so
 // `npm run u` / workspace:bootstrap does not leave a stale Beta N expectation.
-const releaseTitleTestPath = path.join(root, "scripts", "release-title.test.cjs");
+const releaseTitleTestPath = path.join(
+  root,
+  "scripts",
+  "release-title.test.cjs",
+);
 if (fs.existsSync(releaseTitleTestPath)) {
   const releaseTitle = formatReleaseTitle(version);
   const releaseTitleTest = fs.readFileSync(releaseTitleTestPath, "utf-8");

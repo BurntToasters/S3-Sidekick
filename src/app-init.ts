@@ -34,19 +34,26 @@ import {
   setConnectionUI,
 } from "./app-connection.ts";
 import { wireEvents } from "./app-events.ts";
-import { recoverPendingTransfers } from "./transfers.ts";
+import {
+  prepareTransferRecovery,
+  recoverPendingTransfers,
+} from "./transfers.ts";
 import { initializeIcons } from "./icons.ts";
 import { wireTitlebar } from "./titlebar.ts";
 
-async function checkSupportPrompt(): Promise<void> {
+async function checkSupportPrompt(retry = false): Promise<void> {
   try {
     if (isSupportPromptDismissed()) return;
-    const count = await incrementLaunchCount();
-    if (count < 2) return;
+    if (!retry) {
+      const count = await incrementLaunchCount();
+      if (count < 2) return;
+    }
 
     setTimeout(() => {
-      if (isDialogActive() || getActiveModalOverlay() || isPaletteOpen())
+      if (isDialogActive() || getActiveModalOverlay() || isPaletteOpen()) {
+        setTimeout(() => void checkSupportPrompt(true), 2000);
         return;
+      }
       const overlay = document.getElementById("support-overlay");
       const dismissButton = document.getElementById(
         "support-no",
@@ -82,7 +89,11 @@ async function checkSupportPrompt(): Promise<void> {
       const onConfirm = () => {
         close();
         persistDismissal();
-        void invoke("open_external_url", { url: "https://rosie.run/support" });
+        void invoke("open_external_url", {
+          url: "https://rosie.run/support",
+        }).catch((err) =>
+          logActivity(`Failed to open support page: ${String(err)}`, "warning"),
+        );
       };
 
       const onOverlayClick = (event: MouseEvent) => {
@@ -137,11 +148,21 @@ async function recoverTransfersAfterSecurityReady(): Promise<void> {
 
 export async function init(): Promise<void> {
   initializeIcons();
-  wireEvents();
   setConnectionUI(false);
 
-  state.platformName = await invoke<string>("get_platform_info");
+  try {
+    state.platformName = await invoke<string>("get_platform_info");
+  } catch (err) {
+    state.platformName = "";
+    console.warn("Platform detection unavailable:", err);
+    logActivity(
+      "Platform-specific window styling and shortcut labels are unavailable this launch.",
+      "warning",
+    );
+  }
   applyPlatformClass();
+  prepareTransferRecovery();
+  wireEvents();
   wireTitlebar();
 
   let settingsValid = true;

@@ -1,14 +1,14 @@
 > [!NOTE]
-> 🅱️ This is a Beta build.
+> 🧪 Beta 5 is the release candidate for v0.11.0 stable.
 
 # ⬇️ Downloads
 
 | <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux |
 | :--- | :--- | :--- |
-| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Linux-arm64.deb) --> |
-| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Linux-arm64.rpm) --> |
-| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.4/S3-Sidekick-Linux-arm64.flatpak) --> |
+| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-arm64.AppImage) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-arm64.deb) --> |
+| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-arm64.rpm) --> |
+| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-arm64.flatpak) --> |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
@@ -19,6 +19,20 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
+## Changes in `v0.11.0-beta.5:`
+
+Beta 5 is the release candidate for v0.11.0 stable. It closes the remaining concurrent-write gaps across S3-compatible providers, makes risky fallbacks require explicit consent, and hardens connection, dialog, and filesystem durability boundaries.
+
+- **Data safety:** Uploads, copies, moves, and renames use provider-supported atomic create-only requests when overwrite is disabled, preventing a concurrent writer from being silently replaced after the initial conflict check.
+- **S3 compatibility:** Create-only support is detected per operation for AWS S3, Cloudflare R2, MinIO, Wasabi, Backblaze B2, and DigitalOcean Spaces. Provider detection requires real hostname boundaries, and unsupported operations fail closed in the backend.
+- **Conflict UX:** Providers that cannot guarantee a create-only write require an explicit **Write anyway** confirmation. Apply-to-all consent is serialized, cancellations are distinguished from destination conflicts, and queued copies retain source size so multipart safety is evaluated correctly.
+- **Connection safety:** Rename and conflict checks stay bound to the connection that initiated them; late async results cannot act on a newly selected connection or location.
+- **Downloads:** Removing unusable scratch data now flushes the parent directory entry, including a native Windows directory flush, so cleanup survives interruption and power loss.
+- **Dialogs:** Queued confirmation dialogs reserve the active slot between presentations, preventing follow-up consent prompts from overlapping or being reordered.
+- **Release workflow:** GitHub draft titles use the exact package version (`0.11.0-beta.5`), and reused drafts have both their title and `CHANGELOG.md` body refreshed.
+- **Testing:** **388** frontend tests, **130** Rust tests, **24** release-asset tests, and **19** icon tests passing.
+- **Ver:** Bumped version to `v0.11.0-beta.5`.
+
 ## Changes in `v0.11.0-beta.4:`
 
 Beta 4 is a polish-and-unbreak pass: the docked inspector behaves for files that cannot preview, release VMs stop dying on a false quality-gate miss, and Windows security tests no longer wedge on Credential Manager when there is no interactive logon session.
@@ -28,7 +42,7 @@ Beta 4 is a polish-and-unbreak pass: the docked inspector behaves for files that
 - **Inspector:** Batch selection toolbar wraps and collapses to icons when the docked panel steals width, so **Deselect** / **Copy URLs** no longer clip off the edge.
 - **Inspector:** Properties pane scrolls reliably (`min-height: 0`), drops the redundant “File Info” header, tightens docked padding, hides Save/Cancel for folder-only views, and allows a wider panel (default ~360px, up to 560px).
 - **Release pipeline:** Quality-gate recording no longer trims git porcelain XY columns. Bootstrap-only metainfo drift (` M path`) was being misparsed as an empty dirty set, so `coverage/.release-quality.json` was never written and `release:prepare` failed with ENOENT on clean release VMs.
-- **Release pipeline / CI:** Rust toolchain and CI install `clippy` + `rustfmt` with the pinned `1.97.1` toolchain (CI was failing after tests on “clippy not installed”).
+- **Release pipeline / CI:** Rust toolchain and CI install `clippy` + `rustfmt` with the stable toolchain (CI was failing after tests on “clippy not installed”).
 - **Testing:** `test:all` prints failed Rust test names instead of only the last log lines; security tests clear the process-global migration-recovery latch between cases so one failure cannot poison the rest of the suite.
 - **Windows:** Biometric credential presence checks treat `ERROR_NO_SUCH_LOGON_SESSION` (`0x80070520`) as “no usable key” so vault migration cleanup does not fail closed on headless/RDP/test VMs without an interactive Credential Manager session.
 - **Testing:** Frontend suite at **339** tests passing.
@@ -63,7 +77,7 @@ Beta 3 is a correctness pass over the parts of the app that can lose data: moves
 - **Release workflow:** GitHub release titles are generated from one shared helper and follow the BurntToasters Changelog Standard, so this release is titled `0.11.0 Beta 3` while the tag stays `v0.11.0-beta.3`.
 - **Testing:** Added coverage for checksum verification, generation pinning, move receipts and resume classification, the adoption proof, migration recovery, and release titling (**338** frontend and **114** Rust tests passing).
 - **Ver:** Bumped version to `v0.11.0-beta.3`.
-- **PKG:** Pinned every Rust dependency to an exact version and pinned the Rust toolchain to `1.97.1` in both the repo and CI, so local and CI builds resolve identically.
+- **PKG:** Pinned every Rust dependency to an exact version and use the stable Rust toolchain in the repo and CI, so dependency resolution stays explicit while Rust receives current stable fixes.
 
 ## Changes in `v0.11.0-beta.2:`
 

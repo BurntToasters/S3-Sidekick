@@ -16,6 +16,7 @@ import {
   getBookmarks,
   exportBookmarksJson,
   importBookmarksJson,
+  MAX_IMPORT_BYTES,
   type Bookmark,
 } from "./bookmarks.ts";
 import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
@@ -24,6 +25,8 @@ import { showConfirm, showAlert } from "./dialogs.ts";
 import { friendlyError } from "./utils.ts";
 
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
+let settingsSaveTail: Promise<void> = Promise.resolve();
+let settingsModalSaveOperation: Promise<void> | null = null;
 
 export function setBookmarkSelectHandler(handler: (b: Bookmark) => void): void {
   onBookmarkSelect = handler;
@@ -104,13 +107,28 @@ export async function loadSettings(): Promise<boolean> {
   return !result.malformed;
 }
 
-export async function saveSettings(): Promise<void> {
-  const payload = mergeSettingsPayload(
-    state.currentSettings,
-    state.settingsExtras,
+function enqueueSettingsSnapshot(
+  settingsSnapshot: UserSettings,
+  extrasSnapshot: typeof state.settingsExtras,
+): Promise<void> {
+  const payload = mergeSettingsPayload(settingsSnapshot, extrasSnapshot);
+  const persistSnapshot = async () => {
+    await invoke("save_settings", { json: payload });
+    state.lastPersistedSettings = { ...settingsSnapshot };
+  };
+  const result = settingsSaveTail.then(persistSnapshot);
+  settingsSaveTail = result.catch(() => undefined);
+  return result;
+}
+
+export function saveSettings(): Promise<void> {
+  if (settingsModalSaveOperation) {
+    return settingsModalSaveOperation.then(() => saveSettings());
+  }
+  return enqueueSettingsSnapshot(
+    { ...state.currentSettings },
+    { ...state.settingsExtras },
   );
-  await invoke("save_settings", { json: payload });
-  state.lastPersistedSettings = { ...state.currentSettings };
 }
 
 export function switchSettingsTab(tab: string): void {
@@ -736,26 +754,71 @@ export function openSettingsModal(): void {
   if (overlay) overlay.classList.add("active");
 }
 
-export async function closeSettingsModal(save: boolean): Promise<void> {
-  if (save) {
-    readSettingsModal();
-    applyTheme(state.currentSettings.theme);
-    try {
-      await saveSettings();
-    } catch (err) {
-      applyTheme(state.lastPersistedSettings.theme);
-      state.currentSettings = { ...state.lastPersistedSettings };
-      const statusEl = document.getElementById("status");
-      if (statusEl)
-        statusEl.textContent = `Failed to save settings: ${String(err)}`;
-      return;
+function setSettingsSaveBusy(busy: boolean): void {
+  const button = document.getElementById(
+    "settings-save",
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  button.disabled = busy;
+  button.setAttribute("aria-busy", String(busy));
+  button.textContent = busy ? "Saving\u2026" : "Save";
+}
+
+function settingsMatchSnapshotExceptWindowSize(
+  snapshot: UserSettings,
+): boolean {
+  const current = { ...state.currentSettings };
+  current.windowWidth = snapshot.windowWidth;
+  current.windowHeight = snapshot.windowHeight;
+  return JSON.stringify(current) === JSON.stringify(snapshot);
+}
+
+async function saveAndCloseSettingsModal(): Promise<void> {
+  readSettingsModal();
+  const attemptedSettings = { ...state.currentSettings };
+  const attemptedExtras = { ...state.settingsExtras };
+  applyTheme(attemptedSettings.theme);
+  setSettingsSaveBusy(true);
+  try {
+    await enqueueSettingsSnapshot(attemptedSettings, attemptedExtras);
+  } catch (err) {
+    if (settingsMatchSnapshotExceptWindowSize(attemptedSettings)) {
+      const latestWindowWidth = state.currentSettings.windowWidth;
+      const latestWindowHeight = state.currentSettings.windowHeight;
+      const rollback = {
+        ...state.lastPersistedSettings,
+        windowWidth: latestWindowWidth,
+        windowHeight: latestWindowHeight,
+      };
+      applyTheme(rollback.theme);
+      state.currentSettings = rollback;
+      setUpdateChannel(rollback.updateChannel);
     }
-  } else {
+    const statusEl = document.getElementById("status");
+    if (statusEl)
+      statusEl.textContent = `Failed to save settings: ${String(err)}`;
+    return;
+  }
+  document.getElementById("settings-overlay")?.classList.remove("active");
+}
+
+export function closeSettingsModal(save: boolean): Promise<void> {
+  if (settingsModalSaveOperation) return settingsModalSaveOperation;
+  if (!save) {
     applyTheme(state.lastPersistedSettings.theme);
     state.currentSettings = { ...state.lastPersistedSettings };
+    document.getElementById("settings-overlay")?.classList.remove("active");
+    return Promise.resolve();
   }
-  const overlay = document.getElementById("settings-overlay");
-  if (overlay) overlay.classList.remove("active");
+
+  const operation = saveAndCloseSettingsModal().finally(() => {
+    if (settingsModalSaveOperation === operation) {
+      settingsModalSaveOperation = null;
+      setSettingsSaveBusy(false);
+    }
+  });
+  settingsModalSaveOperation = operation;
+  return operation;
 }
 
 export async function resetSettings(): Promise<void> {
@@ -787,12 +850,19 @@ export async function resetSettings(): Promise<void> {
     const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
     try {
       await invoke("factory_reset", { settingsJson: defaults });
-      // Remove the legacy plaintext transfer fallback and all other app-local
-      // webview state only after the backend transaction succeeds.
-      localStorage.clear();
     } catch (err) {
       await showAlert("Factory Reset Failed", friendlyError(err));
       return;
+    }
+
+    // The backend transaction is the commit point. Browser storage cleanup is
+    // best-effort only: a disabled/unavailable localStorage implementation must
+    // not misreport a completed destructive reset as failed or suppress relaunch.
+    try {
+      localStorage.clear();
+    } catch {
+      // Reads will generally be unavailable under the same policy; the backend
+      // remains authoritative and the relaunch below must still happen.
     }
   } else {
     const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {
@@ -800,7 +870,7 @@ export async function resetSettings(): Promise<void> {
     });
     try {
       await invoke("save_settings", { json: defaults });
-      await invoke("save_connection", { json: "" });
+      await invoke("clear_saved_connection");
     } catch (err) {
       await showAlert("Reset Failed", friendlyError(err));
       return;
@@ -866,7 +936,12 @@ async function refreshBookmarkListUI(): Promise<void> {
         { okLabel: "Delete", okDanger: true },
       );
       if (!confirmed) return;
-      await removeBookmark(index);
+      try {
+        await removeBookmark(index);
+      } catch (err) {
+        void showAlert("Delete Failed", friendlyError(err));
+        return;
+      }
       void refreshBookmarkListUI();
     },
   );
@@ -885,14 +960,24 @@ function wireBookmarkImportExport(): void {
   ) as HTMLInputElement | null;
 
   exportBtn?.addEventListener("click", () => {
-    const json = exportBookmarksJson();
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "s3-sidekick-bookmarks.json";
-    a.click();
-    URL.revokeObjectURL(url);
+    void showConfirm(
+      "Export bookmark secrets?",
+      "Including secret keys writes them to a plaintext file. Choose redacted export to leave secrets out.",
+      {
+        okLabel: "Include secrets",
+        cancelLabel: "Export redacted",
+        okDanger: true,
+      },
+    ).then((includeSecrets) => {
+      const json = exportBookmarksJson(includeSecrets);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "s3-sidekick-bookmarks.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    });
   });
 
   importBtn?.addEventListener("click", () => {
@@ -902,6 +987,11 @@ function wireBookmarkImportExport(): void {
   importInput?.addEventListener("change", () => {
     const file = importInput.files?.[0];
     if (!file) return;
+    if (file.size > MAX_IMPORT_BYTES) {
+      importInput.value = "";
+      void showAlert("Import Failed", "Bookmark import is too large");
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const text = reader.result as string;

@@ -77,8 +77,8 @@
     --border: #27272a;
     --border-focus: #6366f1;
     --text: #fafafa;
-    --text-secondary: #a1a1aa;
-    --text-muted: #85858d;
+    --text-secondary: #b4b4bd;
+    --text-muted: #a1a1aa;
 
     --accent: #6366f1;
     --accent-hover: #818cf8;
@@ -120,8 +120,8 @@
   --border: #27272a;
   --border-focus: #6366f1;
   --text: #fafafa;
-  --text-secondary: #a1a1aa;
-  --text-muted: #85858d;
+  --text-secondary: #b4b4bd;
+  --text-muted: #a1a1aa;
 
   --accent: #6366f1;
   --accent-hover: #818cf8;
@@ -159,6 +159,18 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 html,

@@ -26,3 +26,49 @@
     --glass-bg-heavy: rgba(30, 30, 30, 0.99);
   }
 }
+
+/* Preserve selection, focus, progress, and severity cues in Windows High Contrast. */
+@media (forced-colors: active) {
+  :root {
+    --focus-ring-color: Highlight;
+  }
+
+  .object-row--selected,
+  .transfer-item--selected {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  .bottom-drawer__tab--active {
+    border-bottom-color: Highlight;
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+  }
+
+  .transfer-progress {
+    height: 6px;
+    border: 1px solid CanvasText;
+    background: Canvas;
+    forced-color-adjust: none;
+  }
+
+  .transfer-progress__bar {
+    background: Highlight;
+  }
+
+  .transfer-status--error,
+  .activity-icon--error {
+    outline: 1px solid CanvasText;
+    outline-offset: 1px;
+  }
+
+  .activity-icon--warning {
+    border-bottom: 2px dashed CanvasText;
+  }
+
+  .transfer-error,
+  .activity-icon--error,
+  .activity-icon--warning {
+    font-weight: 700;
+  }
+}

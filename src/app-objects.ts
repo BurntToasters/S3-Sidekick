@@ -1,7 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { state } from "./state.ts";
-import { refreshObjects, refreshBuckets } from "./connection.ts";
+import {
+  captureConnectionSnapshot,
+  connectionSnapshotChanged,
+  invokeS3,
+  invokeS3For,
+  refreshObjects,
+  refreshBuckets,
+} from "./connection.ts";
+import type { ConnectionSnapshot } from "./connection.ts";
 import {
   renderObjectTable,
   renderBreadcrumb,
@@ -9,18 +17,125 @@ import {
   navigateToFolder,
   clearSelection,
   updateSelectionUI,
+  invalidateInspectorSelectionSync,
 } from "./browser.ts";
 import { showConfirm, showPrompt } from "./dialogs.ts";
 import { logActivity, exportActivityLogText } from "./activity-log.ts";
 import { basename, friendlyError } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { getSelectedFileKeys, getSelectedPrefixes } from "./app-selection.ts";
+import {
+  resolveAbsentObjectWriteIntent,
+  resolveObjectConflict,
+  resolveConflictChoice,
+  type ConflictPromptSession,
+} from "./app-conflicts.ts";
 
-export async function handleDelete(): Promise<void> {
+interface DeleteResult {
+  deleted: number;
+  failed: number;
+  incomplete: boolean;
+  errors: string[];
+}
+
+function normalizeDeleteResult(value: unknown): DeleteResult {
+  // Tolerate an older backend during development/hot reload; current backend
+  // always returns the structured shape below.
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return { deleted: value, failed: 0, incomplete: false, errors: [] };
+  }
+  if (!value || typeof value !== "object") {
+    throw new Error("Delete command returned an invalid result");
+  }
+  const row = value as Partial<DeleteResult>;
+  if (
+    !Number.isInteger(row.deleted) ||
+    (row.deleted ?? -1) < 0 ||
+    !Number.isInteger(row.failed) ||
+    (row.failed ?? -1) < 0 ||
+    typeof row.incomplete !== "boolean" ||
+    !Array.isArray(row.errors) ||
+    !row.errors.every((entry) => typeof entry === "string")
+  ) {
+    throw new Error("Delete command returned an invalid result");
+  }
+  return row as DeleteResult;
+}
+
+function deleteFailureSummary(result: DeleteResult): string | null {
+  if (!result.incomplete && result.failed === 0 && result.errors.length === 0) {
+    return null;
+  }
+  const parts: string[] = [];
+  if (result.failed > 0) parts.push(`${result.failed} object(s) failed`);
+  if (result.incomplete) parts.push("operation did not finish");
+  if (result.errors.length > 0)
+    parts.push(result.errors.slice(0, 3).join("; "));
+  return parts.join("; ");
+}
+
+let deleteOperation: Promise<void> | null = null;
+
+function setDeleteOperationBusy(busy: boolean): void {
+  const button = document.getElementById(
+    "batch-delete",
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  const label = button.querySelector<HTMLElement>(".batch-toolbar__label");
+  button.dataset.operationInFlight = String(busy);
+  button.setAttribute("aria-busy", String(busy));
+  if (label) label.textContent = busy ? "Deleting\u2026" : "Delete";
+  if (busy) {
+    button.disabled = true;
+    button.title = "Delete in progress";
+  } else {
+    const selectedCount =
+      getSelectedFileKeys().length + getSelectedPrefixes().length;
+    button.disabled = selectedCount === 0;
+    button.title =
+      selectedCount > 0
+        ? `Delete ${selectedCount} selected item${selectedCount === 1 ? "" : "s"}`
+        : "Select items to delete";
+  }
+}
+
+export function isDeleteInProgress(): boolean {
+  return deleteOperation !== null;
+}
+
+export function handleDelete(): Promise<void> {
+  if (deleteOperation) return deleteOperation;
+  if (
+    getSelectedFileKeys().length === 0 &&
+    getSelectedPrefixes().length === 0
+  ) {
+    return Promise.resolve();
+  }
+
+  setDeleteOperationBusy(true);
+  const operation = performDelete().finally(() => {
+    if (deleteOperation === operation) {
+      deleteOperation = null;
+      setDeleteOperationBusy(false);
+    }
+  });
+  deleteOperation = operation;
+  return operation;
+}
+
+async function performDelete(): Promise<void> {
   const keys = getSelectedFileKeys();
   const prefixes = getSelectedPrefixes();
 
   if (keys.length === 0 && prefixes.length === 0) return;
+
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch (err) {
+    setStatus(`Delete cancelled: ${friendlyError(err)}`, 5000);
+    return;
+  }
 
   const parts: string[] = [];
   if (keys.length > 0)
@@ -36,29 +151,91 @@ export async function handleDelete(): Promise<void> {
     okDanger: true,
   });
   if (!confirmed) return;
+  if (
+    connectionSnapshotChanged(target) ||
+    keys.join("\n") !== getSelectedFileKeys().join("\n") ||
+    prefixes.join("\n") !== getSelectedPrefixes().join("\n")
+  ) {
+    setStatus(
+      "Delete cancelled because connection or selection changed.",
+      5000,
+    );
+    return;
+  }
 
   let totalDeleted = 0;
+  const failures: string[] = [];
   try {
     if (keys.length > 0) {
-      setStatus(`Deleting ${keys.length} file(s)...`);
-      totalDeleted += await invoke<number>("delete_objects", {
-        bucket: state.currentBucket,
-        keys,
-      });
+      if (connectionSnapshotChanged(target)) {
+        failures.push(`${keys.join(", ")}: connection changed`);
+      } else {
+        setStatus(
+          `Deleting ${keys.length} file${keys.length === 1 ? "" : "s"}...`,
+        );
+        try {
+          const result = normalizeDeleteResult(
+            await invokeS3For<unknown>(target.connectionId, "delete_objects", {
+              bucket: target.bucket,
+              keys,
+            }),
+          );
+          totalDeleted += result.deleted;
+          const failure = deleteFailureSummary(result);
+          if (failure) failures.push(`${keys.join(", ")}: ${failure}`);
+        } catch (err) {
+          failures.push(`${keys.join(", ")}: ${friendlyError(err)}`);
+        }
+      }
     }
     for (const prefix of prefixes) {
+      if (connectionSnapshotChanged(target)) {
+        failures.push(`${prefix}: connection changed`);
+        break;
+      }
       setStatus(`Deleting folder "${basename(prefix.replace(/\/$/, ""))}"...`);
-      totalDeleted += await invoke<number>("delete_prefix", {
-        bucket: state.currentBucket,
-        prefix,
-      });
+      try {
+        const result = normalizeDeleteResult(
+          await invokeS3For<unknown>(target.connectionId, "delete_prefix", {
+            bucket: target.bucket,
+            prefix,
+          }),
+        );
+        totalDeleted += result.deleted;
+        const failure = deleteFailureSummary(result);
+        if (failure) failures.push(`${prefix}: ${failure}`);
+      } catch (err) {
+        failures.push(`${prefix}: ${friendlyError(err)}`);
+      }
     }
-    setStatus(`Deleted ${totalDeleted} item(s).`, 5000);
-    logActivity(`Deleted ${totalDeleted} object(s).`, "success");
-    clearSelection();
-    await refreshObjects(state.currentBucket, state.currentPrefix);
-    renderObjectTable();
-    renderBreadcrumb();
+    if (failures.length > 0) {
+      setStatus(
+        `Delete failed for ${failures.length} target(s); deleted ${totalDeleted} item(s).`,
+        5000,
+      );
+      logActivity(
+        `Delete partially failed after ${totalDeleted} item(s): ${failures.join("; ")}`,
+        "warning",
+      );
+    } else {
+      setStatus(`Deleted ${totalDeleted} item(s).`, 5000);
+      logActivity(`Deleted ${totalDeleted} object(s).`, "success");
+    }
+    if (!connectionSnapshotChanged(target)) {
+      clearSelection();
+      try {
+        const committed = await refreshObjects(target.bucket, target.prefix);
+        if (committed && !connectionSnapshotChanged(target)) {
+          renderObjectTable();
+          renderBreadcrumb();
+        }
+      } catch (err) {
+        logActivity(
+          `Listing refresh after delete failed: ${friendlyError(err)}`,
+          "warning",
+        );
+      }
+    }
   } catch (err) {
     setStatus(`Delete failed: ${friendlyError(err)}`);
     logActivity(`Delete failed: ${friendlyError(err)}`, "error");
@@ -68,12 +245,13 @@ export async function handleDelete(): Promise<void> {
 export async function handleCopyUrl(): Promise<void> {
   const keys = getSelectedFileKeys();
   if (keys.length === 0) return;
+  const bucket = state.currentBucket;
 
   try {
     const urls = await Promise.all(
       keys.map((key) =>
-        invoke<string>("build_object_url", {
-          bucket: state.currentBucket,
+        invokeS3<string>("build_object_url", {
+          bucket,
           key,
         }),
       ),
@@ -104,11 +282,12 @@ function formatExpiration(seconds: number): string {
 export async function handleCopyPresignedUrl(): Promise<void> {
   const keys = getSelectedFileKeys();
   if (keys.length !== 1) return;
+  const bucket = state.currentBucket;
   const expiresInSecs = state.currentSettings.presignedUrlExpiration;
 
   try {
-    const url = await invoke<string>("generate_presigned_url", {
-      bucket: state.currentBucket,
+    const url = await invokeS3<string>("generate_presigned_url", {
+      bucket,
       key: keys[0],
       expiresInSecs,
     });
@@ -175,6 +354,20 @@ export async function handleCopyArn(): Promise<void> {
 export async function handleRename(): Promise<void> {
   const keys = getSelectedFileKeys();
   const prefixes = getSelectedPrefixes();
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch (err) {
+    setStatus(`Rename cancelled: ${friendlyError(err)}`, 5000);
+    return;
+  }
+  const targetBucket = target.bucket;
+  const targetPrefix = target.prefix;
+  const targetLocationChanged = (): boolean =>
+    connectionSnapshotChanged(target) ||
+    !state.connected ||
+    state.currentBucket !== targetBucket ||
+    state.currentPrefix !== targetPrefix;
 
   if (keys.length === 1 && prefixes.length === 0) {
     const oldKey = keys[0];
@@ -183,23 +376,65 @@ export async function handleRename(): Promise<void> {
       inputDefault: oldName,
     });
     if (!newName || newName === oldName) return;
+    if (targetLocationChanged()) {
+      setStatus("Rename cancelled because location changed.", 5000);
+      return;
+    }
 
     const keyPrefix = oldKey.slice(0, oldKey.length - oldName.length);
     const newKey = keyPrefix + newName;
 
+    const conflictSession: ConflictPromptSession = { applyAll: null };
+    const sourceSize =
+      state.objects.find((object) => object.key === oldKey)?.size ?? undefined;
+    const intent = await resolveObjectConflict(
+      target.connectionId,
+      targetBucket,
+      newKey,
+      conflictSession,
+      false,
+      { operation: "copy", byteLength: sourceSize },
+    );
+    if (targetLocationChanged()) {
+      setStatus("Rename cancelled because location changed.", 5000);
+      return;
+    }
+    if (intent === "skip") {
+      setStatus(`Rename skipped: "${newName}" already exists.`, 5000);
+      return;
+    }
+    if (intent === "cancel") {
+      setStatus(
+        "Rename cancelled: unconditional write was not authorized.",
+        5000,
+      );
+      return;
+    }
+    if (targetLocationChanged()) {
+      setStatus("Rename cancelled because location changed.", 5000);
+      return;
+    }
+
     try {
       setStatus("Renaming...");
-      await invoke("rename_object", {
-        bucket: state.currentBucket,
+      await invokeS3For(target.connectionId, "rename_object", {
+        bucket: targetBucket,
         oldKey,
         newKey,
+        overwrite: intent.overwrite,
       });
+      if (targetLocationChanged()) return;
       setStatus(`Renamed to "${newName}".`, 5000);
       logActivity(`Renamed "${oldName}" to "${newName}".`, "success");
       clearSelection();
-      await refreshObjects(state.currentBucket, state.currentPrefix);
-      renderObjectTable();
+      if (!targetLocationChanged()) {
+        const committed = await refreshObjects(targetBucket, targetPrefix);
+        if (committed && !targetLocationChanged()) {
+          renderObjectTable();
+        }
+      }
     } catch (err) {
+      if (targetLocationChanged()) return;
       setStatus(`Rename failed for "${oldName}": ${friendlyError(err)}`);
       logActivity(
         `Rename failed for "${oldName}": ${friendlyError(err)}`,
@@ -226,22 +461,113 @@ export async function handleRename(): Promise<void> {
       setStatus("Folder name cannot contain slashes.", 5000);
       return;
     }
+    if (targetLocationChanged()) {
+      setStatus("Folder rename cancelled because location changed.", 5000);
+      return;
+    }
 
     const newPrefix = parentPrefix + newName + "/";
 
+    let overwrite = false;
+    let folderHasConflict = false;
+    try {
+      const existing = await invokeS3For<{
+        objects: Array<{ key: string }>;
+        prefixes: string[];
+      }>(target.connectionId, "list_objects", {
+        bucket: targetBucket,
+        prefix: newPrefix,
+        delimiter: "",
+        continuationToken: "",
+      });
+      folderHasConflict =
+        existing.objects.length > 0 || existing.prefixes.length > 0;
+    } catch (err) {
+      folderHasConflict = true;
+      logActivity(
+        `Could not check whether ${targetBucket}/${newPrefix} exists (${friendlyError(err)}). ` +
+          "Treating it as a conflict.",
+        "warning",
+      );
+    }
+
+    if (targetLocationChanged()) {
+      setStatus("Folder rename cancelled because location changed.", 5000);
+      return;
+    }
+
+    const conflictSession: ConflictPromptSession = { applyAll: null };
+    if (folderHasConflict) {
+      const policy = state.currentSettings.conflictPolicy;
+      let decision: "replace" | "skip";
+      if (policy === "replace") {
+        decision = "replace";
+      } else if (policy === "skip") {
+        setStatus(`Folder rename skipped: "${newName}" already exists.`, 5000);
+        return;
+      } else {
+        decision = await resolveConflictChoice(
+          `${targetBucket}/${newPrefix}`,
+          conflictSession,
+          false,
+        );
+      }
+      if (targetLocationChanged()) {
+        setStatus("Folder rename cancelled because location changed.", 5000);
+        return;
+      }
+      if (decision === "skip") {
+        setStatus(`Folder rename skipped: "${newName}" already exists.`, 5000);
+        return;
+      }
+      overwrite = true;
+    } else if (state.currentSettings.conflictPolicy === "replace") {
+      overwrite = true;
+    } else {
+      const intent = await resolveAbsentObjectWriteIntent(
+        conflictSession,
+        false,
+        { operation: "copy" },
+      );
+      if (targetLocationChanged()) {
+        setStatus("Folder rename cancelled because location changed.", 5000);
+        return;
+      }
+      if (intent === "cancel") {
+        setStatus(
+          "Folder rename cancelled: unconditional write was not authorized.",
+          5000,
+        );
+        return;
+      }
+      overwrite = intent.overwrite;
+    }
+
+    if (targetLocationChanged()) {
+      setStatus("Folder rename cancelled because location changed.", 5000);
+      return;
+    }
+
     try {
       setStatus(`Renaming folder "${folderName}"...`);
-      await invoke("rename_prefix", {
-        bucket: state.currentBucket,
+      await invokeS3For(target.connectionId, "rename_prefix", {
+        bucket: targetBucket,
         oldPrefix,
         newPrefix,
+        overwrite,
       });
+      if (targetLocationChanged()) return;
       setStatus(`Renamed folder to "${newName}".`, 5000);
       logActivity(`Renamed folder "${folderName}" to "${newName}".`, "success");
       clearSelection();
-      await refreshObjects(state.currentBucket, state.currentPrefix);
-      renderObjectTable();
+      if (!targetLocationChanged()) {
+        const committed = await refreshObjects(targetBucket, targetPrefix);
+        if (committed && !targetLocationChanged()) {
+          renderObjectTable();
+        }
+      }
     } catch (err) {
+      if (targetLocationChanged()) return;
       setStatus(`Folder rename failed: ${friendlyError(err)}`);
       logActivity(`Folder rename failed: ${friendlyError(err)}`, "error");
     }
@@ -253,11 +579,29 @@ export async function handleCreateFolder(): Promise<void> {
     setStatus("Connect to a bucket first.");
     return;
   }
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch (err) {
+    setStatus(`Folder creation cancelled: ${friendlyError(err)}`, 5000);
+    return;
+  }
+  const targetBucket = target.bucket;
+  const targetPrefix = target.prefix;
+  const targetLocationChanged = (): boolean =>
+    connectionSnapshotChanged(target) ||
+    !state.connected ||
+    state.currentBucket !== targetBucket ||
+    state.currentPrefix !== targetPrefix;
 
   const name = await showPrompt("New Folder", "Enter folder name:", {
     inputPlaceholder: "Folder name",
   });
   if (!name) return;
+  if (targetLocationChanged()) {
+    setStatus("Folder creation cancelled because location changed.", 5000);
+    return;
+  }
 
   const trimmed = name.trim();
   if (!trimmed) {
@@ -269,19 +613,23 @@ export async function handleCreateFolder(): Promise<void> {
     return;
   }
 
-  const key = state.currentPrefix + trimmed;
+  const key = targetPrefix + trimmed;
 
   try {
     setStatus("Creating folder...");
-    await invoke("create_folder", {
-      bucket: state.currentBucket,
+    await invokeS3For(target.connectionId, "create_folder", {
+      bucket: targetBucket,
       key,
     });
+    if (targetLocationChanged()) return;
     setStatus(`Created folder "${trimmed}".`, 5000);
     logActivity(`Created folder ${trimmed}.`, "success");
-    await refreshObjects(state.currentBucket, state.currentPrefix);
-    renderObjectTable();
+    if (!targetLocationChanged()) {
+      const committed = await refreshObjects(targetBucket, targetPrefix);
+      if (committed && !targetLocationChanged()) renderObjectTable();
+    }
   } catch (err) {
+    if (targetLocationChanged()) return;
     setStatus(`Failed to create folder: ${friendlyError(err)}`);
     logActivity(
       `Failed to create folder ${trimmed}: ${friendlyError(err)}`,
@@ -292,14 +640,25 @@ export async function handleCreateFolder(): Promise<void> {
 
 export async function handleRefresh(): Promise<void> {
   if (!state.connected || !state.currentBucket) return;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    return;
+  }
   setStatus("Refreshing...");
   try {
-    await refreshObjects(state.currentBucket, state.currentPrefix);
-    renderObjectTable();
-    renderBreadcrumb();
-    setStatus("");
+    const committed = await refreshObjects(target.bucket, target.prefix);
+    if (committed && !connectionSnapshotChanged(target)) {
+      invalidateInspectorSelectionSync();
+      renderObjectTable();
+      renderBreadcrumb();
+      setStatus("");
+    }
   } catch (err) {
-    setStatus(`Refresh failed: ${friendlyError(err)}`);
+    if (!connectionSnapshotChanged(target)) {
+      setStatus(`Refresh failed: ${friendlyError(err)}`);
+    }
   }
 }
 
@@ -354,10 +713,15 @@ export async function handleExportActivityLog(): Promise<void> {
 
 export async function handleGoToKeyOrPrefix(): Promise<void> {
   if (!state.connected || !state.currentBucket) return;
+  const targetBucket = state.currentBucket;
   const raw = await showPrompt("Go To", "Enter key or prefix:", {
     inputPlaceholder: "e.g. folder/file.txt or folder/subfolder/",
   });
   if (!raw) return;
+  if (!state.connected || state.currentBucket !== targetBucket) {
+    setStatus("Go To cancelled because connection changed.", 5000);
+    return;
+  }
 
   const input = raw.trim().replace(/^\/+/, "");
   if (!input) return;

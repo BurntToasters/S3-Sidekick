@@ -12,6 +12,13 @@ export interface Bookmark {
 let bookmarks: Bookmark[] = [];
 let persistPromise: Promise<void> = Promise.resolve();
 let onChangeCallback: (() => void) | null = null;
+export const MAX_IMPORT_BYTES = 1_048_576;
+const MAX_IMPORT_BOOKMARKS = 1_000;
+const MAX_BOOKMARK_NAME_LENGTH = 256;
+const MAX_BOOKMARK_ENDPOINT_LENGTH = 2_048;
+const MAX_BOOKMARK_REGION_LENGTH = 128;
+const MAX_BOOKMARK_ACCESS_KEY_LENGTH = 256;
+const MAX_BOOKMARK_SECRET_KEY_LENGTH = 4_096;
 
 export function setBookmarkChangeHandler(handler: () => void): void {
   onChangeCallback = handler;
@@ -34,10 +41,18 @@ function isBookmark(value: unknown): value is Bookmark {
   const row = value as Bookmark;
   return (
     typeof row.name === "string" &&
+    row.name.length > 0 &&
+    row.name.length <= MAX_BOOKMARK_NAME_LENGTH &&
     typeof row.endpoint === "string" &&
+    row.endpoint.length > 0 &&
+    row.endpoint.length <= MAX_BOOKMARK_ENDPOINT_LENGTH &&
     typeof row.region === "string" &&
+    row.region.length <= MAX_BOOKMARK_REGION_LENGTH &&
     typeof row.access_key === "string" &&
-    typeof row.secret_key === "string"
+    row.access_key.length > 0 &&
+    row.access_key.length <= MAX_BOOKMARK_ACCESS_KEY_LENGTH &&
+    typeof row.secret_key === "string" &&
+    row.secret_key.length <= MAX_BOOKMARK_SECRET_KEY_LENGTH
   );
 }
 
@@ -88,35 +103,52 @@ export async function loadBookmarks(): Promise<void> {
   bookmarks = (await loadBackupBookmarks()) ?? [];
 }
 
-async function persistBookmarks(): Promise<void> {
+async function persistBookmarksSnapshot(next: Bookmark[]): Promise<void> {
+  const serialized = JSON.stringify(next, null, 2);
   persistPromise = persistPromise
     .catch(() => {})
     .then(async () => {
-      await invoke("save_bookmarks", {
-        json: JSON.stringify(bookmarks, null, 2),
-      });
-      await saveBookmarksBackupSafe(bookmarks);
+      await invoke("save_bookmarks", { json: serialized });
+      await saveBookmarksBackupSafe(next);
     });
   await persistPromise;
 }
 
-export async function addBookmark(bookmark: Bookmark): Promise<boolean> {
-  const exists = bookmarks.some(
-    (b) =>
-      b.endpoint === bookmark.endpoint && b.access_key === bookmark.access_key,
+let mutationQueue: Promise<void> = Promise.resolve();
+
+function enqueueBookmarkMutation<T>(work: () => Promise<T>): Promise<T> {
+  const run = mutationQueue.then(work, work);
+  mutationQueue = run.then(
+    () => undefined,
+    () => undefined,
   );
-  if (exists) return false;
-  bookmarks.push(bookmark);
-  await persistBookmarks();
-  onChangeCallback?.();
-  return true;
+  return run;
+}
+
+export async function addBookmark(bookmark: Bookmark): Promise<boolean> {
+  return enqueueBookmarkMutation(async () => {
+    const exists = bookmarks.some(
+      (b) =>
+        b.endpoint === bookmark.endpoint &&
+        b.access_key === bookmark.access_key,
+    );
+    if (exists) return false;
+    const next = [...bookmarks, bookmark];
+    await persistBookmarksSnapshot(next);
+    bookmarks = next;
+    onChangeCallback?.();
+    return true;
+  });
 }
 
 export async function removeBookmark(index: number): Promise<void> {
-  if (index < 0 || index >= bookmarks.length) return;
-  bookmarks.splice(index, 1);
-  await persistBookmarks();
-  onChangeCallback?.();
+  return enqueueBookmarkMutation(async () => {
+    if (index < 0 || index >= bookmarks.length) return;
+    const next = bookmarks.filter((_, i) => i !== index);
+    await persistBookmarksSnapshot(next);
+    bookmarks = next;
+    onChangeCallback?.();
+  });
 }
 
 export function renderBookmarkBar(
@@ -152,13 +184,23 @@ export function renderBookmarkBar(
   }
 }
 
-export function exportBookmarksJson(): string {
-  return JSON.stringify(bookmarks, null, 2);
+export function exportBookmarksJson(includeSecrets = false): string {
+  const exported = includeSecrets
+    ? bookmarks
+    : bookmarks.map(({ secret_key: _secretKey, ...bookmark }) => ({
+        ...bookmark,
+        secret_key: "",
+      }));
+  return JSON.stringify(exported, null, 2);
 }
 
 export async function importBookmarksJson(
   json: string,
 ): Promise<{ imported: number; skipped: number; error?: string }> {
+  if (typeof json !== "string" || json.length > MAX_IMPORT_BYTES) {
+    return { imported: 0, skipped: 0, error: "Bookmark import is too large" };
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -169,34 +211,53 @@ export async function importBookmarksJson(
   if (!Array.isArray(parsed)) {
     return { imported: 0, skipped: 0, error: "Expected a JSON array" };
   }
+  if (parsed.length > MAX_IMPORT_BOOKMARKS) {
+    return {
+      imported: 0,
+      skipped: 0,
+      error: `Bookmark import is limited to ${MAX_IMPORT_BOOKMARKS} entries`,
+    };
+  }
 
   const valid = parsed.filter(isBookmark);
   if (valid.length === 0) {
     return { imported: 0, skipped: parsed.length };
   }
 
-  let imported = 0;
-  let skipped = 0;
-  for (const b of valid) {
-    const exists = bookmarks.some(
-      (existing) =>
-        existing.endpoint === b.endpoint &&
-        existing.access_key === b.access_key,
-    );
-    if (exists) {
-      skipped++;
-    } else {
-      bookmarks.push(b);
-      imported++;
-    }
-  }
+  try {
+    return await enqueueBookmarkMutation(async () => {
+      let imported = 0;
+      let skipped = 0;
+      const nextBookmarks = [...bookmarks];
+      for (const b of valid) {
+        const exists = nextBookmarks.some(
+          (existing) =>
+            existing.endpoint === b.endpoint &&
+            existing.access_key === b.access_key,
+        );
+        if (exists) {
+          skipped++;
+        } else {
+          nextBookmarks.push(b);
+          imported++;
+        }
+      }
 
-  if (imported > 0) {
-    await persistBookmarks();
-    onChangeCallback?.();
-  }
+      if (imported > 0) {
+        await persistBookmarksSnapshot(nextBookmarks);
+        bookmarks = nextBookmarks;
+        onChangeCallback?.();
+      }
 
-  return { imported, skipped };
+      return { imported, skipped };
+    });
+  } catch (err) {
+    return {
+      imported: 0,
+      skipped: parsed.length,
+      error: `Failed to save imported bookmarks: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 export function renderBookmarkList(

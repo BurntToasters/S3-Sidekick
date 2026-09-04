@@ -1,5 +1,15 @@
 import { basename, escapeHtml } from "./utils.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
+import { state } from "./state.ts";
+import { canPreview, closePreview, openPreview } from "./preview.ts";
+import {
+  closeInfoPanel,
+  confirmDiscardInfoProperties,
+  hasUnsavedInfoChanges,
+  openInfoPanel,
+  requestCloseInfoPanel,
+  saveInfoPanel,
+} from "./info-panel.ts";
 
 export type InspectorPaneTab = "preview" | "properties";
 
@@ -11,6 +21,153 @@ let inspectorEmptyActive = true;
 let inspectorSyncGeneration = 0;
 
 const INSPECTOR_OPEN_STORAGE_KEY = "s3-sidekick.inspector.open";
+const INSPECTOR_FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+let mobileInspectorModalActive = false;
+let focusBeforeMobileInspector: HTMLElement | null = null;
+const mobileInspectorBackgroundState = new Map<
+  HTMLElement,
+  { inert: boolean; ariaHidden: string | null }
+>();
+
+function setElementInert(element: HTMLElement, inert: boolean): void {
+  (element as HTMLElement & { inert: boolean }).inert = inert;
+}
+
+function getMobileInspectorBackgroundTargets(
+  panel: HTMLElement,
+  backdrop: HTMLElement | null,
+): HTMLElement[] {
+  const targets: HTMLElement[] = [];
+  const appRoot = document.getElementById("app");
+  let branch: HTMLElement = panel;
+  while (branch.parentElement && branch !== appRoot) {
+    const parent = branch.parentElement;
+    for (const sibling of parent.children) {
+      if (
+        sibling instanceof HTMLElement &&
+        sibling !== branch &&
+        sibling !== backdrop
+      ) {
+        targets.push(sibling);
+      }
+    }
+    branch = parent;
+  }
+  return targets;
+}
+
+function getMobileInspectorFocusable(panel: HTMLElement): HTMLElement[] {
+  return Array.from(
+    panel.querySelectorAll<HTMLElement>(INSPECTOR_FOCUSABLE_SELECTOR),
+  ).filter(
+    (element) =>
+      !element.closest("[hidden]") &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      !element.hasAttribute("disabled"),
+  );
+}
+
+function hasOverlayAboveInspector(): boolean {
+  return (
+    document.querySelector(
+      ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden]), .setup-wizard-overlay:not([hidden]), #palette-overlay:not([hidden])",
+    ) !== null
+  );
+}
+
+function trapMobileInspectorFocus(event: KeyboardEvent): void {
+  if (
+    !mobileInspectorModalActive ||
+    event.key !== "Tab" ||
+    hasOverlayAboveInspector()
+  ) {
+    return;
+  }
+  const panel = document.getElementById("inspector-panel");
+  if (!panel) return;
+  const focusable = getMobileInspectorFocusable(panel);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    panel.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  if (event.shiftKey) {
+    if (!active || active === first || !panel.contains(active)) {
+      event.preventDefault();
+      last.focus();
+    }
+  } else if (!active || active === last || !panel.contains(active)) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function acquireMobileInspectorModal(): void {
+  if (mobileInspectorModalActive) return;
+  const panel = document.getElementById("inspector-panel");
+  if (!panel) return;
+  const backdrop = document.getElementById("inspector-backdrop");
+  const active = document.activeElement;
+  focusBeforeMobileInspector =
+    active instanceof HTMLElement && !panel.contains(active) ? active : null;
+
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "inspector-header-title");
+  panel.removeAttribute("aria-label");
+  if (panel.tabIndex < 0) panel.tabIndex = -1;
+
+  for (const target of getMobileInspectorBackgroundTargets(panel, backdrop)) {
+    if (mobileInspectorBackgroundState.has(target)) continue;
+    mobileInspectorBackgroundState.set(target, {
+      inert: Boolean((target as HTMLElement & { inert?: boolean }).inert),
+      ariaHidden: target.getAttribute("aria-hidden"),
+    });
+    setElementInert(target, true);
+    target.setAttribute("aria-hidden", "true");
+  }
+
+  mobileInspectorModalActive = true;
+  document.addEventListener("keydown", trapMobileInspectorFocus, true);
+  const activeTab = panel.querySelector<HTMLElement>(
+    '.inspector-tab[aria-selected="true"]',
+  );
+  const close = panel.querySelector<HTMLElement>("#inspector-close");
+  (activeTab ?? close ?? panel).focus();
+}
+
+function releaseMobileInspectorModal(restoreFocus: boolean): void {
+  const panel = document.getElementById("inspector-panel");
+  if (panel) {
+    panel.setAttribute("role", "complementary");
+    panel.setAttribute("aria-label", "Inspector");
+    panel.removeAttribute("aria-modal");
+    panel.removeAttribute("aria-labelledby");
+  }
+  if (!mobileInspectorModalActive) return;
+  document.removeEventListener("keydown", trapMobileInspectorFocus, true);
+  for (const [target, previous] of mobileInspectorBackgroundState) {
+    setElementInert(target, previous.inert);
+    if (previous.ariaHidden === null) {
+      target.removeAttribute("aria-hidden");
+    } else {
+      target.setAttribute("aria-hidden", previous.ariaHidden);
+    }
+  }
+  mobileInspectorBackgroundState.clear();
+  mobileInspectorModalActive = false;
+  const restore = focusBeforeMobileInspector;
+  focusBeforeMobileInspector = null;
+  if (restoreFocus && restore?.isConnected) restore.focus();
+}
 
 /** Opens the docked inspector before preview/properties render (desktop slide-out or narrow overlay). */
 export function ensureInspectorOpenForPane(tab: InspectorPaneTab): void {
@@ -131,10 +288,6 @@ function syncInspectorPaneVisibility(): void {
 }
 
 export function setInspectorOpen(open: boolean): void {
-  inspectorOpen = open;
-  if (!isMobileInspectorMode()) {
-    window.localStorage.setItem(INSPECTOR_OPEN_STORAGE_KEY, open ? "1" : "0");
-  }
   const panel = document.getElementById("inspector-panel");
   const resizer = document.getElementById("inspector-resizer");
   const backdrop = document.getElementById("inspector-backdrop");
@@ -142,6 +295,11 @@ export function setInspectorOpen(open: boolean): void {
   const toggle = document.getElementById("btn-inspector");
   const mobile = isMobileInspectorMode();
 
+  if (!open) releaseMobileInspectorModal(true);
+  inspectorOpen = open;
+  if (!mobile) {
+    window.localStorage.setItem(INSPECTOR_OPEN_STORAGE_KEY, open ? "1" : "0");
+  }
   if (open && mobile && isDrawerOpen()) {
     closeDrawer();
   }
@@ -153,7 +311,14 @@ export function setInspectorOpen(open: boolean): void {
   layout?.classList.toggle("main-layout--inspector-docked", open && !mobile);
   toggle?.classList.toggle("btn--active", open);
   toggle?.setAttribute("aria-pressed", String(open));
+  toggle?.setAttribute("aria-expanded", String(open));
   document.documentElement.dataset.inspectorOpen = open ? "1" : "0";
+
+  if (open && mobile) {
+    acquireMobileInspectorModal();
+  } else if (open) {
+    releaseMobileInspectorModal(false);
+  }
 
   syncInspectorPaneVisibility();
   if (open) {
@@ -161,8 +326,8 @@ export function setInspectorOpen(open: boolean): void {
   } else {
     inspectorEmptyActive = true;
     showInspectorEmpty("Select an object to inspect.");
-    void import("./preview.ts").then((m) => m.closePreview());
-    void import("./info-panel.ts").then((m) => m.closeInfoPanel());
+    closePreview();
+    closeInfoPanel();
   }
 }
 
@@ -176,11 +341,7 @@ export function toggleInspector(): void {
 
 export async function requestCloseInspector(): Promise<boolean> {
   if (!inspectorOpen) return true;
-  const info = await import("./info-panel.ts");
-  if (
-    info.hasUnsavedInfoChanges() &&
-    !(await info.confirmDiscardInfoProperties())
-  ) {
+  if (hasUnsavedInfoChanges() && !(await confirmDiscardInfoProperties())) {
     return false;
   }
   setInspectorOpen(false);
@@ -226,7 +387,7 @@ export async function syncInspectorFromSelection(
 
   const reason: InspectorSyncReason = options?.reason ?? "selection";
   const syncGen = ++inspectorSyncGeneration;
-  const { state } = await import("./state.ts");
+  await Promise.resolve();
   if (syncGen !== inspectorSyncGeneration) return;
 
   const keysSet = selectedKeys ?? state.selectedKeys;
@@ -253,7 +414,6 @@ export async function syncInspectorFromSelection(
 
   try {
     const fileKeys = keys.filter((k) => !k.startsWith("prefix:"));
-    const { canPreview, openPreview } = await import("./preview.ts");
     if (syncGen !== inspectorSyncGeneration) return;
 
     const singlePreviewable =
@@ -268,7 +428,6 @@ export async function syncInspectorFromSelection(
         return;
       }
       focusInspectorPropertiesPane();
-      const { openInfoPanel } = await import("./info-panel.ts");
       if (syncGen !== inspectorSyncGeneration) return;
       await openInfoPanel(keys);
       return;
@@ -285,7 +444,6 @@ export async function syncInspectorFromSelection(
     }
 
     if (syncGen !== inspectorSyncGeneration) return;
-    const { openInfoPanel } = await import("./info-panel.ts");
     await openInfoPanel(keys);
   } catch (err) {
     if (syncGen !== inspectorSyncGeneration) return;
@@ -324,16 +482,16 @@ export function wireInspectorChrome(): void {
   document
     .getElementById("inspector-info-save")
     ?.addEventListener("click", () => {
-      void import("./info-panel.ts").then((m) => m.saveInfoPanel());
+      void saveInfoPanel();
     });
   document
     .getElementById("inspector-info-cancel")
     ?.addEventListener("click", () => {
-      void import("./info-panel.ts").then(async (m) => {
-        if (await m.requestCloseInfoPanel()) {
+      void (async () => {
+        if (await requestCloseInfoPanel()) {
           void syncInspectorFromSelection();
         }
-      });
+      })();
     });
 
   window.addEventListener("resize", () => {
@@ -346,8 +504,11 @@ export function wireInspectorChrome(): void {
     const backdrop = document.getElementById("inspector-backdrop");
     if (resizer) resizer.hidden = !inspectorOpen || mobile;
     if (backdrop) backdrop.hidden = !inspectorOpen || !mobile;
-    if (mobile && inspectorOpen && isDrawerOpen()) {
-      closeDrawer();
+    if (mobile) {
+      if (isDrawerOpen()) closeDrawer();
+      acquireMobileInspectorModal();
+    } else {
+      releaseMobileInspectorModal(false);
     }
   });
 

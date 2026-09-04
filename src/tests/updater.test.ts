@@ -406,14 +406,14 @@ describe("updater", () => {
     ).toBe("");
   });
 
-  it("defaults to native mode when both support probes fail", async () => {
+  it("defaults to manual mode when both support probes fail", async () => {
     mockInvoke
       .mockRejectedValueOnce(new Error("no support info"))
       .mockRejectedValueOnce(new Error("no legacy support"));
 
     const updater = await import("../updater.ts");
     await updater.initUpdater();
-    expect(updater.isUpdaterEnabled()).toBe(true);
+    expect(updater.isUpdaterEnabled()).toBe(false);
   });
 
   it("uses beta native target suffix per platform", async () => {

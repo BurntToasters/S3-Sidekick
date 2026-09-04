@@ -1,4 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import {
+  invokeS3,
+  invokeS3For,
+  captureConnectionSnapshot,
+  connectionIdentityChanged,
+} from "./connection.ts";
+import type { ConnectionSnapshot } from "./connection.ts";
 import {
   $,
   escapeHtml,
@@ -18,6 +24,11 @@ import {
   clearInfoOverlayActive,
   shouldUseInspectorMount,
 } from "./inspector-mount.ts";
+import {
+  ensureInspectorOpenForPane,
+  focusInspectorPropertiesPane,
+  markInspectorHasContent,
+} from "./inspector.ts";
 
 interface HeadObjectResponse {
   content_type: string;
@@ -153,11 +164,6 @@ function resetEditorState(): void {
 }
 
 export async function openInfoPanel(keys: string[]): Promise<void> {
-  const {
-    ensureInspectorOpenForPane,
-    focusInspectorPropertiesPane,
-    markInspectorHasContent,
-  } = await import("./inspector.ts");
   ensureInspectorOpenForPane("properties");
   if (shouldUseInspectorMount()) {
     focusInspectorPropertiesPane();
@@ -244,7 +250,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
 
   try {
-    const nextHeadData = await invoke<HeadObjectResponse>("head_object", {
+    const nextHeadData = await invokeS3<HeadObjectResponse>("head_object", {
       bucket: state.currentBucket,
       key: selectedKey,
     });
@@ -347,7 +353,7 @@ async function buildUrlAsync(
   requestToken: number,
 ): Promise<void> {
   try {
-    const url = await invoke<string>("build_object_url", {
+    const url = await invokeS3<string>("build_object_url", {
       bucket: state.currentBucket,
       key: expectedKey,
     });
@@ -376,7 +382,7 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
 
   if (!aclData) {
     try {
-      const nextAclData = await invoke<AclResponse>("get_object_acl", {
+      const nextAclData = await invokeS3<AclResponse>("get_object_acl", {
         bucket: state.currentBucket,
         key: selectedKey,
       });
@@ -703,7 +709,20 @@ export async function saveInfoPanel(): Promise<void> {
 
 async function saveSingleChanges(): Promise<void> {
   const selectedKey = currentKey;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    setStatus("Save cancelled: not connected.", 5000);
+    return;
+  }
+  const requestToken = panelRequestToken;
   if (!selectedKey) return;
+
+  const isCurrentRequest = () =>
+    requestToken === panelRequestToken &&
+    currentKey === selectedKey &&
+    !connectionIdentityChanged(target);
 
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl =
@@ -717,6 +736,19 @@ async function saveSingleChanges(): Promise<void> {
     return;
   }
 
+  if (
+    shouldApplyAcl &&
+    requestedVisibility === "public-read" &&
+    initialSingleVisibility !== "public-read"
+  ) {
+    const confirmed = await showConfirm(
+      "Make object public?",
+      `Anyone with the object URL will be able to read ${target.bucket}/${selectedKey}. Continue?`,
+      { okLabel: "Make public", cancelLabel: "Cancel", okDanger: true },
+    );
+    if (!confirmed || !isCurrentRequest()) return;
+  }
+
   const saveBtn = getInfoSaveBtn();
   saveBtn.disabled = true;
   saveBtn.textContent = "Saving\u2026";
@@ -724,63 +756,84 @@ async function saveSingleChanges(): Promise<void> {
   let metadataError: string | null = null;
   let aclError: string | null = null;
 
-  if (shouldApplyMetadata) {
-    try {
-      const payload = collectSingleMetadata();
-      await invoke("update_metadata", {
-        bucket: state.currentBucket,
-        key: selectedKey,
-        contentType: payload.contentType,
-        metadata: payload.metadata,
-      });
-    } catch (err) {
-      metadataError = errorText(err);
+  try {
+    if (shouldApplyMetadata) {
+      try {
+        if (!isCurrentRequest()) return;
+        const payload = collectSingleMetadata();
+        await invokeS3For(target.connectionId, "update_metadata", {
+          bucket: target.bucket,
+          key: selectedKey,
+          contentType: payload.contentType,
+          metadata: payload.metadata,
+        });
+        if (!isCurrentRequest()) return;
+      } catch (err) {
+        metadataError = errorText(err);
+      }
+    }
+
+    if (shouldApplyAcl && requestedVisibility) {
+      try {
+        if (!isCurrentRequest()) return;
+        await invokeS3For(target.connectionId, "set_object_acl", {
+          bucket: target.bucket,
+          key: selectedKey,
+          visibility: requestedVisibility,
+        });
+        if (!isCurrentRequest()) return;
+      } catch (err) {
+        aclError = errorText(err);
+      }
+    }
+
+    if (!isCurrentRequest()) return;
+
+    if (!metadataError && !aclError) {
+      closeInfoPanel();
+      if (shouldApplyMetadata && shouldApplyAcl) {
+        setStatus("Properties updated.", 5000);
+      } else if (shouldApplyAcl) {
+        setStatus("Permissions updated.", 5000);
+      } else {
+        setStatus("Metadata updated.", 5000);
+      }
+      return;
+    }
+
+    if (metadataError && aclError) {
+      setStatus(
+        `Failed to update properties: metadata (${metadataError}); permissions (${aclError})`,
+      );
+      return;
+    }
+
+    if (metadataError) {
+      setStatus(`Failed to update metadata: ${metadataError}`);
+      return;
+    }
+
+    setStatus(`Failed to update permissions: ${aclError ?? "Unknown error"}`);
+  } finally {
+    if (isCurrentRequest()) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save";
     }
   }
-
-  if (shouldApplyAcl && requestedVisibility) {
-    try {
-      await invoke("set_object_acl", {
-        bucket: state.currentBucket,
-        key: selectedKey,
-        visibility: requestedVisibility,
-      });
-    } catch (err) {
-      aclError = errorText(err);
-    }
-  }
-
-  saveBtn.disabled = false;
-  saveBtn.textContent = "Save";
-
-  if (!metadataError && !aclError) {
-    closeInfoPanel();
-    if (shouldApplyMetadata && shouldApplyAcl) {
-      setStatus("Properties updated.", 5000);
-    } else if (shouldApplyAcl) {
-      setStatus("Permissions updated.", 5000);
-    } else {
-      setStatus("Metadata updated.", 5000);
-    }
-    return;
-  }
-
-  if (metadataError && aclError) {
-    setStatus(
-      `Failed to update properties: metadata (${metadataError}); permissions (${aclError})`,
-    );
-    return;
-  }
-
-  if (metadataError) {
-    setStatus(`Failed to update metadata: ${metadataError}`);
-    return;
-  }
-
-  setStatus(`Failed to update permissions: ${aclError ?? "Unknown error"}`);
 }
 
 async function saveBatchChanges(): Promise<void> {
+  const requestToken = panelRequestToken;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    setStatus("Save cancelled: not connected.", 5000);
+    return;
+  }
+  const targetKeys = [...batchKeys];
+  const isCurrentRequest = () =>
+    requestToken === panelRequestToken && !connectionIdentityChanged(target);
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl = aclDirty && requestedVisibility !== null;
 
@@ -797,6 +850,15 @@ async function saveBatchChanges(): Promise<void> {
     return;
   }
 
+  if (shouldApplyAcl && requestedVisibility === "public-read") {
+    const confirmed = await showConfirm(
+      "Make selected objects public?",
+      `This will allow anonymous read access to ${targetKeys.length} object(s) in bucket ${target.bucket}. Continue?`,
+      { okLabel: "Make public", cancelLabel: "Cancel", okDanger: true },
+    );
+    if (!confirmed || !isCurrentRequest()) return;
+  }
+
   const saveBtn = getInfoSaveBtn();
   saveBtn.disabled = true;
   let succeeded = 0;
@@ -806,8 +868,9 @@ async function saveBatchChanges(): Promise<void> {
   const BATCH_CONCURRENCY = 6;
   let processed = 0;
 
-  for (let i = 0; i < batchKeys.length; i += BATCH_CONCURRENCY) {
-    const chunk = batchKeys.slice(i, i + BATCH_CONCURRENCY);
+  for (let i = 0; i < targetKeys.length; i += BATCH_CONCURRENCY) {
+    if (!isCurrentRequest()) return;
+    const chunk = targetKeys.slice(i, i + BATCH_CONCURRENCY);
     const results = await Promise.allSettled(
       chunk.map(async (key) => {
         let metadataFailed = false;
@@ -815,16 +878,20 @@ async function saveBatchChanges(): Promise<void> {
 
         if (shouldApplyMetadata) {
           try {
-            const head = await invoke<HeadObjectResponse>("head_object", {
-              bucket: state.currentBucket,
-              key,
-            });
+            const head = await invokeS3For<HeadObjectResponse>(
+              target.connectionId,
+              "head_object",
+              {
+                bucket: target.bucket,
+                key,
+              },
+            );
             const merged: Record<string, string> = {
               ...head.metadata,
               ...newMeta,
             };
-            await invoke("update_metadata", {
-              bucket: state.currentBucket,
+            await invokeS3For(target.connectionId, "update_metadata", {
+              bucket: target.bucket,
               key,
               contentType: head.content_type,
               metadata: merged,
@@ -836,8 +903,8 @@ async function saveBatchChanges(): Promise<void> {
 
         if (shouldApplyAcl && requestedVisibility) {
           try {
-            await invoke("set_object_acl", {
-              bucket: state.currentBucket,
+            await invokeS3For(target.connectionId, "set_object_acl", {
+              bucket: target.bucket,
               key,
               visibility: requestedVisibility,
             });
@@ -850,9 +917,10 @@ async function saveBatchChanges(): Promise<void> {
       }),
     );
 
+    if (!isCurrentRequest()) return;
     for (const result of results) {
       processed++;
-      saveBtn.textContent = `Saving ${processed}/${batchKeys.length}\u2026`;
+      saveBtn.textContent = `Saving ${processed}/${targetKeys.length}\u2026`;
       if (result.status === "rejected") {
         failed++;
       } else {
@@ -873,6 +941,7 @@ async function saveBatchChanges(): Promise<void> {
     }
   }
 
+  if (!isCurrentRequest()) return;
   saveBtn.disabled = false;
   saveBtn.textContent = "Save";
 

@@ -18,6 +18,37 @@ function formatDate(date) {
   return `${year}-${month}-${day}`;
 }
 
+function compareVersionsDescending(left, right) {
+  const parse = (value) => {
+    const match = value.match(
+      /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/,
+    );
+    return match
+      ? {
+          core: match.slice(1, 4).map(Number),
+          prerelease: match[4] || null,
+        }
+      : null;
+  };
+  const leftVersion = parse(left);
+  const rightVersion = parse(right);
+  if (!leftVersion || !rightVersion) {
+    return right.localeCompare(left, undefined, { numeric: true });
+  }
+  for (let index = 0; index < leftVersion.core.length; index += 1) {
+    if (leftVersion.core[index] !== rightVersion.core[index]) {
+      return rightVersion.core[index] - leftVersion.core[index];
+    }
+  }
+  if (leftVersion.prerelease === null) {
+    return rightVersion.prerelease === null ? 0 : -1;
+  }
+  if (rightVersion.prerelease === null) return 1;
+  return rightVersion.prerelease.localeCompare(leftVersion.prerelease, undefined, {
+    numeric: true,
+  });
+}
+
 function run({ now = new Date() } = {}) {
   if (!fs.existsSync(pkgPath)) {
     throw new Error(`package.json not found at ${pkgPath}`);
@@ -33,8 +64,10 @@ function run({ now = new Date() } = {}) {
   } catch (error) {
     throw new Error(
       `Failed to parse package.json: ${
-        error && typeof error === "object" && "message" in error ? String(error.message) : String(error)
-      }`
+        error && typeof error === "object" && "message" in error
+          ? String(error.message)
+          : String(error)
+      }`,
     );
   }
 
@@ -61,9 +94,11 @@ function run({ now = new Date() } = {}) {
     throw new Error("Could not locate releases section");
   }
 
-  const releaseTagRegex = /<release\b[^>]*\/>|<release\b[^>]*>[\s\S]*?<\/release>/g;
+  const releaseTagRegex =
+    /<release\b[^>]*\/>|<release\b[^>]*>[\s\S]*?<\/release>/g;
   const releaseVersionRegex = /version="([^"]+)"/;
-  const existingReleaseTags = releasesSectionMatch[0].match(releaseTagRegex) || [];
+  const existingReleaseTags =
+    releasesSectionMatch[0].match(releaseTagRegex) || [];
 
   const rebuiltEntries = [];
   let replacedCurrentVersion = false;
@@ -88,8 +123,30 @@ function run({ now = new Date() } = {}) {
     rebuiltEntries.unshift(newReleaseTag.trim());
   }
 
-  const updatedSection = `<releases>\n${rebuiltEntries
-    .map((tag) => `${releaseIndent}${tag}`)
+  const sortableEntries = rebuiltEntries.map((tag, sourceIndex) => {
+    const dateMatch = tag.match(/\bdate="(\d{4}-\d{2}-\d{2})"/);
+    const versionMatch = tag.match(releaseVersionRegex);
+    if (!dateMatch || !versionMatch) {
+      throw new Error(
+        "Release entries must contain version and YYYY-MM-DD date attributes",
+      );
+    }
+    return {
+      tag,
+      date: dateMatch[1],
+      version: versionMatch[1],
+      sourceIndex,
+    };
+  });
+  sortableEntries.sort(
+    (left, right) =>
+      right.date.localeCompare(left.date) ||
+      compareVersionsDescending(left.version, right.version) ||
+      left.sourceIndex - right.sourceIndex,
+  );
+
+  const updatedSection = `<releases>\n${sortableEntries
+    .map(({ tag }) => `${releaseIndent}${tag}`)
     .join("\n")}\n${baseIndent}</releases>`;
 
   if (updatedSection === releasesSectionMatch[0]) {
@@ -105,13 +162,17 @@ if (isDirectExecution(import.meta.url)) {
   try {
     const result = run();
     if (result.updated) {
-      console.log(`Updated AppStream release to ${result.version} (${result.date})`);
+      console.log(
+        `Updated AppStream release to ${result.version} (${result.date})`,
+      );
     } else {
       console.log("AppStream metadata already up to date");
     }
   } catch (error) {
     const message =
-      error && typeof error === "object" && "message" in error ? String(error.message) : String(error);
+      error && typeof error === "object" && "message" in error
+        ? String(error.message)
+        : String(error);
     console.error(`Failed to update AppStream metadata: ${message}`);
     process.exit(1);
   }
