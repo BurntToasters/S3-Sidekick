@@ -71,7 +71,7 @@ if (fs.existsSync(releaseTitleTestPath)) {
   const releaseTitle = formatReleaseTitle(version);
   const releaseTitleTest = fs.readFileSync(releaseTitleTestPath, "utf-8");
   const titleConstantPattern =
-    /^(const EXPECTED_SHIPPED_RELEASE_TITLE = )'[^']*'(;)/m;
+    /^(const EXPECTED_SHIPPED_RELEASE_TITLE = )['"][^'"]*['"](;)/m;
   if (!titleConstantPattern.test(releaseTitleTest)) {
     throw new Error(
       "scripts/release-title.test.cjs is missing EXPECTED_SHIPPED_RELEASE_TITLE",
@@ -79,7 +79,7 @@ if (fs.existsSync(releaseTitleTestPath)) {
   }
   const nextReleaseTitleTest = releaseTitleTest.replace(
     titleConstantPattern,
-    `$1'${releaseTitle}'$2`,
+    `$1"${releaseTitle}"$2`,
   );
   if (nextReleaseTitleTest !== releaseTitleTest) {
     fs.writeFileSync(releaseTitleTestPath, nextReleaseTitleTest);

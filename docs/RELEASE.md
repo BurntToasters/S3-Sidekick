@@ -4,7 +4,7 @@ This runbook covers the local, credentialed work that CI cannot perform. A relea
 
 ## Pinned release hosts
 
-All release hosts must use Node.js `24.20.0`, npm `12.0.2`, Rust `1.98.0`, and `cargo-audit 0.22.2`. The Flatpak manifest uses the Node 24 SDK extension and fails unless its in-sandbox Node/npm versions exactly match those signed coordinator pins. Install the pinned advisory scanner once per host:
+All release hosts must use Node.js `>= 24.18.0`, npm `12.0.2`, Rust `1.98.0`, and `cargo-audit 0.22.2`. The Flatpak manifest uses the Node 24 SDK extension and fails unless its in-sandbox Node/npm versions exactly match those signed coordinator pins. Install the pinned advisory scanner once per host:
 
 ```sh
 npm run setup:cargo-audit

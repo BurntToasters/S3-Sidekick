@@ -269,12 +269,13 @@ function assertReleaseToolVersions(
 ) {
   const expectedNode = String(packageJson.releaseToolchain?.node || "");
   const expectedNpm = String(packageJson.releaseToolchain?.npm || "");
+  const minNodeMatch = expectedNode.match(/^(?:>=\s*|\^)?(\d+\.\d+\.\d+)$/);
   if (
-    !/^\d+\.\d+\.\d+$/.test(expectedNode) ||
+    !minNodeMatch ||
     !/^\d+\.\d+\.\d+$/.test(expectedNpm)
   ) {
     throw new Error(
-      "releaseToolchain must pin exact node and npm versions in package.json.",
+      "releaseToolchain must pin node (exact or >=) and npm versions in package.json.",
     );
   }
   if (packageJson.packageManager !== `npm@${expectedNpm}`) {
@@ -282,6 +283,10 @@ function assertReleaseToolVersions(
       "packageManager and releaseToolchain.npm must pin the same exact npm version.",
     );
   }
+  const minNode = minNodeMatch[1];
+  const normalizedNode = String(nodeVersion || "").replace(/^v/, "");
+  const nodeMeetsRequirement =
+    compareSemanticVersions(normalizedNode, minNode) >= 0;
   const userAgentNpm = String(environment.npm_config_user_agent || "").match(
     /(?:^|\s)npm\/(\d+\.\d+\.\d+)(?:\s|$)/,
   )?.[1];
@@ -296,7 +301,7 @@ function assertReleaseToolVersions(
   }
   if (!actualNpm)
     actualNpm = command(root, "npm", ["--version"], { environment });
-  if (nodeVersion !== expectedNode || actualNpm !== expectedNpm) {
+  if (!nodeMeetsRequirement || actualNpm !== expectedNpm) {
     throw new Error(
       `Release tools do not match package.json pins (node ${nodeVersion}/${expectedNode}, npm ${actualNpm}/${expectedNpm}).`,
     );
