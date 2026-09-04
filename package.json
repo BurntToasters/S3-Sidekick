@@ -10,7 +10,7 @@
     "npm": ">=12.0.1"
   },
   "releaseToolchain": {
-    "node": "24.20.0",
+    "node": ">=24.18.0",
     "npm": "12.0.2"
   },
   "scripts": {

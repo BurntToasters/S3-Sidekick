@@ -468,11 +468,15 @@ test("release input policy pins bootstrap tools and runs Flatpak without build n
     /path\.join\(root, "src-tauri", "Cargo\.toml"\)/,
   );
   assert.match(workflow, /RUST_VERSION: "\d+\.\d+\.\d+"/);
-  assert.match(
-    workflow,
-    new RegExp(
-      `NODE_VERSION: "${packageJson.releaseToolchain.node.replaceAll(".", "\\.")}"`,
-    ),
+  const minReleaseNode = packageJson.releaseToolchain.node.replace(
+    /^(?:>=|\^)\s*/,
+    "",
+  );
+  const workflowNodeMatch = workflow.match(/NODE_VERSION: "(\d+\.\d+\.\d+)"/);
+  assert.ok(workflowNodeMatch, "workflow must define NODE_VERSION");
+  assert.ok(
+    compareSemanticVersions(workflowNodeMatch[1], minReleaseNode) >= 0,
+    `workflow NODE_VERSION (${workflowNodeMatch[1]}) must be >= releaseToolchain minimum (${minReleaseNode})`,
   );
   assert.match(
     workflow,

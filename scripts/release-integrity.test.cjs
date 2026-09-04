@@ -10,6 +10,7 @@ const {
   assertCleanSource,
   assertDescriptorRepository,
   assertExistingGitHubTagCommit,
+  assertReleaseToolVersions,
   artifactNameFromDescriptorReleaseUrl,
   canonicalJson,
   classifyImmutableAsset,
@@ -1016,3 +1017,70 @@ test("non-GPG child environments scrub signing credentials case-insensitively", 
     },
   );
 });
+
+test("assertReleaseToolVersions allows Node.js 24.18.0 and above", () => {
+  const pkg = {
+    packageManager: "npm@12.0.2",
+    releaseToolchain: { node: ">=24.18.0", npm: "12.0.2" },
+  };
+  const env = { npm_config_user_agent: "npm/12.0.2 node/v24.18.0 darwin arm64" };
+
+  assert.deepEqual(
+    assertReleaseToolVersions(pkg, {
+      environment: env,
+      nodeVersion: "24.18.0",
+    }),
+    { node: ">=24.18.0", npm: "12.0.2" },
+  );
+
+  assert.deepEqual(
+    assertReleaseToolVersions(pkg, {
+      environment: env,
+      nodeVersion: "24.20.0",
+    }),
+    { node: ">=24.18.0", npm: "12.0.2" },
+  );
+
+  assert.throws(
+    () =>
+      assertReleaseToolVersions(pkg, {
+        environment: env,
+        nodeVersion: "24.17.0",
+      }),
+    /Release tools do not match package\.json pins/i,
+  );
+
+  assert.throws(
+    () =>
+      assertReleaseToolVersions(pkg, {
+        environment: env,
+        nodeVersion: "22.22.2",
+      }),
+    /Release tools do not match package\.json pins/i,
+  );
+
+  const pkgExact = {
+    packageManager: "npm@12.0.2",
+    releaseToolchain: { node: "24.18.0", npm: "12.0.2" },
+  };
+  assert.deepEqual(
+    assertReleaseToolVersions(pkgExact, {
+      environment: env,
+      nodeVersion: "24.20.0",
+    }),
+    { node: "24.18.0", npm: "12.0.2" },
+  );
+
+  const envWrongNpm = {
+    npm_config_user_agent: "npm/12.0.1 node/v24.18.0 darwin arm64",
+  };
+  assert.throws(
+    () =>
+      assertReleaseToolVersions(pkg, {
+        environment: envWrongNpm,
+        nodeVersion: "24.18.0",
+      }),
+    /Release tools do not match package\.json pins/i,
+  );
+});
+
