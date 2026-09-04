@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { isDirectExecution } from "./direct-execution.js";
 
 const require = createRequire(import.meta.url);
 const {
@@ -182,10 +183,7 @@ function recordInstallSmoke(args = process.argv.slice(2)) {
   return outputPath;
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   try {
     console.log(recordInstallSmoke());
   } catch (error) {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { collectArtifacts } from "./gpg-sign.js";
+import { isDirectExecution } from "./direct-execution.js";
 
 const require = createRequire(import.meta.url);
 const {
@@ -43,10 +44,7 @@ function stageReleaseArtifacts() {
   return collectArtifacts(descriptor);
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   try {
     const files = stageReleaseArtifacts();
     console.log(

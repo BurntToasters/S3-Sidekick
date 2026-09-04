@@ -16,7 +16,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { isDirectExecution } from "./direct-execution.js";
 
 export const MINIMUM_NPM_VERSION = "12.0.1";
 export const NPM_UPDATE_QUARANTINE_DAYS = 3;
@@ -250,10 +250,7 @@ function main() {
   }
 }
 
-const isMainModule =
-  process.argv[1] &&
-  pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (isMainModule) {
+if (isDirectExecution(import.meta.url)) {
   try {
     main();
   } catch (error) {

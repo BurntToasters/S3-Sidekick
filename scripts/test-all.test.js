@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createInitialResults, main } from "./test-all.js";
+import {
+  createInitialResults,
+  main,
+  parseRustFailureNames,
+} from "./test-all.js";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -23,6 +27,28 @@ test("createInitialResults includes cargo quality and frontend build keys", () =
   assert.equal(results.frontendBuild.status, "pending");
   assert.equal(results.nativeBuild.status, "pending");
   assert.equal(results.tauriBuild.status, "pending");
+});
+
+test("Rust failure summary lists test names, not panic detail lines", () => {
+  const output = [
+    "test tests::checkpoint_scratch_path ... FAILED",
+    "",
+    "failures:",
+    "",
+    "---- tests::checkpoint_scratch_path stdout ----",
+    "thread 'tests::checkpoint_scratch_path' panicked at src\\main.rs:1:1:",
+    'called `Result::unwrap()` on an `Err` value: "path must be absolute"',
+    "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+    "",
+    "failures:",
+    "    tests::checkpoint_scratch_path",
+    "",
+    "test result: FAILED. 134 passed; 1 failed;",
+  ].join("\r\n");
+
+  assert.deepEqual(parseRustFailureNames(output), [
+    "tests::checkpoint_scratch_path",
+  ]);
 });
 
 test("package.json scripts define cargo safe update test and policy check", () => {

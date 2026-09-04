@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { isDirectExecution } from "./direct-execution.js";
 
 const require = createRequire(import.meta.url);
 const {
@@ -23,12 +24,14 @@ function runReleasePreparation({
   environment = process.env,
   execute = execFileSync,
   assertSource = assertCleanSource,
+  assertToolVersions = assertReleaseToolVersions,
+  rootDirectory = root,
 } = {}) {
-  const sourceCommit = assertSource(root, { environment });
+  const sourceCommit = assertSource(rootDirectory, { environment });
   const packageJson = JSON.parse(
-    fs.readFileSync(path.join(root, "package.json"), "utf8"),
+    fs.readFileSync(path.join(rootDirectory, "package.json"), "utf8"),
   );
-  assertReleaseToolVersions(packageJson, { environment, root });
+  assertToolVersions(packageJson, { environment, root: rootDirectory });
   const npmExecPath = environment.npm_execpath;
   if (!npmExecPath || !path.isAbsolute(npmExecPath)) {
     throw new Error(
@@ -38,20 +41,20 @@ function runReleasePreparation({
   for (const step of steps) {
     try {
       execute(process.execPath, [npmExecPath, "run", step], {
-        cwd: root,
+        cwd: rootDirectory,
         env: environment,
         stdio: "inherit",
       });
     } finally {
-      assertSource(root, { environment, expectedCommit: sourceCommit });
+      assertSource(rootDirectory, {
+        environment,
+        expectedCommit: sourceCommit,
+      });
     }
   }
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   try {
     runReleasePreparation();
   } catch (error) {

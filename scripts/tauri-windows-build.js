@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { childEnvironment } from "./release-env.js";
+import { isDirectExecution } from "./direct-execution.js";
 
 const require = createRequire(import.meta.url);
 const { assertCleanSource } = require("./release-integrity.cjs");
@@ -219,10 +220,7 @@ function runWindowsBuild({
   }
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   try {
     runWindowsBuild();
   } catch (error) {

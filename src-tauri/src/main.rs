@@ -2319,20 +2319,26 @@ mod tests {
 
     #[test]
     fn checkpoint_scratch_path_accepts_only_owned_download_temps() {
+        let destination = std::env::temp_dir()
+            .join("s3-sidekick-checkpoint-test")
+            .join("file.bin");
+        let temp_path = download_temp_path(&destination);
+        let destination = destination.to_string_lossy().to_string();
+        let temp_path = temp_path.to_string_lossy().to_string();
         let owned = serde_json::json!({
-            "destination": "/tmp/file.bin",
-            "temp_path": "/tmp/file.bin.s3-sidekick.download.tmp"
+            "destination": &destination,
+            "temp_path": &temp_path
         })
         .to_string();
         assert_eq!(
             checkpoint_scratch_path(&owned).unwrap(),
             Some(CheckpointScratchPath {
-                destination: "/tmp/file.bin".to_string(),
-                temp_path: "/tmp/file.bin.s3-sidekick.download.tmp".to_string(),
+                destination: destination.clone(),
+                temp_path: temp_path.clone(),
             })
         );
 
-        let foreign = serde_json::json!({ "temp_path": "/tmp/file.bin" }).to_string();
+        let foreign = serde_json::json!({ "temp_path": &destination }).to_string();
         assert!(checkpoint_scratch_path(&foreign).is_err());
         assert!(checkpoint_scratch_path("not-json").is_err());
         assert_eq!(checkpoint_scratch_path("{}").unwrap(), None);

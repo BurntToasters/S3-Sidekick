@@ -8,6 +8,7 @@ import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import { verifyReleaseSession } from "./release-session.js";
 import { generateReleaseEvidence } from "./release-evidence.js";
+import { isDirectExecution } from "./direct-execution.js";
 import githubCli from "./github-cli.cjs";
 
 const { assertGitHubCliAuthenticated, githubApi, uploadReleaseAssetById } =
@@ -1225,10 +1226,7 @@ async function main() {
   );
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
-) {
+if (isDirectExecution(import.meta.url)) {
   main().catch((err) => {
     console.error(err.message || err);
     process.exit(1);
