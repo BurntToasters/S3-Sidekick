@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDirectExecution } from "./direct-execution.js";
 
 const EXPECTED_CARGO_AUDIT_VERSION = "0.22.2";
 
@@ -27,10 +27,7 @@ function verifyCargoAudit({ execute = spawnSync } = {}) {
   return true;
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   try {
     verifyCargoAudit();
   } catch (error) {

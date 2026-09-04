@@ -20,9 +20,7 @@ function formatDate(date) {
 
 function compareVersionsDescending(left, right) {
   const parse = (value) => {
-    const match = value.match(
-      /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/,
-    );
+    const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
     return match
       ? {
           core: match.slice(1, 4).map(Number),
@@ -44,23 +42,31 @@ function compareVersionsDescending(left, right) {
     return rightVersion.prerelease === null ? 0 : -1;
   }
   if (rightVersion.prerelease === null) return 1;
-  return rightVersion.prerelease.localeCompare(leftVersion.prerelease, undefined, {
-    numeric: true,
-  });
+  return rightVersion.prerelease.localeCompare(
+    leftVersion.prerelease,
+    undefined,
+    {
+      numeric: true,
+    },
+  );
 }
 
-function run({ now = new Date() } = {}) {
-  if (!fs.existsSync(pkgPath)) {
-    throw new Error(`package.json not found at ${pkgPath}`);
+function run({
+  now = new Date(),
+  packagePath = pkgPath,
+  metadataPath = xmlPath,
+} = {}) {
+  if (!fs.existsSync(packagePath)) {
+    throw new Error(`package.json not found at ${packagePath}`);
   }
 
-  if (!fs.existsSync(xmlPath)) {
-    throw new Error(`AppStream metadata not found at ${xmlPath}`);
+  if (!fs.existsSync(metadataPath)) {
+    throw new Error(`AppStream metadata not found at ${metadataPath}`);
   }
 
   let pkg;
   try {
-    pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+    pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
   } catch (error) {
     throw new Error(
       `Failed to parse package.json: ${
@@ -77,9 +83,10 @@ function run({ now = new Date() } = {}) {
   }
 
   const dateStr = formatDate(now);
-  const xml = fs.readFileSync(xmlPath, "utf8");
+  const xml = fs.readFileSync(metadataPath, "utf8");
+  const lineEnding = xml.includes("\r\n") ? "\r\n" : "\n";
 
-  const releasesLineMatch = xml.match(/^(\s*)<releases>\s*$/m);
+  const releasesLineMatch = xml.match(/^([ \t]*)<releases>[ \t]*\r?$/m);
   if (!releasesLineMatch) {
     throw new Error("Could not find <releases> block in AppStream metadata");
   }
@@ -102,6 +109,7 @@ function run({ now = new Date() } = {}) {
 
   const rebuiltEntries = [];
   let replacedCurrentVersion = false;
+  let currentVersionDate = dateStr;
 
   for (const rawTag of existingReleaseTags) {
     const tag = rawTag.trim();
@@ -110,7 +118,9 @@ function run({ now = new Date() } = {}) {
 
     if (tagVersion === version) {
       if (!replacedCurrentVersion) {
-        rebuiltEntries.push(newReleaseTag.trim());
+        const existingDate = tag.match(/\bdate="(\d{4}-\d{2}-\d{2})"/);
+        currentVersionDate = existingDate?.[1] ?? dateStr;
+        rebuiltEntries.push(existingDate ? tag : newReleaseTag.trim());
         replacedCurrentVersion = true;
       }
       continue;
@@ -145,17 +155,17 @@ function run({ now = new Date() } = {}) {
       left.sourceIndex - right.sourceIndex,
   );
 
-  const updatedSection = `<releases>\n${sortableEntries
+  const updatedSection = `<releases>${lineEnding}${sortableEntries
     .map(({ tag }) => `${releaseIndent}${tag}`)
-    .join("\n")}\n${baseIndent}</releases>`;
+    .join(lineEnding)}${lineEnding}${baseIndent}</releases>`;
 
   if (updatedSection === releasesSectionMatch[0]) {
-    return { updated: false, version, date: dateStr };
+    return { updated: false, version, date: currentVersionDate };
   }
 
   const updatedXml = xml.replace(releasesSectionRegex, updatedSection);
-  fs.writeFileSync(xmlPath, updatedXml, "utf8");
-  return { updated: true, version, date: dateStr };
+  fs.writeFileSync(metadataPath, updatedXml, "utf8");
+  return { updated: true, version, date: currentVersionDate };
 }
 
 if (isDirectExecution(import.meta.url)) {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { isDirectExecution } from "./direct-execution.js";
 
 const require = createRequire(import.meta.url);
 const { assertCleanSource } = require("./release-integrity.cjs");
@@ -284,10 +285,7 @@ function main() {
   return runReleaseCommand();
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   try {
     process.exitCode = main();
   } catch (error) {

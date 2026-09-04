@@ -6,6 +6,7 @@ import {
   blockingReleaseWorkingTreePaths,
   recordSuccessfulQualityGate,
 } from "./release-session.js";
+import { isDirectExecution } from "./direct-execution.js";
 
 export function finalizeQualityGate(
   root = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
@@ -37,14 +38,11 @@ function main() {
     }
   }
   console.error(
-    "Commit or stash changes (only version/metainfo lockfile drift from bootstrap is allowed).",
+    "Commit or remove changes before running test:all; release bootstrap must be idempotent on this checkout.",
   );
   process.exit(1);
 }
 
-if (
-  process.argv[1] &&
-  fileURLToPath(import.meta.url) === resolve(process.argv[1])
-) {
+if (isDirectExecution(import.meta.url)) {
   main();
 }

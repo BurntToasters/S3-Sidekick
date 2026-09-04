@@ -7,6 +7,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import integrity from "./release-integrity.cjs";
+import { isDirectExecution } from "./direct-execution.js";
 
 const {
   canonicalJson,
@@ -779,10 +780,7 @@ function checkLicenses() {
   console.log("[release-evidence] License and source policy passed.");
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   try {
     if (process.argv.includes("--check-licenses")) checkLicenses();
     else

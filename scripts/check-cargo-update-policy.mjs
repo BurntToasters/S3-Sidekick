@@ -7,7 +7,8 @@ import console from 'node:console';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { isDirectExecution } from './direct-execution.js';
 
 export const CARGO_UPDATE_POLICY_SCANNER_VERSION = 5;
 export const CARGO_UPDATE_SCANNER_VERSION = 5;
@@ -464,8 +465,6 @@ function main() {
   }
 }
 
-const isMainModule =
-  process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (isMainModule) main();
+if (isDirectExecution(import.meta.url)) main();
 
 export { runPolicyCheck as checkCargoUpdatePolicy };

@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { isDirectExecution } from "./direct-execution.js";
 
 const require = createRequire(import.meta.url);
 const { canonicalJson, parseFlatpakInputs } = require("./release-integrity.cjs");
@@ -58,10 +59,7 @@ function main(args = process.argv.slice(2)) {
   }
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   try {
     main();
   } catch (error) {

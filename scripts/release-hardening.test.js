@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   assertSanitizedSource,
@@ -56,7 +57,7 @@ import { isUpdaterArtifact } from "./updater-sign.js";
 import integrity from "./release-integrity.cjs";
 
 const { canonicalMacosArtifactName, compareSemanticVersions } = integrity;
-const root = path.resolve(new URL("..", import.meta.url).pathname);
+const root = fileURLToPath(new URL("..", import.meta.url));
 
 function semanticEvidenceFixture(descriptor, attestation, descriptorSha256) {
   descriptor.repository ??= {
@@ -790,6 +791,16 @@ test("updater signing is isolated after dependency builds", () => {
   ]) {
     assert.match(packageJson.scripts[name], /release:sign:gpg/);
   }
+});
+
+test("release supply-chain preparation generates license inventories before checking them", () => {
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(root, "package.json"), "utf8"),
+  );
+  const command = packageJson.scripts["release:supply-chain"];
+  assert.ok(
+    command.indexOf("npm run licenses") < command.indexOf("--check-licenses"),
+  );
 });
 
 test("Windows release signs runtime before bundle and verifies the exact signed installer set", () => {

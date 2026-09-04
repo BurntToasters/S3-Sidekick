@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { isDirectExecution } from "./direct-execution.js";
 import {
   BETA_CHANNEL_ROLLOVER_NAME,
   BETA_CHANNEL_ROLLOVER_SIGNATURE_NAME,
@@ -5373,10 +5374,7 @@ async function main() {
   }
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   main().catch((error) => {
     console.error(
       `release-publication: ${error instanceof Error ? error.message : String(error)}`,

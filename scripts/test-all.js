@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { clearQualityGateProof } from "./release-session.js";
+import { isDirectExecution } from "./direct-execution.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -55,8 +56,8 @@ function printTail(output) {
   console.log(`${colors.red}${tail}${colors.reset}`);
 }
 
-function printRustFailures(output) {
-  const cleanOutput = stripAnsi(output);
+function parseRustFailureNames(output) {
+  const cleanOutput = stripAnsi(output).replace(/\r\n?/g, "\n");
   const failedNames = cleanOutput
     .split("\n")
     .map((line) => line.trim())
@@ -72,12 +73,16 @@ function printRustFailures(output) {
     /\nfailures:\n\n([\s\S]*?)\n\ntest result:/,
   );
   const listed = failuresBlock
-    ? failuresBlock[1]
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0 && !line.startsWith("----"))
+    ? Array.from(
+        failuresBlock[1].matchAll(/^---- (.+?) stdout ----$/gm),
+        (match) => match[1],
+      )
     : [];
-  const names = [...new Set([...failedNames, ...listed])].filter(Boolean);
+  return [...new Set([...failedNames, ...listed])].filter(Boolean);
+}
+
+function printRustFailures(output) {
+  const names = parseRustFailureNames(output);
   if (names.length === 0) {
     printTail(output);
     return;
@@ -389,12 +394,7 @@ function main({
   return exitCode;
 }
 
-function isDirectExecution() {
-  if (!process.argv[1]) return false;
-  return fileURLToPath(import.meta.url) === resolve(process.argv[1]);
-}
-
-if (isDirectExecution()) {
+if (isDirectExecution(import.meta.url)) {
   process.exit(main());
 }
 
@@ -402,6 +402,7 @@ export {
   createInitialResults,
   getNpmCommand,
   main,
+  parseRustFailureNames,
   parseRustTest,
   parseTest,
   printSummary,

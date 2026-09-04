@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isDirectExecution } from "./direct-execution.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const tauriCli = fileURLToPath(
@@ -75,10 +76,7 @@ function main() {
   signUpdaterArtifacts();
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isDirectExecution(import.meta.url)) {
   try {
     main();
   } catch (error) {
