@@ -1,4 +1,4 @@
-use crate::validate_existing_path;
+use crate::{detect_case_fold_collision, strip_extended_windows_prefix, validate_existing_path};
 use std::collections::HashMap;
 
 const MAX_LOCAL_SCAN_FILES: usize = 20_000;
@@ -34,14 +34,16 @@ pub(crate) fn normalize_slashes(path: &std::path::Path) -> String {
 
 pub(crate) fn absolute_path_string(path: &std::path::Path) -> String {
     if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical.to_string_lossy().to_string();
+        return strip_extended_windows_prefix(&canonical.to_string_lossy());
     }
     if path.is_absolute() {
-        return path.to_string_lossy().to_string();
+        return strip_extended_windows_prefix(&path.to_string_lossy());
     }
     match std::env::current_dir() {
-        Ok(cwd) => cwd.join(path).to_string_lossy().to_string(),
-        Err(_) => path.to_string_lossy().to_string(),
+        Ok(cwd) => {
+            strip_extended_windows_prefix(&cwd.join(path).to_string_lossy())
+        }
+        Err(_) => strip_extended_windows_prefix(&path.to_string_lossy()),
     }
 }
 
@@ -273,6 +275,15 @@ fn list_local_files_recursive_inner(roots: Vec<String>) -> Result<Vec<LocalFileE
             .cmp(&b.relative_path)
             .then(a.file_path.cmp(&b.file_path))
     });
+
+    // Distinct local files differing only by case would upload as distinct
+    // S3 keys but collide on case-insensitive download volumes. Fail closed.
+    detect_case_fold_collision(
+        entries
+            .iter()
+            .map(|entry| (entry.relative_path.clone(), entry.file_path.clone())),
+        "upload paths",
+    )?;
 
     if warnings.total > 0 {
         eprintln!(

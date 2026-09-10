@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { escapeHtml, getIconHtml } from "./utils.ts";
+import { escapeHtml, getIconHtml, parseJsonArray } from "./utils.ts";
 
 export interface Bookmark {
   name: string;
@@ -32,7 +32,16 @@ export function clearBookmarks(): void {
   bookmarks = [];
 }
 
-export function isEndpointBookmarked(endpoint: string): boolean {
+export function isEndpointBookmarked(
+  endpoint: string,
+  accessKey?: string,
+): boolean {
+  // Composite key: same endpoint with different credentials is distinct.
+  if (accessKey !== undefined) {
+    return bookmarks.some(
+      (b) => b.endpoint === endpoint && b.access_key === accessKey,
+    );
+  }
   return bookmarks.some((b) => b.endpoint === endpoint);
 }
 
@@ -57,16 +66,11 @@ function isBookmark(value: unknown): value is Bookmark {
 }
 
 function parseBookmarksArray(raw: string): Bookmark[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(parsed) || !parsed.every(isBookmark)) {
-    return null;
-  }
-  return [...parsed];
+  const parsed = parseJsonArray(raw);
+  if (parsed === null) return null;
+  // Filter out invalid entries instead of rejecting the whole file so one
+  // corrupt bookmark doesn't wipe the rest.
+  return parsed.filter(isBookmark);
 }
 
 async function loadBackupBookmarks(): Promise<Bookmark[] | null> {
@@ -106,7 +110,8 @@ export async function loadBookmarks(): Promise<void> {
 async function persistBookmarksSnapshot(next: Bookmark[]): Promise<void> {
   const serialized = JSON.stringify(next, null, 2);
   persistPromise = persistPromise
-    .catch(() => {})
+    // Prior persist failure must not break the chain; it was already surfaced.
+    .catch(() => undefined)
     .then(async () => {
       await invoke("save_bookmarks", { json: serialized });
       await saveBookmarksBackupSafe(next);

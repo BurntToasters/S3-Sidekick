@@ -31,7 +31,10 @@ export interface CopyReceipt {
   source_fingerprint: string;
   source_acl_fingerprint: string;
   source_tag_fingerprint: string;
-  source_version_id: string;
+  // Null on buckets without versioning. The backend still pins the copy on
+  // the ETag and guards deletion with a HEAD-fingerprint plus If-Match check
+  // under the mutation lease; the version is used when it exists.
+  source_version_id: string | null;
   destination_key: string;
   destination_etag: string;
   destination_fingerprint: string;
@@ -132,8 +135,12 @@ export interface CopyMoveQueueEntry {
 export interface TransferRunSummary {
   hadUpload: boolean;
   hadDownload: boolean;
+  /** True when a copy/move completed and the current listing may be stale. */
+  hadListingChange: boolean;
   uploadCount: number;
   downloadCount: number;
+  copyCount: number;
+  moveCount: number;
   errorCount: number;
   skippedCount: number;
 }
@@ -244,6 +251,10 @@ const unguardedWriteAuthorizations = new Set<string>();
 let conflictPromptQueue: Promise<void> = Promise.resolve();
 let selectedTransferId: number | null = null;
 let queuePaused = false;
+/// Parked while the webview reports offline. New claims stop and retry waits
+/// wake early so attempts park instead of churning through failures.
+let offlineHold = false;
+let offlineListenersAttached = false;
 let manifestHydrated = false;
 let manifestRecoveryUnresolved = false;
 let recoverySession: string | null = null;
@@ -551,6 +562,59 @@ function maxAttemptsFromSettings(): number {
   return retryCountFromSettings() + 1;
 }
 
+/// Share the backend per-transfer inflight budget across queued fan-out. The
+/// backend clamps each transfer to 256MB inflight, but up to 10 queue workers
+/// can run at once; scale part concurrency down as active transfers rise so
+/// the fleet stays near one budget instead of N budgets.
+const GLOBAL_PART_INFLIGHT_BUDGET_MB = 256;
+
+function scalePartConcurrencyForGlobalBudget(
+  requested: number,
+  partSizeMb: number,
+): number {
+  const safeRequested =
+    Number.isFinite(requested) && requested > 0
+      ? Math.floor(requested)
+      : 1;
+  const safePartMb =
+    Number.isFinite(partSizeMb) && partSizeMb > 0 ? partSizeMb : 16;
+  const activeCount = Math.max(
+    1,
+    queue.filter((t) => t.status === "uploading").length,
+  );
+  const perTransferMb = Math.max(1, safePartMb * activeCount);
+  const budgeted = Math.floor(GLOBAL_PART_INFLIGHT_BUDGET_MB / perTransferMb);
+  return Math.max(1, Math.min(safeRequested, budgeted));
+}
+
+function syncOfflineHold(): void {
+  if (
+    typeof navigator !== "undefined" &&
+    typeof navigator.onLine === "boolean"
+  ) {
+    offlineHold = !navigator.onLine;
+  }
+}
+
+/// A refused scratch discard for a path that was never registered means there
+/// is nothing to clean up, so cancelling must succeed rather than strand the
+/// row as paused-with-error.
+function isNothingToDiscardError(err: unknown): boolean {
+  return /unregistered download scratch/i.test(normalizeError(err));
+}
+
+/// Base64 the browser-file payload (~1.4x) instead of a JSON number array
+/// (~3-4x) for upload_object_bytes.
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const CHUNK = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
 function shouldRetryError(err: unknown): boolean {
   const structured = parseStructuredTransferError(err);
   if (structured) return structured.retryable;
@@ -589,9 +653,26 @@ function computeRetryDelayMs(attempt: number): number {
   return base * expo + jitter;
 }
 
-function delay(ms: number): Promise<void> {
+/// Sleep that wakes promptly on cancel/pause/offline instead of waiting out
+/// the full backoff. Callers re-check item state after it resolves.
+function delayCancellable(ms: number, item: TransferItem): Promise<void> {
   return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
+    const timer = setTimeout(cleanupAndResolve, ms);
+    const probe = setInterval(() => {
+      if (
+        item.cancelRequested ||
+        item.paused ||
+        queuePaused ||
+        offlineHold
+      ) {
+        cleanupAndResolve();
+      }
+    }, 50);
+    function cleanupAndResolve(): void {
+      clearTimeout(timer);
+      clearInterval(probe);
+      resolve();
+    }
   });
 }
 
@@ -800,9 +881,17 @@ function parseCopyReceipts(value: unknown): CopyReceipt[] | undefined {
       !isCanonicalFingerprint(receipt.source_fingerprint) ||
       !isCanonicalFingerprint(receipt.source_acl_fingerprint) ||
       !isCanonicalFingerprint(receipt.source_tag_fingerprint) ||
-      typeof receipt.source_version_id !== "string" ||
-      receipt.source_version_id.trim().length === 0 ||
-      receipt.source_version_id.trim().toLowerCase() === "null" ||
+      // A null source version means an unversioned bucket, not a weak
+      // receipt: deletion authority then comes from the ETag plus the
+      // canonical fingerprints above, rechecked by the backend under its
+      // mutation lease with a conditional delete. The literal "null" version
+      // string some providers return for versioning-suspended objects is a
+      // valid version pin and is preserved as-is; only a truly absent
+      // version (null/undefined) takes the unversioned path.
+      (receipt.source_version_id !== null &&
+        typeof receipt.source_version_id !== "string") ||
+      (typeof receipt.source_version_id === "string" &&
+        receipt.source_version_id.trim().length === 0) ||
       typeof receipt.destination_key !== "string" ||
       receipt.destination_key.length === 0 ||
       typeof receipt.destination_etag !== "string" ||
@@ -842,7 +931,7 @@ function validateFreshCopyReceipts(value: unknown): CopyReceipt[] {
   const receipts = parseCopyReceipts(value);
   if (!receipts) {
     throw new Error(
-      "Copy returned incomplete source/destination safety fingerprints or no immutable source version; source deletion was refused.",
+      "Copy returned incomplete source/destination safety fingerprints; source deletion was refused.",
     );
   }
   return receipts;
@@ -888,9 +977,10 @@ function parseQueueManifest(
         continue;
       }
       // Only v6 receipts carry complete source and destination HEAD/ACL/tag
-      // authority plus a non-null immutable source version. Older manifests and
-      // malformed v6 receipts keep the row but lose the copied marker so
-      // recovery recopies rather than authorizing deletion from weaker evidence.
+      // authority plus a source version (immutable on versioned buckets, null
+      // on unversioned ones). Older manifests and malformed v6 receipts keep
+      // the row but lose the copied marker so recovery recopies rather than
+      // authorizing deletion from weaker evidence.
       const receipts =
         version === 6 ? parseCopyReceipts(row.receipts) : undefined;
       const movePhase =
@@ -1038,6 +1128,16 @@ async function discardTransferRecoveryState(
       checkpointId: item.checkpointId,
       recoverySession: hydratedRecoverySession,
     });
+  }
+}
+
+/// Best-effort scratch/checkpoint cleanup for rows dropped by the clear
+/// actions below. Unlike terminal success, cleared error/skipped rows never
+/// pass through the cancel path, so discard here or orphan the state.
+function discardClearedRecoveryState(removed: TransferItem[]): void {
+  for (const item of removed) {
+    if (item.operation !== "download" && !item.checkpointId) continue;
+    void discardTransferRecoveryState(item).catch(() => undefined);
   }
 }
 
@@ -1478,6 +1578,27 @@ export async function resumeRecoveredTransfersAfterConnect(): Promise<void> {
 export async function initTransferQueueUI(): Promise<void> {
   syncTransferVisibility();
   updateBadge();
+  syncOfflineHold();
+
+  if (!offlineListenersAttached && typeof window !== "undefined") {
+    offlineListenersAttached = true;
+    window.addEventListener("offline", () => {
+      offlineHold = true;
+      logActivity("Network offline — transfer queue parked.", "warning");
+      queueRender();
+    });
+    window.addEventListener("online", () => {
+      offlineHold = false;
+      logActivity("Network restored — resuming transfer queue.", "info");
+      queueRender();
+      void processQueue().catch((err) =>
+        logActivity(
+          `Transfer processing error: ${normalizeError(err)}`,
+          "error",
+        ),
+      );
+    });
+  }
 
   progressUnlisten ??= await listen<TransferProgressPayload>(
     "upload-progress",
@@ -1698,9 +1819,13 @@ export function retrySkippedTransfers(): void {
 }
 
 export function clearNonActiveTransfers(): void {
+  const removed = queue.filter(
+    (item) => item.status !== "queued" && item.status !== "uploading",
+  );
   queue = queue.filter(
     (item) => item.status === "queued" || item.status === "uploading",
   );
+  discardClearedRecoveryState(removed);
   if (
     selectedTransferId != null &&
     !queue.some((item) => item.id === selectedTransferId)
@@ -1756,9 +1881,13 @@ export function toggleTransferQueue(): void {
 }
 
 export function clearCompletedTransfers(): void {
+  const removed = queue.filter(
+    (item) => item.status !== "queued" && item.status !== "uploading",
+  );
   queue = queue.filter(
     (item) => item.status === "queued" || item.status === "uploading",
   );
+  discardClearedRecoveryState(removed);
   if (
     selectedTransferId != null &&
     !queue.some((item) => item.id === selectedTransferId)
@@ -1971,7 +2100,8 @@ export function enqueueFolderEntries(
       size: entry.size,
       status: "queued",
       progress: 0,
-      totalBytes: 0,
+      totalBytes:
+        Number.isFinite(entry.size) && entry.size > 0 ? entry.size : 0,
       attempt: 1,
       maxAttempts,
       verified: false,
@@ -2145,8 +2275,14 @@ async function processQueue(): Promise<void> {
   let completedDownloadThisRun = false;
   let attemptedUploadThisRun = false;
   let attemptedDownloadThisRun = false;
+  let attemptedCopyThisRun = false;
+  let attemptedMoveThisRun = false;
+  let completedCopyThisRun = false;
+  let completedMoveThisRun = false;
   let uploadCount = 0;
   let downloadCount = 0;
+  let copyCount = 0;
+  let moveCount = 0;
   let errorCount = 0;
   let skippedCount = 0;
 
@@ -2156,7 +2292,7 @@ async function processQueue(): Promise<void> {
   }
 
   function claimNextItem(): TransferItem | null {
-    if (queuePaused) return null;
+    if (queuePaused || offlineHold) return null;
     const item = queue.find((t) => t.status === "queued" && !t.paused);
     if (item) {
       item.status = "uploading";
@@ -2173,6 +2309,8 @@ async function processQueue(): Promise<void> {
 
       if (item.operation === "upload") attemptedUploadThisRun = true;
       if (item.operation === "download") attemptedDownloadThisRun = true;
+      if (item.operation === "copy") attemptedCopyThisRun = true;
+      if (item.operation === "move") attemptedMoveThisRun = true;
 
       renderQueue();
       writeQueueManifest();
@@ -2186,6 +2324,14 @@ async function processQueue(): Promise<void> {
         if (completed && item.operation === "upload") {
           completedUploadThisRun = true;
           uploadCount += 1;
+        }
+        if (completed && item.operation === "copy") {
+          completedCopyThisRun = true;
+          copyCount += 1;
+        }
+        if (completed && item.operation === "move") {
+          completedMoveThisRun = true;
+          moveCount += 1;
         }
         if (item.status === "skipped") skippedCount += 1;
 
@@ -2205,19 +2351,26 @@ async function processQueue(): Promise<void> {
             item.error = "Cancelled";
             item.browserFile = undefined;
           } catch (cleanupErr) {
-            const cleanupMessage = `Cancellation cleanup failed: ${normalizeError(cleanupErr)}`;
-            // Keep this item recoverable and cancellable. Excluding it from the
-            // manifest here would orphan scratch/checkpoint state.
-            item.status = "queued";
-            item.phase = "paused";
-            item.paused = true;
-            item.cancelRequested = false;
-            item.error = cleanupMessage;
-            logActivity(
-              `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(cleanupErr)}`,
-              "error",
-            );
-            showToast(cleanupMessage, { type: "error", duration: 0 });
+            if (isNothingToDiscardError(cleanupErr)) {
+              item.status = "error";
+              item.phase = "finalizing";
+              item.error = "Cancelled";
+              item.browserFile = undefined;
+            } else {
+              const cleanupMessage = `Cancellation cleanup failed: ${normalizeError(cleanupErr)}`;
+              // Keep this item recoverable and cancellable. Excluding it from the
+              // manifest here would orphan scratch/checkpoint state.
+              item.status = "queued";
+              item.phase = "paused";
+              item.paused = true;
+              item.cancelRequested = false;
+              item.error = cleanupMessage;
+              logActivity(
+                `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(cleanupErr)}`,
+                "error",
+              );
+              showToast(cleanupMessage, { type: "error", duration: 0 });
+            }
           }
           errorCount += 1;
         } else if (item.paused && /cancel/i.test(errorText)) {
@@ -2257,14 +2410,22 @@ async function processQueue(): Promise<void> {
     onComplete &&
     (attemptedUploadThisRun ||
       attemptedDownloadThisRun ||
+      attemptedCopyThisRun ||
+      attemptedMoveThisRun ||
       errorCount > 0 ||
       skippedCount > 0)
   ) {
     onComplete({
       hadUpload: completedUploadThisRun,
       hadDownload: completedDownloadThisRun,
+      hadListingChange:
+        completedUploadThisRun ||
+        completedCopyThisRun ||
+        completedMoveThisRun,
       uploadCount,
       downloadCount,
+      copyCount,
+      moveCount,
       errorCount,
       skippedCount,
     });
@@ -2291,9 +2452,12 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
   item.maxAttempts = maxAttempts;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (item.paused || queuePaused) {
+    if (item.paused || queuePaused || offlineHold) {
       item.status = "queued";
       item.phase = "paused";
+      if (offlineHold && !item.paused && !queuePaused) {
+        item.error = "Offline — waiting for connection";
+      }
       return false;
     }
     item.attempt = attempt;
@@ -2403,7 +2567,10 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
           } retry ${attempt}/${maxAttempts - 1} for ${item.fileName} in ${waitMs}ms.`,
           "warning",
         );
-        await delay(waitMs);
+        await delayCancellable(waitMs, item);
+        if (item.cancelRequested) {
+          throw new Error("Cancelled");
+        }
         continue;
       }
       throw err;
@@ -2468,7 +2635,10 @@ async function executeTransfer(
             attempt,
             parallelThresholdMb: effective.downloadParallelThresholdMb,
             partSizeMb: effective.downloadPartSizeMb,
-            partConcurrency: effective.downloadPartConcurrency,
+            partConcurrency: scalePartConcurrencyForGlobalBudget(
+              effective.downloadPartConcurrency,
+              effective.downloadPartSizeMb,
+            ),
             bandwidthLimitMbps: effective.bandwidthLimitMbps,
             checkpointId,
             recoverySession: transferRecoverySession ?? "",
@@ -2546,7 +2716,12 @@ async function executeTransfer(
             dstKey: item.destinationKey,
             overwrite,
             transferId: item.id,
-            requireImmutableSourceVersion: item.operation === "move",
+            // Moves no longer demand a versioned source up front: on
+            // versioned buckets the receipt still carries the immutable
+            // version and deletion takes the exact-version path, while on
+            // unversioned buckets the backend falls back to an ETag-pinned
+            // copy plus a fingerprinted conditional delete.
+            requireImmutableSourceVersion: false,
           },
         );
         receipts = [receipt];
@@ -2626,19 +2801,32 @@ async function executeTransfer(
   if (item.filePath) {
     item.resumable = false;
     item.checkpointId = undefined;
-    await invokeS3For(connectionId, "upload_object", {
-      bucket: item.bucket,
-      key: item.key,
-      filePath: item.filePath,
-      contentType,
-      transferId: item.id,
-      attempt,
-      overwrite,
-      partSizeMb: effective.uploadPartSizeMb,
-      partConcurrency: effective.uploadPartConcurrency,
-      bandwidthLimitMbps: effective.bandwidthLimitMbps,
-      checksumVerification: effective.enableTransferChecksumVerification,
-    });
+    // The backend returns the stat'ed file size so post-upload verification
+    // never trusts progress events (or a zero total) for its expectation.
+    const uploadedBytes = await invokeS3For<number>(
+      connectionId,
+      "upload_object",
+      {
+        bucket: item.bucket,
+        key: item.key,
+        filePath: item.filePath,
+        contentType,
+        transferId: item.id,
+        attempt,
+        overwrite,
+        partSizeMb: effective.uploadPartSizeMb,
+        partConcurrency: scalePartConcurrencyForGlobalBudget(
+          effective.uploadPartConcurrency,
+          effective.uploadPartSizeMb,
+        ),
+        bandwidthLimitMbps: effective.bandwidthLimitMbps,
+        checksumVerification: effective.enableTransferChecksumVerification,
+      },
+    );
+    if (Number.isFinite(uploadedBytes) && uploadedBytes > 0) {
+      item.totalBytes = uploadedBytes;
+      item.size = uploadedBytes;
+    }
   } else if (item.browserFile) {
     if (item.browserFile.size > BROWSER_UPLOAD_BYTES_LIMIT) {
       throw new Error(
@@ -2646,14 +2834,14 @@ async function executeTransfer(
           "Use file-path based upload for larger files.",
       );
     }
-    const bytes = Array.from(
-      new Uint8Array(await item.browserFile.arrayBuffer()),
+    const bytesBase64 = arrayBufferToBase64(
+      await item.browserFile.arrayBuffer(),
     );
     ensureTransferActive(item);
     await invokeS3For(connectionId, "upload_object_bytes", {
       bucket: item.bucket,
       key: item.key,
-      bytes,
+      bytes_base64: bytesBase64,
       contentType,
       transferId: item.id,
       attempt,
@@ -2907,7 +3095,16 @@ function renderTransferRow(t: TransferItem): string {
   }
 
   const progressPct = Math.max(0, Math.min(100, Math.round(t.progress) || 0));
+  // Single-PUT uploads emit 0 then 100 with no hook in between, so a
+  // determinate bar would fake progress. Show indeterminate while running.
+  const isSinglePutUpload =
+    t.operation === "upload" &&
+    t.totalBytes > 0 &&
+    t.totalBytes < MULTIPART_UPLOAD_THRESHOLD_BYTES &&
+    t.status === "uploading" &&
+    t.progress < 100;
   const showDeterminate =
+    !isSinglePutUpload &&
     t.totalBytes > 0 &&
     (t.status === "uploading" ||
       t.status === "queued" ||
@@ -3255,16 +3452,22 @@ async function cancelTransferItem(id: number): Promise<void> {
       item.error = "Cancelled";
       item.browserFile = undefined;
     } catch (err) {
-      item.status = "queued";
-      item.phase = "paused";
-      item.paused = true;
-      item.cancelRequested = false;
-      item.error = `Cancellation cleanup failed: ${normalizeError(err)}`;
-      logActivity(
-        `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(err)}`,
-        "error",
-      );
-      showToast(item.error, { type: "error", duration: 0 });
+      if (isNothingToDiscardError(err)) {
+        item.status = "error";
+        item.error = "Cancelled";
+        item.browserFile = undefined;
+      } else {
+        item.status = "queued";
+        item.phase = "paused";
+        item.paused = true;
+        item.cancelRequested = false;
+        item.error = `Cancellation cleanup failed: ${normalizeError(err)}`;
+        logActivity(
+          `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(err)}`,
+          "error",
+        );
+        showToast(item.error, { type: "error", duration: 0 });
+      }
     }
     renderQueue();
   } else if (item.status === "uploading") {

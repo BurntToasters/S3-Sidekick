@@ -1,8 +1,8 @@
 import { state } from "./state.ts";
 import { hideContextMenu } from "./context-menu.ts";
-import { pruneStaleSelection, renderObjectTable } from "./browser.ts";
+import { renderObjectTable } from "./browser.ts";
 
-const SIDEBAR_MIN = 180;
+const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 420;
 const SIDEBAR_STORAGE_KEY = "s3-sidekick.sidebar.width";
 export const FILTER_INPUT_DEBOUNCE_MS = 120;
@@ -33,7 +33,8 @@ export function wireObjectFilterInput(): void {
   ) as HTMLInputElement;
   filterInput.addEventListener("input", () => {
     state.filterText = filterInput.value;
-    pruneStaleSelection();
+    // Do not prune on filter input: selection is retained across filters and
+    // only pruned against the full listing inside updateSelectionUI.
     clearFilterInputDebounce();
     filterInputDebounce = setTimeout(() => {
       renderObjectTable();
@@ -59,17 +60,31 @@ export function updateShortcutChips(): void {
   for (const chip of chips) {
     const text = chip.textContent ?? "";
     if (isMac) {
-      chip.textContent = text
-        .replace(/^Ctrl\+/i, "\u2318")
-        .replace(/^\u2303/, "\u2318");
+      chip.textContent = text.replace(/^Ctrl\+/i, "⌘").replace(/^⌃/, "⌘");
     } else {
       chip.textContent = text
-        .replace(/^\u2318/, "Ctrl+")
-        .replace(/^\u2303/, "Ctrl+")
-        .replace(/\u21e7/, "Shift+");
+        .replace(/^⌘/, "Ctrl+")
+        .replace(/^⌃/, "Ctrl+")
+        .replace(/⇧/, "Shift+");
     }
   }
+  updateToolbarShortcutTitles(isMac);
   updateInspectorToggleShortcutLabel();
+}
+
+function setTitle(id: string, title: string): void {
+  const btn = document.getElementById(id) as HTMLButtonElement | null;
+  if (btn) btn.title = title;
+}
+
+function updateToolbarShortcutTitles(isMac: boolean): void {
+  const accel = isMac ? "⌘" : "Ctrl+";
+  const accelShift = isMac ? "⌘⇧" : "Ctrl+Shift+";
+  setTitle("btn-new-folder", `New Folder (${accel}N)`);
+  setTitle("btn-upload", `Upload Files (${accel}U)`);
+  setTitle("btn-upload-folder", `Upload Folder (${accelShift}U)`);
+  setTitle("btn-palette", `Commands (${accel}K)`);
+  setTitle("palette-hint", `Commands (${accel}K)`);
 }
 
 export function updateInspectorToggleShortcutLabel(): void {
@@ -576,6 +591,14 @@ export function wireLayoutControls(): void {
     applySidebarWidth(clamped);
     persistSidebarWidth(clamped);
     updateResizerAria(clamped);
+  });
+
+  resizer.addEventListener("dblclick", () => {
+    if (isMobileSidebarMode()) return;
+    // Reset to the CSS default (--sidebar-width: 240px in tokens.css).
+    window.localStorage.removeItem(SIDEBAR_STORAGE_KEY);
+    applySidebarWidth(240);
+    updateResizerAria(240);
   });
 }
 

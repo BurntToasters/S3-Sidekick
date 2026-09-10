@@ -14,6 +14,7 @@ import {
   showEmptyState,
   clearSelection,
   clearNavHistory,
+  readLastBucket,
 } from "./browser.ts";
 import {
   addBookmark,
@@ -73,8 +74,10 @@ export function setConnectionInputs(
 export function updateBookmarkBtn(): void {
   const btn = document.getElementById("bookmark-save-btn");
   if (!btn) return;
-  const { endpoint } = getConnectionInputs();
-  const active = endpoint ? isEndpointBookmarked(endpoint) : false;
+  const { endpoint, accessKey } = getConnectionInputs();
+  const active = endpoint
+    ? isEndpointBookmarked(endpoint, accessKey || undefined)
+    : false;
   btn.classList.toggle("bookmark-save-btn--active", active);
 }
 
@@ -150,7 +153,8 @@ export async function switchToBookmark(
   accessKey: string,
   secretKey: string,
 ): Promise<void> {
-  if (state.connecting) return;
+  // Supersede instead of dropping: a rapid second click updates inputs and
+  // starts a newer connect generation that wins via generation guards.
   if (state.connected) {
     if (!(await handleDisconnect())) return;
   }
@@ -236,7 +240,8 @@ export function setConnectionUI(connected: boolean): void {
 }
 
 export async function handleConnect(): Promise<void> {
-  if (state.connecting) return;
+  // Allow superseding connects: rapid bookmark switches start a newer
+  // generation in connect() that wins; stale flows exit via generation checks.
   const { endpoint, region, accessKey, secretKey } = getConnectionInputs();
   if (!endpoint || !accessKey || !secretKey) {
     const message = "Endpoint, access key, and secret key are required.";
@@ -336,9 +341,22 @@ export async function handleConnect(): Promise<void> {
     ) {
       return;
     }
+    state.bucketFilterText = "";
+    const bucketFilterInput = document.getElementById(
+      "bucket-filter-input",
+    ) as HTMLInputElement | null;
+    if (bucketFilterInput) bucketFilterInput.value = "";
     renderBucketList();
-    if (state.buckets.length > 0) {
-      await selectBucket(state.buckets[0].name);
+    // Restore the last bucket if still present; otherwise stay unselected
+    // rather than auto-selecting buckets[0].
+    const lastBucket = readLastBucket();
+    const restoreTarget = lastBucket
+      ? state.buckets.find((b) => b.name === lastBucket)?.name
+      : undefined;
+    if (restoreTarget) {
+      await selectBucket(restoreTarget);
+    } else {
+      showEmptyState();
     }
     if (
       currentConnectionGeneration() !== generation ||
@@ -374,6 +392,13 @@ export async function handleConnect(): Promise<void> {
         return;
       }
     } else if (establishedConnectionId) {
+      return;
+    }
+    // Guard stale error renders: a superseded connect must not repaint.
+    if (
+      workflowGeneration &&
+      currentConnectionGeneration() !== workflowGeneration
+    ) {
       return;
     }
     renderBucketList();
@@ -421,6 +446,11 @@ export async function handleDisconnect(): Promise<boolean> {
     "filter-input",
   ) as HTMLInputElement | null;
   if (filterInput) filterInput.value = "";
+  state.bucketFilterText = "";
+  const bucketFilterInput = document.getElementById(
+    "bucket-filter-input",
+  ) as HTMLInputElement | null;
+  if (bucketFilterInput) bucketFilterInput.value = "";
 
   clearNavHistory();
   clearSelection();

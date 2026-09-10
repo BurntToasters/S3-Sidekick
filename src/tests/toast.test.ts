@@ -27,6 +27,8 @@ describe("toast notifications", () => {
     expect(els).toHaveLength(1);
     expect(els[0].classList.contains("toast--success")).toBe(true);
     expect(els[0].querySelector(".toast__msg")?.textContent).toContain("Saved");
+    expect(els[0].getAttribute("role")).toBe("status");
+    expect(els[0].querySelector(".toast__close svg")).not.toBeNull();
   });
 
   it("marks error and warning toasts as alerts", () => {
@@ -80,13 +82,25 @@ describe("toast notifications", () => {
     expect(toasts()).toHaveLength(0);
   });
 
-  it("caps the number of visible toasts", () => {
+  it("caps auto-dismissing toasts", () => {
     for (let i = 0; i < 8; i += 1) {
-      showToast(`Message ${i}`, { type: "info", duration: 0 });
+      showToast(`Message ${i}`, { type: "info" });
     }
     // Let the leave-animation fallback remove the dropped (oldest) toasts.
     vi.advanceTimersByTime(240);
     expect(toasts().length).toBeLessThanOrEqual(4);
+  });
+
+  it("never auto-evicts sticky toasts to make room", () => {
+    showToast("Sticky A", { type: "error", duration: 0 });
+    showToast("Sticky B", { type: "error", duration: 0 });
+    for (let i = 0; i < 6; i += 1) {
+      showToast(`Transient ${i}`, { type: "info" });
+    }
+    vi.advanceTimersByTime(240);
+    const texts = toasts().map((el) => el.textContent ?? "");
+    expect(texts.some((t) => t.includes("Sticky A"))).toBe(true);
+    expect(texts.some((t) => t.includes("Sticky B"))).toBe(true);
   });
 
   it("lazily creates the region if missing", () => {

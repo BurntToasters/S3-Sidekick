@@ -167,7 +167,9 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 }
 
 .btn--danger:hover {
-  background: var(--danger);
+  /* Darkened so white text stays above 4.5:1 (#ef4444 is only ~3.7:1). */
+  background: #dc2626;
+  border-color: #dc2626;
   color: #fff;
 }
 

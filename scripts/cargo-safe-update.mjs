@@ -27,6 +27,7 @@ import { createServer } from 'node:http';
 import { URL } from 'node:url';
 import { promisify } from 'node:util';
 import { isDirectExecution } from './direct-execution.js';
+import { commandRequiresShell } from './npm-safe-update.mjs';
 
 export const CARGO_SAFE_UPDATE_POLICY_VERSION = 5;
 export const CARGO_SAFE_UPDATE_VERSION = 5;
@@ -131,7 +132,7 @@ function run(command, args, { cwd = process.cwd(), env = process.env } = {}) {
     env,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-    shell: false,
+    shell: commandRequiresShell(command),
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -148,7 +149,7 @@ async function runAsync(command, args, { cwd = process.cwd(), env = process.env 
       env,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
-      shell: false,
+      shell: commandRequiresShell(command),
     });
   } catch (error) {
     const detail = [error.stdout, error.stderr].filter(Boolean).join('\n').trim();

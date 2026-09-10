@@ -42,7 +42,26 @@ if (apps.length === 0) {
 
 for (const appPath of apps) {
   const baseName = path.basename(appPath, ".app");
-  const zipPath = path.join(path.dirname(appPath), `${baseName}.zip`);
+  // Dev-only footgun guard: this script produces unsigned distributables.
+  // Fail if the .app is already signed so a signed build is never mistaken
+  // for an unsigned dev artifact, and name outputs explicitly.
+  try {
+    execFileSync("codesign", ["--verify", "--deep", "--strict", appPath], {
+      stdio: "ignore",
+    });
+    console.error(
+      `Refusing to pack signed bundle as unsigned dev artifact: ${appPath}. Use npm run build:mac:trust for releases.`,
+    );
+    process.exit(1);
+  } catch (err) {
+    // codesign --verify exits non-zero for unsigned bundles (expected dev
+    // case): fall through to packing. Only surface unexpected failures.
+    if (err?.status === undefined && err?.code !== undefined) throw err;
+  }
+  const zipPath = path.join(
+    path.dirname(appPath),
+    `${baseName}-unsigned-dev.zip`,
+  );
   execFileSync(
     "ditto",
     ["-c", "-k", "--sequesterRsrc", "--keepParent", appPath, zipPath],
@@ -50,6 +69,9 @@ for (const appPath of apps) {
       stdio: "inherit",
     },
   );
+  console.warn(
+    `Unsigned dev artifact (quarantined by Gatekeeper on download, do not distribute): ${zipPath}`,
+  );
 }
 
-console.log("Created macOS zip archives.");
+console.log("Created unsigned macOS dev zip archives (-unsigned-dev).");

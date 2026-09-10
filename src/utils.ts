@@ -49,6 +49,18 @@ export function formatSize(bytes: number): string {
 
 export function formatDate(iso: string): string {
   if (!iso) return "—";
+  const cached = formatDateCache.get(iso);
+  if (cached !== undefined) return cached;
+  const formatted = formatDateUncached(iso);
+  if (formatDateCache.size >= FORMAT_DATE_CACHE_MAX) formatDateCache.clear();
+  formatDateCache.set(iso, formatted);
+  return formatted;
+}
+
+const FORMAT_DATE_CACHE_MAX = 2000;
+const formatDateCache = new Map<string, string>();
+
+function formatDateUncached(iso: string): string {
   try {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
@@ -107,7 +119,8 @@ export function joinPath(base: string, leaf: string, platform: string): string {
 }
 
 export function friendlyError(err: unknown): string {
-  const msg = String(err);
+  const raw = err instanceof Error ? err.message : String(err);
+  const msg = raw.replace(/^Error:\s*/u, "");
   if (/403|Forbidden/i.test(msg))
     return "Access denied. Check your credentials and permissions.";
   if (/404|NoSuchBucket|NoSuchKey|NotFound/i.test(msg))
@@ -123,4 +136,36 @@ export function friendlyError(err: unknown): string {
   if (/slow\s*down|429|TooManyRequests|throttl/i.test(msg))
     return "Rate limited. Too many requests \u2014 wait a moment and try again.";
   return msg;
+}
+
+export function parseJsonObject(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+    ) {
+      return parsed as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    // Malformed JSON is an expected input shape here; callers branch on null.
+    return null;
+  }
+}
+
+export function parseJsonArray(raw: string): unknown[] | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    // Malformed JSON is an expected input shape here; callers branch on null.
+    return null;
+  }
+}
+
+export function reportError(message: string, err: unknown): string {
+  const detail = friendlyError(err);
+  return detail ? `${message}: ${detail}` : message;
 }

@@ -159,9 +159,11 @@ function signApp(appPath, identity) {
       candidate,
     ]);
   }
+  // No --deep here: nested code is signed explicitly above. --deep at sign
+  // time is fragile and can silently skip new nested content; verification
+  // below still uses --deep --strict.
   run("codesign", [
     "--force",
-    "--deep",
     "--options",
     "runtime",
     "--timestamp",
@@ -238,14 +240,36 @@ function zipApp(appPath, outputPath) {
 }
 
 function createTarGzApp(appPath, outputPath) {
+  // tar -czf strips macOS metadata (resource forks, quarantine-relevant
+  // xattrs). Stage via ditto --rsrc so the archived copy preserves them,
+  // then tar the staged copy. Callers verify the extracted copy after pack.
   fs.rmSync(outputPath, { force: true });
-  run("tar", [
-    "-czf",
-    outputPath,
-    "-C",
-    path.dirname(appPath),
-    path.basename(appPath),
-  ]);
+  const stageRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-tar-stage-"),
+  );
+  try {
+    const stagedApp = path.join(stageRoot, path.basename(appPath));
+    run("ditto", ["--rsrc", appPath, stagedApp]);
+    run("tar", ["-czf", outputPath, "-C", stageRoot, path.basename(appPath)]);
+    // Post-pack check: extract to a temp dir and verify the signature
+    // survived the round-trip.
+    const verifyRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "s3-sidekick-tar-verify-"),
+    );
+    try {
+      run("tar", ["-xzf", outputPath, "-C", verifyRoot]);
+      run("codesign", [
+        "--verify",
+        "--deep",
+        "--strict",
+        path.join(verifyRoot, path.basename(appPath)),
+      ]);
+    } finally {
+      fs.rmSync(verifyRoot, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(stageRoot, { recursive: true, force: true });
+  }
 }
 
 function createDmg(appPath, outputPath) {
@@ -254,7 +278,7 @@ function createDmg(appPath, outputPath) {
   run("hdiutil", [
     "create",
     "-fs",
-    "HFS+",
+    "APFS",
     "-format",
     "UDZO",
     "-srcfolder",
@@ -337,7 +361,11 @@ function finalizeMacRelease(
     );
     const dmgPath =
       dmgs[0] ||
-      path.join(path.dirname(path.dirname(appPath)), "dmg", "S3 Sidekick.dmg");
+      path.join(
+        path.dirname(path.dirname(appPath)),
+        "dmg",
+        "S3-Sidekick-macOS.dmg",
+      );
     const temporaryZip = path.join(
       os.tmpdir(),
       `s3-sidekick-notary-${process.pid}.zip`,

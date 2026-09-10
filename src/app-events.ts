@@ -19,6 +19,7 @@ import {
   navigateToFolder,
   selectBucket,
   handleRowClick,
+  handleBucketListKeydown,
   handleSelectAll,
   clearSelection,
   setLastClickedKey,
@@ -65,7 +66,11 @@ import {
   handleLockTimeoutChange,
   handleBiometricToggle,
 } from "./security.ts";
-import { initPalette, registerCommands } from "./command-palette.ts";
+import {
+  initPalette,
+  registerCommands,
+  openPalette,
+} from "./command-palette.ts";
 import { basename, friendlyError } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { showToast } from "./toast.ts";
@@ -79,6 +84,7 @@ import {
   initModalLayerObserver,
   disposeModalLayerObserver,
   disposeFilterInputDebounce,
+  FILTER_INPUT_DEBOUNCE_MS,
 } from "./app-layout.ts";
 import {
   handleConnect,
@@ -207,6 +213,9 @@ export function wireEvents(): void {
   (
     document.getElementById("conn-endpoint") as HTMLInputElement
   ).addEventListener("input", updateBookmarkBtn);
+  (
+    document.getElementById("conn-access-key") as HTMLInputElement
+  )?.addEventListener("input", updateBookmarkBtn);
 
   document
     .getElementById("settings-btn")!
@@ -463,6 +472,12 @@ export function wireEvents(): void {
     .getElementById("btn-refresh")!
     .addEventListener("click", handleRefresh);
   document
+    .getElementById("btn-palette")!
+    .addEventListener("click", openPalette);
+  document
+    .getElementById("palette-hint")!
+    .addEventListener("click", openPalette);
+  document
     .getElementById("btn-new-folder")!
     .addEventListener("click", handleCreateFolder);
   document
@@ -482,9 +497,16 @@ export function wireEvents(): void {
   ) as HTMLInputElement | null;
   if (bucketFilterInput) {
     bucketFilterInput.value = state.bucketFilterText;
+    let bucketFilterDebounce: ReturnType<typeof setTimeout> | undefined;
     bucketFilterInput.addEventListener("input", () => {
       state.bucketFilterText = bucketFilterInput.value;
-      renderBucketList();
+      if (bucketFilterDebounce !== undefined) {
+        clearTimeout(bucketFilterDebounce);
+      }
+      bucketFilterDebounce = setTimeout(() => {
+        renderBucketList();
+        bucketFilterDebounce = undefined;
+      }, FILTER_INPUT_DEBOUNCE_MS);
     });
   }
 
@@ -533,6 +555,31 @@ export function wireEvents(): void {
         });
     }
   });
+  dom.bucketList.addEventListener("keydown", (e) => {
+    handleBucketListKeydown(e as KeyboardEvent);
+    if ((e as KeyboardEvent).defaultPrevented) return;
+    if (
+      (e as KeyboardEvent).key !== "Enter" &&
+      (e as KeyboardEvent).key !== " "
+    ) {
+      return;
+    }
+    const button = (e.target as HTMLElement).closest<HTMLElement>(
+      ".list__item-btn",
+    );
+    const bucket = button?.dataset.bucket;
+    if (!bucket) return;
+    (e as KeyboardEvent).preventDefault();
+    void selectBucket(bucket)
+      .then(() => closeSidebarOnMobile())
+      .catch((err) => {
+        setStatus(`Failed to open bucket "${bucket}": ${err}`);
+        logActivity(
+          `Failed to open bucket "${bucket}": ${String(err)}`,
+          "error",
+        );
+      });
+  });
   dom.bucketPanel.addEventListener("contextmenu", handleBucketContextMenu);
 
   dom.objectTbody.addEventListener("click", (e) => {
@@ -541,20 +588,8 @@ export function wireEvents(): void {
     if (!row) return;
     if (target.closest(".row-check")) return;
 
-    if (
-      row.classList.contains("object-row--folder") &&
-      !target.closest(".col-check")
-    ) {
-      const prefix = row.dataset.prefix;
-      if (prefix !== undefined) {
-        void navigateToFolder(prefix).catch((err) => {
-          setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
-          logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
-        });
-      }
-      return;
-    }
-
+    // Standard file-manager behavior: single click selects (with
+    // ctrl/shift support via handleRowClick); open on double-click/Enter.
     const key =
       row.dataset.key ??
       (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
@@ -602,26 +637,9 @@ export function wireEvents(): void {
       return;
     }
 
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      const rows = Array.from(
-        dom.objectTbody.querySelectorAll<HTMLElement>(".object-row"),
-      );
-      const currentIndex = rows.indexOf(row);
-      const nextIndex =
-        e.key === "ArrowDown" ? currentIndex + 1 : currentIndex - 1;
-      rows[nextIndex]?.focus();
-      return;
-    }
-    if (e.key === "Home" || e.key === "End") {
-      e.preventDefault();
-      const rows = Array.from(
-        dom.objectTbody.querySelectorAll<HTMLElement>(".object-row"),
-      );
-      (e.key === "Home" ? rows[0] : rows[rows.length - 1])?.focus();
-      return;
-    }
-
+    // Arrow/Home/End row navigation lives in browser.ts
+    // (handleObjectTableKeydown, capture phase) so virtualized and plain
+    // tables share one owner; Space/Enter are handled here.
     if (e.key === "Enter") {
       e.preventDefault();
       if (row.classList.contains("object-row--folder")) {
@@ -648,6 +666,13 @@ export function wireEvents(): void {
     const row = (e.target as HTMLElement).closest<HTMLElement>(".object-row");
     if (!row) return;
     if (row.classList.contains("object-row--folder")) {
+      const prefix = row.dataset.prefix;
+      if (prefix !== undefined) {
+        void navigateToFolder(prefix).catch((err) => {
+          setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+          logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
+        });
+      }
       return;
     }
     const key = row.dataset.key;
@@ -757,7 +782,11 @@ export function wireEvents(): void {
     });
 
   setTransferCompleteHandler(async (summary) => {
-    if (summary.hadUpload && state.connected && state.currentBucket) {
+    if (
+      (summary.hadUpload || summary.hadListingChange) &&
+      state.connected &&
+      state.currentBucket
+    ) {
       const connectionId = state.connectionId;
       const bucket = state.currentBucket;
       const prefix = state.currentPrefix;
@@ -791,6 +820,12 @@ export function wireEvents(): void {
     if (summary.uploadCount > 0) {
       parts.push(`${summary.uploadCount} uploaded`);
     }
+    if (summary.copyCount > 0) {
+      parts.push(`${summary.copyCount} copied`);
+    }
+    if (summary.moveCount > 0) {
+      parts.push(`${summary.moveCount} moved`);
+    }
     if (summary.downloadCount > 0) {
       parts.push(`${summary.downloadCount} downloaded`);
     }
@@ -798,7 +833,11 @@ export function wireEvents(): void {
       showToast(`Transfer complete \u2014 ${parts.join(", ")}`, {
         type: "success",
       });
-    } else if (summary.hadUpload || summary.hadDownload) {
+    } else if (
+      summary.hadUpload ||
+      summary.hadDownload ||
+      summary.hadListingChange
+    ) {
       showToast("Transfer complete", { type: "success" });
     }
     if (summary.errorCount > 0) {
@@ -1016,8 +1055,19 @@ export function wireEvents(): void {
       window.clearTimeout(resizeTimeout);
     }
     resizeTimeout = window.setTimeout(async () => {
+      // Track the live size in memory always, but skip persisting while the
+      // settings modal is open: a resize behind the modal would otherwise
+      // contaminate the draft the modal saves on close. The in-memory size
+      // is picked up by the modal's normal save, applying pending resizes.
       state.currentSettings.windowWidth = window.innerWidth;
       state.currentSettings.windowHeight = window.innerHeight;
+      if (
+        document
+          .getElementById("settings-overlay")
+          ?.classList.contains("active")
+      ) {
+        return;
+      }
       try {
         await saveSettings();
       } catch (err) {

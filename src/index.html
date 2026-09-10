@@ -88,7 +88,7 @@
                 title="Create new connection"
                 aria-label="New connection"
               >
-                +
+                <span class="lucide-icon" data-icon="plus"></span>
               </button>
             </div>
             <ul id="conn-saved-list" class="conn-saved-list"></ul>
@@ -327,6 +327,14 @@
                 aria-label="Filter objects"
               />
               <div class="content-toolbar__actions">
+                <button
+                  id="btn-palette"
+                  class="btn btn--icon"
+                  title="Commands (Ctrl+K)"
+                  aria-label="Commands"
+                >
+                  <span class="lucide-icon" data-icon="search"></span>
+                </button>
                 <button
                   id="btn-refresh"
                   class="btn btn--icon"
@@ -685,7 +693,7 @@
         <div id="bottom-drawer" class="bottom-drawer" hidden>
           <div
             class="bottom-drawer__resize-handle"
-            role="separator"
+            role="slider"
             aria-label="Resize bottom panel"
             aria-orientation="horizontal"
             tabindex="0"
@@ -858,6 +866,16 @@
               ></span>
             </button>
             <span id="version-label"></span>
+            <button
+              id="palette-hint"
+              class="btn btn--ghost btn--sm statusbar__palette"
+              title="Commands (Ctrl+K)"
+              aria-label="Open command palette"
+            >
+              <span class="lucide-icon" data-icon="search"></span>
+              <span>Commands</span>
+              <span class="shortcut-chip">Ctrl+K</span>
+            </button>
           </div>
         </footer>
       </main>
@@ -1676,7 +1694,7 @@
             id="dialog-input-reveal"
             class="dialog-input-reveal"
             type="button"
-            tabindex="-1"
+            tabindex="0"
             aria-label="Show password"
             hidden
           >
@@ -2255,8 +2273,6 @@
       class="toast-region"
       role="region"
       aria-label="Notifications"
-      aria-live="polite"
-      aria-relevant="additions"
     ></div>
 
     <script type="module" src="main.ts"></script>

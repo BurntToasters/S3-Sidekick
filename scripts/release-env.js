@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { isDirectExecution } from "./direct-execution.js";
+import { commandRequiresShell } from "./npm-safe-update.mjs";
 
 const require = createRequire(import.meta.url);
 const { assertCleanSource } = require("./release-integrity.cjs");
@@ -267,7 +268,7 @@ function runReleaseCommand({
       cwd: workingDirectory,
       env: childEnvironment(mode, environment),
       stdio: "inherit",
-      shell: false,
+      shell: commandRequiresShell(command[0]),
     });
   } finally {
     if (sourceCommit !== null) {

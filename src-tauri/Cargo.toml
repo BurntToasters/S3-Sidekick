@@ -4,7 +4,8 @@ version = "0.11.0-beta.5"
 description = "Cross-platform desktop client for S3-compatible object storage."
 authors = ["BurntToasters <code@rosie.run>"]
 edition = "2021"
-rust-version = "1.94.1"
+# MSRV floor tracks the pinned release toolchain below (npm run rust:update).
+rust-version = "1.98.0"
 
 [build-dependencies]
 tauri-build = { version = "=2.6.3", features = [] }

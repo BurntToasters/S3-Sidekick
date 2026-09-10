@@ -394,9 +394,11 @@ describe("browser core rendering and selection", () => {
     state.selectedKeys.add("hidden.json");
 
     browser.renderObjectTable();
-    expect(state.selectedKeys.has("hidden.json")).toBe(false);
+    // Selection is retained across filters; hidden rows stay selected.
+    expect(state.selectedKeys.has("hidden.json")).toBe(true);
     browser.handleSelectAll(true);
     expect([...state.selectedKeys].sort()).toEqual([
+      "hidden.json",
       "prefix:txt-folder/",
       "visible.txt",
     ]);
@@ -541,8 +543,11 @@ describe("browser core rendering and selection", () => {
 
     state.filterText = "other";
     browser.renderObjectTable();
-    expect(state.selectedKeys.size).toBe(0);
-    expect(syncInspectorMock).toHaveBeenCalledTimes(4);
+    // Filtering hides but retains selection.
+    expect(state.selectedKeys.size).toBe(1);
+    expect(state.selectedKeys.has("selected.txt")).toBe(true);
+    // Retained selection keeps the inspector signature stable: no resync.
+    expect(syncInspectorMock).toHaveBeenCalledTimes(3);
     expect([...selectionSnapshot]).toEqual(["selected.txt"]);
   });
 

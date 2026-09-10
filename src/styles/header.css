@@ -235,3 +235,9 @@ body:not(.titlebar-custom) .header__actions {
   color: var(--text-primary);
   background: var(--glass-bg);
 }
+
+.field-toggle-btn:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+  opacity: 1;
+}

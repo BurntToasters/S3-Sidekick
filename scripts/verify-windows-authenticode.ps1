@@ -90,6 +90,15 @@ try {
       $embeddedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $embedded[0].FullName).Hash
       if ($embeddedHash -ne $baselineRuntimeHash) { throw "Embedded runtime differs from the signed pre-bundle runtime in $($installer.FullName)" }
     }
+    # NSIS writes the uninstaller at install time from the installer payload;
+    # signing only the outer .exe leaves an unsigned uninstall.exe on disk.
+    # The bundle must run signCommand (!uninstfinalize) so the extracted
+    # uninstaller below carries a valid signature.
+    if ($installer.Extension.ToLowerInvariant() -eq '.exe') {
+      $uninstallers = @(Get-ChildItem -LiteralPath $extractDir -File -Recurse | Where-Object { $_.Name -match '(?i)^uninstall.*\.exe$' })
+      if ($uninstallers.Count -ne 1) { throw "Expected exactly one extracted uninstaller in $($installer.FullName); found $($uninstallers.Count). Ensure signCommand ran during bundling (!uninstfinalize)." }
+      Assert-TrustedArtifact $uninstallers[0] $expected
+    }
   }
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

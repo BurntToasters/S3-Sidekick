@@ -536,4 +536,348 @@ describe("connection module", () => {
     expect(state.connected).toBe(false);
     expect(state.endpoint).toBe("");
   });
+
+  it("ignores stale bucket responses and stale bucket errors", async () => {
+    const resolvers: Array<{
+      resolve: (v: unknown) => void;
+      reject: (e: unknown) => void;
+    }> = [];
+    mockInvoke.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          resolvers.push({ resolve, reject });
+        }),
+    );
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+
+    const first = connection.refreshBuckets();
+    const second = connection.refreshBuckets();
+    expect(resolvers.length).toBe(2);
+
+    resolvers[1]?.resolve([{ name: "fresh", creation_date: "t" }]);
+    await expect(second).resolves.toBeUndefined();
+    expect(state.buckets).toEqual([{ name: "fresh", creation_date: "t" }]);
+
+    resolvers[0]?.resolve([{ name: "stale", creation_date: "t" }]);
+    await expect(first).resolves.toBeUndefined();
+    expect(state.buckets).toEqual([{ name: "fresh", creation_date: "t" }]);
+
+    // Stale error is swallowed; fresh error is thrown.
+    const errResolvers: Array<{
+      resolve: (v: unknown) => void;
+      reject: (e: unknown) => void;
+    }> = [];
+    mockInvoke.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          errResolvers.push({ resolve, reject });
+        }),
+    );
+    const staleFail = connection.refreshBuckets();
+    const freshOk = connection.refreshBuckets();
+    errResolvers[0]?.reject(new Error("stale boom"));
+    errResolvers[1]?.resolve([]);
+    await expect(staleFail).resolves.toBeUndefined();
+    await expect(freshOk).resolves.toBeUndefined();
+
+    mockInvoke.mockRejectedValueOnce(new Error("fresh boom"));
+    await expect(connection.refreshBuckets()).rejects.toThrow("fresh boom");
+  });
+
+  it("second connect supersedes the first without overwriting fresh state", async () => {
+    const resolvers: Array<(v: typeof CONNECT_RESULT) => void> = [];
+    mockInvoke.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve as (v: typeof CONNECT_RESULT) => void);
+        }),
+    );
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+
+    const first = connection.connect("https://a.example.com", "", "k", "s");
+    const second = connection.connect("https://b.example.com", "", "k", "s");
+    resolvers[1]?.({
+      region: "us-east-1",
+      connection_id: "conn-fresh",
+      connection_identity: "ident-fresh",
+      create_only_capabilities: {
+        put_object: true,
+        complete_multipart: true,
+        copy_object: true,
+      },
+    });
+    await expect(second).resolves.toBe("us-east-1");
+    expect(state.connectionId).toBe("conn-fresh");
+
+    resolvers[0]?.({
+      region: "us-east-1",
+      connection_id: "conn-stale",
+      connection_identity: "ident-stale",
+      create_only_capabilities: {
+        put_object: true,
+        complete_multipart: true,
+        copy_object: true,
+      },
+    });
+    await expect(first).rejects.toThrow("superseded");
+    expect(state.connectionId).toBe("conn-fresh");
+    expect(state.endpoint).toBe("https://b.example.com");
+  });
+
+  it("synthesizeMissingPrefixes derives immediate children from markers only", async () => {
+    const connection = await import("../connection.ts");
+    const obj = (key: string) => ({
+      key,
+      size: 0,
+      last_modified: "",
+      is_folder: false,
+    });
+
+    // Nested marker synthesizes only the immediate child.
+    expect(
+      connection.synthesizeMissingPrefixes(
+        [obj("docs/a/b/"), obj("docs/a/file.txt")],
+        [],
+        "docs/",
+      ),
+    ).toEqual(["docs/a/"]);
+
+    // Marker-only folder with no prefixes entry.
+    expect(
+      connection.synthesizeMissingPrefixes([obj("docs/empty/")], [], "docs/"),
+    ).toEqual(["docs/empty/"]);
+
+    // Existing prefix is not duplicated; duplicate markers collapse.
+    expect(
+      connection.synthesizeMissingPrefixes(
+        [obj("docs/empty/"), obj("docs/empty/")],
+        ["docs/empty/"],
+        "docs/",
+      ),
+    ).toEqual([]);
+
+    // Non-markers, outside-prefix keys, and the prefix itself are ignored.
+    expect(
+      connection.synthesizeMissingPrefixes(
+        [
+          obj("docs/file.txt"),
+          obj("other/folder/"),
+          obj("docs/"),
+          { ...obj("docs/no-slash-marker"), key: "docs/noslash" },
+        ],
+        [],
+        "docs/",
+      ),
+    ).toEqual([]);
+  });
+
+  it("loadMoreObjects dedupes repeated boundary keys across pages", async () => {
+    mockInvoke.mockResolvedValueOnce({
+      objects: [
+        { key: "docs/a.txt", size: 1, last_modified: "", is_folder: false },
+        { key: "docs/b.txt", size: 2, last_modified: "", is_folder: false },
+      ],
+      prefixes: ["docs/", "extra/"],
+      truncated: false,
+      next_continuation_token: "",
+    });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.objects = [
+      { key: "docs/a.txt", size: 1, last_modified: "", is_folder: false },
+    ];
+    state.prefixes = ["docs/"];
+    state.hasMore = true;
+    state.continuationToken = "token-1";
+
+    await connection.loadMoreObjects();
+    expect(state.objects.map((o) => o.key)).toEqual([
+      "docs/a.txt",
+      "docs/b.txt",
+    ]);
+    expect(state.prefixes).toEqual(["docs/", "extra/"]);
+  });
+
+  it("loadMoreObjects ignores stale paginated responses", async () => {
+    const resolvers: Array<(v: unknown) => void> = [];
+    mockInvoke.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.objects = [
+      { key: "docs/a.txt", size: 1, last_modified: "", is_folder: false },
+    ];
+    state.prefixes = [];
+    state.hasMore = true;
+    state.continuationToken = "token-1";
+
+    const first = connection.loadMoreObjects();
+    const second = connection.loadMoreObjects();
+    resolvers[0]?.({
+      objects: [
+        { key: "docs/stale.txt", size: 9, last_modified: "", is_folder: false },
+      ],
+      prefixes: [],
+      truncated: false,
+      next_continuation_token: "",
+    });
+    await first;
+    expect(state.objects.map((o) => o.key)).toEqual(["docs/a.txt"]);
+
+    resolvers[1]?.({
+      objects: [
+        { key: "docs/fresh.txt", size: 9, last_modified: "", is_folder: false },
+      ],
+      prefixes: [],
+      truncated: false,
+      next_continuation_token: "",
+    });
+    await second;
+    expect(state.objects.map((o) => o.key)).toEqual([
+      "docs/a.txt",
+      "docs/fresh.txt",
+    ]);
+  });
+
+  it("loadMoreObjects caps accumulation and stops pagination", async () => {
+    document.body.innerHTML = "";
+    const objects = Array.from({ length: 4999 }, (_, i) => ({
+      key: `docs/f-${i}.txt`,
+      size: 1,
+      last_modified: "",
+      is_folder: false,
+    }));
+    mockInvoke.mockResolvedValueOnce({
+      objects: [
+        { key: "docs/tail-1.txt", size: 1, last_modified: "", is_folder: false },
+        { key: "docs/tail-2.txt", size: 1, last_modified: "", is_folder: false },
+      ],
+      prefixes: ["docs/extra/"],
+      truncated: true,
+      next_continuation_token: "more",
+    });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.objects = [...objects];
+    state.prefixes = ["docs/"];
+    state.hasMore = true;
+    state.continuationToken = "token-1";
+
+    await connection.loadMoreObjects();
+    expect(state.hasMore).toBe(false);
+    expect(state.continuationToken).toBe("");
+    expect(document.getElementById("toast-region")?.textContent).toContain(
+      "Listing capped",
+    );
+  });
+
+  it("refresh re-drives one trailing listing behind navigation", async () => {
+    const resolvers: Array<(v: unknown) => void> = [];
+    mockInvoke.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+
+    const navigating = connection.refreshObjects("bucket-a", "");
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    const trailingFirst = connection.refreshObjects("bucket-a", "", {
+      supersedePending: false,
+    });
+    const trailingSecond = connection.refreshObjects("bucket-a", "", {
+      supersedePending: false,
+    });
+    // Coalesced automatic refreshes share one promise.
+    expect(trailingFirst).toBe(trailingSecond);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+
+    resolvers[0]?.({
+      objects: [],
+      prefixes: [],
+      truncated: false,
+      next_continuation_token: "",
+    });
+    await expect(navigating).resolves.toBe(true);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({ bucket: "bucket-a" }),
+    );
+
+    resolvers[1]?.({
+      objects: [
+        { key: "b.txt", size: 1, last_modified: "", is_folder: false },
+      ],
+      prefixes: [],
+      truncated: false,
+      next_continuation_token: "",
+    });
+    await expect(trailingFirst).resolves.toBe(true);
+    expect(state.currentBucket).toBe("bucket-a");
+  });
+
+  it("stale refresh failure parks as false while fresh failure throws", async () => {
+    const resolvers: Array<{
+      resolve: (v: unknown) => void;
+      reject: (e: unknown) => void;
+    }> = [];
+    mockInvoke.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          resolvers.push({ resolve, reject });
+        }),
+    );
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+
+    const first = connection.refreshObjects("bucket-a", "");
+    const second = connection.refreshObjects("bucket-b", "");
+    resolvers[0]?.reject(new Error("stale list boom"));
+    await expect(first).resolves.toBe(false);
+    resolvers[1]?.resolve({
+      objects: [],
+      prefixes: [],
+      truncated: false,
+      next_continuation_token: "",
+    });
+    await expect(second).resolves.toBe(true);
+
+    mockInvoke.mockRejectedValueOnce(new Error("fresh list boom"));
+    await expect(connection.refreshObjects("bucket-a", "")).rejects.toThrow(
+      "fresh list boom",
+    );
+  });
 });

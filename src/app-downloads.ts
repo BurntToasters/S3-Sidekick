@@ -153,7 +153,7 @@ function estimateKnownObjectSize(entry: DownloadQueueEntry): number | null {
 async function estimateDownloadEntryBytes(
   entry: DownloadQueueEntry,
   connectionId: string,
-): Promise<number> {
+): Promise<number | null> {
   const known = estimateKnownObjectSize(entry);
   if (known !== null) return known;
   try {
@@ -166,10 +166,11 @@ async function estimateDownloadEntryBytes(
       },
     );
     if (!Number.isFinite(head.content_length) || head.content_length < 0)
-      return 0;
+      return null;
     return head.content_length;
   } catch {
-    return 0;
+    // Unknown, not zero: a zero would silently skip the disk preflight below.
+    return null;
   }
 }
 
@@ -182,7 +183,17 @@ async function preflightDownloadDiskSpace(
   const estimatedBytes = await Promise.all(
     entries.map((entry) => estimateDownloadEntryBytes(entry, connectionId)),
   );
-  const totalEstimatedBytes = estimatedBytes.reduce(
+  if (estimatedBytes.some((bytes) => bytes === null)) {
+    // Fail open and say so: proceeding without a preflight is honest, while a
+    // zero estimate would pretend small downloads need no disk check.
+    logActivity(
+      "Disk preflight skipped: could not determine every download size.",
+      "warning",
+    );
+    return true;
+  }
+  const knownBytes = estimatedBytes as number[];
+  const totalEstimatedBytes = knownBytes.reduce(
     (sum, bytes) => sum + bytes,
     0,
   );
@@ -194,7 +205,7 @@ async function preflightDownloadDiskSpace(
   for (let i = 0; i < entries.length; i += 1) {
     const dir = parentDirectory(entries[i].destination);
     if (!dir) continue;
-    const size = estimatedBytes[i];
+    const size = knownBytes[i];
     if (!Number.isFinite(size) || size <= 0) continue;
     requiredByDirectory.set(dir, (requiredByDirectory.get(dir) ?? 0) + size);
   }

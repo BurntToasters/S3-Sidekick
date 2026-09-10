@@ -42,6 +42,7 @@ import panelRight from "lucide-static/icons/panel-right.svg?raw";
 import moreHorizontal from "lucide-static/icons/more-horizontal.svg?raw";
 import minus from "lucide-static/icons/minus.svg?raw";
 import square from "lucide-static/icons/square.svg?raw";
+import plus from "lucide-static/icons/plus.svg?raw";
 
 const registry: Record<string, string> = {
   settings,
@@ -89,6 +90,7 @@ const registry: Record<string, string> = {
   "more-horizontal": moreHorizontal,
   minus,
   square,
+  plus,
 };
 
 export function getIconHtml(

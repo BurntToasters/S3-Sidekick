@@ -254,6 +254,19 @@ export interface LoadSettingsResult {
   malformed: boolean;
 }
 
+export const SETTINGS_SCHEMA_VERSION = 2;
+
+// Extras carried alongside settings. Unknown keys from older/newer clients
+// are pruned on load so stale experiments cannot accumulate; add new keys
+// here explicitly.
+const KNOWN_EXTRAS = new Set([
+  "_schemaVersion",
+  "_setupComplete",
+  "launchCount",
+  "supportPromptDismissed",
+  "transfersHintDismissed",
+]);
+
 export function parseSettingsRaw(json: string): LoadSettingsResult {
   let parsed: Record<string, unknown>;
   let malformed = false;
@@ -280,10 +293,13 @@ export function parseSettingsRaw(json: string): LoadSettingsResult {
       extras[key] = value;
     } else if (key in SETTING_DEFAULTS) {
       (settingsRaw as Record<string, unknown>)[key] = value;
-    } else {
+    } else if (KNOWN_EXTRAS.has(key)) {
       extras[key] = value;
     }
+    // Unknown non-underscore keys are pruned (schema v2): neither settings
+    // nor known extras, so dropping them cannot lose user intent.
   }
+  extras._schemaVersion = SETTINGS_SCHEMA_VERSION;
 
   return {
     settings: normalizeUserSettings(settingsRaw),
@@ -296,5 +312,9 @@ export function mergeSettingsPayload(
   settings: UserSettings,
   extras: Record<string, unknown>,
 ): string {
-  return JSON.stringify({ ...extras, ...settings }, null, 2);
+  return JSON.stringify(
+    { ...extras, ...settings, _schemaVersion: SETTINGS_SCHEMA_VERSION },
+    null,
+    2,
+  );
 }

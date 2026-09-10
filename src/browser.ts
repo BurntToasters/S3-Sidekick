@@ -1,4 +1,4 @@
-import { state, dom } from "./state.ts";
+import { state, dom, type ObjectInfo } from "./state.ts";
 import {
   escapeHtml,
   formatSize,
@@ -8,6 +8,7 @@ import {
   friendlyError,
 } from "./utils.ts";
 import { refreshObjects } from "./connection.ts";
+import { showToast } from "./toast.ts";
 import {
   closeInspectorOnMobile,
   markInspectorHasContent,
@@ -24,30 +25,108 @@ const OBJECT_VIRTUALIZE_THRESHOLD = 250;
 const OBJECT_VIRTUAL_OVERSCAN = 8;
 const OBJECT_VIRTUAL_FALLBACK_VIEWPORT = 600;
 
+// Row icons are static markup: build once instead of per row per render.
+const FOLDER_ROW_ICON_HTML = getIconHtml("folder", {
+  className: "lucide-icon lucide-icon--inline",
+  decorative: true,
+});
+const FILE_ROW_ICON_HTML = getIconHtml("file", {
+  className: "lucide-icon lucide-icon--inline",
+  decorative: true,
+});
+
 let lastInspectorSelectionSignature: string | null = null;
+
+// Revision lookup for the inspector signature. Rebuilt when the listing
+// itself changes (new array ref, length, or content revision); per-selection
+// signature calls then cost O(picked) plus one cheap O(listing) revision hash
+// instead of scanning every object per click. The index stores live object
+// references (not snapshots), so in-place metadata mutations are still
+// observed without a rescan.
+let objectRevisionIndex: Map<string, ObjectInfo> | null = null;
+let indexedObjects: typeof state.objects | null = null;
+let indexedListingSizes = "";
+
+function listingContentRevision(): string {
+  // Cheap FNV-1a over key/size/mtime so a same-length in-place replacement
+  // (same array ref and length, swapped element) still invalidates the index
+  // and resyncs the inspector.
+  let hash = 0x811c9dc5;
+  const mix = (text: string): void => {
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+  };
+  for (const object of state.objects) {
+    mix(object.key);
+    mix(":");
+    mix(String(object.size));
+    mix(":");
+    mix(object.last_modified);
+    mix(";");
+  }
+  for (const prefix of state.prefixes) {
+    mix(prefix);
+    mix(";");
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function selectedObjectRevisions(selectedKeys: string[]): string[] {
+  const sizes = `${state.objects.length}:${state.prefixes.length}:${listingContentRevision()}`;
+  if (
+    objectRevisionIndex === null ||
+    indexedObjects !== state.objects ||
+    indexedListingSizes !== sizes
+  ) {
+    const index = new Map<string, ObjectInfo>();
+    for (const object of state.objects) {
+      if (!object.is_folder) {
+        index.set(object.key, object);
+      }
+    }
+    objectRevisionIndex = index;
+    indexedObjects = state.objects;
+    indexedListingSizes = sizes;
+  }
+  const index = objectRevisionIndex;
+  return selectedKeys.map((key) => {
+    if (key.startsWith("prefix:")) return key;
+    const object = index.get(key);
+    return object
+      ? `${key}:${object.size}:${object.last_modified}`
+      : `${key}:missing`;
+  });
+}
 
 function getInspectorSelectionSignature(): string {
   const selectedKeys = Array.from(state.selectedKeys).sort();
-  const objectRevisions = new Map(
-    state.objects
-      .filter((object) => !object.is_folder)
-      .map(
-        (object) =>
-          [object.key, `${object.size}:${object.last_modified}`] as const,
-      ),
-  );
-  const selectedRevisions = selectedKeys.map((key) =>
-    key.startsWith("prefix:")
-      ? key
-      : `${key}:${objectRevisions.get(key) ?? "missing"}`,
-  );
   return JSON.stringify([
     state.connectionIdentity,
     state.connectionId,
     state.currentBucket,
     state.currentPrefix,
-    selectedRevisions,
+    selectedObjectRevisions(selectedKeys),
   ]);
+}
+
+const LAST_BUCKET_KEY = "s3-sidekick.last-bucket";
+
+export function readLastBucket(): string | null {
+  try {
+    return window.localStorage.getItem(LAST_BUCKET_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeLastBucket(name: string): void {
+  try {
+    window.localStorage.setItem(LAST_BUCKET_KEY, name);
+  } catch {
+    // Storage unavailable (private mode); last-bucket restore is best-effort.
+  }
 }
 
 function syncInspectorForSemanticSelectionChange(): void {
@@ -96,18 +175,131 @@ export function getSelectableKeys(): string[] {
   return keys;
 }
 
+// Navigation failures used to only flash a 5s status line. Report them three
+// ways so they survive long enough to act on: status line, error toast with a
+// Retry action, and an inline table row (prepended after the re-render below,
+// so it is not wiped by it) with its own Retry button.
+function reportNavFailure(message: string, retry: () => void): void {
+  setStatus(message, 8000);
+  showToast(message, {
+    type: "error",
+    actionLabel: "Retry",
+    onAction: retry,
+  });
+  const tbody = document.getElementById("object-tbody");
+  if (!tbody) return;
+  tbody.querySelector("[data-nav-error]")?.remove();
+  const row = document.createElement("tr");
+  row.dataset.navError = "true";
+  const cell = document.createElement("td");
+  cell.colSpan = 4;
+  cell.className = "table-error";
+  const text = document.createElement("span");
+  text.textContent = message;
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.className = "btn btn--sm";
+  retryBtn.textContent = "Retry";
+  retryBtn.addEventListener("click", () => {
+    row.remove();
+    retry();
+  });
+  cell.append(text, retryBtn);
+  row.appendChild(cell);
+  tbody.prepend(row);
+}
+
+// Memoized lowercased basenames: filter ticks re-evaluate every row, so
+// avoid recomputing basename+toLowerCase per row per keystroke. Pure in the
+// key, so entries stay valid across listings; bounded to avoid growth.
+const LOWER_BASENAME_CACHE_MAX = 10000;
+const lowerBasenameCache = new Map<string, string>();
+
+function lowerBasename(key: string): string {
+  let lower = lowerBasenameCache.get(key);
+  if (lower === undefined) {
+    lower = basename(key).toLowerCase();
+    if (lowerBasenameCache.size >= LOWER_BASENAME_CACHE_MAX) {
+      lowerBasenameCache.clear();
+    }
+    lowerBasenameCache.set(key, lower);
+  }
+  return lower;
+}
+
+// Full sort order depends only on the listing + sort settings, not on the
+// filter text. Cache it so 120ms filter ticks skip the O(n log n) re-sort
+// and only re-filter. Lengths are part of the key because Load More mutates
+// the arrays in place via push.
+let sortedListingCache: {
+  objects: ObjectInfo[];
+  prefixes: string[];
+  objectsLen: number;
+  prefixesLen: number;
+  sortColumn: typeof state.sortColumn;
+  sortAsc: boolean;
+  sortedFiles: ObjectInfo[];
+  sortedPrefixes: string[];
+} | null = null;
+
+function getCachedSortedListing(): {
+  sortedFiles: ObjectInfo[];
+  sortedPrefixes: string[];
+} {
+  const cached = sortedListingCache;
+  if (
+    cached &&
+    cached.objects === state.objects &&
+    cached.prefixes === state.prefixes &&
+    cached.objectsLen === state.objects.length &&
+    cached.prefixesLen === state.prefixes.length &&
+    cached.sortColumn === state.sortColumn &&
+    cached.sortAsc === state.sortAsc
+  ) {
+    return cached;
+  }
+  const col = state.sortColumn;
+  const asc = state.sortAsc;
+  const sortedFiles = state.objects.filter((o) => !o.is_folder);
+  sortedFiles.sort((a, b) => {
+    let cmp = 0;
+    if (col === "name") {
+      cmp = basename(a.key).localeCompare(basename(b.key));
+    } else if (col === "size") {
+      cmp = a.size - b.size;
+    } else if (col === "modified") {
+      cmp = a.last_modified.localeCompare(b.last_modified);
+    }
+    return asc ? cmp : -cmp;
+  });
+  const sortedPrefixes = [...state.prefixes].sort((a, b) =>
+    asc ? a.localeCompare(b) : b.localeCompare(a),
+  );
+  sortedListingCache = {
+    objects: state.objects,
+    prefixes: state.prefixes,
+    objectsLen: state.objects.length,
+    prefixesLen: state.prefixes.length,
+    sortColumn: col,
+    sortAsc: asc,
+    sortedFiles,
+    sortedPrefixes,
+  };
+  return sortedListingCache;
+}
+
 function getVisibleSelectableKeys(): string[] {
   const filter = state.filterText.toLowerCase();
   const keys: string[] = [];
   for (const prefix of state.prefixes) {
-    if (!filter || basename(prefix).toLowerCase().includes(filter)) {
+    if (!filter || lowerBasename(prefix).includes(filter)) {
       keys.push("prefix:" + prefix);
     }
   }
   for (const obj of state.objects) {
     if (
       !obj.is_folder &&
-      (!filter || basename(obj.key).toLowerCase().includes(filter))
+      (!filter || lowerBasename(obj.key).includes(filter))
     ) {
       keys.push(obj.key);
     }
@@ -138,8 +330,10 @@ function clearFilter(): void {
 }
 
 export function updateSelectionUI(): void {
+  // Retain selection across filter input; only prune keys that left the
+  // listing itself. Filtering merely hides rows, it must not deselect them.
+  pruneStaleSelection(getSelectableKeys());
   const allKeys = getVisibleSelectableKeys();
-  pruneStaleSelection(allKeys);
 
   const rows = dom.objectTbody.querySelectorAll<HTMLElement>(".object-row");
   for (const row of rows) {
@@ -162,6 +356,12 @@ export function updateSelectionUI(): void {
       allKeys.length > 0 && visibleSelectedCount === allKeys.length;
     selectAll.indeterminate =
       visibleSelectedCount > 0 && visibleSelectedCount < allKeys.length;
+    // Label select-all as filtered when a filter is active so users know
+    // hidden rows are untouched by the toggle.
+    const filtered = state.filterText.trim().length > 0;
+    const label = filtered ? "Select all (filtered)" : "Select all";
+    selectAll.title = label;
+    selectAll.setAttribute("aria-label", label);
   }
 
   const selectedFileCount = getSelectedFileKeys().length;
@@ -313,28 +513,12 @@ export function handleSelectAll(checked: boolean): void {
 }
 
 function getSortedObjects() {
+  // Sort once per listing/sort change (see getCachedSortedListing); filter
+  // ticks reuse the cached order and only re-filter.
+  const { sortedFiles } = getCachedSortedListing();
   const filter = state.filterText.toLowerCase();
-  const files = state.objects.filter(
-    (o) =>
-      !o.is_folder &&
-      (!filter || basename(o.key).toLowerCase().includes(filter)),
-  );
-  const col = state.sortColumn;
-  const asc = state.sortAsc;
-
-  files.sort((a, b) => {
-    let cmp = 0;
-    if (col === "name") {
-      cmp = basename(a.key).localeCompare(basename(b.key));
-    } else if (col === "size") {
-      cmp = a.size - b.size;
-    } else if (col === "modified") {
-      cmp = a.last_modified.localeCompare(b.last_modified);
-    }
-    return asc ? cmp : -cmp;
-  });
-
-  return files;
+  if (!filter) return sortedFiles;
+  return sortedFiles.filter((o) => lowerBasename(o.key).includes(filter));
 }
 
 export function toggleSort(column: "name" | "size" | "modified"): void {
@@ -383,7 +567,23 @@ function updateSortIndicators(): void {
 
 export function renderBucketList(): void {
   const el = dom.bucketList;
+  // Preserve focus + scroll across the innerHTML rebuild (same pattern as the
+  // object table's activeRowId restore) so filtering/selection keystrokes
+  // don't destroy sidebar focus.
+  const activeBucket =
+    document.activeElement instanceof HTMLElement
+      ? (document.activeElement.closest<HTMLElement>(".list__item-btn")?.dataset
+          .bucket ?? null)
+      : null;
+  const scrollTop =
+    (el as HTMLElement).scrollTop ??
+    (el.parentElement as HTMLElement | null)?.scrollTop ??
+    0;
+  const scrollParent = el.parentElement as HTMLElement | null;
+  const parentScrollTop = scrollParent?.scrollTop ?? 0;
   el.setAttribute("aria-busy", "false");
+  el.setAttribute("role", "listbox");
+  el.setAttribute("aria-label", "Buckets");
   if (state.buckets.length === 0) {
     el.innerHTML = `<li class="list__empty">No buckets found</li>`;
     return;
@@ -402,17 +602,67 @@ export function renderBucketList(): void {
     className: "lucide-icon bucket-icon",
     decorative: true,
   });
+  // Roving tabindex: active bucket (or first visible) is tabbable, the rest
+  // are reachable via arrow keys handled in handleBucketListKeydown.
+  const rovingBucket = state.currentBucket || visibleBuckets[0].name;
   el.innerHTML = visibleBuckets
     .map(
       (b) =>
-        `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}">` +
-        `<button type="button" class="list__item-btn" data-bucket="${escapeHtml(b.name)}" title="${escapeHtml(b.name)}" aria-label="Open bucket ${escapeHtml(b.name)}"${b.name === state.currentBucket ? ' aria-current="true"' : ""}>` +
+        `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}" role="presentation">` +
+        `<button type="button" class="list__item-btn" role="option" aria-selected="${b.name === state.currentBucket ? "true" : "false"}" tabindex="${b.name === rovingBucket ? "0" : "-1"}" data-bucket="${escapeHtml(b.name)}" title="${escapeHtml(b.name)}" aria-label="Open bucket ${escapeHtml(b.name)}"${b.name === state.currentBucket ? ' aria-current="true"' : ""}>` +
         bucketIcon +
-        `<span>${escapeHtml(b.name)}</span>` +
+        `<span class="list__item-label">${escapeHtml(b.name)}</span>` +
         `</button>` +
         `</li>`,
     )
     .join("");
+  if (scrollParent) scrollParent.scrollTop = parentScrollTop;
+  (el as HTMLElement).scrollTop = scrollTop;
+  // Only restore focus when it was inside the list before the rebuild.
+  // Unconditionally focusing the roving button pulls focus away from the
+  // filter input, dialogs, or other panels on every refresh.
+  if (activeBucket === null) return;
+  const restoreName = activeBucket;
+  const restoreTarget =
+    (Array.from(el.querySelectorAll<HTMLElement>(".list__item-btn")).find(
+      (btn) => btn.dataset.bucket === restoreName,
+    ) ??
+      Array.from(el.querySelectorAll<HTMLElement>(".list__item-btn")).find(
+        (btn) => btn.dataset.bucket === rovingBucket,
+      ) ??
+      null);
+  (restoreTarget as HTMLElement | null)?.focus?.({ preventScroll: true });
+}
+
+export function handleBucketListKeydown(e: KeyboardEvent): void {
+  if (
+    e.key !== "ArrowDown" &&
+    e.key !== "ArrowUp" &&
+    e.key !== "Home" &&
+    e.key !== "End"
+  ) {
+    return;
+  }
+  const target = (e.target as HTMLElement).closest<HTMLElement>(
+    ".list__item-btn",
+  );
+  if (!target) return;
+  const buttons = Array.from(
+    dom.bucketList.querySelectorAll<HTMLElement>(".list__item-btn"),
+  );
+  const index = buttons.indexOf(target);
+  if (index < 0) return;
+  e.preventDefault();
+  let nextIndex = index;
+  if (e.key === "ArrowDown") nextIndex = (index + 1) % buttons.length;
+  else if (e.key === "ArrowUp")
+    nextIndex = (index - 1 + buttons.length) % buttons.length;
+  else if (e.key === "Home") nextIndex = 0;
+  else if (e.key === "End") nextIndex = buttons.length - 1;
+  const next = buttons[nextIndex];
+  if (!next) return;
+  for (const btn of buttons) btn.tabIndex = btn === next ? 0 : -1;
+  next.focus();
 }
 
 export function renderBucketListSkeleton(rowCount = 6): void {
@@ -542,10 +792,8 @@ function updateObjectRow(
   if (nameText) nameText.textContent = entry.name;
   if (icon) {
     icon.className = `object-kind-icon icon-${entry.kind}`;
-    icon.innerHTML = getIconHtml(entry.kind === "folder" ? "folder" : "file", {
-      className: "lucide-icon lucide-icon--inline",
-      decorative: true,
-    });
+    icon.innerHTML =
+      entry.kind === "folder" ? FOLDER_ROW_ICON_HTML : FILE_ROW_ICON_HTML;
   }
   if (sizeCell) {
     sizeCell.className =
@@ -693,11 +941,11 @@ function scheduleVirtualWindowRender(): void {
   }
 }
 
-function handleVirtualTableKeydown(event: KeyboardEvent): void {
-  if (renderedTableEntries.length < OBJECT_VIRTUALIZE_THRESHOLD) return;
-  if (
-    !(["ArrowDown", "ArrowUp", "Home", "End"] as string[]).includes(event.key)
-  ) {
+// Sole owner of Arrow/Home/End row navigation for the object table (both
+// virtualized and plain windows). Registered capture-phase so it runs before
+// the app-events tbody handler, which only handles Space/Enter.
+function handleObjectTableKeydown(event: KeyboardEvent): void {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
     return;
   }
   const target = event.target as HTMLElement;
@@ -722,20 +970,22 @@ function handleVirtualTableKeydown(event: KeyboardEvent): void {
 
   event.preventDefault();
   event.stopImmediatePropagation();
-  const panel = dom.objectPanel;
-  const viewportHeight =
-    panel.clientHeight > 0
-      ? panel.clientHeight
-      : OBJECT_VIRTUAL_FALLBACK_VIEWPORT;
-  if (nextIndex * OBJECT_ROW_HEIGHT < panel.scrollTop) {
-    panel.scrollTop = nextIndex * OBJECT_ROW_HEIGHT;
-  } else if (
-    (nextIndex + 1) * OBJECT_ROW_HEIGHT >
-    panel.scrollTop + viewportHeight
-  ) {
-    panel.scrollTop = (nextIndex + 1) * OBJECT_ROW_HEIGHT - viewportHeight;
+  if (renderedTableEntries.length >= OBJECT_VIRTUALIZE_THRESHOLD) {
+    const panel = dom.objectPanel;
+    const viewportHeight =
+      panel.clientHeight > 0
+        ? panel.clientHeight
+        : OBJECT_VIRTUAL_FALLBACK_VIEWPORT;
+    if (nextIndex * OBJECT_ROW_HEIGHT < panel.scrollTop) {
+      panel.scrollTop = nextIndex * OBJECT_ROW_HEIGHT;
+    } else if (
+      (nextIndex + 1) * OBJECT_ROW_HEIGHT >
+      panel.scrollTop + viewportHeight
+    ) {
+      panel.scrollTop = (nextIndex + 1) * OBJECT_ROW_HEIGHT - viewportHeight;
+    }
+    renderCurrentObjectWindow();
   }
-  renderCurrentObjectWindow();
   tbodyRowAtLogicalIndex(nextIndex)?.focus();
 }
 
@@ -758,21 +1008,21 @@ function ensureObjectPanelListeners(): void {
   panel.addEventListener("scroll", scheduleVirtualWindowRender, {
     passive: true,
   });
-  dom.objectTbody.addEventListener("keydown", handleVirtualTableKeydown, true);
+  dom.objectTbody.addEventListener("keydown", handleObjectTableKeydown, true);
 }
 
 export function renderObjectTable(): void {
   const tbody = dom.objectTbody;
   const filter = state.filterText.toLowerCase();
-  const sortedPrefixes = [...state.prefixes]
-    .filter(
-      (prefix) => !filter || basename(prefix).toLowerCase().includes(filter),
-    )
-    .sort((a, b) => (state.sortAsc ? a.localeCompare(b) : b.localeCompare(a)));
+  // Reuse the cached sort order; filter ticks only re-filter.
+  const { sortedPrefixes } = getCachedSortedListing();
+  const filteredPrefixes = filter
+    ? sortedPrefixes.filter((prefix) => lowerBasename(prefix).includes(filter))
+    : sortedPrefixes;
   const sortedFiles = getSortedObjects();
 
   renderedTableEntries = [
-    ...sortedPrefixes.map((prefix): ObjectTableEntry => ({
+    ...filteredPrefixes.map((prefix): ObjectTableEntry => ({
       id: `prefix:${prefix}`,
       kind: "folder",
       key: prefix,
@@ -998,7 +1248,10 @@ export async function navigateToLocationPath(raw: string): Promise<boolean> {
     if (bucketChanged) renderBucketList();
     renderObjectTable();
     renderBreadcrumb();
-    setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
+    reportNavFailure(
+      `Navigation failed: ${friendlyError(err)}`,
+      () => void navigateToLocationPath(raw),
+    );
     return false;
   }
 }
@@ -1143,7 +1396,10 @@ export async function navigateBack(): Promise<void> {
     renderBucketList();
     renderObjectTable();
     renderBreadcrumb();
-    setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
+    reportNavFailure(
+      `Navigation failed: ${friendlyError(err)}`,
+      () => void navigateBack(),
+    );
   } finally {
     if (historySuppressRequest === request) {
       historySuppressRequest = 0;
@@ -1193,7 +1449,10 @@ export async function navigateForward(): Promise<void> {
     renderBucketList();
     renderObjectTable();
     renderBreadcrumb();
-    setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
+    reportNavFailure(
+      `Navigation failed: ${friendlyError(err)}`,
+      () => void navigateForward(),
+    );
   } finally {
     if (historySuppressRequest === request) {
       historySuppressRequest = 0;
@@ -1245,7 +1504,10 @@ export async function navigateUp(): Promise<void> {
   try {
     await navigateToFolder(newPrefix);
   } catch (err) {
-    setStatus(`Navigation failed: ${friendlyError(err)}`, 5000);
+    reportNavFailure(
+      `Navigation failed: ${friendlyError(err)}`,
+      () => void navigateUp(),
+    );
   }
 }
 
@@ -1273,6 +1535,7 @@ export async function selectBucket(name: string): Promise<void> {
     }
     resetSelectionForListingChange();
     pushNav(name, "", request);
+    writeLastBucket(name);
     renderBucketList();
     renderObjectTable();
     renderBreadcrumb();
