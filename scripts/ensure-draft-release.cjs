@@ -1,61 +1,30 @@
-// One machine (Windows by convention) creates the canonical draft and descriptor.
-// Other release hosts use --wait and consume that exact signed descriptor.
-
+// Windows creates one GitHub draft. Other hosts use --wait and never create it.
 "use strict";
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 
 const {
   assertGitHubCliAuthenticated,
-  downloadReleaseAsset,
   githubApi,
-  uploadReleaseAssetById,
+  githubStatusCode,
 } = require("./github-cli.cjs");
+const { assertStableReleaseOverridesAllowed } = require("./release-policy.cjs");
 const {
-  DESCRIPTOR_NAME,
-  DESCRIPTOR_SIGNATURE_NAME,
-  assertCleanSource,
-  assertExistingGitHubTagCommit,
-  classifyImmutableAsset,
-  createReleaseDescriptor,
-  listAllReleaseAssets,
-  readReleaseDescriptor,
-  selectUniqueTaggedRelease,
-  signDescriptor,
-  sourceCommit,
-  validateDescriptorForCheckout,
-  validateMutableRelease,
-  verifyDescriptorSignature,
-  writeReleaseDescriptor,
-} = require("./release-integrity.cjs");
-const { formatReleaseTitle } = require("./release-title.cjs");
-const packageJson = require("../package.json");
+  assertExpectedRelease,
+  assertNoMisnamedVersionDrafts,
+  isExpectedRelease,
+} = require("./release-draft-metadata.cjs");
 
-const REPOSITORY_ROOT = path.resolve(__dirname, "..");
-const RELEASE_DIR = path.join(REPOSITORY_ROOT, "release");
-const CHANGELOG_PATH = path.join(REPOSITORY_ROOT, "CHANGELOG.md");
-const DESCRIPTOR_PATH = path.join(RELEASE_DIR, DESCRIPTOR_NAME);
-const DESCRIPTOR_SIGNATURE_PATH = path.join(
-  RELEASE_DIR,
-  DESCRIPTOR_SIGNATURE_NAME,
-);
+const ROOT = path.resolve(__dirname, "..");
+const packageJson = require("../package.json");
+const VERSION = packageJson.version;
+const TAG = `v${VERSION}`;
+const IS_PRERELEASE = /-beta\.\d+$/.test(VERSION);
 const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
 const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
-const REPOSITORY = `${REPO_OWNER}/${REPO_NAME}`;
-const VERSION = packageJson.version;
-const TAG_NAME = `v${VERSION}`;
-const IS_PRERELEASE = /-(?:alpha|beta|rc)\./i.test(VERSION);
-const SOURCE_COMMIT = sourceCommit(REPOSITORY_ROOT);
-const GH_REQUEST_RETRIES = Number.parseInt(
-  process.env.GH_REQUEST_RETRIES || "3",
-  10,
-);
-const GH_REQUEST_RETRY_DELAY_MS = Number.parseInt(
-  process.env.GH_REQUEST_RETRY_DELAY_MS || "1500",
-  10,
-);
-const WAIT_MODE = process.argv.slice(2).includes("--wait");
+const WAIT_MODE = process.argv.includes("--wait");
 const WAIT_TIMEOUT_MS = Number.parseInt(
   process.env.RELEASE_DRAFT_WAIT_TIMEOUT_MS || "1800000",
   10,
@@ -65,314 +34,196 @@ const WAIT_POLL_INTERVAL_MS = Number.parseInt(
   10,
 );
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function readChangelogReleaseBody(changelogPath = CHANGELOG_PATH) {
-  let body;
-  try {
-    body = fs.readFileSync(changelogPath, "utf8");
-  } catch (error) {
-    throw new Error(
-      `CHANGELOG.md is required for GitHub release notes: ${error && error.message ? error.message : String(error)}`,
-      { cause: error },
-    );
+function currentCommit() {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  if (!/^[0-9a-f]{40}$/i.test(commit)) {
+    throw new Error("Could not resolve an exact release commit from git HEAD.");
   }
-  if (!body.trim())
-    throw new Error(
-      "CHANGELOG.md is empty; refusing to set blank release notes.",
-    );
-  return body;
+  return commit;
 }
 
-function isRetryableGithubError(error) {
-  if (!error) return false;
-  const retryableStatusCodes = new Set([
-    408, 409, 425, 429, 500, 502, 503, 504,
-  ]);
-  const retryableCodes = new Set([
-    "ETIMEDOUT",
-    "ECONNRESET",
-    "ENOTFOUND",
-    "EAI_AGAIN",
-    "ECONNREFUSED",
-    "EPIPE",
-  ]);
-  if (
-    typeof error.statusCode === "number" &&
-    retryableStatusCodes.has(error.statusCode)
-  )
-    return true;
-  if (typeof error.code === "string" && retryableCodes.has(error.code))
-    return true;
-  const message = String(error.message || "").toLowerCase();
-  return (
-    message.includes("timeout") ||
-    message.includes("socket hang up") ||
-    message.includes("aborted")
+function verifySession() {
+  execFileSync(
+    process.execPath,
+    [path.join(ROOT, "scripts", "release-session.js")],
+    { cwd: ROOT, stdio: "inherit" },
   );
 }
 
-function githubRequest(method, endpoint, body) {
-  return Promise.resolve(githubApi(method, endpoint, body));
+function readChangelogReleaseBody() {
+  const body = fs.readFileSync(path.join(ROOT, "CHANGELOG.md"), "utf8");
+  const heading = `## Changes in \`v${VERSION}:`;
+  const start = body.indexOf(heading);
+  if (start < 0) {
+    throw new Error(`CHANGELOG.md has no ${heading} section.`);
+  }
+  const next = body.indexOf("\n## Changes in `", start + heading.length);
+  const section = body.slice(start, next < 0 ? body.length : next).trim();
+  if (!section.slice(heading.length).trim()) {
+    throw new Error(`CHANGELOG.md section for ${heading} is empty.`);
+  }
+  return `${section}\n`;
 }
 
-async function githubRequestWithRetry(method, endpoint, body) {
-  const attempts = Math.max(1, GH_REQUEST_RETRIES);
+function isRetryable(error) {
+  return (
+    [408, 409, 425, 429, 500, 502, 503, 504].includes(
+      githubStatusCode(error?.message),
+    ) ||
+    [
+      "ETIMEDOUT",
+      "ECONNRESET",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "ECONNREFUSED",
+    ].includes(error?.code) ||
+    /timeout|socket hang up|aborted/i.test(String(error?.message || ""))
+  );
+}
+
+function request(method, endpoint, body) {
+  return githubApi(method, endpoint, body);
+}
+
+async function requestWithRetry(method, endpoint, body) {
+  const attempts = Math.max(
+    1,
+    Number.parseInt(process.env.GH_REQUEST_RETRIES || "3", 10),
+  );
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return await githubRequest(method, endpoint, body);
+      return request(method, endpoint, body);
     } catch (error) {
-      if (attempt >= attempts || !isRetryableGithubError(error)) throw error;
-      const backoffMs = GH_REQUEST_RETRY_DELAY_MS * attempt;
-      console.log(
-        `   Retry ${attempt}/${attempts - 1} in ${backoffMs}ms (${error.message})`,
+      if (attempt >= attempts || !isRetryable(error)) throw error;
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          attempt *
+            Math.max(
+              100,
+              Number.parseInt(
+                process.env.GH_REQUEST_RETRY_DELAY_MS || "1500",
+                10,
+              ),
+            ),
+        ),
       );
-      await sleep(backoffMs);
     }
   }
-  throw new Error("GitHub retry loop exhausted unexpectedly.");
 }
 
-function releaseValidationOptions(expectedId) {
-  return {
-    expectedId,
-    expectedPrerelease: IS_PRERELEASE,
-    expectedTag: TAG_NAME,
-    expectedTargetCommitish: SOURCE_COMMIT,
-  };
-}
-
-async function assertExistingTagMatchesSource(
-  request = githubRequestWithRetry,
-) {
-  return assertExistingGitHubTagCommit(request, {
-    expectedCommit: SOURCE_COMMIT,
-    owner: REPO_OWNER,
-    repository: REPO_NAME,
-    tag: TAG_NAME,
-  });
-}
-
-async function findExistingRelease() {
-  const releases = await listAllReleaseAssets((page, perPage) =>
-    githubRequestWithRetry(
+async function listReleases() {
+  const releases = [];
+  for (let page = 1; ; page += 1) {
+    const batch = await requestWithRetry(
       "GET",
-      `/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=${perPage}&page=${page}`,
-    ),
-  );
-  return selectUniqueTaggedRelease(releases, releaseValidationOptions());
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=100&page=${page}`,
+    );
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    releases.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return releases;
 }
 
-async function loadReleaseById(releaseId) {
-  const release = await githubRequestWithRetry(
-    "GET",
-    `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${releaseId}`,
-  );
-  return validateMutableRelease(release, releaseValidationOptions(releaseId));
+function matchingReleases(releases) {
+  assertNoMisnamedVersionDrafts(releases, TAG);
+  return releases.filter((release) => isExpectedRelease(release, TAG, VERSION));
 }
 
-async function syncReleaseNotesBody(release, body) {
-  validateMutableRelease(release, releaseValidationOptions(release.id));
-  await loadReleaseById(release.id);
-  const updated = await githubRequestWithRetry(
+function assertCommit(release, commit) {
+  if (release?.target_commitish === commit) return release;
+  throw new Error(
+    `Draft ${TAG} targets ${release?.target_commitish || "unknown"}, not HEAD ${commit}.`,
+  );
+}
+
+async function syncDraft(release, body, commit) {
+  const updated = await requestWithRetry(
     "PATCH",
     `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${release.id}`,
-    { name: formatReleaseTitle(VERSION), body },
+    {
+      body,
+      draft: true,
+      name: VERSION,
+      prerelease: IS_PRERELEASE,
+      tag_name: TAG,
+      target_commitish: commit,
+    },
   );
-  validateMutableRelease(updated, releaseValidationOptions(release.id));
-  console.log(
-    `   Synced CHANGELOG.md into draft ${TAG_NAME} (${body.length} chars).`,
-  );
-  return updated;
-}
-
-async function listReleaseAssets(releaseId) {
-  return listAllReleaseAssets((page, perPage) =>
-    githubRequestWithRetry(
-      "GET",
-      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${releaseId}/assets?per_page=${perPage}&page=${page}`,
-    ),
+  return assertCommit(
+    assertExpectedRelease(updated, TAG, VERSION, "Updated draft release"),
+    commit,
   );
 }
 
-async function uploadImmutableDraftAsset(release, filePath) {
-  await loadReleaseById(release.id);
-  const assets = await listReleaseAssets(release.id);
-  const name = path.basename(filePath);
-  const matches = assets.filter((asset) => asset?.name === name);
-  if (matches.length > 1)
-    throw new Error(`Draft has duplicate assets named ${name}.`);
-  const action = classifyImmutableAsset(matches[0], filePath);
-  if (action === "skip") {
-    console.log(`   Descriptor asset already matches: ${name}`);
-    return;
+async function ensureDraftRelease() {
+  const commit = currentCommit();
+  const body = readChangelogReleaseBody();
+  const matches = matchingReleases(await listReleases());
+  const drafts = matches.filter((release) => release.draft);
+  if (drafts.length > 1) {
+    throw new Error(`Multiple draft releases exist for ${TAG}.`);
   }
-  await loadReleaseById(release.id);
-  uploadReleaseAssetById(REPOSITORY, release.id, filePath);
-  console.log(`   Uploaded immutable descriptor asset: ${name}`);
-}
-
-function descriptorAssets(assets) {
-  const byName = new Map(assets.map((asset) => [asset?.name, asset]));
-  return {
-    descriptor: byName.get(DESCRIPTOR_NAME),
-    signature: byName.get(DESCRIPTOR_SIGNATURE_NAME),
-  };
-}
-
-async function downloadAndValidateDescriptor(
-  release,
-  descriptorAsset,
-  signatureAsset,
-) {
-  fs.mkdirSync(RELEASE_DIR, { recursive: true });
-  downloadReleaseAsset(REPOSITORY, descriptorAsset.id, DESCRIPTOR_PATH);
-  downloadReleaseAsset(
-    REPOSITORY,
-    signatureAsset.id,
-    DESCRIPTOR_SIGNATURE_PATH,
+  if (drafts[0])
+    return syncDraft(assertCommit(drafts[0], commit), body, commit);
+  if (matches.some((release) => !release.draft)) {
+    throw new Error(`Release ${TAG} is already published.`);
+  }
+  const created = await requestWithRetry(
+    "POST",
+    `/repos/${REPO_OWNER}/${REPO_NAME}/releases`,
+    {
+      body,
+      draft: true,
+      name: VERSION,
+      prerelease: IS_PRERELEASE,
+      tag_name: TAG,
+      target_commitish: commit,
+    },
   );
-  verifyDescriptorSignature(DESCRIPTOR_PATH, DESCRIPTOR_SIGNATURE_PATH);
-  const descriptor = readReleaseDescriptor(DESCRIPTOR_PATH);
-  validateDescriptorForCheckout(descriptor, {
-    root: REPOSITORY_ROOT,
-    release,
-    repository: { name: REPO_NAME, owner: REPO_OWNER },
-  });
-  return descriptor;
-}
-
-async function ensureCanonicalDescriptor(release, { waitOnly = false } = {}) {
-  await assertExistingTagMatchesSource();
-  const assets = await listReleaseAssets(release.id);
-  const { descriptor: descriptorAsset, signature: signatureAsset } =
-    descriptorAssets(assets);
-  if (descriptorAsset && signatureAsset) {
-    await downloadAndValidateDescriptor(
-      release,
-      descriptorAsset,
-      signatureAsset,
-    );
-    console.log(
-      `   Consumed signed descriptor bound to release id ${release.id}.`,
-    );
-    return true;
-  }
-  if (waitOnly) return false;
-  if (signatureAsset && !descriptorAsset) {
-    throw new Error(
-      "Draft contains a descriptor signature without its descriptor; refusing repair by replacement.",
-    );
-  }
-
-  fs.mkdirSync(RELEASE_DIR, { recursive: true });
-  if (descriptorAsset) {
-    downloadReleaseAsset(REPOSITORY, descriptorAsset.id, DESCRIPTOR_PATH);
-    const descriptor = readReleaseDescriptor(DESCRIPTOR_PATH);
-    validateDescriptorForCheckout(descriptor, {
-      root: REPOSITORY_ROOT,
-      release,
-      repository: { name: REPO_NAME, owner: REPO_OWNER },
-    });
-  } else {
-    const descriptor = createReleaseDescriptor({
-      root: REPOSITORY_ROOT,
-      release,
-    });
-    writeReleaseDescriptor(DESCRIPTOR_PATH, descriptor);
-    await uploadImmutableDraftAsset(release, DESCRIPTOR_PATH);
-  }
-  signDescriptor(DESCRIPTOR_PATH, DESCRIPTOR_SIGNATURE_PATH);
-  await uploadImmutableDraftAsset(release, DESCRIPTOR_SIGNATURE_PATH);
-  verifyDescriptorSignature(DESCRIPTOR_PATH, DESCRIPTOR_SIGNATURE_PATH);
-  console.log(
-    `   Canonical signed descriptor is ready for release id ${release.id}.`,
+  return assertCommit(
+    assertExpectedRelease(created, TAG, VERSION, "Created draft release"),
+    commit,
   );
-  return true;
 }
 
-async function ensureDraftRelease({ assertSource = assertCleanSource } = {}) {
-  const checkedCommit = assertSource(REPOSITORY_ROOT, {
-    expectedCommit: SOURCE_COMMIT,
-  });
-  try {
-    console.log(`Ensuring immutable draft release exists for ${TAG_NAME}...`);
-    const body = readChangelogReleaseBody();
-    let release = await findExistingRelease();
-    if (release) {
-      release = await syncReleaseNotesBody(release, body);
-    } else {
-      console.log("   No release found. Creating draft...");
-      try {
-        release = await githubRequestWithRetry(
-          "POST",
-          `/repos/${REPO_OWNER}/${REPO_NAME}/releases`,
-          {
-            tag_name: TAG_NAME,
-            name: formatReleaseTitle(VERSION),
-            body,
-            draft: true,
-            prerelease: IS_PRERELEASE,
-            target_commitish: SOURCE_COMMIT,
-          },
-        );
-        validateMutableRelease(release, releaseValidationOptions(release.id));
-      } catch (error) {
-        if (error.statusCode !== 422) throw error;
-        await sleep(2000);
-        release = await findExistingRelease();
-        if (!release) throw error;
-        release = await syncReleaseNotesBody(release, body);
-      }
+async function waitForDraftRelease() {
+  const deadline = Date.now() + WAIT_TIMEOUT_MS;
+  const commit = currentCommit();
+  for (;;) {
+    const matches = matchingReleases(await listReleases());
+    const drafts = matches.filter((release) => release.draft);
+    if (drafts.length > 1) {
+      throw new Error(`Multiple draft releases exist for ${TAG}.`);
     }
-    await ensureCanonicalDescriptor(release);
-    return release;
-  } finally {
-    assertSource(REPOSITORY_ROOT, { expectedCommit: checkedCommit });
-  }
-}
-
-async function waitForDraftRelease({ assertSource = assertCleanSource } = {}) {
-  const checkedCommit = assertSource(REPOSITORY_ROOT, {
-    expectedCommit: SOURCE_COMMIT,
-  });
-  try {
-    const deadline = Date.now() + WAIT_TIMEOUT_MS;
-    console.log(
-      `Waiting for canonical draft ${TAG_NAME}; this host will never create or patch it...`,
-    );
-    let attempt = 0;
-    for (;;) {
-      attempt += 1;
-      const release = await findExistingRelease();
-      if (
-        release &&
-        (await ensureCanonicalDescriptor(release, { waitOnly: true }))
-      ) {
-        console.log(
-          `   Found descriptor-bound draft id ${release.id}. Proceeding.`,
-        );
-        return release;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `Timed out waiting for signed descriptor on draft ${TAG_NAME}. Run release:draft on the coordinator first.`,
-        );
-      }
-      console.log(
-        `   Draft/descriptor not ready (attempt ${attempt}); retrying in ${Math.round(WAIT_POLL_INTERVAL_MS / 1000)}s...`,
+    if (drafts[0]) {
+      return syncDraft(
+        assertCommit(drafts[0], commit),
+        readChangelogReleaseBody(),
+        commit,
       );
-      await sleep(WAIT_POLL_INTERVAL_MS);
     }
-  } finally {
-    assertSource(REPOSITORY_ROOT, { expectedCommit: checkedCommit });
+    if (matches.some((release) => !release.draft)) {
+      throw new Error(`Release ${TAG} is already published.`);
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out waiting for draft ${TAG}. Run npm run release:draft on Windows first.`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_INTERVAL_MS));
   }
 }
 
 async function main() {
+  assertStableReleaseOverridesAllowed(process.env, VERSION);
   assertGitHubCliAuthenticated();
+  verifySession();
   if (WAIT_MODE) await waitForDraftRelease();
   else await ensureDraftRelease();
 }
@@ -380,23 +231,17 @@ async function main() {
 if (require.main === module) {
   main().catch((error) => {
     console.error(
-      `✗ ERROR: Failed to prepare canonical draft: ${error && error.message ? error.message : String(error)}`,
+      `release:draft failed: ${error instanceof Error ? error.message : String(error)}`,
     );
     process.exit(1);
   });
 }
 
 module.exports = {
-  SOURCE_COMMIT,
-  assertExistingTagMatchesSource,
-  descriptorAssets,
-  ensureCanonicalDescriptor,
+  assertCommit,
+  currentCommit,
   ensureDraftRelease,
-  findExistingRelease,
-  isRetryableGithubError,
+  matchingReleases,
   readChangelogReleaseBody,
-  releaseValidationOptions,
-  syncReleaseNotesBody,
-  uploadImmutableDraftAsset,
   waitForDraftRelease,
 };

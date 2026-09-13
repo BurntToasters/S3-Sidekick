@@ -93,9 +93,7 @@ jobs:
         run: cargo audit --file src-tauri/Cargo.lock
 
       - name: Enforce dependency license and source policy
-        run: |
-          npm run licenses
-          node scripts/release-evidence.js --check-licenses
+        run: npm run licenses
 
       - name: Run test suite and formatting checks
         run: npm run test:all

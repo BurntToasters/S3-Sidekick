@@ -4,30 +4,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { SECRET_NAMES, childEnvironment, parseDotEnv } from "./release-env.js";
+import { createRequire } from "node:module";
 import { isDirectExecution } from "./direct-execution.js";
+import { childEnvironment, parseDotEnv } from "./release-env.js";
 
-const require = createRequire(import.meta.url);
-const {
-  DESCRIPTOR_NAME,
-  DESCRIPTOR_SIGNATURE_NAME,
-  assertCleanSource,
-  readReleaseDescriptor,
-  sha256File,
-  validateDescriptorForCheckout,
-  verifyDescriptorSignature,
-} = require("./release-integrity.cjs");
+const { assertCleanSource } = createRequire(import.meta.url)(
+  "./release-integrity.cjs",
+);
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const stagedSource = path.join(root, ".flatpak-source");
-const descriptorPath = path.join(root, "release", DESCRIPTOR_NAME);
-const descriptorSignaturePath = path.join(
-  root,
-  "release",
-  DESCRIPTOR_SIGNATURE_NAME,
-);
+const architectures = Object.freeze({ x64: "x86_64" });
 const excludedRootNames = new Set([
   ".flatpak-source",
   ".git",
@@ -45,10 +33,10 @@ const excludedRootNames = new Set([
 
 function run(command, args, { capture = false, cwd = root } = {}) {
   const result = spawnSync(command, args, {
-    stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
-    encoding: capture ? "utf8" : undefined,
     cwd,
+    encoding: capture ? "utf8" : undefined,
     env: childEnvironment("build", process.env, {}),
+    stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -59,37 +47,24 @@ function run(command, args, { capture = false, cwd = root } = {}) {
   return capture ? String(result.stdout || "").trim() : "";
 }
 
-function normalizeArch(raw) {
-  const value = String(raw || "")
+function normalizeArch(value) {
+  const normalized = String(value || "")
     .toLowerCase()
     .trim();
-  if (["x86_64", "amd64", "x64", "x86-64"].includes(value)) return "x64";
-  if (["aarch64", "arm64"].includes(value)) return "arm64";
-  return value || "unknown";
+  if (["x86_64", "amd64", "x64", "x86-64"].includes(normalized)) return "x64";
+  return normalized || "unknown";
 }
 
 function detectArch(execute = run) {
-  const envArch = normalizeArch(process.env.FLATPAK_ARCH || "");
-  if (envArch !== "unknown") return envArch;
+  const configured = normalizeArch(process.env.FLATPAK_ARCH);
+  if (configured !== "unknown") return configured;
   try {
-    const flatpakArch = normalizeArch(
+    return normalizeArch(
       execute("flatpak", ["--default-arch"], { capture: true }),
     );
-    if (flatpakArch !== "unknown") return flatpakArch;
   } catch {
-    // Fall back to Node's architecture below.
+    return normalizeArch(process.arch);
   }
-  return normalizeArch(process.arch);
-}
-
-// ARM64 is tier-2/manual-only: no hosted ARM64 Linux runner builds it in CI.
-// x64 CI covers the release path; ARM64 bundles are built manually on an
-// ARM64 host (`FLATPAK_ARCH=arm64 npm run flatpak:bundle`). Cross-arch
-// builds need a cross linker + qemu-user-static and are not supported by
-// this script; build natively per arch instead.
-function flatpakArchName(arch) {
-  if (arch === "arm64") return "aarch64";
-  return "x86_64";
 }
 
 function isSecretEnvironmentFile(sourcePath) {
@@ -107,8 +82,7 @@ function shouldStage(sourcePath) {
   if (excludedRootNames.has(segments[0])) return false;
   if (segments[0] === "src-tauri" && segments[1] === "target") return false;
   if (isSecretEnvironmentFile(sourcePath)) return false;
-  if (sourcePath.endsWith(".log")) return false;
-  return true;
+  return !sourcePath.endsWith(".log");
 }
 
 function installFlatpakDependencies(
@@ -123,11 +97,10 @@ function installFlatpakDependencies(
   const npmExecPath = String(environment.npm_execpath || "");
   if (!path.isAbsolute(npmExecPath)) {
     throw new Error(
-      "Flatpak dependency reconstruction requires an absolute npm_execpath from the pinned release toolchain.",
+      "Flatpak dependency reconstruction requires an absolute npm_execpath.",
     );
   }
   const cacheDirectory = makeCache();
-  const nodeModules = path.join(directory, "node_modules");
   const baseArguments = [
     npmExecPath,
     "ci",
@@ -140,18 +113,16 @@ function installFlatpakDependencies(
   ];
   try {
     execute(process.execPath, baseArguments, { cwd: directory });
-    fs.rmSync(nodeModules, { recursive: true, force: true });
+    fs.rmSync(path.join(directory, "node_modules"), {
+      force: true,
+      recursive: true,
+    });
     execute(process.execPath, [...baseArguments, "--offline"], {
       cwd: directory,
     });
-    if (!fs.existsSync(nodeModules)) {
-      throw new Error(
-        "Offline npm ci did not produce staged Flatpak dependencies.",
-      );
-    }
-    return nodeModules;
+    return path.join(directory, "node_modules");
   } finally {
-    fs.rmSync(cacheDirectory, { recursive: true, force: true });
+    fs.rmSync(cacheDirectory, { force: true, recursive: true });
   }
 }
 
@@ -163,16 +134,16 @@ function stageFlatpakSource(
 ) {
   const sourceCommit = assertSource(root, { environment });
   try {
-    fs.rmSync(stagedSource, { recursive: true, force: true });
+    fs.rmSync(stagedSource, { force: true, recursive: true });
     fs.mkdirSync(stagedSource, { recursive: true });
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       const sourcePath = path.join(root, entry.name);
       if (!shouldStage(sourcePath)) continue;
       fs.cpSync(sourcePath, path.join(stagedSource, entry.name), {
-        recursive: true,
         dereference: false,
         filter: shouldStage,
         preserveTimestamps: true,
+        recursive: true,
       });
     }
     installDependencies(stagedSource, { execute });
@@ -202,9 +173,9 @@ function configuredSecretValues(environment = process.env) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  return Array.from(SECRET_NAMES)
-    .map((name) => environment[name] ?? fileValues[name])
-    .filter((value) => typeof value === "string" && value.length >= 8);
+  return Object.values({ ...fileValues, ...environment }).filter(
+    (value) => typeof value === "string" && value.length >= 8,
+  );
 }
 
 function assertSanitizedSource(
@@ -226,16 +197,12 @@ function assertSanitizedSource(
           `Secret environment file entered Flatpak source context: ${fullPath}`,
         );
       }
-      if (
-        secretValues.length === 0 ||
-        fs.statSync(fullPath).size > 5 * 1024 * 1024
-      )
-        continue;
+      if (fs.statSync(fullPath).size > 5 * 1024 * 1024) continue;
       const content = fs.readFileSync(fullPath);
       for (const value of secretValues) {
         if (content.includes(Buffer.from(value))) {
           throw new Error(
-            `A configured release secret entered Flatpak source context: ${fullPath}`,
+            `Release secret entered Flatpak source context: ${fullPath}`,
           );
         }
       }
@@ -244,113 +211,35 @@ function assertSanitizedSource(
   return true;
 }
 
-function loadPinnedFlatpakInputs(arch) {
-  const descriptor = readReleaseDescriptor(descriptorPath);
-  verifyDescriptorSignature(
-    descriptorPath,
-    descriptorSignaturePath,
-    descriptor.release.signingKeyFingerprint,
-  );
-  validateDescriptorForCheckout(descriptor, {
-    root,
-    release: {
-      draft: true,
-      id: descriptor.release.id,
-      prerelease: descriptor.release.prerelease,
-      tag_name: descriptor.release.tag,
-      target_commitish: descriptor.source.commit,
-    },
-  });
-  const inputs = descriptor.toolchains?.flatpak?.inputsByArchitecture?.[arch];
-  if (!Array.isArray(inputs) || inputs.length === 0) {
-    throw new Error(
-      `Release descriptor has no exact Flatpak commits for ${arch}.`,
-    );
-  }
-  return {
-    descriptorSha256: sha256File(descriptorPath),
-    inputs,
-  };
-}
-
-function verifyFlatpakInputs(inputs, execute = run) {
-  const observed = inputs.map((input) => {
-    const commit = execute("flatpak", ["info", "--show-commit", input.ref], {
-      capture: true,
-    }).toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(commit)) {
-      throw new Error(
-        `Flatpak ref ${input.ref} did not resolve to an exact commit.`,
-      );
-    }
-    if (commit !== input.commit) {
-      throw new Error(
-        `Flatpak ref ${input.ref} is installed at ${commit}, not descriptor-pinned commit ${input.commit}.`,
-      );
-    }
-    return { commit, ref: input.ref };
-  });
-  return observed;
-}
-
-function recordFlatpakInputs({ arch, descriptorSha256, inputs }) {
-  const releaseDir = path.join(root, "release");
-  fs.mkdirSync(releaseDir, { recursive: true });
-  const outputPath = path.join(releaseDir, `flatpak-inputs-${arch}.json`);
-  fs.writeFileSync(
-    outputPath,
-    `${JSON.stringify(
-      { arch, descriptorSha256, inputs, schemaVersion: 2 },
-      null,
-      2,
-    )}\n`,
-    { mode: 0o600 },
-  );
-  return outputPath;
-}
-
 function runFlatpakBuild({
   platform = process.platform,
   arch = detectArch(),
   environment = process.env,
   execute = run,
-  loadInputs = loadPinnedFlatpakInputs,
-  verifyInputs = verifyFlatpakInputs,
   stageSource = stageFlatpakSource,
   sanitizeSource = assertSanitizedSource,
-  recordInputs = recordFlatpakInputs,
   assertSource = assertCleanSource,
 } = {}) {
-  if (platform !== "linux")
+  if (platform !== "linux") {
     throw new Error("Flatpak bundling is only supported on Linux hosts.");
+  }
+  if (!architectures[arch]) {
+    throw new Error(`Linux Flatpak release supports x64 only; found ${arch}.`);
+  }
   const sourceCommit = assertSource(root, { environment });
   try {
-    const pinned = loadInputs(arch);
-    verifyInputs(pinned.inputs, execute);
-    try {
-      stageSource(execute, undefined, assertSource, environment);
-      sanitizeSource(stagedSource);
-      execute("flatpak-builder", [
-        `--arch=${flatpakArchName(arch)}`,
-        "--disable-download",
-        "--repo=flatpak-repo",
-        "--force-clean",
-        "flatpak-build",
-        "run.rosie.s3-sidekick.yml",
-      ]);
-      const observed = verifyInputs(pinned.inputs, execute);
-      recordInputs({
-        arch,
-        descriptorSha256: pinned.descriptorSha256,
-        inputs: observed,
-      });
-    } finally {
-      fs.rmSync(stagedSource, { recursive: true, force: true });
-    }
-
+    stageSource(execute, undefined, assertSource, environment);
+    sanitizeSource(stagedSource);
+    execute("flatpak-builder", [
+      `--arch=${architectures[arch]}`,
+      "--repo=flatpak-repo",
+      "--force-clean",
+      "flatpak-build",
+      "run.rosie.s3-sidekick.yml",
+    ]);
     const distDir = path.join(root, "dist");
     fs.mkdirSync(distDir, { recursive: true });
-    const bundlePath = path.join(distDir, `S3-Sidekick-Linux-${arch}.flatpak`);
+    const bundlePath = path.join(distDir, "S3-Sidekick-Linux-x64.flatpak");
     execute("flatpak", [
       "build-bundle",
       "flatpak-repo",
@@ -360,6 +249,7 @@ function runFlatpakBuild({
     console.log(`Created offline Flatpak bundle: ${bundlePath}`);
     return bundlePath;
   } finally {
+    fs.rmSync(stagedSource, { force: true, recursive: true });
     assertSource(root, { environment, expectedCommit: sourceCommit });
   }
 }
@@ -377,16 +267,10 @@ if (isDirectExecution(import.meta.url)) {
 
 export {
   assertSanitizedSource,
-  configuredSecretValues,
   detectArch,
-  flatpakArchName,
   installFlatpakDependencies,
   isSecretEnvironmentFile,
-  loadPinnedFlatpakInputs,
-  normalizeArch,
-  recordFlatpakInputs,
   runFlatpakBuild,
   shouldStage,
   stageFlatpakSource,
-  verifyFlatpakInputs,
 };

@@ -1,5 +1,5 @@
 > [!NOTE]
-> 🧪 Beta 5 is the release candidate for v0.11.0 stable.
+> 🅱️ This is a beta build
 
 # ⬇️ Downloads
 

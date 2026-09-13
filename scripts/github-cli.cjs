@@ -106,6 +106,14 @@ function githubApi(method, endpoint, body) {
   });
 }
 
+function githubApiRaw(method, endpoint, body) {
+  return String(
+    runGitHub(githubApiArgs(method, endpoint, body !== undefined), {
+      input: body === undefined ? undefined : JSON.stringify(body),
+    }).stdout || "",
+  );
+}
+
 function assertGitHubCliAuthenticated() {
   runGitHub(["auth", "status", "--hostname", "github.com"]);
 }
@@ -148,6 +156,7 @@ module.exports = {
   deleteReleaseAssetById,
   downloadReleaseAsset,
   githubApi,
+  githubApiRaw,
   githubApiArgs,
   githubCliEnvironment,
   githubStatusCode,
