@@ -329,7 +329,9 @@ function targetKeysForArtifact(name) {
     ]);
   }
   const arch = inferArch(baseName);
-  if (/^S3-Sidekick-Linux-(?:x64|arm64)\.(?:deb|rpm|flatpak)$/i.test(baseName)) {
+  if (
+    /^S3-Sidekick-Linux-(?:x64|arm64)\.(?:deb|rpm|flatpak)$/i.test(baseName)
+  ) {
     return [`linux-${arch}`, `linux-beta-${arch}`];
   }
   if (/^S3-Sidekick-Windows-(?:x64|arm64)\.msi$/i.test(baseName)) {
