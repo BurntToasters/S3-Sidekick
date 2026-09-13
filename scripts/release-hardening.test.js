@@ -59,6 +59,16 @@ import integrity from "./release-integrity.cjs";
 const { canonicalMacosArtifactName, compareSemanticVersions } = integrity;
 const root = fileURLToPath(new URL("..", import.meta.url));
 
+/**
+ * Owner-only file permissions are a POSIX concept. Windows synthesizes
+ * `stat().mode` from the read-only attribute (0o666), and its access control
+ * comes from the profile-directory ACL — there is nothing to assert here.
+ */
+function assertOwnerOnlyFileMode(filePath) {
+  if (process.platform === "win32") return;
+  assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+}
+
 function semanticEvidenceFixture(descriptor, attestation, descriptorSha256) {
   descriptor.repository ??= {
     owner: "BurntToasters",
@@ -2515,11 +2525,8 @@ test("publication sessions serialize locally and retain descriptor-scoped owners
       "423e4567-e89b-42d3-a456-426614174000.json",
       "crash-residue.json",
     ]);
-    assert.equal(
-      fs.statSync(
-        path.join(stateDirectory, "owners", `${descriptorSha256}.json`),
-      ).mode & 0o777,
-      0o600,
+    assertOwnerOnlyFileMode(
+      path.join(stateDirectory, "owners", `${descriptorSha256}.json`),
     );
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
@@ -2623,7 +2630,7 @@ test("explicit cross-host takeover adopts only stable remote owner evidence unde
       JSON.parse(fs.readFileSync(installedOwnerPath, "utf8")),
       remoteOwner,
     );
-    assert.equal(fs.statSync(installedOwnerPath).mode & 0o777, 0o600);
+    assertOwnerOnlyFileMode(installedOwnerPath);
 
     const changingState = path.join(workspace, "changing-state");
     let changingCalls = 0;
