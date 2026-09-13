@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { expectedReleaseBranch } from "./release-preflight.js";
 
-test("beta releases use versioned next branches", () => {
-  assert.equal(expectedReleaseBranch("0.11.0-beta.5"), "next-0.11.0");
+test("beta releases use beta", () => {
+  assert.equal(expectedReleaseBranch("0.11.0-beta.5"), "beta");
 });
 
 test("stable releases use main", () => {
