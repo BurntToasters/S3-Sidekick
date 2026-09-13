@@ -27,7 +27,7 @@
     "check:cargo-update-policy": "node scripts/check-cargo-update-policy.mjs",
     "audit:cargo": "node scripts/verify-cargo-audit.js && cargo audit --file src-tauri/Cargo.lock",
     "setup:cargo-audit": "cargo install cargo-audit --version 0.22.2 --locked",
-    "release:supply-chain": "npm audit --audit-level=high --ignore-scripts && npm audit signatures && npm run audit:cargo && npm run licenses && node scripts/release-evidence.js --check-licenses",
+    "release:supply-chain": "npm run setup:cargo-audit && npm audit --audit-level=high --ignore-scripts && npm audit signatures && npm run audit:cargo && npm run licenses && node scripts/release-evidence.js --check-licenses",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/ scripts/ && npm run lint:comments",
     "lint:comments": "node scripts/lint-comments.mjs src src-tauri/src scripts",
@@ -139,7 +139,7 @@
     "@types/node": "^25.2.1",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
-    "@vitest/coverage-v8": "^4.1.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^10.0.3",
     "jsdom": "^29.0.0",
     "license-checker": "^25.0.1",
@@ -147,6 +147,6 @@
     "prettier": "^3.8.1",
     "typescript": "^5.6.0",
     "vite": "^7.3.1",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.11"
   }
 }
