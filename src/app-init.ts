@@ -187,6 +187,7 @@ async function loadSavedConnectionIntoInputs(): Promise<void> {
         saved.region,
         saved.access_key,
         saved.secret_key,
+        saved.session_token ?? "",
       );
     }
   } catch (err) {

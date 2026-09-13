@@ -23,6 +23,9 @@ finish-args:
   # webkit2gtk 4.1 + Tauri v2 stabilize (track upstream Tauri wayland issue).
   - --env=GDK_BACKEND=x11
   - --share=network
+  # notify-rust talks to org.freedesktop.Notifications directly; Flatpak's
+  # default bus policy allows only portals and the app's own name.
+  - --talk-name=org.freedesktop.Notifications
   - --device=dri
   - --filesystem=xdg-download:rw
   - --filesystem=xdg-documents:rw

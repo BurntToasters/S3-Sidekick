@@ -275,18 +275,31 @@ function createTarGzApp(appPath, outputPath) {
 function createDmg(appPath, outputPath) {
   fs.rmSync(outputPath, { force: true });
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  run("hdiutil", [
-    "create",
-    "-fs",
-    "APFS",
-    "-format",
-    "UDZO",
-    "-srcfolder",
-    appPath,
-    "-volname",
-    "S3 Sidekick",
-    outputPath,
-  ]);
+  // A bare `-srcfolder <app>` DMG has no /Applications alias, so users launch
+  // the translocated read-only copy from the mounted volume. Updates then fail
+  // with EROFS, so stage the standard app + Applications alias layout.
+  const stageRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-dmg-stage-"),
+  );
+  try {
+    const stagedApp = path.join(stageRoot, path.basename(appPath));
+    run("ditto", ["--rsrc", appPath, stagedApp]);
+    fs.symlinkSync("/Applications", path.join(stageRoot, "Applications"));
+    run("hdiutil", [
+      "create",
+      "-fs",
+      "APFS",
+      "-format",
+      "UDZO",
+      "-srcfolder",
+      stageRoot,
+      "-volname",
+      "S3 Sidekick",
+      outputPath,
+    ]);
+  } finally {
+    fs.rmSync(stageRoot, { recursive: true, force: true });
+  }
 }
 
 function gatekeeperAssess(appPath, dmgPath) {

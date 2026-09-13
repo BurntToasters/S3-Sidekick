@@ -405,10 +405,7 @@ pub(crate) fn save_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     // Cross-process guard: STORAGE_OP_LOCK is in-process only. Hold an OS
     // exclusive lock so a second instance cannot interleave vault writes.
-    let _vault_guard = path
-        .parent()
-        .map(lock_vault_file)
-        .transpose()?;
+    let _vault_guard = path.parent().map(lock_vault_file).transpose()?;
     atomic_write(&path, &json)
 }
 

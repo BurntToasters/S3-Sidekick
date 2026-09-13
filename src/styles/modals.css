@@ -89,6 +89,13 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   border-top: 1px solid var(--border);
 }
 
+.settings-save-error {
+  margin-right: auto;
+  align-self: center;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .setting-item {
   display: flex;
   align-items: center;

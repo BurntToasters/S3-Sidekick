@@ -796,9 +796,24 @@ fn parse_user_path(raw: &str, label: &str) -> Result<PathBuf, String> {
     if trimmed.is_empty() {
         return Err(format!("{} path is required", label));
     }
+    if trimmed.contains('\0') {
+        return Err(format!("{} path must not contain NUL bytes", label));
+    }
     let path = PathBuf::from(trimmed);
     if !path.is_absolute() {
         return Err(format!("{} path must be absolute: {}", label, trimmed));
+    }
+    // Keys are untrusted data; `..` must never climb out of the directory the
+    // user selected. Native dialogs never return `..`, so rejecting it
+    // everywhere costs nothing and closes the whole traversal class.
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "{} path must not contain '..' components: {}",
+            label, trimmed
+        ));
     }
     validate_windows_file_name(&path)?;
     Ok(path)
@@ -826,13 +841,40 @@ fn validate_windows_file_name(path: &Path) -> Result<(), String> {
                 path.display()
             ));
         }
+        if name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+        {
+            return Err(format!(
+                "Path contains characters Windows does not allow: {}",
+                path.display()
+            ));
+        }
         let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
         let reserved = matches!(
             stem.as_str(),
-            "CON" | "PRN" | "AUX" | "NUL"
-                | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7"
-                | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
-                | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
         );
         if reserved {
             return Err(format!(
@@ -1533,6 +1575,9 @@ fn transfer_checkpoint_gc(
         .collect();
     let security = load_security_config(&app)?;
     let mut removed = 0u32;
+    // Destinations bound to surviving checkpoints: their scratch leases must
+    // survive too, so crash-resumable downloads stay recoverable.
+    let mut kept_destinations: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let iter = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
     for entry in iter {
@@ -1548,6 +1593,11 @@ fn transfer_checkpoint_gc(
             .unwrap_or("")
             .to_string();
         if keep.contains(&id_hash) {
+            if let Ok(json) = read_checkpoint_json(&path, &security) {
+                if let Ok(Some(scratch)) = checkpoint_scratch_path(&json) {
+                    kept_destinations.insert(scratch.destination);
+                }
+            }
             continue;
         }
         let modified = match entry.metadata().ok().and_then(|m| m.modified().ok()) {
@@ -1596,7 +1646,63 @@ fn transfer_checkpoint_gc(
         }
     }
 
+    sweep_unreferenced_download_leases(&app, &kept_destinations)?;
+
     Ok(removed)
+}
+
+/// Remove download leases (and their derived scratch) that no surviving
+/// checkpoint references.
+///
+/// A crash between scratch preallocation and the first checkpoint write leaves
+/// a full-size scratch file with no record outside its lease; nothing else
+/// walks that directory, so reclaim it at recovery time.
+fn sweep_unreferenced_download_leases<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    keep_destinations: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let app_handle = app.app_handle();
+    let dir = resolved_app_data_dir(app)?.join("download-leases");
+    let iter = match std::fs::read_dir(&dir) {
+        Ok(iter) => iter,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    for entry in iter {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let json = match read_download_lease_json(app_handle, &path) {
+            Ok(json) => json,
+            Err(_) => continue,
+        };
+        let lease = match serde_json::from_str::<DownloadScratchLease>(&json) {
+            Ok(lease) => lease,
+            Err(_) => continue,
+        };
+        if keep_destinations.contains(&lease.destination) {
+            continue;
+        }
+        if let Ok(temp_path) = parse_user_path(&lease.temp_path, "Lease scratch") {
+            if temp_path.exists() {
+                clear_unusable_download_scratch(&temp_path)?;
+            }
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "Failed to remove download lease '{}': {}",
+                    path.display(),
+                    err
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1778,7 +1884,9 @@ struct TransferManifestHydration {
 }
 
 #[tauri::command]
-async fn load_transfer_manifest(app: tauri::AppHandle) -> Result<TransferManifestHydration, String> {
+async fn load_transfer_manifest(
+    app: tauri::AppHandle,
+) -> Result<TransferManifestHydration, String> {
     security::run_blocking(move || {
         let _storage_guard = lock_storage_meta()?;
         let recovery_session = load_or_create_transfer_recovery_session_unchecked(&app)?;
@@ -1837,7 +1945,10 @@ async fn save_transfer_manifest(
 }
 
 #[tauri::command]
-async fn clear_transfer_manifest(app: tauri::AppHandle, recovery_session: String) -> Result<(), String> {
+async fn clear_transfer_manifest(
+    app: tauri::AppHandle,
+    recovery_session: String,
+) -> Result<(), String> {
     security::run_blocking(move || {
         let _storage_guard = lock_storage_meta()?;
         require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
@@ -1868,7 +1979,21 @@ pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
 #[cfg(unix)]
 fn fsync_directory(dir: &std::path::Path) -> Result<(), String> {
     let file = std::fs::File::open(dir).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())
+    match file.sync_all() {
+        Ok(()) => Ok(()),
+        // vfat/exFAT/FUSE/SMB reject directory fsync with EINVAL/ENOTSUP.
+        // The rename is already visible to readers; reporting failure here
+        // would mark a successful download as failed.
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 #[cfg(windows)]
@@ -1943,6 +2068,90 @@ pub(crate) fn fsync_parent(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
+/// Create-only move for Windows volumes where hard links are unavailable.
+///
+/// `MoveFileW` fails with `ERROR_ALREADY_EXISTS` when the destination exists;
+/// unlike `MoveFileExW` it never replaces, so the name stays reserved.
+#[cfg(windows)]
+fn move_file_noreplace(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::MoveFileW;
+
+    let source_wide: Vec<u16> = to_extended_windows_path(source)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination_wide: Vec<u16> = to_extended_windows_path(destination)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        MoveFileW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+        )
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// Last-resort create-only publish for filesystems without hard links or
+/// exclusive renames (FAT/exFAT USB drives, some SMB/FUSE mounts).
+///
+/// The destination is reserved with `create_new` before any bytes are written,
+/// so an existing file is never replaced. A crash between reservation and
+/// completion leaves a partial file at the destination; every error path
+/// removes the reservation so the caller can retry cleanly.
+fn copy_file_exclusive(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut destination_file = options.open(destination).map_err(|e| e.to_string())?;
+    let copy_result = std::fs::File::open(source).and_then(|mut source_file| {
+        std::io::copy(&mut source_file, &mut destination_file)?;
+        destination_file.sync_all()
+    });
+    drop(destination_file);
+    match copy_result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(destination);
+            Err(err.to_string())
+        }
+    }
+}
+
+/// Publish a fully synced temp file without replacing an existing destination.
+///
+/// Prefers an atomic hard link (same directory), then the Windows exclusive
+/// move, then a reservation-and-copy fallback so downloads work on filesystems
+/// that support neither.
+fn publish_exclusive(
+    temp_path: &std::path::Path,
+    destination_path: &std::path::Path,
+) -> Result<(), String> {
+    if std::fs::hard_link(temp_path, destination_path).is_ok() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    if move_file_noreplace(temp_path, destination_path).is_ok() {
+        return Ok(());
+    }
+    copy_file_exclusive(temp_path, destination_path)
+        .map_err(|err| format!("Destination was not published without overwrite: {}", err))
+}
+
 pub(crate) fn publish_temp_file(
     temp_path: &std::path::Path,
     destination_path: &std::path::Path,
@@ -1967,15 +2176,9 @@ pub(crate) fn publish_temp_file(
         return Err(last_err);
     }
 
-    // Both paths are created in the same directory. A hard link publishes the
-    // fully synced inode only if the destination is still absent, closing the
-    // exists-then-rename race without relying on platform-specific rename flags.
-    if let Err(err) = std::fs::hard_link(temp_path, destination_path) {
+    if let Err(err) = publish_exclusive(temp_path, destination_path) {
         let _ = std::fs::remove_file(temp_path);
-        return Err(format!(
-            "Destination was not published without overwrite: {}",
-            err
-        ));
+        return Err(err);
     }
     if let Err(err) = fsync_parent(destination_path) {
         let _ = std::fs::remove_file(destination_path);
@@ -2190,6 +2393,7 @@ fn main() {
             biometric::disable_biometric,
             biometric::unlock_biometric,
             platform::get_platform_info,
+            platform::is_app_translocated,
             platform::updater_supported,
             platform::updater_support_info,
             platform::open_external_url,

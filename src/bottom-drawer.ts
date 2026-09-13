@@ -6,12 +6,15 @@ export type DrawerTab = "activity" | "transfers";
 
 let currentTab: DrawerTab = "activity";
 let minimized = false;
-const _parsedHeight = parseInt(
-  localStorage.getItem("drawer-height") ?? "240",
-  10,
-);
-let drawerHeight =
-  Number.isFinite(_parsedHeight) && _parsedHeight >= 120 ? _parsedHeight : 240;
+function readStoredDrawerHeight(): number {
+  try {
+    const parsed = parseInt(localStorage.getItem("drawer-height") ?? "240", 10);
+    return Number.isFinite(parsed) && parsed >= 120 ? parsed : 240;
+  } catch {
+    return 240;
+  }
+}
+let drawerHeight = readStoredDrawerHeight();
 
 const STORAGE_KEY = "drawer-height";
 const MIN_HEIGHT = 120;
@@ -143,6 +146,14 @@ export function updateClearButton(): void {
     btn.textContent = "Clear done";
     btn.style.display = "";
   }
+  // Export only exports the activity log; hide it while transfers are shown
+  // instead of leaving a button that does nothing.
+  const exportBtn = document.getElementById(
+    "drawer-export",
+  ) as HTMLButtonElement | null;
+  if (exportBtn) {
+    exportBtn.style.display = currentTab === "activity" ? "" : "none";
+  }
 }
 
 function syncToggleButtons(open: boolean): void {
@@ -192,7 +203,11 @@ function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {
     document.removeEventListener("mouseup", onMouseUp);
     document.body.style.userSelect = "";
     document.body.style.cursor = "";
-    localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+    try {
+      localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+    } catch {
+      // Storage unavailable (private mode); height persistence is best-effort.
+    }
     updateHandleAria();
   }
 
@@ -224,7 +239,11 @@ function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {
     e.preventDefault();
     drawerHeight = Math.min(maxHeight(), Math.max(MIN_HEIGHT, nextHeight));
     drawer.style.height = `${drawerHeight}px`;
-    localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+    try {
+      localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+    } catch {
+      // Storage unavailable (private mode); height persistence is best-effort.
+    }
     updateHandleAria();
   });
 

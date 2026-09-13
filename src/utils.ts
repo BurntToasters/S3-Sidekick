@@ -86,6 +86,41 @@ export function basename(key: string): string {
   return idx >= 0 ? key.slice(idx + 1) : key;
 }
 
+const WINDOWS_ILLEGAL_NAME_CHARS = /[%<>:"/\\|?*\u0000-\u001f]/g;
+const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+const WINDOWS_TRAILING_DOTS_SPACES = /[ .]+$/;
+
+function percentEncodeAscii(value: string): string {
+  return Array.from(
+    value,
+    (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`,
+  ).join("");
+}
+
+/**
+ * Map an S3 object key to a file name that is legal on `platform`.
+ *
+ * Keys may contain characters no Windows filesystem accepts (`< > : " / \ | ?
+ * *`, control characters) and the special names `.` and `..`. Unsafe code
+ * units are percent-encoded so the mapping stays injective and can never
+ * traverse out of the destination directory (`%` itself is encoded). Unicode
+ * is folded to NFC because APFS treats NFC/NFD spellings as one file.
+ */
+export function safeFileName(key: string, platform: string): string {
+  const normalized = basename(key).normalize("NFC");
+  const base = normalized.length > 0 ? normalized : "unnamed";
+  if (platform !== "windows") {
+    return base === "." || base === ".." ? percentEncodeAscii(base) : base;
+  }
+  let name = base.replace(WINDOWS_ILLEGAL_NAME_CHARS, percentEncodeAscii);
+  const stem = name.split(".")[0] ?? "";
+  if (WINDOWS_RESERVED_NAME.test(stem)) {
+    name = percentEncodeAscii(name[0] ?? "u") + name.slice(1);
+  }
+  name = name.replace(WINDOWS_TRAILING_DOTS_SPACES, percentEncodeAscii);
+  return name.length > 0 ? name : "unnamed";
+}
+
 export function isEditableElement(el: Element | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
   const tag = el.tagName;

@@ -7,6 +7,7 @@ export interface Bookmark {
   region: string;
   access_key: string;
   secret_key: string;
+  session_token?: string;
 }
 
 let bookmarks: Bookmark[] = [];
@@ -19,6 +20,7 @@ const MAX_BOOKMARK_ENDPOINT_LENGTH = 2_048;
 const MAX_BOOKMARK_REGION_LENGTH = 128;
 const MAX_BOOKMARK_ACCESS_KEY_LENGTH = 256;
 const MAX_BOOKMARK_SECRET_KEY_LENGTH = 4_096;
+const MAX_BOOKMARK_SESSION_TOKEN_LENGTH = 16_384;
 
 export function setBookmarkChangeHandler(handler: () => void): void {
   onChangeCallback = handler;
@@ -61,7 +63,10 @@ function isBookmark(value: unknown): value is Bookmark {
     row.access_key.length > 0 &&
     row.access_key.length <= MAX_BOOKMARK_ACCESS_KEY_LENGTH &&
     typeof row.secret_key === "string" &&
-    row.secret_key.length <= MAX_BOOKMARK_SECRET_KEY_LENGTH
+    row.secret_key.length <= MAX_BOOKMARK_SECRET_KEY_LENGTH &&
+    (row.session_token === undefined ||
+      (typeof row.session_token === "string" &&
+        row.session_token.length <= MAX_BOOKMARK_SESSION_TOKEN_LENGTH))
   );
 }
 
@@ -69,8 +74,12 @@ function parseBookmarksArray(raw: string): Bookmark[] | null {
   const parsed = parseJsonArray(raw);
   if (parsed === null) return null;
   // Filter out invalid entries instead of rejecting the whole file so one
-  // corrupt bookmark doesn't wipe the rest.
-  return parsed.filter(isBookmark);
+  // corrupt bookmark doesn't wipe the rest. A non-empty file where every
+  // entry is invalid is corruption, not an empty list: returning [] here
+  // would overwrite the good backup with nothing.
+  const valid = parsed.filter(isBookmark);
+  if (parsed.length > 0 && valid.length === 0) return null;
+  return valid;
 }
 
 async function loadBackupBookmarks(): Promise<Bookmark[] | null> {

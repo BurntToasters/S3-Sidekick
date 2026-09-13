@@ -99,6 +99,9 @@ export function initPalette(): void {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
+      // Stop here: the global shortcut handler would otherwise see a closed
+      // palette and close the next layer underneath in the same keypress.
+      e.stopPropagation();
       closePalette();
       return;
     }

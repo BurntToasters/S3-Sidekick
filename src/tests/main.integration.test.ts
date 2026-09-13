@@ -796,6 +796,7 @@ describe("main integration", () => {
       "us-east-1",
       "ak",
       "sk",
+      "",
     );
     expect(mockRefreshBuckets).toHaveBeenCalledTimes(1);
     expect(mockSaveConnection).toHaveBeenCalledTimes(1);
@@ -808,7 +809,9 @@ describe("main integration", () => {
 
     (document.getElementById("btn-refresh") as HTMLButtonElement).click();
     await flushMicrotasks();
-    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
+    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
+      preserveSelection: true,
+    });
 
     mockShowPrompt.mockResolvedValueOnce("new-folder");
     (document.getElementById("btn-new-folder") as HTMLButtonElement).click();
@@ -908,6 +911,7 @@ describe("main integration", () => {
       "us-west-2",
       "bookmark-access",
       "bookmark-secret",
+      "",
     );
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
@@ -2410,7 +2414,7 @@ describe("main integration", () => {
     failRename = false;
 
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowConfirm.mockResolvedValueOnce(false);
     (document.getElementById("batch-delete") as HTMLButtonElement).click();
     await flushMicrotasks(4);
@@ -2579,7 +2583,7 @@ describe("main integration", () => {
       copy_object: false,
     };
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
 
     mockShowPrompt.mockResolvedValueOnce("renamed-folder");
     mockShowConfirm.mockResolvedValueOnce(false);
@@ -2750,8 +2754,8 @@ describe("main integration", () => {
     keylessRow.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:docs/folder/");
-    state.selectedKeys.add("prefix:docs/other/");
+    state.selectedPrefixes.add("docs/folder/");
+    state.selectedPrefixes.add("docs/other/");
     const menuBeforeMultiFolder = mockShowContextMenu.mock.calls.length;
     folderRow.dispatchEvent(
       new MouseEvent("contextmenu", {
@@ -3244,7 +3248,7 @@ describe("main integration", () => {
     ) as HTMLInputElement;
     folderCheck.checked = true;
     folderCheck.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(state.selectedKeys.has("prefix:docs/folder/")).toBe(true);
+    expect(state.selectedPrefixes.has("docs/folder/")).toBe(true);
 
     const folderRow = tbody.querySelector(".object-row") as HTMLElement;
     folderRow.dispatchEvent(
@@ -3254,7 +3258,7 @@ describe("main integration", () => {
         cancelable: true,
       }),
     );
-    expect(state.selectedKeys.has("prefix:docs/folder/")).toBe(false);
+    expect(state.selectedPrefixes.has("docs/folder/")).toBe(false);
 
     const resizer = document.getElementById(
       "sidebar-resizer",

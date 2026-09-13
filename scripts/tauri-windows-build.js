@@ -74,6 +74,16 @@ function windowsBuildCommands(args, { signBundle = false } = {}) {
   // strict runtime-byte hash check stable.
   const bundleCommand = [tauriCli, "bundle", ...tauriArguments];
   if (!signBundle) bundleCommand.push("--no-sign");
+  // Tauri signs updater artifacts during bundling whenever
+  // createUpdaterArtifacts is enabled, which requires the updater private key
+  // — intentionally absent from the bundle environment. Updater signing is a
+  // separate release phase (scripts/updater-sign.js), so suppress artifact
+  // generation here while keeping bundle code signing (signCommand) enabled
+  // for the embedded NSIS uninstaller.
+  bundleCommand.push(
+    "--config",
+    JSON.stringify({ bundle: { createUpdaterArtifacts: false } }),
+  );
   return {
     bundle: bundleCommand,
     compile: [

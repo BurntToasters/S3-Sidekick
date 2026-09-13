@@ -3,7 +3,10 @@ name: CI
 on:
   push:
   pull_request:
-    branches: [main, beta]
+    branches: [main, beta, next-0.11.0]
+  schedule:
+    # Weekly re-audit catches advisories published against unchanged pins.
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read

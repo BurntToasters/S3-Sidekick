@@ -817,7 +817,19 @@ async function saveAndCloseSettingsModal(): Promise<void> {
     const statusEl = document.getElementById("status");
     if (statusEl)
       statusEl.textContent = `Failed to save settings: ${String(err)}`;
+    // The modal overlay makes #status inert, so the failure must be visible
+    // inside the modal (and the draft must stay open so nothing is lost).
+    const errorEl = document.getElementById("settings-save-error");
+    if (errorEl) {
+      errorEl.textContent = `Failed to save settings: ${String(err)}`;
+      errorEl.hidden = false;
+    }
     return;
+  }
+  const errorEl = document.getElementById("settings-save-error");
+  if (errorEl) {
+    errorEl.textContent = "";
+    errorEl.hidden = true;
   }
   document.getElementById("settings-overlay")?.classList.remove("active");
 }
@@ -1020,8 +1032,11 @@ function wireBookmarkImportExport(): void {
         const a = document.createElement("a");
         a.href = url;
         a.download = "s3-sidekick-bookmarks.json";
+        document.body.appendChild(a);
         a.click();
-        URL.revokeObjectURL(url);
+        a.remove();
+        // Revoking synchronously can cancel the download in WebKit.
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       });
     });
   });

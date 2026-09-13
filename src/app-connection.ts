@@ -52,7 +52,11 @@ export function getConnectionInputs() {
   const secretKey = (
     document.getElementById("conn-secret-key") as HTMLInputElement
   ).value.trim();
-  return { endpoint, region, accessKey, secretKey };
+  const sessionToken =
+    (
+      document.getElementById("conn-session-token") as HTMLInputElement | null
+    )?.value.trim() ?? "";
+  return { endpoint, region, accessKey, secretKey, sessionToken };
 }
 
 export function setConnectionInputs(
@@ -60,6 +64,7 @@ export function setConnectionInputs(
   region: string,
   accessKey: string,
   secretKey: string,
+  sessionToken = "",
 ): void {
   (document.getElementById("conn-endpoint") as HTMLInputElement).value =
     endpoint;
@@ -68,6 +73,10 @@ export function setConnectionInputs(
     accessKey;
   (document.getElementById("conn-secret-key") as HTMLInputElement).value =
     secretKey;
+  const sessionInput = document.getElementById(
+    "conn-session-token",
+  ) as HTMLInputElement | null;
+  if (sessionInput) sessionInput.value = sessionToken;
   updateBookmarkBtn();
 }
 
@@ -93,6 +102,7 @@ export function refreshSavedConnectionsList(): void {
         bookmark.region,
         bookmark.access_key,
         bookmark.secret_key,
+        bookmark.session_token ?? "",
       );
     },
     (index) => {
@@ -124,6 +134,7 @@ export function refreshBookmarkBar(): void {
           bookmark.region,
           bookmark.access_key,
           bookmark.secret_key,
+          bookmark.session_token ?? "",
         );
       },
       state.connected ? state.endpoint : undefined,
@@ -152,13 +163,14 @@ export async function switchToBookmark(
   region: string,
   accessKey: string,
   secretKey: string,
+  sessionToken = "",
 ): Promise<void> {
   // Supersede instead of dropping: a rapid second click updates inputs and
   // starts a newer connect generation that wins via generation guards.
   if (state.connected) {
     if (!(await handleDisconnect())) return;
   }
-  setConnectionInputs(endpoint, region, accessKey, secretKey);
+  setConnectionInputs(endpoint, region, accessKey, secretKey, sessionToken);
   setStatus(`Connecting to "${name}"...`, 5000);
   await handleConnect();
 }
@@ -196,6 +208,7 @@ function setConnectionFormDisabled(disabled: boolean): void {
     "conn-region",
     "conn-access-key",
     "conn-secret-key",
+    "conn-session-token",
     "conn-new-btn",
     "bookmark-save-btn",
   ];
@@ -242,7 +255,8 @@ export function setConnectionUI(connected: boolean): void {
 export async function handleConnect(): Promise<void> {
   // Allow superseding connects: rapid bookmark switches start a newer
   // generation in connect() that wins; stale flows exit via generation checks.
-  const { endpoint, region, accessKey, secretKey } = getConnectionInputs();
+  const { endpoint, region, accessKey, secretKey, sessionToken } =
+    getConnectionInputs();
   if (!endpoint || !accessKey || !secretKey) {
     const message = "Endpoint, access key, and secret key are required.";
     setConnectionFormError(message);
@@ -299,7 +313,13 @@ export async function handleConnect(): Promise<void> {
     }
 
     setStatus("Connecting...");
-    const connectionAttempt = connect(endpoint, region, accessKey, secretKey);
+    const connectionAttempt = connect(
+      endpoint,
+      region,
+      accessKey,
+      secretKey,
+      sessionToken,
+    );
     workflowGeneration = currentConnectionGeneration();
     const generation = workflowGeneration;
     const resolvedRegion = await connectionAttempt;
@@ -313,6 +333,7 @@ export async function handleConnect(): Promise<void> {
         resolvedRegion,
         accessKey,
         secretKey,
+        sessionToken,
       );
     } catch (saveErr) {
       if (
@@ -354,7 +375,16 @@ export async function handleConnect(): Promise<void> {
       ? state.buckets.find((b) => b.name === lastBucket)?.name
       : undefined;
     if (restoreTarget) {
-      await selectBucket(restoreTarget);
+      try {
+        await selectBucket(restoreTarget);
+      } catch (restoreError) {
+        // A listing failure is not a connection failure: keep the session
+        // and let the user retry the bucket or pick another one.
+        const message = `Connected, but failed to list "${restoreTarget}": ${friendlyError(restoreError)}`;
+        setStatus(message, 8000);
+        logActivity(message, "warning");
+        showEmptyState();
+      }
     } else {
       showEmptyState();
     }
@@ -467,7 +497,8 @@ export async function handleDisconnect(): Promise<boolean> {
 }
 
 export async function handleBookmarkSave(): Promise<void> {
-  const { endpoint, region, accessKey, secretKey } = getConnectionInputs();
+  const { endpoint, region, accessKey, secretKey, sessionToken } =
+    getConnectionInputs();
   if (!endpoint || !accessKey) {
     setStatus("Fill in endpoint and access key to bookmark.");
     return;
@@ -488,6 +519,7 @@ export async function handleBookmarkSave(): Promise<void> {
       region,
       access_key: accessKey,
       secret_key: secretKey,
+      ...(sessionToken ? { session_token: sessionToken } : {}),
     });
     if (added) {
       setStatus(`Bookmarked "${name}".`, 5000);

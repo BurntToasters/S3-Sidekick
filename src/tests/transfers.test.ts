@@ -80,8 +80,8 @@ async function flushMicrotasks(cycles = 2): Promise<void> {
 beforeEach(() => {
   vi.resetModules();
   mockInvoke.mockReset();
-    mockInvoke.mockImplementation(async (cmd, payload) => {
-      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
+  mockInvoke.mockImplementation(async (cmd, payload) => {
+    if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
     if (cmd === "transfer_checkpoint_gc") return 0;
     if (cmd === "object_exists" || cmd === "path_exists") return false;
     if (cmd === "download_object") return 1234;
@@ -2287,7 +2287,13 @@ describe("transfer coverage lift", () => {
     await transfers.initTransferQueueUI();
     await transfers.recoverPendingTransfers();
     transfers.enqueueFolderEntries(
-      [{ file_path: "C:\\tmp\\adopt.txt", relative_path: "adopt.txt", size: 1 }],
+      [
+        {
+          file_path: "C:\\tmp\\adopt.txt",
+          relative_path: "adopt.txt",
+          size: 1,
+        },
+      ],
       "pref/",
     );
     await vi.waitFor(() => {
@@ -2321,9 +2327,7 @@ describe("transfer coverage lift", () => {
     transfers.enqueueFiles([file], "web/");
     await vi.waitFor(() => {
       expect(
-        mockInvoke.mock.calls.some(
-          ([cmd]) => cmd === "upload_object_bytes",
-        ),
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "upload_object_bytes"),
       ).toBe(true);
     });
     const call = mockInvoke.mock.calls.find(
@@ -2353,7 +2357,11 @@ describe("transfer coverage lift", () => {
     await transfers.initTransferQueueUI();
     await transfers.recoverPendingTransfers();
     transfers.enqueueDownloads([
-      { bucket: "b", key: "clear-me.txt", destination: "C:\\tmp\\clear-me.txt" },
+      {
+        bucket: "b",
+        key: "clear-me.txt",
+        destination: "C:\\tmp\\clear-me.txt",
+      },
     ]);
     await vi.waitFor(() => {
       expect(

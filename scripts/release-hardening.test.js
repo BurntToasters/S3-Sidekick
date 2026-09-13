@@ -811,6 +811,17 @@ test("Windows release signs runtime before bundle and verifies the exact signed 
   assert.equal(commands.bundle[1], "bundle");
   assert.ok(commands.bundle.includes("--no-sign"));
 
+  // Signed bundles keep the code-signing path but must not try to sign
+  // updater artifacts: the updater key is not in the bundle environment.
+  const signedCommands = windowsBuildCommands(args, { signBundle: true });
+  assert.ok(!signedCommands.bundle.includes("--no-sign"));
+  const configIndex = signedCommands.bundle.indexOf("--config");
+  assert.notEqual(configIndex, -1);
+  assert.deepEqual(
+    JSON.parse(signedCommands.bundle[configIndex + 1]),
+    { bundle: { createUpdaterArtifacts: false } },
+  );
+
   const environment = {
     OS: "Windows_NT",
     PATH: "C:\\Windows\\System32",

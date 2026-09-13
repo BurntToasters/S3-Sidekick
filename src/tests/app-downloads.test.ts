@@ -308,9 +308,8 @@ describe("last download folder", () => {
   });
 
   it("reports when no folder is remembered", async () => {
-    const { handleOpenLastDownloadFolder } = await import(
-      "../app-downloads.ts"
-    );
+    const { handleOpenLastDownloadFolder } =
+      await import("../app-downloads.ts");
     await handleOpenLastDownloadFolder();
     expect(document.getElementById("status")?.textContent).toContain(
       "No remembered download folder",
@@ -321,9 +320,8 @@ describe("last download folder", () => {
   it("opens the remembered folder", async () => {
     localStorage.setItem("s3-sidekick.last-download-dir", "/tmp/dl");
     mockInvoke.mockResolvedValueOnce(undefined);
-    const { handleOpenLastDownloadFolder } = await import(
-      "../app-downloads.ts"
-    );
+    const { handleOpenLastDownloadFolder } =
+      await import("../app-downloads.ts");
     await handleOpenLastDownloadFolder();
     expect(mockInvoke).toHaveBeenCalledWith("open_local_path", {
       path: "/tmp/dl",
@@ -334,9 +332,8 @@ describe("last download folder", () => {
   it("maps open failures through friendlyError", async () => {
     localStorage.setItem("s3-sidekick.last-download-dir", "/tmp/dl");
     mockInvoke.mockRejectedValueOnce(new Error("403 Forbidden"));
-    const { handleOpenLastDownloadFolder } = await import(
-      "../app-downloads.ts"
-    );
+    const { handleOpenLastDownloadFolder } =
+      await import("../app-downloads.ts");
     await handleOpenLastDownloadFolder();
     expect(document.getElementById("status")?.textContent).toContain(
       "Access denied",

@@ -11,7 +11,15 @@ import { basename, friendlyError } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
 import { closeSidebarOnMobile } from "./app-layout.ts";
-import { getSelectedFileKeys } from "./app-selection.ts";
+import {
+  addSelection,
+  clearAllSelection,
+  getSelectedFileKeys,
+  getSelectedPrefixes,
+  getSelectionEntries,
+  isSelected,
+  selectionCount,
+} from "./app-selection.ts";
 import {
   handleDelete,
   handleCopyUrl,
@@ -59,19 +67,17 @@ export function handleContextMenu(e: MouseEvent): void {
   const isFolder = row.classList.contains("object-row--folder");
   const itemKey = isFolder ? "prefix:" + prefix : key;
 
-  if (!state.selectedKeys.has(itemKey)) {
-    state.selectedKeys.clear();
-    state.selectedKeys.add(itemKey);
+  if (!isSelected(itemKey)) {
+    clearAllSelection();
+    addSelection(itemKey);
     updateSelectionUI();
   }
 
-  const selectedCount = state.selectedKeys.size;
+  const selectedCount = selectionCount();
   const fileKeys = getSelectedFileKeys();
   const hasFiles = fileKeys.length > 0;
 
-  const folderKeys = Array.from(state.selectedKeys).filter((k) =>
-    k.startsWith("prefix:"),
-  );
+  const folderKeys = getSelectedPrefixes();
   const hasFolders = folderKeys.length > 0;
   const items: MenuItem[] = [];
 
@@ -139,7 +145,7 @@ export function handleContextMenu(e: MouseEvent): void {
 
   if (items.length === 0) return;
 
-  const selectedKeys = Array.from(state.selectedKeys);
+  const selectedKeys = Array.from(getSelectionEntries());
 
   showContextMenu(e.clientX, e.clientY, items, (action) => {
     if (action === "preview") void openPreview(fileKeys[0]);

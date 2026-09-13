@@ -828,7 +828,14 @@ describe("settings module", () => {
     expect(mockExportBookmarksJson).toHaveBeenCalledTimes(1);
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(anchorClick).toHaveBeenCalledTimes(1);
-    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    // Revocation is deferred so Safari/WebKit does not cancel the download;
+    // wait for the timer rather than asserting synchronously.
+    await vi.waitFor(
+      () => {
+        expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 3000 },
+    );
 
     const importInput = document.getElementById(
       "bookmarks-import-input",
@@ -1484,8 +1491,11 @@ describe("settings module", () => {
     expect(searchPanel.hidden).toBe(true);
     expect(searchPanel.style.display).toBe("none");
     expect(
-      (document.querySelector('[data-settings-panel="transfers"]') as HTMLElement)
-        .hidden,
+      (
+        document.querySelector(
+          '[data-settings-panel="transfers"]',
+        ) as HTMLElement
+      ).hidden,
     ).toBe(false);
   });
 
@@ -1656,8 +1666,11 @@ describe("settings module", () => {
         .value,
     ).toBe("replace");
     expect(
-      (document.getElementById("setting-bandwidth-limit-mbps") as HTMLSelectElement)
-        .value,
+      (
+        document.getElementById(
+          "setting-bandwidth-limit-mbps",
+        ) as HTMLSelectElement
+      ).value,
     ).toBe("100");
     expect(
       (document.getElementById("settings-platform") as HTMLElement).textContent,

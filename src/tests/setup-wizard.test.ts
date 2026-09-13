@@ -239,7 +239,9 @@ describe("setup wizard", () => {
   it("rejects empty and short passwords without backend calls", async () => {
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
@@ -278,7 +280,9 @@ describe("setup wizard", () => {
   it("rejects mismatched passwords without backend calls", async () => {
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
@@ -321,7 +325,9 @@ describe("setup wizard", () => {
 
     const wizard = await import("../setup-wizard.ts");
     const donePromise = wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(document.getElementById("setup-step-encryption")?.hidden).toBe(
@@ -340,7 +346,9 @@ describe("setup wizard", () => {
     await flushMicrotasks();
     expect(document.getElementById("setup-step-updates")?.hidden).toBe(false);
 
-    (document.getElementById("setup-updates-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-updates-next") as HTMLButtonElement
+    ).click();
     expect(document.getElementById("setup-step-done")?.hidden).toBe(false);
 
     (document.getElementById("setup-done-btn") as HTMLButtonElement).click();
@@ -379,7 +387,9 @@ describe("setup wizard", () => {
 
     const wizard = await import("../setup-wizard.ts");
     const donePromise = wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
@@ -391,14 +401,17 @@ describe("setup wizard", () => {
       password: null,
     });
 
-    (document.getElementById("setup-auto-updates") as HTMLInputElement).checked =
-      false;
+    (
+      document.getElementById("setup-auto-updates") as HTMLInputElement
+    ).checked = false;
     const channel = document.getElementById(
       "setup-update-channel",
     ) as HTMLSelectElement;
     channel.innerHTML = `<option value="release">r</option><option value="beta" selected>beta</option>`;
     channel.value = "beta";
-    (document.getElementById("setup-updates-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-updates-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-done-btn") as HTMLButtonElement).click();
     const result = await donePromise;
 
@@ -423,7 +436,9 @@ describe("setup wizard", () => {
 
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
@@ -460,7 +475,9 @@ describe("setup wizard", () => {
 
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
@@ -472,8 +489,9 @@ describe("setup wizard", () => {
     ) as HTMLInputElement;
     password.value = "password123";
     confirm.value = "password123";
-    (document.getElementById("setup-enc-biometric") as HTMLInputElement).checked =
-      true;
+    (
+      document.getElementById("setup-enc-biometric") as HTMLInputElement
+    ).checked = true;
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(document.getElementById("setup-enc-error")?.textContent).toContain(
@@ -484,8 +502,9 @@ describe("setup wizard", () => {
     // must not re-validate or re-invoke initialize_security.
     password.value = "";
     confirm.value = "";
-    (document.getElementById("setup-enc-biometric") as HTMLInputElement).checked =
-      false;
+    (
+      document.getElementById("setup-enc-biometric") as HTMLInputElement
+    ).checked = false;
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
@@ -515,7 +534,9 @@ describe("setup wizard", () => {
     const wizard = await import("../setup-wizard.ts");
     const donePromise = wizard.showSetupWizard();
     await flushMicrotasks();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
@@ -523,13 +544,16 @@ describe("setup wizard", () => {
       "password123";
     (document.getElementById("setup-enc-confirm") as HTMLInputElement).value =
       "password123";
-    (document.getElementById("setup-enc-biometric") as HTMLInputElement).checked =
-      true;
+    (
+      document.getElementById("setup-enc-biometric") as HTMLInputElement
+    ).checked = true;
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
     expect(document.getElementById("setup-step-updates")?.hidden).toBe(false);
-    (document.getElementById("setup-updates-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-updates-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-done-btn") as HTMLButtonElement).click();
     const result = await donePromise;
     expect(result?.biometricEnabled).toBe(true);
@@ -546,14 +570,18 @@ describe("setup wizard", () => {
 
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks(6);
 
     expect(document.getElementById("setup-step-updates")?.hidden).toBe(false);
 
     // Back from updates returns to theme when already initialized.
-    (document.getElementById("setup-updates-back") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-updates-back") as HTMLButtonElement
+    ).click();
     await flushMicrotasks(6);
     expect(document.getElementById("setup-step-theme")?.hidden).toBe(false);
   });
@@ -561,7 +589,9 @@ describe("setup wizard", () => {
   it("returns to encryption from updates when setup is fresh", async () => {
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
@@ -577,7 +607,9 @@ describe("setup wizard", () => {
     await flushMicrotasks();
     expect(document.getElementById("setup-step-updates")?.hidden).toBe(false);
 
-    (document.getElementById("setup-updates-back") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-updates-back") as HTMLButtonElement
+    ).click();
     await flushMicrotasks();
     expect(document.getElementById("setup-step-encryption")?.hidden).toBe(
       false,
@@ -588,13 +620,17 @@ describe("setup wizard", () => {
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
 
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     expect(document.getElementById("setup-step-theme")?.hidden).toBe(false);
 
     (document.getElementById("setup-theme-back") as HTMLButtonElement).click();
     expect(document.getElementById("setup-step-welcome")?.hidden).toBe(false);
 
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(document.getElementById("setup-step-encryption")?.hidden).toBe(
@@ -613,7 +649,9 @@ describe("setup wizard", () => {
     await flushMicrotasks();
     expect(document.getElementById("setup-step-updates")?.hidden).toBe(false);
 
-    (document.getElementById("setup-updates-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-updates-next") as HTMLButtonElement
+    ).click();
     expect(document.getElementById("setup-step-done")?.hidden).toBe(false);
   });
 
@@ -627,7 +665,9 @@ describe("setup wizard", () => {
 
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks(6);
 
@@ -704,7 +744,9 @@ describe("setup wizard", () => {
     `;
     const wizard = await import("../setup-wizard.ts");
     const donePromise = wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
 
     const btns = Array.from(
       document.querySelectorAll<HTMLButtonElement>(".setup-wizard-theme-btn"),
@@ -722,7 +764,9 @@ describe("setup wizard", () => {
     await flushMicrotasks();
     (document.getElementById("setup-enc-skip") as HTMLButtonElement).click();
     await flushMicrotasks();
-    (document.getElementById("setup-updates-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-updates-next") as HTMLButtonElement
+    ).click();
     (document.getElementById("setup-done-btn") as HTMLButtonElement).click();
     const result = await donePromise;
     expect(result?.theme).toBe("dark");
@@ -758,7 +802,9 @@ describe("setup wizard", () => {
     `;
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
-    (document.getElementById("setup-welcome-next") as HTMLButtonElement).click();
+    (
+      document.getElementById("setup-welcome-next") as HTMLButtonElement
+    ).click();
 
     const options = document.getElementById(
       "setup-theme-options",
@@ -816,8 +862,9 @@ describe("setup wizard", () => {
       void wizard.showSetupWizard();
       await flushMicrotasks(6);
       return {
-        hidden: (document.getElementById("setup-biometric-label") as HTMLElement)
-          .hidden,
+        hidden: (
+          document.getElementById("setup-biometric-label") as HTMLElement
+        ).hidden,
         text: (document.getElementById("setup-biometric-text") as HTMLElement)
           .textContent,
       };

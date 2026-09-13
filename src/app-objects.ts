@@ -23,7 +23,12 @@ import { showConfirm, showPrompt } from "./dialogs.ts";
 import { logActivity, exportActivityLogText } from "./activity-log.ts";
 import { basename, friendlyError } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
-import { getSelectedFileKeys, getSelectedPrefixes } from "./app-selection.ts";
+import {
+  addSelection,
+  clearAllSelection,
+  getSelectedFileKeys,
+  getSelectedPrefixes,
+} from "./app-selection.ts";
 import {
   resolveAbsentObjectWriteIntent,
   resolveObjectConflict,
@@ -739,10 +744,13 @@ export async function handleRefresh(): Promise<void> {
   }
   setStatus("Refreshing...");
   try {
-    const committed = await refreshObjects(target.bucket, target.prefix);
+    const committed = await refreshObjects(target.bucket, target.prefix, {
+      preserveSelection: true,
+    });
     if (committed && !connectionSnapshotChanged(target)) {
       invalidateInspectorSelectionSync();
       renderObjectTable();
+      updateSelectionUI();
       renderBreadcrumb();
       setStatus("");
     }
@@ -808,10 +816,16 @@ export async function handleExportActivityLog(): Promise<void> {
     return;
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const destination = await save({
-    title: "Export Activity Log",
-    defaultPath: `s3-sidekick-activity-${stamp}.txt`,
-  });
+  let destination: string | null;
+  try {
+    destination = await save({
+      title: "Export Activity Log",
+      defaultPath: `s3-sidekick-activity-${stamp}.txt`,
+    });
+  } catch (err) {
+    setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
+    return;
+  }
   if (!destination) return;
 
   let overwrite = false;
@@ -864,8 +878,8 @@ export async function handleGoToKeyOrPrefix(): Promise<void> {
 
     const targetKey = input;
     if (state.objects.some((obj) => obj.key === targetKey)) {
-      state.selectedKeys.clear();
-      state.selectedKeys.add(targetKey);
+      clearAllSelection();
+      addSelection(targetKey);
       updateSelectionUI();
       return;
     }

@@ -7,10 +7,11 @@ import {
   getIconHtml,
   friendlyError,
 } from "./utils.ts";
-import { refreshObjects } from "./connection.ts";
+import { refreshObjects, MAX_ACCUMULATED_LISTING_ITEMS } from "./connection.ts";
 import { showToast } from "./toast.ts";
 import {
   closeInspectorOnMobile,
+  isInspectorOpen,
   markInspectorHasContent,
   syncInspectorFromSelection,
 } from "./inspector.ts";
@@ -18,7 +19,15 @@ import {
   confirmDiscardInfoProperties,
   hasUnsavedInfoChanges,
 } from "./info-panel.ts";
-import { getSelectedFileKeys } from "./app-selection.ts";
+import {
+  addSelection,
+  clearAllSelection,
+  getSelectedFileKeys,
+  getSelectionEntries,
+  isSelected,
+  removeSelection,
+  selectionCount,
+} from "./app-selection.ts";
 
 const OBJECT_ROW_HEIGHT = 36;
 const OBJECT_VIRTUALIZE_THRESHOLD = 250;
@@ -101,7 +110,7 @@ function selectedObjectRevisions(selectedKeys: string[]): string[] {
 }
 
 function getInspectorSelectionSignature(): string {
-  const selectedKeys = Array.from(state.selectedKeys).sort();
+  const selectedKeys = Array.from(getSelectionEntries()).sort();
   return JSON.stringify([
     state.connectionIdentity,
     state.connectionId,
@@ -130,10 +139,13 @@ function writeLastBucket(name: string): void {
 }
 
 function syncInspectorForSemanticSelectionChange(): void {
+  // Signature computation walks the whole accumulated listing; skip it
+  // entirely while the inspector is closed (opening it syncs fresh).
+  if (!isInspectorOpen()) return;
   const signature = getInspectorSelectionSignature();
   if (signature === lastInspectorSelectionSignature) return;
   lastInspectorSelectionSignature = signature;
-  void syncInspectorFromSelection(new Set(state.selectedKeys));
+  void syncInspectorFromSelection(getSelectionEntries());
 }
 
 export function invalidateInspectorSelectionSync(): void {
@@ -308,7 +320,7 @@ function getVisibleSelectableKeys(): string[] {
 }
 
 export function clearSelection(): void {
-  state.selectedKeys.clear();
+  clearAllSelection();
   updateSelectionUI();
 }
 
@@ -317,6 +329,11 @@ export function pruneStaleSelection(validKeys?: readonly string[]): void {
   for (const key of state.selectedKeys) {
     if (!valid.has(key)) {
       state.selectedKeys.delete(key);
+    }
+  }
+  for (const prefix of state.selectedPrefixes) {
+    if (!valid.has("prefix:" + prefix)) {
+      state.selectedPrefixes.delete(prefix);
     }
   }
 }
@@ -339,14 +356,14 @@ export function updateSelectionUI(): void {
   for (const row of rows) {
     const key = row.dataset.key ?? "prefix:" + row.dataset.prefix;
     const cb = row.querySelector<HTMLInputElement>(".row-check");
-    const selected = state.selectedKeys.has(key);
+    const selected = isSelected(key);
     row.classList.toggle("object-row--selected", selected);
     if (cb) cb.checked = selected;
   }
 
   let visibleSelectedCount = 0;
   for (const key of allKeys) {
-    if (state.selectedKeys.has(key)) visibleSelectedCount += 1;
+    if (isSelected(key)) visibleSelectedCount += 1;
   }
   const selectAll = document.getElementById(
     "select-all",
@@ -365,7 +382,7 @@ export function updateSelectionUI(): void {
   }
 
   const selectedFileCount = getSelectedFileKeys().length;
-  const totalSelected = state.selectedKeys.size;
+  const totalSelected = selectionCount();
   const selectedFolderCount = totalSelected - selectedFileCount;
   const batchToolbar = document.getElementById(
     "batch-toolbar",
@@ -432,7 +449,7 @@ export function updateSelectionUI(): void {
     if (batchCopyUrls) {
       batchCopyUrls.disabled = !canDownloadFiles;
       batchCopyUrls.title = canDownloadFiles
-        ? "Copy presigned URLs for selected files"
+        ? "Copy URLs for selected files"
         : "Select files to copy URLs";
     }
   }
@@ -470,18 +487,18 @@ export function handleRowClick(key: string, e: MouseEvent): void {
       const [from, to] =
         startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
       for (let i = from; i <= to; i++) {
-        state.selectedKeys.add(allKeys[i]);
+        addSelection(allKeys[i]);
       }
     }
   } else if (hasAccelModifier(e)) {
-    if (state.selectedKeys.has(key)) {
-      state.selectedKeys.delete(key);
+    if (isSelected(key)) {
+      removeSelection(key);
     } else {
-      state.selectedKeys.add(key);
+      addSelection(key);
     }
   } else {
-    state.selectedKeys.clear();
-    state.selectedKeys.add(key);
+    clearAllSelection();
+    addSelection(key);
   }
 
   for (const row of dom.objectTbody.querySelectorAll<HTMLElement>(
@@ -505,9 +522,9 @@ export function handleRowClick(key: string, e: MouseEvent): void {
 export function handleSelectAll(checked: boolean): void {
   const allKeys = getVisibleSelectableKeys();
   if (checked) {
-    for (const k of allKeys) state.selectedKeys.add(k);
+    for (const k of allKeys) addSelection(k);
   } else {
-    for (const k of allKeys) state.selectedKeys.delete(k);
+    for (const k of allKeys) removeSelection(k);
   }
   updateSelectionUI();
 }
@@ -624,13 +641,13 @@ export function renderBucketList(): void {
   if (activeBucket === null) return;
   const restoreName = activeBucket;
   const restoreTarget =
-    (Array.from(el.querySelectorAll<HTMLElement>(".list__item-btn")).find(
+    Array.from(el.querySelectorAll<HTMLElement>(".list__item-btn")).find(
       (btn) => btn.dataset.bucket === restoreName,
     ) ??
-      Array.from(el.querySelectorAll<HTMLElement>(".list__item-btn")).find(
-        (btn) => btn.dataset.bucket === rovingBucket,
-      ) ??
-      null);
+    Array.from(el.querySelectorAll<HTMLElement>(".list__item-btn")).find(
+      (btn) => btn.dataset.bucket === rovingBucket,
+    ) ??
+    null;
   (restoreTarget as HTMLElement | null)?.focus?.({ preventScroll: true });
 }
 
@@ -782,12 +799,9 @@ function updateObjectRow(
 
   if (checkbox) {
     checkbox.setAttribute("aria-label", `Select ${entry.kind} ${entry.name}`);
-    checkbox.checked = state.selectedKeys.has(semanticKey);
+    checkbox.checked = isSelected(semanticKey);
   }
-  row.classList.toggle(
-    "object-row--selected",
-    state.selectedKeys.has(semanticKey),
-  );
+  row.classList.toggle("object-row--selected", isSelected(semanticKey));
   if (nameCell) nameCell.title = entry.name;
   if (nameText) nameText.textContent = entry.name;
   if (icon) {
@@ -1085,7 +1099,18 @@ function updateObjectCount(): void {
 
 function updateLoadMore(): void {
   const row = document.getElementById("load-more-row");
-  if (row) row.style.display = state.hasMore ? "" : "none";
+  if (row) {
+    row.style.display = state.hasMore || state.listingCapped ? "" : "none";
+  }
+  const button = document.getElementById("btn-load-more");
+  if (button) button.style.display = state.hasMore ? "" : "none";
+  const notice = document.getElementById("listing-cap-notice");
+  if (notice) {
+    notice.hidden = !state.listingCapped;
+    notice.textContent = state.listingCapped
+      ? `Showing the first ${MAX_ACCUMULATED_LISTING_ITEMS.toLocaleString()} items. Narrow the prefix to reach the rest.`
+      : "";
+  }
 }
 
 export function renderBreadcrumb(): void {
@@ -1314,7 +1339,7 @@ function restoreListingSnapshot(snapshot: ListingSnapshot): void {
 }
 
 function resetSelectionForListingChange(): void {
-  state.selectedKeys.clear();
+  clearAllSelection();
   lastClickedKey = null;
   updateSelectionUI();
 }

@@ -161,9 +161,7 @@ describe("transfers UI shell", () => {
     );
     await vi.waitFor(() => {
       expect(
-        mockInvoke.mock.calls.some(
-          ([cmd]) => cmd === "upload_object_bytes",
-        ),
+        mockInvoke.mock.calls.some(([cmd]) => cmd === "upload_object_bytes"),
       ).toBe(true);
     });
     await new Promise((resolve) => setTimeout(resolve, 30));

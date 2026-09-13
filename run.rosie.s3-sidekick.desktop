@@ -6,5 +6,5 @@ Exec=env GDK_BACKEND=x11 s3-sidekick
 Icon=run.rosie.s3-sidekick
 Categories=Network;Utility;
 Keywords=S3;storage;cloud;backup;
-StartupWMClass=run.rosie.s3-sidekick
+StartupWMClass=s3-sidekick
 Terminal=false

@@ -133,6 +133,7 @@ describe("connection UX polish", () => {
       "us-east-1",
       "AKIA",
       "secret",
+      "",
     );
   });
 

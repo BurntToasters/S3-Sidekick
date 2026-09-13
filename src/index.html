@@ -186,6 +186,23 @@
                   </div>
                 </div>
 
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="conn-session-token"
+                      >Session Token
+                      <span class="field-optional">(optional)</span></label
+                    >
+                    <input
+                      id="conn-session-token"
+                      class="field field--full"
+                      type="password"
+                      placeholder="Session Token"
+                      aria-label="Session token"
+                      autocomplete="off"
+                    />
+                  </div>
+                </div>
+
                 <div class="form-actions">
                   <button
                     id="bookmark-save-btn"
@@ -547,6 +564,12 @@
                     <button id="btn-load-more" class="btn btn--ghost">
                       Load more...
                     </button>
+                    <span
+                      id="listing-cap-notice"
+                      class="listing-cap-notice"
+                      role="status"
+                      hidden
+                    ></span>
                     <span id="object-count" class="object-count"></span>
                   </div>
                 </div>
@@ -1660,6 +1683,12 @@
           </div>
         </div>
         <div class="modal__footer">
+          <div
+            id="settings-save-error"
+            class="form-error settings-save-error"
+            role="alert"
+            hidden
+          ></div>
           <button id="settings-cancel" class="btn btn--ghost">Cancel</button>
           <button id="settings-save" class="btn btn--primary">Save</button>
         </div>
@@ -1672,6 +1701,7 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="dialog-title"
+      aria-describedby="dialog-message"
     >
       <div class="dialog-box">
         <div id="dialog-title" class="dialog-box__title"></div>

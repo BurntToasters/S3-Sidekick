@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { clearAllSelection } from "./app-selection.ts";
 import { state } from "./state.ts";
 import { showToast } from "./toast.ts";
 import type { BucketInfo, ObjectInfo } from "./state.ts";
@@ -13,6 +14,7 @@ interface ConnectionConfig {
   region: string;
   access_key: string;
   secret_key: string;
+  session_token?: string;
 }
 
 interface ConnectResult {
@@ -189,6 +191,7 @@ export async function connect(
   region: string,
   accessKey: string,
   secretKey: string,
+  sessionToken = "",
 ): Promise<string> {
   const generation = ++connectionGeneration;
   invalidateListingOwnership();
@@ -199,6 +202,7 @@ export async function connect(
       region,
       accessKey,
       secretKey,
+      sessionToken: sessionToken || null,
     });
     if (generation !== connectionGeneration) {
       throw new Error("Connection attempt superseded");
@@ -276,7 +280,8 @@ export async function disconnect(connectionId?: string): Promise<boolean> {
   state.buckets = [];
   state.objects = [];
   state.prefixes = [];
-  state.selectedKeys.clear();
+  clearAllSelection();
+  state.listingCapped = false;
   state.continuationToken = "";
   state.hasMore = false;
   return true;
@@ -288,6 +293,7 @@ export async function saveConnection(
   region: string,
   accessKey: string,
   secretKey: string,
+  sessionToken = "",
 ): Promise<void> {
   if (!connectionId) {
     throw new Error("Connection id is required");
@@ -297,6 +303,7 @@ export async function saveConnection(
     region,
     access_key: accessKey,
     secret_key: secretKey,
+    ...(sessionToken ? { session_token: sessionToken } : {}),
   };
   await invoke("save_connection", {
     connectionId,
@@ -315,7 +322,9 @@ export async function loadConnection(): Promise<ConnectionConfig | null> {
       typeof (parsed as Record<string, unknown>).endpoint === "string" &&
       typeof (parsed as Record<string, unknown>).region === "string" &&
       typeof (parsed as Record<string, unknown>).access_key === "string" &&
-      typeof (parsed as Record<string, unknown>).secret_key === "string"
+      typeof (parsed as Record<string, unknown>).secret_key === "string" &&
+      ((parsed as Record<string, unknown>).session_token === undefined ||
+        typeof (parsed as Record<string, unknown>).session_token === "string")
     ) {
       return parsed as ConnectionConfig;
     }
@@ -347,6 +356,8 @@ export async function refreshBuckets(): Promise<void> {
 export interface RefreshObjectsOptions {
   /** Do not interrupt an already-owned listing transaction. */
   supersedePending?: boolean;
+  /** Keep the current selection (manual refresh) instead of clearing it. */
+  preserveSelection?: boolean;
 }
 
 function queueTrailingListingRefresh(
@@ -409,6 +420,7 @@ function releaseListingOwnership(request: number): void {
 async function runObjectRefresh(
   bucket: string,
   prefix: string,
+  preserveSelection = false,
 ): Promise<boolean> {
   const request = ++listingGeneration;
   activeListingRequest = request;
@@ -450,7 +462,10 @@ async function runObjectRefresh(
     ];
     state.continuationToken = response.next_continuation_token;
     state.hasMore = response.truncated;
-    state.selectedKeys.clear();
+    state.listingCapped = false;
+    if (!preserveSelection) {
+      clearAllSelection();
+    }
     return true;
   } finally {
     releaseListingOwnership(request);
@@ -471,7 +486,7 @@ export function refreshObjects(
   if (options.supersedePending === false && activeListingRequest !== null) {
     return queueTrailingListingRefresh(bucket, prefix);
   }
-  return runObjectRefresh(bucket, prefix);
+  return runObjectRefresh(bucket, prefix, options.preserveSelection ?? false);
 }
 
 export async function loadMoreObjects(): Promise<void> {
@@ -552,6 +567,7 @@ export async function loadMoreObjects(): Promise<void> {
   ) {
     state.continuationToken = "";
     state.hasMore = false;
+    state.listingCapped = true;
     showToast(
       `Listing capped at ${MAX_ACCUMULATED_LISTING_ITEMS.toLocaleString()} items to keep browsing responsive. Narrow the prefix to see more.`,
       { type: "warning" },

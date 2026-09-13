@@ -388,3 +388,14 @@
   border: 0;
   pointer-events: none;
 }
+
+.listing-cap-notice {
+  color: var(--warning);
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.metadata-batch-more {
+  color: var(--text-secondary, var(--muted));
+  font-style: italic;
+}

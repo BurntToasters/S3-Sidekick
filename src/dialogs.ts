@@ -146,6 +146,10 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     if (config.showInput) {
       el.input.focus();
       el.input.select();
+    } else if (config.okDanger && config.showCancel) {
+      // A destructive action must not be the default Enter/Space target:
+      // focus the safe choice so the confirmation is actually read.
+      el.cancel.focus();
     } else {
       el.ok.focus();
     }

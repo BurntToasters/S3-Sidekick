@@ -166,9 +166,13 @@ describe("app-conflicts choice and consent branches", () => {
 
   it("resolveConflictChoice short-circuits when applyAll is set", async () => {
     const { resolveConflictChoice } = await import("../app-conflicts.ts");
-    const decision = await resolveConflictChoice("bucket/k", {
-      applyAll: "skip",
-    }, true);
+    const decision = await resolveConflictChoice(
+      "bucket/k",
+      {
+        applyAll: "skip",
+      },
+      true,
+    );
     expect(decision).toBe("skip");
     expect(mockShowConfirm).not.toHaveBeenCalled();
   });
@@ -395,14 +399,9 @@ describe("app-conflicts object and download routing", () => {
     mockInvoke.mockResolvedValueOnce(false);
     const { resolveObjectConflict } = await import("../app-conflicts.ts");
     await expect(
-      resolveObjectConflict(
-        "conn",
-        "b",
-        "k",
-        { applyAll: "replace" },
-        true,
-        { operation: "upload" },
-      ),
+      resolveObjectConflict("conn", "b", "k", { applyAll: "replace" }, true, {
+        operation: "upload",
+      }),
     ).resolves.toEqual({ overwrite: true });
     expect(mockShowConfirm).not.toHaveBeenCalled();
   });

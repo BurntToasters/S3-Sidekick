@@ -76,6 +76,8 @@ export interface TransferItem {
     | "finalizing";
   tempPath?: string;
   speedBps: number;
+  /** Wall-clock of the last progress event; drives the stalled indicator. */
+  lastProgressAt?: number;
   etaSeconds: number | null;
   paused: boolean;
   resumable: boolean;
@@ -243,6 +245,29 @@ let downloadProgressUnlisten: UnlistenFn | null = null;
 let renderQueued = false;
 let fullRenderQueued = false;
 const dirtyTransferIds = new Set<number>();
+let stallTicker: ReturnType<typeof setInterval> | null = null;
+const STALLED_AFTER_MS = 15_000;
+
+function ensureStallTicker(): void {
+  if (stallTicker !== null) return;
+  stallTicker = setInterval(() => {
+    if (!queue.some((item) => item.status === "uploading")) {
+      if (stallTicker !== null) {
+        clearInterval(stallTicker);
+        stallTicker = null;
+      }
+      return;
+    }
+    queueRender();
+  }, 5_000);
+}
+
+function stopStallTicker(): void {
+  if (stallTicker !== null) {
+    clearInterval(stallTicker);
+    stallTicker = null;
+  }
+}
 let cancelClickHandler: ((e: Event) => void) | null = null;
 let recoveredQueue = false;
 let recoveryInFlight: Promise<void> | null = null;
@@ -361,7 +386,7 @@ async function confirmUnguardedTransferWrite(
   const proceed = await showConfirm(
     "Unconditional Write",
     "This storage provider cannot enforce create-only writes. Another client could create the same key before this transfer finishes. Write anyway?",
-    { okLabel: "Write anyway", cancelLabel: "Cancel" },
+    { okLabel: "Write anyway", cancelLabel: "Cancel", okDanger: true },
   );
   if (!proceed) return false;
   const remaining = queue.filter(
@@ -573,9 +598,7 @@ function scalePartConcurrencyForGlobalBudget(
   partSizeMb: number,
 ): number {
   const safeRequested =
-    Number.isFinite(requested) && requested > 0
-      ? Math.floor(requested)
-      : 1;
+    Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : 1;
   const safePartMb =
     Number.isFinite(partSizeMb) && partSizeMb > 0 ? partSizeMb : 16;
   const activeCount = Math.max(
@@ -659,12 +682,7 @@ function delayCancellable(ms: number, item: TransferItem): Promise<void> {
   return new Promise<void>((resolve) => {
     const timer = setTimeout(cleanupAndResolve, ms);
     const probe = setInterval(() => {
-      if (
-        item.cancelRequested ||
-        item.paused ||
-        queuePaused ||
-        offlineHold
-      ) {
+      if (item.cancelRequested || item.paused || queuePaused || offlineHold) {
         cleanupAndResolve();
       }
     }, 50);
@@ -1424,6 +1442,7 @@ function applyProgressPayload(
   if (typeof payload.speed_bps === "number" && payload.speed_bps >= 0) {
     item.speedBps = payload.speed_bps;
   }
+  item.lastProgressAt = Date.now();
   if (typeof payload.eta_seconds === "number" && payload.eta_seconds >= 0) {
     item.etaSeconds = payload.eta_seconds;
   }
@@ -1670,7 +1689,7 @@ export async function initTransferQueueUI(): Promise<void> {
         return;
       }
       selectedTransferId = id;
-      queueRender();
+      queueRender(id);
     };
     list.addEventListener("click", cancelClickHandler);
   }
@@ -1679,6 +1698,7 @@ export async function initTransferQueueUI(): Promise<void> {
 }
 
 export function disposeTransferQueueUI(): void {
+  stopStallTicker();
   if (progressUnlisten) {
     const unlisten = progressUnlisten;
     progressUnlisten = null;
@@ -1969,7 +1989,8 @@ export function enqueueFiles(
       typeof (file as { path?: unknown }).path === "string"
         ? ((file as { path?: string }).path ?? "")
         : "";
-    const key = targetPrefix + file.name;
+    const fileName = file.name.normalize("NFC");
+    const key = targetPrefix + fileName;
     queue.push({
       id: allocateTransferId(),
       connectionId: enqueueTarget.connectionId,
@@ -2027,7 +2048,7 @@ export function enqueuePaths(
   for (const filePath of paths) {
     const normalizedPath = filePath.trim();
     const parts = normalizedPath.replace(/\\/g, "/").split("/");
-    const fileName = parts[parts.length - 1] ?? "";
+    const fileName = (parts[parts.length - 1] ?? "").normalize("NFC");
     const key = targetPrefix + fileName;
     queue.push({
       id: allocateTransferId(),
@@ -2083,7 +2104,13 @@ export function enqueueFolderEntries(
   const bucket = enqueueTarget.bucket;
   const maxAttempts = maxAttemptsFromSettings();
   for (const entry of entries) {
-    const rel = entry.relative_path.replace(/\\/g, "/").replace(/^\/+/, "");
+    const rel = (
+      state.platformName === "windows"
+        ? entry.relative_path.replace(/\\/g, "/")
+        : entry.relative_path
+    )
+      .replace(/^\/+/, "")
+      .normalize("NFC");
     if (!rel) continue;
     const segments = rel.split("/");
     const fileName = segments[segments.length - 1];
@@ -2271,6 +2298,7 @@ async function processQueue(): Promise<void> {
   }
 
   processing = true;
+  ensureStallTicker();
   let completedUploadThisRun = false;
   let completedDownloadThisRun = false;
   let attemptedUploadThisRun = false;
@@ -2403,6 +2431,20 @@ async function processQueue(): Promise<void> {
   }
 
   await Promise.all(workers);
+  // An enqueue continuation can land after the last worker claimed null but
+  // before `processing` is cleared; without this drain loop that item would sit
+  // queued until an unrelated pause/resume/online event arrived.
+  while (
+    !queuePaused &&
+    !offlineHold &&
+    queue.some((t) => t.status === "queued" && !t.paused)
+  ) {
+    const drain: Promise<void>[] = [];
+    for (let i = 0; i < maxConcurrent; i += 1) {
+      drain.push(runWorker());
+    }
+    await Promise.all(drain);
+  }
   processing = false;
   resetConflictApplyAllWhenIdle();
 
@@ -2419,9 +2461,7 @@ async function processQueue(): Promise<void> {
       hadUpload: completedUploadThisRun,
       hadDownload: completedDownloadThisRun,
       hadListingChange:
-        completedUploadThisRun ||
-        completedCopyThisRun ||
-        completedMoveThisRun,
+        completedUploadThisRun || completedCopyThisRun || completedMoveThisRun,
       uploadCount,
       downloadCount,
       copyCount,
@@ -3155,28 +3195,34 @@ function renderTransferRow(t: TransferItem): string {
       ? `<span class="transfer-attempt">Attempt ${t.attempt}/${t.maxAttempts}</span>`
       : "";
 
+  const stalled =
+    t.status === "uploading" &&
+    t.lastProgressAt !== undefined &&
+    Date.now() - t.lastProgressAt > STALLED_AFTER_MS;
   const phaseLabel =
     t.status === "uploading"
-      ? `<span class="transfer-phase">${
-          t.phase === "retry_wait"
-            ? "Retry wait"
-            : t.phase === "verifying"
-              ? "Verifying"
-              : t.phase === "paused"
-                ? "Paused"
-                : t.phase === "resuming"
-                  ? "Resuming"
-                  : t.phase === "finalizing"
-                    ? "Finalizing"
-                    : "Running"
+      ? `<span class="transfer-phase${stalled ? " transfer-phase--stalled" : ""}">${
+          stalled
+            ? "Stalled — waiting for data"
+            : t.phase === "retry_wait"
+              ? "Retry wait"
+              : t.phase === "verifying"
+                ? "Verifying"
+                : t.phase === "paused"
+                  ? "Paused"
+                  : t.phase === "resuming"
+                    ? "Resuming"
+                    : t.phase === "finalizing"
+                      ? "Finalizing"
+                      : "Running"
         }</span>`
       : "";
   const speedLabel =
-    t.status === "uploading" && t.speedBps > 0
+    t.status === "uploading" && !stalled && t.speedBps > 0
       ? `<span class="transfer-phase">${escapeHtml(formatSpeedBps(t.speedBps))}</span>`
       : "";
   const etaLabel =
-    t.status === "uploading" && t.etaSeconds !== null
+    t.status === "uploading" && !stalled && t.etaSeconds !== null
       ? `<span class="transfer-phase">ETA ${escapeHtml(formatEtaSeconds(t.etaSeconds))}</span>`
       : "";
   const partsLabel =

@@ -220,13 +220,13 @@ describe("syncInspectorFromSelection", () => {
     state.connectionId = "test-connection";
     state.connectionIdentity = "test-identity";
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:folder/");
+    state.selectedPrefixes.add("folder/");
 
     const inspector = await import("../inspector.ts");
     inspector.setInspectorOpen(true);
     inspector.focusInspectorPropertiesPane();
 
-    await inspector.syncInspectorFromSelection(state.selectedKeys, {
+    await inspector.syncInspectorFromSelection(undefined, {
       reason: "selection",
     });
 

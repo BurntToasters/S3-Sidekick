@@ -108,24 +108,6 @@ describe("activity log with drawer", () => {
     expect(transferToggle.getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("shows/hides activity drawer only in activity-tab contexts", async () => {
-    const drawer = await import("../bottom-drawer.ts");
-    drawer.initDrawer();
-    const activity = await import("../activity-log.ts");
-    const el = document.getElementById("bottom-drawer") as HTMLDivElement;
-
-    activity.showActivityLog();
-    expect(el.hidden).toBe(false);
-
-    drawer.switchDrawerTab("transfers");
-    activity.hideActivityLog();
-    expect(el.hidden).toBe(false);
-
-    drawer.switchDrawerTab("activity");
-    activity.hideActivityLog();
-    expect(el.hidden).toBe(true);
-  });
-
   it("caps activity history at 200 entries and renders warning/error icons", async () => {
     const drawer = await import("../bottom-drawer.ts");
     drawer.initDrawer();

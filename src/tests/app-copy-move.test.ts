@@ -207,7 +207,12 @@ describe("copy/move validation", () => {
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "object_exists") return true;
       if (cmd === "list_objects") {
-        return { objects: [], prefixes: [], truncated: false, next_continuation_token: "" };
+        return {
+          objects: [],
+          prefixes: [],
+          truncated: false,
+          next_continuation_token: "",
+        };
       }
       return undefined;
     });
@@ -256,7 +261,12 @@ describe("copy/move validation", () => {
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "object_exists") return true;
       if (cmd === "list_objects") {
-        return { objects: [], prefixes: [], truncated: false, next_continuation_token: "" };
+        return {
+          objects: [],
+          prefixes: [],
+          truncated: false,
+          next_continuation_token: "",
+        };
       }
       return undefined;
     });
@@ -310,7 +320,7 @@ describe("copy/move validation", () => {
     state.selectedKeys.clear();
     state.selectedKeys.add("docs/a.txt");
     state.selectedKeys.add("docs/b.txt");
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     openCopyMoveDialog();
     expect(
       (document.getElementById("copy-move-desc") as HTMLElement).textContent,
@@ -359,7 +369,12 @@ describe("copy/move conflict routing", () => {
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "object_exists") return false;
       if (cmd === "list_objects") {
-        return { objects: [], prefixes: [], truncated: false, next_continuation_token: "" };
+        return {
+          objects: [],
+          prefixes: [],
+          truncated: false,
+          next_continuation_token: "",
+        };
       }
       return undefined;
     });
@@ -409,7 +424,7 @@ describe("copy/move conflict routing", () => {
     const { state } = await import("../state.ts");
     state.selectedKeys.add("docs/a.txt");
     state.selectedKeys.add("docs/b.txt");
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockInvoke.mockImplementation(async (cmd, args) => {
       if (cmd === "object_exists") {
         const key = (args as { key?: string }).key ?? "";
@@ -425,7 +440,12 @@ describe("copy/move conflict routing", () => {
             next_continuation_token: "",
           };
         }
-        return { objects: [], prefixes: [], truncated: false, next_continuation_token: "" };
+        return {
+          objects: [],
+          prefixes: [],
+          truncated: false,
+          next_continuation_token: "",
+        };
       }
       return undefined;
     });
@@ -452,7 +472,7 @@ describe("copy/move conflict routing", () => {
   it("creates a lone folder without conflict as overwrite when policy is replace", async () => {
     const { state } = await import("../state.ts");
     state.currentSettings.conflictPolicy = "replace";
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     const { openCopyMoveDialog } = await import("../app-copy-move.ts");
     openCopyMoveDialog();
     (document.getElementById("copy-move-path") as HTMLInputElement).value =
@@ -470,7 +490,7 @@ describe("copy/move conflict routing", () => {
 
   it("accepts unguarded folder creation when consent is given", async () => {
     const { state } = await import("../state.ts");
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     state.createOnlyCapabilities = {
       put_object: false,
       complete_multipart: false,
@@ -494,7 +514,7 @@ describe("copy/move conflict routing", () => {
 
   it("cancels folder creation when unguarded consent is declined", async () => {
     const { state } = await import("../state.ts");
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     state.createOnlyCapabilities = {
       put_object: false,
       complete_multipart: false,
@@ -519,7 +539,7 @@ describe("copy/move conflict routing", () => {
   it("skips conflicting folders under skip policy without prompting", async () => {
     const { state } = await import("../state.ts");
     state.currentSettings.conflictPolicy = "skip";
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "list_objects") {
         return {
@@ -549,7 +569,7 @@ describe("copy/move conflict routing", () => {
 
   it("replaces conflicting folders when the user confirms", async () => {
     const { state } = await import("../state.ts");
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "list_objects") {
         return {
@@ -580,7 +600,7 @@ describe("copy/move conflict routing", () => {
   it("treats folder existence probe errors as conflicts", async () => {
     const { state } = await import("../state.ts");
     state.currentSettings.conflictPolicy = "replace";
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "list_objects") throw new Error("throttled");
       return undefined;
@@ -649,7 +669,12 @@ describe("copy/move browser and recents", () => {
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "object_exists") return false;
       if (cmd === "list_objects") {
-        return { objects: [], prefixes: [], truncated: false, next_continuation_token: "" };
+        return {
+          objects: [],
+          prefixes: [],
+          truncated: false,
+          next_continuation_token: "",
+        };
       }
       return undefined;
     });
@@ -718,7 +743,10 @@ describe("copy/move browser and recents", () => {
       document.querySelectorAll(".copy-move-recent-item"),
     ).map((el) => el.textContent);
     expect(items[0]).toContain("bucket-a/archive/");
-    (items[0] ? document.querySelector(".copy-move-recent-item") as HTMLButtonElement : null)?.click();
+    (items[0]
+      ? (document.querySelector(".copy-move-recent-item") as HTMLButtonElement)
+      : null
+    )?.click();
     expect(
       (document.getElementById("copy-move-path") as HTMLInputElement).value,
     ).toBe("archive/");
@@ -739,17 +767,19 @@ describe("copy/move browser and recents", () => {
     });
     const { openCopyMoveDialog } = await import("../app-copy-move.ts");
     openCopyMoveDialog();
-    (document.getElementById("copy-move-browse-toggle") as HTMLButtonElement).click();
+    (
+      document.getElementById("copy-move-browse-toggle") as HTMLButtonElement
+    ).click();
     await vi.waitFor(() => {
-      expect(
-        document.querySelector(".copy-move-folder-item"),
-      ).not.toBeNull();
+      expect(document.querySelector(".copy-move-folder-item")).not.toBeNull();
     });
     expect(
       (document.getElementById("copy-move-browser-crumbs") as HTMLElement)
         .textContent,
     ).toContain("docs");
-    (document.querySelector(".copy-move-folder-item") as HTMLButtonElement).click();
+    (
+      document.querySelector(".copy-move-folder-item") as HTMLButtonElement
+    ).click();
     expect(
       (document.getElementById("copy-move-path") as HTMLInputElement).value,
     ).toBe("docs/sub/file.txt");
@@ -758,7 +788,9 @@ describe("copy/move browser and recents", () => {
   it("shows an empty state when a folder has no subfolders", async () => {
     const { openCopyMoveDialog } = await import("../app-copy-move.ts");
     openCopyMoveDialog();
-    (document.getElementById("copy-move-browse-toggle") as HTMLButtonElement).click();
+    (
+      document.getElementById("copy-move-browse-toggle") as HTMLButtonElement
+    ).click();
     await vi.waitFor(() => {
       expect(
         (document.getElementById("copy-move-browser-list") as HTMLElement)
@@ -774,7 +806,9 @@ describe("copy/move browser and recents", () => {
     });
     const { openCopyMoveDialog } = await import("../app-copy-move.ts");
     openCopyMoveDialog();
-    (document.getElementById("copy-move-browse-toggle") as HTMLButtonElement).click();
+    (
+      document.getElementById("copy-move-browse-toggle") as HTMLButtonElement
+    ).click();
     await vi.waitFor(() => {
       expect(
         (document.getElementById("copy-move-browser-list") as HTMLElement)

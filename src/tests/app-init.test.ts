@@ -264,6 +264,7 @@ describe("app-init startup waterfall", () => {
       "us-east-1",
       "ak",
       "sk",
+      "",
     );
     expect(mockInitUpdater).toHaveBeenCalledTimes(1);
     // Deferred via setTimeout fallback: allow the timer to fire.
@@ -526,6 +527,7 @@ describe("app-init startup waterfall", () => {
       "eu-west-1",
       "ak2",
       "sk2",
+      "",
     );
   });
 
@@ -610,9 +612,7 @@ describe("app-init startup waterfall", () => {
       const { init } = await import("../app-init.ts");
       await init();
       await vi.advanceTimersByTimeAsync(1600);
-      const overlay = document.getElementById(
-        "support-overlay",
-      ) as HTMLElement;
+      const overlay = document.getElementById("support-overlay") as HTMLElement;
       expect(overlay.hasAttribute("hidden")).toBe(false);
 
       // Backdrop click dismisses.
@@ -631,9 +631,7 @@ describe("app-init startup waterfall", () => {
     try {
       mockIsSupportPromptDismissed.mockReturnValue(false);
       mockIncrementLaunchCount.mockResolvedValue(5);
-      mockMarkSupportPromptDismissed.mockRejectedValue(
-        new Error("save gone"),
-      );
+      mockMarkSupportPromptDismissed.mockRejectedValue(new Error("save gone"));
       mockInvoke.mockImplementation(async (cmd) => {
         if (cmd === "get_platform_info") return "macos";
         if (cmd === "open_external_url") throw new Error("no browser");
@@ -691,9 +689,7 @@ describe("app-init startup waterfall", () => {
       await vi.advanceTimersByTimeAsync(1600);
       await vi.advanceTimersByTimeAsync(2100);
       await vi.advanceTimersByTimeAsync(1600);
-      const overlay = document.getElementById(
-        "support-overlay",
-      ) as HTMLElement;
+      const overlay = document.getElementById("support-overlay") as HTMLElement;
       expect(overlay.hasAttribute("hidden")).toBe(false);
 
       document.dispatchEvent(

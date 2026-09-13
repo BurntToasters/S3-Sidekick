@@ -5,8 +5,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use aws_sdk_s3::types::{
-    ChecksumAlgorithm, ChecksumMode, ChecksumType, Delete, MetadataDirective, ObjectCannedAcl,
-    ObjectIdentifier,
+    ChecksumAlgorithm, ChecksumMode, ChecksumType, Delete, EncodingType, MetadataDirective,
+    ObjectCannedAcl, ObjectIdentifier,
 };
 use aws_sdk_s3::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -41,6 +41,15 @@ const PARALLEL_DOWNLOAD_THRESHOLD_MB: u32 = 128;
 const RANGE_UNSUPPORTED_CODE: &str = "__range_unsupported__";
 const MAX_UPLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DOWNLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+// 5 TiB at the 16 MiB minimum part size is ~328k parts; anything beyond this
+// means the endpoint lied about Content-Length and must not size allocations.
+const MAX_DOWNLOAD_PARTS: u64 = 1_000_000;
+// Connect phase stays short; body-bearing requests scale their attempt timeout
+// with payload size so slow links are not cut off mid-transfer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const MIN_BODY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(45);
+const MAX_BODY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3600);
+const MIN_TRANSFER_RATE_BYTES_PER_SECOND: u64 = 256 * 1024;
 const TRANSFER_ERROR_PREFIX: &str = "__S3_SIDEKICK_TRANSFER_ERROR__";
 const CHECKSUM_METADATA_KEY: &str = "s3-sidekick-sha256";
 const PREFERRED_MULTIPART_COPY_PART_SIZE: u64 = 500 * 1024 * 1024;
@@ -248,9 +257,10 @@ fn validate_bucket_name(bucket: &str) -> Result<(), String> {
     if !(3..=63).contains(&bucket.len()) {
         return Err("Bucket name must be between 3 and 63 characters".to_string());
     }
-    if !bucket.bytes().all(|byte| {
-        byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.' || byte == b'_'
-    }) {
+    if !bucket
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.' || byte == b'_')
+    {
         return Err(
             "Bucket name may only contain letters, digits, hyphens, underscores, and dots"
                 .to_string(),
@@ -828,6 +838,7 @@ async fn prefix_has_content(
         .bucket(bucket)
         .prefix(prefix)
         .max_keys(1)
+        .encoding_type(EncodingType::Url)
         .send();
     let output = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
@@ -951,6 +962,31 @@ fn clamp_part_size_mb(value: Option<u32>, fallback: u32) -> u32 {
         .clamp(MIN_PART_SIZE_MB, MAX_PART_SIZE_MB)
 }
 
+/// Content-Length is endpoint-controlled. A negative or overflowing value must
+/// never become a huge unsigned progress total or part count.
+fn sanitized_content_length(value: Option<i64>) -> u64 {
+    value.and_then(|v| u64::try_from(v).ok()).unwrap_or(0)
+}
+
+/// Attempt timeout for a request whose body can take real time to move.
+///
+/// The SDK's `operation_attempt_timeout` covers the whole attempt including
+/// body streaming, so the fixed 45s global value fails large parts below
+/// ~6 Mbps. Scale with payload size at a conservative floor rate instead.
+fn attempt_timeout_for_bytes(bytes: u64) -> Duration {
+    Duration::from_secs(bytes / MIN_TRANSFER_RATE_BYTES_PER_SECOND)
+        .clamp(MIN_BODY_ATTEMPT_TIMEOUT, MAX_BODY_ATTEMPT_TIMEOUT)
+}
+
+/// Per-operation config override that applies the scaled attempt timeout.
+fn body_attempt_timeout_override(bytes: u64) -> aws_sdk_s3::config::Builder {
+    let timeout = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .operation_attempt_timeout(attempt_timeout_for_bytes(bytes))
+        .build();
+    aws_sdk_s3::config::Builder::new().timeout_config(timeout)
+}
+
 fn clamp_transfer_concurrency(value: Option<u32>) -> usize {
     value
         .unwrap_or(DEFAULT_TRANSFER_CONCURRENCY)
@@ -1009,13 +1045,20 @@ fn choose_upload_part_size_bytes(
     requested_mb: Option<u32>,
 ) -> Result<usize, String> {
     let part_mb = clamp_part_size_mb(requested_mb, DEFAULT_UPLOAD_PART_SIZE_MB);
-    let part_size = (part_mb as u64) * 1024 * 1024;
-    let parts = file_size.div_ceil(part_size);
+    let mut part_size = (part_mb as u64) * 1024 * 1024;
+    let mut parts = file_size.div_ceil(part_size);
     if parts > 10_000 {
-        return Err(format!(
-            "File requires too many multipart parts ({}) with {}MB part size.",
-            parts, part_mb
-        ));
+        // Grow the part size toward the 5 GiB provider maximum rather than
+        // refusing objects above ~1.25 TiB at the default preset. Every part
+        // except the last must be equal, which `div_ceil` preserves.
+        const MAX_UPLOAD_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
+        part_size = file_size.div_ceil(10_000).min(MAX_UPLOAD_PART_SIZE);
+        parts = file_size.div_ceil(part_size);
+        if parts > 10_000 {
+            return Err(
+                "Object is too large to upload within the 10,000-part multipart limit.".to_string(),
+            );
+        }
     }
     Ok(part_size as usize)
 }
@@ -1097,16 +1140,17 @@ fn save_checkpoint_payload(
     save_transfer_checkpoint_json(app, checkpoint_id, &json, recovery_session)
 }
 
-fn persist_checkpoint_and_advance<F>(
+async fn persist_checkpoint_and_advance<F, Fut>(
     last_saved_at: &mut Instant,
     last_saved_parts: &mut u32,
     completed_count: u32,
     persist: F,
 ) -> Result<(), String>
 where
-    F: FnOnce() -> Result<(), String>,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
 {
-    persist()?;
+    persist().await?;
     *last_saved_at = Instant::now();
     *last_saved_parts = completed_count;
     Ok(())
@@ -1424,16 +1468,15 @@ fn parse_endpoint_host(endpoint: &str) -> Option<String> {
     }
 
     let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    if host_port.starts_with('[') {
-        return None;
+    // Bracketed IPv6 literals (`http://[::1]:9000`) are valid endpoint hosts;
+    // strip the brackets instead of refusing to parse them.
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
     }
-
-    let host = host_port
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .trim_end_matches('.');
+    .trim()
+    .trim_end_matches('.');
     if host.is_empty() {
         return None;
     }
@@ -1502,6 +1545,32 @@ fn resolve_region(endpoint: &str, region: &str) -> Result<String, String> {
     })
 }
 
+/// Strip a virtual-hosted bucket label from a known AWS S3 host.
+///
+/// Accepts `<bucket>.s3.amazonaws.com`, `<bucket>.s3.<region>.amazonaws.com`,
+/// `<bucket>.s3-<region>.amazonaws.com` and the dualstack forms, returning the
+/// service endpoint and extracted bucket. Foreign hosts are left untouched:
+/// stripping a label there would corrupt legitimate hostnames.
+fn strip_aws_virtual_host(host: &str) -> Option<(String, String)> {
+    let suffix = [".amazonaws.com", ".amazonaws.com.cn"]
+        .into_iter()
+        .find(|suffix| host.ends_with(suffix))?;
+    let labels: Vec<&str> = host.trim_end_matches(suffix).split('.').collect();
+    let s3_index = labels
+        .iter()
+        .position(|label| *label == "s3" || label.starts_with("s3-"))?;
+    // Only a single leading bucket label is a virtual-hosted address; an `s3`
+    // label at position 0 means this is already the service endpoint.
+    if s3_index != 1 {
+        return None;
+    }
+    let bucket = labels[0].to_string();
+    if bucket.is_empty() {
+        return None;
+    }
+    Some((format!("{}{}", labels[1..].join("."), suffix), bucket))
+}
+
 /// Normalize an endpoint string into a full URL suitable for the AWS SDK.
 fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), String> {
     let trimmed = raw.trim().trim_end_matches('/');
@@ -1530,19 +1599,31 @@ fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), String> {
         _ => (authority, None),
     };
 
-    let host_lower = host.to_ascii_lowercase();
-    let mut bucket_hint: Option<String> = None;
-
-    // Extract bucket from path if present
-    if !path.is_empty() {
-        let first_segment = path.split('/').next().unwrap_or("");
-        if !first_segment.is_empty() {
-            bucket_hint = Some(first_segment.to_string());
-        }
+    // A single trailing path segment is accepted as a bucket hint (pasting a
+    // bucket URL). Anything deeper is a reverse-proxy base path that
+    // path-style request building cannot preserve, so reject it rather than
+    // silently dropping segments.
+    if path.contains('/') {
+        return Err(
+            "Endpoint URLs with a base path are not supported; use the service endpoint."
+                .to_string(),
+        );
     }
 
+    let host_lower = host.to_ascii_lowercase();
+    let mut bucket_hint: Option<String> = if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    };
+
     let do_suffix = ".digitaloceanspaces.com";
-    let normalized_host = if host_lower.ends_with(do_suffix) {
+    let normalized_host = if let Some((endpoint, bucket)) = strip_aws_virtual_host(&host_lower) {
+        if bucket_hint.is_none() {
+            bucket_hint = Some(bucket);
+        }
+        endpoint
+    } else if host_lower.ends_with(do_suffix) {
         let prefix = host_lower.trim_end_matches(do_suffix);
         let parts: Vec<&str> = prefix.split('.').collect();
         if parts.len() >= 2 {
@@ -1563,10 +1644,25 @@ fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), String> {
     };
 
     if normalized_host.is_empty() {
-        return Err("Endpoint URL has no host; enter a full endpoint such as https://s3.amazonaws.com.".to_string());
+        return Err(
+            "Endpoint URL has no host; enter a full endpoint such as https://s3.amazonaws.com."
+                .to_string(),
+        );
     }
 
     Ok((url, bucket_hint))
+}
+
+/// Decode a key or prefix returned by a listing requested with
+/// `encoding-type=url`.
+///
+/// Without it S3 emits keys raw inside XML, and a key containing a character
+/// XML 1.0 forbids (for example a control byte) makes the whole page
+/// unparseable. Continuation tokens are opaque and must never be decoded.
+fn decode_listed(value: &str) -> String {
+    urlencoding::decode(value)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| value.to_string())
 }
 
 fn format_sdk_error<E: std::fmt::Debug>(
@@ -1586,8 +1682,23 @@ fn format_sdk_error<E: std::fmt::Debug>(
             if body.chars().count() > 200 {
                 excerpt.push('…');
             }
-            eprintln!("S3 {} (HTTP {}): full service body: {}", prefix, status, body);
-            format!("{} (HTTP {}): {}", prefix, status, excerpt)
+            eprintln!(
+                "S3 {} (HTTP {}): full service body: {}",
+                prefix, status, body
+            );
+            let mut message = format!("{} (HTTP {}): {}", prefix, status, excerpt);
+            // Wrong-region buckets answer 301/307 with the authoritative
+            // region in a header; surface it so the user can correct the
+            // connection instead of staring at an opaque redirect.
+            if status == 301 || status == 307 {
+                if let Some(region) = raw.headers().get("x-amz-bucket-region") {
+                    message.push_str(&format!(
+                        " Bucket is in region '{}'; reconnect with that region.",
+                        region
+                    ));
+                }
+            }
+            message
         }
         SdkError::DispatchFailure(err) => {
             eprintln!("S3 {} (dispatch): full error: {:?}", prefix, err);
@@ -1633,6 +1744,43 @@ fn structured_transfer_sdk_error<E: std::fmt::Debug>(
         }
         SdkError::DispatchFailure(_) => encode_transfer_error("network", true, None, message),
         _ => encode_transfer_error(default_code, default_retryable, None, message),
+    }
+}
+
+/// CompleteMultipartUpload can fail with HTTP 200 plus an embedded error body,
+/// and AWS documents such completions as possibly still in progress. Retrying
+/// the same completed-part list is safe; aborting a live completion is not.
+/// CompleteMultipartUpload can fail with HTTP 200 plus an embedded error body,
+/// and AWS documents such completions as possibly still in progress. Retrying
+/// the same completed-part list is safe; aborting a live completion is not.
+fn complete_upload_error_is_retryable<E: std::fmt::Debug>(
+    err: &aws_sdk_s3::error::SdkError<E>,
+) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    match err {
+        SdkError::ServiceError(ctx) => {
+            let status = ctx.raw().status().as_u16();
+            status == 200 || status == 408 || status == 425 || status == 429 || status >= 500
+        }
+        SdkError::DispatchFailure(_) | SdkError::TimeoutError(_) => true,
+        _ => false,
+    }
+}
+
+/// Retry only failures a later attempt can fix. A 400/403/404 part failure is
+/// deterministic; re-sending the part just burns bandwidth before the same
+/// error surfaces.
+fn upload_part_error_is_retryable<E: std::fmt::Debug>(
+    err: &aws_sdk_s3::error::SdkError<E>,
+) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    match err {
+        SdkError::ServiceError(ctx) => {
+            let status = ctx.raw().status().as_u16();
+            status == 408 || status == 425 || status == 429 || status >= 500
+        }
+        SdkError::DispatchFailure(_) | SdkError::TimeoutError(_) => true,
+        _ => false,
     }
 }
 
@@ -2136,6 +2284,7 @@ pub(crate) async fn connect(
     region: String,
     mut access_key: String,
     mut secret_key: String,
+    mut session_token: Option<String>,
 ) -> Result<ConnectResult, String> {
     let endpoint = endpoint.trim().to_string();
     if endpoint.is_empty() {
@@ -2159,23 +2308,37 @@ pub(crate) async fn connect(
     let (normalized, bucket_hint) = normalize_endpoint(&endpoint)?;
     let identity = connection_identity(&normalized, &access_key);
 
-    let creds =
-        aws_sdk_s3::config::Credentials::new(&access_key, &secret_key, None, None, "s3-sidekick");
+    // Temporary STS credentials (SSO, AssumeRole) carry a session token that
+    // must be signed with every request; without it those keys fail closed.
+    let session = session_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+    let creds = aws_sdk_s3::config::Credentials::new(
+        &access_key,
+        &secret_key,
+        session,
+        None,
+        "s3-sidekick",
+    );
 
     // Zeroize the plaintext credential strings now that they've been consumed
     access_key.zeroize();
     secret_key.zeroize();
+    if let Some(token) = session_token.as_mut() {
+        token.zeroize();
+    }
 
     // Bound hung connections: without timeouts a stalled TCP connect or an
     // idle response body blocks forever, since the cancel token only fires on
     // explicit user cancellation. Per-attempt (not total-operation) timeouts
     // are used so large multipart transfers are not cut off mid-stream; each
     // individual request still races the cancel token at every call site.
-    let timeout_config =
-        aws_sdk_s3::config::timeout::TimeoutConfig::builder()
-            .connect_timeout(Duration::from_secs(8))
-            .operation_attempt_timeout(Duration::from_secs(45))
-            .build();
+    let timeout_config = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .operation_attempt_timeout(Duration::from_secs(45))
+        .build();
     let retry_config = aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(3);
 
     let config = aws_sdk_s3::config::Builder::new()
@@ -2355,7 +2518,11 @@ pub(crate) async fn list_objects(
     let client = require_client(&state, &connection_id, None)?;
     let cancel = client.token();
 
-    let mut req = client.list_objects_v2().bucket(&bucket).max_keys(1000);
+    let mut req = client
+        .list_objects_v2()
+        .bucket(&bucket)
+        .max_keys(1000)
+        .encoding_type(EncodingType::Url);
 
     if !prefix.is_empty() {
         req = req.prefix(&prefix);
@@ -2378,7 +2545,7 @@ pub(crate) async fn list_objects(
         .contents()
         .iter()
         .map(|obj| {
-            let key = obj.key().unwrap_or_default().to_string();
+            let key = decode_listed(obj.key().unwrap_or_default());
             let is_folder = key.ends_with('/');
             ObjectInfo {
                 key,
@@ -2395,7 +2562,7 @@ pub(crate) async fn list_objects(
     let prefixes = output
         .common_prefixes()
         .iter()
-        .filter_map(|p| p.prefix().map(|s| s.to_string()))
+        .filter_map(|p| p.prefix().map(decode_listed))
         .collect();
 
     let truncated = output.is_truncated().unwrap_or(false);
@@ -2871,7 +3038,10 @@ pub(crate) async fn upload_object(
         // until the whole body had been transmitted.
         let output = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
-            result = req.send() => {
+            result = req
+                .customize()
+                .config_override(body_attempt_timeout_override(file_size))
+                .send() => {
                 result.map_err(|e| {
                     if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
                         return map_create_only_write_error(&key, &e, overwrite, "upload");
@@ -2937,7 +3107,10 @@ async fn upload_part_with_retry(
         if let Some(checksum) = checksum.as_ref() {
             request = request.checksum_sha256(&checksum.base64);
         }
-        let send = request.send();
+        let send = request
+            .customize()
+            .config_override(body_attempt_timeout_override(bytes as u64))
+            .send();
         let result = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
             result = send => result,
@@ -2961,6 +3134,9 @@ async fn upload_part_with_retry(
                     "upload_part",
                     true,
                 );
+                if !upload_part_error_is_retryable(&err) {
+                    return Err(last_error);
+                }
                 if attempt < UPLOAD_PART_RETRY_ATTEMPTS {
                     let delay = Duration::from_millis(250 * (2u64.pow(attempt - 1)));
                     // Observe cancellation during backoff rather than sleeping
@@ -3249,50 +3425,73 @@ async fn upload_multipart(
         .set_parts(Some(final_parts))
         .build();
 
-    let mut complete_request = client
-        .complete_multipart_upload()
-        .bucket(bucket)
-        .key(key)
-        .upload_id(&upload_id)
-        .multipart_upload(completed_upload)
-        .mpu_object_size(file_size as i64);
-    if let Some((request_checksum, _)) = composite_checksum.as_ref() {
-        complete_request = complete_request
-            .checksum_sha256(request_checksum)
-            .checksum_type(ChecksumType::Composite);
-    }
-    if !overwrite {
-        complete_request =
-            apply_complete_multipart_create_only_guard(complete_request, provider, key)?;
-    }
-    let complete_request = complete_request.send();
-    let complete_result = tokio::select! {
-        _ = cancel.cancelled() => {
-            abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
-            return Err(cancelled_error());
+    let mut complete_output = None;
+    let mut last_complete_error = String::new();
+    const COMPLETE_ATTEMPTS: u32 = 3;
+    for attempt in 1..=COMPLETE_ATTEMPTS {
+        let mut complete_request = client
+            .complete_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .multipart_upload(completed_upload.clone())
+            .mpu_object_size(file_size as i64);
+        if let Some((request_checksum, _)) = composite_checksum.as_ref() {
+            complete_request = complete_request
+                .checksum_sha256(request_checksum)
+                .checksum_type(ChecksumType::Composite);
         }
-        result = complete_request => result,
-    };
-
-    let complete_output = match complete_result {
-        Ok(output) => output,
-        Err(e) => {
-            abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
-            if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
-                return Err(map_create_only_write_error(
-                    key,
-                    &e,
-                    overwrite,
-                    "complete upload",
-                ));
+        if !overwrite {
+            complete_request =
+                apply_complete_multipart_create_only_guard(complete_request, provider, key)?;
+        }
+        let complete_request = complete_request
+            .customize()
+            .config_override(body_attempt_timeout_override(file_size))
+            .send();
+        let complete_result = tokio::select! {
+            _ = cancel.cancelled() => {
+                abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+                return Err(cancelled_error());
             }
-            return Err(structured_transfer_sdk_error(
-                "Failed to complete multipart upload",
-                &e,
-                "upload_complete",
-                true,
-            ));
+            result = complete_request => result,
+        };
+        match complete_result {
+            Ok(output) => {
+                complete_output = Some(output);
+                break;
+            }
+            Err(e) => {
+                if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
+                    abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+                    return Err(map_create_only_write_error(
+                        key,
+                        &e,
+                        overwrite,
+                        "complete upload",
+                    ));
+                }
+                last_complete_error = structured_transfer_sdk_error(
+                    "Failed to complete multipart upload",
+                    &e,
+                    "upload_complete",
+                    true,
+                );
+                if !complete_upload_error_is_retryable(&e) || attempt == COMPLETE_ATTEMPTS {
+                    abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+                    return Err(last_complete_error);
+                }
+                let delay = Duration::from_millis(500 * 2u64.pow(attempt - 1));
+                if !cancel.sleep_unless_cancelled(delay).await {
+                    abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+                    return Err(cancelled_error());
+                }
+            }
         }
+    }
+    let complete_output = match complete_output {
+        Some(output) => output,
+        None => return Err(last_complete_error),
     };
     if let Some((_, response_checksum)) = composite_checksum.as_ref() {
         verify_upload_checksum_value(
@@ -3331,7 +3530,15 @@ pub(crate) async fn upload_object_bytes(
     validate_bucket_name(&bucket)?;
     validate_mutating_key(&key, "Object key")?;
     // Base64 keeps the browser-file IPC payload near 1.4x instead of the 3-4x
-    // of a JSON number array for the same bytes.
+    // of a JSON number array for the same bytes. Reject oversized payloads
+    // before decoding so a compromised webview cannot force the allocation.
+    let max_encoded_len = MAX_UPLOAD_OBJECT_BYTES / 3 * 4 + 4;
+    if bytes_base64.trim().len() > max_encoded_len {
+        return Err(format!(
+            "Browser upload fallback is limited to {} MB.",
+            MAX_UPLOAD_OBJECT_BYTES / (1024 * 1024)
+        ));
+    }
     let bytes = B64
         .decode(bytes_base64.trim())
         .map_err(|e| format!("Invalid browser upload payload: {e}"))?;
@@ -3400,7 +3607,10 @@ pub(crate) async fn upload_object_bytes(
 
     let output = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
-        result = req.send() => {
+        result = req
+            .customize()
+            .config_override(body_attempt_timeout_override(total))
+            .send() => {
             result.map_err(|e| {
                 if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
                     return map_create_only_write_error(&key, &e, overwrite, "upload");
@@ -3627,7 +3837,7 @@ pub(crate) async fn download_object(
         }
     };
 
-    let total_bytes = output.content_length().unwrap_or(0) as u64;
+    let total_bytes = sanitized_content_length(output.content_length());
     emit_transfer_progress(
         &app,
         "download-progress",
@@ -3765,8 +3975,16 @@ async fn stream_body_to_temp(
 
     let mut written = 0u64;
     let mut last_emitted = 0u64;
+    let mut last_emitted_at = Instant::now();
     let mut buf = [0u8; 64 * 1024];
     const PROGRESS_INTERVAL: u64 = 256 * 1024;
+    // Bandwidth-proportional events would flood the IPC bridge on fast links;
+    // keep byte granularity but never emit more than ten times a second. The
+    // caller emits the terminal update after this returns.
+    const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+    // A body read that yields nothing for this long is a stalled endpoint, not
+    // a slow transfer: fail retryably instead of hanging the transfer forever.
+    const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
     loop {
         if cancel.is_cancelled() {
@@ -3775,8 +3993,22 @@ async fn stream_body_to_temp(
 
         let count = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
-            result = reader.read(&mut buf) => {
-                result.map_err(|e| format!("Failed to read body: {}", e))?
+            result = tokio::time::timeout(BODY_IDLE_TIMEOUT, reader.read(&mut buf)) => {
+                match result {
+                    Ok(read_result) => read_result
+                        .map_err(|e| format!("Failed to read body: {}", e))?,
+                    Err(_) => {
+                        return Err(encode_transfer_error(
+                            "stalled",
+                            true,
+                            None,
+                            format!(
+                                "Download stalled: no data received for {} seconds.",
+                                BODY_IDLE_TIMEOUT.as_secs()
+                            ),
+                        ));
+                    }
+                }
             }
         };
         if count == 0 {
@@ -3791,7 +4023,9 @@ async fn stream_body_to_temp(
         }
         written += count as u64;
 
-        if written - last_emitted >= PROGRESS_INTERVAL {
+        if written - last_emitted >= PROGRESS_INTERVAL
+            && last_emitted_at.elapsed() >= PROGRESS_MIN_INTERVAL
+        {
             emit_transfer_progress(
                 app,
                 "download-progress",
@@ -3807,6 +4041,7 @@ async fn stream_body_to_temp(
                 Some(false),
             );
             last_emitted = written;
+            last_emitted_at = Instant::now();
         }
     }
 
@@ -3874,11 +4109,9 @@ async fn claim_download_temp_async(
 ) -> Result<crate::DownloadTempGuard, String> {
     let temp_path = temp_path.to_path_buf();
     let destination = destination.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        crate::claim_download_temp(&temp_path, &destination)
-    })
-    .await
-    .map_err(|err| format!("Download scratch claim task failed: {}", err))?
+    tokio::task::spawn_blocking(move || crate::claim_download_temp(&temp_path, &destination))
+        .await
+        .map_err(|err| format!("Download scratch claim task failed: {}", err))?
 }
 
 async fn issue_download_lease_async(
@@ -3896,11 +4129,7 @@ async fn issue_download_lease_async(
     .map_err(|err| format!("Download lease task failed: {}", err))?
 }
 
-async fn release_download_lease_async(
-    app: &tauri::AppHandle,
-    destination: &Path,
-    nonce: &str,
-) {
+async fn release_download_lease_async(app: &tauri::AppHandle, destination: &Path, nonce: &str) {
     let app = app.clone();
     let destination = destination.to_path_buf();
     let nonce = nonce.to_owned();
@@ -3912,11 +4141,9 @@ async fn release_download_lease_async(
 
 async fn clear_download_scratch_async(temp_path: &Path) -> Result<(), String> {
     let temp_path = temp_path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        crate::clear_unusable_download_scratch(&temp_path)
-    })
-    .await
-    .map_err(|err| format!("Download scratch cleanup task failed: {}", err))?
+    tokio::task::spawn_blocking(move || crate::clear_unusable_download_scratch(&temp_path))
+        .await
+        .map_err(|err| format!("Download scratch cleanup task failed: {}", err))?
 }
 
 async fn remove_download_scratch(path: &Path) {
@@ -4158,7 +4385,7 @@ pub(crate) async fn download_object_parallel(
             })?
         }
     };
-    let total_bytes = head.content_length().unwrap_or(0) as u64;
+    let total_bytes = sanitized_content_length(head.content_length());
     let object_etag = head.e_tag().unwrap_or_default().to_string();
     let object_version_id = head
         .version_id()
@@ -4195,7 +4422,14 @@ pub(crate) async fn download_object_parallel(
 
     let part_size =
         (clamp_part_size_mb(part_size_mb, DEFAULT_DOWNLOAD_PART_SIZE_MB) as u64) * 1024 * 1024;
-    let total_parts = total_bytes.div_ceil(part_size) as u32;
+    let total_parts_u64 = total_bytes.div_ceil(part_size);
+    if total_parts_u64 > MAX_DOWNLOAD_PARTS {
+        return Err(format!(
+            "Object metadata reports {} bytes ({} parts), beyond the supported download range.",
+            total_bytes, total_parts_u64
+        ));
+    }
+    let total_parts = total_parts_u64 as u32;
     if total_parts <= 1 {
         // Hand off to the sequential path. Release our registered client first
         // so disconnect/reset never observes an untracked credential clone.
@@ -4490,8 +4724,29 @@ pub(crate) async fn download_object_parallel(
                                 &mut last_checkpoint_saved_at,
                                 &mut last_checkpoint_saved_parts,
                                 completed_count,
-                                || save_checkpoint_payload(&app, id, &payload, &recovery_session),
-                            ) {
+                                {
+                                    let save_app = app.clone();
+                                    let save_id = id.to_string();
+                                    let save_session = recovery_session.clone();
+                                    let save_payload = payload.clone();
+                                    move || async move {
+                                        tokio::task::spawn_blocking(move || {
+                                            save_checkpoint_payload(
+                                                &save_app,
+                                                &save_id,
+                                                &save_payload,
+                                                &save_session,
+                                            )
+                                        })
+                                        .await
+                                        .map_err(
+                                            |err| format!("Checkpoint writer task failed: {}", err),
+                                        )?
+                                    }
+                                },
+                            )
+                            .await
+                            {
                                 // Other workers may still be writing later
                                 // ranges. Stop and drain them before returning,
                                 // while retaining both checkpoint and scratch so
@@ -4817,7 +5072,9 @@ fn immutable_version_id(value: Option<&str>) -> Option<&str> {
     // AWS returns the literal "null" version ID for versioning-suspended
     // objects. It pins that generation exactly like any other version, so it
     // must be preserved as a valid version pin, not normalized to None.
-    value.map(str::trim).filter(|version_id| !version_id.is_empty())
+    value
+        .map(str::trim)
+        .filter(|version_id| !version_id.is_empty())
 }
 
 fn require_immutable_move_version(value: Option<&str>, key: &str) -> Result<String, String> {
@@ -5467,7 +5724,11 @@ async fn copy_object_multipart(
         if let Some(etag) = info.etag.as_deref() {
             part_builder = part_builder.copy_source_if_match(etag);
         }
-        let part_request = part_builder.send();
+        let part_bytes = end - offset + 1;
+        let part_request = part_builder
+            .customize()
+            .config_override(body_attempt_timeout_override(part_bytes))
+            .send();
         let part_result = tokio::select! {
             _ = cancel.cancelled() => {
                 abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
@@ -5690,9 +5951,16 @@ pub(crate) async fn rename_object(
     // back to an ETag-pinned copy plus a HEAD-fingerprint and If-Match guarded
     // delete under the mutation lease held above. Either way the copy carries
     // `copy-source-if-match`, and deletion revalidates both ends.
-    let source_version = preflight_optional_move_version(&client, &bucket, &old_key, &cancel).await?;
-    let source_info =
-        describe_object(&client, &bucket, &old_key, source_version.as_deref(), &cancel).await?;
+    let source_version =
+        preflight_optional_move_version(&client, &bucket, &old_key, &cancel).await?;
+    let source_info = describe_object(
+        &client,
+        &bucket,
+        &old_key,
+        source_version.as_deref(),
+        &cancel,
+    )
+    .await?;
     let receipt = copy_with_receipt(
         &client,
         &bucket,
@@ -5754,7 +6022,8 @@ async fn preflight_prefix_copy_sources(
         let mut request = client
             .list_objects_v2()
             .bucket(src_bucket)
-            .prefix(src_prefix);
+            .prefix(src_prefix)
+            .encoding_type(EncodingType::Url);
         if let Some(token) = continuation_token.as_deref() {
             request = request.continuation_token(token);
         }
@@ -5766,16 +6035,17 @@ async fn preflight_prefix_copy_sources(
         };
 
         for object in output.contents() {
-            let Some(key) = object.key() else {
+            let Some(raw_key) = object.key() else {
                 continue;
             };
+            let key = decode_listed(raw_key);
             if sources.len() >= MAX_PREFIX_TRANSACTION_OBJECTS {
                 return Err(format!(
                     "Prefix operation exceeds the {}-object transaction limit; no destination was changed",
                     MAX_PREFIX_TRANSACTION_OBJECTS
                 ));
             }
-            if !seen_keys.insert(key.to_string()) {
+            if !seen_keys.insert(key.clone()) {
                 return Err(format!(
                     "S3 listing repeated source key '{}'; no destination was changed",
                     key
@@ -5796,12 +6066,12 @@ async fn preflight_prefix_copy_sources(
             // unversioned ones record `None` and rely on the ETag-pinned
             // fallback at deletion time. Only genuine failures abort here.
             let immutable_version_id = if require_immutable_versions {
-                preflight_optional_move_version(client, src_bucket, key, cancel).await?
+                preflight_optional_move_version(client, src_bucket, &key, cancel).await?
             } else {
                 None
             };
             sources.push(PrefixCopySource {
-                source_key: key.to_string(),
+                source_key: key,
                 destination_key,
                 immutable_version_id,
             });
@@ -5832,7 +6102,11 @@ async fn list_all_keys_under_prefix(
     let mut seen_tokens = HashSet::new();
 
     loop {
-        let mut req = client.list_objects_v2().bucket(bucket).prefix(prefix);
+        let mut req = client
+            .list_objects_v2()
+            .bucket(bucket)
+            .prefix(prefix)
+            .encoding_type(EncodingType::Url);
         if let Some(ref token) = continuation_token {
             req = req.continuation_token(token);
         }
@@ -5852,7 +6126,7 @@ async fn list_all_keys_under_prefix(
                         MAX_PREFIX_TRANSACTION_OBJECTS
                     ));
                 }
-                keys.push(k.to_string());
+                keys.push(decode_listed(k));
             }
         }
 
@@ -5893,7 +6167,11 @@ pub(crate) async fn delete_prefix(
     let mut seen_tokens = HashSet::new();
 
     'pages: loop {
-        let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
+        let mut req = client
+            .list_objects_v2()
+            .bucket(&bucket)
+            .prefix(&prefix)
+            .encoding_type(EncodingType::Url);
         if let Some(ref token) = continuation_token {
             req = req.continuation_token(token);
         }
@@ -5925,7 +6203,7 @@ pub(crate) async fn delete_prefix(
         let keys: Vec<String> = output
             .contents()
             .iter()
-            .filter_map(|obj| obj.key().map(|k| k.to_string()))
+            .filter_map(|obj| obj.key().map(decode_listed))
             .collect();
         let next_token = match next_page_token(
             output.is_truncated().unwrap_or(false),
@@ -7210,8 +7488,10 @@ async fn delete_move_receipts_checked(
     } else if versioned == 0 {
         delete_unversioned_receipts_checked(client, src_bucket, dst_bucket, receipts, cancel).await
     } else {
-        Err("Move receipts mix versioned and unversioned sources; source deletion was refused."
-            .to_string())
+        Err(
+            "Move receipts mix versioned and unversioned sources; source deletion was refused."
+                .to_string(),
+        )
     }
 }
 
@@ -7682,14 +7962,16 @@ mod tests {
 
     #[test]
     fn normalize_endpoint_adds_https_scheme() {
-        let (url, bucket) = normalize_endpoint("sfo3.digitaloceanspaces.com").expect("valid test endpoint");
+        let (url, bucket) =
+            normalize_endpoint("sfo3.digitaloceanspaces.com").expect("valid test endpoint");
         assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
         assert_eq!(bucket, None);
     }
 
     #[test]
     fn normalize_endpoint_preserves_existing_scheme() {
-        let (url, _) = normalize_endpoint("https://sfo3.digitaloceanspaces.com").expect("valid test endpoint");
+        let (url, _) =
+            normalize_endpoint("https://sfo3.digitaloceanspaces.com").expect("valid test endpoint");
         assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
         let (url, _) = normalize_endpoint("http://localhost:9000").expect("valid test endpoint");
         assert_eq!(url, "http://localhost:9000");
@@ -7697,25 +7979,29 @@ mod tests {
 
     #[test]
     fn normalize_endpoint_strips_do_bucket_subdomain() {
-        let (url, bucket) = normalize_endpoint("https://fortis.sfo3.digitaloceanspaces.com").expect("valid test endpoint");
+        let (url, bucket) = normalize_endpoint("https://fortis.sfo3.digitaloceanspaces.com")
+            .expect("valid test endpoint");
         assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
         assert_eq!(bucket, Some("fortis".to_string()));
 
-        let (url, bucket) = normalize_endpoint("fortis.sfo3.digitaloceanspaces.com").expect("valid test endpoint");
+        let (url, bucket) =
+            normalize_endpoint("fortis.sfo3.digitaloceanspaces.com").expect("valid test endpoint");
         assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
         assert_eq!(bucket, Some("fortis".to_string()));
     }
 
     #[test]
     fn normalize_endpoint_keeps_region_only_do_host() {
-        let (url, bucket) = normalize_endpoint("https://nyc3.digitaloceanspaces.com").expect("valid test endpoint");
+        let (url, bucket) =
+            normalize_endpoint("https://nyc3.digitaloceanspaces.com").expect("valid test endpoint");
         assert_eq!(url, "https://nyc3.digitaloceanspaces.com");
         assert_eq!(bucket, None);
     }
 
     #[test]
     fn normalize_endpoint_strips_trailing_path_as_bucket() {
-        let (url, bucket) = normalize_endpoint("https://sfo3.digitaloceanspaces.com/fortis").expect("valid test endpoint");
+        let (url, bucket) = normalize_endpoint("https://sfo3.digitaloceanspaces.com/fortis")
+            .expect("valid test endpoint");
         assert_eq!(url, "https://sfo3.digitaloceanspaces.com");
         assert_eq!(bucket, Some("fortis".to_string()));
     }
@@ -7728,8 +8014,60 @@ mod tests {
 
     #[test]
     fn normalize_endpoint_strips_trailing_slash() {
-        let (url, _) = normalize_endpoint("https://s3.amazonaws.com/").expect("valid test endpoint");
+        let (url, _) =
+            normalize_endpoint("https://s3.amazonaws.com/").expect("valid test endpoint");
         assert_eq!(url, "https://s3.amazonaws.com");
+    }
+
+    #[test]
+    fn normalize_endpoint_strips_aws_virtual_host_bucket() {
+        let (url, bucket) = normalize_endpoint("https://mybucket.s3.us-east-1.amazonaws.com")
+            .expect("valid test endpoint");
+        assert_eq!(url, "https://s3.us-east-1.amazonaws.com");
+        assert_eq!(bucket, Some("mybucket".to_string()));
+
+        let (url, bucket) = normalize_endpoint("https://mybucket.s3-us-west-2.amazonaws.com")
+            .expect("valid test endpoint");
+        assert_eq!(url, "https://s3-us-west-2.amazonaws.com");
+        assert_eq!(bucket, Some("mybucket".to_string()));
+
+        let (url, bucket) =
+            normalize_endpoint("https://mybucket.s3.dualstack.us-east-1.amazonaws.com")
+                .expect("valid test endpoint");
+        assert_eq!(url, "https://s3.dualstack.us-east-1.amazonaws.com");
+        assert_eq!(bucket, Some("mybucket".to_string()));
+    }
+
+    #[test]
+    fn normalize_endpoint_keeps_aws_service_endpoints() {
+        let (url, bucket) =
+            normalize_endpoint("https://s3.us-east-1.amazonaws.com").expect("valid test endpoint");
+        assert_eq!(url, "https://s3.us-east-1.amazonaws.com");
+        assert_eq!(bucket, None);
+    }
+
+    #[test]
+    fn normalize_endpoint_rejects_multi_segment_base_path() {
+        assert!(normalize_endpoint("https://gateway.example.com/s3/proxy").is_err());
+        assert!(normalize_endpoint("https://gateway.example.com/s3/proxy/").is_err());
+    }
+
+    #[test]
+    fn sanitized_content_length_rejects_negative_and_overflow() {
+        assert_eq!(sanitized_content_length(Some(-1)), 0);
+        assert_eq!(sanitized_content_length(Some(0)), 0);
+        assert_eq!(sanitized_content_length(Some(2048)), 2048);
+        assert_eq!(sanitized_content_length(None), 0);
+    }
+
+    #[test]
+    fn body_attempt_timeout_scales_with_payload() {
+        assert_eq!(attempt_timeout_for_bytes(0), MIN_BODY_ATTEMPT_TIMEOUT);
+        assert!(attempt_timeout_for_bytes(32 * 1024 * 1024) >= Duration::from_secs(128));
+        assert_eq!(
+            attempt_timeout_for_bytes(u64::MAX),
+            MAX_BODY_ATTEMPT_TIMEOUT
+        );
     }
 
     #[tokio::test]
@@ -8063,10 +8401,7 @@ mod tests {
     /// prefix operation must never target the namespace holding them.
     #[test]
     fn validate_mutating_prefix_protects_the_rollback_namespace() {
-        for prefix in [
-            ROLLBACK_BACKUP_PREFIX,
-            ".s3-sidekick-rollback/1234-99-7/",
-        ] {
+        for prefix in [ROLLBACK_BACKUP_PREFIX, ".s3-sidekick-rollback/1234-99-7/"] {
             let err = validate_mutating_prefix(prefix, "Prefix")
                 .expect_err("rollback backups must not be a mutating target");
             assert!(err.contains("rollback"), "got: {}", err);
@@ -8428,17 +8763,20 @@ mod tests {
         assert!(err.contains("Invalid transfer checkpoint JSON"));
     }
 
-    #[test]
-    fn failed_checkpoint_save_does_not_advance_markers() {
+    #[tokio::test]
+    async fn failed_checkpoint_save_does_not_advance_markers() {
         let original_time = Instant::now();
         let mut last_saved_at = original_time;
         let mut last_saved_parts = 3;
 
-        let err =
-            persist_checkpoint_and_advance(&mut last_saved_at, &mut last_saved_parts, 11, || {
-                Err("disk full".to_string())
-            })
-            .expect_err("persistence failure must be propagated");
+        let err = persist_checkpoint_and_advance(
+            &mut last_saved_at,
+            &mut last_saved_parts,
+            11,
+            || async { Err::<(), String>("disk full".to_string()) },
+        )
+        .await
+        .expect_err("persistence failure must be propagated");
 
         assert_eq!(err, "disk full");
         assert_eq!(last_saved_at, original_time);

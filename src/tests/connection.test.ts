@@ -74,6 +74,7 @@ describe("connection module", () => {
       region: "",
       accessKey: "AKIA123",
       secretKey: "secret",
+      sessionToken: null,
     });
     expect(state.connected).toBe(true);
     expect(state.connecting).toBe(true);
@@ -769,8 +770,18 @@ describe("connection module", () => {
     }));
     mockInvoke.mockResolvedValueOnce({
       objects: [
-        { key: "docs/tail-1.txt", size: 1, last_modified: "", is_folder: false },
-        { key: "docs/tail-2.txt", size: 1, last_modified: "", is_folder: false },
+        {
+          key: "docs/tail-1.txt",
+          size: 1,
+          last_modified: "",
+          is_folder: false,
+        },
+        {
+          key: "docs/tail-2.txt",
+          size: 1,
+          last_modified: "",
+          is_folder: false,
+        },
       ],
       prefixes: ["docs/extra/"],
       truncated: true,
@@ -835,9 +846,7 @@ describe("connection module", () => {
     );
 
     resolvers[1]?.({
-      objects: [
-        { key: "b.txt", size: 1, last_modified: "", is_folder: false },
-      ],
+      objects: [{ key: "b.txt", size: 1, last_modified: "", is_folder: false }],
       prefixes: [],
       truncated: false,
       next_continuation_token: "",

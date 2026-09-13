@@ -97,7 +97,14 @@ import {
   handleNewConnection,
   awsRegionalEndpoint,
 } from "./app-connection.ts";
-import { getSelectedFileKeys } from "./app-selection.ts";
+import {
+  addSelection,
+  getSelectedFileKeys,
+  getSelectionEntries,
+  isSelected,
+  removeSelection,
+  selectionCount,
+} from "./app-selection.ts";
 import {
   handleDelete,
   handleRename,
@@ -121,6 +128,7 @@ import {
   handleContextMenu,
   handleBucketContextMenu,
 } from "./app-context-menu.ts";
+import { openCopyMoveDialog } from "./app-copy-move.ts";
 
 let dragDropUnlisten: (() => void) | null = null;
 
@@ -133,6 +141,7 @@ export function wireEvents(): void {
     "conn-region",
     "conn-access-key",
     "conn-secret-key",
+    "conn-session-token",
   ];
   for (const id of connectionFieldIds) {
     const field = document.getElementById(id) as HTMLInputElement | null;
@@ -361,7 +370,7 @@ export function wireEvents(): void {
     .addEventListener("click", toggleActivityLog);
 
   document.getElementById("batch-properties")!.addEventListener("click", () => {
-    const keys = Array.from(state.selectedKeys);
+    const keys = Array.from(getSelectionEntries());
     if (keys.length > 0) {
       void openInfoPanel(keys);
     }
@@ -396,6 +405,7 @@ export function wireEvents(): void {
             saved.region,
             saved.access_key,
             saved.secret_key,
+            saved.session_token ?? "",
           );
         }
       } catch {
@@ -608,9 +618,9 @@ export function wireEvents(): void {
       (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
     if (!key) return;
     if (input.checked) {
-      state.selectedKeys.add(key);
+      addSelection(key);
     } else {
-      state.selectedKeys.delete(key);
+      removeSelection(key);
     }
     setLastClickedKey(key);
     updateSelectionUI();
@@ -627,10 +637,10 @@ export function wireEvents(): void {
         row.dataset.key ??
         (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
       if (!key) return;
-      if (state.selectedKeys.has(key)) {
-        state.selectedKeys.delete(key);
+      if (isSelected(key)) {
+        removeSelection(key);
       } else {
-        state.selectedKeys.add(key);
+        addSelection(key);
       }
       setLastClickedKey(key);
       updateSelectionUI();
@@ -909,7 +919,14 @@ export function wireEvents(): void {
       label: "Delete Selected",
       icon: "trash-2",
       action: () => void handleDelete(),
-      available: () => state.connected && getSelectedFileKeys().length > 0,
+      available: () => state.connected && selectionCount() > 0,
+    },
+    {
+      id: "copy-move",
+      label: "Copy / Move to...",
+      icon: "folder",
+      action: () => openCopyMoveDialog(),
+      available: () => state.connected && selectionCount() > 0,
     },
     {
       id: "select-all",
@@ -926,7 +943,7 @@ export function wireEvents(): void {
       label: "Deselect All",
       icon: "x-square",
       action: () => clearSelection(),
-      available: () => state.selectedKeys.size > 0,
+      available: () => selectionCount() > 0,
     },
     {
       id: "filter",
@@ -1009,12 +1026,12 @@ export function wireEvents(): void {
       label: "Open Properties for Selection",
       icon: "info",
       action: () => {
-        const keys = Array.from(state.selectedKeys);
+        const keys = Array.from(getSelectionEntries());
         if (keys.length > 0) {
           void openInfoPanel(keys);
         }
       },
-      available: () => state.connected && state.selectedKeys.size > 0,
+      available: () => state.connected && selectionCount() > 0,
     },
     {
       id: "go-up",

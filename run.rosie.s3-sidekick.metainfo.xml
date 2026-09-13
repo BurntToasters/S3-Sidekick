@@ -18,13 +18,6 @@
   <developer>
     <name>BurntToasters</name>
   </developer>
-  <screenshots>
-    <screenshot type="default">
-      <caption>Main browser window</caption>
-      <!-- Placeholder: replace with a hosted 16:9 screenshot before Flathub submission. -->
-      <image>https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/main/docs/screenshot-placeholder.png</image>
-    </screenshot>
-  </screenshots>
   <content_rating type="oars-1.1" />
   <releases>
     <release version="0.11.0-beta.5" date="2026-08-29"/>

@@ -76,14 +76,16 @@
         "bundleMediaFramework": false
       },
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libayatana-appindicator3-1"]
+        "depends": ["libwebkit2gtk-4.1-0"]
+      },
+      "rpm": {
+        "depends": ["webkit2gtk4.1", "gtk3"]
       }
     }
   },
   "plugins": {
     "updater": {
       "active": true,
-      "dialog": true,
       "endpoints": [
         "https://github.com/BurntToasters/S3-Sidekick/releases/latest/download/latest-{{target}}-{{arch}}.json"
       ],

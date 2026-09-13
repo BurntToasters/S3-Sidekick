@@ -1,6 +1,6 @@
 import { basename, escapeHtml } from "./utils.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
-import { state } from "./state.ts";
+import { getSelectionEntries } from "./app-selection.ts";
 import { canPreview, closePreview, openPreview } from "./preview.ts";
 import {
   closeInfoPanel,
@@ -390,7 +390,7 @@ export async function syncInspectorFromSelection(
   await Promise.resolve();
   if (syncGen !== inspectorSyncGeneration) return;
 
-  const keysSet = selectedKeys ?? state.selectedKeys;
+  const keysSet = selectedKeys ?? getSelectionEntries();
   const keys = Array.from(keysSet);
 
   if (keys.length === 0) {
@@ -424,7 +424,13 @@ export async function syncInspectorFromSelection(
       // Selection change picks the useful default pane.
       if (singlePreviewable) {
         focusInspectorPreviewPane();
-        await openPreview(fileKeys[0]);
+        // Debounce: rapid keyboard/mouse selection would otherwise fetch a
+        // preview body for every intermediate row. A newer sync bumps
+        // `syncGen`, so the pending fetch is abandoned instead of racing.
+        const previewKey = fileKeys[0];
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+        if (syncGen !== inspectorSyncGeneration) return;
+        await openPreview(previewKey);
         return;
       }
       focusInspectorPropertiesPane();

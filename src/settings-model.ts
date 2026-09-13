@@ -289,9 +289,15 @@ export function parseSettingsRaw(json: string): LoadSettingsResult {
   const settingsRaw: Partial<UserSettings> = {};
 
   for (const [key, value] of Object.entries(parsed)) {
+    // `__proto__` and friends would mutate Object.prototype through the
+    // `extras[key] = value` assignment below.
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      malformed = true;
+      continue;
+    }
     if (key.startsWith("_")) {
       extras[key] = value;
-    } else if (key in SETTING_DEFAULTS) {
+    } else if (Object.prototype.hasOwnProperty.call(SETTING_DEFAULTS, key)) {
       (settingsRaw as Record<string, unknown>)[key] = value;
     } else if (KNOWN_EXTRAS.has(key)) {
       extras[key] = value;

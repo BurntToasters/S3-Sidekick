@@ -73,7 +73,9 @@ function defaultInvoke(cmd: unknown, args?: Record<string, unknown>): unknown {
   return undefined;
 }
 
-async function setupConnected(): Promise<typeof import("../state.ts")["state"]> {
+async function setupConnected(): Promise<
+  (typeof import("../state.ts"))["state"]
+> {
   const { state } = await import("../state.ts");
   state.connected = true;
   state.connectionId = "test-connection";
@@ -290,7 +292,7 @@ describe("file rename validation", () => {
 describe("folder rename rules", () => {
   it("does nothing when folder prompt is dismissed or unchanged", async () => {
     const state = await setupConnected();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowPrompt.mockResolvedValueOnce(null);
     const { handleRename } = await import("../app-objects.ts");
     await handleRename();
@@ -308,7 +310,7 @@ describe("folder rename rules", () => {
 
   it("rejects folder names with slashes", async () => {
     const state = await setupConnected();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowPrompt.mockResolvedValueOnce("bad/name");
     const { handleRename } = await import("../app-objects.ts");
     await handleRename();
@@ -320,7 +322,7 @@ describe("folder rename rules", () => {
   it("skips conflicting folder under skip policy", async () => {
     const state = await setupConnected();
     state.currentSettings.conflictPolicy = "skip";
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowPrompt.mockResolvedValueOnce("taken");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "list_objects") {
@@ -342,7 +344,7 @@ describe("folder rename rules", () => {
   it("replaces conflicting folder under replace policy", async () => {
     const state = await setupConnected();
     state.currentSettings.conflictPolicy = "replace";
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowPrompt.mockResolvedValueOnce("taken");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "list_objects") {
@@ -360,7 +362,7 @@ describe("folder rename rules", () => {
 
   it("asks before replacing a conflicting folder and honors skip", async () => {
     const state = await setupConnected();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowPrompt.mockResolvedValueOnce("taken");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "list_objects") {
@@ -379,7 +381,7 @@ describe("folder rename rules", () => {
   it("treats folder probe errors as conflicts", async () => {
     const state = await setupConnected();
     state.currentSettings.conflictPolicy = "replace";
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowPrompt.mockResolvedValueOnce("new-folder");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "list_objects") throw new Error("denied");
@@ -395,7 +397,7 @@ describe("folder rename rules", () => {
 
   it("requires consent for unguarded folder creation and honors decline", async () => {
     const state = await setupConnected();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     state.createOnlyCapabilities = {
       put_object: false,
       complete_multipart: false,
@@ -416,7 +418,7 @@ describe("folder rename rules", () => {
 
   it("renames an absent guarded folder create-only", async () => {
     const state = await setupConnected();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowPrompt.mockResolvedValueOnce("fresh");
     const { handleRename } = await import("../app-objects.ts");
     await handleRename();
@@ -428,7 +430,7 @@ describe("folder rename rules", () => {
 
   it("maps folder rename errors to user messages", async () => {
     const state = await setupConnected();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowPrompt.mockResolvedValueOnce("fresh");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "rename_prefix") throw new Error("Rate limited 429");
@@ -698,7 +700,7 @@ describe("delete confirmations", () => {
 
   it("deletes folders via delete_prefix", async () => {
     const state = await setupConnected();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowConfirm.mockResolvedValueOnce(true);
     const { handleDelete } = await import("../app-objects.ts");
     await handleDelete();
@@ -763,12 +765,10 @@ describe("object copy helpers and presigned expiry", () => {
   it("copies keys and ARNs for multi-select", async () => {
     const state = await setupConnected();
     state.selectedKeys.add("docs/a.txt");
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     const { handleCopyKey, handleCopyArn } = await import("../app-objects.ts");
     await handleCopyKey();
-    expect(mockClipboardWrite).toHaveBeenCalledWith(
-      "docs/a.txt\ndocs/folder/",
-    );
+    expect(mockClipboardWrite).toHaveBeenCalledWith("docs/a.txt\ndocs/folder/");
     await handleCopyArn();
     expect(mockClipboardWrite).toHaveBeenCalledWith(
       expect.stringContaining("arn:aws:s3:::bucket-a/docs/a.txt"),
