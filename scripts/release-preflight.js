@@ -10,12 +10,13 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 
 function expectedReleaseBranch(version) {
   const numeric = "(?:0|[1-9]\\d*)";
-  const beta = String(version).match(
-    new RegExp(
-      `^(${numeric})\\.(${numeric})\\.(${numeric})-beta\\.${numeric}$`,
-    ),
-  );
-  if (beta) return `next-${beta.slice(1, 4).join(".")}`;
+  if (
+    new RegExp(`^${numeric}\\.${numeric}\\.${numeric}-beta\\.${numeric}$`).test(
+      version,
+    )
+  ) {
+    return "beta";
+  }
   if (new RegExp(`^${numeric}\\.${numeric}\\.${numeric}$`).test(version)) {
     return "main";
   }
