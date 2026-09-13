@@ -123,7 +123,7 @@ function uploadReleaseAsset(repository, tag, filePath) {
 }
 
 function uploadReleaseAssetById(repository, releaseId, filePath) {
-  runGitHub(releaseAssetUploadArgs(repository, releaseId, filePath));
+  return githubJson(releaseAssetUploadArgs(repository, releaseId, filePath));
 }
 
 function deleteReleaseAssetById(repository, assetId) {

@@ -7,7 +7,6 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { isDirectExecution } from "./direct-execution.js";
-import { childEnvironment, parseDotEnv } from "./release-env.js";
 
 const { assertCleanSource } = createRequire(import.meta.url)(
   "./release-integrity.cjs",
@@ -35,7 +34,7 @@ function run(command, args, { capture = false, cwd = root } = {}) {
   const result = spawnSync(command, args, {
     cwd,
     encoding: capture ? "utf8" : undefined,
-    env: childEnvironment("build", process.env, {}),
+    env: process.env,
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (result.error) throw result.error;
@@ -166,16 +165,32 @@ function stageFlatpakSource(
   }
 }
 
+const SECRET_ENV_NAMES = new Set([
+  "APPLE_PASSWORD",
+  "AZURE_CLIENT_SECRET",
+  "GPG_KEY_ID",
+  "GPG_PASSPHRASE",
+  "SSH_USER_PWD",
+  "TAURI_SIGNING_PRIVATE_KEY",
+  "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+]);
+
+function isSecretEnvironmentName(name) {
+  if (SECRET_ENV_NAMES.has(name)) return true;
+  if (/^(GH|GITHUB)_TOKEN$/i.test(name)) return true;
+  if (name.startsWith("npm_")) return false;
+  return /PASSWORD|SECRET|PASSPHRASE|PRIVATE_KEY/i.test(name);
+}
+
 function configuredSecretValues(environment = process.env) {
-  let fileValues = {};
-  try {
-    fileValues = parseDotEnv(fs.readFileSync(path.join(root, ".env"), "utf8"));
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  return Object.values({ ...fileValues, ...environment }).filter(
-    (value) => typeof value === "string" && value.length >= 8,
-  );
+  return Object.entries(environment)
+    .filter(
+      ([name, value]) =>
+        typeof value === "string" &&
+        value.length >= 8 &&
+        isSecretEnvironmentName(name),
+    )
+    .map(([, value]) => value);
 }
 
 function assertSanitizedSource(
@@ -267,9 +282,11 @@ if (isDirectExecution(import.meta.url)) {
 
 export {
   assertSanitizedSource,
+  configuredSecretValues,
   detectArch,
   installFlatpakDependencies,
   isSecretEnvironmentFile,
+  isSecretEnvironmentName,
   runFlatpakBuild,
   shouldStage,
   stageFlatpakSource,

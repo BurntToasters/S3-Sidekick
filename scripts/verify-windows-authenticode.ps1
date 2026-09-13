@@ -7,17 +7,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'Authenticode verification must run on Windows.' }
 if ([string]::IsNullOrWhiteSpace($env:AZURE_ARTIFACT_SIGNING_PUBLISHER)) { throw 'AZURE_ARTIFACT_SIGNING_PUBLISHER is required for Authenticode verification.' }
+if ([string]::IsNullOrWhiteSpace($env:AZURE_ARTIFACT_SIGNING_PUBLISHER_DN)) { throw 'AZURE_ARTIFACT_SIGNING_PUBLISHER_DN is required for full Authenticode identity verification.' }
 if ($SignatureOnly -and -not [string]::IsNullOrWhiteSpace($ExpectedRuntimePath)) { throw 'SignatureOnly cannot be combined with ExpectedRuntimePath.' }
 if (-not $SignatureOnly -and [string]::IsNullOrWhiteSpace($ExpectedRuntimePath)) { throw 'ExpectedRuntimePath is required for strict installer verification.' }
 . (Join-Path $PSScriptRoot 'artifact-signing-tools.ps1')
 Import-BundledPowerShellSecurityModule
 
-function Assert-TrustedArtifact([System.IO.FileInfo]$File, [string]$ExpectedPublisher) {
+function Assert-TrustedArtifact([System.IO.FileInfo]$File, [string]$ExpectedPublisher, [string]$ExpectedSubject) {
   $signature = Get-AuthenticodeSignature -LiteralPath $File.FullName
   if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) { throw "Invalid or missing Authenticode signature: $($File.FullName) ($($signature.Status))" }
   if (-not $signature.SignerCertificate) { throw "Missing signer certificate: $($File.FullName)" }
   $publisher = $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
   if ($publisher -ne $ExpectedPublisher) { throw "Unexpected publisher for $($File.FullName): '$publisher'" }
+  $subject = $signature.SignerCertificate.Subject.Trim()
+  if ($subject -ne $ExpectedSubject) { throw "Unexpected certificate Subject for $($File.FullName). Expected '$ExpectedSubject', got '$subject'." }
   if (-not $signature.TimeStamperCertificate) { throw "Missing RFC3161 timestamp: $($File.FullName)" }
   Write-Host "Verified: $($File.FullName)"
 }
@@ -32,12 +35,13 @@ $rawInstallerPaths = @($parsedInstallerPaths)
 if ($rawInstallerPaths.Count -eq 0) { throw 'InstallerPathsJson must contain at least one installer.' }
 
 $expected = $env:AZURE_ARTIFACT_SIGNING_PUBLISHER.Trim()
+$expectedSubject = $env:AZURE_ARTIFACT_SIGNING_PUBLISHER_DN.Trim()
 $runtime = $null
 $baselineRuntimeHash = $null
 if (-not $SignatureOnly) {
   $runtime = Get-Item -LiteralPath (Resolve-Path -LiteralPath $ExpectedRuntimePath).Path
   if ($runtime.PSIsContainer -or $runtime.Extension.ToLowerInvariant() -ne '.exe') { throw 'ExpectedRuntimePath must resolve to an executable file.' }
-  Assert-TrustedArtifact $runtime $expected
+  Assert-TrustedArtifact $runtime $expected $expectedSubject
   $baselineRuntimeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $runtime.FullName).Hash
 }
 
@@ -72,7 +76,7 @@ $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("s3-sidekick-authentico
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 try {
   foreach ($installer in $installers) {
-    Assert-TrustedArtifact $installer $expected
+    Assert-TrustedArtifact $installer $expected $expectedSubject
     $extractDir = Join-Path $tempRoot ([Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $extractDir | Out-Null
     if ($installer.Extension.ToLowerInvariant() -eq '.msi') {
@@ -88,7 +92,7 @@ try {
     }
     $embedded = @(Get-ChildItem -LiteralPath $extractDir -File -Recurse -Filter 's3-sidekick.exe')
     if ($embedded.Count -ne 1) { throw "Expected exactly one embedded s3-sidekick.exe in $($installer.FullName); found $($embedded.Count)" }
-    Assert-TrustedArtifact $embedded[0] $expected
+    Assert-TrustedArtifact $embedded[0] $expected $expectedSubject
     if (-not $SignatureOnly) {
       $embeddedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $embedded[0].FullName).Hash
       if ($embeddedHash -ne $baselineRuntimeHash) { throw "Embedded runtime differs from the signed pre-bundle runtime in $($installer.FullName)" }
@@ -100,11 +104,11 @@ try {
     if ($installer.Extension.ToLowerInvariant() -eq '.exe') {
       $uninstallers = @(Get-ChildItem -LiteralPath $extractDir -File -Recurse | Where-Object { $_.Name -match '(?i)^uninstall.*\.exe$' })
       if ($uninstallers.Count -ne 1) { throw "Expected exactly one extracted uninstaller in $($installer.FullName); found $($uninstallers.Count). Ensure signCommand ran during bundling (!uninstfinalize)." }
-      Assert-TrustedArtifact $uninstallers[0] $expected
+      Assert-TrustedArtifact $uninstallers[0] $expected $expectedSubject
     }
   }
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 $mode = if ($SignatureOnly) { 'signature-only evidence' } else { 'strict runtime-byte verification' }
-Write-Host "Verified $($installers.Count) exact timestamped installer(s), including extracted runtime signatures, from '$expected' ($mode)."
+Write-Host "Verified $($installers.Count) exact timestamped installer(s), including extracted runtime signatures, from '$expectedSubject' ($mode)."

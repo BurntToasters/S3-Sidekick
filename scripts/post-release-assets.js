@@ -88,6 +88,12 @@ function shouldSkipBetaMirror(environment = process.env, version) {
   );
 }
 
+function shouldSkipConfiguredMirror(environment = process.env) {
+  return /^(1|true|yes|on)$/i.test(
+    String(environment.SKIP_RELEASE_MIRROR ?? "").trim(),
+  );
+}
+
 function isMirrorableReleaseEntry(name) {
   return Boolean(name) && !name.startsWith(".");
 }
@@ -215,7 +221,12 @@ function copyReleaseEntryToMirror(sourcePath, destinationPath) {
   const rollbackPath = `${destinationPath}.s3-sidekick-old-${token}`;
   removePath(stagingPath);
   copyPathRecursive(sourcePath, stagingPath);
-  verifyCopiedPath(sourcePath, stagingPath);
+  try {
+    verifyCopiedPath(sourcePath, stagingPath);
+  } catch (error) {
+    removePath(stagingPath);
+    throw error;
+  }
   const hadPrevious = fs.existsSync(destinationPath);
   if (hadPrevious) fs.renameSync(destinationPath, rollbackPath);
   try {
@@ -260,7 +271,8 @@ function run({
 } = {}) {
   let destination = getAfterPackLocation(environment);
   const skippedBetaMirror = shouldSkipBetaMirror(environment, version);
-  if (skippedBetaMirror) destination = "";
+  const skippedConfiguredMirror = shouldSkipConfiguredMirror(environment);
+  if (skippedBetaMirror || skippedConfiguredMirror) destination = "";
   if (destination) resolveMirrorPaths(releaseDir, destination);
   cleanReleaseArtifacts(releaseDir);
   if (!destination) {
@@ -319,5 +331,6 @@ export {
   resolveMirrorPaths,
   run,
   shouldSkipBetaMirror,
+  shouldSkipConfiguredMirror,
   verifyCopiedPath,
 };
