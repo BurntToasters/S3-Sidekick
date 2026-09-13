@@ -796,11 +796,187 @@ fn parse_user_path(raw: &str, label: &str) -> Result<PathBuf, String> {
     if trimmed.is_empty() {
         return Err(format!("{} path is required", label));
     }
+    if trimmed.contains('\0') {
+        return Err(format!("{} path must not contain NUL bytes", label));
+    }
     let path = PathBuf::from(trimmed);
     if !path.is_absolute() {
         return Err(format!("{} path must be absolute: {}", label, trimmed));
     }
+    // Keys are untrusted data; `..` must never climb out of the directory the
+    // user selected. Native dialogs never return `..`, so rejecting it
+    // everywhere costs nothing and closes the whole traversal class.
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "{} path must not contain '..' components: {}",
+            label, trimmed
+        ));
+    }
+    validate_windows_file_name(&path)?;
     Ok(path)
+}
+
+/// Reject Windows-unsafe file names at the trust boundary.
+///
+/// Reserved device names (CON/PRN/AUX/NUL/COM1-9/LPT1-9 with any extension),
+/// trailing spaces/dots (silently stripped by Win32), and colons (ADS
+/// `file:stream` syntax outside the drive prefix) all name a different file
+/// than the user sees. Enforced only on Windows so Linux/macOS keep their
+/// native naming rules.
+fn validate_windows_file_name(path: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(());
+    }
+    for component in path.components() {
+        let name = match component {
+            std::path::Component::Normal(os) => os.to_string_lossy().to_string(),
+            _ => continue,
+        };
+        if name.ends_with(' ') || name.ends_with('.') {
+            return Err(format!(
+                "Path must not end a file or directory name with a space or dot: {}",
+                path.display()
+            ));
+        }
+        if name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+        {
+            return Err(format!(
+                "Path contains characters Windows does not allow: {}",
+                path.display()
+            ));
+        }
+        let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let reserved = matches!(
+            stem.as_str(),
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
+        );
+        if reserved {
+            return Err(format!(
+                "Path uses a Windows reserved device name: {}",
+                path.display()
+            ));
+        }
+        // Check every path segment, not just the file name: a colon in a
+        // parent directory (`dir:stream\file.txt`) is the same ADS syntax.
+        // The drive prefix (`C:`) is a Prefix component, not Normal, so it
+        // is unaffected by this check.
+        if name.contains(':') {
+            return Err(format!(
+                "Path must not contain ':' (Alternate Data Stream syntax): {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Prepend the Win32 extended-length prefix so long absolute paths work with
+/// CreateFileW. No-op on other platforms and when already prefixed.
+#[cfg(target_os = "windows")]
+pub(crate) fn to_extended_windows_path(path: &Path) -> PathBuf {
+    if !cfg!(target_os = "windows") {
+        return path.to_path_buf();
+    }
+    let text = path.to_string_lossy();
+    if text.starts_with(r"\\?\") {
+        return path.to_path_buf();
+    }
+    if let Some(rest) = text.strip_prefix(r"\\") {
+        return PathBuf::from(format!(r"\\?\UNC\{}", rest));
+    }
+    PathBuf::from(format!(r"\\?\{}", text))
+}
+
+/// Strip the Win32 extended-length prefix before returning paths to the UI.
+///
+/// `std::fs::canonicalize` on Windows returns `\\?\C:\...`, which leaks
+/// into dialogs and breaks string prefix comparisons in the frontend.
+pub(crate) fn strip_extended_windows_prefix(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{}", rest);
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    text.to_string()
+}
+
+/// Fail when distinct paths fold to the same key on case-insensitive volumes.
+///
+/// S3 keys are case-sensitive but NTFS/APFS default volumes are not: two
+/// keys differing only by case would overwrite one target. Over-serialization
+/// in `download_path_identity` already folds temp ownership; this helper is
+/// for batch mappings (upload `relative_path` sets, multi-key downloads).
+pub(crate) fn detect_case_fold_collision(
+    pairs: impl IntoIterator<Item = (String, String)>,
+    what: &str,
+) -> Result<(), String> {
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (fold_key, original) in pairs {
+        let folded = fold_key.to_lowercase();
+        if let Some(first) = seen.get(&folded) {
+            if first != &original {
+                return Err(format!(
+                    "Case-insensitive volume collision in {}: '{}' and '{}' map to the same file",
+                    what, first, original
+                ));
+            }
+        } else {
+            seen.insert(folded, original);
+        }
+    }
+    Ok(())
+}
+
+/// Cross-process vault mutation guard.
+///
+/// `STORAGE_OP_LOCK` is in-process only; a second app instance (or a stale
+/// updater copy) could interleave vault writes. Hold an OS-exclusive lock on
+/// `security.json.lock` around mutations. Windows DACL hardening is deferred:
+/// per-user AppData already ACLs to the owner, and explicit deny-ACEs risk
+/// locking users out after domain migration; revisit with a migration-safe
+/// SDDL if threat review requires it.
+pub(crate) struct VaultFileGuard {
+    _file: std::fs::File,
+}
+
+pub(crate) fn lock_vault_file(app_data_dir: &Path) -> Result<VaultFileGuard, String> {
+    use fs2::FileExt;
+    let lock_path = app_data_dir.join("security.json.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| e.to_string())?;
+    file.lock_exclusive().map_err(|e| e.to_string())?;
+    Ok(VaultFileGuard { _file: file })
 }
 
 pub(crate) fn validate_existing_path(raw: &str, label: &str) -> Result<PathBuf, String> {
@@ -908,6 +1084,9 @@ fn download_path_identity(path: &Path) -> Result<PathBuf, String> {
     // Case folding may serialize distinct case-sensitive paths, but it prevents
     // a second owner on case-insensitive volumes. Over-serialization is safer
     // than allowing two writers to target one physical scratch file.
+    // Deferred: to_string_lossy collapses non-UTF8 names the same way. Lease
+    // comparison additionally pins temp_path/destination strings, so a
+    // collision only over-serializes; fix by hashing raw bytes if ever hit.
     Ok(PathBuf::from(
         canonical_parent
             .join(file_name)
@@ -1396,6 +1575,9 @@ fn transfer_checkpoint_gc(
         .collect();
     let security = load_security_config(&app)?;
     let mut removed = 0u32;
+    // Destinations bound to surviving checkpoints: their scratch leases must
+    // survive too, so crash-resumable downloads stay recoverable.
+    let mut kept_destinations: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let iter = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
     for entry in iter {
@@ -1411,6 +1593,11 @@ fn transfer_checkpoint_gc(
             .unwrap_or("")
             .to_string();
         if keep.contains(&id_hash) {
+            if let Ok(json) = read_checkpoint_json(&path, &security) {
+                if let Ok(Some(scratch)) = checkpoint_scratch_path(&json) {
+                    kept_destinations.insert(scratch.destination);
+                }
+            }
             continue;
         }
         let modified = match entry.metadata().ok().and_then(|m| m.modified().ok()) {
@@ -1459,7 +1646,63 @@ fn transfer_checkpoint_gc(
         }
     }
 
+    sweep_unreferenced_download_leases(&app, &kept_destinations)?;
+
     Ok(removed)
+}
+
+/// Remove download leases (and their derived scratch) that no surviving
+/// checkpoint references.
+///
+/// A crash between scratch preallocation and the first checkpoint write leaves
+/// a full-size scratch file with no record outside its lease; nothing else
+/// walks that directory, so reclaim it at recovery time.
+fn sweep_unreferenced_download_leases<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    keep_destinations: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let app_handle = app.app_handle();
+    let dir = resolved_app_data_dir(app)?.join("download-leases");
+    let iter = match std::fs::read_dir(&dir) {
+        Ok(iter) => iter,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    for entry in iter {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let json = match read_download_lease_json(app_handle, &path) {
+            Ok(json) => json,
+            Err(_) => continue,
+        };
+        let lease = match serde_json::from_str::<DownloadScratchLease>(&json) {
+            Ok(lease) => lease,
+            Err(_) => continue,
+        };
+        if keep_destinations.contains(&lease.destination) {
+            continue;
+        }
+        if let Ok(temp_path) = parse_user_path(&lease.temp_path, "Lease scratch") {
+            if temp_path.exists() {
+                clear_unusable_download_scratch(&temp_path)?;
+            }
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "Failed to remove download lease '{}': {}",
+                    path.display(),
+                    err
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1492,44 +1735,81 @@ fn get_available_disk_bytes(path: String) -> Result<u64, String> {
 }
 
 #[tauri::command]
-fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
-    let _storage_guard = lock_storage_meta()?;
-    let path = settings_path(&app)?;
-    if !path.exists() {
-        return Ok("{}".to_string());
-    }
-    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+async fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
+    // Small-file fs behind the storage lock runs on the blocking pool, never
+    // on an async worker. Same pattern as `security::run_blocking`.
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        let path = settings_path(&app)?;
+        if !path.exists() {
+            return Ok("{}".to_string());
+        }
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        // Backup corrupt settings instead of silently returning defaults and
+        // letting the next save overwrite the evidence.
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&raw);
+        match parsed {
+            Ok(value) if value.is_object() => Ok(raw),
+            _ => {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|value| value.as_nanos())
+                    .unwrap_or_default();
+                let backup = path.with_file_name(format!(
+                    "settings.json.corrupt.{}.{}",
+                    std::process::id(),
+                    stamp
+                ));
+                std::fs::rename(&path, &backup).map_err(|e| e.to_string())?;
+                let _ = fsync_parent(&backup);
+                Ok("{}".to_string())
+            }
+        }
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_settings(app: tauri::AppHandle, json: String) -> Result<(), String> {
-    let _storage_guard = lock_storage_meta()?;
-    let path = settings_path(&app)?;
-    atomic_write(&path, &json)
+async fn save_settings(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        let path = settings_path(&app)?;
+        atomic_write(&path, &json)
+    })
+    .await
 }
 
 #[tauri::command]
-fn load_bookmarks(app: tauri::AppHandle) -> Result<String, String> {
-    let _storage_guard = lock_storage_meta()?;
-    let path = bookmarks_path(&app)?;
-    let security = load_security_config(&app)?;
-    read_protected_file(&path, "[]", &security)
+async fn load_bookmarks(app: tauri::AppHandle) -> Result<String, String> {
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        let path = bookmarks_path(&app)?;
+        let security = load_security_config(&app)?;
+        read_protected_file(&path, "[]", &security)
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_bookmarks(app: tauri::AppHandle, json: String) -> Result<(), String> {
-    let _storage_guard = lock_storage_meta()?;
-    let path = bookmarks_path(&app)?;
-    let security = load_security_config(&app)?;
-    write_protected_file(&path, &json, &security)
+async fn save_bookmarks(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        let path = bookmarks_path(&app)?;
+        let security = load_security_config(&app)?;
+        write_protected_file(&path, &json, &security)
+    })
+    .await
 }
 
 #[tauri::command]
-fn load_connection(app: tauri::AppHandle) -> Result<String, String> {
-    let _storage_guard = lock_storage_meta()?;
-    let path = connection_path(&app)?;
-    let security = load_security_config(&app)?;
-    read_protected_file(&path, "", &security)
+async fn load_connection(app: tauri::AppHandle) -> Result<String, String> {
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        let path = connection_path(&app)?;
+        let security = load_security_config(&app)?;
+        read_protected_file(&path, "", &security)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1539,12 +1819,17 @@ fn save_connection(
     connection_id: String,
     json: String,
 ) -> Result<(), String> {
-    // Hold the session lock through persistence. Disconnect and a newer connect
-    // must wait, so an older workflow can never write credentials after the
-    // session it belongs to has been superseded.
+    // Global lock order is storage -> S3: the storage guard is always acquired
+    // first, so credential persistence can never deadlock against vault paths
+    // that take the storage lock and then inspect the session. The session
+    // lock is still held through persistence, so an older workflow can never
+    // write credentials after the session it belongs to has been superseded.
+    // This stays a sync command (with inline fs) because `State` borrows with
+    // a non-'static lifetime and cannot cross into `spawn_blocking`; sync
+    // Tauri commands already run on the blocking pool, off the async executor.
+    let _storage_guard = lock_storage_meta()?;
     let s3 = lock_s3_state(&state)?;
     s3::require_connection_session(&s3, &connection_id)?;
-    let _storage_guard = lock_storage_meta()?;
     let path = connection_path(&app)?;
     let security = load_security_config(&app)?;
     write_protected_file(&path, &json, &security)
@@ -1555,11 +1840,13 @@ fn clear_saved_connection(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    // Serialize against credential saves. Invalidating the session after the
-    // write guarantees an older in-flight connect workflow cannot restore the
-    // credentials that this reset removed.
-    let mut s3 = lock_s3_state(&state)?;
+    // Same global order as `save_connection` (storage -> S3). Serializing
+    // against credential saves and invalidating the session after the write
+    // guarantees an older in-flight connect workflow cannot restore the
+    // credentials that this reset removed. Sync for the same `State`
+    // lifetime reason as above.
     let _storage_guard = lock_storage_meta()?;
+    let mut s3 = lock_s3_state(&state)?;
     let path = connection_path(&app)?;
     let security = load_security_config(&app)?;
     write_protected_file(&path, "", &security)?;
@@ -1568,19 +1855,25 @@ fn clear_saved_connection(
 }
 
 #[tauri::command]
-fn load_bookmarks_backup(app: tauri::AppHandle) -> Result<String, String> {
-    let _storage_guard = lock_storage_meta()?;
-    let path = bookmarks_backup_path(&app)?;
-    let security = load_security_config(&app)?;
-    read_protected_file(&path, "[]", &security)
+async fn load_bookmarks_backup(app: tauri::AppHandle) -> Result<String, String> {
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        let path = bookmarks_backup_path(&app)?;
+        let security = load_security_config(&app)?;
+        read_protected_file(&path, "[]", &security)
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_bookmarks_backup(app: tauri::AppHandle, json: String) -> Result<(), String> {
-    let _storage_guard = lock_storage_meta()?;
-    let path = bookmarks_backup_path(&app)?;
-    let security = load_security_config(&app)?;
-    write_protected_file(&path, &json, &security)
+async fn save_bookmarks_backup(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        let path = bookmarks_backup_path(&app)?;
+        let security = load_security_config(&app)?;
+        write_protected_file(&path, &json, &security)
+    })
+    .await
 }
 
 #[derive(serde::Serialize)]
@@ -1591,71 +1884,85 @@ struct TransferManifestHydration {
 }
 
 #[tauri::command]
-fn load_transfer_manifest(app: tauri::AppHandle) -> Result<TransferManifestHydration, String> {
-    let _storage_guard = lock_storage_meta()?;
-    let recovery_session = load_or_create_transfer_recovery_session_unchecked(&app)?;
-    let path = transfer_manifest_path(&app)?;
-    let security = load_security_config(&app)?;
-    // Releases before this one wrote the manifest unprotected, so plaintext is
-    // tolerated here until the adoption sweep has run.
-    let manifest_json = security::read_protected_file_with_legacy(
-        &path,
-        "",
-        &security,
-        security::LegacyPlaintext::Adopt,
-    )?;
-    let legacy_import_allowed = if manifest_json.trim().is_empty() {
-        transfer_legacy_import_allowed_unchecked(&app)?
-    } else {
-        // Existing native recovery state proves that ownership already moved out
-        // of browser storage. Persist that fact before exposing the hydration so
-        // a later empty/cleared manifest cannot resurrect stale localStorage.
-        close_transfer_legacy_import_unchecked(&app)?;
-        false
-    };
-    Ok(TransferManifestHydration {
-        recovery_session,
-        manifest_json,
-        legacy_import_allowed,
+async fn load_transfer_manifest(
+    app: tauri::AppHandle,
+) -> Result<TransferManifestHydration, String> {
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        let recovery_session = load_or_create_transfer_recovery_session_unchecked(&app)?;
+        let path = transfer_manifest_path(&app)?;
+        let security = load_security_config(&app)?;
+        // Releases before this one wrote the manifest unprotected, so plaintext is
+        // tolerated here until the adoption sweep has run.
+        let manifest_json = security::read_protected_file_with_legacy(
+            &path,
+            "",
+            &security,
+            security::LegacyPlaintext::Adopt,
+        )?;
+        let legacy_import_allowed = if manifest_json.trim().is_empty() {
+            transfer_legacy_import_allowed_unchecked(&app)?
+        } else {
+            // Existing native recovery state proves that ownership already moved out
+            // of browser storage. Persist that fact before exposing the hydration so
+            // a later empty/cleared manifest cannot resurrect stale localStorage.
+            close_transfer_legacy_import_unchecked(&app)?;
+            false
+        };
+        Ok(TransferManifestHydration {
+            recovery_session,
+            manifest_json,
+            legacy_import_allowed,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-fn save_transfer_manifest(
+async fn save_transfer_manifest(
     app: tauri::AppHandle,
     json: String,
     recovery_session: String,
     legacy_import: Option<bool>,
 ) -> Result<(), String> {
-    let _storage_guard = lock_storage_meta()?;
-    require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
-    if legacy_import.unwrap_or(false) && !transfer_legacy_import_allowed_unchecked(&app)? {
-        return Err(
-            "Legacy transfer import is closed; stale browser recovery state was not imported."
-                .to_string(),
-        );
-    }
-    let path = transfer_manifest_path(&app)?;
-    let security = load_security_config(&app)?;
-    write_protected_file(&path, &json, &security)?;
-    // Every successful native save, including the one permitted legacy import,
-    // permanently transfers ownership away from browser storage.
-    close_transfer_legacy_import_unchecked(&app)
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
+        if legacy_import.unwrap_or(false) && !transfer_legacy_import_allowed_unchecked(&app)? {
+            return Err(
+                "Legacy transfer import is closed; stale browser recovery state was not imported."
+                    .to_string(),
+            );
+        }
+        let path = transfer_manifest_path(&app)?;
+        let security = load_security_config(&app)?;
+        write_protected_file(&path, &json, &security)?;
+        // Every successful native save, including the one permitted legacy import,
+        // permanently transfers ownership away from browser storage.
+        close_transfer_legacy_import_unchecked(&app)
+    })
+    .await
 }
 
 #[tauri::command]
-fn clear_transfer_manifest(app: tauri::AppHandle, recovery_session: String) -> Result<(), String> {
-    let _storage_guard = lock_storage_meta()?;
-    require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
-    // Close first: a crash between these operations may leave an old native
-    // manifest, but can never leave an empty backend with legacy import rearmed.
-    close_transfer_legacy_import_unchecked(&app)?;
-    let path = transfer_manifest_path(&app)?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => fsync_parent(&path),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.to_string()),
-    }
+async fn clear_transfer_manifest(
+    app: tauri::AppHandle,
+    recovery_session: String,
+) -> Result<(), String> {
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
+        // Close first: a crash between these operations may leave an old native
+        // manifest, but can never leave an empty backend with legacy import rearmed.
+        close_transfer_legacy_import_unchecked(&app)?;
+        let path = transfer_manifest_path(&app)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => fsync_parent(&path),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    })
+    .await
 }
 pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
     let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1672,7 +1979,21 @@ pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
 #[cfg(unix)]
 fn fsync_directory(dir: &std::path::Path) -> Result<(), String> {
     let file = std::fs::File::open(dir).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())
+    match file.sync_all() {
+        Ok(()) => Ok(()),
+        // vfat/exFAT/FUSE/SMB reject directory fsync with EINVAL/ENOTSUP.
+        // The rename is already visible to readers; reporting failure here
+        // would mark a successful download as failed.
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 #[cfg(windows)]
@@ -1685,7 +2006,7 @@ fn fsync_directory(dir: &std::path::Path) -> Result<(), String> {
         FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
-    let wide: Vec<u16> = dir
+    let wide: Vec<u16> = to_extended_windows_path(dir)
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
@@ -1747,28 +2068,117 @@ pub(crate) fn fsync_parent(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
+/// Create-only move for Windows volumes where hard links are unavailable.
+///
+/// `MoveFileW` fails with `ERROR_ALREADY_EXISTS` when the destination exists;
+/// unlike `MoveFileExW` it never replaces, so the name stays reserved.
+#[cfg(windows)]
+fn move_file_noreplace(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::MoveFileW;
+
+    let source_wide: Vec<u16> = to_extended_windows_path(source)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination_wide: Vec<u16> = to_extended_windows_path(destination)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        MoveFileW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+        )
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// Last-resort create-only publish for filesystems without hard links or
+/// exclusive renames (FAT/exFAT USB drives, some SMB/FUSE mounts).
+///
+/// The destination is reserved with `create_new` before any bytes are written,
+/// so an existing file is never replaced. A crash between reservation and
+/// completion leaves a partial file at the destination; every error path
+/// removes the reservation so the caller can retry cleanly.
+fn copy_file_exclusive(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut destination_file = options.open(destination).map_err(|e| e.to_string())?;
+    let copy_result = std::fs::File::open(source).and_then(|mut source_file| {
+        std::io::copy(&mut source_file, &mut destination_file)?;
+        destination_file.sync_all()
+    });
+    drop(destination_file);
+    match copy_result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(destination);
+            Err(err.to_string())
+        }
+    }
+}
+
+/// Publish a fully synced temp file without replacing an existing destination.
+///
+/// Prefers an atomic hard link (same directory), then the Windows exclusive
+/// move, then a reservation-and-copy fallback so downloads work on filesystems
+/// that support neither.
+fn publish_exclusive(
+    temp_path: &std::path::Path,
+    destination_path: &std::path::Path,
+) -> Result<(), String> {
+    if std::fs::hard_link(temp_path, destination_path).is_ok() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    if move_file_noreplace(temp_path, destination_path).is_ok() {
+        return Ok(());
+    }
+    copy_file_exclusive(temp_path, destination_path)
+        .map_err(|err| format!("Destination was not published without overwrite: {}", err))
+}
+
 pub(crate) fn publish_temp_file(
     temp_path: &std::path::Path,
     destination_path: &std::path::Path,
     overwrite: bool,
 ) -> Result<(), String> {
     if overwrite {
-        if let Err(err) = std::fs::rename(temp_path, destination_path) {
-            let _ = std::fs::remove_file(temp_path);
-            return Err(err.to_string());
+        // Windows AV/indexer briefly opens the temp file after close, making
+        // the rename fail with PermissionDenied. Retry twice before giving up.
+        let mut last_err = String::new();
+        for attempt in 0..3 {
+            match std::fs::rename(temp_path, destination_path) {
+                Ok(()) => return fsync_parent(destination_path),
+                Err(err) => {
+                    last_err = err.to_string();
+                    if attempt < 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
         }
-        return fsync_parent(destination_path);
+        let _ = std::fs::remove_file(temp_path);
+        return Err(last_err);
     }
 
-    // Both paths are created in the same directory. A hard link publishes the
-    // fully synced inode only if the destination is still absent, closing the
-    // exists-then-rename race without relying on platform-specific rename flags.
-    if let Err(err) = std::fs::hard_link(temp_path, destination_path) {
+    if let Err(err) = publish_exclusive(temp_path, destination_path) {
         let _ = std::fs::remove_file(temp_path);
-        return Err(format!(
-            "Destination was not published without overwrite: {}",
-            err
-        ));
+        return Err(err);
     }
     if let Err(err) = fsync_parent(destination_path) {
         let _ = std::fs::remove_file(destination_path);
@@ -1831,6 +2241,9 @@ fn is_owned_atomic_temp(path: &Path) -> bool {
 fn main() {
     #[cfg(target_os = "linux")]
     {
+        // Forced X11: see run.rosie.s3-sidekick.yml finish-args. Re-evaluate
+        // native Wayland once WebKitGTK/Tauri stabilize; keep env override
+        // escape hatch (user-set GDK_BACKEND is respected).
         if std::env::var("GDK_BACKEND").is_err() {
             std::env::set_var("GDK_BACKEND", "x11");
         }
@@ -1980,6 +2393,7 @@ fn main() {
             biometric::disable_biometric,
             biometric::unlock_biometric,
             platform::get_platform_info,
+            platform::is_app_translocated,
             platform::updater_supported,
             platform::updater_support_info,
             platform::open_external_url,

@@ -58,7 +58,7 @@ function removeBundleArguments(args) {
   return result;
 }
 
-function windowsBuildCommands(args) {
+function windowsBuildCommands(args, { signBundle = false } = {}) {
   const withoutSigningFlag = args.filter(
     (argument) => argument !== "--no-sign",
   );
@@ -67,8 +67,25 @@ function windowsBuildCommands(args) {
     cargoSeparator >= 0
       ? withoutSigningFlag.slice(0, cargoSeparator)
       : withoutSigningFlag;
+  // The bundle step must run with signing enabled (no --no-sign) so the
+  // merged signCommand signs the NSIS uninstaller via !uninstfinalize.
+  // Compile stays --no-sign: the runtime is signed manually pre-bundle and
+  // windows-artifact-sign.ps1 skips re-signing valid binaries to keep the
+  // strict runtime-byte hash check stable.
+  const bundleCommand = [tauriCli, "bundle", ...tauriArguments];
+  if (!signBundle) bundleCommand.push("--no-sign");
+  // Tauri signs updater artifacts during bundling whenever
+  // createUpdaterArtifacts is enabled, which requires the updater private key
+  // — intentionally absent from the bundle environment. Updater signing is a
+  // separate release phase (scripts/updater-sign.js), so suppress artifact
+  // generation here while keeping bundle code signing (signCommand) enabled
+  // for the embedded NSIS uninstaller.
+  bundleCommand.push(
+    "--config",
+    JSON.stringify({ bundle: { createUpdaterArtifacts: false } }),
+  );
   return {
-    bundle: [tauriCli, "bundle", ...tauriArguments, "--no-sign"],
+    bundle: bundleCommand,
     compile: [
       tauriCli,
       "build",
@@ -152,7 +169,9 @@ function runWindowsBuild({
       "release",
     );
     const runtimePath = path.join(targetReleaseDir, "s3-sidekick.exe");
-    const commands = windowsBuildCommands(args);
+    const commands = windowsBuildCommands(args, {
+      signBundle: !skipWindowsCodeSigning,
+    });
     const buildEnvironment = childEnvironment("build", environment, {});
     execute(process.execPath, commands.compile, {
       stdio: "inherit",

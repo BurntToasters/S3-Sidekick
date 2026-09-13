@@ -14,6 +14,7 @@ import {
   joinPath,
   pathSeparator,
   friendlyError,
+  safeFileName,
 } from "../utils.ts";
 
 describe("escapeHtml", () => {
@@ -201,6 +202,38 @@ describe("basename", () => {
 
   it("handles empty string", () => {
     expect(basename("")).toBe("");
+  });
+});
+
+describe("safeFileName", () => {
+  it("keeps ordinary names on macOS and Linux", () => {
+    expect(safeFileName("photos/cat.jpg", "macos")).toBe("cat.jpg");
+    expect(safeFileName("photos/cat.jpg", "linux")).toBe("cat.jpg");
+  });
+
+  it("encodes dot segments that would traverse directories", () => {
+    expect(safeFileName("a/..", "linux")).toBe("%2E%2E");
+    expect(safeFileName("a/.", "macos")).toBe("%2E");
+    expect(safeFileName("a/..", "windows")).toBe("%2E%2E");
+  });
+
+  it("percent-encodes Windows-illegal characters injectively", () => {
+    expect(safeFileName('a<b>c:d"e|f?g*h.txt', "windows")).toBe(
+      "a%3Cb%3Ec%3Ad%22e%7Cf%3Fg%2Ah.txt",
+    );
+    expect(safeFileName("back\\slash.txt", "windows")).toBe("back%5Cslash.txt");
+    expect(safeFileName("100%.txt", "windows")).toBe("100%25.txt");
+  });
+
+  it("encodes trailing dots and spaces and reserved device names", () => {
+    expect(safeFileName("report.", "windows")).toBe("report%2E");
+    expect(safeFileName("report ", "windows")).toBe("report%20");
+    expect(safeFileName("CON.txt", "windows")).toBe("%43ON.txt");
+    expect(safeFileName("lpt9", "windows")).toBe("%6Cpt9");
+  });
+
+  it("folds Unicode to NFC", () => {
+    expect(safeFileName("cafe\u0301.txt", "macos")).toBe("caf\u00e9.txt");
   });
 });
 

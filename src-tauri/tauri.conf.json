@@ -16,6 +16,8 @@
         "title": "S3 Sidekick",
         "width": 1100,
         "height": 720,
+        "minWidth": 760,
+        "minHeight": 520,
         "resizable": true,
         "hiddenTitle": true,
         "titleBarStyle": "Overlay"
@@ -27,14 +29,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "dmg",
-      "app",
-      "nsis",
-      "appimage",
-      "deb",
-      "rpm"
-    ],
+    "category": "Utility",
+    "shortDescription": "Desktop client for S3-compatible object storage",
+    "targets": ["dmg", "app", "nsis", "msi", "appimage", "deb", "rpm"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -45,26 +42,50 @@
     ],
     "createUpdaterArtifacts": true,
     "windows": {
+      "signCommand": {
+        "cmd": "powershell.exe",
+        "args": [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "../scripts/windows-artifact-sign.ps1",
+          "-FilePath",
+          "%1"
+        ]
+      },
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
       "nsis": {
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico"
+      },
+      "wix": {
+        "language": "en-US"
       }
     },
     "macOS": {
       "entitlements": "entitlements.plist",
       "hardenedRuntime": true,
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "11.0"
     },
     "linux": {
       "appimage": {
         "bundleMediaFramework": false
+      },
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0"]
+      },
+      "rpm": {
+        "depends": ["webkit2gtk4.1", "gtk3"]
       }
     }
   },
   "plugins": {
     "updater": {
       "active": true,
-      "dialog": true,
       "endpoints": [
         "https://github.com/BurntToasters/S3-Sidekick/releases/latest/download/latest-{{target}}-{{arch}}.json"
       ],

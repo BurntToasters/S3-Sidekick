@@ -121,7 +121,9 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     if (el.inputLabel) el.inputLabel.textContent = inputLabel;
     el.inputWrapper.classList.toggle("dialog-input-wrapper--icon", isPassword);
     el.reveal.hidden = !isPassword;
-    el.reveal.tabIndex = isPassword ? 0 : -1;
+    // The reveal toggle stays in the tab order: keyboard users must be able
+    // to reach it, and the focus trap below already includes it.
+    el.reveal.tabIndex = 0;
     if (isPassword) {
       el.reveal.textContent = "Show";
       el.reveal.setAttribute("aria-label", "Show password");
@@ -144,13 +146,17 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     if (config.showInput) {
       el.input.focus();
       el.input.select();
+    } else if (config.okDanger && config.showCancel) {
+      // A destructive action must not be the default Enter/Space target:
+      // focus the safe choice so the confirmation is actually read.
+      el.cancel.focus();
     } else {
       el.ok.focus();
     }
 
     function focusableInDialog(): HTMLElement[] {
-      // The reveal button is intentionally tabindex="-1" (not in the tab order),
-      // so it is deliberately excluded here to match native Tab behavior.
+      // The reveal toggle is in the tab order while visible (see above), so
+      // it is part of the trap to match native Tab behavior.
       const candidates: (HTMLElement | null)[] = [
         config.showInput ? el.input : null,
         config.showInput && isPassword ? el.reveal : null,
@@ -283,6 +289,15 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
         if (config.showCancel) {
           onCancel();
         } else {
+          // showCancel:false is alert-only (showAlert is the sole caller that
+          // passes it): Escape acknowledges the alert. Never route a confirm
+          // through here — resolving onOk on Escape would silently confirm a
+          // destructive choice the user tried to back out of.
+          if (config.showInput || config.okDanger) {
+            throw new Error(
+              "Dialog misuse: showCancel:false is only valid for plain alerts.",
+            );
+          }
           void onOk();
         }
       }

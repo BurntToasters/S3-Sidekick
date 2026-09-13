@@ -82,6 +82,16 @@ function detectArch(execute = run) {
   return normalizeArch(process.arch);
 }
 
+// ARM64 is tier-2/manual-only: no hosted ARM64 Linux runner builds it in CI.
+// x64 CI covers the release path; ARM64 bundles are built manually on an
+// ARM64 host (`FLATPAK_ARCH=arm64 npm run flatpak:bundle`). Cross-arch
+// builds need a cross linker + qemu-user-static and are not supported by
+// this script; build natively per arch instead.
+function flatpakArchName(arch) {
+  if (arch === "arm64") return "aarch64";
+  return "x86_64";
+}
+
 function isSecretEnvironmentFile(sourcePath) {
   const name = path.basename(sourcePath);
   return (
@@ -321,6 +331,7 @@ function runFlatpakBuild({
       stageSource(execute, undefined, assertSource, environment);
       sanitizeSource(stagedSource);
       execute("flatpak-builder", [
+        `--arch=${flatpakArchName(arch)}`,
         "--disable-download",
         "--repo=flatpak-repo",
         "--force-clean",
@@ -368,6 +379,7 @@ export {
   assertSanitizedSource,
   configuredSecretValues,
   detectArch,
+  flatpakArchName,
   installFlatpakDependencies,
   isSecretEnvironmentFile,
   loadPinnedFlatpakInputs,

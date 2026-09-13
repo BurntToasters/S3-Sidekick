@@ -36,6 +36,7 @@ vi.mock("../browser.ts", () => ({
   showEmptyState: showEmptyStateMock,
   clearSelection: clearSelectionMock,
   clearNavHistory: clearNavHistoryMock,
+  readLastBucket: vi.fn(() => null),
 }));
 
 vi.mock("../bookmarks.ts", () => ({
@@ -132,10 +133,11 @@ describe("connection UX polish", () => {
       "us-east-1",
       "AKIA",
       "secret",
+      "",
     );
   });
 
-  it("ignores bookmark selection while a connect is already in progress", async () => {
+  it("supersedes an in-progress connect when switching bookmarks rapidly", async () => {
     const app = await import("../app-connection.ts");
     const { state } = await import("../state.ts");
     state.connecting = true;
@@ -148,7 +150,8 @@ describe("connection UX polish", () => {
       "secret",
     );
 
-    expect(connectMock).not.toHaveBeenCalled();
+    // The second click is not dropped; its generation supersedes the first.
+    expect(connectMock).toHaveBeenCalled();
   });
 
   it("shows inline validation errors on the connection form", async () => {

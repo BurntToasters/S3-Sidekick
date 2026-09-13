@@ -10,6 +10,14 @@ All release hosts must use Node.js `>= 24.18.0`, npm `12.0.2`, Rust `1.98.0`, an
 npm run setup:cargo-audit
 ```
 
+Toolchain pin roles (`package.json`): `engines` is the dev range
+(`^22.22.2 || ^24.15.0 || >=26.0.0`), `packageManager` pins the npm client
+(`npm@12.0.2`), and `releaseToolchain` is the stricter release floor
+(`node >=24.18.0`, `npm 12.0.2`) that `release:prepare` enforces. Day-to-day
+development may use any in-range Node; credentialed releases must meet the
+release floor. `src-tauri/Cargo.toml` `rust-version` tracks the same pinned
+Rust toolchain (`1.98.0`).
+
 `npm run release:prepare` verifies Node/npm and `npm run release:supply-chain` now refuses any other `cargo-audit` version. CI uses the same Node/npm/Rust/cargo-audit pins.
 
 On Windows, open an elevated PowerShell terminal and run:

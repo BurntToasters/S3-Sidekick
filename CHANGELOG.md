@@ -30,8 +30,17 @@ Beta 5 is the release candidate for v0.11.0 stable. It closes the remaining conc
 - **Downloads:** Removing unusable scratch data now flushes the parent directory entry, including a native Windows directory flush, so cleanup survives interruption and power loss.
 - **Dialogs:** Queued confirmation dialogs reserve the active slot between presentations, preventing follow-up consent prompts from overlapping or being reordered.
 - **Release workflow:** GitHub draft titles use the exact package version (`0.11.0-beta.5`), and reused drafts have both their title and `CHANGELOG.md` body refreshed.
-- **Testing:** **388** frontend tests, **130** Rust tests, **24** release-asset tests, and **19** icon tests passing.
+- **Testing:** **610** frontend tests, **141** Rust tests, **183** release-asset tests, and **19** icon tests passing.
 - **Ver:** Bumped version to `v0.11.0-beta.5`.
+
+### Release-candidate hardening
+
+- **Filesystem safety:** S3 keys are mapped to local file names structurally — `..`/`.` segments and names that would traverse out of the chosen folder are rejected, and Windows-illegal characters (`< > : " \ | ? *`, control characters, trailing dots/spaces, reserved device names) are percent-encoded deterministically with collision detection. Unicode is folded to NFC so APFS cannot silently collapse distinct keys.
+- **Publishing:** Create-only downloads no longer depend on hard links; filesystems without them (exFAT/FAT32, some SMB/FUSE mounts) fall back to an exclusive reservation or an atomic no-replace move. Directory `fsync` is treated as best-effort where the filesystem rejects it.
+- **S3:** Virtual-hosted AWS endpoints are normalized instead of misrouting keys; listings request `encoding-type=url` so keys with XML-hostile characters no longer break pages; `CompleteMultipartUpload` retries 200-with-error-body responses instead of aborting a possibly live upload; request-body timeouts scale with part size so slow links can complete; download bodies have a stall timeout; optional STS **session tokens** are supported in the connection form.
+- **Transfers:** Part retries honor error classification, failed checkpoints are written off the async coordinator, the recovery sweep reclaims orphaned scratch leases, and the queue drains items enqueued while workers were finishing.
+- **UI:** Destructive confirmations focus the safe choice, selection is stored structurally (a key named `prefix:…` can no longer be treated as a folder), Escape closes only the palette, failed settings saves surface inside the modal, and stalled uploads show a stalled state.
+- **Release:** Signed Windows bundles suppress duplicate updater-artifact signing (the isolated signing phase owns it), the DMG ships the `/Applications` alias and warns when running translocated, the keychain setup no longer replaces the user's search list, RPM declares its runtime dependencies, Flatpak can post notifications, and CI re-audits dependencies weekly.
 
 ## Changes in `v0.11.0-beta.4:`
 

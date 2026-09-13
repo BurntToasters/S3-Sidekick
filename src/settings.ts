@@ -107,10 +107,30 @@ export async function loadSettings(): Promise<boolean> {
   return !result.malformed;
 }
 
+function clampWindowSize(settingsSnapshot: UserSettings): void {
+  // Clamp pre-save so a corrupt in-memory size never persists an
+  // off-screen/unusable window. Bounds match settings-model validation.
+  if (
+    !Number.isInteger(settingsSnapshot.windowWidth) ||
+    settingsSnapshot.windowWidth < 400 ||
+    settingsSnapshot.windowWidth > 10000
+  ) {
+    settingsSnapshot.windowWidth = SETTING_DEFAULTS.windowWidth;
+  }
+  if (
+    !Number.isInteger(settingsSnapshot.windowHeight) ||
+    settingsSnapshot.windowHeight < 300 ||
+    settingsSnapshot.windowHeight > 10000
+  ) {
+    settingsSnapshot.windowHeight = SETTING_DEFAULTS.windowHeight;
+  }
+}
+
 function enqueueSettingsSnapshot(
   settingsSnapshot: UserSettings,
   extrasSnapshot: typeof state.settingsExtras,
 ): Promise<void> {
+  clampWindowSize(settingsSnapshot);
   const payload = mergeSettingsPayload(settingsSnapshot, extrasSnapshot);
   const persistSnapshot = async () => {
     await invoke("save_settings", { json: payload });
@@ -797,7 +817,19 @@ async function saveAndCloseSettingsModal(): Promise<void> {
     const statusEl = document.getElementById("status");
     if (statusEl)
       statusEl.textContent = `Failed to save settings: ${String(err)}`;
+    // The modal overlay makes #status inert, so the failure must be visible
+    // inside the modal (and the draft must stay open so nothing is lost).
+    const errorEl = document.getElementById("settings-save-error");
+    if (errorEl) {
+      errorEl.textContent = `Failed to save settings: ${String(err)}`;
+      errorEl.hidden = false;
+    }
     return;
+  }
+  const errorEl = document.getElementById("settings-save-error");
+  if (errorEl) {
+    errorEl.textContent = "";
+    errorEl.hidden = true;
   }
   document.getElementById("settings-overlay")?.classList.remove("active");
 }
@@ -865,9 +897,24 @@ export async function resetSettings(): Promise<void> {
       // remains authoritative and the relaunch below must still happen.
     }
   } else {
-    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {
+    // Partial reset: settings go to defaults but engagement extras survive
+    // so launchCount/support prompts do not re-fire after a routine reset.
+    const { launchCount, supportPromptDismissed, transfersHintDismissed } =
+      state.settingsExtras as {
+        launchCount?: unknown;
+        supportPromptDismissed?: unknown;
+        transfersHintDismissed?: unknown;
+      };
+    const carriedExtras: Record<string, unknown> = {
       _setupComplete: true,
-    });
+    };
+    if (typeof launchCount === "number")
+      carriedExtras.launchCount = launchCount;
+    if (typeof supportPromptDismissed === "boolean")
+      carriedExtras.supportPromptDismissed = supportPromptDismissed;
+    if (typeof transfersHintDismissed === "boolean")
+      carriedExtras.transfersHintDismissed = transfersHintDismissed;
+    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, carriedExtras);
     try {
       await invoke("save_settings", { json: defaults });
       await invoke("clear_saved_connection");
@@ -960,23 +1007,37 @@ function wireBookmarkImportExport(): void {
   ) as HTMLInputElement | null;
 
   exportBtn?.addEventListener("click", () => {
+    // Tri-state: Export? -> secrets or redacted? Cancel aborts without writing.
     void showConfirm(
-      "Export bookmark secrets?",
-      "Including secret keys writes them to a plaintext file. Choose redacted export to leave secrets out.",
+      "Export bookmarks?",
+      "Download bookmarks as a JSON file?",
       {
-        okLabel: "Include secrets",
-        cancelLabel: "Export redacted",
-        okDanger: true,
+        okLabel: "Export",
+        cancelLabel: "Cancel",
       },
-    ).then((includeSecrets) => {
-      const json = exportBookmarksJson(includeSecrets);
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "s3-sidekick-bookmarks.json";
-      a.click();
-      URL.revokeObjectURL(url);
+    ).then((confirmed) => {
+      if (!confirmed) return;
+      void showConfirm(
+        "Export bookmark secrets?",
+        "Including secret keys writes them to a plaintext file. Choose redacted export to leave secrets out.",
+        {
+          okLabel: "Include secrets",
+          cancelLabel: "Export redacted",
+          okDanger: true,
+        },
+      ).then((includeSecrets) => {
+        const json = exportBookmarksJson(includeSecrets);
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "s3-sidekick-bookmarks.json";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Revoking synchronously can cancel the download in WebKit.
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      });
     });
   });
 

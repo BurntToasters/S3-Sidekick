@@ -86,6 +86,13 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     }
 
     function cleanup(): void {
+      // Clear wizard passwords after init so secrets do not linger in DOM.
+      try {
+        encPassword.value = "";
+        encConfirm.value = "";
+      } catch {
+        // Best-effort: inputs may already be detached.
+      }
       overlay.hidden = true;
       welcomeNext.removeEventListener("click", onWelcomeNext);
       themeBack.removeEventListener("click", onThemeBack);

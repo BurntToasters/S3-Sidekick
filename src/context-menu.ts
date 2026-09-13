@@ -14,6 +14,7 @@ export type MenuItem = MenuAction | MenuSeparator;
 let activeMenu: HTMLElement | null = null;
 let dismissHandler: ((e: MouseEvent) => void) | null = null;
 let keyHandler: ((e: KeyboardEvent) => void) | null = null;
+let restoreFocusTarget: HTMLElement | null = null;
 
 export function showContextMenu(
   x: number,
@@ -22,6 +23,10 @@ export function showContextMenu(
   onAction: (action: string) => void,
 ): void {
   hideContextMenu();
+  restoreFocusTarget =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
 
   const menu = document.createElement("div");
   menu.className = "context-menu";
@@ -120,5 +125,16 @@ export function hideContextMenu(): void {
   if (keyHandler) {
     document.removeEventListener("keydown", keyHandler);
     keyHandler = null;
+  }
+  // Return focus to the invoker when the menu was dismissed without moving
+  // focus somewhere else (click actions own their own focus behavior).
+  const target = restoreFocusTarget;
+  restoreFocusTarget = null;
+  if (
+    target &&
+    target.isConnected &&
+    document.activeElement === document.body
+  ) {
+    target.focus();
   }
 }

@@ -32,6 +32,8 @@ interface ActiveToast {
   key: string;
   count: number;
   countEl: HTMLElement;
+  /** 0 = sticky (persistent): exempt from auto-eviction so errors survive. */
+  duration: number;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -44,10 +46,12 @@ function getRegion(): HTMLElement | null {
     region = document.createElement("div");
     region.id = "toast-region";
     region.className = "toast-region";
+    // Single live strategy: the region itself is NOT a live region. Each
+    // toast carries its own role (status/alert), so screen readers announce
+    // every toast exactly once instead of double-announcing (polite region +
+    // alert) for errors/warnings.
     region.setAttribute("role", "region");
     region.setAttribute("aria-label", "Notifications");
-    region.setAttribute("aria-live", "polite");
-    region.setAttribute("aria-relevant", "additions");
     document.body.appendChild(region);
   }
   return region;
@@ -119,6 +123,8 @@ export function showToast(message: string, options: ToastOptions = {}): void {
   el.className = `toast toast--${type}`;
   if (type === "error" || type === "warning") {
     el.setAttribute("role", "alert");
+  } else {
+    el.setAttribute("role", "status");
   }
 
   const action =
@@ -130,7 +136,7 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     `<span class="toast__icon" aria-hidden="true">${getIconHtml(TYPE_ICON[type], { className: "lucide-icon toast__icon-svg", decorative: true })}</span>` +
     `<span class="toast__msg">${escapeHtml(message)}<span class="toast__count" hidden></span></span>` +
     action +
-    `<button type="button" class="toast__close" aria-label="Dismiss notification">\u00d7</button>`;
+    `<button type="button" class="toast__close" aria-label="Dismiss notification">${getIconHtml("x", { className: "lucide-icon toast__close-svg", decorative: true })}</button>`;
 
   const countEl = el.querySelector<HTMLElement>(".toast__count")!;
   el.querySelector<HTMLButtonElement>(".toast__close")!.addEventListener(
@@ -150,13 +156,17 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     );
   }
 
-  const toast: ActiveToast = { el, key, count: 1, countEl };
+  const toast: ActiveToast = { el, key, count: 1, countEl, duration };
   active.push(toast);
   region.appendChild(el);
   armTimer(toast, duration);
 
-  // Keep the stack bounded; drop the oldest beyond the cap.
+  // Keep the stack bounded, but never auto-evict sticky (duration 0)
+  // toasts: those are persistent errors/warnings the user must dismiss.
+  // Evict the oldest auto-dismissing toast instead; only if every visible
+  // toast is sticky does the oldest sticky give way to preserve the bound.
   while (active.length > MAX_VISIBLE) {
-    dismissToast(active[0].el);
+    const evictable = active.find((t) => t.duration > 0) ?? active[0];
+    dismissToast(evictable.el);
   }
 }

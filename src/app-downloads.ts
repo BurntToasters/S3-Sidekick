@@ -11,11 +11,11 @@ import { enqueueDownloads, type TransferEnqueueTarget } from "./transfers.ts";
 import { showConfirm } from "./dialogs.ts";
 import { logActivity } from "./activity-log.ts";
 import {
-  basename,
   formatSize,
   splitNameExt,
   joinPath,
   friendlyError,
+  safeFileName,
 } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
@@ -121,10 +121,10 @@ async function uniqueDownloadEntries(
   const caseInsensitive =
     state.platformName === "windows" || state.platformName === "macos";
   const dedupeKey = (name: string) =>
-    caseInsensitive ? name.toLowerCase() : name;
+    caseInsensitive ? name.normalize("NFC").toLowerCase() : name;
 
   for (const key of keys) {
-    const base = basename(key);
+    const base = safeFileName(key, state.platformName);
     const { stem, ext } = splitNameExt(base);
     let candidate = base;
     let n = 2;
@@ -153,7 +153,7 @@ function estimateKnownObjectSize(entry: DownloadQueueEntry): number | null {
 async function estimateDownloadEntryBytes(
   entry: DownloadQueueEntry,
   connectionId: string,
-): Promise<number> {
+): Promise<number | null> {
   const known = estimateKnownObjectSize(entry);
   if (known !== null) return known;
   try {
@@ -166,10 +166,11 @@ async function estimateDownloadEntryBytes(
       },
     );
     if (!Number.isFinite(head.content_length) || head.content_length < 0)
-      return 0;
+      return null;
     return head.content_length;
   } catch {
-    return 0;
+    // Unknown, not zero: a zero would silently skip the disk preflight below.
+    return null;
   }
 }
 
@@ -182,10 +183,17 @@ async function preflightDownloadDiskSpace(
   const estimatedBytes = await Promise.all(
     entries.map((entry) => estimateDownloadEntryBytes(entry, connectionId)),
   );
-  const totalEstimatedBytes = estimatedBytes.reduce(
-    (sum, bytes) => sum + bytes,
-    0,
-  );
+  if (estimatedBytes.some((bytes) => bytes === null)) {
+    // Fail open and say so: proceeding without a preflight is honest, while a
+    // zero estimate would pretend small downloads need no disk check.
+    logActivity(
+      "Disk preflight skipped: could not determine every download size.",
+      "warning",
+    );
+    return true;
+  }
+  const knownBytes = estimatedBytes as number[];
+  const totalEstimatedBytes = knownBytes.reduce((sum, bytes) => sum + bytes, 0);
   if (totalEstimatedBytes < DOWNLOAD_DISK_PREFLIGHT_THRESHOLD_BYTES) {
     return true;
   }
@@ -194,7 +202,7 @@ async function preflightDownloadDiskSpace(
   for (let i = 0; i < entries.length; i += 1) {
     const dir = parentDirectory(entries[i].destination);
     if (!dir) continue;
-    const size = estimatedBytes[i];
+    const size = knownBytes[i];
     if (!Number.isFinite(size) || size <= 0) continue;
     requiredByDirectory.set(dir, (requiredByDirectory.get(dir) ?? 0) + size);
   }
@@ -272,13 +280,19 @@ export async function handleDownload(): Promise<void> {
   const rememberedDir = getRememberedDownloadDir();
 
   if (capturedKeys.length === 1) {
-    const fileName = basename(capturedKeys[0]);
-    const destination = await save({
-      defaultPath: rememberedDir
-        ? joinPath(rememberedDir, fileName, state.platformName)
-        : fileName,
-      title: `Save ${fileName}`,
-    });
+    const fileName = safeFileName(capturedKeys[0], state.platformName);
+    let destination: string | null;
+    try {
+      destination = await save({
+        defaultPath: rememberedDir
+          ? joinPath(rememberedDir, fileName, state.platformName)
+          : fileName,
+        title: `Save ${fileName}`,
+      });
+    } catch (err) {
+      setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
+      return;
+    }
     if (!destination) return;
     if (connectionSnapshotChanged(snap)) {
       setStatus(
@@ -294,12 +308,18 @@ export async function handleDownload(): Promise<void> {
       destination,
     });
   } else {
-    const selected = await open({
-      title: "Select destination folder",
-      multiple: false,
-      directory: true,
-      defaultPath: rememberedDir || undefined,
-    });
+    let selected: string | string[] | null;
+    try {
+      selected = await open({
+        title: "Select destination folder",
+        multiple: false,
+        directory: true,
+        defaultPath: rememberedDir || undefined,
+      });
+    } catch (err) {
+      setStatus(`Failed to open folder picker: ${friendlyError(err)}`);
+      return;
+    }
     if (!selected || Array.isArray(selected)) return;
     if (connectionSnapshotChanged(snap)) {
       setStatus(

@@ -57,6 +57,8 @@ const mockNavigateBack = vi.fn<() => Promise<void>>();
 const mockNavigateForward = vi.fn<() => Promise<void>>();
 const mockClearNavHistory = vi.fn();
 const mockPruneStaleSelection = vi.fn();
+const mockReadLastBucket = vi.fn<() => string | null>(() => null);
+const mockHandleBucketListKeydown = vi.fn();
 
 const mockInitUpdater = vi.fn<() => Promise<void>>();
 const mockAutoCheckUpdates = vi.fn<() => Promise<void>>();
@@ -126,6 +128,8 @@ const mockIsDialogActive = vi.fn();
 const mockInitPalette = vi.fn();
 const mockRegisterCommands = vi.fn();
 const mockIsPaletteOpen = vi.fn();
+const mockOpenPalette = vi.fn();
+const mockClosePalette = vi.fn();
 
 const mockSetSize = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockGetCurrentWindow = vi.fn();
@@ -233,6 +237,7 @@ vi.mock("../browser.ts", () => ({
   selectBucket: mockSelectBucket,
   showEmptyState: mockShowEmptyState,
   handleRowClick: mockHandleRowClick,
+  handleBucketListKeydown: mockHandleBucketListKeydown,
   handleSelectAll: mockHandleSelectAll,
   clearSelection: mockClearSelection,
   setLastClickedKey: vi.fn(),
@@ -246,6 +251,7 @@ vi.mock("../browser.ts", () => ({
   navigateToLocationPath: vi.fn(async () => true),
   clearNavHistory: mockClearNavHistory,
   pruneStaleSelection: mockPruneStaleSelection,
+  readLastBucket: mockReadLastBucket,
 }));
 
 vi.mock("../updater.ts", () => ({
@@ -342,6 +348,8 @@ vi.mock("../command-palette.ts", () => ({
   initPalette: mockInitPalette,
   registerCommands: mockRegisterCommands,
   isPaletteOpen: mockIsPaletteOpen,
+  openPalette: mockOpenPalette,
+  closePalette: mockClosePalette,
 }));
 
 const mockShouldShowSetupWizard = vi.fn(() => false);
@@ -518,6 +526,8 @@ describe("main integration", () => {
     mockInitPalette.mockReset();
     mockRegisterCommands.mockReset();
     mockIsPaletteOpen.mockReset();
+    mockOpenPalette.mockReset();
+    mockClosePalette.mockReset();
 
     mockInvoke.mockImplementation(async (cmd, payload) => {
       if (cmd === "get_platform_info") return "windows";
@@ -661,7 +671,13 @@ describe("main integration", () => {
     expect(mockEnsureSecurityReady).toHaveBeenCalledTimes(1);
     expect(mockLoadSettings).toHaveBeenCalledTimes(1);
     expect(mockInitUpdater).toHaveBeenCalledTimes(1);
-    expect(mockAutoCheckUpdates).toHaveBeenCalledTimes(1);
+    // Update checks are deferred to idle: wait for the scheduled run.
+    await vi.waitFor(
+      () => {
+        expect(mockAutoCheckUpdates).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 5000 },
+    );
     expect(
       (document.getElementById("version-label") as HTMLSpanElement).textContent,
     ).toBe("v0.6.0");
@@ -780,6 +796,7 @@ describe("main integration", () => {
       "us-east-1",
       "ak",
       "sk",
+      "",
     );
     expect(mockRefreshBuckets).toHaveBeenCalledTimes(1);
     expect(mockSaveConnection).toHaveBeenCalledTimes(1);
@@ -792,7 +809,9 @@ describe("main integration", () => {
 
     (document.getElementById("btn-refresh") as HTMLButtonElement).click();
     await flushMicrotasks();
-    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
+    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
+      preserveSelection: true,
+    });
 
     mockShowPrompt.mockResolvedValueOnce("new-folder");
     (document.getElementById("btn-new-folder") as HTMLButtonElement).click();
@@ -800,6 +819,7 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("create_folder", {
       bucket: "bucket-a",
       key: "docs/new-folder",
+      overwrite: false,
       connectionId: "test-connection",
     });
 
@@ -891,6 +911,7 @@ describe("main integration", () => {
       "us-west-2",
       "bookmark-access",
       "bookmark-secret",
+      "",
     );
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
@@ -959,7 +980,11 @@ describe("main integration", () => {
     const rowCheck = fileRow.querySelector(".row-check") as HTMLInputElement;
 
     folderRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(mockNavigateToFolder).toHaveBeenCalledWith("docs/folder/");
+    // Single click selects (file-manager behavior); open on dblclick/Enter.
+    expect(mockHandleRowClick).toHaveBeenCalledWith(
+      "prefix:docs/folder/",
+      expect.any(MouseEvent),
+    );
     folderCheckRow
       .querySelector(".col-check")
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1497,6 +1522,7 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("create_folder", {
       bucket: "bucket-a",
       key: "docs/from-context",
+      overwrite: false,
       connectionId: "test-connection",
     });
     expect(mockEnqueuePaths).toHaveBeenCalled();
@@ -2106,6 +2132,7 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("create_folder", {
       bucket: "bucket-a",
       key: "docs/cmd-folder",
+      overwrite: false,
       connectionId: "test-connection",
     });
     expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
@@ -2178,6 +2205,7 @@ describe("main integration", () => {
     mockRefreshBuckets.mockImplementationOnce(async () => {
       state.buckets = [{ name: "first-bucket", creation_date: "" }];
     });
+    mockReadLastBucket.mockReturnValueOnce("first-bucket");
     mockSaveConnection.mockRejectedValueOnce(new Error("save creds failed"));
     (document.getElementById("conn-endpoint") as HTMLInputElement).value =
       "https://service.example.com";
@@ -2386,7 +2414,7 @@ describe("main integration", () => {
     failRename = false;
 
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowConfirm.mockResolvedValueOnce(false);
     (document.getElementById("batch-delete") as HTMLButtonElement).click();
     await flushMicrotasks(4);
@@ -2426,7 +2454,7 @@ describe("main integration", () => {
     failCreateFolder = true;
     mockShowPrompt.mockResolvedValueOnce("will-fail");
     (document.getElementById("btn-new-folder") as HTMLButtonElement).click();
-    await flushMicrotasks(4);
+    await flushMicrotasks(10);
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Failed to create folder");
@@ -2555,7 +2583,7 @@ describe("main integration", () => {
       copy_object: false,
     };
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
 
     mockShowPrompt.mockResolvedValueOnce("renamed-folder");
     mockShowConfirm.mockResolvedValueOnce(false);
@@ -2726,8 +2754,8 @@ describe("main integration", () => {
     keylessRow.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:docs/folder/");
-    state.selectedKeys.add("prefix:docs/other/");
+    state.selectedPrefixes.add("docs/folder/");
+    state.selectedPrefixes.add("docs/other/");
     const menuBeforeMultiFolder = mockShowContextMenu.mock.calls.length;
     folderRow.dispatchEvent(
       new MouseEvent("contextmenu", {
@@ -3220,7 +3248,7 @@ describe("main integration", () => {
     ) as HTMLInputElement;
     folderCheck.checked = true;
     folderCheck.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(state.selectedKeys.has("prefix:docs/folder/")).toBe(true);
+    expect(state.selectedPrefixes.has("docs/folder/")).toBe(true);
 
     const folderRow = tbody.querySelector(".object-row") as HTMLElement;
     folderRow.dispatchEvent(
@@ -3230,7 +3258,7 @@ describe("main integration", () => {
         cancelable: true,
       }),
     );
-    expect(state.selectedKeys.has("prefix:docs/folder/")).toBe(false);
+    expect(state.selectedPrefixes.has("docs/folder/")).toBe(false);
 
     const resizer = document.getElementById(
       "sidebar-resizer",

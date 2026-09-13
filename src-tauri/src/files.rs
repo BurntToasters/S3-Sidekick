@@ -1,4 +1,4 @@
-use crate::validate_existing_path;
+use crate::{detect_case_fold_collision, strip_extended_windows_prefix, validate_existing_path};
 use std::collections::HashMap;
 
 const MAX_LOCAL_SCAN_FILES: usize = 20_000;
@@ -29,19 +29,26 @@ pub(crate) struct LocalFileEntry {
 }
 
 pub(crate) fn normalize_slashes(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let text = path.to_string_lossy();
+    // Backslashes are separators only on Windows. On Unix a backslash is a
+    // legal filename character and must survive into the object key.
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
 }
 
 pub(crate) fn absolute_path_string(path: &std::path::Path) -> String {
     if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical.to_string_lossy().to_string();
+        return strip_extended_windows_prefix(&canonical.to_string_lossy());
     }
     if path.is_absolute() {
-        return path.to_string_lossy().to_string();
+        return strip_extended_windows_prefix(&path.to_string_lossy());
     }
     match std::env::current_dir() {
-        Ok(cwd) => cwd.join(path).to_string_lossy().to_string(),
-        Err(_) => path.to_string_lossy().to_string(),
+        Ok(cwd) => strip_extended_windows_prefix(&cwd.join(path).to_string_lossy()),
+        Err(_) => strip_extended_windows_prefix(&path.to_string_lossy()),
     }
 }
 
@@ -205,6 +212,17 @@ fn collect_local_files_from_root(
             };
             let rel_with_root = std::path::Path::new(label).join(rel_under_root);
 
+            // Rust paths are byte strings; every S3 key is UTF-8. Carrying a
+            // lossy U+FFFD name to the frontend would mint the wrong key and
+            // can collapse distinct files, so skip and say so instead.
+            if path.to_str().is_none() || rel_with_root.to_str().is_none() {
+                warnings.push(format!(
+                    "Skipping '{}' because its name is not valid UTF-8.",
+                    path.to_string_lossy()
+                ));
+                continue;
+            }
+
             if entries.len() >= MAX_LOCAL_SCAN_FILES {
                 warnings.push(format!(
                     "Stopped scanning after reaching file limit ({}).",
@@ -274,6 +292,15 @@ fn list_local_files_recursive_inner(roots: Vec<String>) -> Result<Vec<LocalFileE
             .then(a.file_path.cmp(&b.file_path))
     });
 
+    // Distinct local files differing only by case would upload as distinct
+    // S3 keys but collide on case-insensitive download volumes. Fail closed.
+    detect_case_fold_collision(
+        entries
+            .iter()
+            .map(|entry| (entry.relative_path.clone(), entry.file_path.clone())),
+        "upload paths",
+    )?;
+
     if warnings.total > 0 {
         eprintln!(
             "list_local_files_recursive skipped {} path(s). Sample: {}",
@@ -307,9 +334,16 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn normalize_slashes_converts_backslashes() {
+    fn normalize_slashes_converts_backslashes_only_on_windows() {
         let path = Path::new("foo\\bar\\baz.txt");
-        assert_eq!(normalize_slashes(path), "foo/bar/baz.txt");
+        let normalized = normalize_slashes(path);
+        if cfg!(windows) {
+            assert_eq!(normalized, "foo/bar/baz.txt");
+        } else {
+            // On Unix a backslash is a legal filename character and must stay
+            // part of the object key.
+            assert_eq!(normalized, "foo\\bar\\baz.txt");
+        }
     }
 
     #[test]

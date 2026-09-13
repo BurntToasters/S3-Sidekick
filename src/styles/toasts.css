@@ -96,16 +96,22 @@
 
 .toast__close {
   flex-shrink: 0;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 16px;
-  line-height: 1;
   cursor: pointer;
   border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toast__close-svg {
+  width: 14px;
+  height: 14px;
 }
 
 .toast__close:hover {

@@ -55,6 +55,46 @@ pub(crate) fn updater_support_info() -> UpdaterSupportInfo {
     }
 }
 
+/// True when macOS is running a translocated copy (launched from a mounted
+/// DMG). The mounted copy is read-only, so the updater's rename-replace fails
+/// with EROFS; the UI tells the user to move the app to /Applications.
+#[tauri::command]
+pub(crate) fn is_app_translocated() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_foundation::base::{CFTypeRef, TCFType};
+        use core_foundation::url::CFURL;
+
+        type Boolean = u8;
+        #[link(name = "Security", kind = "framework")]
+        extern "C" {
+            fn SecTranslocateIsTranslocatedURL(
+                url: CFTypeRef,
+                is_translocated: *mut Boolean,
+                error: *mut CFTypeRef,
+            ) -> Boolean;
+        }
+
+        let executable = std::env::current_exe().map_err(|err| err.to_string())?;
+        let url = CFURL::from_path(&executable, false)
+            .ok_or_else(|| "Failed to build a URL for the app executable.".to_string())?;
+        let mut translocated: Boolean = 0;
+        let result = unsafe {
+            SecTranslocateIsTranslocatedURL(
+                url.as_CFTypeRef(),
+                &mut translocated,
+                std::ptr::null_mut(),
+            )
+        };
+        Ok(result != 0 && translocated != 0)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
+}
+
 #[tauri::command]
 pub(crate) fn open_external_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://") {

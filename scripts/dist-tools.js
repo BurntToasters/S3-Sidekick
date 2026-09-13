@@ -42,7 +42,9 @@ function listTauriBundleDirs(cwd) {
       if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
         results.push(path.relative(cwd, fullPath));
       }
-    } catch {}
+    } catch {
+      // Best-effort cleanup probe; unreadable paths are simply skipped.
+    }
   };
 
   addIfDir(path.join(targetRoot, "release", "bundle"));
@@ -56,7 +58,9 @@ function listTauriBundleDirs(cwd) {
       addIfDir(path.join(base, "debug", "bundle"));
       addIfDir(path.join(base, "bundle"));
     }
-  } catch {}
+  } catch {
+    // Best-effort cleanup probe; unreadable target roots are skipped.
+  }
 
   return Array.from(new Set(results));
 }

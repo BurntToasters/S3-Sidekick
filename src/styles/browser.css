@@ -259,6 +259,17 @@
   color: var(--text-secondary);
 }
 
+.table-error {
+  padding: 10px 14px;
+  color: var(--disconnect-text);
+  background: var(--disconnect-bg);
+  font-size: 13px;
+}
+
+.table-error .btn {
+  margin-left: 12px;
+}
+
 .icon-folder,
 .icon-file {
   display: inline-flex;
@@ -289,6 +300,7 @@
   align-items: center;
   gap: 8px;
   width: 100%;
+  min-width: 0;
   padding: 6px 10px;
   border: none;
   background: transparent;
@@ -318,6 +330,15 @@
 .bucket-icon {
   width: 14px;
   height: 14px;
+  flex-shrink: 0;
+}
+
+.list__item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .list__item-btn:focus-visible,
@@ -346,6 +367,18 @@
   border-top: 1px solid var(--glass-border);
 }
 
+.statusbar__palette {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.statusbar__palette .lucide-icon {
+  width: 13px;
+  height: 13px;
+}
+
 .object-row {
   height: 36px;
 }
@@ -354,4 +387,15 @@
   padding: 0;
   border: 0;
   pointer-events: none;
+}
+
+.listing-cap-notice {
+  color: var(--warning);
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.metadata-batch-more {
+  color: var(--text-secondary, var(--muted));
+  font-style: italic;
 }

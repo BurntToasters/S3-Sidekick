@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { escapeHtml, getIconHtml } from "./utils.ts";
+import { escapeHtml, getIconHtml, parseJsonArray } from "./utils.ts";
 
 export interface Bookmark {
   name: string;
@@ -7,6 +7,7 @@ export interface Bookmark {
   region: string;
   access_key: string;
   secret_key: string;
+  session_token?: string;
 }
 
 let bookmarks: Bookmark[] = [];
@@ -19,6 +20,7 @@ const MAX_BOOKMARK_ENDPOINT_LENGTH = 2_048;
 const MAX_BOOKMARK_REGION_LENGTH = 128;
 const MAX_BOOKMARK_ACCESS_KEY_LENGTH = 256;
 const MAX_BOOKMARK_SECRET_KEY_LENGTH = 4_096;
+const MAX_BOOKMARK_SESSION_TOKEN_LENGTH = 16_384;
 
 export function setBookmarkChangeHandler(handler: () => void): void {
   onChangeCallback = handler;
@@ -32,7 +34,16 @@ export function clearBookmarks(): void {
   bookmarks = [];
 }
 
-export function isEndpointBookmarked(endpoint: string): boolean {
+export function isEndpointBookmarked(
+  endpoint: string,
+  accessKey?: string,
+): boolean {
+  // Composite key: same endpoint with different credentials is distinct.
+  if (accessKey !== undefined) {
+    return bookmarks.some(
+      (b) => b.endpoint === endpoint && b.access_key === accessKey,
+    );
+  }
   return bookmarks.some((b) => b.endpoint === endpoint);
 }
 
@@ -52,21 +63,23 @@ function isBookmark(value: unknown): value is Bookmark {
     row.access_key.length > 0 &&
     row.access_key.length <= MAX_BOOKMARK_ACCESS_KEY_LENGTH &&
     typeof row.secret_key === "string" &&
-    row.secret_key.length <= MAX_BOOKMARK_SECRET_KEY_LENGTH
+    row.secret_key.length <= MAX_BOOKMARK_SECRET_KEY_LENGTH &&
+    (row.session_token === undefined ||
+      (typeof row.session_token === "string" &&
+        row.session_token.length <= MAX_BOOKMARK_SESSION_TOKEN_LENGTH))
   );
 }
 
 function parseBookmarksArray(raw: string): Bookmark[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(parsed) || !parsed.every(isBookmark)) {
-    return null;
-  }
-  return [...parsed];
+  const parsed = parseJsonArray(raw);
+  if (parsed === null) return null;
+  // Filter out invalid entries instead of rejecting the whole file so one
+  // corrupt bookmark doesn't wipe the rest. A non-empty file where every
+  // entry is invalid is corruption, not an empty list: returning [] here
+  // would overwrite the good backup with nothing.
+  const valid = parsed.filter(isBookmark);
+  if (parsed.length > 0 && valid.length === 0) return null;
+  return valid;
 }
 
 async function loadBackupBookmarks(): Promise<Bookmark[] | null> {
@@ -106,7 +119,8 @@ export async function loadBookmarks(): Promise<void> {
 async function persistBookmarksSnapshot(next: Bookmark[]): Promise<void> {
   const serialized = JSON.stringify(next, null, 2);
   persistPromise = persistPromise
-    .catch(() => {})
+    // Prior persist failure must not break the chain; it was already surfaced.
+    .catch(() => undefined)
     .then(async () => {
       await invoke("save_bookmarks", { json: serialized });
       await saveBookmarksBackupSafe(next);

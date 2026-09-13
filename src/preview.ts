@@ -32,53 +32,13 @@ const PREVIEWABLE_IMAGE_TYPES = new Set([
   "image/x-icon",
 ]);
 
-const PREVIEWABLE_TEXT_EXTS = new Set([
-  "txt",
-  "md",
-  "json",
-  "xml",
-  "html",
-  "htm",
-  "css",
-  "js",
-  "ts",
-  "csv",
-  "yaml",
-  "yml",
-  "toml",
-  "ini",
-  "cfg",
-  "log",
-  "sh",
-  "bat",
-  "py",
-  "rs",
-  "go",
-  "java",
-  "c",
-  "cpp",
-  "h",
-  "hpp",
-  "svg",
-]);
-
-const PREVIEWABLE_IMAGE_EXTS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "bmp",
-  "ico",
-  "svg",
-]);
-
 let activePreviewObjectUrl: string | null = null;
 let previewSeq = 0;
 
 function canPreview(name: string): boolean {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  return PREVIEWABLE_TEXT_EXTS.has(ext) || PREVIEWABLE_IMAGE_EXTS.has(ext);
+  // Always offer Preview; rendering is decided by content_type/is_text
+  // below, not by extension. Keep a non-empty guard for menu affordance.
+  return name.trim().length > 0;
 }
 
 export { canPreview };
@@ -94,6 +54,16 @@ function mediaType(contentType: string): string {
   return contentType.split(";", 1)[0].trim().toLowerCase();
 }
 
+function base64ToBlobUrl(base64: string, type: string): string {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const blob = new Blob([bytes.buffer as ArrayBuffer], { type });
+  return URL.createObjectURL(blob);
+}
+
 export async function openPreview(key: string): Promise<void> {
   ensureInspectorOpenForPane("preview");
   if (shouldUseInspectorMount()) {
@@ -105,11 +75,15 @@ export async function openPreview(key: string): Promise<void> {
   const body = getPreviewBodyEl();
   const seq = ++previewSeq;
   const bucket = state.currentBucket;
+  const connectionId = state.connectionId;
+  const connectionIdentity = state.connectionIdentity;
+  const previewKey = key;
 
   clearActivePreviewObjectUrl();
   title.textContent = basename(key);
   showPreviewOverlay(true);
-  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading preview&#8230;</div>`;
+  body.setAttribute("aria-busy", "true");
+  body.innerHTML = `<div class="metadata-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading preview&#8230;</div>`;
 
   try {
     const resp = await invokeS3<PreviewResponse>("preview_object", {
@@ -117,7 +91,14 @@ export async function openPreview(key: string): Promise<void> {
       key,
     });
 
-    if (seq !== previewSeq || state.currentBucket !== bucket) return;
+    if (
+      seq !== previewSeq ||
+      previewKey !== key ||
+      state.currentBucket !== bucket ||
+      state.connectionId !== connectionId ||
+      state.connectionIdentity !== connectionIdentity
+    )
+      return;
 
     let html = "";
     const type = mediaType(resp.content_type);
@@ -129,7 +110,17 @@ export async function openPreview(key: string): Promise<void> {
         activePreviewObjectUrl = url;
         html += `<div class="preview-image"><img src="${url}" alt="${escapeHtml(basename(key))}" /></div>`;
       } else {
-        html += `<div class="preview-image"><img src="data:${type};base64,${resp.data}" alt="${escapeHtml(basename(key))}" /></div>`;
+        // Blob URLs (same pattern as SVG above) keep large base64 payloads
+        // out of the DOM; fall back to a data URL if decoding fails.
+        let src = `data:${type};base64,${resp.data}`;
+        try {
+          const url = base64ToBlobUrl(resp.data, type);
+          activePreviewObjectUrl = url;
+          src = url;
+        } catch {
+          // Keep the data-URL fallback.
+        }
+        html += `<div class="preview-image"><img src="${src}" alt="${escapeHtml(basename(key))}" /></div>`;
       }
     } else if (resp.is_text) {
       html += `<pre class="preview-text">${escapeHtml(resp.data)}</pre>`;
@@ -141,10 +132,24 @@ export async function openPreview(key: string): Promise<void> {
       html += `<div class="preview-truncated">Showing first 1 MB of ${formatSize(resp.total_size)}</div>`;
     }
 
+    body.setAttribute("aria-busy", "false");
     body.innerHTML = html;
   } catch (err) {
-    if (seq !== previewSeq || state.currentBucket !== bucket) return;
-    body.innerHTML = `<div class="metadata-loading">Failed to load preview: ${escapeHtml(friendlyError(err))}</div>`;
+    if (
+      seq !== previewSeq ||
+      previewKey !== key ||
+      state.currentBucket !== bucket ||
+      state.connectionId !== connectionId ||
+      state.connectionIdentity !== connectionIdentity
+    )
+      return;
+    body.setAttribute("aria-busy", "false");
+    body.innerHTML =
+      `<div class="metadata-loading" role="alert">Failed to load preview: ${escapeHtml(friendlyError(err))} ` +
+      `<button type="button" class="btn btn--sm" data-preview-retry>Retry</button></div>`;
+    body
+      .querySelector("[data-preview-retry]")
+      ?.addEventListener("click", () => void openPreview(previewKey));
   }
 }
 

@@ -12,6 +12,7 @@ export interface PaletteCommand {
 let commands: PaletteCommand[] = [];
 let activeIndex = 0;
 let filtered: PaletteCommand[] = [];
+let previouslyFocused: HTMLElement | null = null;
 
 export function registerCommands(cmds: PaletteCommand[]): void {
   commands = cmds;
@@ -26,6 +27,9 @@ export function openPalette(): void {
   ) as HTMLInputElement | null;
   if (!overlay || !input) return;
 
+  if (document.activeElement instanceof HTMLElement) {
+    previouslyFocused = document.activeElement;
+  }
   overlay.hidden = false;
   input.value = "";
   input.setAttribute("aria-expanded", "true");
@@ -45,6 +49,13 @@ export function closePalette(): void {
   if (input) {
     input.setAttribute("aria-expanded", "false");
     input.setAttribute("aria-activedescendant", "");
+  }
+  // Restore focus to whatever opened the palette (mirrors dialogs.ts so
+  // keyboard users land back where they were instead of losing focus).
+  const restore = previouslyFocused;
+  previouslyFocused = null;
+  if (restore && restore.isConnected) {
+    restore.focus();
   }
 }
 
@@ -88,6 +99,9 @@ export function initPalette(): void {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
+      // Stop here: the global shortcut handler would otherwise see a closed
+      // palette and close the next layer underneath in the same keypress.
+      e.stopPropagation();
       closePalette();
       return;
     }

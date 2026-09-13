@@ -146,6 +146,56 @@ async function recoverTransfersAfterSecurityReady(): Promise<void> {
   }
 }
 
+// Update checks are deferrable: run them when the browser is idle (with a
+// timeout fallback) instead of blocking startup behind network IO.
+function scheduleAutoCheckUpdates(): void {
+  const run = (): void => {
+    void autoCheckUpdates();
+  };
+  const idle = (
+    window as unknown as {
+      requestIdleCallback?: (
+        cb: () => void,
+        opts?: { timeout: number },
+      ) => void;
+    }
+  ).requestIdleCallback;
+  if (typeof idle === "function") {
+    idle.call(window, run, { timeout: 5000 });
+  } else {
+    window.setTimeout(run, 1500);
+  }
+}
+
+async function loadBookmarksIntoBar(): Promise<void> {
+  try {
+    await loadBookmarks();
+    setBookmarkChangeHandler(refreshBookmarkBar);
+    refreshBookmarkBar();
+  } catch (err) {
+    console.warn("Failed to load bookmarks:", err);
+    logActivity("Failed to load bookmarks.", "warning");
+  }
+}
+
+async function loadSavedConnectionIntoInputs(): Promise<void> {
+  try {
+    const saved = await loadConnection();
+    if (saved) {
+      setConnectionInputs(
+        saved.endpoint,
+        saved.region,
+        saved.access_key,
+        saved.secret_key,
+        saved.session_token ?? "",
+      );
+    }
+  } catch (err) {
+    setStatus(`Failed to load saved connection: ${String(err)}`);
+    logActivity(`Failed to load saved connection: ${String(err)}`, "error");
+  }
+}
+
 export async function init(): Promise<void> {
   initializeIcons();
   setConnectionUI(false);
@@ -164,6 +214,17 @@ export async function init(): Promise<void> {
   prepareTransferRecovery();
   wireEvents();
   wireTitlebar();
+
+  // Independent of settings IO below: start early so it settles in parallel.
+  // Failures only affect the label, never startup.
+  const versionPromise = getVersion().then(
+    (version) => {
+      dom.versionLabel.textContent = `v${version}`;
+    },
+    (err) => {
+      console.warn("Version label unavailable:", err);
+    },
+  );
 
   let settingsValid = true;
   try {
@@ -224,37 +285,16 @@ export async function init(): Promise<void> {
     }
 
     updateShortcutChips();
-    const version = await getVersion();
-    dom.versionLabel.textContent = `v${version}`;
+    await versionPromise;
 
     if (wizardSecurityReady) {
-      try {
-        await loadBookmarks();
-        setBookmarkChangeHandler(refreshBookmarkBar);
-        refreshBookmarkBar();
-      } catch (err) {
-        console.warn("Failed to load bookmarks:", err);
-        logActivity("Failed to load bookmarks.", "warning");
-      }
+      await loadBookmarksIntoBar();
     }
 
-    try {
-      const saved = await loadConnection();
-      if (saved) {
-        setConnectionInputs(
-          saved.endpoint,
-          saved.region,
-          saved.access_key,
-          saved.secret_key,
-        );
-      }
-    } catch (err) {
-      setStatus(`Failed to load saved connection: ${String(err)}`);
-      logActivity(`Failed to load saved connection: ${String(err)}`, "error");
-    }
+    await loadSavedConnectionIntoInputs();
 
     await initUpdater();
-    void autoCheckUpdates();
+    scheduleAutoCheckUpdates();
     return;
   }
 
@@ -274,35 +314,16 @@ export async function init(): Promise<void> {
   void checkSupportPrompt();
 
   updateShortcutChips();
-  const version = await getVersion();
-  dom.versionLabel.textContent = `v${version}`;
+  await versionPromise;
 
   if (securityReady) {
-    try {
-      await loadBookmarks();
-      setBookmarkChangeHandler(refreshBookmarkBar);
-      refreshBookmarkBar();
-    } catch (err) {
-      console.warn("Failed to load bookmarks:", err);
-      logActivity("Failed to load bookmarks.", "warning");
-    }
-
-    try {
-      const saved = await loadConnection();
-      if (saved) {
-        setConnectionInputs(
-          saved.endpoint,
-          saved.region,
-          saved.access_key,
-          saved.secret_key,
-        );
-      }
-    } catch (err) {
-      setStatus(`Failed to load saved connection: ${String(err)}`);
-      logActivity(`Failed to load saved connection: ${String(err)}`, "error");
-    }
+    // Bookmarks and the saved connection are independent: load concurrently.
+    await Promise.all([
+      loadBookmarksIntoBar(),
+      loadSavedConnectionIntoInputs(),
+    ]);
   }
 
   await initUpdater();
-  void autoCheckUpdates();
+  scheduleAutoCheckUpdates();
 }

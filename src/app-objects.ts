@@ -23,7 +23,12 @@ import { showConfirm, showPrompt } from "./dialogs.ts";
 import { logActivity, exportActivityLogText } from "./activity-log.ts";
 import { basename, friendlyError } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
-import { getSelectedFileKeys, getSelectedPrefixes } from "./app-selection.ts";
+import {
+  addSelection,
+  clearAllSelection,
+  getSelectedFileKeys,
+  getSelectedPrefixes,
+} from "./app-selection.ts";
 import {
   resolveAbsentObjectWriteIntent,
   resolveObjectConflict,
@@ -144,7 +149,17 @@ async function performDelete(): Promise<void> {
     parts.push(
       `${prefixes.length} folder${prefixes.length === 1 ? "" : "s"} and all their contents`,
     );
-  const msg = `Delete ${parts.join(" and ")}?`;
+  // Name what is about to be destroyed (at most 5) and say it cannot be
+  // undone; the dialog message preserves line breaks (pre-line).
+  const targetNames = [...prefixes, ...keys]
+    .map((key) => basename(key.replace(/\/$/, "")) || key)
+    .slice(0, 5);
+  const remaining = keys.length + prefixes.length - targetNames.length;
+  const nameList =
+    targetNames.length > 0
+      ? `\n${targetNames.join(", ")}${remaining > 0 ? `, and ${remaining} more` : ""}`
+      : "";
+  const msg = `Delete ${parts.join(" and ")}?${nameList}\nThis cannot be undone.`;
 
   const confirmed = await showConfirm("Delete", msg, {
     okLabel: "Delete",
@@ -372,10 +387,20 @@ export async function handleRename(): Promise<void> {
   if (keys.length === 1 && prefixes.length === 0) {
     const oldKey = keys[0];
     const oldName = basename(oldKey);
-    const newName = await showPrompt("Rename", "Enter new name:", {
+    const rawName = await showPrompt("Rename", "Enter new name:", {
       inputDefault: oldName,
     });
-    if (!newName || newName === oldName) return;
+    if (!rawName || rawName === oldName) return;
+    const newName = rawName.trim();
+    if (!newName) {
+      setStatus("Name cannot be empty.", 5000);
+      return;
+    }
+    if (newName === oldName) return;
+    if (newName.includes("/")) {
+      setStatus('Name cannot contain "/".', 5000);
+      return;
+    }
     if (targetLocationChanged()) {
       setStatus("Rename cancelled because location changed.", 5000);
       return;
@@ -614,13 +639,43 @@ export async function handleCreateFolder(): Promise<void> {
   }
 
   const key = targetPrefix + trimmed;
+  const folderKey = key.endsWith("/") ? key : `${key}/`;
+
+  const conflictSession: ConflictPromptSession = { applyAll: null };
+  const intent = await resolveObjectConflict(
+    target.connectionId,
+    targetBucket,
+    folderKey,
+    conflictSession,
+    false,
+    { operation: "upload" },
+  );
+  if (targetLocationChanged()) {
+    setStatus("Folder creation cancelled because location changed.", 5000);
+    return;
+  }
+  if (intent === "skip") {
+    setStatus(`Folder creation skipped: "${trimmed}" already exists.`, 5000);
+    return;
+  }
+  if (intent === "cancel") {
+    setStatus(
+      "Folder creation cancelled: unconditional write was not authorized.",
+      5000,
+    );
+    return;
+  }
+
+  const createWithOverwrite = (overwrite: boolean): Promise<unknown> =>
+    invokeS3For(target.connectionId, "create_folder", {
+      bucket: targetBucket,
+      key,
+      overwrite,
+    });
 
   try {
     setStatus("Creating folder...");
-    await invokeS3For(target.connectionId, "create_folder", {
-      bucket: targetBucket,
-      key,
-    });
+    await createWithOverwrite(intent.overwrite);
     if (targetLocationChanged()) return;
     setStatus(`Created folder "${trimmed}".`, 5000);
     logActivity(`Created folder ${trimmed}.`, "success");
@@ -630,11 +685,52 @@ export async function handleCreateFolder(): Promise<void> {
     }
   } catch (err) {
     if (targetLocationChanged()) return;
-    setStatus(`Failed to create folder: ${friendlyError(err)}`);
-    logActivity(
-      `Failed to create folder ${trimmed}: ${friendlyError(err)}`,
-      "error",
-    );
+    const message = friendlyError(err);
+    // A create-only probe can lose a race, or the provider may lack atomic
+    // create-only support: surface the same overwrite-retry consent used by
+    // Put/Copy instead of failing silently.
+    const needsOverwriteRetry =
+      !intent.overwrite &&
+      (/already exists/i.test(message) ||
+        /cannot enforce a create-only/i.test(message) ||
+        /unconditional write/i.test(message));
+    if (needsOverwriteRetry) {
+      const replace = await showConfirm(
+        "Folder Exists",
+        `${targetBucket}/${folderKey} already exists or cannot be created without overwrite. Replace it?`,
+        { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
+      );
+      if (targetLocationChanged()) return;
+      if (!replace) {
+        setStatus(
+          `Folder creation skipped: "${trimmed}" already exists.`,
+          5000,
+        );
+        return;
+      }
+      try {
+        setStatus("Creating folder...");
+        await createWithOverwrite(true);
+        if (targetLocationChanged()) return;
+        setStatus(`Created folder "${trimmed}".`, 5000);
+        logActivity(`Created folder ${trimmed}.`, "success");
+        if (!targetLocationChanged()) {
+          const committed = await refreshObjects(targetBucket, targetPrefix);
+          if (committed && !targetLocationChanged()) renderObjectTable();
+        }
+        return;
+      } catch (retryErr) {
+        if (targetLocationChanged()) return;
+        setStatus(`Failed to create folder: ${friendlyError(retryErr)}`);
+        logActivity(
+          `Failed to create folder ${trimmed}: ${friendlyError(retryErr)}`,
+          "error",
+        );
+        return;
+      }
+    }
+    setStatus(`Failed to create folder: ${message}`);
+    logActivity(`Failed to create folder ${trimmed}: ${message}`, "error");
   }
 }
 
@@ -648,10 +744,13 @@ export async function handleRefresh(): Promise<void> {
   }
   setStatus("Refreshing...");
   try {
-    const committed = await refreshObjects(target.bucket, target.prefix);
+    const committed = await refreshObjects(target.bucket, target.prefix, {
+      preserveSelection: true,
+    });
     if (committed && !connectionSnapshotChanged(target)) {
       invalidateInspectorSelectionSync();
       renderObjectTable();
+      updateSelectionUI();
       renderBreadcrumb();
       setStatus("");
     }
@@ -662,16 +761,51 @@ export async function handleRefresh(): Promise<void> {
   }
 }
 
+let bucketRefreshInFlight = false;
+
+export function isBucketRefreshInFlight(): boolean {
+  return bucketRefreshInFlight;
+}
+
 export async function handleRefreshBuckets(): Promise<void> {
-  if (!state.connected) return;
+  if (!state.connected || bucketRefreshInFlight) return;
+  const connectionId = state.connectionId;
+  const bucketList = document.getElementById("bucket-list");
+  bucketRefreshInFlight = true;
   try {
     setStatus("Refreshing buckets...");
+    bucketList?.setAttribute("aria-busy", "true");
     await refreshBuckets();
+    // Ignore stale completions after disconnect/reconnect.
+    if (!state.connected || state.connectionId !== connectionId) return;
     renderBucketList();
     setStatus("Buckets refreshed.", 3000);
   } catch (err) {
+    if (!state.connected || state.connectionId !== connectionId) return;
     setStatus(`Failed to refresh buckets: ${friendlyError(err)}`);
     logActivity(`Failed to refresh buckets: ${friendlyError(err)}`, "error");
+    // Inline retry affordance inside the list (aria-busy cleared).
+    if (bucketList) {
+      bucketList.setAttribute("aria-busy", "false");
+      const retryRow = document.createElement("li");
+      retryRow.className = "list__empty";
+      const retryBtn = document.createElement("button");
+      retryBtn.type = "button";
+      retryBtn.className = "btn btn--sm";
+      retryBtn.textContent = "Retry bucket refresh";
+      retryBtn.addEventListener("click", () => {
+        void handleRefreshBuckets();
+      });
+      retryRow.textContent = `Failed to refresh buckets: ${friendlyError(err)} `;
+      retryRow.appendChild(retryBtn);
+      bucketList.replaceChildren(retryRow);
+    }
+    return;
+  } finally {
+    bucketRefreshInFlight = false;
+    if (state.connected && state.connectionId === connectionId) {
+      bucketList?.setAttribute("aria-busy", "false");
+    }
   }
 }
 
@@ -682,10 +816,16 @@ export async function handleExportActivityLog(): Promise<void> {
     return;
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const destination = await save({
-    title: "Export Activity Log",
-    defaultPath: `s3-sidekick-activity-${stamp}.txt`,
-  });
+  let destination: string | null;
+  try {
+    destination = await save({
+      title: "Export Activity Log",
+      defaultPath: `s3-sidekick-activity-${stamp}.txt`,
+    });
+  } catch (err) {
+    setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
+    return;
+  }
   if (!destination) return;
 
   let overwrite = false;
@@ -738,8 +878,8 @@ export async function handleGoToKeyOrPrefix(): Promise<void> {
 
     const targetKey = input;
     if (state.objects.some((obj) => obj.key === targetKey)) {
-      state.selectedKeys.clear();
-      state.selectedKeys.add(targetKey);
+      clearAllSelection();
+      addSelection(targetKey);
       updateSelectionUI();
       return;
     }

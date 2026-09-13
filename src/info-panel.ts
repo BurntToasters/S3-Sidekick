@@ -464,13 +464,21 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
 }
 
 function renderBatchView(body: HTMLElement, keys: string[]): void {
-  const listItems = keys
+  // Ctrl+A on a capped listing can select thousands of keys; rendering one
+  // list item each froze the panel. It is informational, so cap the preview.
+  const MAX_LISTED = 100;
+  const shown = keys.slice(0, MAX_LISTED);
+  const listItems = shown
     .map((k) => `<li>${escapeHtml(basename(k))}</li>`)
     .join("");
+  const more =
+    keys.length > shown.length
+      ? `<li class="metadata-batch-more">+${keys.length - shown.length} more…</li>`
+      : "";
   body.innerHTML =
     `<div class="metadata-batch-info">` +
     `<p>Selected ${keys.length} file(s):</p>` +
-    `<ul class="metadata-batch-list">${listItems}</ul>` +
+    `<ul class="metadata-batch-list">${listItems}${more}</ul>` +
     `</div>` +
     `<div class="setting-section">Permissions</div>` +
     `<div class="metadata-permissions-editor">` +

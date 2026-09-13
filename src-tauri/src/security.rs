@@ -11,8 +11,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     atomic_write, bookmarks_backup_path, bookmarks_path, collect_transfer_checkpoint_scratch_paths,
-    connection_path, fsync_parent, lock_storage_meta, lock_storage_ops, purge_transfer_checkpoints,
-    security_journal_path, security_path, transfer_manifest_path,
+    connection_path, fsync_parent, lock_storage_meta, lock_storage_ops, lock_vault_file,
+    purge_transfer_checkpoints, security_journal_path, security_path, transfer_manifest_path,
 };
 
 #[cfg(not(test))]
@@ -291,7 +291,11 @@ pub(crate) fn require_unlocked_key() -> Result<Zeroizing<[u8; KEY_LEN]>, String>
 fn default_security_config() -> SecurityConfig {
     SecurityConfig {
         initialized: false,
-        encryption_enabled: false,
+        // Fresh installs encrypt by default: the first save through
+        // `write_protected_file` requires the vault key, so plaintext can only
+        // ever be written after an explicit opt-out (setup-wizard Skip). See
+        // `load_security_config` for the pre-vault legacy upgrade path.
+        encryption_enabled: true,
         salt: String::new(),
         verifier: String::new(),
         lock_timeout_minutes: 0,
@@ -305,11 +309,55 @@ fn default_security_config() -> SecurityConfig {
     }
 }
 
+/// Explicit opt-out / reset target: uninitialized and unencrypted.
+///
+/// Resets and the setup-wizard Skip path must be able to name plaintext
+/// directly — they cannot use the fresh-install default above, which encrypts.
+fn uninitialized_plaintext_config() -> SecurityConfig {
+    SecurityConfig {
+        initialized: false,
+        encryption_enabled: false,
+        salt: String::new(),
+        verifier: String::new(),
+        lock_timeout_minutes: 0,
+        pbkdf2_iterations: PBKDF2_ITERATIONS,
+        biometric_enrolled: false,
+        legacy_plaintext_adopted: true,
+        legacy_plaintext_adoption_proof: String::new(),
+    }
+}
+
+/// True when managed files from before the vault existed are still on disk.
+///
+/// Those installs have no `security.json` but hold plaintext worth keeping.
+/// Returning the encrypted fresh default for them would lock the user out of
+/// their own data; they get the plaintext config instead so old reads keep
+/// working and the setup wizard records an explicit choice.
+fn fresh_install_has_legacy_plaintext<R: tauri::Runtime, M: tauri::Manager<R>>(app: &M) -> bool {
+    let paths = [
+        bookmarks_path(app),
+        connection_path(app),
+        bookmarks_backup_path(app),
+        transfer_manifest_path(app),
+    ];
+    paths.into_iter().any(|path| {
+        path.map(|path| {
+            std::fs::metadata(&path)
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+    })
+}
+
 pub(crate) fn load_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<SecurityConfig, String> {
     let path = security_path(app)?;
     if !path.exists() {
+        if fresh_install_has_legacy_plaintext(app) {
+            return Ok(uninitialized_plaintext_config());
+        }
         return Ok(default_security_config());
     }
 
@@ -355,6 +403,9 @@ pub(crate) fn save_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
 ) -> Result<(), String> {
     let path = security_path(app)?;
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    // Cross-process guard: STORAGE_OP_LOCK is in-process only. Hold an OS
+    // exclusive lock so a second instance cannot interleave vault writes.
+    let _vault_guard = path.parent().map(lock_vault_file).transpose()?;
     atomic_write(&path, &json)
 }
 
@@ -1266,7 +1317,10 @@ pub(crate) fn security_status(config: &SecurityConfig) -> SecurityStatus {
 /// inside an async command body stalls a Tokio worker for the duration; moving
 /// the whole body onto the blocking pool keeps the runtime responsive and keeps
 /// the `MutexGuard` from ever crossing an await point.
-async fn run_blocking<T, F>(work: F) -> Result<T, String>
+///
+/// Also shared by the metadata commands in `main.rs`, whose small-file reads
+/// and writes likewise must not stall async workers.
+pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -1712,6 +1766,12 @@ pub(crate) fn remove_file_if_present(path: &std::path::Path) -> Result<(), Strin
 }
 
 fn validate_factory_settings(settings_json: &str) -> Result<(), String> {
+    // Destructive endpoint: fail closed on oversized or misshapen payloads
+    // before the preflight reads. Extras are allowed (schema v2), so shape
+    // validation is limited to object-ness plus a size cap.
+    if settings_json.len() > 256 * 1024 {
+        return Err("Factory settings payload is too large".to_string());
+    }
     let settings_value: serde_json::Value = serde_json::from_str(settings_json)
         .map_err(|err| format!("Invalid factory settings JSON: {}", err))?;
     if !settings_value.is_object() {
@@ -1789,7 +1849,10 @@ fn recover_interrupted_factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<
     // Security and settings are both replayed from the durable journal. If a
     // crash lands between them, protected I/O stays latched until this function
     // writes the missing half on the next startup.
-    let default = default_security_config();
+    // A reset returns to explicit plaintext, not the encrypted fresh-install
+    // default: there is no key yet, and the setup wizard records the next
+    // choice.
+    let default = uninitialized_plaintext_config();
     save_security_config(app, &default)?;
     atomic_write(&crate::settings_path(app)?, &journal.settings_json)?;
 
@@ -1925,7 +1988,9 @@ fn factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     }
     result?;
 
-    let default = default_security_config();
+    // Match what recovery persisted: explicit plaintext, so the setup wizard
+    // re-runs and records the next encryption choice.
+    let default = uninitialized_plaintext_config();
     Ok(security_status(&default))
 }
 
@@ -2020,8 +2085,9 @@ fn reset_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     // encryption is off. `read_protected_file` refuses ciphertext without a key,
     // so those files fail closed and a repeated reset finishes removing them.
     // Deleting first would instead leave the data gone while the configuration
-    // still claimed an enabled vault.
-    let default = default_security_config();
+    // still claimed an enabled vault. The reset target is explicit plaintext,
+    // never the encrypted fresh-install default.
+    let default = uninitialized_plaintext_config();
     save_security_config(app, &default)?;
     let _ = set_unlocked_key(None, 0);
 
@@ -2284,7 +2350,7 @@ mod tests {
     fn default_security_config_is_uninitialized() {
         let config = default_security_config();
         assert!(!config.initialized);
-        assert!(!config.encryption_enabled);
+        assert!(config.encryption_enabled);
         assert_eq!(config.pbkdf2_iterations, PBKDF2_ITERATIONS);
     }
 
@@ -3055,7 +3121,7 @@ mod tests {
 
         // Config says encryption is off, which is what a lost or reset
         // security.json looks like.
-        let config = default_security_config();
+        let config = uninitialized_plaintext_config();
         let err = read_protected_file(&path, "[]", &config)
             .expect_err("must not return ciphertext as plaintext");
         assert!(err.contains("still encrypted"), "unexpected error: {}", err);
@@ -3248,7 +3314,7 @@ mod tests {
         std::fs::remove_file(&journal).unwrap();
         recover_interrupted_migration(&handle).unwrap();
         assert_eq!(
-            read_protected_file(&bookmarks, "[]", &default_security_config()).unwrap(),
+            read_protected_file(&bookmarks, "[]", &uninitialized_plaintext_config()).unwrap(),
             "[]"
         );
     }

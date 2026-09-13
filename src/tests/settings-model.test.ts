@@ -181,9 +181,10 @@ describe("settings model", () => {
       }),
     );
 
+    // Schema v2 prunes unknown non-underscore keys; _schemaVersion is stamped.
     expect(result.extras).toEqual({
       _launchCount: 4,
-      unknownKey: "keep-me",
+      _schemaVersion: 2,
     });
     expect(result.settings.theme).toBe("system");
     expect(result.settings.autoCheckUpdates).toBe(true);
@@ -245,5 +246,124 @@ describe("settings model", () => {
     );
     expect(result.settings.windowWidth).toBe(SETTING_DEFAULTS.windowWidth);
     expect(result.settings.windowHeight).toBe(SETTING_DEFAULTS.windowHeight);
+  });
+
+  it("keeps known non-underscore extras and prunes unknown keys", () => {
+    const result = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        launchCount: 5,
+        supportPromptDismissed: true,
+        transfersHintDismissed: false,
+        _setupComplete: true,
+        unknownKey: "drop-me",
+        anotherUnknown: 123,
+      }),
+    );
+    expect(result.malformed).toBe(false);
+    expect(result.extras).toMatchObject({
+      launchCount: 5,
+      supportPromptDismissed: true,
+      transfersHintDismissed: false,
+      _setupComplete: true,
+      _schemaVersion: 2,
+    });
+    expect(result.extras.unknownKey).toBeUndefined();
+    expect(result.extras.anotherUnknown).toBeUndefined();
+  });
+
+  it("stamps schema version even when payload carries a stale version", () => {
+    const result = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        _schemaVersion: 1,
+        _setupComplete: true,
+      }),
+    );
+    expect(result.extras._schemaVersion).toBe(2);
+    expect(result.malformed).toBe(false);
+  });
+
+  it("flags corrupt payloads instead of silently defaulting", () => {
+    const empty = parseSettingsRaw("");
+    expect(empty.malformed).toBe(true);
+    expect(empty.settings).toEqual(SETTING_DEFAULTS);
+    expect(empty.extras._schemaVersion).toBe(2);
+
+    const scalar = parseSettingsRaw(JSON.stringify("just-a-string"));
+    expect(scalar.malformed).toBe(true);
+    expect(scalar.settings).toEqual(SETTING_DEFAULTS);
+
+    const nulled = parseSettingsRaw(JSON.stringify(null));
+    expect(nulled.malformed).toBe(true);
+    expect(nulled.settings).toEqual(SETTING_DEFAULTS);
+  });
+
+  it("round-trips factory payloads through merge and parse", () => {
+    const factoryJson = mergeSettingsPayload(SETTING_DEFAULTS, {});
+    const parsed = JSON.parse(factoryJson) as Record<string, unknown>;
+    expect(parsed._schemaVersion).toBe(2);
+    expect(parsed.theme).toBe("system");
+
+    const reparsed = parseSettingsRaw(factoryJson);
+    expect(reparsed.malformed).toBe(false);
+    expect(reparsed.settings).toEqual(SETTING_DEFAULTS);
+    expect(reparsed.extras).toEqual({ _schemaVersion: 2 });
+  });
+
+  it("preserves partial factory payloads carrying setup completion", () => {
+    const json = mergeSettingsPayload(SETTING_DEFAULTS, {
+      _setupComplete: true,
+      launchCount: 9,
+    });
+    const reparsed = parseSettingsRaw(json);
+    expect(reparsed.settings).toEqual(SETTING_DEFAULTS);
+    expect(reparsed.extras).toMatchObject({
+      _setupComplete: true,
+      launchCount: 9,
+      _schemaVersion: 2,
+    });
+  });
+
+  it("clamps zero and boundary window sizes", () => {
+    const zero = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        windowWidth: 0,
+        windowHeight: 0,
+      }),
+    );
+    expect(zero.settings.windowWidth).toBe(SETTING_DEFAULTS.windowWidth);
+    expect(zero.settings.windowHeight).toBe(SETTING_DEFAULTS.windowHeight);
+
+    const min = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        windowWidth: 400,
+        windowHeight: 300,
+      }),
+    );
+    expect(min.settings.windowWidth).toBe(400);
+    expect(min.settings.windowHeight).toBe(300);
+
+    const max = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        windowWidth: 10000,
+        windowHeight: 10000,
+      }),
+    );
+    expect(max.settings.windowWidth).toBe(10000);
+    expect(max.settings.windowHeight).toBe(10000);
+
+    const over = parseSettingsRaw(
+      JSON.stringify({
+        ...SETTING_DEFAULTS,
+        windowWidth: 10001,
+        windowHeight: 10001,
+      }),
+    );
+    expect(over.settings.windowWidth).toBe(SETTING_DEFAULTS.windowWidth);
+    expect(over.settings.windowHeight).toBe(SETTING_DEFAULTS.windowHeight);
   });
 });

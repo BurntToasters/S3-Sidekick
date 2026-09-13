@@ -21,7 +21,6 @@ const {
   classifyImmutableAsset,
   descriptorReleaseAssetUrl,
   finalPackageTargetKeysForArtifactName,
-  installSmokeReportName,
   isInstallSmokeReportName,
   listAllReleaseAssets,
   readReleaseDescriptor,

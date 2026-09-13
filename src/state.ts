@@ -36,6 +36,8 @@ export const state = {
   objects: [] as ObjectInfo[],
   prefixes: [] as string[],
   selectedKeys: new Set<string>(),
+  selectedPrefixes: new Set<string>(),
+  listingCapped: false,
   continuationToken: "",
   hasMore: false,
   sortColumn: "name" as "name" | "size" | "modified",

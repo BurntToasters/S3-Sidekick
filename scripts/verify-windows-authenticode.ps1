@@ -76,7 +76,10 @@ try {
     $extractDir = Join-Path $tempRoot ([Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $extractDir | Out-Null
     if ($installer.Extension.ToLowerInvariant() -eq '.msi') {
-      $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/a', $installer.FullName, '/qn', "TARGETDIR=$extractDir") -Wait -PassThru
+      # Quote both paths: Start-Process joins ArgumentList with spaces, so an
+      # unquoted path (default TEMP lives under C:\Users\<name>) breaks msiexec.
+      $msiArguments = @('/a', ('"{0}"' -f $installer.FullName), '/qn', ('TARGETDIR="{0}"' -f $extractDir))
+      $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArguments -Wait -PassThru
       if ($process.ExitCode -ne 0) { throw "MSI extraction failed for $($installer.FullName): exit $($process.ExitCode)" }
     } else {
       if (-not $sevenZipPath) { throw "Pinned 7z.exe $expectedSevenZipVersion is required to inspect signed NSIS installer payloads. Run npm run setup:win:7zip." }
@@ -89,6 +92,15 @@ try {
     if (-not $SignatureOnly) {
       $embeddedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $embedded[0].FullName).Hash
       if ($embeddedHash -ne $baselineRuntimeHash) { throw "Embedded runtime differs from the signed pre-bundle runtime in $($installer.FullName)" }
+    }
+    # NSIS writes the uninstaller at install time from the installer payload;
+    # signing only the outer .exe leaves an unsigned uninstall.exe on disk.
+    # The bundle must run signCommand (!uninstfinalize) so the extracted
+    # uninstaller below carries a valid signature.
+    if ($installer.Extension.ToLowerInvariant() -eq '.exe') {
+      $uninstallers = @(Get-ChildItem -LiteralPath $extractDir -File -Recurse | Where-Object { $_.Name -match '(?i)^uninstall.*\.exe$' })
+      if ($uninstallers.Count -ne 1) { throw "Expected exactly one extracted uninstaller in $($installer.FullName); found $($uninstallers.Count). Ensure signCommand ran during bundling (!uninstfinalize)." }
+      Assert-TrustedArtifact $uninstallers[0] $expected
     }
   }
 } finally {

@@ -286,3 +286,8 @@
 .statusbar__transfer--idle:hover {
   opacity: 1;
 }
+
+.transfer-phase--stalled {
+  color: var(--warning);
+  font-weight: 600;
+}

@@ -9,6 +9,7 @@ const { syncInspectorMock, markInspectorHasContentMock } = vi.hoisted(() => ({
 
 vi.mock("../inspector.ts", () => ({
   closeInspectorOnMobile: vi.fn(),
+  isInspectorOpen: () => true,
   markInspectorHasContent: markInspectorHasContentMock,
   syncInspectorFromSelection: syncInspectorMock,
 }));
@@ -192,7 +193,7 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("btn-download") as HTMLButtonElement).disabled,
     ).toBe(true);
 
-    state.selectedKeys.add("prefix:folder/");
+    state.selectedPrefixes.add("folder/");
     browser.updateSelectionUI();
     expect(
       (document.getElementById("btn-download") as HTMLButtonElement).disabled,
@@ -394,12 +395,15 @@ describe("browser core rendering and selection", () => {
     state.selectedKeys.add("hidden.json");
 
     browser.renderObjectTable();
-    expect(state.selectedKeys.has("hidden.json")).toBe(false);
+    // Selection is retained across filters; hidden rows stay selected.
+    expect(state.selectedKeys.has("hidden.json")).toBe(true);
     browser.handleSelectAll(true);
-    expect([...state.selectedKeys].sort()).toEqual([
-      "prefix:txt-folder/",
-      "visible.txt",
-    ]);
+    expect(
+      [
+        ...state.selectedKeys,
+        ...[...state.selectedPrefixes].map((prefix) => "prefix:" + prefix),
+      ].sort(),
+    ).toEqual(["hidden.json", "prefix:txt-folder/", "visible.txt"]);
   });
 
   it("updates sort indicators and handles empty state", async () => {
@@ -541,8 +545,11 @@ describe("browser core rendering and selection", () => {
 
     state.filterText = "other";
     browser.renderObjectTable();
-    expect(state.selectedKeys.size).toBe(0);
-    expect(syncInspectorMock).toHaveBeenCalledTimes(4);
+    // Filtering hides but retains selection.
+    expect(state.selectedKeys.size).toBe(1);
+    expect(state.selectedKeys.has("selected.txt")).toBe(true);
+    // Retained selection keeps the inspector signature stable: no resync.
+    expect(syncInspectorMock).toHaveBeenCalledTimes(3);
     expect([...selectionSnapshot]).toEqual(["selected.txt"]);
   });
 

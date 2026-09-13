@@ -1,4 +1,5 @@
 import { state } from "./state.ts";
+import { selectionCount } from "./app-selection.ts";
 import { isEditableElement } from "./utils.ts";
 import { hideContextMenu } from "./context-menu.ts";
 import { isDialogActive } from "./dialogs.ts";
@@ -149,7 +150,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
       return;
     }
 
-    if (e.key === "Delete" && state.selectedKeys.size > 0) {
+    if (e.key === "Delete" && selectionCount() > 0) {
       if (inInput || modalOpen) return;
       e.preventDefault();
       void handlers.handleDelete();
@@ -165,7 +166,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
     if (modalOpen) return;
 
     if (!inInput) {
-      if (e.key === "F2" && state.selectedKeys.size === 1) {
+      if (e.key === "F2" && selectionCount() === 1) {
         e.preventDefault();
         void handlers.handleRename();
       }

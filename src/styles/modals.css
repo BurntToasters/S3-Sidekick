@@ -89,6 +89,13 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   border-top: 1px solid var(--border);
 }
 
+.settings-save-error {
+  margin-right: auto;
+  align-self: center;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .setting-item {
   display: flex;
   align-items: center;
@@ -167,7 +174,9 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 }
 
 .btn--danger:hover {
-  background: var(--danger);
+  /* Darkened so white text stays above 4.5:1 (#ef4444 is only ~3.7:1). */
+  background: #dc2626;
+  border-color: #dc2626;
   color: #fff;
 }
 

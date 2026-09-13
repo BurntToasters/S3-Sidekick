@@ -83,6 +83,17 @@ export async function initUpdater(): Promise<void> {
   }
   updaterEnabled = updaterSupport.mode !== "manual";
   setUpdateChannel(state.currentSettings.updateChannel);
+  if (state.platformName === "macos") {
+    try {
+      if (await invoke<boolean>("is_app_translocated")) {
+        setStatus(
+          "Running from a disk image. Drag S3 Sidekick to Applications to enable automatic updates.",
+        );
+      }
+    } catch {
+      // Translocation detection is advisory; ignore platform-call failures.
+    }
+  }
 }
 
 export function isUpdaterEnabled(): boolean {

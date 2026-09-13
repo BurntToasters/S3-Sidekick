@@ -88,7 +88,7 @@
                 title="Create new connection"
                 aria-label="New connection"
               >
-                +
+                <span class="lucide-icon" data-icon="plus"></span>
               </button>
             </div>
             <ul id="conn-saved-list" class="conn-saved-list"></ul>
@@ -183,6 +183,23 @@
                         Show
                       </button>
                     </div>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="conn-session-token"
+                      >Session Token
+                      <span class="field-optional">(optional)</span></label
+                    >
+                    <input
+                      id="conn-session-token"
+                      class="field field--full"
+                      type="password"
+                      placeholder="Session Token"
+                      aria-label="Session token"
+                      autocomplete="off"
+                    />
                   </div>
                 </div>
 
@@ -327,6 +344,14 @@
                 aria-label="Filter objects"
               />
               <div class="content-toolbar__actions">
+                <button
+                  id="btn-palette"
+                  class="btn btn--icon"
+                  title="Commands (Ctrl+K)"
+                  aria-label="Commands"
+                >
+                  <span class="lucide-icon" data-icon="search"></span>
+                </button>
                 <button
                   id="btn-refresh"
                   class="btn btn--icon"
@@ -539,6 +564,12 @@
                     <button id="btn-load-more" class="btn btn--ghost">
                       Load more...
                     </button>
+                    <span
+                      id="listing-cap-notice"
+                      class="listing-cap-notice"
+                      role="status"
+                      hidden
+                    ></span>
                     <span id="object-count" class="object-count"></span>
                   </div>
                 </div>
@@ -685,7 +716,7 @@
         <div id="bottom-drawer" class="bottom-drawer" hidden>
           <div
             class="bottom-drawer__resize-handle"
-            role="separator"
+            role="slider"
             aria-label="Resize bottom panel"
             aria-orientation="horizontal"
             tabindex="0"
@@ -858,6 +889,16 @@
               ></span>
             </button>
             <span id="version-label"></span>
+            <button
+              id="palette-hint"
+              class="btn btn--ghost btn--sm statusbar__palette"
+              title="Commands (Ctrl+K)"
+              aria-label="Open command palette"
+            >
+              <span class="lucide-icon" data-icon="search"></span>
+              <span>Commands</span>
+              <span class="shortcut-chip">Ctrl+K</span>
+            </button>
           </div>
         </footer>
       </main>
@@ -1642,6 +1683,12 @@
           </div>
         </div>
         <div class="modal__footer">
+          <div
+            id="settings-save-error"
+            class="form-error settings-save-error"
+            role="alert"
+            hidden
+          ></div>
           <button id="settings-cancel" class="btn btn--ghost">Cancel</button>
           <button id="settings-save" class="btn btn--primary">Save</button>
         </div>
@@ -1654,6 +1701,7 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="dialog-title"
+      aria-describedby="dialog-message"
     >
       <div class="dialog-box">
         <div id="dialog-title" class="dialog-box__title"></div>
@@ -1676,7 +1724,7 @@
             id="dialog-input-reveal"
             class="dialog-input-reveal"
             type="button"
-            tabindex="-1"
+            tabindex="0"
             aria-label="Show password"
             hidden
           >
@@ -2255,8 +2303,6 @@
       class="toast-region"
       role="region"
       aria-label="Notifications"
-      aria-live="polite"
-      aria-relevant="additions"
     ></div>
 
     <script type="module" src="main.ts"></script>

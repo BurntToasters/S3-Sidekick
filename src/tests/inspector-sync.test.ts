@@ -37,19 +37,6 @@ function appendInfoFixture(): void {
   `;
 }
 
-const octetHead = {
-  content_type: "application/octet-stream",
-  content_length: 12,
-  last_modified: "",
-  etag: "",
-  storage_class: "",
-  cache_control: "",
-  content_disposition: "",
-  content_encoding: "",
-  server_side_encryption: "",
-  metadata: {},
-};
-
 describe("syncInspectorFromSelection", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -94,9 +81,15 @@ describe("syncInspectorFromSelection", () => {
     ).toBe(false);
   });
 
-  it("falls back to properties for a non-previewable single file on select", async () => {
+  it("opens preview (rendered unavailable) for a binary single file on select", async () => {
     appendInfoFixture();
-    mockInvoke.mockResolvedValueOnce(octetHead);
+    mockInvoke.mockResolvedValueOnce({
+      content_type: "application/octet-stream",
+      data: "AAAA",
+      is_text: false,
+      truncated: false,
+      total_size: 12,
+    });
 
     const { state } = await import("../state.ts");
     state.currentBucket = "bucket-a";
@@ -113,26 +106,35 @@ describe("syncInspectorFromSelection", () => {
       reason: "selection",
     });
 
-    expect(inspector.getInspectorTab()).toBe("properties");
+    // Preview is always offered; binary content renders unavailable copy.
+    expect(inspector.getInspectorTab()).toBe("preview");
     expect(
       (document.getElementById("inspector-empty") as HTMLElement).hidden,
     ).toBe(true);
     expect(
-      (document.getElementById("inspector-pane-info") as HTMLElement).hidden,
+      (document.getElementById("inspector-pane-preview") as HTMLElement).hidden,
     ).toBe(false);
     expect(mockInvoke).toHaveBeenCalled();
     const previewTab = document.querySelector(
       '[data-inspector-tab="preview"]',
     ) as HTMLElement;
     expect(previewTab.classList.contains("inspector-tab--unavailable")).toBe(
-      true,
+      false,
     );
-    expect(previewTab.getAttribute("aria-disabled")).toBe("true");
+    expect(
+      document.getElementById("inspector-preview-body")?.textContent,
+    ).toMatch(/not available/i);
   });
 
   it("keeps Preview tab with unavailable copy when opened explicitly", async () => {
     appendInfoFixture();
-    mockInvoke.mockResolvedValueOnce(octetHead);
+    mockInvoke.mockResolvedValue({
+      content_type: "application/octet-stream",
+      data: "AAAA",
+      is_text: false,
+      truncated: false,
+      total_size: 12,
+    });
 
     const { state } = await import("../state.ts");
     state.currentBucket = "bucket-a";
@@ -146,10 +148,11 @@ describe("syncInspectorFromSelection", () => {
     await inspector.syncInspectorFromSelection(state.selectedKeys, {
       reason: "selection",
     });
-    expect(inspector.getInspectorTab()).toBe("properties");
+    // Selection already lands on Preview with unavailable copy.
+    expect(inspector.getInspectorTab()).toBe("preview");
 
     inspector.setInspectorTab("preview");
-    // setInspectorTab kicks off async sync — wait a turn for it.
+    // setInspectorTab kicks off async sync — wait for the preview to settle.
     await vi.waitFor(() => {
       expect(inspector.getInspectorTab()).toBe("preview");
       expect(
@@ -163,11 +166,14 @@ describe("syncInspectorFromSelection", () => {
     expect(
       (document.getElementById("inspector-pane-preview") as HTMLElement).hidden,
     ).toBe(false);
-    expect(
-      document
-        .getElementById("inspector-preview-body")
-        ?.querySelector(".inspector-preview-unavailable"),
-    ).toBeTruthy();
+    // openPreview renders binary content as an unavailable message
+    // (.preview-unsupported); the explicit-tab unavailable card
+    // (.inspector-preview-unavailable) only applies when preview is gated.
+    await vi.waitFor(() => {
+      expect(
+        document.getElementById("inspector-preview-body")?.textContent,
+      ).toMatch(/not available/i);
+    });
   });
 
   it("clears docked preview when selection is empty", async () => {
@@ -214,13 +220,13 @@ describe("syncInspectorFromSelection", () => {
     state.connectionId = "test-connection";
     state.connectionIdentity = "test-identity";
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:folder/");
+    state.selectedPrefixes.add("folder/");
 
     const inspector = await import("../inspector.ts");
     inspector.setInspectorOpen(true);
     inspector.focusInspectorPropertiesPane();
 
-    await inspector.syncInspectorFromSelection(state.selectedKeys, {
+    await inspector.syncInspectorFromSelection(undefined, {
       reason: "selection",
     });
 

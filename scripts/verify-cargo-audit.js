@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { isDirectExecution } from "./direct-execution.js";
 
 const EXPECTED_CARGO_AUDIT_VERSION = "0.22.2";

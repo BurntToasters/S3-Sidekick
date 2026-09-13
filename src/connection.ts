@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { clearAllSelection } from "./app-selection.ts";
 import { state } from "./state.ts";
+import { showToast } from "./toast.ts";
 import type { BucketInfo, ObjectInfo } from "./state.ts";
 import {
   FULL_CREATE_ONLY_CAPABILITIES,
@@ -12,6 +14,7 @@ interface ConnectionConfig {
   region: string;
   access_key: string;
   secret_key: string;
+  session_token?: string;
 }
 
 interface ConnectResult {
@@ -32,6 +35,10 @@ let connectionGeneration = 0;
 let listingGeneration = 0;
 let activeListingRequest: number | null = null;
 let paginationRequest = 0;
+let bucketRequest = 0;
+
+// Upper bound for paginated "Load more" accumulation in one listing.
+export const MAX_ACCUMULATED_LISTING_ITEMS = 5000;
 
 interface TrailingListingRefresh {
   connectionId: string;
@@ -80,6 +87,40 @@ export function currentConnectionId(): string {
 
 export function currentConnectionGeneration(): number {
   return connectionGeneration;
+}
+
+export function currentBucketRequest(): number {
+  return bucketRequest;
+}
+
+/**
+ * Synthesize delimiter prefixes from trailing-`/` folder-marker objects.
+ * The backend may return zero-byte `foo/` keys with `is_folder` without a
+ * matching entry in `prefixes`; the object table renders folders from
+ * `prefixes` only, so derive the immediate child prefix here (small frontend
+ * blast radius, no backend change).
+ */
+export function synthesizeMissingPrefixes(
+  objects: ObjectInfo[],
+  prefixes: string[],
+  currentPrefix: string,
+): string[] {
+  const existing = new Set(prefixes);
+  const synthesized: string[] = [];
+  for (const obj of objects) {
+    if (!obj.key.endsWith("/")) continue;
+    if (!obj.key.startsWith(currentPrefix)) continue;
+    if (obj.key === currentPrefix) continue;
+    const remainder = obj.key.slice(currentPrefix.length);
+    const slash = remainder.indexOf("/");
+    if (slash < 0) continue;
+    const immediate = currentPrefix + remainder.slice(0, slash + 1);
+    if (!existing.has(immediate)) {
+      existing.add(immediate);
+      synthesized.push(immediate);
+    }
+  }
+  return synthesized;
 }
 
 export interface ConnectionSnapshot {
@@ -150,6 +191,7 @@ export async function connect(
   region: string,
   accessKey: string,
   secretKey: string,
+  sessionToken = "",
 ): Promise<string> {
   const generation = ++connectionGeneration;
   invalidateListingOwnership();
@@ -160,6 +202,7 @@ export async function connect(
       region,
       accessKey,
       secretKey,
+      sessionToken: sessionToken || null,
     });
     if (generation !== connectionGeneration) {
       throw new Error("Connection attempt superseded");
@@ -237,7 +280,8 @@ export async function disconnect(connectionId?: string): Promise<boolean> {
   state.buckets = [];
   state.objects = [];
   state.prefixes = [];
-  state.selectedKeys.clear();
+  clearAllSelection();
+  state.listingCapped = false;
   state.continuationToken = "";
   state.hasMore = false;
   return true;
@@ -249,6 +293,7 @@ export async function saveConnection(
   region: string,
   accessKey: string,
   secretKey: string,
+  sessionToken = "",
 ): Promise<void> {
   if (!connectionId) {
     throw new Error("Connection id is required");
@@ -258,6 +303,7 @@ export async function saveConnection(
     region,
     access_key: accessKey,
     secret_key: secretKey,
+    ...(sessionToken ? { session_token: sessionToken } : {}),
   };
   await invoke("save_connection", {
     connectionId,
@@ -276,7 +322,9 @@ export async function loadConnection(): Promise<ConnectionConfig | null> {
       typeof (parsed as Record<string, unknown>).endpoint === "string" &&
       typeof (parsed as Record<string, unknown>).region === "string" &&
       typeof (parsed as Record<string, unknown>).access_key === "string" &&
-      typeof (parsed as Record<string, unknown>).secret_key === "string"
+      typeof (parsed as Record<string, unknown>).secret_key === "string" &&
+      ((parsed as Record<string, unknown>).session_token === undefined ||
+        typeof (parsed as Record<string, unknown>).session_token === "string")
     ) {
       return parsed as ConnectionConfig;
     }
@@ -288,15 +336,28 @@ export async function loadConnection(): Promise<ConnectionConfig | null> {
 
 export async function refreshBuckets(): Promise<void> {
   const generation = connectionGeneration;
-  const buckets = await invokeS3<BucketInfo[]>("list_buckets");
-  if (generation === connectionGeneration) {
-    state.buckets = buckets;
+  const request = ++bucketRequest;
+  let buckets: BucketInfo[];
+  try {
+    buckets = await invokeS3<BucketInfo[]>("list_buckets");
+  } catch (error) {
+    // Ignore stale completions; only the latest request owns error reporting.
+    if (request !== bucketRequest || generation !== connectionGeneration) {
+      return;
+    }
+    throw error;
   }
+  if (request !== bucketRequest || generation !== connectionGeneration) {
+    return;
+  }
+  state.buckets = buckets;
 }
 
 export interface RefreshObjectsOptions {
   /** Do not interrupt an already-owned listing transaction. */
   supersedePending?: boolean;
+  /** Keep the current selection (manual refresh) instead of clearing it. */
+  preserveSelection?: boolean;
 }
 
 function queueTrailingListingRefresh(
@@ -359,6 +420,7 @@ function releaseListingOwnership(request: number): void {
 async function runObjectRefresh(
   bucket: string,
   prefix: string,
+  preserveSelection = false,
 ): Promise<boolean> {
   const request = ++listingGeneration;
   activeListingRequest = request;
@@ -392,10 +454,18 @@ async function runObjectRefresh(
     state.currentBucket = bucket;
     state.currentPrefix = prefix;
     state.objects = response.objects;
-    state.prefixes = response.prefixes;
+    // Frontend synthesis (preferred): surface empty folders whose only
+    // evidence is a trailing-`/` marker object without a prefixes entry.
+    state.prefixes = [
+      ...response.prefixes,
+      ...synthesizeMissingPrefixes(response.objects, response.prefixes, prefix),
+    ];
     state.continuationToken = response.next_continuation_token;
     state.hasMore = response.truncated;
-    state.selectedKeys.clear();
+    state.listingCapped = false;
+    if (!preserveSelection) {
+      clearAllSelection();
+    }
     return true;
   } finally {
     releaseListingOwnership(request);
@@ -410,10 +480,13 @@ export function refreshObjects(
   // Automatic refreshes are derived from the currently committed location. If
   // navigation already owns a request, queue one trailing refresh rather than
   // cancelling the navigation or silently dropping the refresh.
+  // Note: mutations intentionally refresh from the start (full re-drive)
+  // instead of preserving pagination tokens, so hasMore/token stay correct
+  // after the listing changes. Paginated follow-ups dedupe by key above.
   if (options.supersedePending === false && activeListingRequest !== null) {
     return queueTrailingListingRefresh(bucket, prefix);
   }
-  return runObjectRefresh(bucket, prefix);
+  return runObjectRefresh(bucket, prefix, options.preserveSelection ?? false);
 }
 
 export async function loadMoreObjects(): Promise<void> {
@@ -459,12 +532,47 @@ export async function loadMoreObjects(): Promise<void> {
   ) {
     return;
   }
-  state.objects = state.objects.concat(response.objects);
+  // Dedupe objects by key on append; paginated listings can repeat the
+  // boundary key across pages. Prefixes were already deduped below.
+  const existingKeys = new Set(state.objects.map((o) => o.key));
+  for (const obj of response.objects) {
+    if (!existingKeys.has(obj.key)) {
+      existingKeys.add(obj.key);
+      state.objects.push(obj);
+    }
+  }
   const existingPrefixes = new Set(state.prefixes);
   for (const p of response.prefixes) {
     if (!existingPrefixes.has(p)) {
+      existingPrefixes.add(p);
       state.prefixes.push(p);
     }
+  }
+  for (const p of synthesizeMissingPrefixes(
+    response.objects,
+    [...existingPrefixes],
+    prefix,
+  )) {
+    if (!existingPrefixes.has(p)) {
+      existingPrefixes.add(p);
+      state.prefixes.push(p);
+    }
+  }
+  // Bound unbounded "Load more" accumulation: huge listings otherwise grow
+  // the in-memory table (and every re-sort/re-filter over it) without limit.
+  // When capped, pagination stops with a notice instead of silently dropping.
+  if (
+    state.objects.length + state.prefixes.length >
+    MAX_ACCUMULATED_LISTING_ITEMS
+  ) {
+    state.continuationToken = "";
+    state.hasMore = false;
+    state.listingCapped = true;
+    showToast(
+      `Listing capped at ${MAX_ACCUMULATED_LISTING_ITEMS.toLocaleString()} items to keep browsing responsive. Narrow the prefix to see more.`,
+      { type: "warning" },
+    );
+    return;
   }
   state.continuationToken = response.next_continuation_token;
   state.hasMore = response.truncated;

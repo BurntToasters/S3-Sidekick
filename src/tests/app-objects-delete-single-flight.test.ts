@@ -139,7 +139,9 @@ describe("destructive delete single-flight", () => {
 
     await objects.handleRefresh();
 
-    expect(mocks.refreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
+    expect(mocks.refreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
+      preserveSelection: true,
+    });
     expect(mocks.invalidateInspectorSelectionSync).toHaveBeenCalledTimes(1);
   });
 });

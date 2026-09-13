@@ -40,9 +40,25 @@ export default [
         "error",
         { checksVoidReturn: { arguments: false } },
       ],
+      // Empty catches hide failures; require a reason comment or logging.
+      "no-empty": ["error", { allowEmptyCatch: false }],
     },
   },
   {
-    ignores: ["dist/**", "node_modules/**", "src-tauri/**", "scripts/**"],
+    files: ["scripts/**/*.{js,mjs,cjs}"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+    },
+    rules: {
+      "no-empty": ["error", { allowEmptyCatch: false }],
+      "no-unused-vars": [
+        "error",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
+      ],
+    },
+  },
+  {
+    ignores: ["dist/**", "node_modules/**", "src-tauri/**"],
   },
 ];

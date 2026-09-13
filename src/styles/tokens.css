@@ -82,7 +82,8 @@
 
     --accent: #6366f1;
     --accent-hover: #818cf8;
-    --accent-text: #09090b;
+    /* White on indigo-500 keeps accent-button text above 4.5:1 in dark. */
+    --accent-text: #ffffff;
 
     --disconnect-bg: rgba(248, 113, 113, 0.12);
     --disconnect-border: rgba(248, 113, 113, 0.3);

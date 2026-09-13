@@ -18,8 +18,14 @@ finish-args:
   - --share=ipc
   - --socket=x11
   - --socket=wayland
+  # Forced X11: WebKitGTK under Wayland still shows blank-surface/input-grab
+  # regressions on some compositors. Re-evaluate native Wayland once
+  # webkit2gtk 4.1 + Tauri v2 stabilize (track upstream Tauri wayland issue).
   - --env=GDK_BACKEND=x11
   - --share=network
+  # notify-rust talks to org.freedesktop.Notifications directly; Flatpak's
+  # default bus policy allows only portals and the app's own name.
+  - --talk-name=org.freedesktop.Notifications
   - --device=dri
   - --filesystem=xdg-download:rw
   - --filesystem=xdg-documents:rw
@@ -51,6 +57,7 @@ modules:
       - install -Dm644 run.rosie.s3-sidekick.desktop /app/share/applications/run.rosie.s3-sidekick.desktop
       - install -Dm644 run.rosie.s3-sidekick.metainfo.xml /app/share/metainfo/run.rosie.s3-sidekick.metainfo.xml
       - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/run.rosie.s3-sidekick.png
+      - install -Dm644 src-tauri/icons/64x64.png /app/share/icons/hicolor/64x64/apps/run.rosie.s3-sidekick.png
       - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/run.rosie.s3-sidekick.png
       - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/run.rosie.s3-sidekick.png
     sources:

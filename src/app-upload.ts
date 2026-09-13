@@ -57,11 +57,17 @@ export async function handleUploadButton(): Promise<void> {
   const snap = captureUploadSnapshot();
   if (!snap) return;
 
-  const selected = await open({
-    title: "Select files to upload",
-    multiple: true,
-    directory: false,
-  });
+  let selected: string | string[] | null;
+  try {
+    selected = await open({
+      title: "Select files to upload",
+      multiple: true,
+      directory: false,
+    });
+  } catch (err) {
+    setStatus(`Failed to open file picker: ${String(err)}`);
+    return;
+  }
   if (!selected) return;
   if (destinationChanged(snap)) {
     setStatus("Upload cancelled because destination changed.", 5000);
@@ -81,11 +87,17 @@ export async function handleUploadFolderButton(): Promise<void> {
   const snap = captureUploadSnapshot();
   if (!snap) return;
 
-  const selected = await open({
-    title: "Select folder(s) to upload",
-    multiple: true,
-    directory: true,
-  });
+  let selected: string | string[] | null;
+  try {
+    selected = await open({
+      title: "Select folder(s) to upload",
+      multiple: true,
+      directory: true,
+    });
+  } catch (err) {
+    setStatus(`Failed to open folder picker: ${String(err)}`);
+    return;
+  }
   if (!selected) return;
 
   const roots = Array.isArray(selected) ? selected : [selected];
