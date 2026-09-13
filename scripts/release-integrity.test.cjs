@@ -703,11 +703,9 @@ test("GPG fingerprint and verification subprocesses strip signing secrets", () =
 
 test("one canonical descriptor binds release id, source archive, locks, toolchains, targets, and install predecessor", () => {
   const root = descriptorFixture();
-  const previousTargets = process.env.RELEASE_EXPECTED_TARGETS;
   const previousFingerprint = process.env.RELEASE_GPG_FINGERPRINT;
   const previousInstallVersion =
     process.env.RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION;
-  delete process.env.RELEASE_EXPECTED_TARGETS;
   process.env.RELEASE_GPG_FINGERPRINT = "A".repeat(40);
   process.env.RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION = "1.2.2";
   try {
@@ -777,9 +775,6 @@ test("one canonical descriptor binds release id, source archive, locks, toolchai
       /working tree is not clean/i,
     );
   } finally {
-    if (previousTargets === undefined)
-      delete process.env.RELEASE_EXPECTED_TARGETS;
-    else process.env.RELEASE_EXPECTED_TARGETS = previousTargets;
     if (previousFingerprint === undefined)
       delete process.env.RELEASE_GPG_FINGERPRINT;
     else process.env.RELEASE_GPG_FINGERPRINT = previousFingerprint;

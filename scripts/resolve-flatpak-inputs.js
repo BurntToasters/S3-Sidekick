@@ -11,15 +11,25 @@ const require = createRequire(import.meta.url);
 const { canonicalJson, parseFlatpakInputs } = require("./release-integrity.cjs");
 const root = fileURLToPath(new URL("..", import.meta.url));
 const manifestPath = path.join(root, "run.rosie.s3-sidekick.yml");
-const architectures = Object.freeze({ arm64: "aarch64", x64: "x86_64" });
+const architectures = Object.freeze({ x64: "x86_64", arm64: "aarch64" });
+
+function isArm64Release(environment = process.env) {
+  return /^(1|true|yes|on)$/i.test(
+    String(environment.REQUIRE_LINUX_AARCH64 || "").trim(),
+  );
+}
 
 function resolveFlatpakInputs({
   execute = spawnSync,
   manifest = fs.readFileSync(manifestPath, "utf8"),
+  includeArm64 = isArm64Release(),
 } = {}) {
   const refs = parseFlatpakInputs(manifest).refs;
   const result = {};
-  for (const [descriptorArch, flatpakArch] of Object.entries(architectures)) {
+  const selectedArchitectures = includeArm64
+    ? Object.entries(architectures)
+    : [["x64", architectures.x64]];
+  for (const [descriptorArch, flatpakArch] of selectedArchitectures) {
     result[descriptorArch] = refs
       .map((ref) => {
         const command = execute(
@@ -48,10 +58,10 @@ function resolveFlatpakInputs({
 }
 
 function main(args = process.argv.slice(2)) {
-  const inputs = resolveFlatpakInputs();
   if (args.length > 1 || (args.length === 1 && args[0] !== "--env")) {
     throw new Error("Usage: node scripts/resolve-flatpak-inputs.js [--env]");
   }
+  const inputs = resolveFlatpakInputs();
   if (args[0] === "--env") {
     process.stdout.write(`RELEASE_FLATPAK_INPUTS=${JSON.stringify(inputs)}\n`);
   } else {

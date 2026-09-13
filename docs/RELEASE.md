@@ -32,17 +32,17 @@ On macOS, create the keychain profile named by `APPLE_NOTARY_PROFILE` with `xcru
 
 ## Freeze Flatpak inputs before draft creation
 
-On a trusted Linux release host with the Flathub remote configured, resolve both architectures:
+On a trusted Linux release host with the Flathub remote configured, resolve the x64 inputs:
 
 ```sh
 npm run release:flatpak-inputs
 ```
 
-Copy the single emitted `RELEASE_FLATPAK_INPUTS=...` line to the draft coordinator's `.env` without editing it. The descriptor requires exact commits for every manifest `release-ref` on both x64 and arm64. Do this before `npm run release:draft`; never resolve or change Flatpak inputs after the descriptor is signed.
+Copy the single emitted `RELEASE_FLATPAK_INPUTS=...` line to the draft coordinator's `.env` without editing it. The descriptor requires exact commits for every manifest `release-ref` on x64. Set `REQUIRE_LINUX_AARCH64=1` before resolving if the release includes Linux arm64. Do this before `npm run release:draft`; never resolve or change Flatpak inputs after the descriptor is signed.
 
 ## Draft and target ownership
 
-The draft coordinator creates and signs the canonical descriptor. `prerelease:prepare` runs `release-preflight` first, so a dirty tree, an unpushed branch, a toolchain mismatch, or missing coordinator inputs (Flatpak pins, smoke predecessor, signing identity, `gh` auth) fail in seconds instead of after the quality gates and builds. Before draft creation, set `RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION` to the one immediate public predecessor (`0.11.0-beta.4` for this RC); descriptor creation rejects missing, non-strict, or non-older values, and every target report must match the signed value exactly. For the one-time migration from legacy GitHub Latest, set `RELEASE_LEGACY_LATEST_BOOTSTRAP` to the exact JSON documented in `.env.example`; remove it after the migration. Publication rechecks the exact Latest release, tag commit, and preexisting asset snapshot before each control upload, accepts only byte-identical partial retries, and performs strict post-bootstrap verification.
+The draft coordinator creates and signs the canonical descriptor. `prerelease:prepare` runs `release-preflight` first, so dirty or unpushed source fails before quality gates and builds. Before draft creation, set `RELEASE_INSTALL_SMOKE_PREVIOUS_VERSION` to the one immediate public predecessor (`0.11.0-beta.4` for this RC); descriptor creation rejects missing, non-strict, or non-older values, and every target report must match the signed value exactly. For the one-time migration from legacy GitHub Latest, set `RELEASE_LEGACY_LATEST_BOOTSTRAP` to the exact JSON documented in `.env.example`; remove it after the migration. Publication rechecks the exact Latest release, tag commit, and preexisting asset snapshot before each control upload, accepts only byte-identical partial retries, and performs strict post-bootstrap verification.
 
 ### Cross-host publication-owner takeover
 

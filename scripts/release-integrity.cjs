@@ -16,7 +16,6 @@ const DEFAULT_GITHUB_REPOSITORY = Object.freeze({
 const DEFAULT_EXPECTED_TARGETS = Object.freeze([
   "darwin-aarch64",
   "darwin-x86_64",
-  "linux-aarch64",
   "linux-x86_64",
   "windows-aarch64",
   "windows-x86_64",
@@ -645,7 +644,11 @@ function parseFlatpakInputs(manifestText) {
   return { extensions, refs, runtime, runtimeVersion, sdk };
 }
 
-function normalizeFlatpakInputsByArchitecture(value, expectedRefs) {
+function normalizeFlatpakInputsByArchitecture(
+  value,
+  expectedRefs,
+  { requireArm64 = true } = {},
+) {
   let parsed = value;
   if (typeof parsed === "string") {
     try {
@@ -658,13 +661,19 @@ function normalizeFlatpakInputsByArchitecture(value, expectedRefs) {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(
-      "RELEASE_FLATPAK_INPUTS must provide x64 and arm64 commit arrays.",
+      `RELEASE_FLATPAK_INPUTS must provide x64${requireArm64 ? " and arm64" : ""} commit arrays.`,
     );
   }
   const sortedExpectedRefs = [...expectedRefs].sort();
   const normalized = {};
   for (const arch of ["x64", "arm64"]) {
     const inputs = parsed[arch];
+    // Linux arm64 is opt-in (see expectedTargets): x64-only releases never
+    // resolve arm64 Flathub pins, so an absent arm64 entry normalizes to empty.
+    if (inputs === undefined && arch === "arm64" && !requireArm64) {
+      normalized[arch] = [];
+      continue;
+    }
     if (!Array.isArray(inputs)) {
       throw new Error(
         `Flatpak ${arch} inputs are missing from the descriptor.`,
@@ -742,20 +751,21 @@ function normalizeLegacyLatestBootstrap(value) {
 }
 
 function expectedTargets(environment = process.env) {
-  const configured = String(environment.RELEASE_EXPECTED_TARGETS || "")
-    .split(/[\s,]+/)
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean);
-  const targets = configured.length > 0 ? configured : DEFAULT_EXPECTED_TARGETS;
+  const targets = [...DEFAULT_EXPECTED_TARGETS];
+  if (
+    /^(1|true|yes|on)$/i.test(
+      String(environment.REQUIRE_LINUX_AARCH64 || "").trim(),
+    )
+  ) {
+    targets.push("linux-aarch64");
+  }
   const unique = Array.from(new Set(targets)).sort();
   if (
     unique.some(
       (target) => !/^(darwin|linux|windows)-(?:aarch64|x86_64)$/.test(target),
     )
   ) {
-    throw new Error(
-      `Invalid RELEASE_EXPECTED_TARGETS value: ${unique.join(", ")}`,
-    );
+    throw new Error(`Invalid release target list: ${unique.join(", ")}`);
   }
   return unique;
 }
@@ -1027,12 +1037,14 @@ function createReleaseDescriptor({
   const rustVersion = parseExactRustVersion(
     fs.readFileSync(path.join(root, "rust-toolchain.toml"), "utf8"),
   );
+  const releaseTargets = expectedTargets(environment);
   const flatpakManifest = parseFlatpakInputs(
     fs.readFileSync(path.join(root, "run.rosie.s3-sidekick.yml"), "utf8"),
   );
   const inputsByArchitecture = normalizeFlatpakInputsByArchitecture(
     flatpakInputsByArchitecture ?? environment.RELEASE_FLATPAK_INPUTS,
     flatpakManifest.refs,
+    { requireArm64: releaseTargets.includes("linux-aarch64") },
   );
   const flatpak = { ...flatpakManifest, inputsByArchitecture };
   const descriptor = {
@@ -1068,7 +1080,7 @@ function createReleaseDescriptor({
       npm: releaseTools.npm,
       rust: rustVersion,
     },
-    expectedTargets: expectedTargets(environment),
+    expectedTargets: releaseTargets,
     requiredEvidence: [...REQUIRED_EVIDENCE_KINDS],
     ...(resolvedLegacyLatestBootstrap
       ? { legacyLatestBootstrap: resolvedLegacyLatestBootstrap }
@@ -1318,7 +1330,6 @@ module.exports = {
   compareSemanticVersions,
   createReleaseDescriptor,
   descriptorReleaseAssetUrl,
-  exactInstallSmokePreviousVersion,
   expectedTargets,
   finalPackageTargetKeysForArtifactName,
   githubAssetSha256,
