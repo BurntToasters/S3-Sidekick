@@ -1318,6 +1318,7 @@ module.exports = {
   compareSemanticVersions,
   createReleaseDescriptor,
   descriptorReleaseAssetUrl,
+  exactInstallSmokePreviousVersion,
   expectedTargets,
   finalPackageTargetKeysForArtifactName,
   githubAssetSha256,

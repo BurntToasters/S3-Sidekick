@@ -82,7 +82,7 @@
     "release:record-install-smoke": "node scripts/record-install-smoke.js",
     "release:draft": "node scripts/release-env.js draft -- node scripts/ensure-draft-release.cjs",
     "release:wait-draft": "node scripts/release-env.js draft -- node scripts/ensure-draft-release.cjs --wait",
-    "prerelease:prepare": "node scripts/release-warning.js",
+    "prerelease:prepare": "node scripts/release-warning.js && node scripts/release-preflight.js",
     "release:mirror": "node scripts/release-env.js mirror -- node scripts/finalize-release-assets.js",
     "release:finalize": "npm run release:mirror",
     "release:publish": "node scripts/release-env.js publish -- node scripts/release-publication.js",
