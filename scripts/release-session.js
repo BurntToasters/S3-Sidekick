@@ -165,7 +165,6 @@ const RELEASE_BOOTSTRAP_PATHS = new Set([
   "src-tauri/Cargo.toml",
   "src-tauri/Cargo.lock",
   "package-lock.json",
-  "scripts/release-title.test.cjs",
 ]);
 const RELEASE_BOOTSTRAP_PREFIXES = ["src-tauri/gen/schemas/"];
 

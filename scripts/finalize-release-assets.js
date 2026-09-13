@@ -6,48 +6,35 @@ import {
   readPackageVersion,
   shouldSkipBetaMirror,
 } from "./post-release-assets.js";
+import { assertStableReleaseOverridesAllowed } from "./release-policy.cjs";
 
-// Dedicated entry point: never gate on argv/path identity (Windows ESM footgun).
 function banner(message) {
   fs.writeSync(2, `[release:mirror] ${message}\n`);
 }
 
-function allowSkipMirror(env = process.env) {
-  return /^(1|true|yes|on)$/i.test(String(env.SKIP_RELEASE_MIRROR ?? "").trim());
-}
-
 const version = readPackageVersion();
-banner("starting");
-banner(`platform=${process.platform}; node=${process.version}`);
-banner(`cwd=${process.cwd()}`);
-banner(`releaseDir=${RELEASE_DIR}`);
+assertStableReleaseOverridesAllowed(process.env, version);
 banner(`version=${JSON.stringify(version)}`);
+banner(`releaseDir=${RELEASE_DIR}`);
 banner(`AFTER_PACK_LOC=${JSON.stringify(getAfterPackLocation())}`);
-banner(
-  `OVERRIDE_BETA_MIRROR_SKIP=${JSON.stringify(process.env.OVERRIDE_BETA_MIRROR_SKIP ?? "")}`,
-);
 
 try {
   const skipBeta = shouldSkipBetaMirror(process.env, version);
-  const skipForced = allowSkipMirror();
-  if (!skipBeta && !skipForced && !getAfterPackLocation()) {
+  if (!skipBeta && !getAfterPackLocation()) {
     throw new Error(
-      `Stable release ${version} requires AFTER_PACK_LOC so artifacts are mirrored outside the release staging directory. Set AFTER_PACK_LOC or SKIP_RELEASE_MIRROR=1. Beta versions (X.Y.Z-beta.N) skip the mirror by default.`,
+      `Stable release ${version} requires AFTER_PACK_LOC. Beta releases skip the mirror by default.`,
     );
   }
-  const result = finalizeReleaseAssets({ version });
-  if (!skipBeta && !skipForced && !result.mirrored) {
-    throw new Error(`Stable release ${version} did not mirror to AFTER_PACK_LOC.`);
+  const result = finalizeReleaseAssets({ logger: console, version });
+  if (!skipBeta && !result.mirrored) {
+    throw new Error(
+      `Stable release ${version} did not mirror to AFTER_PACK_LOC.`,
+    );
   }
   banner(
-    `finished ok; copied=${result.copiedEntries ?? 0}; dest=${result.destination}; skippedBetaMirror=${result.skippedBetaMirror}`,
+    `finished ok; copied=${result.copiedEntries ?? 0}; destination=${result.destination ?? ""}`,
   );
-  process.exit(0);
 } catch (error) {
-  const message =
-    error && typeof error === "object" && "message" in error
-      ? String(error.message)
-      : String(error);
-  banner(`FAILED: ${message}`);
+  banner(`FAILED: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);
 }

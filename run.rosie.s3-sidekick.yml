@@ -5,12 +5,6 @@ sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.node24
   - org.freedesktop.Sdk.Extension.rust-stable
-# Branch refs are signed into the release descriptor together with coordinator-
-# supplied x64 commits; arm64 commits are included when Linux arm64 is enabled.
-# release-ref: org.gnome.Platform//49
-# release-ref: org.gnome.Sdk//49
-# release-ref: org.freedesktop.Sdk.Extension.node24//25.08
-# release-ref: org.freedesktop.Sdk.Extension.rust-stable//25.08
 command: s3-sidekick
 separate-locales: false
 
