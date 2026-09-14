@@ -30,7 +30,6 @@ const packageJson = JSON.parse(
 );
 const VERSION = packageJson.version;
 const TAG = `v${VERSION}`;
-const IS_PRERELEASE = /-beta\.\d+$/.test(VERSION);
 const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
 const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
 
@@ -50,24 +49,19 @@ export function requiredDraftInstallerNames() {
   ];
 }
 
-export function requiredDraftManifestNames() {
-  const keys = [
+export function requiredDraftManifestNames(_version = VERSION) {
+  return [
     "windows-x86_64",
     "windows-aarch64",
     "darwin-x86_64",
     "darwin-aarch64",
     "linux-x86_64",
-  ];
-  if (IS_PRERELEASE) {
-    keys.push(
-      "windows-beta-x86_64",
-      "windows-beta-aarch64",
-      "darwin-beta-x86_64",
-      "darwin-beta-aarch64",
-      "linux-beta-x86_64",
-    );
-  }
-  return keys.map((key) => `latest-${key}.json`);
+    "windows-beta-x86_64",
+    "windows-beta-aarch64",
+    "darwin-beta-x86_64",
+    "darwin-beta-aarch64",
+    "linux-beta-x86_64",
+  ].map((key) => `latest-${key}.json`);
 }
 
 function updaterArtifacts() {
@@ -91,15 +85,11 @@ export function requiredDraftAssetNames() {
     "darwin-x86_64",
     "darwin-aarch64",
     "linux-x86_64",
-    ...(IS_PRERELEASE
-      ? [
-          "windows-beta-x86_64",
-          "windows-beta-aarch64",
-          "darwin-beta-x86_64",
-          "darwin-beta-aarch64",
-          "linux-beta-x86_64",
-        ]
-      : []),
+    "windows-beta-x86_64",
+    "windows-beta-aarch64",
+    "darwin-beta-x86_64",
+    "darwin-beta-aarch64",
+    "linux-beta-x86_64",
   ].flatMap((key) => [`SHA256SUMS-${key}.txt`, `SHA256SUMS-${key}.txt.asc`]);
   return [
     ...installers,
@@ -173,7 +163,12 @@ function currentHead() {
   }).trim();
 }
 
-function assertManifestReferences(manifest, name, assetNames) {
+export function assertManifestReferences(
+  manifest,
+  name,
+  assetNames,
+  { repoOwner = REPO_OWNER, repoName = REPO_NAME, tag = TAG } = {},
+) {
   if (manifest?.version !== VERSION) {
     throw new Error(
       `${name} reports version ${JSON.stringify(manifest?.version)}.`,
@@ -191,14 +186,39 @@ function assertManifestReferences(manifest, name, assetNames) {
       throw new Error(`${name} has invalid platform ${target}.`);
     }
     const url = new URL(entry.url);
+    if (url.protocol !== "https:") {
+      throw new Error(`${name} platform ${target} is not https: ${entry.url}`);
+    }
     const fileName = decodeURIComponent(url.pathname.split("/").at(-1) || "");
     const expectedPrefix =
-      `/` + `${REPO_OWNER}/${REPO_NAME}/releases/download/${TAG}/`;
+      `/` + `${repoOwner}/${repoName}/releases/download/${tag}/`;
     if (
-      url.hostname !== "github.com" ||
-      !url.pathname.startsWith(expectedPrefix) ||
-      !assetNames.has(fileName)
+      url.hostname.toLowerCase() !== "github.com" ||
+      url.port !== "" ||
+      url.username ||
+      url.password ||
+      url.hash ||
+      !url.pathname.toLowerCase().startsWith(expectedPrefix.toLowerCase())
     ) {
+      throw new Error(`${name} points outside this draft: ${entry.url}`);
+    }
+    if (
+      !fileName ||
+      fileName !== path.posix.basename(fileName) ||
+      fileName !== path.win32.basename(fileName) ||
+      path.posix.isAbsolute(fileName) ||
+      path.win32.isAbsolute(fileName) ||
+      fileName.includes("/") ||
+      fileName.includes("\\") ||
+      fileName.includes(":") ||
+      fileName === "." ||
+      fileName === ".."
+    ) {
+      throw new Error(
+        `${name} platform ${target} has an unsafe artifact filename: ${fileName}`,
+      );
+    }
+    if (!assetNames.has(fileName)) {
       throw new Error(`${name} points outside this draft: ${entry.url}`);
     }
     if (!assetNames.has(`${fileName}.sig`)) {
@@ -207,11 +227,30 @@ function assertManifestReferences(manifest, name, assetNames) {
   }
 }
 
-async function verifyUpdaterArtifacts(release, assets) {
+async function verifyUpdaterArtifacts(release, assets, manifests) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "s3-sidekick-draft-"));
   try {
     const byName = new Map(assets.map((asset) => [asset.name, asset]));
-    for (const name of updaterArtifacts()) {
+    const records = new Map();
+    for (const { manifest, name: manifestName } of manifests) {
+      for (const [target, entry] of Object.entries(manifest.platforms || {})) {
+        const parsed = new URL(entry.url);
+        const artifactName = decodeURIComponent(
+          parsed.pathname.split("/").filter(Boolean).at(-1) || "",
+        );
+        const previous = records.get(artifactName);
+        if (previous && previous.signature !== entry.signature) {
+          throw new Error(
+            `${manifestName} platform ${target} disagrees on the updater signature for ${artifactName}.`,
+          );
+        }
+        records.set(artifactName, { signature: entry.signature });
+      }
+    }
+    if (records.size === 0) {
+      throw new Error("Draft manifests reference no updater artifacts.");
+    }
+    for (const [name, record] of records) {
       const artifact = byName.get(name);
       const signature = byName.get(`${name}.sig`);
       if (!artifact || !signature)
@@ -228,8 +267,15 @@ async function verifyUpdaterArtifacts(release, assets) {
         signature.id,
         signaturePath,
       );
-      if (!normalizeUpdaterSignature(signaturePath)) {
-        throw new Error(`Empty updater signature ${name}.sig.`);
+      const manifestSignaturePath = `${artifactPath}.manifest.sig`;
+      fs.writeFileSync(manifestSignaturePath, `${record.signature}\n`);
+      if (
+        normalizeUpdaterSignature(signaturePath) !==
+        normalizeUpdaterSignature(manifestSignaturePath)
+      ) {
+        throw new Error(
+          `Draft asset ${name}.sig does not match updater signature in its manifest.`,
+        );
       }
       verifyUpdaterSignature(artifactPath, signaturePath);
     }
@@ -258,6 +304,7 @@ async function main() {
     headCommit: currentHead(),
     release,
   });
+  const manifests = [];
   const manifestDirectory = fs.mkdtempSync(
     path.join(os.tmpdir(), "s3-sidekick-manifest-"),
   );
@@ -271,18 +318,14 @@ async function main() {
         asset.id,
         manifestPath,
       );
-      assertManifestReferences(
-        JSON.parse(fs.readFileSync(manifestPath, "utf8")),
-        asset.name,
-        assetNames,
-      );
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      assertManifestReferences(manifest, asset.name, assetNames);
+      manifests.push({ manifest, name: asset.name });
     }
   } finally {
     fs.rmSync(manifestDirectory, { force: true, recursive: true });
   }
-  if (process.argv.includes("--verify-artifacts")) {
-    await verifyUpdaterArtifacts(release, assets);
-  }
+  await verifyUpdaterArtifacts(release, assets, manifests);
   console.log(`verify-draft: ok (${TAG}, ${assets.length} assets).`);
 }
 

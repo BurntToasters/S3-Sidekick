@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import { parseReleaseArgs } from "./run-release.js";
 import {
@@ -39,6 +41,11 @@ test("S3 draft matrix is static and Linux x64-only", () => {
     false,
   );
   assert.ok(requiredDraftManifestNames().includes("latest-linux-x86_64.json"));
+  assert.ok(
+    requiredDraftManifestNames("0.11.0").includes(
+      "latest-linux-beta-x86_64.json",
+    ),
+  );
   assert.equal(
     requiredDraftManifestNames().some(
       (name) => name.includes("linux") && name.includes("aarch64"),
@@ -72,5 +79,41 @@ test("stable release rejects recovery overrides", () => {
         "0.11.0",
       ),
     /refuses SKIP_RELEASE_MIRROR/,
+  );
+});
+
+test("macOS SSH wrapper invokes the release runner directly", () => {
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
+  );
+  assert.equal(
+    packageJson.scripts["release:mac:ssh"],
+    "npm run mac:ssh:keychain && node scripts/run-release.js mac",
+  );
+  assert.equal("release:sync-beta-manifests" in packageJson.scripts, true);
+});
+
+test("macOS release uses Tauri signing and notarization like Zinnia", () => {
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
+  );
+  const scripts = packageJson.scripts;
+  assert.match(scripts["build:mac:universal:prepared"], /^dotenv -e \.env -- /);
+  assert.doesNotMatch(scripts["build:mac:universal:prepared"], /--no-sign/);
+  assert.doesNotMatch(scripts["release:mac:continue"], /build:mac:trust/);
+  assert.equal("build:mac:trust" in scripts, false);
+  assert.equal(
+    Object.values(scripts).some((command) =>
+      /release-env|macos-release/.test(command),
+    ),
+    false,
+  );
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(process.cwd(), ".env.example"), "utf8"),
+    /APPLE_NOTARY_PROFILE/,
+  );
+  assert.match(
+    fs.readFileSync(path.join(process.cwd(), ".env.example"), "utf8"),
+    /AZURE_ARTIFACT_SIGNING_PUBLISHER_DN/,
   );
 });

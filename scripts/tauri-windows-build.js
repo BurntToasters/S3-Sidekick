@@ -5,7 +5,6 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { childEnvironment } from "./release-env.js";
 import { isDirectExecution } from "./direct-execution.js";
 
 const require = createRequire(import.meta.url);
@@ -18,6 +17,7 @@ const REQUIRED_SIGNING_ENV = Object.freeze([
   "AZURE_ARTIFACT_SIGNING_ACCOUNT",
   "AZURE_ARTIFACT_SIGNING_PROFILE",
   "AZURE_ARTIFACT_SIGNING_PUBLISHER",
+  "AZURE_ARTIFACT_SIGNING_PUBLISHER_DN",
 ]);
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -172,7 +172,7 @@ function runWindowsBuild({
     const commands = windowsBuildCommands(args, {
       signBundle: !skipWindowsCodeSigning,
     });
-    const buildEnvironment = childEnvironment("build", environment, {});
+    const buildEnvironment = environment;
     execute(process.execPath, commands.compile, {
       stdio: "inherit",
       env: buildEnvironment,
@@ -181,7 +181,7 @@ function runWindowsBuild({
       throw new Error(`Final Windows runtime was not produced: ${runtimePath}`);
     }
 
-    const signingEnvironment = childEnvironment("windows", environment, {});
+    const signingEnvironment = environment;
     if (!skipWindowsCodeSigning) {
       console.log(
         `[tauri-windows-build] Signing runtime before bundling: ${runtimePath}`,
@@ -229,7 +229,7 @@ function runWindowsBuild({
         ],
         {
           stdio: "inherit",
-          env: childEnvironment("windows-verify", environment, {}),
+          env: environment,
         },
       );
     }

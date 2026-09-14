@@ -1,6 +1,8 @@
-import fs from "fs";
-import path from "path";
-import { execFileSync } from "child_process";
+#!/usr/bin/env node
+
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
 
 if (process.platform !== "darwin") {
   console.log("zip-macos can only run on macOS.");
@@ -8,70 +10,75 @@ if (process.platform !== "darwin") {
 }
 
 const root = process.cwd();
-const targetRoot = path.join(root, "src-tauri", "target");
+const targetIndex = process.argv.indexOf("--target");
+const target =
+  targetIndex >= 0 ? process.argv[targetIndex + 1] : "universal-apple-darwin";
+if (!target || target.startsWith("--")) {
+  throw new Error("Usage: node scripts/zip-macos.js [--target <rust-target>]");
+}
 
-function findApps(dir) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  const results = [];
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name.endsWith(".app")) {
-        results.push(full);
-      } else {
-        results.push(...findApps(full));
-      }
-    }
+const appPath = path.join(
+  root,
+  "src-tauri",
+  "target",
+  target,
+  "release",
+  "bundle",
+  "macos",
+  "S3 Sidekick.app",
+);
+if (!fs.existsSync(appPath)) {
+  throw new Error(`Expected macOS bundle was not found: ${appPath}`);
+}
+
+const binaryPath = path.join(appPath, "Contents", "MacOS", "s3-sidekick");
+const architectures = execFileSync("lipo", ["-archs", binaryPath], {
+  encoding: "utf8",
+}).trim();
+for (const architecture of ["x86_64", "arm64"]) {
+  if (!architectures.split(/\s+/).includes(architecture)) {
+    throw new Error(
+      `macOS release binary is missing ${architecture}: ${binaryPath}`,
+    );
   }
-  return results;
 }
 
-if (!fs.existsSync(targetRoot)) {
-  console.error("No build output found in src-tauri/target.");
-  process.exit(1);
+execFileSync(
+  "codesign",
+  ["--verify", "--deep", "--strict", "--verbose=2", appPath],
+  { stdio: "inherit" },
+);
+const signature = spawnSync("codesign", ["--display", "--verbose=4", appPath], {
+  encoding: "utf8",
+});
+if (signature.error || signature.status !== 0) {
+  throw signature.error ?? new Error(signature.stderr);
+}
+const signatureDetails = `${signature.stdout}${signature.stderr}`;
+if (
+  /Signature=adhoc/i.test(signatureDetails) ||
+  !/Authority=Developer ID Application:/i.test(signatureDetails)
+) {
+  throw new Error(
+    "macOS release app is not signed with a Developer ID Application certificate.",
+  );
 }
 
-const apps = findApps(targetRoot).filter((appPath) =>
-  appPath.includes(`${path.sep}bundle${path.sep}macos`),
+execFileSync("xcrun", ["stapler", "validate", appPath], {
+  stdio: "inherit",
+});
+execFileSync(
+  "spctl",
+  ["--assess", "--type", "execute", "--verbose=2", appPath],
+  { stdio: "inherit" },
 );
 
-if (apps.length === 0) {
-  console.error("No .app bundles found. Build macOS bundles first.");
-  process.exit(1);
-}
+const zipPath = path.join(path.dirname(appPath), "S3-Sidekick-macOS.zip");
+fs.rmSync(zipPath, { force: true });
+execFileSync(
+  "ditto",
+  ["-c", "-k", "--sequesterRsrc", "--keepParent", appPath, zipPath],
+  { stdio: "inherit" },
+);
 
-for (const appPath of apps) {
-  const baseName = path.basename(appPath, ".app");
-  // Dev-only footgun guard: this script produces unsigned distributables.
-  // Fail if the .app is already signed so a signed build is never mistaken
-  // for an unsigned dev artifact, and name outputs explicitly.
-  try {
-    execFileSync("codesign", ["--verify", "--deep", "--strict", appPath], {
-      stdio: "ignore",
-    });
-    console.error(
-      `Refusing to pack signed bundle as unsigned dev artifact: ${appPath}. Use npm run build:mac:trust for releases.`,
-    );
-    process.exit(1);
-  } catch (err) {
-    // codesign --verify exits non-zero for unsigned bundles (expected dev
-    // case): fall through to packing. Only surface unexpected failures.
-    if (err?.status === undefined && err?.code !== undefined) throw err;
-  }
-  const zipPath = path.join(
-    path.dirname(appPath),
-    `${baseName}-unsigned-dev.zip`,
-  );
-  execFileSync(
-    "ditto",
-    ["-c", "-k", "--sequesterRsrc", "--keepParent", appPath, zipPath],
-    {
-      stdio: "inherit",
-    },
-  );
-  console.warn(
-    `Unsigned dev artifact (quarantined by Gatekeeper on download, do not distribute): ${zipPath}`,
-  );
-}
-
-console.log("Created unsigned macOS dev zip archives (-unsigned-dev).");
+console.log(`Created ${zipPath}`);

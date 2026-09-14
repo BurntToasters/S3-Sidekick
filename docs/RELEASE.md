@@ -6,10 +6,16 @@ macOS and Linux wait for that draft.
 
 ## Prepare each release VM
 
-Refresh checkout:
+Refresh checkout. Beta:
 
 ```sh
 npm run b
+```
+
+Stable:
+
+```sh
+npm run r
 ```
 
 Authenticate GitHub CLI on each VM:
@@ -18,14 +24,24 @@ Authenticate GitHub CLI on each VM:
 gh auth login
 ```
 
-Install platform signing tools before first release:
+Install platform tools before first release.
+
+Windows:
 
 ```sh
 npm run setup:win:release
 ```
 
-Windows needs Azure Artifact Signing values. macOS needs
-`APPLE_SIGNING_IDENTITY`, `APPLE_NOTARY_PROFILE`, and `APPLE_TEAM_ID`.
+Linux:
+
+```sh
+npm run setup:deb
+npm run setup:flatpak
+```
+
+Windows needs Azure Artifact Signing values, including
+`AZURE_ARTIFACT_SIGNING_PUBLISHER_DN` (full certificate Subject). macOS needs
+`APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`.
 All signing hosts need `GPG_KEY_ID`, `GPG_PASSPHRASE`,
 `TAURI_SIGNING_PRIVATE_KEY`, and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
@@ -48,6 +64,11 @@ Linux release contains x64 AppImage, DEB, RPM, and Flatpak. ARM64 Linux build
 commands remain available for local packaging, but public release matrix is
 x64-only.
 
+Beta signing copies `latest-*-beta-*.json` onto the latest *stable* GitHub
+release so native beta clients can fetch
+`/releases/latest/download/latest-{{target}}-{{arch}}.json`. If that copy is
+interrupted, recover with `npm run release:sync-beta-manifests`.
+
 ## Verify and publish
 
 After all host uploads complete:
@@ -61,8 +82,8 @@ npm run release:verify:published
 `release:verify:draft` checks draft identity, required S3 package matrix,
 checksums, detached signatures, updater manifests, and updater signatures.
 `release:publish` refuses a stale or incomplete draft.
-`release:verify:published` checks the public release matrix and updater
-signatures after publication.
+`release:verify:published` checks the tagged release matrix, then the public
+`/releases/latest` updater feed and signatures after publication.
 
 Perform clean-machine checks before publishing:
 

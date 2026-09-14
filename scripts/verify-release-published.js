@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -96,6 +97,20 @@ async function main() {
       throw new Error(`Published release is missing ${name}.`);
   }
   await verifyUpdaterAssets(assets);
+  const live = spawnSync(
+    process.execPath,
+    [
+      path.join(root, "scripts", "validate-updater-live.js"),
+      "--expected-version=current",
+    ],
+    { cwd: root, stdio: "inherit" },
+  );
+  if (live.error) throw live.error;
+  if (live.status !== 0) {
+    throw new Error(
+      "Live /releases/latest updater verification failed; beta clients cannot discover this feed.",
+    );
+  }
   console.log(`verify-published: ok (${tag}, ${assets.length} assets).`);
 }
 

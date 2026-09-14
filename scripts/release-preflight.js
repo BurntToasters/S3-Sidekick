@@ -3,8 +3,13 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { isDirectExecution } from "./direct-execution.js";
+
+const { assertReleaseToolVersions } = createRequire(import.meta.url)(
+  "./release-integrity.cjs",
+);
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -34,11 +39,14 @@ function git(args, rootDirectory = root) {
 }
 
 function runReleasePreflight({ rootDirectory = root } = {}) {
-  const version = String(
-    JSON.parse(
-      fs.readFileSync(path.join(rootDirectory, "package.json"), "utf8"),
-    ).version ?? "",
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(rootDirectory, "package.json"), "utf8"),
   );
+  assertReleaseToolVersions(packageJson, {
+    environment: process.env,
+    root: rootDirectory,
+  });
+  const version = String(packageJson.version ?? "");
   const expectedBranch = expectedReleaseBranch(version);
   const branch = git(["branch", "--show-current"], rootDirectory);
   if (branch !== expectedBranch) {

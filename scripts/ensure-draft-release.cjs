@@ -10,7 +10,11 @@ const {
   githubApi,
   githubStatusCode,
 } = require("./github-cli.cjs");
-const { assertStableReleaseOverridesAllowed } = require("./release-policy.cjs");
+const {
+  assertStableReleaseOverridesAllowed,
+  isExplicitTruthy,
+} = require("./release-policy.cjs");
+const { assertReleaseToolVersions } = require("./release-integrity.cjs");
 const {
   assertExpectedRelease,
   assertNoMisnamedVersionDrafts,
@@ -21,7 +25,19 @@ const ROOT = path.resolve(__dirname, "..");
 const packageJson = require("../package.json");
 const VERSION = packageJson.version;
 const TAG = `v${VERSION}`;
-const IS_PRERELEASE = /-beta\.\d+$/.test(VERSION);
+const NUMERIC_VERSION = "(?:0|[1-9]\\d*)";
+const BETA_VERSION = new RegExp(
+  `^${NUMERIC_VERSION}\\.${NUMERIC_VERSION}\\.${NUMERIC_VERSION}-beta\\.${NUMERIC_VERSION}$`,
+);
+const STABLE_VERSION = new RegExp(
+  `^${NUMERIC_VERSION}\\.${NUMERIC_VERSION}\\.${NUMERIC_VERSION}$`,
+);
+if (!BETA_VERSION.test(VERSION) && !STABLE_VERSION.test(VERSION)) {
+  throw new Error(
+    `Unsupported release version '${VERSION}'; S3-Sidekick releases use beta or stable versions only.`,
+  );
+}
+const IS_PRERELEASE = BETA_VERSION.test(VERSION);
 const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
 const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
 const WAIT_MODE = process.argv.includes("--wait");
@@ -135,10 +151,16 @@ function matchingReleases(releases) {
   return releases.filter((release) => isExpectedRelease(release, TAG, VERSION));
 }
 
-function assertCommit(release, commit) {
+function assertCommit(release, commit, env = process.env, log = console) {
   if (release?.target_commitish === commit) return release;
+  if (isExplicitTruthy(env.FORCE_UPLOAD)) {
+    log.warn(
+      `WARNING: Draft ${TAG} targets ${release?.target_commitish || "unknown"}, not HEAD ${commit}. FORCE_UPLOAD=1 bypassing commit check.`,
+    );
+    return release;
+  }
   throw new Error(
-    `Draft ${TAG} targets ${release?.target_commitish || "unknown"}, not HEAD ${commit}.`,
+    `Draft ${TAG} targets ${release?.target_commitish || "unknown"}, not HEAD ${commit}. Delete or retarget stale draft before continuing. Or set FORCE_UPLOAD=1 to bypass.`,
   );
 }
 
@@ -185,7 +207,17 @@ async function ensureDraftRelease() {
       tag_name: TAG,
       target_commitish: commit,
     },
-  );
+  ).catch(async (error) => {
+    if (githubStatusCode(error?.message) !== 422 && error?.statusCode !== 422) {
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const afterRetry = matchingReleases(await listReleases()).find(
+      (release) => release.draft,
+    );
+    if (!afterRetry) throw error;
+    return afterRetry;
+  });
   return assertCommit(
     assertExpectedRelease(created, TAG, VERSION, "Created draft release"),
     commit,
@@ -196,7 +228,16 @@ async function waitForDraftRelease() {
   const deadline = Date.now() + WAIT_TIMEOUT_MS;
   const commit = currentCommit();
   for (;;) {
-    const matches = matchingReleases(await listReleases());
+    let matches;
+    try {
+      matches = matchingReleases(await listReleases());
+    } catch (error) {
+      if (!isRetryable(error) || Date.now() >= deadline) throw error;
+      await new Promise((resolve) =>
+        setTimeout(resolve, WAIT_POLL_INTERVAL_MS),
+      );
+      continue;
+    }
     const drafts = matches.filter((release) => release.draft);
     if (drafts.length > 1) {
       throw new Error(`Multiple draft releases exist for ${TAG}.`);
@@ -222,6 +263,10 @@ async function waitForDraftRelease() {
 
 async function main() {
   assertStableReleaseOverridesAllowed(process.env, VERSION);
+  assertReleaseToolVersions(packageJson, {
+    environment: process.env,
+    root: ROOT,
+  });
   assertGitHubCliAuthenticated();
   verifySession();
   if (WAIT_MODE) await waitForDraftRelease();
