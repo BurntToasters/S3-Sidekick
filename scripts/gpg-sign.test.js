@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 import {
   artifactMatchesVersion,
@@ -105,7 +106,7 @@ test("FORCE_UPLOAD bypasses draft commit mismatch", () => {
 
 test("artifact discovery stays in canonical bundle roots", () => {
   const dirs = releaseArtifactSearchDirs("/tmp/s3-sidekick-target");
-  assert.ok(dirs.some((dir) => dir.endsWith("release/bundle")));
+  assert.ok(dirs.some((dir) => dir.endsWith(path.join("release", "bundle"))));
   assert.equal(
     dirs.some((dir) => dir === "/tmp/s3-sidekick-target"),
     false,
