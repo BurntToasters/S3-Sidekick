@@ -30,14 +30,22 @@ function releaseUploadArgs(repository, tag, filePath) {
 }
 
 function releaseAssetUploadArgs(repository, releaseId, filePath) {
-  const fileName = encodeURIComponent(path.basename(filePath));
+  const url = new URL(
+    `https://uploads.github.com/repos/${repository}/releases/${releaseId}/assets`,
+  );
+  url.searchParams.set("name", path.basename(filePath));
+  const contentType = /\.(asc|txt|json)$/i.test(filePath)
+    ? "text/plain"
+    : "application/octet-stream";
   return [
     "api",
     "--method",
     "POST",
-    "-H",
-    "Content-Type: application/octet-stream",
-    `/repos/${repository}/releases/${releaseId}/assets?name=${fileName}`,
+    url.toString(),
+    "--header",
+    "Accept: application/vnd.github+json",
+    "--header",
+    `Content-Type: ${contentType}`,
     "--input",
     filePath,
   ];

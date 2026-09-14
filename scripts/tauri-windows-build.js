@@ -21,6 +21,9 @@ const REQUIRED_SIGNING_ENV = Object.freeze([
 ]);
 
 const root = fileURLToPath(new URL("..", import.meta.url));
+const packageVersion = JSON.parse(
+  fs.readFileSync(path.join(root, "package.json"), "utf8"),
+).version;
 const tauriCli = fileURLToPath(
   new URL("../node_modules/@tauri-apps/cli/tauri.js", import.meta.url),
 );
@@ -58,6 +61,36 @@ function removeBundleArguments(args) {
   return result;
 }
 
+function msiVersionForAppVersion(version) {
+  const match = String(version).match(/^(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$/);
+  if (!match) return null;
+
+  const [major, minor, patch, beta] = match.slice(1).map(Number);
+  if (major > 255 || minor > 255 || patch > 65535 || beta > 65535) {
+    throw new Error(
+      `MSI version components must fit WiX limits (major/minor <= 255; patch/beta <= 65535): ${version}`,
+    );
+  }
+  return `${major}.${minor}.${patch}.${beta}`;
+}
+
+function bundleConfig(version = packageVersion) {
+  const config = {
+    bundle: {
+      createUpdaterArtifacts: false,
+    },
+  };
+  const msiVersion = msiVersionForAppVersion(version);
+  if (msiVersion) {
+    config.bundle.windows = {
+      wix: {
+        version: msiVersion,
+      },
+    };
+  }
+  return config;
+}
+
 function windowsBuildCommands(args, { signBundle = false } = {}) {
   const withoutSigningFlag = args.filter(
     (argument) => argument !== "--no-sign",
@@ -80,10 +113,7 @@ function windowsBuildCommands(args, { signBundle = false } = {}) {
   // separate release phase (scripts/updater-sign.js), so suppress artifact
   // generation here while keeping bundle code signing (signCommand) enabled
   // for the embedded NSIS uninstaller.
-  bundleCommand.push(
-    "--config",
-    JSON.stringify({ bundle: { createUpdaterArtifacts: false } }),
-  );
+  bundleCommand.push("--config", JSON.stringify(bundleConfig()));
   return {
     bundle: bundleCommand,
     compile: [
@@ -252,7 +282,9 @@ if (isDirectExecution(import.meta.url)) {
 
 export {
   REQUIRED_SIGNING_ENV,
+  bundleConfig,
   collectWindowsInstallers,
+  msiVersionForAppVersion,
   removeBundleArguments,
   runWindowsBuild,
   windowsBuildCommands,

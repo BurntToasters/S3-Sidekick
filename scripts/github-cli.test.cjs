@@ -40,7 +40,7 @@ test("GitHub CLI errors expose only recognized HTTP status codes", () => {
   assert.equal(githubStatusCode("network connection failed"), undefined);
 });
 
-test("normal release uploads never request clobber and can bind directly to a release id", () => {
+test("release asset uploads use GitHub uploads host and never request clobber", () => {
   assert.deepEqual(releaseUploadArgs("o/r", "v1", "/tmp/app.zip"), [
     "release",
     "upload",
@@ -57,9 +57,11 @@ test("normal release uploads never request clobber and can bind directly to a re
     "api",
     "--method",
     "POST",
-    "-H",
+    "https://uploads.github.com/repos/o/r/releases/42/assets?name=app+build.zip",
+    "--header",
+    "Accept: application/vnd.github+json",
+    "--header",
     "Content-Type: application/octet-stream",
-    "/repos/o/r/releases/42/assets?name=app%20build.zip",
     "--input",
     "/tmp/app build.zip",
   ]);

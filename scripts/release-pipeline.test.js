@@ -16,6 +16,10 @@ import {
   assertExpectedRelease,
   isExpectedRelease,
 } from "./release-draft-metadata.cjs";
+import {
+  bundleConfig,
+  msiVersionForAppVersion,
+} from "./tauri-windows-build.js";
 
 test("run-release accepts only canonical host commands", () => {
   assert.equal(
@@ -115,5 +119,18 @@ test("macOS release uses Tauri signing and notarization like Zinnia", () => {
   assert.match(
     fs.readFileSync(path.join(process.cwd(), ".env.example"), "utf8"),
     /AZURE_ARTIFACT_SIGNING_PUBLISHER_DN/,
+  );
+});
+
+test("Windows beta MSI version uses numeric WiX override", () => {
+  assert.equal(msiVersionForAppVersion("0.11.0-beta.5"), "0.11.0.5");
+  assert.equal(msiVersionForAppVersion("0.11.0"), null);
+  assert.equal(
+    bundleConfig("0.11.0-beta.5").bundle.windows.wix.version,
+    "0.11.0.5",
+  );
+  assert.throws(
+    () => msiVersionForAppVersion("0.11.0-beta.65536"),
+    /WiX limits/,
   );
 });
