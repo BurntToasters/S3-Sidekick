@@ -8,7 +8,10 @@ import {
   releaseArtifactSearchDirs,
   rpmArtifactMatchesVersion,
 } from "./gpg-sign.js";
-import { configuredSecretValues } from "./flatpak-bundle.js";
+import {
+  configuredSecretValues,
+  isSecretEnvironmentFile,
+} from "./flatpak-bundle.js";
 import {
   assertManifestReferences,
   requiredDraftManifestNames,
@@ -122,6 +125,13 @@ test("Flatpak secret scanner ignores npm package metadata", () => {
   assert.equal(values.includes("s3-sidekick"), false);
   assert.equal(values.includes("/usr/bin"), false);
   assert.equal(values.includes("super-secret-passphrase"), true);
+  assert.equal(
+    isSecretEnvironmentFile(
+      "/tmp/s3-sidekick/.flatpak-source/node_modules/dotenv-cli/.env",
+    ),
+    false,
+  );
+  assert.equal(isSecretEnvironmentFile("/tmp/s3-sidekick/.env"), true);
 });
 
 test("stable and beta drafts both require beta-transition manifests", () => {

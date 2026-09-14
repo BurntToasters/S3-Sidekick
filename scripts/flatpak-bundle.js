@@ -68,6 +68,8 @@ function detectArch(execute = run) {
 
 function isSecretEnvironmentFile(sourcePath) {
   const name = path.basename(sourcePath);
+  const pathSegments = path.normalize(sourcePath).split(path.sep);
+  if (pathSegments.includes("node_modules")) return false;
   return (
     name !== ".env.example" && (name === ".env" || name.startsWith(".env."))
   );
