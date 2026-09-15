@@ -44,7 +44,9 @@ modules:
     build-commands:
       - node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major !== 24 || minor < 18) { console.error('Node 24.18+ required, found', process.version); process.exit(1); }"
       # The Node 24 SDK ships npm 11.x, while packageManager requires npm 12.0.2.
-      - npm install --global npm@12.0.2 --ignore-scripts --engine-strict=false --no-audit --no-fund --prefix /run/build/s3-sidekick/npm-global
+      # npm_config_offline stays on for later lockfile-only commands; --no-offline
+      # is required here or the CLI uses only-if-cached and fails with ENOTCACHED.
+      - npm install --global npm@12.0.2 --no-offline --ignore-scripts --engine-strict=false --no-audit --no-fund --prefix /run/build/s3-sidekick/npm-global
       - test "$(npm --version)" = "12.0.2"
       - rustc --version
       - test ! -e .env && test ! -e .env.local && test ! -e .env.production
