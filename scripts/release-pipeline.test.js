@@ -19,6 +19,8 @@ import {
 import {
   bundleConfig,
   msiVersionForAppVersion,
+  runWindowsBuild,
+  windowsBuildCommand,
 } from "./tauri-windows-build.js";
 
 test("run-release accepts only canonical host commands", () => {
@@ -133,4 +135,87 @@ test("Windows beta MSI version uses numeric WiX override", () => {
     () => msiVersionForAppVersion("0.11.0-beta.65536"),
     /WiX limits/,
   );
+});
+
+test("Windows build is one tauri build like Zinnia, not compile-then-bundle", () => {
+  const command = windowsBuildCommand([
+    "--target",
+    "x86_64-pc-windows-msvc",
+    "--bundles",
+    "nsis,msi",
+  ]);
+  assert.equal(command[1], "build");
+  assert.equal(command.includes("bundle"), false);
+  assert.equal(command.includes("--no-bundle"), false);
+  assert.equal(command.includes("--no-sign"), false);
+  const config = JSON.parse(command[command.indexOf("--config") + 1]);
+  assert.equal(config.bundle.createUpdaterArtifacts, false);
+  assert.equal(config.bundle.windows.wix.version, "0.11.0.5");
+  assert.deepEqual(command.slice(-2), ["--", "--locked"]);
+});
+
+test("Windows signed build re-signs leftover runtime then verifies the release dir", () => {
+  const calls = [];
+  const target = "x86_64-pc-windows-msvc";
+  const targetReleaseDir = path.join(
+    process.cwd(),
+    "src-tauri",
+    "target",
+    target,
+    "release",
+  );
+  const runtimePath = path.join(targetReleaseDir, "s3-sidekick.exe");
+  const installer = path.join(
+    targetReleaseDir,
+    "bundle",
+    "nsis",
+    "S3 Sidekick_0.11.0-beta.5_x64-setup.exe",
+  );
+  const signingEnv = {
+    AZURE_CLIENT_ID: "id",
+    AZURE_TENANT_ID: "tenant",
+    AZURE_CLIENT_SECRET: "secret",
+    AZURE_ARTIFACT_SIGNING_ENDPOINT: "https://example.invalid",
+    AZURE_ARTIFACT_SIGNING_ACCOUNT: "account",
+    AZURE_ARTIFACT_SIGNING_PROFILE: "profile",
+    AZURE_ARTIFACT_SIGNING_PUBLISHER: "Rosie Software LLC",
+    AZURE_ARTIFACT_SIGNING_PUBLISHER_DN: "CN=Rosie Software LLC",
+  };
+  runWindowsBuild({
+    args: ["--target", target, "--bundles", "nsis,msi"],
+    environment: signingEnv,
+    platform: "win32",
+    execute: (_command, args) => {
+      calls.push(args);
+    },
+    fileExists: (filePath) => filePath === runtimePath,
+    findInstallers: () => [installer],
+    listRuntimes: () => [runtimePath],
+    assertSource: () => "a".repeat(40),
+  });
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0][1], "build");
+  assert.equal(calls[0].includes("--no-bundle"), false);
+  assert.equal(calls[1].includes("-FilePath"), true);
+  assert.equal(calls[1].includes(runtimePath), true);
+  assert.equal(calls[2].includes("-TargetReleaseDir"), true);
+  assert.equal(calls[2].includes(targetReleaseDir), true);
+  assert.equal(calls[2].includes("-ExpectedRuntimePath"), false);
+  assert.equal(calls[2].includes("-InstallerPathsJson"), false);
+  assert.equal(
+    calls.some((args) => args.includes(installer)),
+    false,
+  );
+});
+
+test("Windows Authenticode verifier checks release-dir signatures only", () => {
+  const source = fs.readFileSync(
+    path.join(process.cwd(), "scripts", "verify-windows-authenticode.ps1"),
+    "utf8",
+  );
+  assert.match(source, /TargetReleaseDir/);
+  assert.match(source, /AZURE_ARTIFACT_SIGNING_PUBLISHER_DN/);
+  assert.match(source, /TimeStamperCertificate/);
+  assert.doesNotMatch(source, /InstallerPathsJson|ExpectedRuntimePath/);
+  assert.doesNotMatch(source, /TAURI_BUNDLE_TYPE|msiexec|7z\.exe/);
 });
