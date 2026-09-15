@@ -69,9 +69,13 @@ modules:
           - .env.*
           - .git
           - .github
+          - .flatpak-builder
+          - .flatpak-source
           - release
           - release-artifacts
           - dist
+          - flatpak-build
+          - flatpak-repo
           - src-tauri/target
           - target
           - "*.log"
