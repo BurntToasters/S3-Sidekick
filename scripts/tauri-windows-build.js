@@ -42,25 +42,6 @@ function valueAfter(args, flag) {
   );
 }
 
-function removeBundleArguments(args) {
-  const result = [];
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === "--bundles" || argument === "-b") {
-      index += 1;
-      while (index + 1 < args.length && !args[index + 1].startsWith("-")) {
-        index += 1;
-      }
-      continue;
-    }
-    if (argument.startsWith("--bundles=") || argument.startsWith("-b=")) {
-      continue;
-    }
-    result.push(argument);
-  }
-  return result;
-}
-
 function msiVersionForAppVersion(version) {
   const match = String(version).match(/^(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$/);
   if (!match) return null;
@@ -91,43 +72,23 @@ function bundleConfig(version = packageVersion) {
   return config;
 }
 
-function windowsBuildCommands(args, { signBundle = false } = {}) {
-  const withoutSigningFlag = args.filter(
-    (argument) => argument !== "--no-sign",
-  );
-  const cargoSeparator = withoutSigningFlag.indexOf("--");
+function windowsBuildCommand(args) {
+  const cargoSeparator = args.indexOf("--");
   const tauriArguments =
-    cargoSeparator >= 0
-      ? withoutSigningFlag.slice(0, cargoSeparator)
-      : withoutSigningFlag;
-  // The bundle step must run with signing enabled (no --no-sign) so the
-  // merged signCommand signs the NSIS uninstaller via !uninstfinalize.
-  // Compile stays --no-sign: the runtime is signed manually pre-bundle. The
-  // bundler patches each staged runtime with its package-type marker and
-  // re-signs it before embedding, then restores the pre-bundle binary on
-  // disk; verify-windows-authenticode.ps1 normalizes those expected regions
-  // so the embedded payload can still be compared to the pre-bundle runtime.
-  const bundleCommand = [tauriCli, "bundle", ...tauriArguments];
-  if (!signBundle) bundleCommand.push("--no-sign");
-  // Tauri signs updater artifacts during bundling whenever
-  // createUpdaterArtifacts is enabled, which requires the updater private key
-  // — intentionally absent from the bundle environment. Updater signing is a
-  // separate release phase (scripts/updater-sign.js), so suppress artifact
-  // generation here while keeping bundle code signing (signCommand) enabled
-  // for the embedded NSIS uninstaller.
-  bundleCommand.push("--config", JSON.stringify(bundleConfig()));
-  return {
-    bundle: bundleCommand,
-    compile: [
-      tauriCli,
-      "build",
-      ...removeBundleArguments(tauriArguments),
-      "--no-bundle",
-      "--no-sign",
-      "--",
-      "--locked",
-    ],
-  };
+    cargoSeparator >= 0 ? args.slice(0, cargoSeparator) : args;
+  // Same shape as Zinnia: one `tauri build` so compile, bundle-type patching,
+  // signCommand (NSIS !uninstfinalize), and installer signing happen together.
+  // createUpdaterArtifacts stays off here; updater signing is a later phase
+  // (scripts/updater-sign.js) and must not require the updater key at bundle time.
+  return [
+    tauriCli,
+    "build",
+    ...tauriArguments,
+    "--config",
+    JSON.stringify(bundleConfig()),
+    "--",
+    "--locked",
+  ];
 }
 
 function collectWindowsInstallers(bundleDirectory) {
@@ -147,7 +108,17 @@ function collectWindowsInstallers(bundleDirectory) {
   return results.sort();
 }
 
-function powershellArguments(script, filePath) {
+function listReleaseExecutables(releaseDir) {
+  if (!fs.existsSync(releaseDir)) return [];
+  return fs
+    .readdirSync(releaseDir, { withFileTypes: true })
+    .filter(
+      (entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".exe"),
+    )
+    .map((entry) => path.join(releaseDir, entry.name));
+}
+
+function powershellArguments(script, extraArgs) {
   return [
     "-NoProfile",
     "-NonInteractive",
@@ -155,8 +126,7 @@ function powershellArguments(script, filePath) {
     "Bypass",
     "-File",
     script,
-    "-FilePath",
-    filePath,
+    ...extraArgs,
   ];
 }
 
@@ -167,6 +137,7 @@ function runWindowsBuild({
   execute = execFileSync,
   fileExists = fs.existsSync,
   findInstallers = collectWindowsInstallers,
+  listRuntimes = listReleaseExecutables,
   assertSource = assertCleanSource,
 } = {}) {
   const skipWindowsCodeSigning = environment.SKIP_WIN_CODESIGN?.trim() === "1";
@@ -201,33 +172,13 @@ function runWindowsBuild({
       "release",
     );
     const runtimePath = path.join(targetReleaseDir, "s3-sidekick.exe");
-    const commands = windowsBuildCommands(args, {
-      signBundle: !skipWindowsCodeSigning,
-    });
-    const buildEnvironment = environment;
-    execute(process.execPath, commands.compile, {
+    execute(process.execPath, windowsBuildCommand(args), {
       stdio: "inherit",
-      env: buildEnvironment,
+      env: environment,
     });
     if (!fileExists(runtimePath)) {
       throw new Error(`Final Windows runtime was not produced: ${runtimePath}`);
     }
-
-    const signingEnvironment = environment;
-    if (!skipWindowsCodeSigning) {
-      console.log(
-        `[tauri-windows-build] Signing runtime before bundling: ${runtimePath}`,
-      );
-      execute("powershell.exe", powershellArguments(signScript, runtimePath), {
-        stdio: "inherit",
-        env: signingEnvironment,
-      });
-    }
-
-    execute(process.execPath, commands.bundle, {
-      stdio: "inherit",
-      env: buildEnvironment,
-    });
     const installers = findInstallers(path.join(targetReleaseDir, "bundle"));
     if (installers.length === 0) {
       throw new Error(
@@ -236,33 +187,29 @@ function runWindowsBuild({
     }
 
     if (!skipWindowsCodeSigning) {
-      for (const installer of installers) {
-        console.log(
-          `[tauri-windows-build] Signing final installer: ${installer}`,
+      const runtimeExecutables = listRuntimes(targetReleaseDir);
+      if (runtimeExecutables.length === 0) {
+        throw new Error(
+          `No final Windows runtime executables found under ${targetReleaseDir}`,
         );
-        execute("powershell.exe", powershellArguments(signScript, installer), {
-          stdio: "inherit",
-          env: signingEnvironment,
-        });
+      }
+      for (const executable of runtimeExecutables) {
+        console.log(
+          `[tauri-windows-build] Finalizing Authenticode signature: ${executable}`,
+        );
+        execute(
+          "powershell.exe",
+          powershellArguments(signScript, ["-FilePath", executable]),
+          { stdio: "inherit", env: environment },
+        );
       }
       execute(
         "powershell.exe",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          verifyScript,
-          "-ExpectedRuntimePath",
-          runtimePath,
-          "-InstallerPathsJson",
-          JSON.stringify(installers),
-        ],
-        {
-          stdio: "inherit",
-          env: environment,
-        },
+        powershellArguments(verifyScript, [
+          "-TargetReleaseDir",
+          targetReleaseDir,
+        ]),
+        { stdio: "inherit", env: environment },
       );
     }
     return { installers, runtimePath, targetReleaseDir };
@@ -286,8 +233,8 @@ export {
   REQUIRED_SIGNING_ENV,
   bundleConfig,
   collectWindowsInstallers,
+  listReleaseExecutables,
   msiVersionForAppVersion,
-  removeBundleArguments,
   runWindowsBuild,
-  windowsBuildCommands,
+  windowsBuildCommand,
 };
