@@ -25,6 +25,74 @@ function Assert-TrustedArtifact([System.IO.FileInfo]$File, [string]$ExpectedPubl
   Write-Host "Verified: $($File.FullName)"
 }
 
+# Tauri's Windows bundler patches the __TAURI_BUNDLE_TYPE marker in the main
+# binary per package type (MSI -> MSI, NSIS -> NSS) and re-signs it, then
+# restores the pre-bundle binary on disk. The embedded runtime therefore
+# differs from the pre-bundle runtime in exactly three places: the 3-byte
+# marker suffix, the PE checksum, and the Authenticode certificate table.
+# Hashing the image bytes below the certificate table with those regions
+# zeroed keeps strict payload verification possible.
+$bundleTokenPrefix = '__TAURI_BUNDLE_TYPE_VAR_'
+
+function Get-PeBundleTokenOffset([byte[]]$Bytes, [string]$SourcePath) {
+  $unknownToken = $bundleTokenPrefix + 'UNK'
+  $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+  $text = $latin1.GetString($Bytes)
+  $offset = $text.IndexOf($unknownToken, [System.StringComparison]::Ordinal)
+  if ($offset -lt 0) { throw "Missing $unknownToken marker in $SourcePath" }
+  if ($text.IndexOf($unknownToken, $offset + 1, [System.StringComparison]::Ordinal) -ge 0) { throw "Multiple $unknownToken markers in $SourcePath" }
+  return $offset
+}
+
+function Get-PeBundleToken([byte[]]$Bytes, [int]$BundleTokenOffset, [string]$SourcePath) {
+  $tokenLength = $bundleTokenPrefix.Length + 3
+  if ($BundleTokenOffset -lt 0 -or ($BundleTokenOffset + $tokenLength) -gt $Bytes.Length) { throw "Bundle marker offset is out of range in $SourcePath" }
+  $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+  $token = $latin1.GetString($Bytes, $BundleTokenOffset, $tokenLength)
+  if (-not $token.StartsWith($bundleTokenPrefix, [System.StringComparison]::Ordinal)) { throw "Missing bundle marker at the expected offset in $SourcePath" }
+  return $token
+}
+
+function Get-NormalizedRuntimeHash([byte[]]$Bytes, [string]$SourcePath, [int]$BundleTokenOffset) {
+  if ($Bytes.Length -lt 0x40) { throw "File is too small to be a PE image: $SourcePath" }
+  $peOffset = [System.BitConverter]::ToInt32($Bytes, 0x3C)
+  if ($peOffset -lt 0 -or ($peOffset + 24) -ge $Bytes.Length) { throw "Invalid PE header offset in $SourcePath" }
+  if ([System.BitConverter]::ToUInt32($Bytes, $peOffset) -ne 0x00004550) { throw "Missing PE signature in $SourcePath" }
+  $optionalHeaderOffset = $peOffset + 24
+  $magic = [System.BitConverter]::ToUInt16($Bytes, $optionalHeaderOffset)
+  $dataDirectoryOffset = $null
+  if ($magic -eq 0x10B) {
+    $dataDirectoryOffset = $optionalHeaderOffset + 96
+  } elseif ($magic -eq 0x20B) {
+    $dataDirectoryOffset = $optionalHeaderOffset + 112
+  } else {
+    throw ("Unsupported PE optional header magic 0x{0:X} in {1}" -f $magic, $SourcePath)
+  }
+  $checksumOffset = $optionalHeaderOffset + 64
+  $certificateEntryOffset = $dataDirectoryOffset + (4 * 8)
+  if (($certificateEntryOffset + 8) -gt $Bytes.Length) { throw "Certificate table entry is out of range in $SourcePath" }
+  $certificateOffset = [int][System.BitConverter]::ToUInt32($Bytes, $certificateEntryOffset)
+  $certificateSize = [int][System.BitConverter]::ToUInt32($Bytes, $certificateEntryOffset + 4)
+  if ($certificateOffset -le 0 -or $certificateSize -le 0 -or (($certificateOffset + $certificateSize) -gt $Bytes.Length)) { throw "Missing Authenticode certificate table in $SourcePath" }
+
+  $normalized = New-Object byte[] $certificateOffset
+  [System.Array]::Copy($Bytes, 0, $normalized, 0, $certificateOffset)
+  [System.Array]::Clear($normalized, ($BundleTokenOffset + $bundleTokenPrefix.Length), 3)
+  [System.Array]::Clear($normalized, $checksumOffset, 4)
+  [System.Array]::Clear($normalized, $certificateEntryOffset, 8)
+
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $hash = [System.BitConverter]::ToString($sha256.ComputeHash($normalized)).Replace('-', '')
+  } finally {
+    $sha256.Dispose()
+  }
+  return [PSCustomObject]@{
+    Hash = $hash
+    CertificateOffset = [int]$certificateOffset
+  }
+}
+
 if (-not $InstallerPathsJson.Trim().StartsWith('[')) { throw 'InstallerPathsJson must be a JSON array.' }
 try {
   $parsedInstallerPaths = ConvertFrom-Json -InputObject $InstallerPathsJson -ErrorAction Stop
@@ -38,11 +106,17 @@ $expected = $env:AZURE_ARTIFACT_SIGNING_PUBLISHER.Trim()
 $expectedSubject = $env:AZURE_ARTIFACT_SIGNING_PUBLISHER_DN.Trim()
 $runtime = $null
 $baselineRuntimeHash = $null
+$runtimeTokenOffset = $null
+$baselineCertificateOffset = $null
 if (-not $SignatureOnly) {
   $runtime = Get-Item -LiteralPath (Resolve-Path -LiteralPath $ExpectedRuntimePath).Path
   if ($runtime.PSIsContainer -or $runtime.Extension.ToLowerInvariant() -ne '.exe') { throw 'ExpectedRuntimePath must resolve to an executable file.' }
   Assert-TrustedArtifact $runtime $expected $expectedSubject
-  $baselineRuntimeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $runtime.FullName).Hash
+  $runtimeBytes = [System.IO.File]::ReadAllBytes($runtime.FullName)
+  $runtimeTokenOffset = Get-PeBundleTokenOffset $runtimeBytes $runtime.FullName
+  $baselinePayload = Get-NormalizedRuntimeHash $runtimeBytes $runtime.FullName $runtimeTokenOffset
+  $baselineRuntimeHash = $baselinePayload.Hash
+  $baselineCertificateOffset = $baselinePayload.CertificateOffset
 }
 
 $seenPaths = @{}
@@ -94,8 +168,13 @@ try {
     if ($embedded.Count -ne 1) { throw "Expected exactly one embedded s3-sidekick.exe in $($installer.FullName); found $($embedded.Count)" }
     Assert-TrustedArtifact $embedded[0] $expected $expectedSubject
     if (-not $SignatureOnly) {
-      $embeddedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $embedded[0].FullName).Hash
-      if ($embeddedHash -ne $baselineRuntimeHash) { throw "Embedded runtime differs from the signed pre-bundle runtime in $($installer.FullName)" }
+      $embeddedBytes = [System.IO.File]::ReadAllBytes($embedded[0].FullName)
+      $embeddedToken = Get-PeBundleToken $embeddedBytes $runtimeTokenOffset $embedded[0].FullName
+      $allowedTokens = if ($installer.Extension.ToLowerInvariant() -eq '.msi') { @($bundleTokenPrefix + 'MSI', $bundleTokenPrefix + 'UNK') } else { @($bundleTokenPrefix + 'NSS', $bundleTokenPrefix + 'UNK') }
+      if ($allowedTokens -notcontains $embeddedToken) { throw "Unexpected bundle marker in the embedded runtime in $($installer.FullName): '$embeddedToken'" }
+      $embeddedPayload = Get-NormalizedRuntimeHash $embeddedBytes $embedded[0].FullName $runtimeTokenOffset
+      if ($embeddedPayload.CertificateOffset -ne $baselineCertificateOffset) { throw "Embedded runtime layout differs from the signed pre-bundle runtime in $($installer.FullName) (marker '$embeddedToken', certificate offset $($embeddedPayload.CertificateOffset) vs $baselineCertificateOffset)" }
+      if ($embeddedPayload.Hash -ne $baselineRuntimeHash) { throw "Embedded runtime payload differs from the signed pre-bundle runtime in $($installer.FullName) (marker '$embeddedToken', expected $baselineRuntimeHash, found $($embeddedPayload.Hash))" }
     }
     # NSIS writes the uninstaller at install time from the installer payload;
     # signing only the outer .exe leaves an unsigned uninstall.exe on disk.
@@ -110,5 +189,5 @@ try {
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
-$mode = if ($SignatureOnly) { 'signature-only evidence' } else { 'strict runtime-byte verification' }
+$mode = if ($SignatureOnly) { 'signature-only evidence' } else { 'strict runtime payload verification' }
 Write-Host "Verified $($installers.Count) exact timestamped installer(s), including extracted runtime signatures, from '$expectedSubject' ($mode)."

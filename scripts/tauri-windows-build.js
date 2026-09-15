@@ -102,9 +102,11 @@ function windowsBuildCommands(args, { signBundle = false } = {}) {
       : withoutSigningFlag;
   // The bundle step must run with signing enabled (no --no-sign) so the
   // merged signCommand signs the NSIS uninstaller via !uninstfinalize.
-  // Compile stays --no-sign: the runtime is signed manually pre-bundle and
-  // windows-artifact-sign.ps1 skips re-signing valid binaries to keep the
-  // strict runtime-byte hash check stable.
+  // Compile stays --no-sign: the runtime is signed manually pre-bundle. The
+  // bundler patches each staged runtime with its package-type marker and
+  // re-signs it before embedding, then restores the pre-bundle binary on
+  // disk; verify-windows-authenticode.ps1 normalizes those expected regions
+  // so the embedded payload can still be compared to the pre-bundle runtime.
   const bundleCommand = [tauriCli, "bundle", ...tauriArguments];
   if (!signBundle) bundleCommand.push("--no-sign");
   // Tauri signs updater artifacts during bundling whenever

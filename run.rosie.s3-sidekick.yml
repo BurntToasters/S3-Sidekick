@@ -29,10 +29,13 @@ modules:
   - name: s3-sidekick
     buildsystem: simple
     build-options:
-      # flatpak-builder runs with downloads disabled. The release wrapper
-      # reconstructs lockfile-verified node_modules with a disposable cache and
-      # final offline npm ci, then stages Cargo vendor sources without secrets.
-      append-path: /usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
+      # The release wrapper reconstructs lockfile-verified node_modules with a
+      # disposable cache and stages Cargo vendor sources without secrets.
+      # Build-only network access is needed to install the pinned release npm;
+      # npm dependencies and Cargo sources remain locked and offline.
+      build-args:
+        - --share=network
+      append-path: /run/build/s3-sidekick/npm-global/bin:/usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
       env:
         CARGO_NET_OFFLINE: "true"
         HUSKY: "0"
@@ -40,6 +43,8 @@ modules:
         npm_config_offline: "true"
     build-commands:
       - node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major !== 24 || minor < 18) { console.error('Node 24.18+ required, found', process.version); process.exit(1); }"
+      # The Node 24 SDK ships npm 11.x, while packageManager requires npm 12.0.2.
+      - npm install --global npm@12.0.2 --ignore-scripts --engine-strict=false --no-audit --no-fund --prefix /run/build/s3-sidekick/npm-global
       - test "$(npm --version)" = "12.0.2"
       - rustc --version
       - test ! -e .env && test ! -e .env.local && test ! -e .env.production
