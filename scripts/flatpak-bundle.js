@@ -16,6 +16,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const stagedSource = path.join(root, ".flatpak-source");
 const architectures = Object.freeze({ x64: "x86_64" });
 const excludedRootNames = new Set([
+  ".flatpak-builder",
   ".flatpak-source",
   ".git",
   ".github",
@@ -81,6 +82,9 @@ function shouldStage(sourcePath) {
   if (!relative || relative.startsWith("..")) return false;
   const segments = relative.split(path.sep);
   if (excludedRootNames.has(segments[0])) return false;
+  // Nested builder caches from a prior sideload must not re-enter the export.
+  // Copying .flatpak-builder into .flatpak-source nests each run until ENOSPC.
+  if (segments.includes(".flatpak-builder")) return false;
   if (segments[0] === "src-tauri" && segments[1] === "target") return false;
   if (isSecretEnvironmentFile(sourcePath)) return false;
   return !sourcePath.endsWith(".log");

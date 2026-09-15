@@ -16,6 +16,8 @@ import {
   assertExpectedRelease,
   isExpectedRelease,
 } from "./release-draft-metadata.cjs";
+import { getCleanTargets } from "./dist-tools.js";
+import { shouldStage } from "./flatpak-bundle.js";
 import {
   bundleConfig,
   msiVersionForAppVersion,
@@ -229,4 +231,22 @@ test("Flatpak npm 12 install overrides sandbox offline mode", () => {
   assert.match(yaml, /npm install --global npm@12\.0\.2 --no-offline /);
   assert.match(yaml, /--share=network/);
   assert.match(yaml, /CARGO_NET_OFFLINE:\s*"true"/);
+});
+
+test("Flatpak staging and clean omit nested builder caches", () => {
+  const root = process.cwd();
+  assert.equal(shouldStage(path.join(root, "package.json")), true);
+  assert.equal(shouldStage(path.join(root, ".flatpak-builder")), false);
+  assert.equal(
+    shouldStage(path.join(root, ".flatpak-builder", "build", "s3-sidekick-11")),
+    false,
+  );
+  const yaml = fs.readFileSync(
+    path.join(root, "run.rosie.s3-sidekick.yml"),
+    "utf8",
+  );
+  assert.match(yaml, /^\s+- \.flatpak-builder$/m);
+  const cleaned = getCleanTargets("clean-flatpak", root);
+  assert.equal(cleaned.includes(".flatpak-builder"), true);
+  assert.equal(cleaned.includes(".flatpak-source"), true);
 });
