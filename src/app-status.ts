@@ -8,8 +8,10 @@ export function setStatus(text: string, autoResetMs?: number): void {
   dom.statusEl.textContent = text;
   if (autoResetMs && autoResetMs > 0) {
     state.statusTimeout = setTimeout(() => {
-      dom.statusEl.textContent = "";
       state.statusTimeout = undefined;
+      if (typeof document === "undefined") return;
+      const el = document.getElementById("status");
+      if (el) el.textContent = "";
     }, autoResetMs);
   }
 }

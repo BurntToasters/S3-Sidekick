@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionSnapshot } from "../connection.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
@@ -662,6 +662,14 @@ describe("main integration", () => {
         state.endpoint !== snap.endpoint ||
         state.currentBucket !== snap.bucket,
     );
+  });
+
+  afterEach(async () => {
+    const { state } = await import("../state.ts");
+    if (state.statusTimeout !== undefined) {
+      clearTimeout(state.statusTimeout);
+      state.statusTimeout = undefined;
+    }
   });
 
   it("initializes app and wires base controls", async () => {

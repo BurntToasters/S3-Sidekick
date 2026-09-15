@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
@@ -104,6 +104,13 @@ beforeEach(() => {
   mockShowConfirm.mockResolvedValue(false);
   localStorage.clear();
   renderFixture();
+});
+
+afterEach(async () => {
+  vi.useRealTimers();
+  await new Promise<void>((resolve) =>
+    window.requestAnimationFrame(() => resolve()),
+  );
 });
 
 describe("transfers queue UI", () => {
