@@ -219,3 +219,14 @@ test("Windows Authenticode verifier checks release-dir signatures only", () => {
   assert.doesNotMatch(source, /InstallerPathsJson|ExpectedRuntimePath/);
   assert.doesNotMatch(source, /TAURI_BUNDLE_TYPE|msiexec|7z\.exe/);
 });
+
+test("Flatpak npm 12 install overrides sandbox offline mode", () => {
+  const yaml = fs.readFileSync(
+    path.join(process.cwd(), "run.rosie.s3-sidekick.yml"),
+    "utf8",
+  );
+  assert.match(yaml, /npm_config_offline:\s*"true"/);
+  assert.match(yaml, /npm install --global npm@12\.0\.2 --no-offline /);
+  assert.match(yaml, /--share=network/);
+  assert.match(yaml, /CARGO_NET_OFFLINE:\s*"true"/);
+});
