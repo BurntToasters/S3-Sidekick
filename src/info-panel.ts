@@ -1007,9 +1007,10 @@ function setStatus(text: string, autoResetMs?: number): void {
   if (el) el.textContent = text;
   if (autoResetMs && autoResetMs > 0) {
     state.statusTimeout = setTimeout(() => {
+      state.statusTimeout = undefined;
+      if (typeof document === "undefined") return;
       const el2 = document.getElementById("status");
       if (el2) el2.textContent = "";
-      state.statusTimeout = undefined;
     }, autoResetMs);
   }
 }
