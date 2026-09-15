@@ -1,11 +1,20 @@
 Set-StrictMode -Version Latest
 
-function Import-BundledPowerShellSecurityModule {
-  $moduleManifest = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+function Import-BundledPowerShellInboxModule {
+  param([Parameter(Mandatory = $true)][string]$Name)
+  $moduleManifest = Join-Path $PSHOME "Modules\$Name\$Name.psd1"
   if (-not (Test-Path -LiteralPath $moduleManifest -PathType Leaf)) {
-    throw "The bundled Microsoft.PowerShell.Security module was not found: $moduleManifest"
+    throw "The bundled $Name module was not found: $moduleManifest"
   }
   Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+}
+
+function Import-BundledPowerShellSecurityModule {
+  # Launch-VsDevShell (and the Node child that inherits it) rewrites
+  # PSModulePath so inbox cmdlets stop autoloading. Import by $PSHOME path.
+  # Security: Get-AuthenticodeSignature. Utility: Get-FileHash.
+  Import-BundledPowerShellInboxModule 'Microsoft.PowerShell.Security'
+  Import-BundledPowerShellInboxModule 'Microsoft.PowerShell.Utility'
 }
 
 function Get-ArtifactSigningTools {
