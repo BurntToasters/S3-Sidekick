@@ -21,10 +21,12 @@ $tools = Get-ArtifactSigningTools
 $expectedPublisher = $env:AZURE_ARTIFACT_SIGNING_PUBLISHER.Trim()
 
 # Idempotent for the bundle flow: the runtime is signed pre-bundle, then the
-# bundler invokes this signCommand again for staged copies. Re-signing would
-# change bytes (new timestamp) and break strict runtime-byte verification, so
-# leave an already-valid signature untouched and only sign unsigned files
-# (notably the NSIS uninstaller via !uninstfinalize).
+# bundler invokes this signCommand again for staged copies. Re-signing an
+# already-valid binary is unnecessary work and changes its timestamp, so
+# leave it untouched and only sign unsigned files (notably the NSIS
+# uninstaller via !uninstfinalize). Note the bundler patches the runtime's
+# package-type marker between signing passes, which intentionally invalidates
+# the pre-bundle signature and forces the staged copy through this script.
 try {
   $existing = Get-AuthenticodeSignature -LiteralPath $resolved
   if ($existing.Status -eq [System.Management.Automation.SignatureStatus]::Valid -and $existing.SignerCertificate -and $existing.TimeStamperCertificate) {
