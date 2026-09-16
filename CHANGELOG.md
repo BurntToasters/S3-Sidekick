@@ -19,6 +19,12 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
+## Changes in `v0.11.0-beta.7:`
+
+Beta 7 fixes a native process crash that could occur while previewing JSON and other objects.
+
+- **Preview:** Prevented a native stack overflow from terminating the app by boxing the Tauri preview command future and heap-allocating its bounded read buffer. Preview size limits, content handling, and cancellation behavior are unchanged.
+
 ## Changes in `v0.11.0-beta.6:`
 
 Beta 6 is a corrective follow-up to Beta 5 and restores the connection and release-note workflows.
