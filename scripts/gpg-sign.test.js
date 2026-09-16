@@ -149,11 +149,11 @@ test("stable and beta drafts both require beta-transition manifests", () => {
 
 test("manifest URL validation rejects credentials, fragments, and traversal", () => {
   const valid = {
-    version: "0.11.0-beta.5",
+    version: "0.11.0-beta.6",
     platforms: {
       "linux-x86_64": {
         signature: "sig",
-        url: "https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.AppImage",
+        url: "https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-x64.AppImage",
       },
     },
   };
@@ -172,7 +172,7 @@ test("manifest URL validation rejects credentials, fragments, and traversal", ()
           platforms: {
             "linux-x86_64": {
               signature: "sig",
-              url: "http://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.AppImage",
+              url: "http://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-x64.AppImage",
             },
           },
         },
@@ -189,7 +189,7 @@ test("manifest URL validation rejects credentials, fragments, and traversal", ()
           platforms: {
             "linux-x86_64": {
               signature: "sig",
-              url: "https://user:pass@github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.AppImage",
+              url: "https://user:pass@github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-x64.AppImage",
             },
           },
         },
@@ -206,7 +206,7 @@ test("manifest URL validation rejects credentials, fragments, and traversal", ()
           platforms: {
             "linux-x86_64": {
               signature: "sig",
-              url: "https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/%2e%2e%2fsecret",
+              url: "https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/%2e%2e%2fsecret",
             },
           },
         },

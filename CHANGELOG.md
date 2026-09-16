@@ -1,14 +1,14 @@
 > [!NOTE]
-> 🅱️ This is a beta build
+> 🅱️ This is a beta build.
 
 # ⬇️ Downloads
 
 | <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux |
 | :--- | :--- | :--- |
-| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-arm64.deb) --> |
-| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-arm64.rpm) --> |
-| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.5/S3-Sidekick-Linux-arm64.flatpak) --> |
+| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-arm64.AppImage) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-arm64.deb) --> |
+| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-arm64.rpm) --> |
+| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.6/S3-Sidekick-Linux-arm64.flatpak) --> |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
@@ -18,6 +18,15 @@
 > ⚠️ Arm64 Linux Binaries are _NOT_ available at the moment. It's something I may get around to in the future but it's not a priority. I do have the logic set up in the repo in case people would like to build their own :)
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
+
+## Changes in `v0.11.0-beta.6:`
+
+Beta 6 is a corrective follow-up to Beta 5 and restores the connection and release-note workflows.
+
+- **Connection UI:** Successful connections keep the fetched bucket sidebar visible when no saved bucket can be restored; failed last-bucket restores also leave the sidebar available for retry or another selection.
+- **Release workflow:** GitHub draft releases now receive the complete `CHANGELOG.md`, including downloads and the remaining release information, instead of only the current beta section.
+- **Testing:** Added connection-flow regression coverage for missing, stale, and failed saved-bucket restores.
+- **Ver:** Bumped version to `v0.11.0-beta.6`.
 
 ## Changes in `v0.11.0-beta.5:`
 

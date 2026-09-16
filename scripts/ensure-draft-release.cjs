@@ -82,7 +82,7 @@ function readChangelogReleaseBody() {
   if (!section.slice(heading.length).trim()) {
     throw new Error(`CHANGELOG.md section for ${heading} is empty.`);
   }
-  return `${section}\n`;
+  return body;
 }
 
 function isRetryable(error) {
