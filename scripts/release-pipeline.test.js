@@ -25,6 +25,11 @@ import {
   windowsBuildCommand,
 } from "./tauri-windows-build.js";
 
+const packageJson = JSON.parse(
+  fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
+);
+const packageVersion = packageJson.version;
+
 test("run-release accepts only canonical host commands", () => {
   assert.equal(
     parseReleaseArgs(["win"]).continueScript,
@@ -152,8 +157,39 @@ test("Windows build is one tauri build like Zinnia, not compile-then-bundle", ()
   assert.equal(command.includes("--no-sign"), false);
   const config = JSON.parse(command[command.indexOf("--config") + 1]);
   assert.equal(config.bundle.createUpdaterArtifacts, false);
-  assert.equal(config.bundle.windows.wix.version, "0.11.0.6");
+  assert.equal(
+    config.bundle.windows.wix.version,
+    msiVersionForAppVersion(packageVersion),
+  );
   assert.deepEqual(command.slice(-2), ["--", "--locked"]);
+});
+
+test("release metadata stays aligned with package.json", () => {
+  const tauriConfig = JSON.parse(
+    fs.readFileSync(
+      path.join(process.cwd(), "src-tauri", "tauri.conf.json"),
+      "utf8",
+    ),
+  );
+  const cargoToml = fs.readFileSync(
+    path.join(process.cwd(), "src-tauri", "Cargo.toml"),
+    "utf8",
+  );
+  const cargoLock = fs.readFileSync(
+    path.join(process.cwd(), "src-tauri", "Cargo.lock"),
+    "utf8",
+  );
+  const cargoVersion = cargoToml.match(
+    /^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m,
+  )?.[1];
+  const lockVersion = cargoLock.match(
+    /^\[\[package\]\]\r?\nname = "s3-sidekick"\r?\nversion = "([^"]+)"/m,
+  )?.[1];
+
+  assert.equal(tauriConfig.version, packageVersion);
+  assert.equal(cargoVersion, packageVersion);
+  assert.equal(lockVersion, packageVersion);
+  assert.match(packageJson.scripts.u, /npm run sync-version/);
 });
 
 test("Windows signed build re-signs leftover runtime then verifies the release dir", () => {
