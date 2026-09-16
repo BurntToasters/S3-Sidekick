@@ -384,9 +384,15 @@ export async function handleConnect(): Promise<void> {
         setStatus(message, 8000);
         logActivity(message, "warning");
         showEmptyState();
+        // showEmptyState also clears the bucket list; keep the fetched
+        // buckets available so the user can retry or choose another one.
+        renderBucketList();
       }
     } else {
       showEmptyState();
+      // showEmptyState also clears the bucket list; the connection is still
+      // usable and must leave the fetched buckets available for selection.
+      renderBucketList();
     }
     if (
       currentConnectionGeneration() !== generation ||

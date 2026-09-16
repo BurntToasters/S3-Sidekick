@@ -152,7 +152,7 @@ test("Windows build is one tauri build like Zinnia, not compile-then-bundle", ()
   assert.equal(command.includes("--no-sign"), false);
   const config = JSON.parse(command[command.indexOf("--config") + 1]);
   assert.equal(config.bundle.createUpdaterArtifacts, false);
-  assert.equal(config.bundle.windows.wix.version, "0.11.0.5");
+  assert.equal(config.bundle.windows.wix.version, "0.11.0.6");
   assert.deepEqual(command.slice(-2), ["--", "--locked"]);
 });
 
