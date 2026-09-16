@@ -7774,8 +7774,20 @@ pub(crate) async fn generate_presigned_url(
     Ok(presigned.uri().to_string())
 }
 
-#[tauri::command]
-pub(crate) async fn preview_object(
+// Keep the future held by Tauri's IPC responder small. The implementation
+// owns AWS SDK request state and the bounded preview body, so returning it
+// boxed prevents that state from being copied onto the responder's stack.
+#[tauri::command(async)]
+pub(crate) fn preview_object(
+    state: tauri::State<'_, AppState>,
+    connection_id: String,
+    bucket: String,
+    key: String,
+) -> impl std::future::Future<Output = Result<PreviewResponse, String>> + Send + use<'_> {
+    Box::pin(preview_object_inner(state, connection_id, bucket, key))
+}
+
+async fn preview_object_inner(
     state: tauri::State<'_, AppState>,
     connection_id: String,
     bucket: String,
@@ -7849,7 +7861,7 @@ pub(crate) async fn preview_object(
     let mut reader = output.body.into_async_read();
     let max_bytes = MAX_PREVIEW as usize;
     let mut raw_bytes = Vec::with_capacity(max_bytes + 1);
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buffer = vec![0u8; 64 * 1024];
     while raw_bytes.len() <= max_bytes {
         let read = reader.read(&mut buffer);
         let count = tokio::select! {
