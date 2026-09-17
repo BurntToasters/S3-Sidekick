@@ -24,7 +24,7 @@ export function finalizeQualityGate(
 function main() {
   const result = finalizeQualityGate();
   if (result.ok) {
-    console.log("Release quality-gate proof recorded for this clean commit.");
+    console.log("Release quality-gate proof recorded for this checkout.");
     return;
   }
 

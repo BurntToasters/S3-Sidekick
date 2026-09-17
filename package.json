@@ -107,7 +107,7 @@
     "build:linux:x64:prepared": "dotenv -e .env -- tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb,rpm -- --locked",
     "build:linux:arm64:prepared": "dotenv -e .env -- tauri build --target aarch64-unknown-linux-gnu --bundles appimage,deb,rpm -- --locked",
     "build:linux:prepared": "npm run build:linux:x64:prepared && npm run build:linux:arm64:prepared",
-    "workspace:bootstrap": "npm run rust:update && npm ci --ignore-scripts && npm run sync-version && node scripts/update-metainfo.js",
+    "workspace:bootstrap": "npm run rust:update && npm ci --ignore-scripts && npm run sync-version",
     "workspace:prepare": "npm run workspace:bootstrap && npm run test:all",
     "release:session:verify": "node scripts/release-session.js",
     "release:session:start": "node scripts/release-session.js start",
