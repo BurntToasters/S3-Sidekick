@@ -3,6 +3,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { run as updateMetainfo } from "./update-metainfo.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const version = JSON.parse(
@@ -55,4 +56,20 @@ if (fs.existsSync(cargoLockPath)) {
     fs.writeFileSync(cargoLockPath, nextLock);
     console.log(`Cargo.lock      → ${version}`);
   }
+}
+
+try {
+  const metainfo = updateMetainfo();
+  if (metainfo.updated) {
+    console.log(
+      `AppStream metadata → ${metainfo.version} (${metainfo.date})`,
+    );
+  }
+} catch (error) {
+  const message =
+    error && typeof error === "object" && "message" in error
+      ? String(error.message)
+      : String(error);
+  console.error(`Failed to update AppStream metadata: ${message}`);
+  process.exit(1);
 }

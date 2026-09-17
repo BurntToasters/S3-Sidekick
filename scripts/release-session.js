@@ -225,7 +225,12 @@ function blockingReleaseWorkingTreePaths(root = defaultRoot) {
   } catch {
     return ["<git status failed>"];
   }
-  return parsePorcelainPaths(status);
+  if (isAcceptableReleaseWorkingTree(status)) {
+    return [];
+  }
+  return parsePorcelainPaths(status).filter(
+    (filePath) => !isAllowedBootstrapPath(filePath),
+  );
 }
 
 function recordSuccessfulQualityGate(root = defaultRoot) {
@@ -235,7 +240,7 @@ function recordSuccessfulQualityGate(root = defaultRoot) {
   } catch {
     return false;
   }
-  if (status.trim()) {
+  if (!isAcceptableReleaseWorkingTree(status)) {
     return false;
   }
   const proofPath = path.join(root, QUALITY_GATE_RELATIVE_PATH);
@@ -258,10 +263,10 @@ function verifyQualityGate(root = defaultRoot, options) {
       `Release quality-gate proof is missing or invalid. On a clean checkout, run "npm run test:all" (or "npm run workspace:prepare") before release:prepare. ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const blockers = blockingReleaseWorkingTreePaths(root);
-  if (blockers.length > 0) {
+  if (!isAcceptableReleaseWorkingTree(gitPorcelainStatus(root))) {
+    const blockers = blockingReleaseWorkingTreePaths(root);
     throw new Error(
-      `Release quality-gate verification requires a clean working tree: ${blockers.join(", ")}`,
+      `Release quality-gate verification requires a clean working tree or bootstrap-only drift: ${blockers.join(", ")}`,
     );
   }
   return validateQualityGate(proof, currentReleaseIdentity(root), options);
@@ -292,10 +297,10 @@ function createReleaseSession(root = defaultRoot) {
 }
 
 function verifyReleaseSession(root = defaultRoot, options) {
-  const blockers = blockingReleaseWorkingTreePaths(root);
-  if (blockers.length > 0) {
+  if (!isAcceptableReleaseWorkingTree(gitPorcelainStatus(root))) {
+    const blockers = blockingReleaseWorkingTreePaths(root);
     throw new Error(
-      `Release build session verification requires a clean working tree: ${blockers.join(", ")}`,
+      `Release build session verification requires a clean working tree or bootstrap-only drift: ${blockers.join(", ")}`,
     );
   }
   const sessionPath = path.join(root, RELEASE_SESSION_RELATIVE_PATH);

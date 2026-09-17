@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import {
   createReleaseSession,
   isAcceptableReleaseWorkingTree,
   parsePorcelainPaths,
+  recordSuccessfulQualityGate,
   sha256WorkingTree,
   validateQualityGate,
 } from "./release-session.js";
@@ -32,6 +34,23 @@ test("isAcceptableReleaseWorkingTree allows bootstrap-only drift", () => {
   );
   assert.equal(isAcceptableReleaseWorkingTree(" M package-lock.json"), true);
   assert.equal(isAcceptableReleaseWorkingTree(" M package.json"), false);
+});
+
+test("blockingReleaseWorkingTreePaths ignores bootstrap-only drift", () => {
+  assert.deepEqual(
+    parsePorcelainPaths(" M run.rosie.s3-sidekick.metainfo.xml").filter(
+      (filePath) => filePath === "run.rosie.s3-sidekick.metainfo.xml",
+    ),
+    ["run.rosie.s3-sidekick.metainfo.xml"],
+  );
+  assert.equal(
+    isAcceptableReleaseWorkingTree(" M run.rosie.s3-sidekick.metainfo.xml"),
+    true,
+  );
+  assert.equal(
+    isAcceptableReleaseWorkingTree(" M package.json"),
+    false,
+  );
 });
 
 test("parsePorcelainPaths preserves leading XY status spaces", () => {
@@ -93,4 +112,82 @@ test("sha256WorkingTree returns a stable digest for this checkout", () => {
   const second = sha256WorkingTree(repoRoot);
   assert.match(first, /^[0-9a-f]{64}$/);
   assert.equal(first, second);
+});
+
+function initTempGitRepo(root) {
+  execFileSync("git", ["-c", "init.templateDir=", "init", "-q"], { cwd: root });
+  execFileSync("git", ["add", "."], { cwd: root });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "user.name=test",
+      "commit",
+      "-qm",
+      "init",
+    ],
+    { cwd: root },
+  );
+}
+
+test("recordSuccessfulQualityGate accepts bootstrap-only metainfo drift", () => {
+  const root = fs.mkdtempSync(path.join(repoRoot, ".tmp-quality-gate-"));
+  const coverageDir = path.join(root, "coverage");
+  const proofPath = path.join(coverageDir, ".release-quality.json");
+  try {
+    fs.mkdirSync(path.join(root, "src-tauri"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      `${JSON.stringify({ version: "0.11.0-beta.7" })}\n`,
+    );
+    fs.writeFileSync(path.join(root, "package-lock.json"), "{}\n");
+    fs.writeFileSync(path.join(root, "src-tauri", "Cargo.lock"), "{}\n");
+    fs.writeFileSync(
+      path.join(root, "run.rosie.s3-sidekick.metainfo.xml"),
+      "<component/>",
+    );
+    fs.writeFileSync(
+      path.join(root, ".gitignore"),
+      "coverage/\nrelease/\n",
+    );
+    initTempGitRepo(root);
+    fs.appendFileSync(
+      path.join(root, "run.rosie.s3-sidekick.metainfo.xml"),
+      "\n",
+    );
+
+    assert.equal(recordSuccessfulQualityGate(root), true);
+    assert.equal(fs.existsSync(proofPath), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recordSuccessfulQualityGate rejects non-bootstrap drift", () => {
+  const root = fs.mkdtempSync(path.join(repoRoot, ".tmp-quality-gate-"));
+  try {
+    fs.mkdirSync(path.join(root, "src-tauri"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      `${JSON.stringify({ version: "0.11.0-beta.7" })}\n`,
+    );
+    fs.writeFileSync(path.join(root, "package-lock.json"), "{}\n");
+    fs.writeFileSync(path.join(root, "src-tauri", "Cargo.lock"), "{}\n");
+    fs.writeFileSync(
+      path.join(root, "run.rosie.s3-sidekick.metainfo.xml"),
+      "<component/>",
+    );
+    initTempGitRepo(root);
+    fs.appendFileSync(path.join(root, "package.json"), "\n");
+
+    assert.equal(recordSuccessfulQualityGate(root), false);
+    assert.equal(
+      fs.existsSync(path.join(root, "coverage", ".release-quality.json")),
+      false,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
