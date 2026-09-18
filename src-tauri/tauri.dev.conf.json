@@ -8,6 +8,7 @@
         "title": "S3 Sidekick (Dev)",
         "width": 1100,
         "height": 720,
+        "center": true,
         "resizable": true,
         "hiddenTitle": true,
         "titleBarStyle": "Overlay"

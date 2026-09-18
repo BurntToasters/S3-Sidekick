@@ -235,4 +235,73 @@ describe("syncInspectorFromSelection", () => {
       /folder/i,
     );
   });
+
+  it("keeps explicit Properties pane when opening inspector for a previewable file", async () => {
+    vi.useFakeTimers();
+    try {
+      appendInfoFixture();
+      mockInvoke.mockResolvedValue({
+        content_type: "application/json",
+        data: "{}",
+        is_text: true,
+        truncated: false,
+        total_size: 2,
+      });
+
+      const { state } = await import("../state.ts");
+      state.currentBucket = "bucket-a";
+      state.connectionId = "test-connection";
+      state.connectionIdentity = "test-identity";
+      state.selectedKeys.clear();
+      state.selectedKeys.add("latest-linux-beta-x86_64.json");
+
+      const inspector = await import("../inspector.ts");
+      expect(inspector.isInspectorOpen()).toBe(false);
+
+      inspector.ensureInspectorOpenForPane("properties");
+      expect(inspector.isInspectorOpen()).toBe(true);
+      expect(inspector.getInspectorTab()).toBe("properties");
+
+      await vi.advanceTimersByTimeAsync(400);
+      expect(inspector.getInspectorTab()).toBe("properties");
+      expect(mockInvoke).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("explicit Properties wins over in-flight selection preview", async () => {
+    vi.useFakeTimers();
+    try {
+      appendInfoFixture();
+      mockInvoke.mockResolvedValue({
+        content_type: "application/json",
+        data: "{}",
+        is_text: true,
+        truncated: false,
+        total_size: 2,
+      });
+
+      const { state } = await import("../state.ts");
+      state.currentBucket = "bucket-a";
+      state.connectionId = "test-connection";
+      state.connectionIdentity = "test-identity";
+      state.selectedKeys.clear();
+      state.selectedKeys.add("latest-linux-beta-x86_64.json");
+
+      const inspector = await import("../inspector.ts");
+      inspector.setInspectorOpen(true, { syncSelection: false });
+      const syncPromise = inspector.syncInspectorFromSelection(
+        state.selectedKeys,
+      );
+      inspector.ensureInspectorOpenForPane("properties");
+      await vi.advanceTimersByTimeAsync(400);
+      await syncPromise;
+
+      expect(inspector.getInspectorTab()).toBe("properties");
+      expect(mockInvoke).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

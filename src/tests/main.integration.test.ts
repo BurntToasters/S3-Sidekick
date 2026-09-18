@@ -3415,6 +3415,7 @@ describe("main integration", () => {
     expect(mockSaveSettings).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(350);
+    await flushMicrotasks();
     expect(state.currentSettings.windowWidth).toBe(950);
     expect(state.currentSettings.windowHeight).toBe(700);
     expect(mockSaveSettings).toHaveBeenCalled();

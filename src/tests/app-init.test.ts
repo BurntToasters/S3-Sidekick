@@ -71,6 +71,7 @@ vi.mock("../settings.ts", () => ({
   incrementLaunchCount: mockIncrementLaunchCount,
   markSupportPromptDismissed: mockMarkSupportPromptDismissed,
   isSupportPromptDismissed: mockIsSupportPromptDismissed,
+  saveSettings: vi.fn(async () => undefined),
 }));
 
 vi.mock("../connection.ts", () => ({

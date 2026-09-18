@@ -6,7 +6,6 @@ import {
   resetSettings,
   setBookmarkSelectHandler,
   switchSettingsTab,
-  saveSettings,
 } from "./settings.ts";
 import {
   loadConnection,
@@ -36,6 +35,7 @@ import {
   updateFilterClearButton,
 } from "./browser.ts";
 import { wireInspectorChrome, toggleInspector } from "./inspector.ts";
+import { wireWindowSizePersistence } from "./window-size.ts";
 import { checkUpdates, setUpdateChannel } from "./updater.ts";
 import { loadBookmarks, clearBookmarks } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
@@ -1138,30 +1138,5 @@ export function wireEvents(): void {
     );
   });
 
-  let resizeTimeout: number | undefined;
-  window.addEventListener("resize", () => {
-    if (resizeTimeout) {
-      window.clearTimeout(resizeTimeout);
-    }
-    resizeTimeout = window.setTimeout(async () => {
-      // Track the live size in memory always, but skip persisting while the
-      // settings modal is open: a resize behind the modal would otherwise
-      // contaminate the draft the modal saves on close. The in-memory size
-      // is picked up by the modal's normal save, applying pending resizes.
-      state.currentSettings.windowWidth = window.innerWidth;
-      state.currentSettings.windowHeight = window.innerHeight;
-      if (
-        document
-          .getElementById("settings-overlay")
-          ?.classList.contains("active")
-      ) {
-        return;
-      }
-      try {
-        await saveSettings();
-      } catch (err) {
-        console.warn("Failed to save window size settings:", err);
-      }
-    }, 500);
-  });
+  wireWindowSizePersistence();
 }
