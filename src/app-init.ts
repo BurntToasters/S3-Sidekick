@@ -1,8 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { LogicalSize } from "@tauri-apps/api/dpi";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { state, dom } from "./state.ts";
 import {
   loadSettings,
@@ -40,6 +38,10 @@ import {
 } from "./transfers.ts";
 import { initializeIcons } from "./icons.ts";
 import { wireTitlebar } from "./titlebar.ts";
+import {
+  enableWindowSizePersistence,
+  restoreWindowSize,
+} from "./window-size.ts";
 
 async function checkSupportPrompt(retry = false): Promise<void> {
   try {
@@ -119,18 +121,6 @@ async function checkSupportPrompt(retry = false): Promise<void> {
   } catch (err) {
     console.warn("Support prompt unavailable:", err);
     logActivity("Support prompt unavailable this launch.", "warning");
-  }
-}
-
-async function restoreWindowSize(): Promise<void> {
-  try {
-    const { windowWidth, windowHeight } = state.currentSettings;
-    if (windowWidth && windowHeight) {
-      const win = getCurrentWindow();
-      await win.setSize(new LogicalSize(windowWidth, windowHeight));
-    }
-  } catch (err) {
-    console.warn("Failed to restore window size:", err);
   }
 }
 
@@ -231,8 +221,11 @@ export async function init(): Promise<void> {
     settingsValid = await loadSettings();
     if (settingsValid) {
       void restoreWindowSize();
+    } else {
+      enableWindowSizePersistence();
     }
   } catch (err) {
+    enableWindowSizePersistence();
     setStatus(`Failed to load settings: ${String(err)}`);
   }
 
@@ -267,6 +260,7 @@ export async function init(): Promise<void> {
       await loadSettings();
       void restoreWindowSize();
     } catch (err) {
+      enableWindowSizePersistence();
       setStatus(`Failed to load settings: ${String(err)}`);
       logActivity(`Failed to load settings: ${String(err)}`, "error");
     }

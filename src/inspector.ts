@@ -172,13 +172,14 @@ function releaseMobileInspectorModal(restoreFocus: boolean): void {
 
 /** Opens the docked inspector before preview/properties render (desktop slide-out or narrow overlay). */
 export function ensureInspectorOpenForPane(tab: InspectorPaneTab): void {
+  inspectorTab = tab;
+  // Cancel in-flight selection sync so auto-preview cannot steal an explicit
+  // Properties/Preview request after the inspector opens.
+  inspectorSyncGeneration += 1;
   if (!inspectorOpen) {
-    setInspectorOpen(true);
-  }
-  if (tab === "preview") {
-    focusInspectorPreviewPane();
+    setInspectorOpen(true, { syncSelection: false });
   } else {
-    focusInspectorPropertiesPane();
+    syncInspectorPaneVisibility();
   }
 }
 
@@ -288,7 +289,10 @@ function syncInspectorPaneVisibility(): void {
   }
 }
 
-export function setInspectorOpen(open: boolean): void {
+export function setInspectorOpen(
+  open: boolean,
+  options?: { syncSelection?: boolean },
+): void {
   const panel = document.getElementById("inspector-panel");
   const resizer = document.getElementById("inspector-resizer");
   const backdrop = document.getElementById("inspector-backdrop");
@@ -324,7 +328,9 @@ export function setInspectorOpen(open: boolean): void {
   syncInspectorPaneVisibility();
   syncPanelWidths();
   if (open) {
-    void syncInspectorFromSelection();
+    if (options?.syncSelection !== false) {
+      void syncInspectorFromSelection();
+    }
   } else {
     inspectorEmptyActive = true;
     showInspectorEmpty("Select an object to inspect.");
