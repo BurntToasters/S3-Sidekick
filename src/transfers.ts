@@ -3099,7 +3099,7 @@ function restoreTransferRenderFocus(
   target.focus({ preventScroll: true });
 }
 
-function renderTransferRow(t: TransferItem): string {
+export function renderTransferRow(t: TransferItem): string {
   let statusIcon = "";
   let statusClass = "";
   if (t.status === "queued") {
@@ -3135,29 +3135,31 @@ function renderTransferRow(t: TransferItem): string {
   }
 
   const progressPct = Math.max(0, Math.min(100, Math.round(t.progress) || 0));
+  // A row is busy only while the backend is actively transferring it. A
+  // pause request can briefly leave a download in the uploading state, so
+  // paused is part of this check as well.
+  const isPaused = t.paused || t.phase === "paused";
+  const isActive = t.status === "uploading" && !isPaused;
   // Single-PUT uploads emit 0 then 100 with no hook in between, so a
-  // determinate bar would fake progress. Show indeterminate while running.
+  // determinate bar would fake progress. Hide that fake 0% while queued or
+  // paused, and use an indeterminate bar only while the upload is running.
   const isSinglePutUpload =
     t.operation === "upload" &&
     t.totalBytes > 0 &&
     t.totalBytes < MULTIPART_UPLOAD_THRESHOLD_BYTES &&
-    t.status === "uploading" &&
     t.progress < 100;
+  const hasStaticPartialProgress =
+    t.totalBytes > 0 && t.progress > 0 && (t.status === "error" || isPaused);
   const showDeterminate =
-    !isSinglePutUpload &&
     t.totalBytes > 0 &&
-    (t.status === "uploading" ||
-      t.status === "queued" ||
-      (t.status === "error" && t.progress > 0));
-  const showIndeterminate =
-    !showDeterminate &&
-    (t.status === "uploading" ||
-      t.status === "queued" ||
-      t.operation === "copy" ||
-      t.operation === "move");
+    ((isActive && !isSinglePutUpload) ||
+      hasStaticPartialProgress ||
+      (t.status === "queued" && !isSinglePutUpload));
+  const showIndeterminate = isActive && !showDeterminate;
+  const progressBusyAttribute = isActive ? ' aria-busy="true"' : "";
   const progressBar = showDeterminate
     ? `<div class="transfer-progress-wrap">` +
-      `<div class="transfer-progress" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressPct}"><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
+      `<div class="transfer-progress" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressPct}"${progressBusyAttribute}><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
       `<span class="transfer-progress__label">${progressPct}%</span>` +
       `</div>`
     : showIndeterminate
@@ -3179,6 +3181,12 @@ function renderTransferRow(t: TransferItem): string {
       : t.operation === "copy" || t.operation === "move"
         ? `${t.destinationBucket ?? t.bucket}/${t.destinationKey ?? t.destinationPrefix ?? ""}`
         : t.key;
+  const source =
+    t.operation === "copy" || t.operation === "move"
+      ? `${t.sourceBucket ?? t.bucket}/${t.sourceKey ?? t.sourcePrefix ?? t.key}`
+      : t.operation === "download"
+        ? `${t.bucket}/${t.key}`
+        : t.filePath || t.fileName;
   const arrow =
     t.operation === "download"
       ? getIconHtml("arrow-left", {
@@ -3196,33 +3204,47 @@ function renderTransferRow(t: TransferItem): string {
       : "";
 
   const stalled =
-    t.status === "uploading" &&
+    isActive &&
     t.lastProgressAt !== undefined &&
     Date.now() - t.lastProgressAt > STALLED_AFTER_MS;
-  const phaseLabel =
-    t.status === "uploading"
-      ? `<span class="transfer-phase${stalled ? " transfer-phase--stalled" : ""}">${
-          stalled
-            ? "Stalled — waiting for data"
-            : t.phase === "retry_wait"
-              ? "Retry wait"
-              : t.phase === "verifying"
-                ? "Verifying"
-                : t.phase === "paused"
-                  ? "Paused"
-                  : t.phase === "resuming"
-                    ? "Resuming"
-                    : t.phase === "finalizing"
-                      ? "Finalizing"
-                      : "Running"
-        }</span>`
-      : "";
+  const phaseLabel = isActive
+    ? `<span class="transfer-phase${stalled ? " transfer-phase--stalled" : ""}">${
+        stalled
+          ? "Stalled — waiting for data"
+          : t.phase === "retry_wait"
+            ? "Retry wait"
+            : t.phase === "verifying"
+              ? "Verifying"
+              : t.phase === "paused"
+                ? "Paused"
+                : t.phase === "resuming"
+                  ? "Resuming"
+                  : t.phase === "finalizing"
+                    ? "Finalizing"
+                    : "Running"
+      }</span>`
+    : "";
+  const statusLabel =
+    t.status === "done"
+      ? "Completed"
+      : t.status === "error"
+        ? "Failed"
+        : t.status === "skipped"
+          ? "Skipped"
+          : isPaused
+            ? "Paused"
+            : t.status === "queued"
+              ? "Queued"
+              : "";
+  const statusText = statusLabel
+    ? `<span class="transfer-phase transfer-phase--status">${statusLabel}</span>`
+    : "";
   const speedLabel =
-    t.status === "uploading" && !stalled && t.speedBps > 0
+    isActive && !stalled && t.speedBps > 0
       ? `<span class="transfer-phase">${escapeHtml(formatSpeedBps(t.speedBps))}</span>`
       : "";
   const etaLabel =
-    t.status === "uploading" && !stalled && t.etaSeconds !== null
+    isActive && !stalled && t.etaSeconds !== null
       ? `<span class="transfer-phase">ETA ${escapeHtml(formatEtaSeconds(t.etaSeconds))}</span>`
       : "";
   const partsLabel =
@@ -3252,17 +3274,22 @@ function renderTransferRow(t: TransferItem): string {
     `<div class="transfer-main">` +
     `<div class="transfer-main__row">` +
     `<span class="transfer-op">${escapeHtml(opLabel)}</span>` +
-    `<span class="transfer-name">${escapeHtml(t.fileName)}</span>` +
+    `<span class="transfer-name" title="${escapeHtml(source)}" aria-label="${escapeHtml(source)}">${escapeHtml(t.fileName)}</span>` +
     (target
       ? `<span class="transfer-arrow">${arrow}</span>` +
-        `<span class="transfer-key">${escapeHtml(target)}</span>`
+        `<span class="transfer-key" title="${escapeHtml(target)}" aria-label="${escapeHtml(target)}">${escapeHtml(target)}</span>`
       : "") +
     `</div>` +
-    (attemptLabel || phaseLabel || speedLabel || etaLabel || partsLabel
-      ? `<div class="transfer-meta">${attemptLabel}${phaseLabel}${speedLabel}${etaLabel}${partsLabel}</div>`
+    (attemptLabel ||
+    phaseLabel ||
+    statusText ||
+    speedLabel ||
+    etaLabel ||
+    partsLabel
+      ? `<div class="transfer-meta">${statusText}${attemptLabel}${phaseLabel}${speedLabel}${etaLabel}${partsLabel}</div>`
       : "") +
     progressBar +
-    (t.status === "error" || t.status === "skipped" || (t.paused && t.error)
+    (t.status === "error" || t.status === "skipped" || (isPaused && t.error)
       ? `<span class="transfer-error" title="${escapeHtml(t.error ?? "")}">${escapeHtml(t.error ?? "Error")}</span>`
       : "") +
     `</div>` +

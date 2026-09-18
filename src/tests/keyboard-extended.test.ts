@@ -195,6 +195,38 @@ describe("keyboard shortcuts extended", () => {
     expect(inspector.isInspectorOpen()).toBe(true);
   });
 
+  it("consumes Escape after dismissing a context menu", async () => {
+    const keyboard = await import("../keyboard.ts");
+    const handlers = createHandlers();
+    keyboard.wireKeyboardShortcuts(handlers);
+    mockHideContextMenu.mockReturnValue(true);
+    mockIsDrawerOpen.mockReturnValue(true);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", cancelable: true }),
+    );
+
+    expect(mockHideContextMenu).toHaveBeenCalledTimes(1);
+    expect(mockCloseDrawer).not.toHaveBeenCalled();
+  });
+
+  it("does not dismiss a later layer when Escape was already prevented", async () => {
+    const keyboard = await import("../keyboard.ts");
+    const handlers = createHandlers();
+    keyboard.wireKeyboardShortcuts(handlers);
+    mockIsDrawerOpen.mockReturnValue(true);
+
+    const event = new KeyboardEvent("keydown", {
+      key: "Escape",
+      cancelable: true,
+    });
+    event.preventDefault();
+    document.dispatchEvent(event);
+
+    expect(mockHideContextMenu).not.toHaveBeenCalled();
+    expect(mockCloseDrawer).not.toHaveBeenCalled();
+  });
+
   it("fires accel/navigation shortcuts and select-all behavior", async () => {
     const { state } = await import("../state.ts");
     const keyboard = await import("../keyboard.ts");

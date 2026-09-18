@@ -88,6 +88,7 @@ describe("bottom drawer", () => {
     const handle = drawerEl.querySelector(
       ".bottom-drawer__resize-handle",
     ) as HTMLDivElement;
+    expect(handle.getAttribute("aria-orientation")).toBe("horizontal");
     vi.spyOn(drawerEl, "getBoundingClientRect").mockReturnValue({
       width: 1000,
       height: 240,
@@ -128,6 +129,40 @@ describe("bottom drawer", () => {
       new KeyboardEvent("keydown", { key: "End", bubbles: true }),
     );
     expect(parseInt(drawerEl.style.height, 10)).toBeLessThanOrEqual(450);
+  });
+
+  it("collapses to the header, moves focus out of the body, and restores the invoker", async () => {
+    const drawer = await import("../bottom-drawer.ts");
+    drawer.initDrawer();
+    drawer.openDrawer("activity");
+
+    const drawerEl = document.getElementById("bottom-drawer") as HTMLDivElement;
+    const body = drawerEl.querySelector(
+      ".bottom-drawer__body",
+    ) as HTMLDivElement;
+    const bodyInput = document.createElement("input");
+    body.appendChild(bodyInput);
+    bodyInput.focus();
+
+    const handle = drawerEl.querySelector(
+      ".bottom-drawer__resize-handle",
+    ) as HTMLElement;
+    (document.getElementById("drawer-minimize") as HTMLButtonElement).click();
+    expect(drawerEl.style.height).toBe("");
+    expect(handle.hidden).toBe(true);
+    expect(document.activeElement).toBe(
+      document.getElementById("drawer-tab-activity"),
+    );
+
+    (document.getElementById("drawer-minimize") as HTMLButtonElement).click();
+    expect(drawerEl.style.height).toBe("240px");
+    expect(handle.hidden).toBe(false);
+
+    (document.getElementById("drawer-close") as HTMLButtonElement).focus();
+    (document.getElementById("drawer-close") as HTMLButtonElement).click();
+    expect(document.activeElement).toBe(
+      document.getElementById("activity-toggle"),
+    );
   });
 
   it("covers tab click wiring and no-op guards when drawer elements are missing", async () => {

@@ -70,6 +70,8 @@ function listingContentRevision(): string {
   for (const object of state.objects) {
     mix(object.key);
     mix(":");
+    mix(object.is_folder ? "folder" : "file");
+    mix(":");
     mix(String(object.size));
     mix(":");
     mix(object.last_modified);
@@ -177,15 +179,11 @@ function setStatus(text: string, autoResetMs?: number): void {
 }
 
 export function getSelectableKeys(): string[] {
-  const keys: string[] = [];
-  for (const prefix of state.prefixes) {
-    keys.push("prefix:" + prefix);
-  }
-  for (const obj of state.objects) {
-    if (obj.is_folder) continue;
-    keys.push(obj.key);
-  }
-  return keys;
+  const { sortedFiles, sortedPrefixes } = getCachedSortedListing();
+  return [
+    ...sortedPrefixes.map((prefix) => `prefix:${prefix}`),
+    ...sortedFiles.map((object) => object.key),
+  ];
 }
 
 // Navigation failures used to only flash a 5s status line. Report them three
@@ -251,6 +249,7 @@ let sortedListingCache: {
   prefixesLen: number;
   sortColumn: typeof state.sortColumn;
   sortAsc: boolean;
+  listingRevision: string;
   sortedFiles: ObjectInfo[];
   sortedPrefixes: string[];
 } | null = null;
@@ -260,14 +259,15 @@ function getCachedSortedListing(): {
   sortedPrefixes: string[];
 } {
   const cached = sortedListingCache;
+  const listingRevision = listingContentRevision();
   if (
-    cached &&
-    cached.objects === state.objects &&
+    cached?.objects === state.objects &&
     cached.prefixes === state.prefixes &&
     cached.objectsLen === state.objects.length &&
     cached.prefixesLen === state.prefixes.length &&
     cached.sortColumn === state.sortColumn &&
-    cached.sortAsc === state.sortAsc
+    cached.sortAsc === state.sortAsc &&
+    cached.listingRevision === listingRevision
   ) {
     return cached;
   }
@@ -295,29 +295,43 @@ function getCachedSortedListing(): {
     prefixesLen: state.prefixes.length,
     sortColumn: col,
     sortAsc: asc,
+    listingRevision,
     sortedFiles,
     sortedPrefixes,
   };
   return sortedListingCache;
 }
 
-function getVisibleSelectableKeys(): string[] {
-  const filter = state.filterText.toLowerCase();
-  const keys: string[] = [];
-  for (const prefix of state.prefixes) {
-    if (!filter || lowerBasename(prefix).includes(filter)) {
-      keys.push("prefix:" + prefix);
-    }
-  }
-  for (const obj of state.objects) {
-    if (
-      !obj.is_folder &&
-      (!filter || lowerBasename(obj.key).includes(filter))
-    ) {
-      keys.push(obj.key);
-    }
-  }
-  return keys;
+interface FilteredListing {
+  sortedFiles: ObjectInfo[];
+  sortedPrefixes: string[];
+}
+
+function getFilteredListing(filterText = state.filterText): FilteredListing {
+  const { sortedFiles, sortedPrefixes } = getCachedSortedListing();
+  const filter = filterText.trim().toLowerCase();
+  if (!filter) return { sortedFiles, sortedPrefixes };
+  return {
+    sortedFiles: sortedFiles.filter((object) =>
+      lowerBasename(object.key).includes(filter),
+    ),
+    sortedPrefixes: sortedPrefixes.filter((prefix) =>
+      lowerBasename(prefix).includes(filter),
+    ),
+  };
+}
+
+/**
+ * Return the logical row order used by the table, including rows outside the
+ * currently mounted virtual window. Folders and files intentionally share the
+ * same order as renderObjectTable so shift ranges never depend on DOM rows.
+ */
+export function getVisibleSelectableKeys(): string[] {
+  const { sortedFiles, sortedPrefixes } = getFilteredListing();
+  return [
+    ...sortedPrefixes.map((prefix) => `prefix:${prefix}`),
+    ...sortedFiles.map((object) => object.key),
+  ];
 }
 
 export function clearSelection(): void {
@@ -326,7 +340,9 @@ export function clearSelection(): void {
 }
 
 export function pruneStaleSelection(validKeys?: readonly string[]): void {
-  const valid = new Set(validKeys ?? getVisibleSelectableKeys());
+  // Omit the filter from the default validity set: a hidden item is still in
+  // the loaded listing and must remain actionable after the filter changes.
+  const valid = new Set(validKeys ?? getSelectableKeys());
   for (const key of state.selectedKeys) {
     if (!valid.has(key)) {
       state.selectedKeys.delete(key);
@@ -339,17 +355,109 @@ export function pruneStaleSelection(validKeys?: readonly string[]): void {
   }
 }
 
-function clearFilter(): void {
+export function updateFilterClearButton(): void {
+  const filterInput = document.getElementById(
+    "filter-input",
+  ) as HTMLInputElement | null;
+  const clearButton = document.getElementById(
+    "filter-clear",
+  ) as HTMLButtonElement | null;
+  if (!clearButton) return;
+  const inputFilter = filterInput?.value.trim();
+  const hasFilter = [inputFilter, state.filterText.trim()].some(Boolean);
+  clearButton.disabled = !hasFilter;
+  clearButton.setAttribute("aria-hidden", String(!hasFilter));
+  clearButton.classList.toggle("filter-clear--visible", hasFilter);
+}
+
+export function clearFilter(): void {
   state.filterText = "";
   const input = document.getElementById(
     "filter-input",
   ) as HTMLInputElement | null;
   if (input) input.value = "";
+  updateFilterClearButton();
+}
+
+function formatItemCounts(folderCount: number, fileCount: number): string {
+  const parts: string[] = [];
+  if (folderCount > 0) {
+    parts.push(`${folderCount} folder${folderCount === 1 ? "" : "s"}`);
+  }
+  if (fileCount > 0) {
+    parts.push(`${fileCount} file${fileCount === 1 ? "" : "s"}`);
+  }
+  return parts.length > 0 ? parts.join(", ") : "0 objects";
+}
+
+function getLoadedListingCounts(): { folders: number; files: number } {
+  return {
+    folders: state.prefixes.length,
+    files: state.objects.filter((object) => !object.is_folder).length,
+  };
+}
+
+function getListingSummaryText(): string {
+  const { folders: loadedFolders, files: loadedFiles } =
+    getLoadedListingCounts();
+  const loadedText = formatItemCounts(loadedFolders, loadedFiles);
+  const filter = state.filterText.trim();
+  if (!filter) return `${loadedText} loaded`;
+
+  const { sortedFiles, sortedPrefixes } = getFilteredListing();
+  const matchingText = formatItemCounts(
+    sortedPrefixes.length,
+    sortedFiles.length,
+  );
+  const prefix =
+    sortedPrefixes.length + sortedFiles.length > 0
+      ? `${matchingText} matching`
+      : "No objects match filter";
+  return `${prefix} · ${loadedText} loaded · Filter searches loaded listing only`;
+}
+
+function getSelectionCountText(
+  selectedFileCount: number,
+  selectedFolderCount: number,
+  totalSelected: number,
+  hiddenSelectedCount: number,
+): string {
+  const parts: string[] = [];
+  if (selectedFileCount > 0) {
+    parts.push(
+      `${selectedFileCount} file${selectedFileCount === 1 ? "" : "s"}`,
+    );
+  }
+  if (selectedFolderCount > 0) {
+    parts.push(
+      `${selectedFolderCount} folder${selectedFolderCount === 1 ? "" : "s"}`,
+    );
+  }
+  const selectedText =
+    parts.length > 0
+      ? `${parts.join(" + ")} selected`
+      : `${totalSelected} selected`;
+  if (hiddenSelectedCount > 0 && state.filterText.trim()) {
+    return `${selectedText} · ${totalSelected} selected · ${hiddenSelectedCount} hidden by filter`;
+  }
+  return selectedText;
+}
+
+function getCompactSelectionCountText(
+  totalSelected: number,
+  hiddenSelectedCount: number,
+): string {
+  const hiddenText =
+    hiddenSelectedCount > 0 && state.filterText.trim()
+      ? ` · ${hiddenSelectedCount} hidden`
+      : "";
+  return `${totalSelected} selected${hiddenText}`;
 }
 
 export function updateSelectionUI(): void {
   // Retain selection across filter input; only prune keys that left the
   // listing itself. Filtering merely hides rows, it must not deselect them.
+  updateFilterClearButton();
   pruneStaleSelection(getSelectableKeys());
   const allKeys = getVisibleSelectableKeys();
 
@@ -359,6 +467,7 @@ export function updateSelectionUI(): void {
     const cb = row.querySelector<HTMLInputElement>(".row-check");
     const selected = isSelected(key);
     row.classList.toggle("object-row--selected", selected);
+    row.setAttribute("aria-selected", String(selected));
     if (cb) cb.checked = selected;
   }
 
@@ -385,6 +494,8 @@ export function updateSelectionUI(): void {
   const selectedFileCount = getSelectedFileKeys().length;
   const totalSelected = selectionCount();
   const selectedFolderCount = totalSelected - selectedFileCount;
+  const hiddenSelectedCount = totalSelected - visibleSelectedCount;
+  const listingLoading = dom.objectPanel.getAttribute("aria-busy") === "true";
   const batchToolbar = document.getElementById(
     "batch-toolbar",
   ) as HTMLDivElement | null;
@@ -392,21 +503,36 @@ export function updateSelectionUI(): void {
     "batch-count",
   ) as HTMLSpanElement | null;
   if (batchToolbar && batchCount) {
-    if (totalSelected >= 1) {
-      const parts: string[] = [];
-      if (selectedFileCount > 0)
-        parts.push(
-          `${selectedFileCount} file${selectedFileCount === 1 ? "" : "s"}`,
-        );
-      if (selectedFolderCount > 0)
-        parts.push(
-          `${selectedFolderCount} folder${selectedFolderCount === 1 ? "" : "s"}`,
-        );
-      batchCount.textContent = `${parts.join(" + ")} selected`;
-      batchToolbar.hidden = false;
+    batchToolbar.hidden = false;
+    batchToolbar.dataset.selectionState =
+      totalSelected > 0 ? "selected" : listingLoading ? "loading" : "idle";
+    batchToolbar.setAttribute("aria-busy", String(listingLoading));
+    const batchCountText =
+      totalSelected > 0
+        ? getSelectionCountText(
+            selectedFileCount,
+            selectedFolderCount,
+            totalSelected,
+            hiddenSelectedCount,
+          )
+        : listingLoading
+          ? "Loading listing…"
+          : getListingSummaryText();
+    batchCount.textContent = batchCountText;
+    batchCount.title = batchCount.textContent;
+    batchCount.setAttribute("aria-label", batchCountText);
+    if (totalSelected > 0) {
+      batchCount.dataset.compactCount = getCompactSelectionCountText(
+        totalSelected,
+        hiddenSelectedCount,
+      );
     } else {
-      batchToolbar.hidden = true;
+      delete batchCount.dataset.compactCount;
     }
+    const batchActions = document.getElementById(
+      "batch-toolbar-actions",
+    ) as HTMLDivElement | null;
+    if (batchActions) batchActions.hidden = totalSelected === 0;
 
     const batchDownload = document.getElementById(
       "batch-download",
@@ -424,34 +550,59 @@ export function updateSelectionUI(): void {
     const hasOnlyFolders = selectedFolderCount > 0 && selectedFileCount === 0;
 
     if (batchDownload) {
-      batchDownload.disabled = !canDownloadFiles;
+      batchDownload.disabled = !canDownloadFiles || listingLoading;
       batchDownload.title = canDownloadFiles
-        ? `Download ${selectedFileCount} selected file${selectedFileCount === 1 ? "" : "s"}`
+        ? listingLoading
+          ? "Download unavailable while listing loads"
+          : `Download ${selectedFileCount} selected file${selectedFileCount === 1 ? "" : "s"}`
         : hasOnlyFolders
           ? "Download applies to files only"
           : "Select files to download";
     }
     if (batchDelete) {
       const deleteInFlight = batchDelete.dataset.operationInFlight === "true";
-      batchDelete.disabled = totalSelected === 0 || deleteInFlight;
+      batchDelete.disabled =
+        totalSelected === 0 || deleteInFlight || listingLoading;
       batchDelete.title = deleteInFlight
         ? "Delete in progress"
-        : totalSelected > 0
-          ? `Delete ${totalSelected} selected item${totalSelected === 1 ? "" : "s"}`
-          : "Select items to delete";
+        : listingLoading
+          ? "Delete unavailable while listing loads"
+          : totalSelected > 0
+            ? `Delete ${totalSelected} selected item${totalSelected === 1 ? "" : "s"}`
+            : "Select items to delete";
     }
     if (batchProperties) {
-      batchProperties.disabled = totalSelected === 0;
-      batchProperties.title =
-        totalSelected > 0
+      batchProperties.disabled = totalSelected === 0 || listingLoading;
+      batchProperties.title = listingLoading
+        ? "Properties unavailable while listing loads"
+        : totalSelected > 0
           ? `Properties for ${totalSelected} selected`
           : "Select items for properties";
     }
     if (batchCopyUrls) {
-      batchCopyUrls.disabled = !canDownloadFiles;
+      batchCopyUrls.disabled = !canDownloadFiles || listingLoading;
       batchCopyUrls.title = canDownloadFiles
-        ? "Copy URLs for selected files"
+        ? listingLoading
+          ? "Copy URLs unavailable while listing loads"
+          : "Copy URLs for selected files"
         : "Select files to copy URLs";
+    }
+    const batchDeselect = document.getElementById(
+      "batch-deselect",
+    ) as HTMLButtonElement | null;
+    if (batchDeselect) {
+      batchDeselect.disabled = totalSelected === 0;
+      batchDeselect.title =
+        totalSelected > 0 ? "Deselect all selected items" : "No items selected";
+    }
+    const batchMore = document.getElementById(
+      "batch-more",
+    ) as HTMLButtonElement | null;
+    if (batchMore) {
+      batchMore.hidden = totalSelected === 0;
+      batchMore.disabled = totalSelected === 0;
+      batchMore.setAttribute("aria-label", "More selection actions");
+      batchMore.title = "More selection actions";
     }
   }
 
@@ -459,9 +610,10 @@ export function updateSelectionUI(): void {
     "btn-download",
   ) as HTMLButtonElement | null;
   if (downloadBtn) {
-    downloadBtn.disabled = selectedFileCount === 0;
-    downloadBtn.title =
-      selectedFileCount > 0
+    downloadBtn.disabled = selectedFileCount === 0 || listingLoading;
+    downloadBtn.title = listingLoading
+      ? "Download unavailable while listing loads"
+      : selectedFileCount > 0
         ? `Download ${selectedFileCount} selected file${selectedFileCount === 1 ? "" : "s"}`
         : "Select files to download";
   }
@@ -490,6 +642,12 @@ export function handleRowClick(key: string, e: MouseEvent): void {
       for (let i = from; i <= to; i++) {
         addSelection(allKeys[i]);
       }
+    } else {
+      // A filter can hide the anchor while the clicked row remains visible.
+      // Treat that range as a normal click so Shift-click always selects the
+      // row instead of silently doing nothing.
+      clearAllSelection();
+      addSelection(key);
     }
   } else if (hasAccelModifier(e)) {
     if (isSelected(key)) {
@@ -528,15 +686,6 @@ export function handleSelectAll(checked: boolean): void {
     for (const k of allKeys) removeSelection(k);
   }
   updateSelectionUI();
-}
-
-function getSortedObjects() {
-  // Sort once per listing/sort change (see getCachedSortedListing); filter
-  // ticks reuse the cached order and only re-filter.
-  const { sortedFiles } = getCachedSortedListing();
-  const filter = state.filterText.toLowerCase();
-  if (!filter) return sortedFiles;
-  return sortedFiles.filter((o) => lowerBasename(o.key).includes(filter));
 }
 
 export function toggleSort(column: "name" | "size" | "modified"): void {
@@ -602,6 +751,7 @@ export function renderBucketList(): void {
   el.setAttribute("aria-busy", "false");
   el.setAttribute("role", "listbox");
   el.setAttribute("aria-label", "Buckets");
+  el.setAttribute("aria-multiselectable", "false");
   if (state.buckets.length === 0) {
     el.innerHTML = `<li class="list__empty">No buckets found</li>`;
     return;
@@ -622,7 +772,12 @@ export function renderBucketList(): void {
   });
   // Roving tabindex: active bucket (or first visible) is tabbable, the rest
   // are reachable via arrow keys handled in handleBucketListKeydown.
-  const rovingBucket = state.currentBucket || visibleBuckets[0].name;
+  const activeBucketIsVisible = visibleBuckets.some(
+    (bucket) => bucket.name === state.currentBucket,
+  );
+  const rovingBucket = activeBucketIsVisible
+    ? state.currentBucket
+    : visibleBuckets[0].name;
   el.innerHTML = visibleBuckets
     .map(
       (b) =>
@@ -696,7 +851,7 @@ export function renderObjectTableSkeleton(rowCount = 8): void {
   const row =
     `<tr class="object-row object-row--skeleton" aria-hidden="true">` +
     `<td class="col-check"><span class="skeleton skeleton--check"></span></td>` +
-    `<td class="object-name"><span class="skeleton skeleton--icon"></span><span class="skeleton skeleton--text"></span></td>` +
+    `<td class="object-name"><div class="object-name__inner"><span class="skeleton skeleton--icon"></span><span class="skeleton skeleton--text"></span></div></td>` +
     `<td class="object-size"><span class="skeleton skeleton--text skeleton--sm"></span></td>` +
     `<td class="object-modified"><span class="skeleton skeleton--text skeleton--md"></span></td>` +
     `</tr>`;
@@ -706,6 +861,7 @@ export function renderObjectTableSkeleton(rowCount = 8): void {
   dom.emptyState.style.display = "none";
   const loadMore = document.getElementById("load-more-row");
   if (loadMore) loadMore.style.display = "none";
+  updateSelectionUI();
 }
 
 function emptyFolderRowHtml(): string {
@@ -765,7 +921,7 @@ let virtualRenderScheduled = false;
 function createObjectRow(): HTMLTableRowElement {
   const row = document.createElement("tr");
   row.innerHTML = `<td class="col-check"><input type="checkbox" class="row-check" /></td>
-    <td class="object-name"><span class="object-kind-icon"></span><span class="object-name__text"></span></td>
+    <td class="object-name"><div class="object-name__inner"><span class="object-kind-icon"></span><span class="object-name__text"></span></div></td>
     <td class="object-size"></td>
     <td class="object-modified"></td>`;
   return row;
@@ -797,14 +953,19 @@ function updateObjectRow(
   const modifiedCell = row.querySelector<HTMLElement>(".object-modified");
   const semanticKey =
     entry.kind === "folder" ? `prefix:${entry.key}` : entry.key;
+  const selected = isSelected(semanticKey);
 
   if (checkbox) {
     checkbox.setAttribute("aria-label", `Select ${entry.kind} ${entry.name}`);
-    checkbox.checked = isSelected(semanticKey);
+    checkbox.checked = selected;
   }
-  row.classList.toggle("object-row--selected", isSelected(semanticKey));
+  row.classList.toggle("object-row--selected", selected);
+  row.setAttribute("aria-selected", String(selected));
   if (nameCell) nameCell.title = entry.name;
-  if (nameText) nameText.textContent = entry.name;
+  if (nameText) {
+    nameText.textContent = entry.name;
+    nameText.title = entry.name;
+  }
   if (icon) {
     icon.className = `object-kind-icon icon-${entry.kind}`;
     icon.innerHTML =
@@ -1028,13 +1189,11 @@ function ensureObjectPanelListeners(): void {
 
 export function renderObjectTable(): void {
   const tbody = dom.objectTbody;
-  const filter = state.filterText.toLowerCase();
-  // Reuse the cached sort order; filter ticks only re-filter.
-  const { sortedPrefixes } = getCachedSortedListing();
-  const filteredPrefixes = filter
-    ? sortedPrefixes.filter((prefix) => lowerBasename(prefix).includes(filter))
-    : sortedPrefixes;
-  const sortedFiles = getSortedObjects();
+  const filter = state.filterText.trim().toLowerCase();
+  // Reuse the exact filtered order used by getVisibleSelectableKeys so a
+  // Shift-click range follows the rows shown to the user.
+  const { sortedPrefixes: filteredPrefixes, sortedFiles } =
+    getFilteredListing();
 
   renderedTableEntries = [
     ...filteredPrefixes.map((prefix): ObjectTableEntry => ({
@@ -1578,6 +1737,7 @@ export async function selectBucket(name: string): Promise<void> {
 export function showEmptyState(): void {
   committedListingSnapshot = null;
   dom.objectPanel.style.display = "none";
+  dom.objectPanel.setAttribute("aria-busy", "false");
   dom.emptyState.style.display = "";
   dom.objectTbody.innerHTML = "";
   dom.breadcrumb.innerHTML = "";
@@ -1592,5 +1752,6 @@ export function showEmptyState(): void {
     "btn-download",
   ) as HTMLButtonElement | null;
   if (downloadBtn) downloadBtn.disabled = true;
+  updateSelectionUI();
   updateNavButtons();
 }

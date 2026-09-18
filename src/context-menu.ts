@@ -15,18 +15,21 @@ let activeMenu: HTMLElement | null = null;
 let dismissHandler: ((e: MouseEvent) => void) | null = null;
 let keyHandler: ((e: KeyboardEvent) => void) | null = null;
 let restoreFocusTarget: HTMLElement | null = null;
+let dismissCallback: (() => void) | null = null;
 
 export function showContextMenu(
   x: number,
   y: number,
   items: MenuItem[],
   onAction: (action: string) => void,
+  onDismiss?: () => void,
 ): void {
   hideContextMenu();
   restoreFocusTarget =
     document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
+  dismissCallback = onDismiss ?? null;
 
   const menu = document.createElement("div");
   menu.className = "context-menu";
@@ -76,18 +79,37 @@ export function showContextMenu(
   if (buttons.length > 0) buttons[0].focus();
 
   keyHandler = (e: KeyboardEvent) => {
+    if (e.defaultPrevented) return;
+
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
       hideContextMenu();
       return;
     }
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    if (e.key === "Tab") {
+      // A context menu is a transient layer. Tabbing away dismisses it and
+      // returns focus to the element that opened it instead of trapping the
+      // user in a menu that has no surrounding document order.
+      e.preventDefault();
+      hideContextMenu();
+      return;
+    }
+    if (
+      e.key === "ArrowDown" ||
+      e.key === "ArrowUp" ||
+      e.key === "Home" ||
+      e.key === "End"
+    ) {
       e.preventDefault();
       const focused = document.activeElement as HTMLElement | null;
       const idx = focused ? buttons.indexOf(focused as HTMLButtonElement) : -1;
       let next: number;
-      if (e.key === "ArrowDown") {
+      if (e.key === "Home") {
+        next = 0;
+      } else if (e.key === "End") {
+        next = buttons.length - 1;
+      } else if (e.key === "ArrowDown") {
         next = idx < buttons.length - 1 ? idx + 1 : 0;
       } else {
         next = idx > 0 ? idx - 1 : buttons.length - 1;
@@ -113,11 +135,17 @@ export function showContextMenu(
   }, 0);
 }
 
-export function hideContextMenu(): void {
+export function hideContextMenu(): boolean {
+  const menu = activeMenu;
+  const activeElement = document.activeElement;
+  const wasOpen = menu !== null;
+  const onDismiss = dismissCallback;
+
   if (activeMenu) {
     activeMenu.remove();
     activeMenu = null;
   }
+  dismissCallback = null;
   if (dismissHandler) {
     document.removeEventListener("mousedown", dismissHandler);
     dismissHandler = null;
@@ -133,8 +161,21 @@ export function hideContextMenu(): void {
   if (
     target &&
     target.isConnected &&
-    document.activeElement === document.body
+    (activeElement === document.body ||
+      activeElement === menu ||
+      (menu !== null &&
+        activeElement instanceof Node &&
+        menu.contains(activeElement)))
   ) {
     target.focus();
   }
+
+  onDismiss?.();
+
+  return wasOpen;
+}
+
+/** Returns whether a transient context menu is currently mounted. */
+export function isContextMenuOpen(): boolean {
+  return activeMenu !== null;
 }

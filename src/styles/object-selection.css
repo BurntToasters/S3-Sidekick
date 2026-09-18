@@ -1,13 +1,14 @@
 /* Object selection, drag-over state, batch toolbar */
 
 .col-check {
-  width: 32px;
+  width: 36px;
   text-align: center;
   vertical-align: middle;
 }
 
 .object-table th.col-check,
 .object-table td.col-check {
+  width: 36px;
   padding-left: 8px;
   padding-right: 8px;
 }
@@ -19,6 +20,7 @@
 
 .object-row--selected {
   background: var(--bg-active);
+  transition: box-shadow var(--transition-smooth);
 }
 
 .object-row--selected:hover {
@@ -39,54 +41,82 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 10px;
+  height: 36px;
+  min-height: 36px;
   min-width: 0;
-  padding: 6px 14px;
+  padding: 0 14px;
   background: var(--bg-active);
   border-bottom: 1px solid var(--glass-border);
   font-size: 12px;
   font-weight: 500;
-  animation: batch-slide-in 0.15s ease;
-}
-.batch-toolbar[hidden] {
-  display: none;
+  flex-shrink: 0;
 }
 
-@keyframes batch-slide-in {
-  from {
-    opacity: 0;
-    transform: translateY(-100%);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+/* responsive.css has legacy wrapping rules for this row; keep the permanent
+   36px surface single-line at every content width. */
+.content-main .batch-toolbar {
+  flex-wrap: nowrap;
 }
 
 .batch-toolbar__count {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--text);
   white-space: nowrap;
-  flex-shrink: 0;
+  flex: 1 1 auto;
+}
+
+.content-main .batch-toolbar__count {
+  width: auto;
 }
 
 .batch-toolbar__actions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex: 0 0 auto;
+  gap: 4px;
   min-width: 0;
   justify-content: flex-end;
-  flex: 1;
+  flex-wrap: nowrap;
 }
 
-/* Inspector steals width from content-main — collapse labels, keep icons. */
-@container content-main (max-width: 560px) {
+.batch-toolbar__actions[hidden],
+.batch-toolbar__actions .btn[hidden] {
+  display: none;
+}
+
+#batch-more {
+  display: none;
+}
+
+/* The content-main container narrows when the inspector is docked. Keep the
+   permanent row on one line and move the less common actions into the shared
+   keyboard-aware context-menu surface. */
+@container content-main (max-width: 759px) {
+  .batch-toolbar {
+    gap: 4px;
+    padding-inline: 8px;
+  }
+
   .batch-toolbar__actions .btn {
     padding-inline: 8px;
   }
 
-  .batch-toolbar__label {
+  .batch-toolbar__actions #batch-delete,
+  .batch-toolbar__actions #batch-copy-urls,
+  .batch-toolbar__actions #batch-deselect {
+    display: none;
+  }
+
+  .batch-toolbar__actions #batch-more {
+    display: inline-flex;
+  }
+
+  .batch-toolbar__actions #batch-properties .batch-toolbar__label,
+  .batch-toolbar__actions #batch-download .batch-toolbar__label,
+  .batch-toolbar__actions #batch-more .batch-toolbar__label {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -96,5 +126,21 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
+  }
+
+  .batch-toolbar[data-selection-state="selected"] .batch-toolbar__count {
+    font-size: 0;
+    overflow: hidden;
+    text-overflow: clip;
+  }
+
+  .batch-toolbar[data-selection-state="selected"]
+    .batch-toolbar__count[data-compact-count]::before {
+    content: attr(data-compact-count);
+    display: block;
+    overflow: hidden;
+    text-overflow: clip;
+    white-space: nowrap;
+    font-size: 11px;
   }
 }

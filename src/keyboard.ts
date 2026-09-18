@@ -57,10 +57,18 @@ function isSetupWizardVisible(): boolean {
 
 export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
   const onKeyDown = (e: KeyboardEvent) => {
+    // A more specific layer (for example a dialog or context menu) may have
+    // already consumed this key while listening in capture/target phase.
+    if (e.defaultPrevented) return;
+
     if (e.key === "Escape") {
-      hideContextMenu();
+      if (hideContextMenu()) {
+        e.preventDefault();
+        return;
+      }
 
       if (isPaletteOpen()) {
+        e.preventDefault();
         closePalette();
         return;
       }
@@ -78,24 +86,28 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
 
       const previewOverlay = document.getElementById("preview-overlay");
       if (previewOverlay?.classList.contains("active")) {
+        e.preventDefault();
         closePreview();
         return;
       }
 
       const infoOverlay = document.getElementById("info-overlay");
       if (infoOverlay?.classList.contains("active")) {
+        e.preventDefault();
         void requestCloseInfoPanel();
         return;
       }
 
       const copyMoveOverlay = document.getElementById("copy-move-overlay");
       if (copyMoveOverlay?.classList.contains("active")) {
+        e.preventDefault();
         copyMoveOverlay.classList.remove("active");
         return;
       }
 
       const licensesOverlay = document.getElementById("licenses-overlay");
       if (licensesOverlay?.classList.contains("active")) {
+        e.preventDefault();
         closeLicensesModal();
         return;
       }
@@ -108,12 +120,14 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
       }
 
       if (isDrawerOpen()) {
+        e.preventDefault();
         closeDrawer();
         return;
       }
 
       const layout = document.getElementById("main-layout");
       if (layout?.classList.contains("main-layout--sidebar-open")) {
+        e.preventDefault();
         handlers.setSidebarOpen(false);
         return;
       }

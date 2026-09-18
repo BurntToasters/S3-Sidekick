@@ -50,6 +50,8 @@ const mockHandleRowClick = vi.fn();
 const mockHandleSelectAll = vi.fn();
 const mockClearSelection = vi.fn();
 const mockUpdateSelectionUI = vi.fn();
+const mockClearFilter = vi.fn();
+const mockUpdateFilterClearButton = vi.fn();
 const mockGetSelectableKeys = vi.fn();
 const mockToggleSort = vi.fn();
 const mockNavigateUp = vi.fn<() => Promise<void>>();
@@ -240,6 +242,8 @@ vi.mock("../browser.ts", () => ({
   handleBucketListKeydown: mockHandleBucketListKeydown,
   handleSelectAll: mockHandleSelectAll,
   clearSelection: mockClearSelection,
+  clearFilter: mockClearFilter,
+  updateFilterClearButton: mockUpdateFilterClearButton,
   setLastClickedKey: vi.fn(),
   updateSelectionUI: mockUpdateSelectionUI,
   invalidateInspectorSelectionSync: vi.fn(),
@@ -463,6 +467,8 @@ describe("main integration", () => {
     mockHandleSelectAll.mockReset();
     mockClearSelection.mockReset();
     mockUpdateSelectionUI.mockReset();
+    mockClearFilter.mockReset();
+    mockUpdateFilterClearButton.mockReset();
     mockGetSelectableKeys.mockReset();
     mockToggleSort.mockReset();
     mockNavigateUp.mockReset();
@@ -1035,6 +1041,23 @@ describe("main integration", () => {
     rowCheck.checked = false;
     rowCheck.dispatchEvent(new Event("change", { bubbles: true }));
     expect(mockUpdateSelectionUI).toHaveBeenCalled();
+    const previewCallsBeforeCheckboxDblclick =
+      mockOpenPreview.mock.calls.length;
+    rowCheck.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await flushMicrotasks();
+    expect(mockOpenPreview.mock.calls.length).toBe(
+      previewCallsBeforeCheckboxDblclick,
+    );
+    const folderCheck = folderCheckRow.querySelector(
+      ".row-check",
+    ) as HTMLInputElement;
+    const navigateCallsBeforeFolderCheckboxDblclick =
+      mockNavigateToFolder.mock.calls.length;
+    folderCheck.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await flushMicrotasks();
+    expect(mockNavigateToFolder.mock.calls.length).toBe(
+      navigateCallsBeforeFolderCheckboxDblclick,
+    );
 
     state.selectedKeys.delete("docs/file.txt");
     fileRow.dispatchEvent(
@@ -1115,6 +1138,48 @@ describe("main integration", () => {
         connectionIdentity: "test-identity",
       }),
     );
+  });
+
+  it("opens compact batch actions and follows shared menu dismissal", async () => {
+    const { state } = await import("../state.ts");
+    await import("../main.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.currentBucket = "bucket-a";
+    state.selectedKeys.add("docs/file.txt");
+
+    const batchMore = document.getElementById(
+      "batch-more",
+    ) as HTMLButtonElement;
+    batchMore.hidden = false;
+    batchMore.disabled = false;
+
+    let sharedDismiss: (() => void) | undefined;
+    mockShowContextMenu.mockImplementation((...args: unknown[]) => {
+      sharedDismiss = args[4] as (() => void) | undefined;
+    });
+
+    batchMore.click();
+    const menuItems = mockShowContextMenu.mock.calls.at(-1)?.[2] as Array<{
+      label: string;
+      disabled?: boolean;
+    }>;
+    expect(menuItems.map((item) => item.label)).toEqual([
+      "Delete",
+      "Copy URLs",
+      "Deselect All",
+    ]);
+    expect(menuItems.some((item) => item.disabled)).toBe(false);
+    expect(batchMore.getAttribute("aria-expanded")).toBe("true");
+
+    sharedDismiss?.();
+    expect(batchMore.getAttribute("aria-expanded")).toBe("false");
+
+    batchMore.click();
+    expect(batchMore.getAttribute("aria-expanded")).toBe("true");
+    sharedDismiss?.();
+    expect(batchMore.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("builds preview and multi-select properties context menu variants", async () => {

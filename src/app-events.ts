@@ -32,6 +32,8 @@ import {
   enterLocationEditMode,
   exitLocationEditMode,
   pruneStaleSelection,
+  clearFilter,
+  updateFilterClearButton,
 } from "./browser.ts";
 import { wireInspectorChrome, toggleInspector } from "./inspector.ts";
 import { checkUpdates, setUpdateChannel } from "./updater.ts";
@@ -81,6 +83,7 @@ import {
   closeSidebarOnMobile,
   handleTabListArrowKey,
   wireObjectFilterInput,
+  clearFilterInputDebounce,
   initModalLayerObserver,
   disposeModalLayerObserver,
   disposeFilterInputDebounce,
@@ -128,6 +131,7 @@ import {
   handleContextMenu,
   handleBucketContextMenu,
 } from "./app-context-menu.ts";
+import { showContextMenu, type MenuItem } from "./context-menu.ts";
 import { openCopyMoveDialog } from "./app-copy-move.ts";
 
 let dragDropUnlisten: (() => void) | null = null;
@@ -388,6 +392,59 @@ export function wireEvents(): void {
     clearSelection();
   });
 
+  const batchMore = document.getElementById(
+    "batch-more",
+  ) as HTMLButtonElement | null;
+  if (batchMore) {
+    const dismissMoreMenu = (): void => {
+      batchMore.setAttribute("aria-expanded", "false");
+    };
+    batchMore.addEventListener("click", () => {
+      if (batchMore.hidden || batchMore.disabled) return;
+      dismissMoreMenu();
+
+      const objectPanel = document.getElementById("object-panel");
+      const listingLoading = objectPanel?.getAttribute("aria-busy") === "true";
+      const selectedFiles = getSelectedFileKeys().length;
+      const selectedCount = selectionCount();
+      const deleteButton = document.getElementById(
+        "batch-delete",
+      ) as HTMLButtonElement | null;
+      const deleteInFlight = deleteButton?.dataset.operationInFlight === "true";
+      const rect = batchMore.getBoundingClientRect();
+      const menuItems: MenuItem[] = [
+        {
+          label: "Delete",
+          action: "delete",
+          disabled: selectedCount === 0 || listingLoading || deleteInFlight,
+        },
+        {
+          label: "Copy URLs",
+          action: "copy-urls",
+          disabled: selectedFiles === 0 || listingLoading,
+        },
+        {
+          label: "Deselect All",
+          action: "deselect-all",
+          disabled: selectedCount === 0,
+        },
+      ];
+      showContextMenu(
+        rect.left,
+        rect.bottom,
+        menuItems,
+        (action) => {
+          dismissMoreMenu();
+          if (action === "delete") void handleDelete();
+          else if (action === "copy-urls") void handleCopyUrl();
+          else if (action === "deselect-all") clearSelection();
+        },
+        dismissMoreMenu,
+      );
+      batchMore.setAttribute("aria-expanded", "true");
+    });
+  }
+
   document.getElementById("security-toggle")!.addEventListener("click", () => {
     void (async () => {
       await handleSecurityToggle(setStatus);
@@ -501,6 +558,19 @@ export function wireEvents(): void {
   });
 
   wireObjectFilterInput();
+
+  const filterInput = document.getElementById(
+    "filter-input",
+  ) as HTMLInputElement | null;
+  filterInput?.addEventListener("input", updateFilterClearButton);
+  updateFilterClearButton();
+  document.getElementById("filter-clear")?.addEventListener("click", () => {
+    clearFilterInputDebounce();
+    if (filterInput) filterInput.value = "";
+    clearFilter();
+    renderObjectTable();
+    filterInput?.focus();
+  });
 
   const bucketFilterInput = document.getElementById(
     "bucket-filter-input",
@@ -673,7 +743,9 @@ export function wireEvents(): void {
   });
 
   dom.objectTbody.addEventListener("dblclick", (e) => {
-    const row = (e.target as HTMLElement).closest<HTMLElement>(".object-row");
+    const target = e.target as HTMLElement;
+    if (target.closest(".row-check")) return;
+    const row = target.closest<HTMLElement>(".object-row");
     if (!row) return;
     if (row.classList.contains("object-row--folder")) {
       const prefix = row.dataset.prefix;

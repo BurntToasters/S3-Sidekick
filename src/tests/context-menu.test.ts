@@ -80,6 +80,31 @@ describe("context menu", () => {
     expect(document.querySelector(".context-menu")).toBeNull();
   });
 
+  it("dismisses on Tab and restores focus to the invoker", () => {
+    const invoker = document.createElement("button");
+    document.body.appendChild(invoker);
+    invoker.focus();
+    const onDismiss = vi.fn();
+    showContextMenu(
+      10,
+      10,
+      [{ label: "One", action: "one" }],
+      () => {},
+      onDismiss,
+    );
+    vi.runAllTimers();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+    );
+
+    expect(document.querySelector(".context-menu")).toBeNull();
+    expect(document.activeElement).toBe(invoker);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    hideContextMenu();
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
   it("closes when clicking outside and handles disabled items", () => {
     const onAction = vi.fn();
     showContextMenu(

@@ -252,7 +252,7 @@
               <span>Buckets</span>
               <input
                 id="bucket-filter-input"
-                class="field field--sm sidebar__filter"
+                class="field sidebar__filter"
                 type="text"
                 placeholder="Filter buckets..."
                 aria-label="Filter buckets"
@@ -261,7 +261,9 @@
             <ul
               id="bucket-list"
               class="list"
+              role="listbox"
               aria-label="Buckets"
+              aria-multiselectable="false"
               aria-busy="false"
             ></ul>
           </aside>
@@ -336,13 +338,26 @@
                   />
                 </div>
               </div>
-              <input
-                id="filter-input"
-                class="field filter-input"
-                type="text"
-                placeholder="Filter..."
-                aria-label="Filter objects"
-              />
+              <div class="filter-control">
+                <input
+                  id="filter-input"
+                  class="field filter-input"
+                  type="text"
+                  placeholder="Filter..."
+                  aria-label="Filter objects"
+                />
+                <button
+                  id="filter-clear"
+                  class="btn btn--icon filter-clear"
+                  type="button"
+                  title="Clear object filter"
+                  aria-label="Clear object filter"
+                  aria-hidden="true"
+                  disabled
+                >
+                  <span class="lucide-icon" data-icon="x"></span>
+                </button>
+              </div>
               <div class="content-toolbar__actions">
                 <button
                   id="btn-palette"
@@ -413,37 +428,56 @@
 
             <div class="content-body">
               <div class="content-main">
-                <div id="batch-toolbar" class="batch-toolbar" hidden>
+                <div
+                  id="batch-toolbar"
+                  class="batch-toolbar"
+                  aria-live="polite"
+                  aria-busy="false"
+                >
                   <span id="batch-count" class="batch-toolbar__count"></span>
-                  <div class="batch-toolbar__actions">
+                  <div
+                    id="batch-toolbar-actions"
+                    class="batch-toolbar__actions"
+                    role="group"
+                    aria-label="Selection actions"
+                    hidden
+                  >
                     <button
                       id="batch-properties"
+                      type="button"
                       class="btn btn--sm btn--ghost"
                       title="Properties"
+                      aria-label="Properties"
                     >
                       <span class="lucide-icon" data-icon="info"></span>
                       <span class="batch-toolbar__label">Properties</span>
                     </button>
                     <button
                       id="batch-download"
+                      type="button"
                       class="btn btn--sm"
                       title="Download"
+                      aria-label="Download"
                     >
                       <span class="lucide-icon" data-icon="download"></span>
                       <span class="batch-toolbar__label">Download</span>
                     </button>
                     <button
                       id="batch-delete"
+                      type="button"
                       class="btn btn--sm btn--danger"
                       title="Delete"
+                      aria-label="Delete"
                     >
                       <span class="lucide-icon" data-icon="trash-2"></span>
                       <span class="batch-toolbar__label">Delete</span>
                     </button>
                     <button
                       id="batch-copy-urls"
+                      type="button"
                       class="btn btn--sm btn--ghost"
                       title="Copy URLs"
+                      aria-label="Copy URLs"
                     >
                       <span
                         class="lucide-icon"
@@ -453,11 +487,29 @@
                     </button>
                     <button
                       id="batch-deselect"
+                      type="button"
                       class="btn btn--sm btn--ghost"
                       title="Deselect All"
+                      aria-label="Deselect all"
                     >
                       <span class="lucide-icon" data-icon="x-square"></span>
                       <span class="batch-toolbar__label">Deselect All</span>
+                    </button>
+                    <button
+                      id="batch-more"
+                      type="button"
+                      class="btn btn--sm btn--ghost"
+                      title="More selection actions"
+                      aria-label="More selection actions"
+                      aria-haspopup="menu"
+                      aria-expanded="false"
+                      hidden
+                    >
+                      <span
+                        class="lucide-icon"
+                        data-icon="more-horizontal"
+                      ></span>
+                      <span class="batch-toolbar__label">More</span>
                     </button>
                   </div>
                 </div>
@@ -488,7 +540,17 @@
                   style="display: none"
                   aria-busy="false"
                 >
-                  <table class="object-table" aria-label="Objects">
+                  <table
+                    class="object-table"
+                    aria-label="Objects"
+                    aria-rowcount="0"
+                  >
+                    <colgroup>
+                      <col class="col-object-check" />
+                      <col class="col-object-name" />
+                      <col class="col-object-size" />
+                      <col class="col-object-modified" />
+                    </colgroup>
                     <thead>
                       <tr>
                         <th scope="col" class="col-check">
@@ -501,7 +563,7 @@
                         </th>
                         <th
                           scope="col"
-                          class="col-sortable"
+                          class="col-name col-sortable"
                           data-sort="name"
                           aria-sort="ascending"
                         >
@@ -521,7 +583,7 @@
                         </th>
                         <th
                           scope="col"
-                          class="col-sortable"
+                          class="col-size col-sortable"
                           data-sort="size"
                           aria-sort="none"
                         >
@@ -536,7 +598,7 @@
                         </th>
                         <th
                           scope="col"
-                          class="col-sortable"
+                          class="col-modified col-sortable"
                           data-sort="modified"
                           aria-sort="none"
                         >

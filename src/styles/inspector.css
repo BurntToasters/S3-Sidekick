@@ -18,6 +18,12 @@
   container-name: content-main;
 }
 
+@media (min-width: 901px) {
+  .content-main {
+    min-width: 360px;
+  }
+}
+
 .inspector-panel {
   width: var(--inspector-width);
   min-width: var(--inspector-min);
@@ -228,7 +234,7 @@
 }
 
 .main-layout--inspector-docked .content-main {
-  min-width: 0;
+  min-width: 360px;
 }
 
 .main-layout--inspector-docked .inspector-preview__title {

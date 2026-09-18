@@ -19,6 +19,17 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
+## Changes in `v0.11.0-beta.8:`
+
+Beta 8 is a UI polish pass for object browsing, responsive panels, transfers, and feedback.
+
+- **Object browsing:** The selection toolbar keeps a permanent 36px action row, table columns and row dividers stay aligned across the native table geometry, and compact selection actions fit beside a docked inspector. Checkbox double-clicks no longer navigate into folders accidentally.
+- **Selection and filtering:** Shift-click ranges follow sorted filtered listings, including virtualized rows. Selections hidden by a filter remain selected and are disclosed in the count; object filters are clearable in one click, and sidebar filtering keeps keyboard focus on a visible bucket.
+- **Panels and keyboard flow:** Sidebar and inspector widths fit the available desktop space while preserving preferred sizes. The activity drawer collapses and restores cleanly with focus returned to its opener, and Escape dismisses one transient layer at a time while restoring focus.
+- **Feedback and dialogs:** Disabled controls have consistent states, toast countdowns pause while hovered or focused, sticky messages stay available until dismissed, and long confirmation dialogs fit within the viewport with scrollable messages and visible actions.
+- **Transfers:** Progress indicators distinguish queued, active, paused, completed, and failed transfers; transfer rows expose full source and destination paths and wrap readable error messages.
+- **Testing:** Added Playwright Chromium and WebKit UI regression coverage for table geometry, virtualization and selection, responsive panel layout, drawer behavior, listing states, and long dialogs; CI runs the browser suite.
+
 ## Changes in `v0.11.0-beta.7:`
 
 Beta 7 fixes a native process crash that could occur while previewing JSON and other objects.

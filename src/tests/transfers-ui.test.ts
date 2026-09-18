@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { TransferItem } from "../transfers.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
@@ -47,6 +48,46 @@ function renderFixture(): void {
       </div>
     </div>
   `;
+}
+
+function transferFixture(overrides: Partial<TransferItem> = {}): TransferItem {
+  return {
+    id: 1,
+    operation: "copy",
+    bucket: "source-bucket",
+    fileName: "report.csv",
+    filePath: "",
+    key: "reports/report.csv",
+    sourceBucket: "source-bucket",
+    sourceKey: "reports/report.csv",
+    destinationBucket: "destination-bucket",
+    destinationKey: "archive/report.csv",
+    size: 0,
+    status: "queued",
+    progress: 0,
+    totalBytes: 0,
+    attempt: 1,
+    maxAttempts: 1,
+    verified: false,
+    conflictResolution: "ask",
+    phase: "running",
+    speedBps: 0,
+    etaSeconds: null,
+    paused: false,
+    resumable: false,
+    completedParts: 0,
+    totalParts: 0,
+    ...overrides,
+  };
+}
+
+function renderRow(
+  transfers: { renderTransferRow: (item: TransferItem) => string },
+  item: TransferItem,
+): HTMLElement {
+  const template = document.createElement("template");
+  template.innerHTML = transfers.renderTransferRow(item);
+  return template.content.firstElementChild as HTMLElement;
 }
 
 async function loadTransfersModule() {
@@ -168,5 +209,137 @@ describe("transfers UI shell", () => {
     const list = document.getElementById("transfer-list")!;
     expect(list.innerHTML).toContain("transfer-progress--indeterminate");
     releaseUpload();
+  });
+
+  it("keeps terminal copy and move rows static with explicit status text", async () => {
+    const transfers = await loadTransfersModule();
+
+    for (const operation of ["copy", "move"] as const) {
+      for (const [status, label] of [
+        ["done", "Completed"],
+        ["error", "Failed"],
+        ["skipped", "Skipped"],
+      ] as const) {
+        const row = renderRow(
+          transfers,
+          transferFixture({
+            id: operation === "copy" ? 10 : 20,
+            operation,
+            status,
+            error:
+              status === "error" ? "Destination already exists" : undefined,
+          }),
+        );
+        expect(
+          row.querySelector(".transfer-progress-wrap--indeterminate"),
+        ).toBeNull();
+        expect(row.querySelector("[aria-busy]")).toBeNull();
+        expect(row.querySelector(".transfer-phase--status")?.textContent).toBe(
+          label,
+        );
+        expect(row.querySelector(".transfer-cancel")).toBeNull();
+      }
+    }
+  });
+
+  it("animates only active copy and move rows", async () => {
+    const transfers = await loadTransfersModule();
+    const running = renderRow(
+      transfers,
+      transferFixture({ status: "uploading", phase: "running" }),
+    );
+    expect(
+      running.querySelector(".transfer-progress-wrap--indeterminate"),
+    ).not.toBeNull();
+    expect(
+      running.querySelector(".transfer-progress[aria-busy='true']"),
+    ).not.toBeNull();
+
+    const queued = renderRow(transfers, transferFixture({ status: "queued" }));
+    expect(
+      queued.querySelector(".transfer-progress-wrap--indeterminate"),
+    ).toBeNull();
+    expect(queued.querySelector("[aria-busy]")).toBeNull();
+
+    const paused = renderRow(
+      transfers,
+      transferFixture({
+        status: "uploading",
+        phase: "running",
+        paused: true,
+        totalBytes: 100,
+        progress: 42,
+        speedBps: 4_000_000,
+        etaSeconds: 12,
+        lastProgressAt: Date.now() - 60_000,
+      }),
+    );
+    expect(
+      paused.querySelector(".transfer-progress-wrap--indeterminate"),
+    ).toBeNull();
+    expect(
+      paused.querySelector(".transfer-progress[aria-valuenow='42']"),
+    ).not.toBeNull();
+    expect(paused.querySelector("[aria-busy]")).toBeNull();
+    expect(paused.querySelector(".transfer-phase--status")?.textContent).toBe(
+      "Paused",
+    );
+    expect(paused.querySelectorAll(".transfer-phase")).toHaveLength(1);
+    expect(paused.querySelector(".transfer-phase--stalled")).toBeNull();
+
+    const phasePaused = renderRow(
+      transfers,
+      transferFixture({
+        operation: "upload",
+        status: "uploading",
+        phase: "paused",
+        paused: false,
+        totalBytes: 100,
+        progress: 42,
+        speedBps: 4_000_000,
+        etaSeconds: 12,
+        lastProgressAt: Date.now() - 60_000,
+      }),
+    );
+    expect(
+      phasePaused.querySelector(".transfer-progress-wrap--indeterminate"),
+    ).toBeNull();
+    expect(phasePaused.querySelector("[aria-busy]")).toBeNull();
+    expect(
+      phasePaused.querySelector(".transfer-progress[aria-valuenow='42']"),
+    ).not.toBeNull();
+    expect(
+      phasePaused.querySelector(".transfer-phase--status")?.textContent,
+    ).toBe("Paused");
+    expect(phasePaused.querySelectorAll(".transfer-phase")).toHaveLength(1);
+    expect(phasePaused.querySelector(".transfer-phase--stalled")).toBeNull();
+    expect(phasePaused.querySelector(".transfer-pause")).toBeNull();
+  });
+
+  it("keeps full transfer paths and wrapped errors available to assistive users", async () => {
+    const transfers = await loadTransfersModule();
+    const source =
+      "source-bucket/very/long/path/that/must/remain/available/report.csv";
+    const destination = "destination-bucket/archive/very/long/path/report.csv";
+    const error = "Upload failed: " + "x".repeat(260);
+    const row = renderRow(
+      transfers,
+      transferFixture({
+        status: "error",
+        sourceKey: source.slice("source-bucket/".length),
+        destinationKey: destination.slice("destination-bucket/".length),
+        error,
+      }),
+    );
+    expect(row.querySelector(".transfer-name")?.getAttribute("title")).toBe(
+      source,
+    );
+    expect(row.querySelector(".transfer-key")?.getAttribute("title")).toBe(
+      destination,
+    );
+    expect(row.querySelector(".transfer-error")?.textContent).toBe(error);
+    expect(row.querySelector(".transfer-error")?.getAttribute("title")).toBe(
+      error,
+    );
   });
 });
