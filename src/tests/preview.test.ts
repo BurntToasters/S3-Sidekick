@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 describe("preview module", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     mockInvoke.mockReset();
     document.body.innerHTML = `
@@ -16,14 +16,21 @@ describe("preview module", () => {
         <div id="preview-body"></div>
       </div>
     `;
+    const { state } = await import("../state.ts");
+    state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
   });
 
-  it("canPreview handles supported and unsupported extensions", async () => {
+  it("canPreview always offers preview; render decides by content type", async () => {
     const preview = await import("../preview.ts");
     expect(preview.canPreview("readme.md")).toBe(true);
     expect(preview.canPreview("photo.jpeg")).toBe(true);
-    expect(preview.canPreview("archive.zip")).toBe(false);
-    expect(preview.canPreview("README")).toBe(false);
+    // Extension-gating removed: unsupported types still offer Preview and
+    // render an unavailable message from content_type/is_text.
+    expect(preview.canPreview("archive.zip")).toBe(true);
+    expect(preview.canPreview("README")).toBe(true);
+    expect(preview.canPreview("")).toBe(false);
   });
 
   it("renders text preview and truncated size hint", async () => {
@@ -56,6 +63,7 @@ describe("preview module", () => {
     expect(mockInvoke).toHaveBeenCalledWith("preview_object", {
       bucket: "bucket-a",
       key: "notes/readme.txt",
+      connectionId: "test-connection",
     });
   });
 
@@ -112,12 +120,20 @@ describe("preview module", () => {
 
     mockInvoke.mockRejectedValueOnce(new Error("network error"));
     await preview.openPreview("bin/error.bin");
-    expect(
-      (document.getElementById("preview-body") as HTMLDivElement).textContent,
-    ).toContain("Failed to load preview");
+    const body = document.getElementById("preview-body") as HTMLDivElement;
+    expect(body.textContent).toContain("Failed to load preview");
+    expect(body.querySelector("[role='alert']")).not.toBeNull();
+    expect(body.querySelector("[data-preview-retry]")).not.toBeNull();
   });
 
-  it("renders non-SVG image previews using a base64 data URL", async () => {
+  it("renders non-SVG image previews using a blob object URL", async () => {
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValue("blob:preview-png");
+    const revokeObjectURL = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => undefined);
+
     mockInvoke.mockResolvedValueOnce({
       content_type: "image/png",
       data: "AAAA",
@@ -131,6 +147,10 @@ describe("preview module", () => {
 
     await preview.openPreview("images/photo.png");
     const img = document.querySelector("#preview-body img") as HTMLImageElement;
-    expect(img.getAttribute("src")).toBe("data:image/png;base64,AAAA");
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(img.getAttribute("src")).toBe("blob:preview-png");
+
+    preview.closePreview();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview-png");
   });
 });

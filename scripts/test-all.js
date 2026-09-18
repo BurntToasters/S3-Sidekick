@@ -2,17 +2,15 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import {
-  clearQualityGateProof,
-  recordSuccessfulQualityGate,
-} from "./release-session.js";
+import { clearQualityGateProof } from "./release-session.js";
+import { isDirectExecution } from "./direct-execution.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageJsonPath = resolve(__dirname, "..", "package.json");
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 const appVersion = packageJson.version ?? "unknown";
-const scriptVersion = "1.0.0";
+const scriptVersion = "1.1.1";
 
 const colors = {
   reset: "\x1b[0m",
@@ -27,9 +25,18 @@ const rustTimeoutMs = process.platform === "win32" ? 1_200_000 : 600_000;
 function createInitialResults() {
   return {
     typecheck: { status: "pending" },
+    lint: { status: "pending" },
     format: { status: "pending" },
+    cargoSafeUpdate: { status: "pending" },
+    cargoUpdatePolicy: { status: "pending" },
+    clippy: { status: "pending" },
+    cargoFmt: { status: "pending" },
+    frontendBuild: { status: "pending" },
+    nativeBuild: { status: "pending" },
+    tauriBuild: { status: "pending" },
+    scriptTests: { status: "pending" },
     test: { status: "pending", passed: null, failed: null, files: null },
-    rust: { status: "pending" },
+    rust: { status: "pending", passed: null, failed: null },
   };
 }
 
@@ -49,6 +56,43 @@ function printTail(output) {
   console.log(`${colors.red}${tail}${colors.reset}`);
 }
 
+function parseRustFailureNames(output) {
+  const cleanOutput = stripAnsi(output).replace(/\r\n?/g, "\n");
+  const failedNames = cleanOutput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.endsWith("FAILED"))
+    .map((line) =>
+      line
+        .replace(/\s+FAILED$/, "")
+        .replace(/^test\s+/, "")
+        .replace(/\s+\.\.\.$/, "")
+        .trim(),
+    );
+  const failuresBlock = cleanOutput.match(
+    /\nfailures:\n\n([\s\S]*?)\n\ntest result:/,
+  );
+  const listed = failuresBlock
+    ? Array.from(
+        failuresBlock[1].matchAll(/^---- (.+?) stdout ----$/gm),
+        (match) => match[1],
+      )
+    : [];
+  return [...new Set([...failedNames, ...listed])].filter(Boolean);
+}
+
+function printRustFailures(output) {
+  const names = parseRustFailureNames(output);
+  if (names.length === 0) {
+    printTail(output);
+    return;
+  }
+  console.log(`${colors.red}Failed tests (${names.length}):${colors.reset}`);
+  for (const name of names) {
+    console.log(`${colors.red}  - ${name}${colors.reset}`);
+  }
+}
+
 function parseTest(output, results) {
   const cleanOutput = stripAnsi(output);
   const passedMatch = cleanOutput.match(/Tests?\s+(\d+)\s+passed/);
@@ -62,6 +106,17 @@ function parseTest(output, results) {
 
   if (filesMatch) {
     results.test.files = parseInt(filesMatch[1], 10);
+  }
+}
+
+function parseRustTest(output, results) {
+  const cleanOutput = stripAnsi(output);
+  const resultMatch = cleanOutput.match(
+    /test result:\s+(?:ok|FAILED)\.\s+(\d+)\s+passed;\s+(\d+)\s+failed/,
+  );
+  if (resultMatch) {
+    results.rust.passed = parseInt(resultMatch[1], 10);
+    results.rust.failed = parseInt(resultMatch[2], 10);
   }
 }
 
@@ -93,7 +148,11 @@ function runCommand(name, command, args, parser, results, options = {}) {
       ? `signal ${run.signal || "unknown"}`
       : `exit code ${run.status}`;
   console.log(`${colors.red}✗ ${name} failed (${reason})${colors.reset}`);
-  printTail(output);
+  if (name === "rust") {
+    printRustFailures(output);
+  } else {
+    printTail(output);
+  }
   console.log("");
   return false;
 }
@@ -134,6 +193,69 @@ ${colors.reset}`);
     }${colors.reset}`,
   );
   console.log(
+    `${colors.bold}Lint:${colors.reset}       ${
+      results.lint.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Cargo Safe Update:${colors.reset} ${
+      results.cargoSafeUpdate?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Cargo Policy:${colors.reset}      ${
+      results.cargoUpdatePolicy?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Clippy:${colors.reset}     ${
+      results.clippy.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Cargo fmt:${colors.reset}  ${
+      results.cargoFmt?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Frontend build:${colors.reset} ${
+      results.frontendBuild?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Native build:${colors.reset} ${
+      results.nativeBuild.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Tauri build:${colors.reset}  ${
+      results.tauriBuild?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Script tests:${colors.reset} ${
+      results.scriptTests.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
     `${colors.bold}Tests:${colors.reset}      ${
       results.test.status === "passed"
         ? `${colors.green}✓ PASS`
@@ -145,11 +267,15 @@ ${colors.reset}`);
     }${results.test.files ? `, ${results.test.files} files` : ""})`,
   );
   console.log(
-    `${colors.bold}Rust Check:${colors.reset} ${
+    `${colors.bold}Rust tests:${colors.reset}  ${
       results.rust.status === "passed"
         ? `${colors.green}✓ PASS`
         : `${colors.red}✗ FAIL`
-    }${colors.reset}`,
+    }${colors.reset} (${results.rust.passed ?? "n/a"} passed${
+      results.rust.failed && results.rust.failed > 0
+        ? `, ${results.rust.failed} failed`
+        : ""
+    })`,
   );
 
   console.log("");
@@ -166,35 +292,119 @@ ${colors.reset}`);
   return 1;
 }
 
-function main() {
-  clearQualityGateProof(resolve(__dirname, ".."));
+function main({
+  root = resolve(__dirname, ".."),
+  clearProof = clearQualityGateProof,
+  runner = runCommand,
+} = {}) {
+  clearProof(root);
   const results = createInitialResults();
   const npm = getNpmCommand();
   printBanner();
 
-  runCommand("typecheck", npm, ["run", "typecheck"], null, results);
-  runCommand("format", npm, ["run", "format:check"], null, results);
-  runCommand("test", npm, ["run", "test"], parseTest, results);
-  runCommand(
+  runner("typecheck", npm, ["run", "typecheck"], null, results);
+  runner("lint", npm, ["run", "lint"], null, results);
+  runner("format", npm, ["run", "format:check"], null, results);
+  runner(
+    "cargoSafeUpdate",
+    npm,
+    ["run", "test:cargo-safe-update"],
+    null,
+    results,
+  );
+  runner(
+    "cargoUpdatePolicy",
+    npm,
+    ["run", "check:cargo-update-policy"],
+    null,
+    results,
+  );
+  runner(
+    "clippy",
+    "cargo",
+    [
+      "clippy",
+      "--locked",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings",
+    ],
+    null,
+    results,
+    { timeout: rustTimeoutMs },
+  );
+  runner(
+    "cargoFmt",
+    "cargo",
+    [
+      "fmt",
+      "--all",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--",
+      "--check",
+    ],
+    null,
+    results,
+  );
+  runner("frontendBuild", npm, ["run", "build"], null, results);
+  runner(
+    "nativeBuild",
+    "cargo",
+    [
+      "build",
+      "--release",
+      "--locked",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+    ],
+    null,
+    results,
+    { timeout: rustTimeoutMs },
+  );
+  runner(
+    "tauriBuild",
+    npm,
+    ["run", "tauri", "--", "build", "--no-bundle", "--", "--locked"],
+    null,
+    results,
+    { timeout: rustTimeoutMs },
+  );
+  runner(
+    "scriptTests",
+    "node",
+    ["--test", "scripts/github-cli.test.cjs", "scripts/test-all.test.js"],
+    null,
+    results,
+  );
+  runner("test", npm, ["run", "test:cov"], parseTest, results);
+  runner(
     "rust",
     "cargo",
-    ["check", "--manifest-path", "src-tauri/Cargo.toml"],
-    null,
+    ["test", "--locked", "--manifest-path", "src-tauri/Cargo.toml"],
+    parseRustTest,
     results,
     { timeout: rustTimeoutMs },
   );
 
   const exitCode = printSummary(results);
-  if (exitCode === 0) {
-    if (recordSuccessfulQualityGate(resolve(__dirname, ".."))) {
-      console.log("Release quality-gate proof recorded for this clean commit.");
-    } else {
-      console.log(
-        "Release quality-gate proof not recorded because the working tree is dirty.",
-      );
-    }
-  }
   return exitCode;
 }
 
-process.exit(main());
+if (isDirectExecution(import.meta.url)) {
+  process.exit(main());
+}
+
+export {
+  createInitialResults,
+  getNpmCommand,
+  main,
+  parseRustFailureNames,
+  parseRustTest,
+  parseTest,
+  printSummary,
+  runCommand,
+};

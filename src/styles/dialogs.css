@@ -9,6 +9,7 @@
   display: none;
   align-items: center;
   justify-content: center;
+  padding: 16px;
   z-index: 320;
 }
 
@@ -32,6 +33,9 @@ body.modal-open .dialog-overlay.active {
 }
 
 .dialog-box {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
@@ -39,6 +43,9 @@ body.modal-open .dialog-overlay.active {
   border-radius: var(--radius-lg);
   padding: 24px;
   width: min(360px, 92vw);
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - var(--titlebar-height, 0px) - 32px);
+  overflow: hidden;
   box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
   animation: modal-in 0.15s ease;
 }
@@ -47,19 +54,27 @@ body.modal-open .dialog-overlay.active {
   font-size: 16px;
   font-weight: 600;
   margin-bottom: 8px;
+  overflow-wrap: anywhere;
 }
 
 .dialog-box__message {
+  min-height: 0;
+  max-height: min(42vh, 300px);
+  overflow-x: hidden;
+  overflow-y: auto;
   font-size: 13px;
   color: var(--text-secondary);
   margin-bottom: 20px;
   line-height: 1.5;
   white-space: pre-line;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .dialog-input-wrapper {
   position: relative;
   margin-bottom: 20px;
+  flex-shrink: 0;
 }
 
 .dialog-input-icon {
@@ -127,8 +142,20 @@ body.modal-open .dialog-overlay.active {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .modal--wide {
   width: min(560px, 94vw);
+}
+
+.dialog-validation-error {
+  margin: -12px 0 20px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.dialog-box__input[aria-invalid="true"] {
+  border-color: var(--danger);
 }

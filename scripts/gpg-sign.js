@@ -1,85 +1,263 @@
 #!/usr/bin/env node
 
-import fs from "fs";
-import path from "path";
-import crypto from "crypto";
-import { execSync, spawnSync } from "child_process";
-import https from "https";
-import { fileURLToPath } from "url";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { isDirectExecution } from "./direct-execution.js";
 import { verifyReleaseSession } from "./release-session.js";
+import githubCli from "./github-cli.cjs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, "..");
+const {
+  assertGitHubCliAuthenticated,
+  deleteReleaseAssetById,
+  downloadReleaseAsset,
+  githubApi,
+  uploadReleaseAssetById,
+} = githubCli;
+const require = createRequire(import.meta.url);
+const {
+  assertReleaseToolVersions,
+  signDetachedFile,
+} = require("./release-integrity.cjs");
+const {
+  assertStableReleaseOverridesAllowed,
+  isExplicitTruthy,
+} = require("./release-policy.cjs");
+const {
+  assertExpectedRelease,
+  assertNoMisnamedVersionDrafts,
+  isExpectedRelease,
+} = require("./release-draft-metadata.cjs");
+
+const root = fileURLToPath(new URL("..", import.meta.url));
 const releaseDir = path.join(root, "release");
-const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8"));
-
+const pkg = JSON.parse(
+  fs.readFileSync(path.join(root, "package.json"), "utf8"),
+);
+const tauriConfig = JSON.parse(
+  fs.readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"),
+);
 const VERSION = pkg.version;
 const TAG = `v${VERSION}`;
-const IS_PRERELEASE = /-(?:beta|alpha)\./i.test(VERSION);
-
-const GPG_KEY_ID = process.env.GPG_KEY_ID;
-const GPG_PASSPHRASE = process.env.GPG_PASSPHRASE;
-const GH_TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+const NUMERIC_VERSION = "(?:0|[1-9]\\d*)";
+const BETA_VERSION = new RegExp(
+  `^${NUMERIC_VERSION}\\.${NUMERIC_VERSION}\\.${NUMERIC_VERSION}-beta\\.${NUMERIC_VERSION}$`,
+);
+const STABLE_VERSION = new RegExp(
+  `^${NUMERIC_VERSION}\\.${NUMERIC_VERSION}\\.${NUMERIC_VERSION}$`,
+);
+if (!BETA_VERSION.test(VERSION) && !STABLE_VERSION.test(VERSION)) {
+  throw new Error(
+    `Unsupported release version '${VERSION}'; S3-Sidekick releases use beta or stable versions only.`,
+  );
+}
+const IS_PRERELEASE = BETA_VERSION.test(VERSION);
+const EXPECTED_TAG = (process.env.EXPECTED_TAG || "").trim();
 const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
 const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
-const TAG_DOWNLOAD_BASE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${encodeURIComponent(TAG)}`;
-const RELEASE_DOWNLOAD_BASE_URL = (
-  process.env.RELEASE_DOWNLOAD_BASE_URL ||
-  TAG_DOWNLOAD_BASE_URL
-).replace(/\/+$/, "");
+const REPOSITORY = `${REPO_OWNER}/${REPO_NAME}`;
 const RELEASE_NOTES = process.env.RELEASE_NOTES || "";
-const RELEASE_PUB_DATE = process.env.RELEASE_PUB_DATE || new Date().toISOString();
-const REQUIRED_LINUX_TARGETS = (process.env.REQUIRED_LINUX_TARGETS || "").trim();
-const REQUIRE_LINUX_AARCH64 = /^(1|true|yes|on)$/i.test(
-  String(process.env.REQUIRE_LINUX_AARCH64 || "").trim(),
-);
+const RELEASE_PUB_DATE =
+  process.env.RELEASE_PUB_DATE || new Date().toISOString();
+const UPDATER_PUBLIC_KEY = tauriConfig.plugins?.updater?.pubkey;
+const TAG_DOWNLOAD_BASE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${encodeURIComponent(TAG)}`;
+const RELEASE_BASE_URL = (
+  process.env.RELEASE_DOWNLOAD_BASE_URL || TAG_DOWNLOAD_BASE_URL
+).replace(/\/+$/, "");
+const ALLOW_ASSET_REPLACE = isExplicitTruthy(process.env.ALLOW_ASSET_REPLACE);
 const ENFORCE_LINUX_X64_PACKAGE_SET = !/^(0|false|no|off)$/i.test(
-  String(process.env.ENFORCE_LINUX_X64_PACKAGE_SET || "true").trim(),
+  String(process.env.ENFORCE_LINUX_X64_PACKAGE_SET || "").trim(),
 );
-
-const ext = (e) => (n) => n.toLowerCase().endsWith(e);
-const rx = (r) => (n) => r.test(n);
-const isPerTargetManifest = rx(/^latest-[a-z0-9-]+-[a-z0-9_]+\.json$/i);
-const isChecksumTextName = rx(/^SHA256SUMS(?:-[a-z0-9_-]+)?\.txt$/i);
-
+const BETA_SYNC_LOCK_NAME = "s3-sidekick-beta-manifest-sync-lock";
+const BETA_SYNC_LOCK_RETRIES = 30;
 const ARTIFACT_RULES = [
-  rx(/-setup\.exe$/i),
-  rx(/^S3-Sidekick-(?:Windows|Linux|macOS)-(?:x64|arm64)\.exe$/i),
-  ext(".msi"), ext(".dmg"), ext(".deb"), ext(".rpm"), ext(".flatpak"),
-  rx(/\.appimage$/i),
-  rx(/\.zip$/i),
-  rx(/\.nsis\.zip$/i),
-  rx(/\.app\.tar\.gz$/i),
-  rx(/\.appimage\.tar\.gz$/i),
-  rx(/\.(?:exe|msi|dmg|deb|rpm|flatpak|appimage|zip)\.sig$/i),
-  rx(/\.tar\.gz\.sig$/i),
-  isPerTargetManifest,
+  /\.(?:exe|msi|dmg|deb|rpm|flatpak)$/i,
+  /\.(?:appimage|app\.tar\.gz|zip)$/i,
 ];
+const SIGN_RULES = ARTIFACT_RULES;
+const MANIFEST_PATTERN = /^latest-[a-z0-9_-]+\.json$/i;
+const CHECKSUM_PATTERN = /^SHA256SUMS-[a-z0-9_-]+\.txt$/i;
 
-const SIGN_RULES = [
-  ext(".exe"), ext(".msi"), ext(".dmg"), ext(".deb"), ext(".rpm"), ext(".flatpak"),
-  rx(/\.appimage$/i),
-  rx(/\.zip$/i),
-  rx(/\.nsis\.zip$/i),
-  rx(/\.app\.tar\.gz$/i),
-  rx(/\.appimage\.tar\.gz$/i),
-];
+function currentCommit() {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  if (!/^[0-9a-f]{40}$/i.test(commit)) {
+    throw new Error("Could not resolve an exact release commit from git HEAD.");
+  }
+  return commit;
+}
 
-const isArtifact = (name) => ARTIFACT_RULES.some((r) => r(name));
-const isSignable = (name) => SIGN_RULES.some((r) => r(name));
+function assertReleaseTargetsCommit(
+  release,
+  commit,
+  env = process.env,
+  log = console,
+) {
+  if (release?.target_commitish === commit) return release;
+  if (isExplicitTruthy(env.FORCE_UPLOAD)) {
+    log.warn(
+      `WARNING: Draft release ${TAG} targets ${release?.target_commitish || "an unknown commit"}, not checked-out commit ${commit}. FORCE_UPLOAD=1 bypassing commit check.`,
+    );
+    return release;
+  }
+  throw new Error(
+    `Draft release ${TAG} targets ${release?.target_commitish || "an unknown commit"}, not checked-out commit ${commit}. Delete or retarget stale draft before uploading assets. Or set FORCE_UPLOAD=1 to bypass.`,
+  );
+}
 
-const SEARCH_DIRS = [
-  path.join(root, "src-tauri", "target"),
-  path.join(root, "dist"),
-];
+function isArtifact(name) {
+  return ARTIFACT_RULES.some((pattern) => pattern.test(name));
+}
 
+function isSignable(name) {
+  return SIGN_RULES.some((pattern) => pattern.test(name));
+}
+
+function releaseArtifactSearchDirs(
+  targetRoot = path.join(root, "src-tauri", "target"),
+) {
+  const dirs = [
+    path.join(targetRoot, "release", "bundle"),
+    path.join(root, "dist"),
+  ];
+  try {
+    for (const entry of fs.readdirSync(targetRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      dirs.push(path.join(targetRoot, entry.name, "release", "bundle"));
+    }
+  } catch {
+    // Missing target/ is fine before the first host build.
+  }
+  return dirs;
+}
+
+function walk(directory, result = []) {
+  if (!fs.existsSync(directory)) return result;
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) walk(fullPath, result);
+    else if (entry.isFile() && isArtifact(entry.name)) result.push(fullPath);
+  }
+  return result;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function rpmArtifactMatchesVersion(name, releaseVersion = VERSION) {
+  if (!/\.rpm(?:\.sig)?$/i.test(name)) return false;
+
+  const numericVersions = name.match(/\d+\.\d+\.\d+/g);
+  if (!numericVersions || numericVersions.length === 0) return true;
+
+  const betaMatch = releaseVersion.match(
+    /^(\d+\.\d+\.\d+)-beta\.(0|[1-9]\d*)$/,
+  );
+  const stableMatch = releaseVersion.match(/^(\d+\.\d+\.\d+)$/);
+  if (!betaMatch && !stableMatch) return false;
+
+  const numericVersion = betaMatch?.[1] ?? stableMatch[1];
+  const escapedNumericVersion = escapeRegExp(numericVersion);
+  const versionPattern = betaMatch
+    ? `${escapedNumericVersion}(?:-beta\\.${betaMatch[2]}|[._~]beta[._-]${betaMatch[2]})`
+    : escapedNumericVersion;
+  const rpmRelease = "[0-9][0-9A-Za-z_+~%^.-]*";
+  const rpmArch =
+    "(?:x86_64|amd64|aarch64|arm64|i[3-6]86|noarch|ppc64le|ppc64|s390x|riscv64|armv[67]hl)";
+  return new RegExp(
+    `(?:^|[^0-9A-Za-z])${versionPattern}(?:-${rpmRelease})?(?:\\.${rpmArch})?\\.rpm(?:\\.sig)?$`,
+    "i",
+  ).test(name);
+}
+
+function artifactMatchesVersion(name, releaseVersion = VERSION) {
+  if (/\.rpm(?:\.sig)?$/i.test(name)) {
+    return rpmArtifactMatchesVersion(name, releaseVersion);
+  }
+  const versions = name.match(
+    /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/g,
+  );
+  return !versions || versions.some((value) => value === releaseVersion);
+}
+
+function inferArch(name) {
+  if (/(?:^|[-_.])(aarch64|arm64)(?:[-_.]|$)/i.test(name)) return "aarch64";
+  if (/(?:^|[-_.])(x86_64|amd64|x64)(?:[-_.]|$)/i.test(name)) return "x86_64";
+  return null;
+}
+
+function resolveUpdaterTargets(name) {
+  if (/\.app\.tar\.gz$/i.test(name)) {
+    return ["x86_64", "aarch64"].map((arch) => ({
+      arch,
+      installer: "app",
+      os: "darwin",
+    }));
+  }
+  const arch = inferArch(name);
+  if (!arch) return [];
+  if (/\.exe$/i.test(name)) return [{ arch, installer: "nsis", os: "windows" }];
+  if (/\.appimage$/i.test(name)) {
+    return [{ arch, installer: "appimage", os: "linux" }];
+  }
+  return [];
+}
+
+function cleanArtifactName(name) {
+  if (/\.app\.tar\.gz$/i.test(name)) return "S3-Sidekick-macOS.app.tar.gz";
+  if (/\.dmg$/i.test(name)) return "S3-Sidekick-macOS.dmg";
+  if (/^S3(?:[ ._-])Sidekick\.zip$/i.test(name)) {
+    return "S3-Sidekick-macOS.zip";
+  }
+  if (/x64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-x64.exe";
+  if (/arm64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-arm64.exe";
+  if (/_x64_en-US\.msi$/i.test(name)) return "S3-Sidekick-Windows-x64.msi";
+  if (/_arm64_en-US\.msi$/i.test(name)) return "S3-Sidekick-Windows-arm64.msi";
+  if (/amd64\.AppImage$/i.test(name)) return "S3-Sidekick-Linux-x64.AppImage";
+  if (/aarch64\.AppImage$/i.test(name))
+    return "S3-Sidekick-Linux-arm64.AppImage";
+  if (/amd64\.deb$/i.test(name)) return "S3-Sidekick-Linux-x64.deb";
+  if (/aarch64\.deb$/i.test(name)) return "S3-Sidekick-Linux-arm64.deb";
+  if (/x86_64\.rpm$/i.test(name)) return "S3-Sidekick-Linux-x64.rpm";
+  if (/aarch64\.rpm$/i.test(name)) return "S3-Sidekick-Linux-arm64.rpm";
+  return name;
+}
+
+function assertLinuxX64PackageSet(
+  byName,
+  { enforce = ENFORCE_LINUX_X64_PACKAGE_SET } = {},
+) {
+  if (!enforce) return;
+  const names = [...byName.keys()].filter((name) => !name.endsWith(".sig"));
+  if (!names.some((name) => /^S3-Sidekick-Linux-x64\./i.test(name))) return;
+  const required = [
+    "S3-Sidekick-Linux-x64.AppImage",
+    "S3-Sidekick-Linux-x64.deb",
+    "S3-Sidekick-Linux-x64.rpm",
+    "S3-Sidekick-Linux-x64.flatpak",
+  ];
+  const missing = required.filter((name) => !byName.has(name));
+  if (missing.length > 0) {
+    throw new Error(
+      `Incomplete Linux x86_64 bundle set: missing ${missing.join(", ")} artifact(s).`,
+    );
+  }
+}
 
 function readBuildSession() {
   try {
     return verifyReleaseSession(root);
   } catch (error) {
     throw new Error(
-      `Release build session is missing or invalid. Run npm run release:prepare before building: ${error instanceof Error ? error.message : String(error)}`
+      `Release build session is missing or invalid. Run npm run release:prepare before building: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
@@ -92,886 +270,857 @@ function wasBuiltInSession(filePath, session) {
   }
 }
 
-function artifactMatchesVersion(name) {
-  if (isPerTargetManifest(name)) return true;
-  const versions = name.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/g);
-  if (!versions || versions.length === 0) return true;
-  return versions.some((v) => v === VERSION || v.startsWith(VERSION + "-"));
-}
-
-function clearReleaseStaging() {
-  if (!fs.existsSync(releaseDir)) return;
+function clearStaging() {
+  fs.mkdirSync(releaseDir, { recursive: true });
   for (const name of fs.readdirSync(releaseDir)) {
-    const fullPath = path.join(releaseDir, name);
-    let isFile = false;
-    try {
-      isFile = fs.statSync(fullPath).isFile();
-    } catch {
-      continue;
-    }
-    if (!isFile) continue;
-    if (isArtifact(name) || name.endsWith(".asc") || isChecksumTextName(name)) {
-      fs.rmSync(fullPath, { force: true });
+    if (
+      isArtifact(name) ||
+      name.endsWith(".asc") ||
+      name.endsWith(".sig") ||
+      MANIFEST_PATTERN.test(name) ||
+      CHECKSUM_PATTERN.test(name)
+    ) {
+      fs.rmSync(path.join(releaseDir, name), { force: true });
     }
   }
 }
 
-function clearPreStagedUpdaterManifests() {
-  if (!fs.existsSync(releaseDir)) return;
-  const removed = [];
-  for (const name of fs.readdirSync(releaseDir)) {
-    if (!isPerTargetManifest(name)) continue;
-    const fullPath = path.join(releaseDir, name);
-    let isFile = false;
-    try {
-      isFile = fs.statSync(fullPath).isFile();
-    } catch {
-      continue;
-    }
-    if (!isFile) continue;
-    fs.rmSync(fullPath, { force: true });
-    removed.push(name);
-  }
-  if (removed.length > 0) {
-    console.log(`  ~ Removed ${removed.length} stale updater manifest(s) from release/`);
-  }
+function updaterSignatureText(filePath) {
+  return fs.readFileSync(filePath, "utf8").trim();
 }
 
-function pickNewestByBasename(paths) {
-  const latest = new Map();
-  for (const filePath of paths) {
-    const name = path.basename(filePath);
-    let stat;
-    try {
-      stat = fs.statSync(filePath);
-    } catch {
-      continue;
-    }
-    const current = latest.get(name);
-    if (!current || stat.mtimeMs > current.mtimeMs) {
-      latest.set(name, { filePath, mtimeMs: stat.mtimeMs });
-    }
+function normalizeUpdaterSignature(filePath) {
+  const value = updaterSignatureText(filePath);
+  if (!value) throw new Error(`Updater signature is empty: ${filePath}`);
+  try {
+    const decoded = Buffer.from(value, "base64").toString("utf8");
+    if (decoded.includes("untrusted comment:")) return value;
+  } catch {
+    // Treat non-base64 input as raw Minisign text.
   }
-  return Array.from(latest.values()).map((entry) => entry.filePath);
+  return value.includes("untrusted comment:")
+    ? Buffer.from(value, "utf8").toString("base64")
+    : value;
 }
 
-function walk(dir, results = []) {
-  if (!fs.existsSync(dir)) return results;
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      walk(full, results);
-    } else if (entry.isFile() && isArtifact(entry.name)) {
-      results.push(full);
-    }
-  }
-  return results;
+function decodeSignature(value, label) {
+  const decoded = Buffer.from(String(value).replace(/\s/g, ""), "base64");
+  if (!decoded.length) throw new Error(`Malformed ${label}.`);
+  return decoded;
 }
 
-function cleanArtifactBaseName(name) {
-  if (/\.app\.tar\.gz$/i.test(name)) {
-    return "S3-Sidekick-macOS.app.tar.gz";
+function verifyUpdaterSignature(filePath, signaturePath) {
+  const encodedSignature = normalizeUpdaterSignature(signaturePath);
+  if (!UPDATER_PUBLIC_KEY) {
+    throw new Error("Updater public key is missing from tauri.conf.json.");
   }
-  if (/\.nsis\.zip$/i.test(name)) return name;
-  if (/\.tar\.gz$/i.test(name)) return name;
-
-  if (/\.dmg$/i.test(name)) return "S3-Sidekick-macOS.dmg";
-  if (/^S3(?:[ ._-])Sidekick\.zip$/i.test(name)) return "S3-Sidekick-macOS.zip";
-
-  if (/x64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-x64.exe";
-  if (/arm64-setup\.exe$/i.test(name)) return "S3-Sidekick-Windows-arm64.exe";
-
-  if (/amd64\.AppImage$/i.test(name)) return "S3-Sidekick-Linux-x64.AppImage";
-  if (/aarch64\.AppImage$/i.test(name)) return "S3-Sidekick-Linux-arm64.AppImage";
-
-  if (/amd64\.deb$/i.test(name)) return "S3-Sidekick-Linux-x64.deb";
-  if (/aarch64\.deb$/i.test(name)) return "S3-Sidekick-Linux-arm64.deb";
-
-  if (/x86_64\.rpm$/i.test(name)) return "S3-Sidekick-Linux-x64.rpm";
-  if (/aarch64\.rpm$/i.test(name)) return "S3-Sidekick-Linux-arm64.rpm";
-
-  return name;
-}
-
-function cleanArtifactName(name) {
-  if (name.endsWith(".sig")) {
-    const base = name.slice(0, -4);
-    return `${cleanArtifactBaseName(base)}.sig`;
-  }
-  return cleanArtifactBaseName(name);
-}
-
-function shouldUploadReleaseEntry(name) {
-  return isArtifact(name) || name.endsWith(".asc") || isChecksumTextName(name);
-}
-
-const FALLBACK_INSTALLER_PRIORITY = {
-  windows: { nsis: 3, msi: 2 },
-  linux: { appimage: 3, deb: 2, rpm: 1 },
-  darwin: { app: 3 },
-};
-
-// The beta channel checks updates with a custom, arch-less target (e.g. "darwin-beta").
-// Tauri's updater looks that exact string up in `platforms` with no arch/installer suffix
-// appended, so each beta manifest must expose a bare `{os}-beta` key pointing at the
-// self-updatable installer for that platform.
-const BETA_BARE_TARGET_INSTALLER = {
-  darwin: "app",
-  windows: "nsis",
-  linux: "appimage",
-};
-
-function inferArchFromName(name) {
-  if (/(?:^|[-_.])(aarch64|arm64)(?:[-_.]|$)/i.test(name)) return "aarch64";
-  if (/(?:^|[-_.])(x86_64|amd64|x64)(?:[-_.]|$)/i.test(name)) return "x86_64";
-  if (/(?:^|[-_.])(i686|x86)(?:[-_.]|$)/i.test(name)) return "i686";
-  return null;
-}
-
-function normalizeArchToken(token) {
-  const normalized = token.toLowerCase();
-  if (normalized === "aarch64" || normalized === "arm64") return "aarch64";
-  if (normalized === "x86_64" || normalized === "amd64" || normalized === "x64") return "x86_64";
-  if (normalized === "i686" || normalized === "x86") return "i686";
-  return null;
-}
-
-function requiredLinuxTargetKeys(channelVariants) {
-  const tokens = REQUIRED_LINUX_TARGETS
-    .split(/[,\s]+/)
-    .map((token) => token.trim())
-    .filter(Boolean);
-  if (REQUIRE_LINUX_AARCH64) {
-    tokens.push("aarch64");
-  }
-
-  const targetKeys = new Set();
-  for (const token of tokens) {
-    const explicitMatch = token.toLowerCase().match(/^(linux(?:-beta)?)-([a-z0-9_]+)$/);
-    if (explicitMatch) {
-      const targetName = explicitMatch[1];
-      const arch = normalizeArchToken(explicitMatch[2]);
-      if (!arch) {
-        throw new Error(
-          `Invalid REQUIRED_LINUX_TARGETS entry "${token}". Use arch names like x64/aarch64 or full keys like linux-x86_64.`,
-        );
-      }
-      if (targetName === "linux-beta" && !IS_PRERELEASE) {
-        throw new Error(
-          `Invalid REQUIRED_LINUX_TARGETS entry "${token}" for stable version ${VERSION}; linux-beta targets are only generated for prereleases.`,
-        );
-      }
-      targetKeys.add(`${targetName}-${arch}`);
-      continue;
-    }
-
-    const arch = normalizeArchToken(token);
-    if (!arch) {
-      throw new Error(
-        `Invalid REQUIRED_LINUX_TARGETS entry "${token}". Use arch names like x64/aarch64 or full keys like linux-x86_64.`,
-      );
-    }
-    for (const channel of channelVariants) {
-      targetKeys.add(`linux${channel.targetSuffix}-${arch}`);
-    }
-  }
-  return targetKeys;
-}
-
-function canPopulateFallbackTarget(target) {
-  return target.os !== "linux";
-}
-
-function assertLinuxX64PackageSet(byName) {
-  if (!ENFORCE_LINUX_X64_PACKAGE_SET) {
-    return;
-  }
-
-  const installers = new Set();
-  for (const [name] of byName) {
-    if (name.endsWith(".sig")) continue;
-    const targets = resolveUpdaterTargets(name);
-    for (const target of targets) {
-      if (target.os === "linux" && target.arch === "x86_64") {
-        installers.add(target.installer);
-      }
-    }
-  }
-
-  if (installers.size === 0) {
-    return;
-  }
-
-  const requiredInstallers = ["appimage", "deb", "rpm"];
-  const missing = requiredInstallers.filter((installer) => !installers.has(installer));
-  if (missing.length > 0) {
+  const signatureText = decodeSignature(
+    encodedSignature,
+    `updater signature ${path.basename(signaturePath)}`,
+  ).toString("utf8");
+  const signatureLines = signatureText.trim().split(/\r?\n/);
+  if (
+    signatureLines.length < 4 ||
+    !signatureLines[0].startsWith("untrusted comment: ") ||
+    !signatureLines[2].startsWith("trusted comment: ")
+  ) {
     throw new Error(
-      `Incomplete Linux x86_64 bundle set: missing ${missing.join(", ")} artifact(s). ` +
-        "Expected AppImage, deb, and rpm artifacts before signing.",
+      `Malformed updater signature: ${path.basename(signaturePath)}`,
+    );
+  }
+  const signed = decodeSignature(signatureLines[1], "updater signature");
+  const global = decodeSignature(signatureLines[3], "updater global signature");
+  if (
+    signed.length !== 74 ||
+    global.length !== 64 ||
+    signed.subarray(0, 2).toString() !== "ED"
+  ) {
+    throw new Error(
+      `Unsupported updater signature: ${path.basename(signaturePath)}`,
+    );
+  }
+  const publicText = decodeSignature(
+    UPDATER_PUBLIC_KEY,
+    "updater public key",
+  ).toString("utf8");
+  const publicLines = publicText.trim().split(/\r?\n/);
+  const publicBytes = decodeSignature(publicLines[1], "updater public key");
+  if (
+    publicBytes.length !== 42 ||
+    publicBytes.subarray(0, 2).toString() !== "Ed"
+  ) {
+    throw new Error("Malformed updater public key.");
+  }
+  if (
+    !crypto.timingSafeEqual(signed.subarray(2, 10), publicBytes.subarray(2, 10))
+  ) {
+    throw new Error(`Updater key mismatch: ${path.basename(filePath)}`);
+  }
+  const publicKey = crypto.createPublicKey({
+    key: Buffer.concat([
+      Buffer.from("302a300506032b6570032100", "hex"),
+      publicBytes.subarray(10, 42),
+    ]),
+    format: "der",
+    type: "spki",
+  });
+  const digest = crypto
+    .createHash("blake2b512")
+    .update(fs.readFileSync(filePath))
+    .digest();
+  if (!crypto.verify(null, digest, publicKey, signed.subarray(10))) {
+    throw new Error(
+      `Updater signature verification failed: ${path.basename(filePath)}`,
+    );
+  }
+  const trusted = Buffer.concat([
+    signed.subarray(10),
+    Buffer.from(signatureLines[2].slice("trusted comment: ".length)),
+  ]);
+  if (!crypto.verify(null, trusted, publicKey, global)) {
+    throw new Error(
+      `Updater trusted-comment verification failed: ${path.basename(filePath)}`,
+    );
+  }
+  return true;
+}
+
+function releaseAssetUrl(name, baseUrl = RELEASE_BASE_URL) {
+  return `${baseUrl}/${encodeURIComponent(name)}`;
+}
+
+function validateGeneratedManifests(generated) {
+  const validation = spawnSync(
+    process.execPath,
+    [path.join(root, "scripts", "validate-updater-manifest.js"), ...generated],
+    { cwd: root, encoding: "utf8" },
+  );
+  if (validation.error) throw validation.error;
+  if (validation.status !== 0) {
+    throw new Error(
+      `Generated updater manifest validation failed: ${validation.stderr || validation.stdout}`,
     );
   }
 }
 
-function resolveUpdaterTargets(name) {
-  const targets = [];
-  if (/\.app\.tar\.gz$/i.test(name)) {
-    const arch = inferArchFromName(name);
-    const arches = arch ? [arch] : ["x86_64", "aarch64"];
-    for (const a of arches) {
-      targets.push({ os: "darwin", arch: a, installer: "app" });
-    }
-    return targets;
-  }
-
-  if (/\.exe$/i.test(name)) {
-    const arch = inferArchFromName(name);
-    if (!arch) return targets;
-    targets.push({ os: "windows", arch, installer: "nsis" });
-    return targets;
-  }
-
-  if (/\.msi$/i.test(name)) {
-    const arch = inferArchFromName(name);
-    if (!arch) return targets;
-    targets.push({ os: "windows", arch, installer: "msi" });
-    return targets;
-  }
-
-  if (/\.appimage$/i.test(name)) {
-    const arch = inferArchFromName(name);
-    if (!arch) return targets;
-    targets.push({ os: "linux", arch, installer: "appimage" });
-    return targets;
-  }
-
-  if (/\.deb$/i.test(name)) {
-    const arch = inferArchFromName(name);
-    if (!arch) return targets;
-    targets.push({ os: "linux", arch, installer: "deb" });
-    return targets;
-  }
-
-  if (/\.rpm$/i.test(name)) {
-    const arch = inferArchFromName(name);
-    if (!arch) return targets;
-    targets.push({ os: "linux", arch, installer: "rpm" });
-    return targets;
-  }
-
-  return targets;
-}
-
-function releaseAssetUrl(fileName, baseUrl = RELEASE_DOWNLOAD_BASE_URL) {
-  return `${baseUrl}/${encodeURIComponent(fileName)}`;
-}
-
-function normalizeUpdaterSignature(sigPath) {
-  const trimmed = fs.readFileSync(sigPath, "utf8").trim();
-  if (!trimmed) {
-    return trimmed;
-  }
-
-  try {
-    const decoded = Buffer.from(trimmed, "base64").toString("utf8");
-    if (decoded.includes("untrusted comment:")) {
-      return trimmed;
-    }
-  } catch {
-  }
-
-  if (trimmed.includes("untrusted comment:")) {
-    return Buffer.from(trimmed, "utf8").toString("base64");
-  }
-
-  return trimmed;
-}
-
-function generateUpdaterManifests(files) {
-  const byName = new Map();
-  for (const filePath of files) {
-    byName.set(path.basename(filePath), filePath);
-  }
-
-  assertLinuxX64PackageSet(byName);
-
-  const signatureByBaseName = new Map();
-  for (const [name, filePath] of byName) {
-    if (name.endsWith(".sig")) {
-      signatureByBaseName.set(name.slice(0, -4), filePath);
-    }
-  }
-
+function generateUpdaterManifests(files, outputDirectory = releaseDir) {
+  const byName = new Map(
+    files.map((filePath) => [path.basename(filePath), filePath]),
+  );
+  const signatures = new Map(
+    files
+      .filter((filePath) => path.basename(filePath).endsWith(".sig"))
+      .map((filePath) => [path.basename(filePath).slice(0, -4), filePath]),
+  );
+  const channels = [
+    { baseUrl: RELEASE_BASE_URL, suffix: "" },
+    { baseUrl: RELEASE_BASE_URL, suffix: "-beta" },
+  ];
   const manifests = new Map();
-  const requiredTargetKeys = new Set();
-  const channelVariants = [{ targetSuffix: "", baseUrl: RELEASE_DOWNLOAD_BASE_URL }];
-  if (IS_PRERELEASE) {
-    channelVariants.push({ targetSuffix: "-beta", baseUrl: TAG_DOWNLOAD_BASE_URL });
-  }
-  const expectedLinuxTargetKeys = requiredLinuxTargetKeys(channelVariants);
-  const generatedLinuxAppImageTargets = new Set();
-  const missingSignatures = [];
-  for (const [name] of byName) {
+  for (const [name, filePath] of byName) {
     if (name.endsWith(".sig")) continue;
     const targets = resolveUpdaterTargets(name);
     if (targets.length === 0) continue;
-    for (const target of targets) {
-      for (const channel of channelVariants) {
-        requiredTargetKeys.add(`${target.os}${channel.targetSuffix}-${target.arch}`);
-      }
-    }
-
-    const sigPath = signatureByBaseName.get(name);
-    if (!sigPath) {
-      missingSignatures.push(`${name}.sig`);
-      continue;
-    }
-
-    const signature = normalizeUpdaterSignature(sigPath);
-    for (const target of targets) {
-      for (const channel of channelVariants) {
-        const targetName = `${target.os}${channel.targetSuffix}`;
+    const signaturePath = signatures.get(name);
+    if (!signaturePath)
+      throw new Error(`Missing updater signature: ${name}.sig`);
+    verifyUpdaterSignature(filePath, signaturePath);
+    for (const channel of channels) {
+      for (const target of targets) {
+        const targetName = `${target.os}${channel.suffix}`;
         const manifestName = `latest-${targetName}-${target.arch}.json`;
-        if (!manifests.has(manifestName)) {
-          manifests.set(manifestName, {
-            version: VERSION,
-            notes: RELEASE_NOTES,
-            pub_date: RELEASE_PUB_DATE,
-            platforms: {},
-            fallbackPriority: -1,
-          });
-        }
-
-        const manifest = manifests.get(manifestName);
-        const url = releaseAssetUrl(name, channel.baseUrl);
+        const manifest = manifests.get(manifestName) || {
+          notes: RELEASE_NOTES,
+          platforms: {},
+          pub_date: RELEASE_PUB_DATE,
+          version: VERSION,
+        };
         const installerKey = `${targetName}-${target.arch}-${target.installer}`;
         const fallbackKey = `${targetName}-${target.arch}`;
-        manifest.platforms[installerKey] = { url, signature };
-        if (target.os === "linux" && target.installer === "appimage") {
-          generatedLinuxAppImageTargets.add(fallbackKey);
-        }
-
+        const entry = {
+          signature: normalizeUpdaterSignature(signaturePath),
+          url: releaseAssetUrl(name, channel.baseUrl),
+        };
+        manifest.platforms[installerKey] = entry;
+        if (!manifest.platforms[fallbackKey])
+          manifest.platforms[fallbackKey] = entry;
         if (
-          channel.targetSuffix === "-beta" &&
-          BETA_BARE_TARGET_INSTALLER[target.os] === target.installer
+          channel.suffix === "-beta" &&
+          target.installer ===
+            { darwin: "app", windows: "nsis", linux: "appimage" }[target.os]
         ) {
-          manifest.platforms[targetName] = { url, signature };
+          manifest.platforms[targetName] = entry;
         }
-
-        const priority = FALLBACK_INSTALLER_PRIORITY[target.os]?.[target.installer] ?? 0;
-        if (
-          priority > 0 &&
-          canPopulateFallbackTarget(target) &&
-          (!manifest.platforms[fallbackKey] || priority > manifest.fallbackPriority)
-        ) {
-          manifest.platforms[fallbackKey] = { url, signature };
-          manifest.fallbackPriority = priority;
-        }
+        manifests.set(manifestName, manifest);
       }
     }
   }
-
-  if (missingSignatures.length > 0) {
-    const sorted = Array.from(new Set(missingSignatures)).sort((a, b) =>
-      a.localeCompare(b),
-    );
-    throw new Error(
-      `Missing updater signature file(s): ${sorted.join(", ")}. ` +
-        "Every updater-target artifact must include a matching .sig file.",
-    );
+  const output = [];
+  for (const [name, manifest] of [...manifests.entries()].sort()) {
+    const filePath = path.join(outputDirectory, name);
+    fs.writeFileSync(filePath, `${JSON.stringify(manifest, null, 2)}\n`);
+    output.push(filePath);
   }
-
-  const generated = [];
-  const generatedTargetKeys = new Set();
-  for (const manifestName of Array.from(manifests.keys()).sort()) {
-    const manifest = manifests.get(manifestName);
-    const output = {
-      version: manifest.version,
-      pub_date: manifest.pub_date,
-      platforms: manifest.platforms,
-    };
-    if (manifest.notes) {
-      output.notes = manifest.notes;
-    }
-    const dest = path.join(releaseDir, manifestName);
-    fs.writeFileSync(dest, JSON.stringify(output, null, 2) + "\n");
-    console.log(`  + ${manifestName} (${Object.keys(output.platforms).length} platform entries)`);
-    generated.push(dest);
-    const targetKey = parseManifestTargetKey(manifestName);
-    if (targetKey) {
-      generatedTargetKeys.add(targetKey);
-    }
-  }
-
-  const missingTargets = Array.from(requiredTargetKeys)
-    .filter((targetKey) => !generatedTargetKeys.has(targetKey))
-    .sort((a, b) => a.localeCompare(b));
-  if (missingTargets.length > 0) {
-    throw new Error(
-      `Updater manifest generation is incomplete for target(s): ${missingTargets.join(", ")}.`,
-    );
-  }
-
-  const missingLinuxTargets = Array.from(expectedLinuxTargetKeys)
-    .filter((targetKey) => !generatedLinuxAppImageTargets.has(targetKey))
-    .sort((a, b) => a.localeCompare(b));
-  if (missingLinuxTargets.length > 0) {
-    throw new Error(
-      `Missing required Linux AppImage updater target(s): ${missingLinuxTargets.join(", ")}. ` +
-        "Provide matching AppImage + .sig artifacts or adjust REQUIRED_LINUX_TARGETS/REQUIRE_LINUX_AARCH64.",
-    );
-  }
-
-  return generated;
+  if (output.length > 0) validateGeneratedManifests(output);
+  return output;
 }
 
-function parseManifestTargetKey(name) {
-  const m = name.match(/^latest-([a-z0-9-]+)-([a-z0-9_]+)\.json$/i);
-  if (!m) return null;
-  return `${m[1].toLowerCase()}-${m[2].toLowerCase()}`;
-}
-
-function targetKeysForArtifactName(name) {
-  const manifestKey = parseManifestTargetKey(name);
-  if (manifestKey) return [manifestKey];
-
+function targetKeysForArtifact(name) {
+  const manifest = name.match(/^latest-([a-z0-9_-]+)\.json$/i);
+  if (manifest) return [manifest[1].toLowerCase()];
   const baseName = name.endsWith(".sig") ? name.slice(0, -4) : name;
-  return Array.from(
-    new Set(resolveUpdaterTargets(baseName).map((t) => `${t.os}-${t.arch}`))
-  );
-}
-
-function normalizePreStagedArtifacts(staged) {
-  const selected = new Map();
-
-  for (const filePath of staged) {
-    const originalName = path.basename(filePath);
-    const cleanName = cleanArtifactName(originalName);
-    let stat;
-    try {
-      stat = fs.statSync(filePath);
-    } catch {
-      continue;
-    }
-
-    const current = selected.get(cleanName);
-    if (!current || stat.mtimeMs > current.mtimeMs) {
-      selected.set(cleanName, {
-        filePath,
-        mtimeMs: stat.mtimeMs,
-        originalName,
-      });
-    }
+  const targets = resolveUpdaterTargets(baseName);
+  if (targets.length > 0) {
+    return targets.flatMap((target) => [
+      `${target.os}-${target.arch}`,
+      `${target.os}-beta-${target.arch}`,
+    ]);
   }
-
-  const canonicalPaths = new Set();
-  for (const [cleanName, entry] of selected) {
-    const dest = path.join(releaseDir, cleanName);
-    canonicalPaths.add(path.resolve(dest));
-    if (path.resolve(entry.filePath) !== path.resolve(dest)) {
-      fs.copyFileSync(entry.filePath, dest);
-      console.log(`  + ${entry.originalName} → ${cleanName}`);
-    }
+  const arch = inferArch(baseName);
+  if (
+    /^S3-Sidekick-Linux-(?:x64|arm64)\.(?:deb|rpm|flatpak)$/i.test(baseName)
+  ) {
+    return [`linux-${arch}`, `linux-beta-${arch}`];
   }
-
-  for (const filePath of staged) {
-    if (!canonicalPaths.has(path.resolve(filePath))) {
-      fs.rmSync(filePath, { force: true });
-    }
+  if (/^S3-Sidekick-Windows-(?:x64|arm64)\.msi$/i.test(baseName)) {
+    return [`windows-${arch}`, `windows-beta-${arch}`];
   }
-
-  return Array.from(selected.keys())
-    .sort((a, b) => a.localeCompare(b))
-    .map((name) => path.join(releaseDir, name));
-}
-
-function collectArtifacts() {
-  fs.mkdirSync(releaseDir, { recursive: true });
-  const buildSession = readBuildSession();
-
-  const discovered = SEARCH_DIRS.flatMap((d) => walk(d));
-  const found = discovered.filter((filePath) => artifactMatchesVersion(path.basename(filePath)) && wasBuiltInSession(filePath, buildSession));
-  if (found.length > 0) {
-    clearReleaseStaging();
-    if (found.length < discovered.length) {
-      console.log(`  ~ Skipped ${discovered.length - found.length} artifact(s) not matching ${VERSION}`);
-    }
-
-    const selected = pickNewestByBasename(found);
-    const collected = [];
-    for (const src of selected) {
-      const originalName = path.basename(src);
-      const cleanName = cleanArtifactName(originalName);
-      const dest = path.join(releaseDir, cleanName);
-      fs.copyFileSync(src, dest);
-      if (cleanName !== originalName) {
-        console.log(`  + ${originalName} → ${cleanName}`);
-      } else {
-        console.log(`  + ${originalName}`);
-      }
-      collected.push(dest);
-    }
-    const manifests = generateUpdaterManifests(collected);
-    return [...collected, ...manifests];
+  if (/^S3-Sidekick-macOS\.(?:dmg|zip)$/i.test(baseName)) {
+    return [
+      "darwin-x86_64",
+      "darwin-aarch64",
+      "darwin-beta-x86_64",
+      "darwin-beta-aarch64",
+    ];
   }
-
-  clearPreStagedUpdaterManifests();
-  const staged = fs.readdirSync(releaseDir)
-    .filter((n) =>
-      isArtifact(n) &&
-      !isPerTargetManifest(n) &&
-      artifactMatchesVersion(n) &&
-      !n.endsWith(".asc") &&
-      !isChecksumTextName(n)
-    )
-    .map((n) => path.join(releaseDir, n));
-
-  const currentStaged = staged.filter((filePath) =>
-    wasBuiltInSession(filePath, buildSession)
-  );
-
-  if (currentStaged.length === 0) {
-    console.error("No build artifacts found in:", [...SEARCH_DIRS, releaseDir].join(", "));
-    process.exit(1);
-  }
-
-  console.log(`  Found ${currentStaged.length} pre-staged artifact(s) in release/`);
-  const normalizedStaged = normalizePreStagedArtifacts(currentStaged);
-  const manifests = generateUpdaterManifests(normalizedStaged);
-  return Array.from(new Set([...normalizedStaged, ...manifests]));
+  return ["generic"];
 }
 
 function sha256(filePath) {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  return crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(filePath))
+    .digest("hex");
 }
 
 function generateChecksums(files) {
-  const candidates = files.filter((f) => {
-    const name = path.basename(f);
-    return !name.endsWith(".asc") && !isChecksumTextName(name);
-  });
-
-  const manifestTargetKeys = Array.from(
-    new Set(candidates.map((f) => parseManifestTargetKey(path.basename(f))).filter(Boolean))
-  );
-
   const buckets = new Map();
-  const addToBucket = (targetKey, filePath) => {
-    if (!buckets.has(targetKey)) {
-      buckets.set(targetKey, []);
-    }
-    buckets.get(targetKey).push(filePath);
-  };
-
-  for (const filePath of candidates) {
+  for (const filePath of files) {
     const name = path.basename(filePath);
-    let targetKeys = targetKeysForArtifactName(name);
-    if (targetKeys.length === 0 && manifestTargetKeys.length > 0) {
-      targetKeys = manifestTargetKeys;
-    }
-    if (targetKeys.length === 0) {
-      targetKeys = ["generic"];
-    }
-    for (const targetKey of targetKeys) {
-      addToBucket(targetKey, filePath);
+    if (name.endsWith(".asc") || CHECKSUM_PATTERN.test(name)) continue;
+    for (const key of targetKeysForArtifact(name)) {
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(filePath);
     }
   }
-
-  const outputs = [];
-  for (const targetKey of Array.from(buckets.keys()).sort()) {
-    const uniqueFiles = Array.from(new Set(buckets.get(targetKey)));
-    const entries = uniqueFiles
-      .sort((a, b) => path.basename(a).localeCompare(path.basename(b)))
-      .map((f) => `${sha256(f)}  ${path.basename(f)}`);
-    const fileName = `SHA256SUMS-${targetKey}.txt`;
-    const out = path.join(releaseDir, fileName);
-    fs.writeFileSync(out, entries.join("\n") + "\n");
-    console.log(`  + ${fileName} (${entries.length} entries)`);
-    outputs.push(out);
-  }
-  return outputs;
+  return [...buckets.entries()].sort().map(([key, values]) => {
+    const filePath = path.join(releaseDir, `SHA256SUMS-${key}.txt`);
+    const lines = [...new Set(values)]
+      .sort((left, right) =>
+        path.basename(left).localeCompare(path.basename(right)),
+      )
+      .map((value) => `${sha256(value)}  ${path.basename(value)}`);
+    fs.writeFileSync(filePath, `${lines.join("\n")}\n`);
+    return filePath;
+  });
 }
 
 function signFile(filePath) {
-  const asc = `${filePath}.asc`;
-  const args = ["--batch", "--yes", "--armor", "--detach-sign"];
-  if (GPG_KEY_ID) {
-    args.push("--local-user", GPG_KEY_ID);
-  }
-  if (GPG_PASSPHRASE) {
-    args.push("--pinentry-mode", "loopback", "--passphrase", GPG_PASSPHRASE);
-  }
-  args.push("--output", asc, filePath);
-
-  const result = spawnSync("gpg", args, { stdio: "pipe" });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`GPG signing failed: ${result.stderr?.toString() || "unknown error"}`);
-  }
-  return asc;
+  const signaturePath = `${filePath}.asc`;
+  signDetachedFile(filePath, signaturePath, { environment: process.env });
+  return signaturePath;
 }
 
-function signArtifacts(files) {
-  const ascFiles = [];
-  for (const f of files) {
-    if (isSignable(path.basename(f))) {
-      ascFiles.push(signFile(f));
-      console.log(`  + ${path.basename(f)}.asc`);
+function signFiles(files) {
+  return files
+    .filter((filePath) => {
+      const name = path.basename(filePath);
+      return (
+        isSignable(name) ||
+        MANIFEST_PATTERN.test(name) ||
+        CHECKSUM_PATTERN.test(name)
+      );
+    })
+    .map(signFile);
+}
+
+function listGithubPages(endpoint) {
+  const items = [];
+  for (let page = 1; ; page += 1) {
+    const batch = githubApi(
+      "GET",
+      `${endpoint}${endpoint.includes("?") ? "&" : "?"}per_page=100&page=${page}`,
+    );
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    items.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return items;
+}
+
+function listReleaseAssets(releaseId) {
+  return listGithubPages(
+    `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${releaseId}/assets`,
+  );
+}
+
+function listReleases() {
+  return listGithubPages(`/repos/${REPO_OWNER}/${REPO_NAME}/releases`);
+}
+
+function findDraft() {
+  const commit = currentCommit();
+  let tagged;
+  try {
+    tagged = githubApi(
+      "GET",
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${TAG}`,
+    );
+  } catch (error) {
+    if (error?.statusCode !== 404) throw error;
+  }
+  if (tagged) {
+    return assertReleaseTargetsCommit(
+      assertExpectedRelease(tagged, TAG, VERSION, "Signing release"),
+      commit,
+    );
+  }
+  const releases = listReleases();
+  assertNoMisnamedVersionDrafts(releases, TAG, VERSION);
+  const drafts = releases.filter(
+    (release) => release?.draft && isExpectedRelease(release, TAG, VERSION),
+  );
+  if (drafts.length !== 1) {
+    throw new Error(
+      `Expected one draft release ${TAG}; found ${drafts.length}. No GitHub release exists for ${TAG}. Create the draft with npm run release:draft on Windows first; Mac/Linux wait for that draft.`,
+    );
+  }
+  return assertReleaseTargetsCommit(
+    assertExpectedRelease(drafts[0], TAG, VERSION, "Signing release"),
+    commit,
+  );
+}
+
+function isGitHubConflict(error) {
+  if (error?.statusCode === 422) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /\((?:HTTP )?422\)|"status"\s*:\s*"?422"?/.test(message);
+}
+
+function isRetryableUploadError(error) {
+  if (isGitHubConflict(error)) return false;
+  return [408, 409, 425, 429, 500, 502, 503, 504].includes(
+    Number(error?.statusCode),
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function uploadAssetOnce(release, filePath) {
+  const uploaded = uploadReleaseAssetById(REPOSITORY, release.id, filePath);
+  if (!uploaded || typeof uploaded.id !== "number") {
+    throw new Error(
+      `Upload ${path.basename(filePath)} succeeded but GitHub returned no asset id.`,
+    );
+  }
+  return uploaded;
+}
+
+async function uploadAsset(release, filePath) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await uploadAssetOnce(release, filePath);
+    } catch (error) {
+      lastError = error;
+      if (
+        isGitHubConflict(error) ||
+        attempt === 3 ||
+        !isRetryableUploadError(error)
+      ) {
+        throw error;
+      }
+      await sleep(attempt * 1000);
     }
   }
-  return ascFiles;
-}
-
-function ghRequest(method, endpoint, body) {
-  return new Promise((resolve, reject) => {
-    const opts = {
-      hostname: "api.github.com",
-      path: endpoint,
-      method,
-      headers: {
-        Authorization: `Bearer ${GH_TOKEN}`,
-        "User-Agent": "S3Sidekick-Release",
-        Accept: "application/vnd.github.v3+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    };
-    if (body) opts.headers["Content-Type"] = "application/json";
-
-    const req = https.request(opts, (res) => {
-      let data = "";
-      res.on("data", (c) => (data += c));
-      res.on("end", () => {
-        try {
-          const json = data ? JSON.parse(data) : {};
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(json);
-          } else {
-            reject(new Error(`GitHub ${res.statusCode}: ${json.message || data}`));
-          }
-        } catch {
-          resolve(data);
-        }
-      });
-    });
-    req.on("error", reject);
-    if (body) req.write(JSON.stringify(body));
-    req.end();
-  });
-}
-
-async function getOrCreateRelease() {
-  try {
-    return await ghRequest("GET", `/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${TAG}`);
-  } catch {
-  }
-
-  try {
-    const releases = await ghRequest("GET", `/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=30`);
-    const draft = releases.find((r) => r.draft && r.tag_name === TAG);
-    if (draft) return draft;
-  } catch {
-  }
-
-  return await ghRequest("POST", `/repos/${REPO_OWNER}/${REPO_NAME}/releases`, {
-    tag_name: TAG,
-    name: `S3 Sidekick ${VERSION}`,
-    draft: true,
-    prerelease: VERSION.includes("beta") || VERSION.includes("alpha"),
-  });
-}
-
-async function uploadAsset(uploadUrl, filePath) {
-  const fileName = path.basename(filePath);
-  const content = fs.readFileSync(filePath);
-  const url = new URL(uploadUrl.replace("{?name,label}", ""));
-  url.searchParams.set("name", fileName);
-
-  const isText = /\.(asc|txt|json)$/i.test(fileName);
-
-  await new Promise((resolve, reject) => {
-    const req = https.request(
-      {
-        hostname: url.hostname,
-        path: url.pathname + url.search,
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${GH_TOKEN}`,
-          "User-Agent": "S3Sidekick-Release",
-          Accept: "application/vnd.github.v3+json",
-          "Content-Type": isText ? "text/plain" : "application/octet-stream",
-          "Content-Length": content.length,
-        },
-      },
-      (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          if (res.statusCode < 300) {
-            resolve(true);
-          } else if (res.statusCode === 422) {
-            let detail = data;
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed && typeof parsed.message === "string") {
-                detail = parsed.message;
-              }
-            } catch {
-            }
-            reject(
-              new Error(
-                `Upload ${fileName} was rejected (422): ${detail}. Remove the conflicting release asset and retry.`,
-              ),
-            );
-          } else {
-            reject(new Error(`Upload ${fileName} failed ${res.statusCode}: ${data}`));
-          }
-        });
-      },
-    );
-    req.on("error", reject);
-    req.write(content);
-    req.end();
-  });
-}
-
-async function listReleaseAssets(releaseId) {
-  const assets = await ghRequest(
-    "GET",
-    `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${releaseId}/assets?per_page=100`,
-  );
-  return Array.isArray(assets) ? assets : [];
+  throw lastError;
 }
 
 async function uploadAssetWithReplace(release, filePath) {
   try {
-    await uploadAsset(release.upload_url, filePath);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (!message.includes("(422)")) {
-      throw err;
-    }
-
-    const fileName = path.basename(filePath);
-    const assets = await listReleaseAssets(release.id);
-    const existing = assets.find(
-      (asset) =>
-        asset &&
-        typeof asset === "object" &&
-        asset.name === fileName &&
-        typeof asset.id === "number",
+    await uploadAsset(release, filePath);
+  } catch (error) {
+    if (!isGitHubConflict(error)) throw error;
+    const name = path.basename(filePath);
+    const existing = listReleaseAssets(release.id).find(
+      (asset) => asset?.name === name && typeof asset.id === "number",
     );
-    if (!existing) {
-      throw err;
+    if (!existing) throw error;
+    const remoteDigest = String(existing.digest || "").replace(/^sha256:/, "");
+    if (remoteDigest && remoteDigest === sha256(filePath)) return;
+    if (!release.draft && !ALLOW_ASSET_REPLACE) {
+      throw new Error(
+        `Refusing to replace existing asset "${name}" on published release ${TAG}. Set ALLOW_ASSET_REPLACE=true to override.`,
+      );
     }
-
-    await ghRequest(
-      "DELETE",
-      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${existing.id}`,
-    );
-    await uploadAsset(release.upload_url, filePath);
+    deleteReleaseAssetById(REPOSITORY, existing.id);
+    await uploadAsset(release, filePath);
   }
 }
 
-function isBetaManifestName(name) {
-  return /^latest-[a-z0-9]+-beta-[a-z0-9_]+\.json$/i.test(name);
+function collectArtifacts() {
+  const session = readBuildSession();
+  const discovered = releaseArtifactSearchDirs()
+    .flatMap((directory) => walk(directory))
+    .filter(
+      (filePath) =>
+        artifactMatchesVersion(path.basename(filePath)) &&
+        wasBuiltInSession(filePath, session),
+    );
+  if (discovered.length === 0) {
+    throw new Error("No current release artifacts found.");
+  }
+  clearStaging();
+  const selected = new Map();
+  for (const source of discovered) {
+    const name = cleanArtifactName(path.basename(source));
+    const existing = selected.get(name);
+    if (
+      !existing ||
+      fs.statSync(source).mtimeMs > fs.statSync(existing).mtimeMs
+    ) {
+      selected.set(name, source);
+    }
+  }
+  assertLinuxX64PackageSet(selected);
+  const artifacts = [];
+  const updaterSignatures = [];
+  for (const [name, source] of selected) {
+    const destination = path.join(releaseDir, name);
+    fs.copyFileSync(source, destination);
+    artifacts.push(destination);
+    const sourceSignature = `${source}.sig`;
+    if (fs.existsSync(sourceSignature)) {
+      const destinationSignature = `${destination}.sig`;
+      fs.copyFileSync(sourceSignature, destinationSignature);
+      updaterSignatures.push(destinationSignature);
+    }
+  }
+  const manifests = generateUpdaterManifests([
+    ...artifacts,
+    ...updaterSignatures,
+  ]);
+  return [...artifacts, ...updaterSignatures, ...manifests];
 }
 
-async function syncBetaManifestsToLatestStable(uploadedFiles, currentReleaseId) {
+async function removeAssetBestEffort(asset, label) {
+  if (!asset || typeof asset.id !== "number") return;
+  try {
+    deleteReleaseAssetById(REPOSITORY, asset.id);
+  } catch (error) {
+    console.warn(
+      `  ! could not remove ${label}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function isTransactionalStagingAssetName(name) {
+  return /^(?:default\.)?s3-sidekick-(?:pending|previous|rollback)-/i.test(
+    name,
+  );
+}
+
+async function findBetaManifestSyncLock(releaseId) {
+  return (
+    listReleaseAssets(releaseId).find(
+      (asset) => asset?.name === BETA_SYNC_LOCK_NAME,
+    ) ?? null
+  );
+}
+
+async function assertOwnsBetaManifestSyncLock(release, acquired) {
+  if (!acquired || typeof acquired.id !== "number") {
+    throw new Error("Beta-manifest synchronization lock was not acquired.");
+  }
+  const current = await findBetaManifestSyncLock(release.id);
+  if (!current || current.id !== acquired.id) {
+    throw new Error(
+      "Lost the beta-manifest synchronization lock before mutating live feeds.",
+    );
+  }
+}
+
+async function replaceReleaseAssetsTransactionally(
+  release,
+  files,
+  { assertStillHeld = null } = {},
+) {
+  if (files.length === 0) return;
+  const temporaryDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-release-replace-"),
+  );
+  const token = crypto.randomBytes(8).toString("hex");
+  const staged = [];
+  const swapped = [];
+  try {
+    const assets = listReleaseAssets(release.id);
+    for (const filePath of files) {
+      const name = path.basename(filePath);
+      const existing = assets.find((asset) => asset?.name === name);
+      const stagedName = `s3-sidekick-pending-${token}-${name}`;
+      const stagedPath = path.join(temporaryDirectory, stagedName);
+      fs.copyFileSync(filePath, stagedPath);
+      const uploaded = await uploadAsset(release, stagedPath);
+      staged.push({
+        name,
+        existing: existing && typeof existing.id === "number" ? existing : null,
+        uploaded,
+        backupName: `s3-sidekick-previous-${token}-${name}`,
+        previousRenamed: false,
+      });
+    }
+    if (typeof assertStillHeld === "function") {
+      await assertStillHeld();
+    }
+    for (const item of staged) {
+      if (item.existing) {
+        githubApi(
+          "PATCH",
+          `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.existing.id}`,
+          { name: item.backupName },
+        );
+        item.previousRenamed = true;
+      }
+      try {
+        githubApi(
+          "PATCH",
+          `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.uploaded.id}`,
+          { name: item.name },
+        );
+      } catch (error) {
+        if (item.existing) {
+          githubApi(
+            "PATCH",
+            `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.existing.id}`,
+            { name: item.name },
+          );
+          item.previousRenamed = false;
+        }
+        throw error;
+      }
+      swapped.push(item);
+    }
+    for (const item of staged) {
+      if (!item.existing) continue;
+      try {
+        githubApi(
+          "DELETE",
+          `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.existing.id}`,
+        );
+      } catch (error) {
+        console.warn(
+          `  ! could not remove previous feed asset ${item.backupName}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  } catch (error) {
+    const rollbackErrors = [];
+    for (const item of swapped.reverse()) {
+      try {
+        if (item.existing) {
+          githubApi(
+            "PATCH",
+            `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.uploaded.id}`,
+            { name: `s3-sidekick-rollback-${token}-${item.name}` },
+          );
+          try {
+            githubApi(
+              "PATCH",
+              `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.existing.id}`,
+              { name: item.name },
+            );
+          } catch (restoreError) {
+            githubApi(
+              "PATCH",
+              `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.uploaded.id}`,
+              { name: item.name },
+            );
+            throw restoreError;
+          }
+          item.previousRenamed = false;
+        }
+        githubApi(
+          "DELETE",
+          `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.uploaded.id}`,
+        );
+      } catch (rollbackError) {
+        rollbackErrors.push(
+          `${item.name}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+        );
+      }
+    }
+    const swappedIds = new Set(swapped.map((item) => item.uploaded.id));
+    for (const item of staged) {
+      if (swappedIds.has(item.uploaded.id)) continue;
+      try {
+        if (item.existing && item.previousRenamed) {
+          githubApi(
+            "PATCH",
+            `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.existing.id}`,
+            { name: item.name },
+          );
+          item.previousRenamed = false;
+        }
+        githubApi(
+          "DELETE",
+          `/repos/${REPO_OWNER}/${REPO_NAME}/releases/assets/${item.uploaded.id}`,
+        );
+      } catch (cleanupError) {
+        rollbackErrors.push(
+          `${item.name} staged cleanup: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+        );
+      }
+    }
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}${
+        rollbackErrors.length
+          ? `; live-feed rollback failed: ${rollbackErrors.join("; ")}`
+          : ""
+      }`,
+    );
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+async function withBetaManifestSyncLock(release, operation) {
+  const temporaryDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-beta-sync-lock-"),
+  );
+  const lockToken = crypto.randomBytes(16).toString("hex");
+  const lockPath = path.join(temporaryDirectory, BETA_SYNC_LOCK_NAME);
+  fs.writeFileSync(
+    lockPath,
+    `${JSON.stringify({
+      tag: TAG,
+      pid: process.pid,
+      token: lockToken,
+      createdAt: new Date(),
+    })}\n`,
+  );
+
+  let acquired = null;
+  try {
+    for (let attempt = 1; attempt <= BETA_SYNC_LOCK_RETRIES; attempt += 1) {
+      try {
+        acquired = await uploadAsset(release, lockPath);
+        break;
+      } catch (error) {
+        if (!isGitHubConflict(error)) throw error;
+        if (attempt === BETA_SYNC_LOCK_RETRIES) {
+          const lock = await findBetaManifestSyncLock(release.id);
+          const createdAt = lock?.created_at
+            ? ` (created ${lock.created_at})`
+            : "";
+          throw new Error(
+            `Timed out waiting for another release VM to finish beta-manifest synchronization${createdAt}. If no release signer is still running, manually delete the GitHub release asset named "${BETA_SYNC_LOCK_NAME}" from the latest stable release, then retry. Never remove the lock while another signer is active.`,
+          );
+        }
+        await sleep(2000);
+      }
+    }
+    if (!acquired) {
+      throw new Error(
+        "Could not acquire the beta-manifest synchronization lock.",
+      );
+    }
+    await assertOwnsBetaManifestSyncLock(release, acquired);
+    return await operation({
+      assertStillHeld: () => assertOwnsBetaManifestSyncLock(release, acquired),
+    });
+  } finally {
+    if (acquired && typeof acquired.id === "number") {
+      const current = await findBetaManifestSyncLock(release.id);
+      if (current?.id === acquired.id) {
+        await removeAssetBestEffort(acquired, "beta-manifest sync lock");
+      }
+    }
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+async function cleanupTransactionalStagingAssets(release) {
+  for (const asset of listReleaseAssets(release.id).filter((item) =>
+    isTransactionalStagingAssetName(item?.name ?? ""),
+  )) {
+    await removeAssetBestEffort(asset, `orphan feed asset ${asset.name}`);
+  }
+}
+
+async function syncBetaManifestsToLatestStable(
+  uploadedFiles,
+  currentReleaseId,
+) {
   const betaManifests = uploadedFiles.filter((filePath) =>
-    isBetaManifestName(path.basename(filePath)),
+    /^latest-[a-z0-9]+-beta-[a-z0-9_-]+\.json$/i.test(path.basename(filePath)),
   );
   if (betaManifests.length === 0) return;
 
   let latestStable;
   try {
-    latestStable = await ghRequest(
+    latestStable = githubApi(
       "GET",
       `/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest`,
     );
-  } catch (err) {
+  } catch (error) {
+    throw new Error(
+      `Could not load latest stable release for beta manifest sync: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  if (!latestStable?.id) return;
+  if (latestStable.id === currentReleaseId) {
     console.warn(
-      `  ! Could not load latest stable release for beta manifest sync: ${err instanceof Error ? err.message : String(err)}`,
+      "  ! syncBetaManifests: latest stable is the current release; sync skipped. Publish a stable release before running beta builds.",
     );
     return;
   }
 
-  if (
-    !latestStable ||
-    typeof latestStable !== "object" ||
-    typeof latestStable.id !== "number" ||
-    typeof latestStable.upload_url !== "string"
-  ) {
-    console.warn("  ! Latest stable release metadata is invalid; skipping beta manifest sync.");
-    return;
-  }
-  if (latestStable.id === currentReleaseId) {
-    return;
-  }
-
+  await withBetaManifestSyncLock(latestStable, async ({ assertStillHeld }) => {
+    await assertStillHeld();
+    await replaceReleaseAssetsTransactionally(latestStable, betaManifests, {
+      assertStillHeld,
+    });
+    await assertStillHeld();
+    await cleanupTransactionalStagingAssets(latestStable);
+  });
   for (const filePath of betaManifests) {
-    await uploadAssetWithReplace(latestStable, filePath);
-    console.log(`  ~ synced ${path.basename(filePath)} to latest stable release`);
+    console.log(
+      `  ~ synced ${path.basename(filePath)} to latest stable release`,
+    );
+  }
+}
+
+async function syncBetaManifestsAfterPublish() {
+  if (!IS_PRERELEASE) {
+    throw new Error(
+      "release:sync-beta-manifests is only for beta versions (syncs latest-*-beta-*.json onto /releases/latest).",
+    );
+  }
+  assertGitHubCliAuthenticated();
+  let currentRelease;
+  try {
+    currentRelease = githubApi(
+      "GET",
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${TAG}`,
+    );
+  } catch (error) {
+    if (error?.statusCode === 404) {
+      throw new Error(
+        `Published release ${TAG} not found. Publish the draft on GitHub, then re-run release:sync-beta-manifests.`,
+      );
+    }
+    throw error;
+  }
+  if (currentRelease.draft) {
+    throw new Error(
+      `Release ${TAG} is still a draft. Publish it on GitHub before syncing beta manifests to /latest.`,
+    );
+  }
+  const assets = listReleaseAssets(currentRelease.id).filter((asset) =>
+    /^latest-[a-z0-9]+-beta-[a-z0-9_-]+\.json$/i.test(asset?.name ?? ""),
+  );
+  if (assets.length === 0) {
+    throw new Error(`Published release ${TAG} has no beta updater manifests.`);
+  }
+  const temporaryDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3-sidekick-beta-manifests-"),
+  );
+  try {
+    const files = assets.map((asset) => {
+      const dest = path.join(temporaryDirectory, asset.name);
+      downloadReleaseAsset(REPOSITORY, asset.id, dest);
+      return dest;
+    });
+    console.log(
+      `Syncing ${files.length} beta updater manifest(s) from ${TAG} onto /releases/latest…`,
+    );
+    await syncBetaManifestsToLatestStable(files, currentRelease.id);
+    console.log("Done: beta manifests synced to latest stable release.\n");
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 }
 
 async function main() {
-  console.log(`\nS3 Sidekick ${VERSION} — release pipeline\n`);
-
-  console.log("[1/5] Checking GPG...");
-  if (!GPG_KEY_ID) {
-    console.error("GPG_KEY_ID is required. Set it in your environment or .env file.");
-    process.exit(1);
+  assertStableReleaseOverridesAllowed(process.env, VERSION);
+  assertReleaseToolVersions(pkg, { environment: process.env, root });
+  assertGitHubCliAuthenticated();
+  verifyReleaseSession(root);
+  if (EXPECTED_TAG && EXPECTED_TAG !== TAG) {
+    throw new Error(
+      `Version/tag mismatch: package.json is ${TAG} but EXPECTED_TAG is ${EXPECTED_TAG}.`,
+    );
   }
-  if (!GPG_PASSPHRASE) {
-    console.error("GPG_PASSPHRASE is required. Set it in your environment or .env file.");
-    process.exit(1);
+  if (!process.env.GPG_PASSPHRASE || !process.env.GPG_KEY_ID) {
+    throw new Error("GPG_KEY_ID and GPG_PASSPHRASE are required.");
   }
-  try {
-    execSync("gpg --version", { stdio: "pipe" });
-  } catch {
-    console.error("gpg not found. Install GnuPG and try again.");
-    process.exit(1);
-  }
-
-  console.log("[2/5] Collecting artifacts...");
   const artifacts = collectArtifacts();
-
-  console.log("[3/5] Generating checksums...");
-  const checksumFiles = generateChecksums(artifacts);
-
-  console.log("[4/5] Signing...");
-  const ascFiles = signArtifacts(artifacts);
-  for (const checksumFile of checksumFiles) {
-    ascFiles.push(signFile(checksumFile));
-    console.log(`  + ${path.basename(checksumFile)}.asc`);
+  const checksums = generateChecksums(artifacts);
+  const signatures = signFiles([...artifacts, ...checksums]);
+  const release = findDraft();
+  if (!release?.draft && !ALLOW_ASSET_REPLACE) {
+    throw new Error(
+      `Release ${TAG} already exists as published. Refusing to mutate it without ALLOW_ASSET_REPLACE=true.`,
+    );
   }
-
-  if (!GH_TOKEN) {
-    console.log("\n[5/5] GH_TOKEN not set — skipping GitHub upload.");
-    console.log(`Artifacts staged in: ${releaseDir}\n`);
-    return;
+  const everything = [...artifacts, ...checksums, ...signatures];
+  for (const filePath of everything) {
+    await uploadAssetWithReplace(release, filePath);
+    console.log(`uploaded ${path.basename(filePath)}`);
   }
-
-  console.log("[5/5] Uploading to GitHub...");
-  const release = await getOrCreateRelease();
-  console.log(`  Release: ${release.html_url || TAG}`);
-
-  const everything = fs
-    .readdirSync(releaseDir)
-    .filter((name) => shouldUploadReleaseEntry(name))
-    .map((n) => path.join(releaseDir, n));
-  for (const f of everything) {
-    await uploadAssetWithReplace(release, f);
-    console.log(`  ^ ${path.basename(f)}`);
-  }
-
   if (IS_PRERELEASE) {
-    await syncBetaManifestsToLatestStable(everything, release.id);
+    await syncBetaManifestsToLatestStable(
+      everything.filter((filePath) =>
+        /^latest-[a-z0-9]+-beta-[a-z0-9_-]+\.json$/i.test(
+          path.basename(filePath),
+        ),
+      ),
+      release.id,
+    );
   }
-
-  console.log(`\nDone — ${TAG} uploaded as ${release.draft ? "draft" : "published"}.\n`);
+  console.log(`Uploaded ${TAG} assets to draft.`);
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (isDirectExecution(import.meta.url)) {
+  const run = process.argv.includes("--sync-beta-manifests")
+    ? syncBetaManifestsAfterPublish
+    : main;
+  run().catch((error) => {
+    console.error(
+      `gpg-sign: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(1);
+  });
+}
+
+export {
+  artifactMatchesVersion,
+  assertLinuxX64PackageSet,
+  assertReleaseTargetsCommit,
+  cleanArtifactName,
+  collectArtifacts,
+  generateChecksums,
+  generateUpdaterManifests,
+  inferArch,
+  isGitHubConflict,
+  isTransactionalStagingAssetName,
+  normalizeUpdaterSignature,
+  releaseArtifactSearchDirs,
+  resolveUpdaterTargets,
+  rpmArtifactMatchesVersion,
+  targetKeysForArtifact,
+  verifyUpdaterSignature,
+};

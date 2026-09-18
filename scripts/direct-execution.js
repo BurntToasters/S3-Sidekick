@@ -3,7 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 function comparablePath(value, platform = process.platform) {
-  let resolved = path.resolve(value);
+  const pathApi = platform === "win32" ? path.win32 : path;
+  let resolved = pathApi.resolve(value);
   try {
     resolved = fs.realpathSync.native(resolved);
   } catch {

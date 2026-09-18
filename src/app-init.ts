@@ -1,8 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { LogicalSize } from "@tauri-apps/api/dpi";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { state, dom } from "./state.ts";
 import {
   loadSettings,
@@ -34,17 +32,30 @@ import {
   setConnectionUI,
 } from "./app-connection.ts";
 import { wireEvents } from "./app-events.ts";
+import {
+  prepareTransferRecovery,
+  recoverPendingTransfers,
+} from "./transfers.ts";
 import { initializeIcons } from "./icons.ts";
+import { wireTitlebar } from "./titlebar.ts";
+import {
+  enableWindowSizePersistence,
+  restoreWindowSize,
+} from "./window-size.ts";
 
-async function checkSupportPrompt(): Promise<void> {
+async function checkSupportPrompt(retry = false): Promise<void> {
   try {
     if (isSupportPromptDismissed()) return;
-    const count = await incrementLaunchCount();
-    if (count < 2) return;
+    if (!retry) {
+      const count = await incrementLaunchCount();
+      if (count < 2) return;
+    }
 
     setTimeout(() => {
-      if (isDialogActive() || getActiveModalOverlay() || isPaletteOpen())
+      if (isDialogActive() || getActiveModalOverlay() || isPaletteOpen()) {
+        setTimeout(() => void checkSupportPrompt(true), 2000);
         return;
+      }
       const overlay = document.getElementById("support-overlay");
       const dismissButton = document.getElementById(
         "support-no",
@@ -80,7 +91,11 @@ async function checkSupportPrompt(): Promise<void> {
       const onConfirm = () => {
         close();
         persistDismissal();
-        void invoke("open_external_url", { url: "https://rosie.run/support" });
+        void invoke("open_external_url", {
+          url: "https://rosie.run/support",
+        }).catch((err) =>
+          logActivity(`Failed to open support page: ${String(err)}`, "warning"),
+        );
       };
 
       const onOverlayClick = (event: MouseEvent) => {
@@ -109,33 +124,108 @@ async function checkSupportPrompt(): Promise<void> {
   }
 }
 
-async function restoreWindowSize(): Promise<void> {
+async function recoverTransfersAfterSecurityReady(): Promise<void> {
   try {
-    const { windowWidth, windowHeight } = state.currentSettings;
-    if (windowWidth && windowHeight) {
-      const win = getCurrentWindow();
-      await win.setSize(new LogicalSize(windowWidth, windowHeight));
+    await recoverPendingTransfers();
+  } catch (err) {
+    console.error("Pending transfer recovery failed:", err);
+    logActivity(
+      `Pending transfer recovery deferred: ${String(err)}`,
+      "warning",
+    );
+  }
+}
+
+// Update checks are deferrable: run them when the browser is idle (with a
+// timeout fallback) instead of blocking startup behind network IO.
+function scheduleAutoCheckUpdates(): void {
+  const run = (): void => {
+    void autoCheckUpdates();
+  };
+  const idle = (
+    window as unknown as {
+      requestIdleCallback?: (
+        cb: () => void,
+        opts?: { timeout: number },
+      ) => void;
+    }
+  ).requestIdleCallback;
+  if (typeof idle === "function") {
+    idle.call(window, run, { timeout: 5000 });
+  } else {
+    window.setTimeout(run, 1500);
+  }
+}
+
+async function loadBookmarksIntoBar(): Promise<void> {
+  try {
+    await loadBookmarks();
+    setBookmarkChangeHandler(refreshBookmarkBar);
+    refreshBookmarkBar();
+  } catch (err) {
+    console.warn("Failed to load bookmarks:", err);
+    logActivity("Failed to load bookmarks.", "warning");
+  }
+}
+
+async function loadSavedConnectionIntoInputs(): Promise<void> {
+  try {
+    const saved = await loadConnection();
+    if (saved) {
+      setConnectionInputs(
+        saved.endpoint,
+        saved.region,
+        saved.access_key,
+        saved.secret_key,
+        saved.session_token ?? "",
+      );
     }
   } catch (err) {
-    console.warn("Failed to restore window size:", err);
+    setStatus(`Failed to load saved connection: ${String(err)}`);
+    logActivity(`Failed to load saved connection: ${String(err)}`, "error");
   }
 }
 
 export async function init(): Promise<void> {
   initializeIcons();
-  wireEvents();
   setConnectionUI(false);
 
-  state.platformName = await invoke<string>("get_platform_info");
+  try {
+    state.platformName = await invoke<string>("get_platform_info");
+  } catch (err) {
+    state.platformName = "";
+    console.warn("Platform detection unavailable:", err);
+    logActivity(
+      "Platform-specific window styling and shortcut labels are unavailable this launch.",
+      "warning",
+    );
+  }
   applyPlatformClass();
+  prepareTransferRecovery();
+  wireEvents();
+  wireTitlebar();
+
+  // Independent of settings IO below: start early so it settles in parallel.
+  // Failures only affect the label, never startup.
+  const versionPromise = getVersion().then(
+    (version) => {
+      dom.versionLabel.textContent = `v${version}`;
+    },
+    (err) => {
+      console.warn("Version label unavailable:", err);
+    },
+  );
 
   let settingsValid = true;
   try {
     settingsValid = await loadSettings();
     if (settingsValid) {
       void restoreWindowSize();
+    } else {
+      enableWindowSizePersistence();
     }
   } catch (err) {
+    enableWindowSizePersistence();
     setStatus(`Failed to load settings: ${String(err)}`);
   }
 
@@ -170,6 +260,7 @@ export async function init(): Promise<void> {
       await loadSettings();
       void restoreWindowSize();
     } catch (err) {
+      enableWindowSizePersistence();
       setStatus(`Failed to load settings: ${String(err)}`);
       logActivity(`Failed to load settings: ${String(err)}`, "error");
     }
@@ -183,40 +274,21 @@ export async function init(): Promise<void> {
         "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
         "warning",
       );
+    } else {
+      await recoverTransfersAfterSecurityReady();
     }
 
     updateShortcutChips();
-    const version = await getVersion();
-    dom.versionLabel.textContent = `v${version}`;
+    await versionPromise;
 
     if (wizardSecurityReady) {
-      try {
-        await loadBookmarks();
-        setBookmarkChangeHandler(refreshBookmarkBar);
-        refreshBookmarkBar();
-      } catch (err) {
-        console.warn("Failed to load bookmarks:", err);
-        logActivity("Failed to load bookmarks.", "warning");
-      }
+      await loadBookmarksIntoBar();
     }
 
-    try {
-      const saved = await loadConnection();
-      if (saved) {
-        setConnectionInputs(
-          saved.endpoint,
-          saved.region,
-          saved.access_key,
-          saved.secret_key,
-        );
-      }
-    } catch (err) {
-      setStatus(`Failed to load saved connection: ${String(err)}`);
-      logActivity(`Failed to load saved connection: ${String(err)}`, "error");
-    }
+    await loadSavedConnectionIntoInputs();
 
     await initUpdater();
-    void autoCheckUpdates();
+    scheduleAutoCheckUpdates();
     return;
   }
 
@@ -229,40 +301,23 @@ export async function init(): Promise<void> {
       "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
       "warning",
     );
+  } else {
+    await recoverTransfersAfterSecurityReady();
   }
 
   void checkSupportPrompt();
 
   updateShortcutChips();
-  const version = await getVersion();
-  dom.versionLabel.textContent = `v${version}`;
+  await versionPromise;
 
   if (securityReady) {
-    try {
-      await loadBookmarks();
-      setBookmarkChangeHandler(refreshBookmarkBar);
-      refreshBookmarkBar();
-    } catch (err) {
-      console.warn("Failed to load bookmarks:", err);
-      logActivity("Failed to load bookmarks.", "warning");
-    }
-
-    try {
-      const saved = await loadConnection();
-      if (saved) {
-        setConnectionInputs(
-          saved.endpoint,
-          saved.region,
-          saved.access_key,
-          saved.secret_key,
-        );
-      }
-    } catch (err) {
-      setStatus(`Failed to load saved connection: ${String(err)}`);
-      logActivity(`Failed to load saved connection: ${String(err)}`, "error");
-    }
+    // Bookmarks and the saved connection are independent: load concurrently.
+    await Promise.all([
+      loadBookmarksIntoBar(),
+      loadSavedConnectionIntoInputs(),
+    ]);
   }
 
   await initUpdater();
-  void autoCheckUpdates();
+  scheduleAutoCheckUpdates();
 }

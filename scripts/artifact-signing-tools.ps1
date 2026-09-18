@@ -1,11 +1,20 @@
 Set-StrictMode -Version Latest
 
-function Import-BundledPowerShellSecurityModule {
-  $moduleManifest = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+function Import-BundledPowerShellInboxModule {
+  param([Parameter(Mandatory = $true)][string]$Name)
+  $moduleManifest = Join-Path $PSHOME "Modules\$Name\$Name.psd1"
   if (-not (Test-Path -LiteralPath $moduleManifest -PathType Leaf)) {
-    throw "The bundled Microsoft.PowerShell.Security module was not found: $moduleManifest"
+    throw "The bundled $Name module was not found: $moduleManifest"
   }
   Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+}
+
+function Import-BundledPowerShellSecurityModule {
+  # Launch-VsDevShell (and the Node child that inherits it) rewrites
+  # PSModulePath so inbox cmdlets stop autoloading. Import by $PSHOME path.
+  # Security: Get-AuthenticodeSignature. Utility: Get-FileHash.
+  Import-BundledPowerShellInboxModule 'Microsoft.PowerShell.Security'
+  Import-BundledPowerShellInboxModule 'Microsoft.PowerShell.Utility'
 }
 
 function Get-ArtifactSigningTools {
@@ -41,7 +50,7 @@ function Get-ArtifactSigningTools {
       }
     )
     $dlib = $dlibCandidates |
-      Sort-Object @{ Expression = { if ($_.FullName -match '[\\/]x64[\\/]') { 0 } elseif ($_.FullName -match '[\\/]x86[\\/]') { 2 } else { 1 } } }, @{ Expression = { $_.FullName } } |
+      Sort-Object @{ Expression = { if ($_.FullName -match '[\\/]x64[\\/]') { 0 } elseif ($_.FullName -match '[\\/]arm64[\\/]') { 1 } elseif ($_.FullName -match '[\\/]x86[\\/]') { 3 } else { 2 } } }, @{ Expression = { $_.FullName } } |
       Select-Object -First 1
     if ($dlib) { $dlibPath = $dlib.FullName }
   }
@@ -62,10 +71,11 @@ function Get-ArtifactSigningTools {
         )
       }
     }
-    $preferredArchitecture = if ($dlibPath -and $dlibPath -match '[\\/]x86[\\/]') { 'x86' } else { 'x64' }
+    $preferredArchitecture = if ($dlibPath -and $dlibPath -match '[\\/]x86[\\/]') { 'x86' } elseif ($dlibPath -and $dlibPath -match '[\\/]arm64[\\/]') { 'arm64' } else { 'x64' }
     $matchingSignTools = @($signToolCandidates | Where-Object {
-      if ($preferredArchitecture -eq 'x86') { $_.FullName -notmatch '[\\/]x64[\\/]' }
-      else { $_.FullName -notmatch '[\\/]x86[\\/]' }
+      if ($preferredArchitecture -eq 'x86') { ($_.FullName -notmatch '[\\/]x64[\\/]') -and ($_.FullName -notmatch '[\\/]arm64[\\/]') }
+      elseif ($preferredArchitecture -eq 'arm64') { ($_.FullName -notmatch '[\\/]x64[\\/]') -and ($_.FullName -notmatch '[\\/]x86[\\/]') }
+      else { ($_.FullName -notmatch '[\\/]x86[\\/]') -and ($_.FullName -notmatch '[\\/]arm64[\\/]') }
     })
     $signTool = $matchingSignTools |
       Sort-Object @{ Expression = { if ($_.FullName -match "[\\/]$preferredArchitecture[\\/]") { 0 } else { 1 } } }, @{ Expression = { $_.FullName }; Descending = $true } |
@@ -76,10 +86,11 @@ function Get-ArtifactSigningTools {
   if (-not $signToolPath -or -not $dlibPath) {
     throw 'Artifact Signing Client Tools were not found. Run npm run setup:win:artifact-signing first.'
   }
-  if ($signToolPath -match '[\\/]x86[\\/]' -and $dlibPath -match '[\\/]x64[\\/]') {
-    throw "SignTool and Artifact Signing dlib architectures do not match: $signToolPath ; $dlibPath"
-  }
-  if ($signToolPath -match '[\\/]x64[\\/]' -and $dlibPath -match '[\\/]x86[\\/]') {
+  # Architecture tokens embedded in install paths (x64/x86/arm64). Mixed
+  # bitness fails at signing time; fail closed here with both paths.
+  $signArch = if ($signToolPath -match '[\\/](x64|x86|arm64)[\\/]') { $Matches[1].ToLowerInvariant() } else { '' }
+  $dlibArch = if ($dlibPath -match '[\\/](x64|x86|arm64)[\\/]') { $Matches[1].ToLowerInvariant() } else { '' }
+  if ($signArch -and $dlibArch -and ($signArch -ne $dlibArch)) {
     throw "SignTool and Artifact Signing dlib architectures do not match: $signToolPath ; $dlibPath"
   }
   return [PSCustomObject]@{

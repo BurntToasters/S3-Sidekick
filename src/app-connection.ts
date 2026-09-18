@@ -4,6 +4,8 @@ import {
   disconnect,
   saveConnection,
   refreshBuckets,
+  currentConnectionGeneration,
+  finishConnecting,
 } from "./connection.ts";
 import {
   renderBucketList,
@@ -12,6 +14,7 @@ import {
   showEmptyState,
   clearSelection,
   clearNavHistory,
+  readLastBucket,
 } from "./browser.ts";
 import {
   addBookmark,
@@ -23,7 +26,18 @@ import {
 import { friendlyError } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
-import { clearFilterInputDebounce } from "./app-layout.ts";
+import { clearFilterInputDebounce, setSidebarOpen } from "./app-layout.ts";
+import { setInspectorOpen } from "./inspector.ts";
+import { showConfirm } from "./dialogs.ts";
+import {
+  recoverPendingTransfers,
+  resumeRecoveredTransfersAfterConnect,
+} from "./transfers.ts";
+
+export function awsRegionalEndpoint(region: string): string {
+  const trimmed = region.trim() || "us-east-1";
+  return `https://s3.${trimmed}.amazonaws.com`;
+}
 
 export function getConnectionInputs() {
   const endpoint = (
@@ -38,7 +52,11 @@ export function getConnectionInputs() {
   const secretKey = (
     document.getElementById("conn-secret-key") as HTMLInputElement
   ).value.trim();
-  return { endpoint, region, accessKey, secretKey };
+  const sessionToken =
+    (
+      document.getElementById("conn-session-token") as HTMLInputElement | null
+    )?.value.trim() ?? "";
+  return { endpoint, region, accessKey, secretKey, sessionToken };
 }
 
 export function setConnectionInputs(
@@ -46,6 +64,7 @@ export function setConnectionInputs(
   region: string,
   accessKey: string,
   secretKey: string,
+  sessionToken = "",
 ): void {
   (document.getElementById("conn-endpoint") as HTMLInputElement).value =
     endpoint;
@@ -54,14 +73,20 @@ export function setConnectionInputs(
     accessKey;
   (document.getElementById("conn-secret-key") as HTMLInputElement).value =
     secretKey;
+  const sessionInput = document.getElementById(
+    "conn-session-token",
+  ) as HTMLInputElement | null;
+  if (sessionInput) sessionInput.value = sessionToken;
   updateBookmarkBtn();
 }
 
 export function updateBookmarkBtn(): void {
   const btn = document.getElementById("bookmark-save-btn");
   if (!btn) return;
-  const { endpoint } = getConnectionInputs();
-  const active = endpoint ? isEndpointBookmarked(endpoint) : false;
+  const { endpoint, accessKey } = getConnectionInputs();
+  const active = endpoint
+    ? isEndpointBookmarked(endpoint, accessKey || undefined)
+    : false;
   btn.classList.toggle("bookmark-save-btn--active", active);
 }
 
@@ -77,12 +102,24 @@ export function refreshSavedConnectionsList(): void {
         bookmark.region,
         bookmark.access_key,
         bookmark.secret_key,
+        bookmark.session_token ?? "",
       );
     },
     (index) => {
       void removeBookmark(index);
     },
+    {
+      emptyMessage:
+        "No saved connections yet. Connect using the form, or save a bookmark after you connect.",
+    },
   );
+}
+
+export function focusConnectionScreen(): void {
+  const endpoint = document.getElementById(
+    "conn-endpoint",
+  ) as HTMLInputElement | null;
+  endpoint?.focus();
 }
 
 export function refreshBookmarkBar(): void {
@@ -97,6 +134,7 @@ export function refreshBookmarkBar(): void {
           bookmark.region,
           bookmark.access_key,
           bookmark.secret_key,
+          bookmark.session_token ?? "",
         );
       },
       state.connected ? state.endpoint : undefined,
@@ -111,9 +149,10 @@ export function refreshBookmarkBar(): void {
 
 export async function handleNewConnection(): Promise<void> {
   if (state.connected) {
-    await handleDisconnect();
+    if (!(await handleDisconnect())) return;
   }
   setConnectionInputs("", "", "", "");
+  setConnectionFormError(null);
   (document.getElementById("conn-endpoint") as HTMLInputElement).focus();
   setStatus("Ready for a new connection.", 5000);
 }
@@ -124,16 +163,68 @@ export async function switchToBookmark(
   region: string,
   accessKey: string,
   secretKey: string,
+  sessionToken = "",
 ): Promise<void> {
-  const wasConnected = state.connected;
-  if (wasConnected) {
-    await handleDisconnect();
+  // Supersede instead of dropping: a rapid second click updates inputs and
+  // starts a newer connect generation that wins via generation guards.
+  if (state.connected) {
+    if (!(await handleDisconnect())) return;
   }
-  setConnectionInputs(endpoint, region, accessKey, secretKey);
-  if (wasConnected) {
-    await handleConnect();
+  setConnectionInputs(endpoint, region, accessKey, secretKey, sessionToken);
+  setStatus(`Connecting to "${name}"...`, 5000);
+  await handleConnect();
+}
+
+export function setConnectionFormError(message: string | null): void {
+  const el = document.getElementById("conn-form-error");
+  if (!el) return;
+  if (message) {
+    el.textContent = message;
+    el.hidden = false;
   } else {
-    setStatus(`Loaded bookmark "${name}".`, 5000);
+    el.textContent = "";
+    el.hidden = true;
+  }
+}
+
+function setConnectButtonBusy(busy: boolean): void {
+  const btn = dom.connectBtn;
+  if (busy) {
+    btn.disabled = true;
+    btn.dataset.busy = "true";
+    btn.innerHTML = `<span class="spinner spinner--btn" aria-hidden="true"></span> Connecting…`;
+  } else {
+    btn.disabled = false;
+    delete btn.dataset.busy;
+    btn.textContent = "Connect";
+  }
+  setConnectionFormDisabled(busy);
+}
+
+function setConnectionFormDisabled(disabled: boolean): void {
+  const ids = [
+    "conn-provider-preset",
+    "conn-endpoint",
+    "conn-region",
+    "conn-access-key",
+    "conn-secret-key",
+    "conn-session-token",
+    "conn-new-btn",
+    "bookmark-save-btn",
+  ];
+  for (const id of ids) {
+    const el = document.getElementById(id) as
+      HTMLInputElement | HTMLSelectElement | HTMLButtonElement | null;
+    if (el) el.disabled = disabled;
+  }
+  const savedList = document.getElementById("conn-saved-list");
+  if (savedList) {
+    savedList.classList.toggle("conn-saved-list--disabled", disabled);
+    savedList
+      .querySelectorAll<HTMLElement>(".bookmark-item")
+      .forEach((item) => {
+        item.tabIndex = disabled ? -1 : 0;
+      });
   }
 }
 
@@ -149,6 +240,7 @@ export function setConnectionUI(connected: boolean): void {
     dom.disconnectBtn.style.display = "";
     if (mainLayout) mainLayout.style.display = "flex";
     if (connScreen) connScreen.style.display = "none";
+    setConnectionFormError(null);
   } else {
     badge.textContent = "Disconnected";
     badge.className = "connection-badge connection-badge--off";
@@ -161,100 +253,258 @@ export function setConnectionUI(connected: boolean): void {
 }
 
 export async function handleConnect(): Promise<void> {
-  if (state.connecting) return;
-  const { endpoint, region, accessKey, secretKey } = getConnectionInputs();
+  // Allow superseding connects: rapid bookmark switches start a newer
+  // generation in connect() that wins; stale flows exit via generation checks.
+  const { endpoint, region, accessKey, secretKey, sessionToken } =
+    getConnectionInputs();
   if (!endpoint || !accessKey || !secretKey) {
-    setStatus("Endpoint, access key, and secret key are required.");
+    const message = "Endpoint, access key, and secret key are required.";
+    setConnectionFormError(message);
+    setStatus(message);
     return;
   }
   if (!/^https?:\/\/.+/i.test(endpoint)) {
-    setStatus("Endpoint must start with http:// or https://.");
+    const message = "Endpoint must start with http:// or https://.";
+    setConnectionFormError(message);
+    setStatus(message);
     return;
   }
 
-  // Warn about cleartext HTTP for non-local endpoints (credentials sent unencrypted)
-  if (/^http:\/\//i.test(endpoint)) {
-    try {
-      const host = new URL(endpoint).hostname;
-      const isLocal =
-        host === "localhost" ||
-        host === "127.0.0.1" ||
-        host === "::1" ||
-        host.endsWith(".local");
-      if (!isLocal) {
-        logActivity(
-          `Warning: connecting over plain HTTP to ${host}. Credentials will be sent in cleartext.`,
-          "warning",
-        );
-      }
-    } catch {
-      // URL parse failure handled by the regex check above
-    }
-  }
-
-  dom.connectBtn.disabled = true;
-  setStatus("Connecting...");
+  setConnectionFormError(null);
+  state.connecting = true;
+  setConnectButtonBusy(true);
+  const wasConnected = state.connected;
+  let establishedConnectionId = "";
+  let workflowGeneration = 0;
+  let saveWarning: string | null = null;
 
   try {
-    const resolvedRegion = await connect(
+    // Warn about cleartext HTTP for non-local endpoints (credentials sent unencrypted)
+    if (/^http:\/\//i.test(endpoint)) {
+      try {
+        const host = new URL(endpoint).hostname;
+        const isLocal =
+          host === "localhost" ||
+          host === "127.0.0.1" ||
+          host === "::1" ||
+          host.endsWith(".local");
+        if (!isLocal) {
+          logActivity(
+            `Warning: connecting over plain HTTP to ${host}. Credentials will be sent in cleartext.`,
+            "warning",
+          );
+          const proceed = await showConfirm(
+            "Insecure connection",
+            `Credentials and object traffic will be sent without TLS to ${host}. Connect anyway?`,
+            {
+              okLabel: "Connect anyway",
+              cancelLabel: "Cancel",
+              okDanger: true,
+            },
+          );
+          if (!proceed) {
+            setStatus("Connection cancelled.", 5000);
+            return;
+          }
+        }
+      } catch {
+        // URL parse failure handled by the regex check above
+      }
+    }
+
+    setStatus("Connecting...");
+    const connectionAttempt = connect(
       endpoint,
       region,
       accessKey,
       secretKey,
+      sessionToken,
     );
+    workflowGeneration = currentConnectionGeneration();
+    const generation = workflowGeneration;
+    const resolvedRegion = await connectionAttempt;
+    establishedConnectionId = state.connectionId;
     (document.getElementById("conn-region") as HTMLInputElement).value =
       resolvedRegion;
-    setConnectionUI(true);
-    setStatus("Connected.", 5000);
-    logActivity(`Connected to ${endpoint}.`, "success");
     try {
-      await saveConnection(endpoint, resolvedRegion, accessKey, secretKey);
+      await saveConnection(
+        establishedConnectionId,
+        endpoint,
+        resolvedRegion,
+        accessKey,
+        secretKey,
+        sessionToken,
+      );
     } catch (saveErr) {
-      setStatus(`Connected (credentials not saved: ${saveErr}).`, 5000);
+      if (
+        currentConnectionGeneration() !== generation ||
+        state.connectionId !== establishedConnectionId
+      ) {
+        return;
+      }
+      saveWarning = `Connected (credentials not saved: ${saveErr}).`;
       logActivity(
         `Connected, but failed to save credentials: ${saveErr}`,
         "warning",
       );
     }
+    if (
+      currentConnectionGeneration() !== generation ||
+      state.connectionId !== establishedConnectionId
+    ) {
+      return;
+    }
     renderBucketListSkeleton();
     await refreshBuckets();
+    if (
+      currentConnectionGeneration() !== generation ||
+      state.connectionId !== establishedConnectionId
+    ) {
+      return;
+    }
+    state.bucketFilterText = "";
+    const bucketFilterInput = document.getElementById(
+      "bucket-filter-input",
+    ) as HTMLInputElement | null;
+    if (bucketFilterInput) bucketFilterInput.value = "";
     renderBucketList();
-    if (state.buckets.length > 0) {
-      await selectBucket(state.buckets[0].name);
+    // Restore the last bucket if still present; otherwise stay unselected
+    // rather than auto-selecting buckets[0].
+    const lastBucket = readLastBucket();
+    const restoreTarget = lastBucket
+      ? state.buckets.find((b) => b.name === lastBucket)?.name
+      : undefined;
+    if (restoreTarget) {
+      try {
+        await selectBucket(restoreTarget);
+      } catch (restoreError) {
+        // A listing failure is not a connection failure: keep the session
+        // and let the user retry the bucket or pick another one.
+        const message = `Connected, but failed to list "${restoreTarget}": ${friendlyError(restoreError)}`;
+        setStatus(message, 8000);
+        logActivity(message, "warning");
+        showEmptyState();
+        // showEmptyState also clears the bucket list; keep the fetched
+        // buckets available so the user can retry or choose another one.
+        renderBucketList();
+      }
+    } else {
+      showEmptyState();
+      // showEmptyState also clears the bucket list; the connection is still
+      // usable and must leave the fetched buckets available for selection.
+      renderBucketList();
+    }
+    if (
+      currentConnectionGeneration() !== generation ||
+      state.connectionId !== establishedConnectionId
+    ) {
+      return;
+    }
+    setConnectionUI(true);
+    setStatus(saveWarning ?? "Connected.", 5000);
+    logActivity(`Connected to ${endpoint}.`, "success");
+    try {
+      await recoverPendingTransfers();
+      await resumeRecoveredTransfersAfterConnect();
+    } catch (recoveryError) {
+      const message = `Connected, but transfer recovery is still pending: ${friendlyError(recoveryError)}`;
+      setStatus(message, 8000);
+      logActivity(message, "warning");
     }
   } catch (e) {
+    const stillOwnSession =
+      Boolean(establishedConnectionId) &&
+      state.connectionId === establishedConnectionId;
+    if (stillOwnSession) {
+      try {
+        const disconnected = await disconnect(establishedConnectionId);
+        if (!disconnected) return;
+      } catch (disconnectErr) {
+        const message = `Connection setup failed, and cleanup failed: ${friendlyError(disconnectErr)}`;
+        setConnectionFormError(message);
+        setStatus(message);
+        setConnectionUI(state.connected);
+        logActivity(message, "error");
+        return;
+      }
+    } else if (establishedConnectionId) {
+      return;
+    }
+    // Guard stale error renders: a superseded connect must not repaint.
+    if (
+      workflowGeneration &&
+      currentConnectionGeneration() !== workflowGeneration
+    ) {
+      return;
+    }
     renderBucketList();
-    setStatus(`Connection failed: ${friendlyError(e)}`);
-    setConnectionUI(false);
-    logActivity(`Connection failed: ${friendlyError(e)}`, "error");
+    const message = `Connection failed: ${friendlyError(e)}`;
+    setConnectionFormError(message);
+    setStatus(message);
+    setConnectionUI(wasConnected && state.connected);
+    logActivity(message, "error");
   } finally {
-    dom.connectBtn.disabled = false;
+    if (workflowGeneration) {
+      finishConnecting(workflowGeneration);
+    } else if (!state.connected) {
+      state.connecting = false;
+    }
+    if (
+      !workflowGeneration ||
+      currentConnectionGeneration() === workflowGeneration
+    ) {
+      setConnectButtonBusy(false);
+    }
   }
 }
 
-export async function handleDisconnect(): Promise<void> {
+export async function handleDisconnect(): Promise<boolean> {
+  let disconnected: boolean;
+  try {
+    disconnected = await disconnect();
+  } catch (err) {
+    logActivity(`Disconnect error: ${err}`, "error");
+    setConnectionUI(state.connected);
+    setStatus(`Disconnect failed: ${friendlyError(err)}`, 5000);
+    setConnectButtonBusy(false);
+    return false;
+  }
+  // A resolved old disconnect may have been superseded by a newer session.
+  // Only the call that actually cleared connection state owns the UI teardown.
+  if (!disconnected || state.connected) {
+    setConnectButtonBusy(false);
+    return false;
+  }
+
   clearFilterInputDebounce();
   state.filterText = "";
   const filterInput = document.getElementById(
     "filter-input",
   ) as HTMLInputElement | null;
   if (filterInput) filterInput.value = "";
+  state.bucketFilterText = "";
+  const bucketFilterInput = document.getElementById(
+    "bucket-filter-input",
+  ) as HTMLInputElement | null;
+  if (bucketFilterInput) bucketFilterInput.value = "";
 
-  try {
-    await disconnect();
-  } catch (err) {
-    logActivity(`Disconnect error: ${err}`, "error");
-  }
   clearNavHistory();
   clearSelection();
+  setInspectorOpen(false);
+  // Release mobile sidebar-owned inert state before swapping to the reconnect UI.
+  setSidebarOpen(false);
   setConnectionUI(false);
+  setConnectButtonBusy(false);
+  dom.connectBtn.focus();
   showEmptyState();
   setStatus("Disconnected.", 5000);
   logActivity("Disconnected from endpoint.", "info");
+  return true;
 }
 
 export async function handleBookmarkSave(): Promise<void> {
-  const { endpoint, region, accessKey, secretKey } = getConnectionInputs();
+  const { endpoint, region, accessKey, secretKey, sessionToken } =
+    getConnectionInputs();
   if (!endpoint || !accessKey) {
     setStatus("Fill in endpoint and access key to bookmark.");
     return;
@@ -275,6 +525,7 @@ export async function handleBookmarkSave(): Promise<void> {
       region,
       access_key: accessKey,
       secret_key: secretKey,
+      ...(sessionToken ? { session_token: sessionToken } : {}),
     });
     if (added) {
       setStatus(`Bookmarked "${name}".`, 5000);

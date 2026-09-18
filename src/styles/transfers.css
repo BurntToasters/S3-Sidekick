@@ -9,10 +9,70 @@
 .transfer-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
-  padding: 6px 10px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
+}
+
+.transfer-queue-summary {
+  flex: 1;
+  min-width: 120px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.transfer-toolbar__throughput {
+  margin-left: auto;
+}
+
+#drawer-panel-transfers {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.transfer-op {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.transfer-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(360px, 42vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-progress-wrap--indeterminate .transfer-progress__bar {
+  width: 35% !important;
+  animation: transfer-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes transfer-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.transfer-badge--alert,
+.drawer-badge--alert {
+  background: var(--danger) !important;
+  color: #fff !important;
 }
 
 .transfer-toolbar .statusbar__count {
@@ -33,6 +93,11 @@
 .transfer-item--selected {
   background: var(--bg-active);
   box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.transfer-item:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
 }
 
 .transfer-item:hover {
@@ -67,14 +132,6 @@
   color: var(--danger);
 }
 
-.transfer-name {
-  flex-shrink: 1;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .transfer-main {
   flex: 1;
   min-width: 0;
@@ -94,12 +151,16 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .transfer-attempt,
 .transfer-phase {
   font-size: 10px;
   color: var(--text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .transfer-arrow {
@@ -115,14 +176,21 @@
 
 .transfer-cancel {
   flex-shrink: 0;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   font-size: 14px;
   line-height: 20px;
   text-align: center;
   border-radius: 4px;
   color: var(--text-secondary);
+  align-self: center;
+}
+.transfer-pause {
+  flex-shrink: 0;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0 4px;
   align-self: center;
 }
 .transfer-cancel:hover:not(:disabled) {
@@ -141,13 +209,15 @@
 }
 
 .transfer-error {
-  flex-shrink: 0;
+  display: block;
+  min-width: 0;
+  max-width: 100%;
   color: var(--danger);
   font-size: 11px;
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 
 .transfer-progress-wrap {
@@ -210,4 +280,17 @@
   position: relative;
   font-size: 14px;
   padding: 2px 6px;
+}
+
+.statusbar__transfer--idle {
+  opacity: 0.55;
+}
+
+.statusbar__transfer--idle:hover {
+  opacity: 1;
+}
+
+.transfer-phase--stalled {
+  color: var(--warning);
+  font-weight: 600;
 }

@@ -1,305 +1,292 @@
-// For some reason, I needed to make this script because GitHub started to split my releases into two drafts.
-// make ONE machine the single creator (win), this script has two modes:
-//   (default)  create-or-reuse the single draft. Run by the Windows machine only.
-//   --wait     poll until that draft exists; NEVER create. Run by mac/linux so
-//              they only ever reuse the draft Windows created (no duplicates).
+// Windows creates one GitHub draft. Other hosts use --wait and never create it.
+"use strict";
 
-const https = require('https');
+const fs = require("node:fs");
+const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 
-require('dotenv').config();
+const {
+  assertGitHubCliAuthenticated,
+  githubApi,
+  githubStatusCode,
+} = require("./github-cli.cjs");
+const {
+  assertStableReleaseOverridesAllowed,
+  isExplicitTruthy,
+} = require("./release-policy.cjs");
+const { assertReleaseToolVersions } = require("./release-integrity.cjs");
+const {
+  assertExpectedRelease,
+  assertNoMisnamedVersionDrafts,
+  isExpectedRelease,
+} = require("./release-draft-metadata.cjs");
 
-const GH_TOKEN = process.env.GH_TOKEN;
-const REPO_OWNER = 'BurntToasters';
-const REPO_NAME = 's3-sidekick';
-const GH_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.GH_REQUEST_TIMEOUT_MS || '30000', 10);
-const GH_REQUEST_RETRIES = Number.parseInt(process.env.GH_REQUEST_RETRIES || '3', 10);
-const GH_REQUEST_RETRY_DELAY_MS = Number.parseInt(
-  process.env.GH_REQUEST_RETRY_DELAY_MS || '1500',
-  10
-);
-
-// --wait mode: how long mac/linux will wait for the Windows machine to create
-// the draft before giving up (defaults to 30 minutes, polling every 15s).
-const WAIT_MODE = process.argv.slice(2).includes('--wait');
-const WAIT_TIMEOUT_MS = Number.parseInt(process.env.RELEASE_DRAFT_WAIT_TIMEOUT_MS || '1800000', 10);
-const WAIT_POLL_INTERVAL_MS = Number.parseInt(
-  process.env.RELEASE_DRAFT_WAIT_POLL_MS || '15000',
-  10
-);
-
-const packageJson = require('../package.json');
+const ROOT = path.resolve(__dirname, "..");
+const packageJson = require("../package.json");
 const VERSION = packageJson.version;
-const TAG_NAME = 'v' + VERSION;
-const IS_PRERELEASE = VERSION.includes('beta') || VERSION.includes('alpha');
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isRetryableGithubError(error) {
-  if (!error) return false;
-
-  const retryableStatusCodes = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
-  const retryableCodes = new Set([
-    'ETIMEDOUT',
-    'ECONNRESET',
-    'ENOTFOUND',
-    'EAI_AGAIN',
-    'ECONNREFUSED',
-    'EPIPE',
-  ]);
-
-  if (typeof error.statusCode === 'number' && retryableStatusCodes.has(error.statusCode)) {
-    return true;
-  }
-  if (typeof error.code === 'string' && retryableCodes.has(error.code)) {
-    return true;
-  }
-
-  const msg = String(error.message || '').toLowerCase();
-  return msg.includes('timeout') || msg.includes('socket hang up') || msg.includes('aborted');
-}
-
-function githubRequest(method, endpoint, body) {
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'api.github.com',
-      path: endpoint,
-      method: method,
-      headers: {
-        Authorization: 'Bearer ' + GH_TOKEN,
-        'User-Agent': 'S3-Sidekick-Release-Script',
-        Accept: 'application/vnd.github.v3+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    };
-
-    if (body) {
-      options.headers['Content-Type'] = 'application/json';
-    }
-
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => (data += chunk));
-      res.on('aborted', () => {
-        const err = new Error('GitHub API response aborted for ' + method + ' ' + endpoint);
-        err.code = 'ECONNRESET';
-        reject(err);
-      });
-      res.on('end', () => {
-        const statusCode = res.statusCode || 0;
-        try {
-          if (statusCode >= 200 && statusCode < 300) {
-            resolve(data ? JSON.parse(data) : {});
-          } else {
-            const json = data ? JSON.parse(data) : {};
-            const err = new Error(
-              'GitHub API error ' +
-                statusCode +
-                ' for ' +
-                method +
-                ' ' +
-                endpoint +
-                ': ' +
-                (json.message || data || 'unknown error')
-            );
-            err.statusCode = statusCode;
-            reject(err);
-          }
-        } catch (e) {
-          const err = new Error(
-            'GitHub API invalid JSON for ' + method + ' ' + endpoint + ': ' + e.message
-          );
-          err.statusCode = statusCode;
-          reject(err);
-        }
-      });
-    });
-
-    req.setTimeout(GH_REQUEST_TIMEOUT_MS, () => {
-      const err = new Error(
-        'GitHub API timeout after ' + GH_REQUEST_TIMEOUT_MS + 'ms for ' + method + ' ' + endpoint
-      );
-      err.code = 'ETIMEDOUT';
-      req.destroy(err);
-    });
-
-    req.on('error', reject);
-
-    if (body) {
-      req.write(JSON.stringify(body));
-    }
-    req.end();
-  });
-}
-
-async function githubRequestWithRetry(method, endpoint, body) {
-  const attempts = Math.max(1, GH_REQUEST_RETRIES);
-
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await githubRequest(method, endpoint, body);
-    } catch (error) {
-      const canRetry = attempt < attempts && isRetryableGithubError(error);
-      if (!canRetry) {
-        throw error;
-      }
-
-      const backoffMs = GH_REQUEST_RETRY_DELAY_MS * attempt;
-      console.log(
-        '   Retry ' +
-          attempt +
-          '/' +
-          (attempts - 1) +
-          ' in ' +
-          backoffMs +
-          'ms (' +
-          error.message +
-          ')'
-      );
-      await sleep(backoffMs);
-    }
-  }
-}
-
-async function findExistingRelease() {
-  // Draft releases are not returned by the "get release by tag" endpoint
-  // (no git tag exists yet), so we list and match on tag_name.
-  const releases = await githubRequestWithRetry(
-    'GET',
-    '/repos/' + REPO_OWNER + '/' + REPO_NAME + '/releases?per_page=100'
+const TAG = `v${VERSION}`;
+const NUMERIC_VERSION = "(?:0|[1-9]\\d*)";
+const BETA_VERSION = new RegExp(
+  `^${NUMERIC_VERSION}\\.${NUMERIC_VERSION}\\.${NUMERIC_VERSION}-beta\\.${NUMERIC_VERSION}$`,
+);
+const STABLE_VERSION = new RegExp(
+  `^${NUMERIC_VERSION}\\.${NUMERIC_VERSION}\\.${NUMERIC_VERSION}$`,
+);
+if (!BETA_VERSION.test(VERSION) && !STABLE_VERSION.test(VERSION)) {
+  throw new Error(
+    `Unsupported release version '${VERSION}'; S3-Sidekick releases use beta or stable versions only.`,
   );
+}
+const IS_PRERELEASE = BETA_VERSION.test(VERSION);
+const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
+const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
+const WAIT_MODE = process.argv.includes("--wait");
+const WAIT_TIMEOUT_MS = Number.parseInt(
+  process.env.RELEASE_DRAFT_WAIT_TIMEOUT_MS || "1800000",
+  10,
+);
+const WAIT_POLL_INTERVAL_MS = Number.parseInt(
+  process.env.RELEASE_DRAFT_WAIT_POLL_MS || "15000",
+  10,
+);
 
-  if (!Array.isArray(releases)) {
-    throw new Error('Unexpected releases payload type');
+function currentCommit() {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  if (!/^[0-9a-f]{40}$/i.test(commit)) {
+    throw new Error("Could not resolve an exact release commit from git HEAD.");
   }
+  return commit;
+}
 
-  const matching = releases.filter((r) => r.tag_name === TAG_NAME);
-  if (matching.length === 0) {
-    return null;
+function verifySession() {
+  execFileSync(
+    process.execPath,
+    [path.join(ROOT, "scripts", "release-session.js")],
+    { cwd: ROOT, stdio: "inherit" },
+  );
+}
+
+function readChangelogReleaseBody() {
+  const body = fs.readFileSync(path.join(ROOT, "CHANGELOG.md"), "utf8");
+  const heading = `## Changes in \`v${VERSION}:`;
+  const start = body.indexOf(heading);
+  if (start < 0) {
+    throw new Error(`CHANGELOG.md has no ${heading} section.`);
   }
+  const next = body.indexOf("\n## Changes in `", start + heading.length);
+  const section = body.slice(start, next < 0 ? body.length : next).trim();
+  if (!section.slice(heading.length).trim()) {
+    throw new Error(`CHANGELOG.md section for ${heading} is empty.`);
+  }
+  return body;
+}
 
-  // Prefer a draft (electron-builder publishes into drafts); fall back to any.
-  const draft = matching.find((r) => r.draft);
-  return draft || matching[0];
+function isRetryable(error) {
+  return (
+    [408, 409, 425, 429, 500, 502, 503, 504].includes(
+      githubStatusCode(error?.message),
+    ) ||
+    [
+      "ETIMEDOUT",
+      "ECONNRESET",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "ECONNREFUSED",
+    ].includes(error?.code) ||
+    /timeout|socket hang up|aborted/i.test(String(error?.message || ""))
+  );
+}
+
+function request(method, endpoint, body) {
+  return githubApi(method, endpoint, body);
+}
+
+async function requestWithRetry(method, endpoint, body) {
+  const attempts = Math.max(
+    1,
+    Number.parseInt(process.env.GH_REQUEST_RETRIES || "3", 10),
+  );
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return request(method, endpoint, body);
+    } catch (error) {
+      if (attempt >= attempts || !isRetryable(error)) throw error;
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          attempt *
+            Math.max(
+              100,
+              Number.parseInt(
+                process.env.GH_REQUEST_RETRY_DELAY_MS || "1500",
+                10,
+              ),
+            ),
+        ),
+      );
+    }
+  }
+}
+
+async function listReleases() {
+  const releases = [];
+  for (let page = 1; ; page += 1) {
+    const batch = await requestWithRetry(
+      "GET",
+      `/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=100&page=${page}`,
+    );
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    releases.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return releases;
+}
+
+function matchingReleases(releases) {
+  assertNoMisnamedVersionDrafts(releases, TAG);
+  return releases.filter((release) => isExpectedRelease(release, TAG, VERSION));
+}
+
+function assertCommit(release, commit, env = process.env, log = console) {
+  if (release?.target_commitish === commit) return release;
+  if (isExplicitTruthy(env.FORCE_UPLOAD)) {
+    log.warn(
+      `WARNING: Draft ${TAG} targets ${release?.target_commitish || "unknown"}, not HEAD ${commit}. FORCE_UPLOAD=1 bypassing commit check.`,
+    );
+    return release;
+  }
+  throw new Error(
+    `Draft ${TAG} targets ${release?.target_commitish || "unknown"}, not HEAD ${commit}. Delete or retarget stale draft before continuing. Or set FORCE_UPLOAD=1 to bypass.`,
+  );
+}
+
+async function syncDraft(release, body, commit) {
+  const updated = await requestWithRetry(
+    "PATCH",
+    `/repos/${REPO_OWNER}/${REPO_NAME}/releases/${release.id}`,
+    {
+      body,
+      draft: true,
+      name: VERSION,
+      prerelease: IS_PRERELEASE,
+      tag_name: TAG,
+      target_commitish: commit,
+    },
+  );
+  return assertCommit(
+    assertExpectedRelease(updated, TAG, VERSION, "Updated draft release"),
+    commit,
+  );
 }
 
 async function ensureDraftRelease() {
-  console.log('Ensuring draft release exists for ' + TAG_NAME + '...');
-
-  const existing = await findExistingRelease();
-  if (existing) {
-    console.log(
-      '   Draft already exists: ' +
-        (existing.name || TAG_NAME) +
-        ' (id ' +
-        existing.id +
-        ', ' +
-        (existing.assets ? existing.assets.length : 0) +
-        ' assets) - skipping create.'
-    );
-    return existing;
+  const commit = currentCommit();
+  const body = readChangelogReleaseBody();
+  const matches = matchingReleases(await listReleases());
+  const drafts = matches.filter((release) => release.draft);
+  if (drafts.length > 1) {
+    throw new Error(`Multiple draft releases exist for ${TAG}.`);
   }
-
-  console.log('   No release found. Creating draft...');
-  try {
-    const release = await githubRequestWithRetry(
-      'POST',
-      '/repos/' + REPO_OWNER + '/' + REPO_NAME + '/releases',
-      {
-        // Match electron-builder's createRelease() so it reuses this draft:
-        // tag = "v" + version, name defaults to the version, draft:true.
-        tag_name: TAG_NAME,
-        name: VERSION,
-        draft: true,
-        prerelease: IS_PRERELEASE,
-      }
-    );
-    console.log('   Created draft release: ' + (release.name || TAG_NAME) + ' (id ' + release.id + ')');
-    return release;
-  } catch (error) {
-    // Another concurrent run may have created it (422 already_exists) - re-fetch.
-    if (error.statusCode === 422) {
-      console.log('   Create returned 422; re-checking for existing draft...');
-      await sleep(2000);
-      const afterRetry = await findExistingRelease();
-      if (afterRetry) {
-        console.log('   Found existing draft after retry: id ' + afterRetry.id);
-        return afterRetry;
-      }
+  if (drafts[0])
+    return syncDraft(assertCommit(drafts[0], commit), body, commit);
+  if (matches.some((release) => !release.draft)) {
+    throw new Error(`Release ${TAG} is already published.`);
+  }
+  const created = await requestWithRetry(
+    "POST",
+    `/repos/${REPO_OWNER}/${REPO_NAME}/releases`,
+    {
+      body,
+      draft: true,
+      name: VERSION,
+      prerelease: IS_PRERELEASE,
+      tag_name: TAG,
+      target_commitish: commit,
+    },
+  ).catch(async (error) => {
+    if (githubStatusCode(error?.message) !== 422 && error?.statusCode !== 422) {
+      throw error;
     }
-    throw error;
-  }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const afterRetry = matchingReleases(await listReleases()).find(
+      (release) => release.draft,
+    );
+    if (!afterRetry) throw error;
+    return afterRetry;
+  });
+  return assertCommit(
+    assertExpectedRelease(created, TAG, VERSION, "Created draft release"),
+    commit,
+  );
 }
 
 async function waitForDraftRelease() {
   const deadline = Date.now() + WAIT_TIMEOUT_MS;
-  console.log(
-    'Waiting for draft release ' +
-      TAG_NAME +
-      ' (created by the Windows machine); will NOT create it here...'
-  );
-
-  let attempt = 0;
+  const commit = currentCommit();
   for (;;) {
-    attempt += 1;
-    const existing = await findExistingRelease();
-    if (existing) {
-      console.log(
-        '   Found draft: ' +
-          (existing.name || TAG_NAME) +
-          ' (id ' +
-          existing.id +
-          ', ' +
-          (existing.assets ? existing.assets.length : 0) +
-          ' assets). Proceeding.'
+    let matches;
+    try {
+      matches = matchingReleases(await listReleases());
+    } catch (error) {
+      if (!isRetryable(error) || Date.now() >= deadline) throw error;
+      await new Promise((resolve) =>
+        setTimeout(resolve, WAIT_POLL_INTERVAL_MS),
       );
-      return existing;
+      continue;
     }
-
+    const drafts = matches.filter((release) => release.draft);
+    if (drafts.length > 1) {
+      throw new Error(`Multiple draft releases exist for ${TAG}.`);
+    }
+    if (drafts[0]) {
+      return syncDraft(
+        assertCommit(drafts[0], commit),
+        readChangelogReleaseBody(),
+        commit,
+      );
+    }
+    if (matches.some((release) => !release.draft)) {
+      throw new Error(`Release ${TAG} is already published.`);
+    }
     if (Date.now() >= deadline) {
       throw new Error(
-        'Timed out after ' +
-          Math.round(WAIT_TIMEOUT_MS / 1000) +
-          's waiting for draft ' +
-          TAG_NAME +
-          '. Run "npm run release:draft" on the Windows machine first (or run it here once), then retry.'
+        `Timed out waiting for draft ${TAG}. Run npm run release:draft on Windows first.`,
       );
     }
-
-    console.log(
-      '   Draft not found yet (attempt ' +
-        attempt +
-        '); re-checking in ' +
-        Math.round(WAIT_POLL_INTERVAL_MS / 1000) +
-        's...'
-    );
-    await sleep(WAIT_POLL_INTERVAL_MS);
+    await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_INTERVAL_MS));
   }
 }
 
 async function main() {
-  if (!GH_TOKEN) {
-    if (WAIT_MODE) {
-      console.warn('⚠ WARN: GH_TOKEN not set - cannot check for the draft release. Skipping wait.');
-    } else {
-      console.warn('⚠ WARN: GH_TOKEN not set - cannot pre-create draft release. Skipping.');
-      console.warn('   (electron-builder will create the draft itself, but the duplicate-draft');
-      console.warn('    race may reoccur without a pre-created draft.)');
-    }
-    return;
-  }
-
-  if (WAIT_MODE) {
-    await waitForDraftRelease();
-  } else {
-    await ensureDraftRelease();
-  }
+  assertStableReleaseOverridesAllowed(process.env, VERSION);
+  assertReleaseToolVersions(packageJson, {
+    environment: process.env,
+    root: ROOT,
+  });
+  assertGitHubCliAuthenticated();
+  verifySession();
+  if (WAIT_MODE) await waitForDraftRelease();
+  else await ensureDraftRelease();
 }
 
-main().catch((error) => {
-  const message = error && error.message ? error.message : String(error);
-  console.error('✗ ERROR: Failed to ensure draft release: ' + message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(
+      `release:draft failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  assertCommit,
+  currentCommit,
+  ensureDraftRelease,
+  matchingReleases,
+  readChangelogReleaseBody,
+  waitForDraftRelease,
+};

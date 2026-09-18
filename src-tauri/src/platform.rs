@@ -44,30 +44,7 @@ pub(crate) fn detect_update_mode() -> &'static str {
 
 #[cfg(target_os = "linux")]
 fn linux_native_updater_supported() -> bool {
-    if std::env::var_os("APPIMAGE").is_some() {
-        return true;
-    }
-
-    let Ok(executable_path) = std::env::current_exe() else {
-        return false;
-    };
-
-    package_query_succeeded("dpkg-query", &["-S", "--"], &executable_path)
-        || package_query_succeeded("rpm", &["-qf"], &executable_path)
-}
-
-#[cfg(target_os = "linux")]
-fn package_query_succeeded(
-    program: &str,
-    args: &[&str],
-    executable_path: &std::path::Path,
-) -> bool {
-    Command::new(program)
-        .args(args)
-        .arg(executable_path)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    std::env::var_os("APPIMAGE").is_some()
 }
 
 #[tauri::command]
@@ -78,10 +55,58 @@ pub(crate) fn updater_support_info() -> UpdaterSupportInfo {
     }
 }
 
+/// True when macOS is running a translocated copy (launched from a mounted
+/// DMG). The mounted copy is read-only, so the updater's rename-replace fails
+/// with EROFS; the UI tells the user to move the app to /Applications.
+#[tauri::command]
+pub(crate) fn is_app_translocated() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_foundation::base::{CFTypeRef, TCFType};
+        use core_foundation::url::CFURL;
+
+        type Boolean = u8;
+        #[link(name = "Security", kind = "framework")]
+        extern "C" {
+            fn SecTranslocateIsTranslocatedURL(
+                url: CFTypeRef,
+                is_translocated: *mut Boolean,
+                error: *mut CFTypeRef,
+            ) -> Boolean;
+        }
+
+        let executable = std::env::current_exe().map_err(|err| err.to_string())?;
+        let url = CFURL::from_path(&executable, false)
+            .ok_or_else(|| "Failed to build a URL for the app executable.".to_string())?;
+        let mut translocated: Boolean = 0;
+        let result = unsafe {
+            SecTranslocateIsTranslocatedURL(
+                url.as_CFTypeRef(),
+                &mut translocated,
+                std::ptr::null_mut(),
+            )
+        };
+        Ok(result != 0 && translocated != 0)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
+}
+
 #[tauri::command]
 pub(crate) fn open_external_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://") {
         return Err("Only https:// URLs are allowed".to_string());
+    }
+    // Reject anything a shell handler could interpret as more than one argument
+    // or as an embedded newline. The scheme check alone does not cover these.
+    if url.len() > 2048 {
+        return Err("URL is too long".to_string());
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("URL must not contain whitespace or control characters".to_string());
     }
 
     let status = if cfg!(target_os = "windows") {
@@ -105,6 +130,12 @@ pub(crate) fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
+/// Reveal a folder in the system file manager.
+///
+/// Restricted to directories on purpose. Handing an arbitrary existing file to
+/// `explorer` / `open` / `xdg-open` means the shell's default handler runs it,
+/// which turned this command into a local code-execution primitive reachable
+/// from the webview. The only caller ever needed to open a folder.
 #[tauri::command]
 pub(crate) fn open_local_path(path: String) -> Result<(), String> {
     let trimmed = path.trim();
@@ -118,10 +149,35 @@ pub(crate) fn open_local_path(path: String) -> Result<(), String> {
     if !parsed.exists() {
         return Err(format!("Path does not exist: {}", parsed.display()));
     }
+    if !parsed.is_dir() {
+        return Err(format!(
+            "Only folders can be opened, not individual files: {}",
+            parsed.display()
+        ));
+    }
+    if parsed
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Refusing to open a symbolic link: {}",
+            parsed.display()
+        ));
+    }
 
-    let status = if cfg!(target_os = "windows") {
-        Command::new("explorer").arg(&parsed).status()
-    } else if cfg!(target_os = "macos") {
+    if cfg!(target_os = "windows") {
+        // `explorer.exe` is widely observed to return a non-zero exit code even
+        // when it opened the window successfully, so its status is not a usable
+        // signal. Only a spawn failure is treated as an error here.
+        Command::new("explorer")
+            .arg(&parsed)
+            .status()
+            .map_err(|e| format!("Failed to open local path: {}", e))?;
+        return Ok(());
+    }
+
+    let status = if cfg!(target_os = "macos") {
         Command::new("open").arg(&parsed).status()
     } else {
         Command::new("xdg-open").arg(&parsed).status()
@@ -171,5 +227,40 @@ mod tests {
         let result = open_local_path("relative/path".to_string());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("absolute"));
+    }
+
+    #[test]
+    fn open_external_url_rejects_whitespace_and_control_chars() {
+        for candidate in [
+            "https://example.com/a b",
+            "https://example.com/\nrundll32",
+            "https://example.com/\ttab",
+        ] {
+            let result = open_external_url(candidate.to_string());
+            assert!(result.is_err(), "should reject {:?}", candidate);
+        }
+    }
+
+    #[test]
+    fn open_local_path_rejects_files() {
+        // Only folders may be revealed; handing a file to the OS handler would
+        // execute it.
+        let mut file = std::env::temp_dir();
+        file.push(format!("s3-sidekick-open-guard-{}.txt", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+
+        let result = open_local_path(file.to_string_lossy().to_string());
+        let _ = std::fs::remove_file(&file);
+
+        let err = result.expect_err("a file must be rejected");
+        assert!(err.contains("Only folders"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn open_local_path_rejects_nonexistent() {
+        let mut missing = std::env::temp_dir();
+        missing.push(format!("s3-sidekick-absent-{}", std::process::id()));
+        let result = open_local_path(missing.to_string_lossy().to_string());
+        assert!(result.is_err());
     }
 }

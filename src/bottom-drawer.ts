@@ -1,20 +1,57 @@
 import { $ } from "./utils.ts";
 import { markActivitySeen } from "./activity-log.ts";
+import { handleTabListArrowKey } from "./app-layout.ts";
 
 export type DrawerTab = "activity" | "transfers";
 
 let currentTab: DrawerTab = "activity";
 let minimized = false;
-const _parsedHeight = parseInt(
-  localStorage.getItem("drawer-height") ?? "240",
-  10,
-);
-let drawerHeight =
-  Number.isFinite(_parsedHeight) && _parsedHeight >= 120 ? _parsedHeight : 240;
+let focusBeforeDrawer: HTMLElement | null = null;
+function readStoredDrawerHeight(): number {
+  try {
+    const parsed = parseInt(localStorage.getItem("drawer-height") ?? "240", 10);
+    return Number.isFinite(parsed) && parsed >= 120 ? parsed : 240;
+  } catch {
+    return 240;
+  }
+}
+let drawerHeight = readStoredDrawerHeight();
 
 const STORAGE_KEY = "drawer-height";
 const MIN_HEIGHT = 120;
 const MAX_RATIO = 0.5;
+
+function maxDrawerHeight(): number {
+  return Math.round(window.innerHeight * MAX_RATIO);
+}
+
+function effectiveDrawerHeight(): number {
+  return Math.min(maxDrawerHeight(), Math.max(MIN_HEIGHT, drawerHeight));
+}
+
+function drawerToggle(tab: DrawerTab): HTMLElement | null {
+  return document.getElementById(
+    tab === "activity" ? "activity-toggle" : "transfer-toggle",
+  );
+}
+
+function syncMinimizeButton(): void {
+  const button = document.getElementById(
+    "drawer-minimize",
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  const expanded = !minimized;
+  button.setAttribute("aria-expanded", String(expanded));
+  button.setAttribute(
+    "aria-label",
+    expanded ? "Minimize panel" : "Restore panel",
+  );
+  button.title = expanded ? "Minimize" : "Restore";
+}
+
+function applyExpandedHeight(drawer: HTMLDivElement): void {
+  drawer.style.height = `${effectiveDrawerHeight()}px`;
+}
 
 export function initDrawer(): void {
   const drawer = document.getElementById(
@@ -22,14 +59,20 @@ export function initDrawer(): void {
   ) as HTMLDivElement | null;
   if (!drawer) return;
 
-  drawer.style.height = `${drawerHeight}px`;
+  applyExpandedHeight(drawer);
+  syncMinimizeButton();
 
-  $("drawer-tab-activity").addEventListener("click", () =>
-    switchDrawerTab("activity"),
-  );
-  $("drawer-tab-transfers").addEventListener("click", () =>
-    switchDrawerTab("transfers"),
-  );
+  const activityTab = $("drawer-tab-activity");
+  const transfersTab = $("drawer-tab-transfers");
+  activityTab.addEventListener("click", () => switchDrawerTab("activity"));
+  transfersTab.addEventListener("click", () => switchDrawerTab("transfers"));
+  drawer
+    .querySelector<HTMLElement>(".bottom-drawer__tabs")
+    ?.addEventListener("keydown", (event) => {
+      handleTabListArrowKey(event, [activityTab, transfersTab], (tab) =>
+        switchDrawerTab(tab === activityTab ? "activity" : "transfers"),
+      );
+    });
   $("drawer-close").addEventListener("click", closeDrawer);
   $("drawer-minimize").addEventListener("click", toggleMinimized);
 
@@ -48,10 +91,24 @@ export function openDrawer(tab: DrawerTab): void {
   ) as HTMLDivElement | null;
   if (!drawer) return;
 
+  if (drawer.hidden) {
+    const active = document.activeElement;
+    focusBeforeDrawer =
+      active instanceof HTMLElement &&
+      active !== document.body &&
+      !drawer.contains(active)
+        ? active
+        : drawerToggle(tab);
+  }
+
   minimized = false;
   drawer.classList.remove("bottom-drawer--minimized");
   drawer.hidden = false;
-  drawer.style.height = `${drawerHeight}px`;
+  drawer
+    .querySelector<HTMLElement>(".bottom-drawer__resize-handle")
+    ?.removeAttribute("hidden");
+  applyExpandedHeight(drawer);
+  syncMinimizeButton();
   switchDrawerTab(tab);
   syncToggleButtons(true);
 }
@@ -62,10 +119,26 @@ export function closeDrawer(): void {
   ) as HTMLDivElement | null;
   if (!drawer) return;
 
+  const active = document.activeElement;
+  const focusWasInDrawer =
+    active instanceof HTMLElement && drawer.contains(active);
   drawer.hidden = true;
   minimized = false;
   drawer.classList.remove("bottom-drawer--minimized");
+  drawer
+    .querySelector<HTMLElement>(".bottom-drawer__resize-handle")
+    ?.removeAttribute("hidden");
+  syncMinimizeButton();
   syncToggleButtons(false);
+
+  const restore = focusBeforeDrawer;
+  focusBeforeDrawer = null;
+  if (
+    restore?.isConnected &&
+    (focusWasInDrawer || active === document.body || active === null)
+  ) {
+    restore.focus();
+  }
 }
 
 export function isDrawerOpen(): boolean {
@@ -93,8 +166,37 @@ function toggleMinimized(): void {
   ) as HTMLDivElement | null;
   if (!drawer) return;
 
+  const active = document.activeElement;
+  const body = drawer.querySelector<HTMLElement>(".bottom-drawer__body");
+  const handle = drawer.querySelector<HTMLElement>(
+    ".bottom-drawer__resize-handle",
+  );
+
   minimized = !minimized;
   drawer.classList.toggle("bottom-drawer--minimized", minimized);
+  if (minimized) {
+    // The inline expanded height would beat the CSS `height: auto` rule and
+    // leave the body-sized drawer visible. Removing it lets the header define
+    // the collapsed height while drawerHeight retains the preferred size.
+    drawer.style.height = "";
+    if (handle) handle.hidden = true;
+    if (
+      active instanceof HTMLElement &&
+      ((body?.contains(active) ?? false) || active === handle)
+    ) {
+      document
+        .getElementById(
+          currentTab === "activity"
+            ? "drawer-tab-activity"
+            : "drawer-tab-transfers",
+        )
+        ?.focus();
+    }
+  } else {
+    if (handle) handle.hidden = false;
+    applyExpandedHeight(drawer);
+  }
+  syncMinimizeButton();
 }
 
 export function switchDrawerTab(tab: DrawerTab): void {
@@ -137,6 +239,14 @@ export function updateClearButton(): void {
     btn.textContent = "Clear done";
     btn.style.display = "";
   }
+  // Export only exports the activity log; hide it while transfers are shown
+  // instead of leaving a button that does nothing.
+  const exportBtn = document.getElementById(
+    "drawer-export",
+  ) as HTMLButtonElement | null;
+  if (exportBtn) {
+    exportBtn.style.display = currentTab === "activity" ? "" : "none";
+  }
 }
 
 function syncToggleButtons(open: boolean): void {
@@ -161,23 +271,23 @@ function syncToggleButtons(open: boolean): void {
 function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {
   let startY = 0;
   let startHeight = 0;
-  const maxHeight = () => Math.round(window.innerHeight * MAX_RATIO);
 
   const updateHandleAria = () => {
+    handle.setAttribute("aria-orientation", "horizontal");
     handle.setAttribute("aria-valuemin", String(MIN_HEIGHT));
-    handle.setAttribute("aria-valuemax", String(maxHeight()));
-    handle.setAttribute("aria-valuenow", String(Math.round(drawerHeight)));
-    handle.setAttribute("aria-valuetext", `${Math.round(drawerHeight)} pixels`);
+    handle.setAttribute("aria-valuemax", String(maxDrawerHeight()));
+    handle.setAttribute("aria-valuenow", String(effectiveDrawerHeight()));
+    handle.setAttribute("aria-valuetext", `${effectiveDrawerHeight()} pixels`);
   };
 
   function onMouseMove(e: MouseEvent) {
     const delta = startY - e.clientY;
     const newHeight = Math.min(
-      window.innerHeight * MAX_RATIO,
+      maxDrawerHeight(),
       Math.max(MIN_HEIGHT, startHeight + delta),
     );
     drawerHeight = Math.round(newHeight);
-    drawer.style.height = `${drawerHeight}px`;
+    if (!minimized) applyExpandedHeight(drawer);
     updateHandleAria();
   }
 
@@ -186,7 +296,13 @@ function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {
     document.removeEventListener("mouseup", onMouseUp);
     document.body.style.userSelect = "";
     document.body.style.cursor = "";
-    localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+    if (!minimized) {
+      try {
+        localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+      } catch {
+        // Storage unavailable (private mode); height persistence is best-effort.
+      }
+    }
     updateHandleAria();
   }
 
@@ -211,16 +327,29 @@ function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {
     } else if (e.key === "Home") {
       nextHeight = MIN_HEIGHT;
     } else if (e.key === "End") {
-      nextHeight = maxHeight();
+      nextHeight = maxDrawerHeight();
     }
 
     if (nextHeight === null) return;
     e.preventDefault();
-    drawerHeight = Math.min(maxHeight(), Math.max(MIN_HEIGHT, nextHeight));
-    drawer.style.height = `${drawerHeight}px`;
-    localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+    drawerHeight = Math.min(
+      maxDrawerHeight(),
+      Math.max(MIN_HEIGHT, nextHeight),
+    );
+    if (!minimized) {
+      applyExpandedHeight(drawer);
+      try {
+        localStorage.setItem(STORAGE_KEY, String(drawerHeight));
+      } catch {
+        // Storage unavailable (private mode); height persistence is best-effort.
+      }
+    }
     updateHandleAria();
   });
 
   updateHandleAria();
+  window.addEventListener("resize", () => {
+    if (!drawer.hidden && !minimized) applyExpandedHeight(drawer);
+    updateHandleAria();
+  });
 }

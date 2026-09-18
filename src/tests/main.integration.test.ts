@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ConnectionSnapshot } from "../connection.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
@@ -19,12 +20,25 @@ const mockMarkSupportPromptDismissed = vi.fn<() => Promise<void>>();
 const mockIsSupportPromptDismissed = vi.fn();
 
 const mockConnect = vi.fn<(...args: unknown[]) => Promise<string>>();
-const mockDisconnect = vi.fn<() => Promise<void>>();
+const mockDisconnect = vi.fn<() => Promise<boolean>>();
 const mockSaveConnection = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockLoadConnection = vi.fn<() => Promise<unknown>>();
 const mockRefreshBuckets = vi.fn<() => Promise<void>>();
-const mockRefreshObjects = vi.fn<(...args: unknown[]) => Promise<void>>();
+const mockRefreshObjects = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockLoadMoreObjects = vi.fn<() => Promise<void>>();
+const mockFinishConnecting = vi.fn<(generation: number) => void>();
+const mockCaptureConnectionSnapshot = vi.fn<() => ConnectionSnapshot>();
+const mockConnectionSnapshotChanged = vi.fn<
+  (snap: ConnectionSnapshot) => boolean
+>(() => false);
+const mockConnectionIdentityChanged = vi.fn<
+  (
+    snap: Pick<
+      ConnectionSnapshot,
+      "connectionId" | "connectionIdentity" | "endpoint" | "bucket"
+    >,
+  ) => boolean
+>(() => false);
 
 const mockRenderBucketList = vi.fn();
 const mockRenderObjectTable = vi.fn();
@@ -36,6 +50,8 @@ const mockHandleRowClick = vi.fn();
 const mockHandleSelectAll = vi.fn();
 const mockClearSelection = vi.fn();
 const mockUpdateSelectionUI = vi.fn();
+const mockClearFilter = vi.fn();
+const mockUpdateFilterClearButton = vi.fn();
 const mockGetSelectableKeys = vi.fn();
 const mockToggleSort = vi.fn();
 const mockNavigateUp = vi.fn<() => Promise<void>>();
@@ -43,6 +59,8 @@ const mockNavigateBack = vi.fn<() => Promise<void>>();
 const mockNavigateForward = vi.fn<() => Promise<void>>();
 const mockClearNavHistory = vi.fn();
 const mockPruneStaleSelection = vi.fn();
+const mockReadLastBucket = vi.fn<() => string | null>(() => null);
+const mockHandleBucketListKeydown = vi.fn();
 
 const mockInitUpdater = vi.fn<() => Promise<void>>();
 const mockAutoCheckUpdates = vi.fn<() => Promise<void>>();
@@ -62,6 +80,10 @@ const mockHideContextMenu = vi.fn();
 
 const mockOpenInfoPanel = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockCloseInfoPanel = vi.fn();
+const mockRequestCloseInfoPanel = vi.fn(async () => {
+  mockCloseInfoPanel();
+  return true;
+});
 const mockSaveInfoPanel = vi.fn<() => Promise<void>>();
 const mockSwitchTab = vi.fn();
 
@@ -70,6 +92,9 @@ const mockClearCompletedTransfers = vi.fn();
 const mockEnqueuePaths = vi.fn();
 const mockSetTransferCompleteHandler = vi.fn();
 const mockInitTransferQueueUI = vi.fn<() => Promise<void>>();
+const mockPrepareTransferRecovery = vi.fn();
+const mockRecoverPendingTransfers = vi.fn<() => Promise<void>>();
+const mockResumeRecoveredTransfersAfterConnect = vi.fn<() => Promise<void>>();
 const mockEnqueueFiles = vi.fn();
 const mockDisposeTransferQueueUI = vi.fn<() => Promise<void>>();
 const mockEnqueueDownloads = vi.fn();
@@ -105,6 +130,8 @@ const mockIsDialogActive = vi.fn();
 const mockInitPalette = vi.fn();
 const mockRegisterCommands = vi.fn();
 const mockIsPaletteOpen = vi.fn();
+const mockOpenPalette = vi.fn();
+const mockClosePalette = vi.fn();
 
 const mockSetSize = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockGetCurrentWindow = vi.fn();
@@ -182,6 +209,24 @@ vi.mock("../connection.ts", () => ({
   refreshBuckets: mockRefreshBuckets,
   refreshObjects: mockRefreshObjects,
   loadMoreObjects: mockLoadMoreObjects,
+  invokeS3: (cmd: string, args: Record<string, unknown> = {}) =>
+    mockInvoke(cmd, { ...args, connectionId: "test-connection" }),
+  invokeS3For: (
+    connectionId: string,
+    cmd: string,
+    args: Record<string, unknown> = {},
+  ) => mockInvoke(cmd, { ...args, connectionId }),
+  currentConnectionGeneration: () => 1,
+  finishConnecting: (generation: number) => mockFinishConnecting(generation),
+  captureConnectionSnapshot: () => mockCaptureConnectionSnapshot(),
+  connectionSnapshotChanged: (snap: ConnectionSnapshot) =>
+    mockConnectionSnapshotChanged(snap),
+  connectionIdentityChanged: (
+    snap: Pick<
+      ConnectionSnapshot,
+      "connectionId" | "connectionIdentity" | "endpoint" | "bucket"
+    >,
+  ) => mockConnectionIdentityChanged(snap),
 }));
 
 vi.mock("../browser.ts", () => ({
@@ -194,16 +239,23 @@ vi.mock("../browser.ts", () => ({
   selectBucket: mockSelectBucket,
   showEmptyState: mockShowEmptyState,
   handleRowClick: mockHandleRowClick,
+  handleBucketListKeydown: mockHandleBucketListKeydown,
   handleSelectAll: mockHandleSelectAll,
   clearSelection: mockClearSelection,
+  clearFilter: mockClearFilter,
+  updateFilterClearButton: mockUpdateFilterClearButton,
+  setLastClickedKey: vi.fn(),
   updateSelectionUI: mockUpdateSelectionUI,
+  invalidateInspectorSelectionSync: vi.fn(),
   getSelectableKeys: mockGetSelectableKeys,
   toggleSort: mockToggleSort,
   navigateUp: mockNavigateUp,
   navigateBack: mockNavigateBack,
   navigateForward: mockNavigateForward,
+  navigateToLocationPath: vi.fn(async () => true),
   clearNavHistory: mockClearNavHistory,
   pruneStaleSelection: mockPruneStaleSelection,
+  readLastBucket: mockReadLastBucket,
 }));
 
 vi.mock("../updater.ts", () => ({
@@ -237,6 +289,7 @@ vi.mock("../context-menu.ts", () => ({
 vi.mock("../info-panel.ts", () => ({
   openInfoPanel: mockOpenInfoPanel,
   closeInfoPanel: mockCloseInfoPanel,
+  requestCloseInfoPanel: mockRequestCloseInfoPanel,
   saveInfoPanel: mockSaveInfoPanel,
   switchTab: mockSwitchTab,
 }));
@@ -247,6 +300,10 @@ vi.mock("../transfers.ts", () => ({
   enqueuePaths: mockEnqueuePaths,
   setTransferCompleteHandler: mockSetTransferCompleteHandler,
   initTransferQueueUI: mockInitTransferQueueUI,
+  prepareTransferRecovery: mockPrepareTransferRecovery,
+  recoverPendingTransfers: mockRecoverPendingTransfers,
+  resumeRecoveredTransfersAfterConnect:
+    mockResumeRecoveredTransfersAfterConnect,
   enqueueFiles: mockEnqueueFiles,
   disposeTransferQueueUI: mockDisposeTransferQueueUI,
   enqueueDownloads: mockEnqueueDownloads,
@@ -295,6 +352,8 @@ vi.mock("../command-palette.ts", () => ({
   initPalette: mockInitPalette,
   registerCommands: mockRegisterCommands,
   isPaletteOpen: mockIsPaletteOpen,
+  openPalette: mockOpenPalette,
+  closePalette: mockClosePalette,
 }));
 
 const mockShouldShowSetupWizard = vi.fn(() => false);
@@ -394,6 +453,10 @@ describe("main integration", () => {
     mockRefreshBuckets.mockReset();
     mockRefreshObjects.mockReset();
     mockLoadMoreObjects.mockReset();
+    mockFinishConnecting.mockReset();
+    mockCaptureConnectionSnapshot.mockReset();
+    mockConnectionSnapshotChanged.mockReset();
+    mockConnectionIdentityChanged.mockReset();
     mockRenderBucketList.mockReset();
     mockRenderObjectTable.mockReset();
     mockRenderBreadcrumb.mockReset();
@@ -404,6 +467,8 @@ describe("main integration", () => {
     mockHandleSelectAll.mockReset();
     mockClearSelection.mockReset();
     mockUpdateSelectionUI.mockReset();
+    mockClearFilter.mockReset();
+    mockUpdateFilterClearButton.mockReset();
     mockGetSelectableKeys.mockReset();
     mockToggleSort.mockReset();
     mockNavigateUp.mockReset();
@@ -425,6 +490,11 @@ describe("main integration", () => {
     mockHideContextMenu.mockReset();
     mockOpenInfoPanel.mockReset();
     mockCloseInfoPanel.mockReset();
+    mockRequestCloseInfoPanel.mockReset();
+    mockRequestCloseInfoPanel.mockImplementation(async () => {
+      mockCloseInfoPanel();
+      return true;
+    });
     mockSaveInfoPanel.mockReset();
     mockSwitchTab.mockReset();
     mockToggleTransferQueue.mockReset();
@@ -432,6 +502,9 @@ describe("main integration", () => {
     mockEnqueuePaths.mockReset();
     mockSetTransferCompleteHandler.mockReset();
     mockInitTransferQueueUI.mockReset();
+    mockPrepareTransferRecovery.mockReset();
+    mockRecoverPendingTransfers.mockReset();
+    mockResumeRecoveredTransfersAfterConnect.mockReset();
     mockEnqueueFiles.mockReset();
     mockDisposeTransferQueueUI.mockReset();
     mockEnqueueDownloads.mockReset();
@@ -459,10 +532,14 @@ describe("main integration", () => {
     mockInitPalette.mockReset();
     mockRegisterCommands.mockReset();
     mockIsPaletteOpen.mockReset();
+    mockOpenPalette.mockReset();
+    mockClosePalette.mockReset();
 
     mockInvoke.mockImplementation(async (cmd, payload) => {
       if (cmd === "get_platform_info") return "windows";
-      if (cmd === "delete_objects") return 1;
+      if (cmd === "delete_objects") {
+        return { deleted: 1, failed: 0, incomplete: false, errors: [] };
+      }
       if (cmd === "build_object_url") {
         return `https://example.com/${(payload as { key?: string }).key ?? ""}`;
       }
@@ -470,6 +547,8 @@ describe("main integration", () => {
         return `https://signed/${(payload as { key?: string }).key ?? ""}`;
       }
       if (cmd === "rename_object") return undefined;
+      if (cmd === "object_exists") return false;
+      if (cmd === "path_exists") return false;
       if (cmd === "create_folder") return undefined;
       if (cmd === "download_object") return 128;
       if (cmd === "list_local_files_recursive") {
@@ -497,7 +576,7 @@ describe("main integration", () => {
     mockMarkSupportPromptDismissed.mockResolvedValue(undefined);
     mockIsSupportPromptDismissed.mockReturnValue(false);
     mockConnect.mockResolvedValue("us-west-2");
-    mockDisconnect.mockResolvedValue(undefined);
+    mockDisconnect.mockResolvedValue(true);
     mockSaveConnection.mockResolvedValue(undefined);
     mockLoadConnection.mockResolvedValue({
       endpoint: "https://saved.example.com",
@@ -506,7 +585,7 @@ describe("main integration", () => {
       secret_key: "saved-secret",
     });
     mockRefreshBuckets.mockResolvedValue(undefined);
-    mockRefreshObjects.mockResolvedValue(undefined);
+    mockRefreshObjects.mockResolvedValue(true);
     mockLoadMoreObjects.mockResolvedValue(undefined);
     mockNavigateToFolder.mockResolvedValue(undefined);
     mockSelectBucket.mockResolvedValue(undefined);
@@ -520,6 +599,8 @@ describe("main integration", () => {
     mockAddBookmark.mockResolvedValue(true);
     mockLoadBookmarks.mockResolvedValue(undefined);
     mockInitTransferQueueUI.mockResolvedValue(undefined);
+    mockRecoverPendingTransfers.mockResolvedValue(undefined);
+    mockResumeRecoveredTransfersAfterConnect.mockResolvedValue(undefined);
     mockDisposeTransferQueueUI.mockResolvedValue(undefined);
     mockCanPreview.mockReturnValue(true);
     mockOpenPreview.mockResolvedValue(undefined);
@@ -540,10 +621,61 @@ describe("main integration", () => {
 
     const { state } = await import("../state.ts");
     state.connected = false;
+    state.connecting = false;
     state.currentBucket = "";
     state.currentPrefix = "";
     state.platformName = "";
     state.selectedKeys.clear();
+    mockFinishConnecting.mockImplementation(() => {
+      state.connecting = false;
+    });
+    mockCaptureConnectionSnapshot.mockImplementation(() => {
+      if (
+        !state.connected ||
+        !state.connectionId ||
+        !state.connectionIdentity ||
+        !state.currentBucket
+      ) {
+        throw new Error("Not connected");
+      }
+      return {
+        connectionId: state.connectionId,
+        connectionIdentity: state.connectionIdentity,
+        endpoint: state.endpoint,
+        bucket: state.currentBucket,
+        prefix: state.currentPrefix,
+      };
+    });
+    mockConnectionSnapshotChanged.mockImplementation(
+      (snap: ConnectionSnapshot) =>
+        !state.connected ||
+        state.connectionId !== snap.connectionId ||
+        state.connectionIdentity !== snap.connectionIdentity ||
+        state.endpoint !== snap.endpoint ||
+        state.currentBucket !== snap.bucket ||
+        state.currentPrefix !== snap.prefix,
+    );
+    mockConnectionIdentityChanged.mockImplementation(
+      (
+        snap: Pick<
+          ConnectionSnapshot,
+          "connectionId" | "connectionIdentity" | "endpoint" | "bucket"
+        >,
+      ) =>
+        !state.connected ||
+        state.connectionId !== snap.connectionId ||
+        state.connectionIdentity !== snap.connectionIdentity ||
+        state.endpoint !== snap.endpoint ||
+        state.currentBucket !== snap.bucket,
+    );
+  });
+
+  afterEach(async () => {
+    const { state } = await import("../state.ts");
+    if (state.statusTimeout !== undefined) {
+      clearTimeout(state.statusTimeout);
+      state.statusTimeout = undefined;
+    }
   });
 
   it("initializes app and wires base controls", async () => {
@@ -553,7 +685,13 @@ describe("main integration", () => {
     expect(mockEnsureSecurityReady).toHaveBeenCalledTimes(1);
     expect(mockLoadSettings).toHaveBeenCalledTimes(1);
     expect(mockInitUpdater).toHaveBeenCalledTimes(1);
-    expect(mockAutoCheckUpdates).toHaveBeenCalledTimes(1);
+    // Update checks are deferred to idle: wait for the scheduled run.
+    await vi.waitFor(
+      () => {
+        expect(mockAutoCheckUpdates).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 5000 },
+    );
     expect(
       (document.getElementById("version-label") as HTMLSpanElement).textContent,
     ).toBe("v0.6.0");
@@ -591,7 +729,11 @@ describe("main integration", () => {
 
     const presets: Array<{ value: string; endpoint: string; region: string }> =
       [
-        { value: "aws", endpoint: "", region: "us-east-1" },
+        {
+          value: "aws",
+          endpoint: "https://s3.us-east-1.amazonaws.com",
+          region: "us-east-1",
+        },
         {
           value: "backblaze",
           endpoint: "https://s3.us-west-004.backblazeb2.com",
@@ -668,17 +810,22 @@ describe("main integration", () => {
       "us-east-1",
       "ak",
       "sk",
+      "",
     );
     expect(mockRefreshBuckets).toHaveBeenCalledTimes(1);
     expect(mockSaveConnection).toHaveBeenCalledTimes(1);
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
     (document.getElementById("btn-refresh") as HTMLButtonElement).click();
     await flushMicrotasks();
-    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
+    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
+      preserveSelection: true,
+    });
 
     mockShowPrompt.mockResolvedValueOnce("new-folder");
     (document.getElementById("btn-new-folder") as HTMLButtonElement).click();
@@ -686,6 +833,8 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("create_folder", {
       bucket: "bucket-a",
       key: "docs/new-folder",
+      overwrite: false,
+      connectionId: "test-connection",
     });
 
     (document.getElementById("btn-upload") as HTMLButtonElement).click();
@@ -693,6 +842,11 @@ describe("main integration", () => {
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
       ["C:\\tmp\\upload-a.txt", "C:\\tmp\\upload-b.txt"],
       "docs/",
+      expect.objectContaining({
+        bucket: "bucket-a",
+        connectionId: "test-connection",
+        connectionIdentity: "test-identity",
+      }),
     );
 
     (document.getElementById("btn-upload-folder") as HTMLButtonElement).click();
@@ -700,6 +854,10 @@ describe("main integration", () => {
     expect(mockEnqueueFolderEntries).toHaveBeenCalledWith(
       expect.any(Array),
       "docs/",
+      expect.objectContaining({
+        bucket: "bucket-a",
+        connectionId: "test-connection",
+      }),
     );
 
     vi.useFakeTimers();
@@ -716,10 +874,22 @@ describe("main integration", () => {
     await flushMicrotasks();
     expect(mockLoadMoreObjects).toHaveBeenCalledTimes(1);
 
+    const emptyStateCallsBefore = mockShowEmptyState.mock.calls.length;
+    mockDisconnect.mockResolvedValueOnce(false);
     (document.getElementById("disconnect-btn") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(mockDisconnect).toHaveBeenCalledTimes(1);
-    expect(mockShowEmptyState).toHaveBeenCalledTimes(1);
+    expect(mockShowEmptyState).toHaveBeenCalledTimes(emptyStateCallsBefore);
+    expect(state.connected).toBe(true);
+
+    mockDisconnect.mockImplementationOnce(async () => {
+      state.connected = false;
+      return true;
+    });
+    (document.getElementById("disconnect-btn") as HTMLButtonElement).click();
+    await flushMicrotasks();
+    expect(mockDisconnect).toHaveBeenCalledTimes(2);
+    expect(mockShowEmptyState).toHaveBeenCalledTimes(emptyStateCallsBefore + 1);
   });
 
   it("handles bookmark select callback and overlay close controls", async () => {
@@ -737,6 +907,7 @@ describe("main integration", () => {
       access_key: "bookmark-access",
       secret_key: "bookmark-secret",
     });
+    await flushMicrotasks();
     expect(
       (document.getElementById("conn-endpoint") as HTMLInputElement).value,
     ).toBe("https://bookmarked.example.com");
@@ -749,9 +920,16 @@ describe("main integration", () => {
     expect(
       (document.getElementById("conn-secret-key") as HTMLInputElement).value,
     ).toBe("bookmark-secret");
+    expect(mockConnect).toHaveBeenCalledWith(
+      "https://bookmarked.example.com",
+      "us-west-2",
+      "bookmark-access",
+      "bookmark-secret",
+      "",
+    );
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain('Loaded bookmark "Pinned".');
+    ).toContain("Connected");
 
     (document.getElementById("settings-close") as HTMLButtonElement).click();
     (document.getElementById("settings-cancel") as HTMLButtonElement).click();
@@ -773,7 +951,7 @@ describe("main integration", () => {
       document.getElementById("preview-overlay") as HTMLDivElement
     ).dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(mockCloseLicensesModal).toHaveBeenCalled();
-    expect(mockCloseInfoPanel).toHaveBeenCalled();
+    expect(mockRequestCloseInfoPanel).toHaveBeenCalled();
     expect(mockClosePreview).toHaveBeenCalled();
   });
 
@@ -783,6 +961,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     state.selectedKeys.clear();
@@ -814,7 +994,11 @@ describe("main integration", () => {
     const rowCheck = fileRow.querySelector(".row-check") as HTMLInputElement;
 
     folderRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(mockNavigateToFolder).toHaveBeenCalledWith("docs/folder/");
+    // Single click selects (file-manager behavior); open on dblclick/Enter.
+    expect(mockHandleRowClick).toHaveBeenCalledWith(
+      "prefix:docs/folder/",
+      expect.any(MouseEvent),
+    );
     folderCheckRow
       .querySelector(".col-check")
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -857,6 +1041,23 @@ describe("main integration", () => {
     rowCheck.checked = false;
     rowCheck.dispatchEvent(new Event("change", { bubbles: true }));
     expect(mockUpdateSelectionUI).toHaveBeenCalled();
+    const previewCallsBeforeCheckboxDblclick =
+      mockOpenPreview.mock.calls.length;
+    rowCheck.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await flushMicrotasks();
+    expect(mockOpenPreview.mock.calls.length).toBe(
+      previewCallsBeforeCheckboxDblclick,
+    );
+    const folderCheck = folderCheckRow.querySelector(
+      ".row-check",
+    ) as HTMLInputElement;
+    const navigateCallsBeforeFolderCheckboxDblclick =
+      mockNavigateToFolder.mock.calls.length;
+    folderCheck.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await flushMicrotasks();
+    expect(mockNavigateToFolder.mock.calls.length).toBe(
+      navigateCallsBeforeFolderCheckboxDblclick,
+    );
 
     state.selectedKeys.delete("docs/file.txt");
     fileRow.dispatchEvent(
@@ -898,11 +1099,13 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("build_object_url", {
       bucket: "bucket-a",
       key: "docs/file.txt",
+      connectionId: "test-connection",
     });
     expect(mockInvoke).toHaveBeenCalledWith("generate_presigned_url", {
       bucket: "bucket-a",
       key: "docs/file.txt",
       expiresInSecs: expect.any(Number),
+      connectionId: "test-connection",
     });
     expect(clipboardWriteText).toHaveBeenCalledWith("docs/file.txt");
     expect(clipboardWriteText).toHaveBeenCalledWith(
@@ -912,19 +1115,71 @@ describe("main integration", () => {
       bucket: "bucket-a",
       oldKey: "docs/file.txt",
       newKey: "docs/renamed.txt",
+      overwrite: false,
+      connectionId: "test-connection",
     });
     expect(mockInvoke).toHaveBeenCalledWith("delete_objects", {
       bucket: "bucket-a",
       keys: ["docs/file.txt"],
+      connectionId: "test-connection",
     });
     expect(mockOpenInfoPanel).toHaveBeenCalledWith(["docs/file.txt"]);
-    expect(mockEnqueueDownloads).toHaveBeenCalledWith([
-      {
+    expect(mockEnqueueDownloads).toHaveBeenCalledWith(
+      [
+        {
+          bucket: "bucket-a",
+          key: "docs/file.txt",
+          destination: "C:\\tmp\\download.txt",
+        },
+      ],
+      expect.objectContaining({
         bucket: "bucket-a",
-        key: "docs/file.txt",
-        destination: "C:\\tmp\\download.txt",
-      },
+        connectionId: "test-connection",
+        connectionIdentity: "test-identity",
+      }),
+    );
+  });
+
+  it("opens compact batch actions and follows shared menu dismissal", async () => {
+    const { state } = await import("../state.ts");
+    await import("../main.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.currentBucket = "bucket-a";
+    state.selectedKeys.add("docs/file.txt");
+
+    const batchMore = document.getElementById(
+      "batch-more",
+    ) as HTMLButtonElement;
+    batchMore.hidden = false;
+    batchMore.disabled = false;
+
+    let sharedDismiss: (() => void) | undefined;
+    mockShowContextMenu.mockImplementation((...args: unknown[]) => {
+      sharedDismiss = args[4] as (() => void) | undefined;
+    });
+
+    batchMore.click();
+    const menuItems = mockShowContextMenu.mock.calls.at(-1)?.[2] as Array<{
+      label: string;
+      disabled?: boolean;
+    }>;
+    expect(menuItems.map((item) => item.label)).toEqual([
+      "Delete",
+      "Copy URLs",
+      "Deselect All",
     ]);
+    expect(menuItems.some((item) => item.disabled)).toBe(false);
+    expect(batchMore.getAttribute("aria-expanded")).toBe("true");
+
+    sharedDismiss?.();
+    expect(batchMore.getAttribute("aria-expanded")).toBe("false");
+
+    batchMore.click();
+    expect(batchMore.getAttribute("aria-expanded")).toBe("true");
+    sharedDismiss?.();
+    expect(batchMore.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("builds preview and multi-select properties context menu variants", async () => {
@@ -933,6 +1188,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     const tbody = document.getElementById(
@@ -994,6 +1251,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     state.buckets = [
@@ -1055,18 +1314,27 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("object_exists", {
       bucket: "bucket-b",
       key: "archive/file.txt",
+      connectionId: "test-connection",
     });
-    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith([
-      {
-        operation: "copy",
-        sourceBucket: "bucket-a",
-        fileName: "file.txt",
-        sourceKey: "docs/file.txt",
-        destinationBucket: "bucket-b",
-        destinationKey: "archive/file.txt",
-        conflictResolution: "replace",
-      },
-    ]);
+    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith(
+      [
+        {
+          operation: "copy",
+          sourceBucket: "bucket-a",
+          fileName: "file.txt",
+          sourceKey: "docs/file.txt",
+          destinationBucket: "bucket-b",
+          destinationKey: "archive/file.txt",
+          conflictResolution: "ask",
+          overwrite: false,
+        },
+      ],
+      expect.objectContaining({
+        bucket: "bucket-a",
+        connectionId: "test-connection",
+        connectionIdentity: "test-identity",
+      }),
+    );
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "delete_objects",
       expect.objectContaining({ keys: ["docs/file.txt"] }),
@@ -1106,18 +1374,27 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("object_exists", {
       bucket: "bucket-a",
       key: "moved/file.txt",
+      connectionId: "test-connection",
     });
-    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith([
-      {
-        operation: "move",
-        sourceBucket: "bucket-a",
-        fileName: "file.txt",
-        sourceKey: "docs/file.txt",
-        destinationBucket: "bucket-a",
-        destinationKey: "moved/file.txt",
-        conflictResolution: "replace",
-      },
-    ]);
+    expect(mockEnqueueCopyMoveEntries).toHaveBeenCalledWith(
+      [
+        {
+          operation: "move",
+          sourceBucket: "bucket-a",
+          fileName: "file.txt",
+          sourceKey: "docs/file.txt",
+          destinationBucket: "bucket-a",
+          destinationKey: "moved/file.txt",
+          conflictResolution: "ask",
+          overwrite: false,
+        },
+      ],
+      expect.objectContaining({
+        bucket: "bucket-a",
+        connectionId: "test-connection",
+        connectionIdentity: "test-identity",
+      }),
+    );
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "copy_object_to",
       expect.anything(),
@@ -1191,6 +1468,8 @@ describe("main integration", () => {
     ).toContain("Connect to a bucket first.");
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "";
     mockShowPrompt
@@ -1214,6 +1493,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -1269,7 +1550,9 @@ describe("main integration", () => {
     const objectPanel = document.getElementById(
       "object-panel",
     ) as HTMLDivElement;
-    const breadcrumb = document.getElementById("breadcrumb") as HTMLElement;
+    const breadcrumb = document.getElementById(
+      "location-omnibar-browse",
+    ) as HTMLElement;
     breadcrumb.innerHTML =
       '<button type="button" class="breadcrumb__segment" data-prefix="docs/ctx/"></button>';
     const breadcrumbSeg = breadcrumb.querySelector(
@@ -1312,6 +1595,8 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("create_folder", {
       bucket: "bucket-a",
       key: "docs/from-context",
+      overwrite: false,
+      connectionId: "test-connection",
     });
     expect(mockEnqueuePaths).toHaveBeenCalled();
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
@@ -1396,6 +1681,8 @@ describe("main integration", () => {
     ).toContain("Connect to a bucket first.");
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     capturedDragDropHandler!({
       payload: {
@@ -1424,7 +1711,11 @@ describe("main integration", () => {
       },
     });
     await flushMicrotasks();
-    expect(mockEnqueuePaths).toHaveBeenCalledWith(["C:\\tmp\\a.txt"], "docs/");
+    expect(mockEnqueuePaths).toHaveBeenCalledWith(
+      ["C:\\tmp\\a.txt"],
+      "docs/",
+      expect.anything(),
+    );
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Dropped 1 file(s). Queued for upload.");
@@ -1495,6 +1786,8 @@ describe("main integration", () => {
     );
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "";
 
@@ -1568,6 +1861,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -1593,9 +1888,45 @@ describe("main integration", () => {
     expect(mockRefreshObjects).not.toHaveBeenCalledWith("bucket-a", "docs/");
 
     await transferHandler?.({ hadUpload: true });
-    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
+    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
+      supersedePending: false,
+    });
     expect(mockPruneStaleSelection).toHaveBeenCalled();
     expect(mockRenderObjectTable).toHaveBeenCalled();
+  });
+
+  it("cancels a confirmed delete when the connection changes", async () => {
+    const { state } = await import("../state.ts");
+    await import("../main.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.endpoint = "https://old.example.com";
+    state.connectionId = "old-connection";
+    state.connectionIdentity = "old-identity";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.selectedKeys.add("docs/file.txt");
+
+    const priorDeleteCalls = mockInvoke.mock.calls.filter(
+      ([cmd]) => cmd === "delete_objects",
+    ).length;
+    mockShowConfirm.mockImplementationOnce(async () => {
+      state.endpoint = "https://new.example.com";
+      state.connectionId = "new-connection";
+      state.connectionIdentity = "new-identity";
+      return true;
+    });
+
+    (document.getElementById("batch-delete") as HTMLButtonElement).click();
+    await flushMicrotasks(6);
+
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "delete_objects").length,
+    ).toBe(priorDeleteCalls);
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("connection or selection changed");
   });
 
   it("handles settings/info tab interactions, wrapper button handlers, and unload cleanup", async () => {
@@ -1604,6 +1935,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     state.selectedKeys.clear();
@@ -1691,6 +2024,7 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("build_object_url", {
       bucket: "bucket-a",
       key: "docs/file-a.txt",
+      connectionId: "test-connection",
     });
     expect(clipboardWriteText).toHaveBeenCalled();
 
@@ -1718,6 +2052,7 @@ describe("main integration", () => {
     (document.getElementById("drawer-clear") as HTMLButtonElement).click();
     expect(mockClearCompletedTransfers).toHaveBeenCalled();
 
+    state.connected = false;
     (document.getElementById("security-toggle") as HTMLButtonElement).click();
     (
       document.getElementById("security-change-password") as HTMLButtonElement
@@ -1729,7 +2064,9 @@ describe("main integration", () => {
     (document.getElementById("biometric-toggle") as HTMLButtonElement).click();
     expect(mockHandleSecurityToggle).toHaveBeenCalled();
     expect(mockHandleSecurityChangePassword).toHaveBeenCalled();
-    expect(mockHandleLockNow).toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(mockHandleLockNow).toHaveBeenCalled();
+    });
     expect(mockHandleLockTimeoutChange).toHaveBeenCalled();
     expect(mockHandleBiometricToggle).toHaveBeenCalled();
 
@@ -1815,6 +2152,8 @@ describe("main integration", () => {
     expect(getCommand("go-up").available?.()).toBe(false);
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
     state.selectedKeys.clear();
@@ -1866,13 +2205,15 @@ describe("main integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("create_folder", {
       bucket: "bucket-a",
       key: "docs/cmd-folder",
+      overwrite: false,
+      connectionId: "test-connection",
     });
     expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
     expect(mockInvoke).toHaveBeenCalledWith(
       "delete_objects",
       expect.objectContaining({ bucket: "bucket-a" }),
     );
-    expect(mockUpdateSelectionUI).toHaveBeenCalled();
+    expect(mockHandleSelectAll).toHaveBeenCalledWith(true);
     expect(mockClearSelection).toHaveBeenCalled();
     expect(focusSpy).toHaveBeenCalled();
     expect(mockToggleActivityLog).toHaveBeenCalled();
@@ -1886,6 +2227,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -1907,11 +2250,17 @@ describe("main integration", () => {
     let listMode: "normal" | "empty" | "throw" = "normal";
     mockInvoke.mockImplementation(async (cmd, payload) => {
       if (cmd === "delete_objects" && failDelete) {
-        throw new Error("delete failed");
+        return {
+          deleted: 1,
+          failed: 1,
+          incomplete: false,
+          errors: ["docs/other.txt: access denied"],
+        };
       }
       if (cmd === "rename_object" && failRename) {
         throw new Error("rename failed");
       }
+      if (cmd === "object_exists") return false;
       if (cmd === "create_folder" && failCreateFolder) {
         throw new Error("create folder failed");
       }
@@ -1929,6 +2278,7 @@ describe("main integration", () => {
     mockRefreshBuckets.mockImplementationOnce(async () => {
       state.buckets = [{ name: "first-bucket", creation_date: "" }];
     });
+    mockReadLastBucket.mockReturnValueOnce("first-bucket");
     mockSaveConnection.mockRejectedValueOnce(new Error("save creds failed"));
     (document.getElementById("conn-endpoint") as HTMLInputElement).value =
       "https://service.example.com";
@@ -2130,14 +2480,14 @@ describe("main integration", () => {
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
       ((action: string) => void) | undefined;
     onAction?.("rename");
-    await flushMicrotasks(4);
+    await flushMicrotasks(10);
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Rename failed");
     failRename = false;
 
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:docs/folder/");
+    state.selectedPrefixes.add("docs/folder/");
     mockShowConfirm.mockResolvedValueOnce(false);
     (document.getElementById("batch-delete") as HTMLButtonElement).click();
     await flushMicrotasks(4);
@@ -2166,6 +2516,9 @@ describe("main integration", () => {
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Delete failed");
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("deleted 1 item");
     failDelete = false;
 
     mockShowPrompt.mockResolvedValueOnce(null);
@@ -2174,7 +2527,7 @@ describe("main integration", () => {
     failCreateFolder = true;
     mockShowPrompt.mockResolvedValueOnce("will-fail");
     (document.getElementById("btn-new-folder") as HTMLButtonElement).click();
-    await flushMicrotasks(4);
+    await flushMicrotasks(10);
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Failed to create folder");
@@ -2205,6 +2558,172 @@ describe("main integration", () => {
     ).toContain("Folder upload failed");
   });
 
+  it("rename binds connection snapshot and preserves create-only overwrite intent", async () => {
+    const { state } = await import("../state.ts");
+    const { handleRename } = await import("../app-objects.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
+    state.endpoint = "https://s3.example.com";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+
+    mockShowPrompt.mockResolvedValueOnce("renamed-only.txt");
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") return false;
+      if (cmd === "rename_object") return undefined;
+      return undefined;
+    });
+
+    await handleRename();
+    await flushMicrotasks();
+
+    expect(mockInvoke).toHaveBeenCalledWith("rename_object", {
+      bucket: "bucket-a",
+      oldKey: "docs/file.txt",
+      newKey: "docs/renamed-only.txt",
+      overwrite: false,
+      connectionId: "test-connection",
+    });
+
+    mockInvoke.mockClear();
+    let snapshotChecks = 0;
+    mockConnectionSnapshotChanged.mockImplementation(() => {
+      snapshotChecks += 1;
+      return snapshotChecks >= 2;
+    });
+    mockShowPrompt.mockResolvedValueOnce("renamed-after-switch.txt");
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+    await handleRename();
+    await flushMicrotasks();
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "rename_object")).toBe(
+      false,
+    );
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("location changed");
+
+    mockInvoke.mockClear();
+    mockConnectionSnapshotChanged.mockImplementation(
+      (snap: ConnectionSnapshot) =>
+        !state.connected ||
+        state.connectionId !== snap.connectionId ||
+        state.connectionIdentity !== snap.connectionIdentity ||
+        state.endpoint !== snap.endpoint ||
+        state.currentBucket !== snap.bucket ||
+        state.currentPrefix !== snap.prefix,
+    );
+    state.currentSettings.conflictPolicy = "replace";
+    mockShowPrompt.mockResolvedValueOnce("replaced.txt");
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") return true;
+      if (cmd === "rename_object") return undefined;
+      return undefined;
+    });
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+    await handleRename();
+    await flushMicrotasks();
+    expect(mockInvoke).toHaveBeenCalledWith("rename_object", {
+      bucket: "bucket-a",
+      oldKey: "docs/file.txt",
+      newKey: "docs/replaced.txt",
+      overwrite: true,
+      connectionId: "test-connection",
+    });
+    state.currentSettings.conflictPolicy = "ask";
+  });
+
+  it("folder rename requires consent when create-only copy cannot be enforced", async () => {
+    const { state } = await import("../state.ts");
+    const { handleRename } = await import("../app-objects.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
+    state.endpoint = "https://s3.example.com";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.createOnlyCapabilities = {
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    };
+    state.selectedKeys.clear();
+    state.selectedPrefixes.add("docs/folder/");
+
+    mockShowPrompt.mockResolvedValueOnce("renamed-folder");
+    mockShowConfirm.mockResolvedValueOnce(false);
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "list_objects") return { objects: [], prefixes: [] };
+      return undefined;
+    });
+
+    await handleRename();
+    await flushMicrotasks();
+
+    expect(mockShowConfirm).toHaveBeenCalledWith(
+      "Unconditional Write",
+      expect.stringContaining("cannot enforce create-only writes"),
+      expect.anything(),
+    );
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "rename_prefix")).toBe(
+      false,
+    );
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("unconditional write was not authorized");
+  });
+
+  it("reports connection change instead of skip when reconnect happens during rename probe", async () => {
+    const { state } = await import("../state.ts");
+    const { handleRename } = await import("../app-objects.ts");
+    await flushMicrotasks();
+
+    state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
+    state.endpoint = "https://s3.example.com";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.currentSettings.conflictPolicy = "skip";
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+
+    let probeFinished = false;
+    mockConnectionSnapshotChanged.mockImplementation(() => probeFinished);
+    mockShowPrompt.mockResolvedValueOnce("other-name.txt");
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") {
+        probeFinished = true;
+        return true;
+      }
+      return undefined;
+    });
+
+    await handleRename();
+    await flushMicrotasks();
+
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "rename_object")).toBe(
+      false,
+    );
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("location changed");
+    state.currentSettings.conflictPolicy = "ask";
+  });
+
+  it("dot-segment object keys normalize away in browser URL paths", () => {
+    const url = new URL("https://example.com/bucket/data/%2E%2E/odd.txt");
+    expect(url.pathname).toBe("/bucket/odd.txt");
+  });
+
   it("covers additional table, context-menu, and layout guard branches", async () => {
     const { state } = await import("../state.ts");
     setupMatchMedia(true);
@@ -2212,6 +2731,8 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -2242,6 +2763,8 @@ describe("main integration", () => {
     expect(mockShowContextMenu.mock.calls.length).toBe(ctxBeforeDisconnected);
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     mockSelectBucket.mockRejectedValueOnce(new Error("ctx open failed"));
     (
       bucketPanel.querySelector(".list__item-btn") as HTMLButtonElement
@@ -2304,9 +2827,9 @@ describe("main integration", () => {
     keylessRow.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 
     state.selectedKeys.clear();
-    state.selectedKeys.add("prefix:docs/folder/");
-    state.selectedKeys.add("prefix:docs/other/");
-    const menuBeforeNoItems = mockShowContextMenu.mock.calls.length;
+    state.selectedPrefixes.add("docs/folder/");
+    state.selectedPrefixes.add("docs/other/");
+    const menuBeforeMultiFolder = mockShowContextMenu.mock.calls.length;
     folderRow.dispatchEvent(
       new MouseEvent("contextmenu", {
         bubbles: true,
@@ -2315,7 +2838,14 @@ describe("main integration", () => {
         clientY: 17,
       }),
     );
-    expect(mockShowContextMenu.mock.calls.length).toBe(menuBeforeNoItems);
+    expect(mockShowContextMenu.mock.calls.length).toBe(
+      menuBeforeMultiFolder + 1,
+    );
+    const multiFolderMenu = mockShowContextMenu.mock.calls.at(-1)?.[2] as
+      { label: string }[] | undefined;
+    expect(
+      multiFolderMenu?.some((item) => item.label.includes("Properties")),
+    ).toBe(true);
 
     tbody.innerHTML = `
       <tr class="object-row" data-key="docs/preview.txt" tabindex="0">
@@ -2478,6 +3008,22 @@ describe("main integration", () => {
     vi.useRealTimers();
   });
 
+  it("opens the support URL from the settings sidebar button", async () => {
+    await import("../main.ts");
+    await flushMicrotasks();
+
+    const supportBtn = document.getElementById(
+      "settings-support-me",
+    ) as HTMLButtonElement;
+    expect(supportBtn.textContent).toMatch(/Support Me/);
+    mockInvoke.mockClear();
+    supportBtn.click();
+    await flushMicrotasks(4);
+    expect(mockInvoke).toHaveBeenCalledWith("open_external_url", {
+      url: "https://rosie.run/support",
+    });
+  });
+
   it("closes support prompt when clicking the overlay backdrop", async () => {
     vi.useFakeTimers();
     mockIncrementLaunchCount.mockResolvedValue(2);
@@ -2583,9 +3129,10 @@ describe("main integration", () => {
     });
     await import("../main.ts");
     await flushMicrotasks(6);
-    expect(
-      (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Initialization error:");
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      "Platform-specific window styling and shortcut labels are unavailable this launch.",
+      "warning",
+    );
   });
 
   it("covers additional modal focus trap, tab keyboard, and disconnected/drop guard branches", async () => {
@@ -2702,6 +3249,8 @@ describe("main integration", () => {
     expect(filterInput.value).toBe("");
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     const bucketPanel = document.getElementById(
       "bucket-panel",
     ) as HTMLDivElement;
@@ -2722,6 +3271,8 @@ describe("main integration", () => {
     expect(mockRefreshBuckets.mock.calls.length).toBe(refreshBucketsBefore);
 
     state.connected = true;
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
 
@@ -2750,6 +3301,7 @@ describe("main integration", () => {
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
       ["C:\\tmp\\dropped.txt"],
       "docs/",
+      expect.anything(),
     );
 
     capturedDragDropHandler!({
@@ -2763,6 +3315,7 @@ describe("main integration", () => {
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
       ["/home/user/from-tauri.txt"],
       "docs/",
+      expect.anything(),
     );
 
     const tbody = document.getElementById(
@@ -2784,7 +3337,7 @@ describe("main integration", () => {
     ) as HTMLInputElement;
     folderCheck.checked = true;
     folderCheck.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(state.selectedKeys.has("prefix:docs/folder/")).toBe(true);
+    expect(state.selectedPrefixes.has("docs/folder/")).toBe(true);
 
     const folderRow = tbody.querySelector(".object-row") as HTMLElement;
     folderRow.dispatchEvent(
@@ -2794,7 +3347,7 @@ describe("main integration", () => {
         cancelable: true,
       }),
     );
-    expect(state.selectedKeys.has("prefix:docs/folder/")).toBe(false);
+    expect(state.selectedPrefixes.has("docs/folder/")).toBe(false);
 
     const resizer = document.getElementById(
       "sidebar-resizer",
@@ -2869,11 +3422,16 @@ describe("main integration", () => {
       configurable: true,
     });
 
+    // Startup persistence is unrelated to the resize debounce and can land late
+    // when the suite runs under load. Only saves caused by this resize matter.
+    mockSaveSettings.mockClear();
+
     window.dispatchEvent(new Event("resize"));
     vi.advanceTimersByTime(200);
     expect(mockSaveSettings).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(350);
+    await flushMicrotasks();
     expect(state.currentSettings.windowWidth).toBe(950);
     expect(state.currentSettings.windowHeight).toBe(700);
     expect(mockSaveSettings).toHaveBeenCalled();

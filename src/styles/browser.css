@@ -9,6 +9,14 @@
   backdrop-filter: blur(var(--glass-blur-light));
   -webkit-backdrop-filter: blur(var(--glass-blur-light));
   min-height: 34px;
+  container-type: inline-size;
+  container-name: content-toolbar;
+}
+
+@container content-toolbar (max-width: 950px) {
+  .content-toolbar .shortcut-chip {
+    display: none;
+  }
 }
 
 .content-toolbar__left {
@@ -31,6 +39,52 @@
   padding: 4px 8px;
   font-size: 12px;
   flex-shrink: 0;
+}
+
+.filter-control {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  gap: 2px;
+}
+
+.filter-clear {
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.filter-clear--visible {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.filter-clear .lucide-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.path-input {
+  width: min(280px, 32vw);
+  min-width: 120px;
+  max-width: 360px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--mono);
+  flex-shrink: 1;
+  margin-right: 8px;
+}
+
+.object-size--folder {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.object-modified--muted {
+  color: var(--text-muted);
 }
 
 .sidebar-toggle {
@@ -88,12 +142,15 @@
 }
 
 .breadcrumb {
-  padding: 8px 16px;
+  padding: 8px 12px;
   font-size: 13px;
   color: var(--text-secondary);
   min-height: 34px;
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .breadcrumb__segment {
@@ -149,11 +206,15 @@
 
 .object-panel {
   flex: 1;
-  overflow-y: auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
 }
 
 .object-table {
   width: 100%;
+  min-width: 520px;
+  table-layout: fixed;
   border-collapse: collapse;
 }
 
@@ -176,7 +237,8 @@
 }
 
 .object-table td {
-  padding: 6px 14px;
+  height: 36px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   overflow: hidden;
@@ -200,14 +262,19 @@
 }
 
 .object-row--folder:hover {
-  background: var(--bg-active);
+  background: var(--bg-hover);
 }
 
 .object-name {
+  overflow: hidden;
+}
+
+.object-name__inner {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: min(500px, 50vw);
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
 }
 
@@ -234,6 +301,17 @@
   text-align: center;
   padding: 32px 14px;
   color: var(--text-secondary);
+}
+
+.table-error {
+  padding: 10px 14px;
+  color: var(--disconnect-text);
+  background: var(--disconnect-bg);
+  font-size: 13px;
+}
+
+.table-error .btn {
+  margin-left: 12px;
 }
 
 .icon-folder,
@@ -266,6 +344,7 @@
   align-items: center;
   gap: 8px;
   width: 100%;
+  min-width: 0;
   padding: 6px 10px;
   border: none;
   background: transparent;
@@ -295,6 +374,15 @@
 .bucket-icon {
   width: 14px;
   height: 14px;
+  flex-shrink: 0;
+}
+
+.list__item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .list__item-btn:focus-visible,
@@ -321,4 +409,41 @@
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border-top: 1px solid var(--glass-border);
+}
+
+.statusbar__palette {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.statusbar__palette .lucide-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.object-row {
+  height: 36px;
+}
+
+.object-table tbody .object-row > td {
+  height: 36px;
+}
+
+.object-virtual-spacer td {
+  padding: 0;
+  border: 0;
+  pointer-events: none;
+}
+
+.listing-cap-notice {
+  color: var(--warning);
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.metadata-batch-more {
+  color: var(--text-secondary, var(--muted));
+  font-style: italic;
 }

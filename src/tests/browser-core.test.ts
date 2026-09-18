@@ -1,10 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { syncInspectorMock, markInspectorHasContentMock } = vi.hoisted(() => ({
+  syncInspectorMock: vi.fn<(selectedKeys?: Set<string>) => Promise<void>>(
+    async () => {},
+  ),
+  markInspectorHasContentMock: vi.fn(),
+}));
+
+vi.mock("../inspector.ts", () => ({
+  closeInspectorOnMobile: vi.fn(),
+  isInspectorOpen: () => true,
+  markInspectorHasContent: markInspectorHasContentMock,
+  syncInspectorFromSelection: syncInspectorMock,
+}));
+
 const refreshObjectsMock = vi.fn(
-  async (bucket: string, prefix: string): Promise<void> => {
+  async (bucket: string, prefix: string): Promise<boolean> => {
     const { state } = await import("../state.ts");
     state.currentBucket = bucket;
     state.currentPrefix = prefix;
+    state.selectedKeys.clear();
+    return true;
   },
 );
 
@@ -12,11 +28,17 @@ vi.mock("../connection.ts", () => ({
   refreshObjects: refreshObjectsMock,
 }));
 
+vi.mock("../info-panel.ts", () => ({
+  hasUnsavedInfoChanges: () => false,
+  confirmDiscardInfoProperties: async () => true,
+}));
+
 function renderFixture(): void {
   document.body.innerHTML = `
     <input id="filter-input" />
+    <input id="bucket-filter-input" />
     <ul id="bucket-list"></ul>
-    <nav id="breadcrumb"></nav>
+    <nav id="location-omnibar-browse" class="breadcrumb"></nav>
     <div id="object-panel" style="display:none"></div>
     <div id="empty-state"></div>
     <table>
@@ -30,12 +52,25 @@ function renderFixture(): void {
       <tbody id="object-tbody"></tbody>
     </table>
     <input id="select-all" type="checkbox" />
-    <div id="batch-toolbar" hidden><span id="batch-count"></span></div>
+    <div id="batch-toolbar">
+      <span id="batch-count"></span>
+      <div id="batch-toolbar-actions" hidden>
+        <button id="batch-properties"></button>
+        <button id="batch-download"></button>
+        <button id="batch-delete"></button>
+        <button id="batch-copy-urls"></button>
+        <button id="batch-deselect"></button>
+        <button id="batch-more"></button>
+      </div>
+    </div>
     <div id="load-more-row"></div>
     <span id="statusbar-count"></span>
     <span id="object-count"></span>
     <button id="nav-back"></button>
     <button id="nav-forward"></button>
+    <button id="nav-up"></button>
+    <input id="location-omnibar-edit" type="text" hidden />
+    <button id="btn-download" disabled></button>
     <span id="status"></span>
   `;
 }
@@ -44,6 +79,8 @@ describe("browser core rendering and selection", () => {
   beforeEach(async () => {
     vi.resetModules();
     refreshObjectsMock.mockClear();
+    syncInspectorMock.mockClear();
+    markInspectorHasContentMock.mockClear();
     renderFixture();
     const { state } = await import("../state.ts");
     state.connected = true;
@@ -80,6 +117,24 @@ describe("browser core rendering and selection", () => {
       '.list__item-btn[data-bucket="bucket-b"]',
     ) as HTMLButtonElement;
     expect(active.getAttribute("aria-current")).toBe("true");
+
+    state.bucketFilterText = "a";
+    browser.renderBucketList();
+    const filteredActive = document.querySelector(
+      '.list__item-btn[data-bucket="bucket-a"]',
+    ) as HTMLButtonElement;
+    expect(filteredActive.tabIndex).toBe(0);
+    expect(
+      document.querySelector('.list__item-btn[data-bucket="bucket-b"]'),
+    ).toBeNull();
+
+    const bucketFilter = document.getElementById(
+      "bucket-filter-input",
+    ) as HTMLInputElement;
+    bucketFilter.focus();
+    state.bucketFilterText = "a";
+    browser.renderBucketList();
+    expect(document.activeElement).toBe(bucketFilter);
   });
 
   it("renders object table, breadcrumb, counts, and selection UI", async () => {
@@ -108,13 +163,31 @@ describe("browser core rendering and selection", () => {
 
     const rows = document.querySelectorAll("#object-tbody .object-row");
     expect(rows).toHaveLength(3);
+    expect(rows[0].querySelector(".object-name")?.tagName).toBe("TD");
+    expect(rows[0].querySelector(".object-name__inner")).toBeTruthy();
+    const folderSize = rows[0].querySelector(".object-size");
+    expect(folderSize?.textContent).toBe("Folder");
+    expect(folderSize?.classList.contains("object-size--folder")).toBe(true);
+    expect(rows[0].querySelector(".object-modified")?.textContent).toBe("—");
     expect(
       (document.getElementById("statusbar-count") as HTMLSpanElement)
         .textContent,
     ).toContain("1 folder, 2 files");
     expect(
-      (document.getElementById("breadcrumb") as HTMLElement).textContent,
+      (document.getElementById("location-omnibar-browse") as HTMLElement)
+        .textContent,
     ).toContain("bucket-a");
+    expect(
+      (document.getElementById("location-omnibar-edit") as HTMLInputElement)
+        .value,
+    ).toBe("bucket-a/docs/");
+    expect(
+      (document.getElementById("location-omnibar-browse") as HTMLElement)
+        .textContent,
+    ).toContain("bucket-a");
+    expect(
+      (document.getElementById("nav-up") as HTMLButtonElement).disabled,
+    ).toBe(false);
 
     state.selectedKeys.add("docs/file-a.txt");
     state.selectedKeys.add("docs/file-b.txt");
@@ -125,6 +198,57 @@ describe("browser core rendering and selection", () => {
     expect(
       (document.getElementById("batch-count") as HTMLSpanElement).textContent,
     ).toContain("2 files selected");
+    expect(
+      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+    ).toBe(false);
+
+    const objectPanel = document.getElementById("object-panel") as HTMLElement;
+    objectPanel.setAttribute("aria-busy", "true");
+    browser.updateSelectionUI();
+    expect(
+      (document.getElementById("batch-count") as HTMLSpanElement).textContent,
+    ).toContain("2 files selected");
+    expect(
+      (document.getElementById("batch-delete") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    objectPanel.setAttribute("aria-busy", "false");
+    browser.updateSelectionUI();
+
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file-a.txt");
+    browser.updateSelectionUI();
+    expect(
+      (document.getElementById("batch-toolbar") as HTMLDivElement).hidden,
+    ).toBe(false);
+    expect(
+      (document.getElementById("batch-count") as HTMLSpanElement).textContent,
+    ).toBe("1 file selected");
+    expect(
+      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+    ).toBe(false);
+
+    state.selectedKeys.clear();
+    browser.updateSelectionUI();
+    expect(
+      (document.getElementById("batch-toolbar") as HTMLDivElement).hidden,
+    ).toBe(false);
+    expect(
+      (document.getElementById("batch-count") as HTMLSpanElement).textContent,
+    ).toContain("1 folder, 2 files loaded");
+    expect(
+      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    state.selectedPrefixes.add("folder/");
+    browser.updateSelectionUI();
+    expect(
+      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    browser.renderObjectTableSkeleton(1);
+    expect(
+      document.querySelector(".object-row--skeleton .object-name__inner"),
+    ).toBeTruthy();
   });
 
   it("supports row click multi-selection and select-all", async () => {
@@ -300,6 +424,222 @@ describe("browser core rendering and selection", () => {
     ).toBe("none");
   });
 
+  it("uses sorted filtered rows for ranges, including virtualized rows", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.sortColumn = "size";
+    state.sortAsc = true;
+    state.filterText = "match";
+    state.objects = Array.from({ length: 260 }, (_, index) => ({
+      key: `match-${String(260 - index).padStart(3, "0")}.txt`,
+      size: 260 - index,
+      last_modified: "2024-01-01T00:00:00Z",
+      is_folder: false,
+    }));
+    state.objects.push({
+      key: "other.txt",
+      size: 0,
+      last_modified: "2024-01-01T00:00:00Z",
+      is_folder: false,
+    });
+
+    browser.renderObjectTable();
+    const visible = browser.getVisibleSelectableKeys();
+    expect(visible).toHaveLength(260);
+    expect(visible[0]).toBe("match-001.txt");
+    expect(visible.at(-1)).toBe("match-260.txt");
+
+    browser.handleRowClick(
+      visible[0],
+      new MouseEvent("click", { bubbles: true }),
+    );
+    browser.handleRowClick(
+      visible.at(-1)!,
+      new MouseEvent("click", { bubbles: true, shiftKey: true }),
+    );
+    expect(state.selectedKeys.size).toBe(260);
+    expect(
+      (document.getElementById("batch-count") as HTMLSpanElement).textContent,
+    ).toContain("260 files selected");
+  });
+
+  it("selects the clicked row when the Shift anchor is filtered away", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.objects = [
+      {
+        key: "anchor.txt",
+        size: 1,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+      {
+        key: "clicked.txt",
+        size: 2,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+      {
+        key: "middle.txt",
+        size: 3,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    browser.renderObjectTable();
+    browser.handleRowClick(
+      "anchor.txt",
+      new MouseEvent("click", { bubbles: true }),
+    );
+    state.filterText = "clicked";
+    browser.renderObjectTable();
+    browser.handleRowClick(
+      "clicked.txt",
+      new MouseEvent("click", { bubbles: true, shiftKey: true }),
+    );
+
+    expect([...state.selectedKeys]).toEqual(["clicked.txt"]);
+  });
+
+  it("keeps shift ranges aligned with ascending and descending sort orders", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    const objects = [
+      {
+        key: "z.txt",
+        size: 30,
+        last_modified: "2024-03-01T00:00:00Z",
+        is_folder: false,
+      },
+      {
+        key: "m.txt",
+        size: 20,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+      {
+        key: "a.txt",
+        size: 10,
+        last_modified: "2024-02-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    const scenarios: Array<{
+      column: "name" | "size" | "modified";
+      asc: boolean;
+      expected: string[];
+    }> = [
+      {
+        column: "name",
+        asc: true,
+        expected: ["a.txt", "m.txt", "z.txt"],
+      },
+      {
+        column: "name",
+        asc: false,
+        expected: ["z.txt", "m.txt", "a.txt"],
+      },
+      {
+        column: "modified",
+        asc: true,
+        expected: ["m.txt", "a.txt", "z.txt"],
+      },
+      {
+        column: "modified",
+        asc: false,
+        expected: ["z.txt", "a.txt", "m.txt"],
+      },
+      {
+        column: "size",
+        asc: false,
+        expected: ["z.txt", "m.txt", "a.txt"],
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      state.sortColumn = scenario.column;
+      state.sortAsc = scenario.asc;
+      state.filterText = "";
+      state.objects = objects.map((object) => ({ ...object }));
+      state.selectedKeys.clear();
+      browser.setLastClickedKey(null);
+      browser.renderObjectTable();
+
+      const ordered = browser.getVisibleSelectableKeys();
+      expect(ordered).toEqual(scenario.expected);
+      browser.handleRowClick(
+        ordered[0],
+        new MouseEvent("click", { bubbles: true }),
+      );
+      browser.handleRowClick(
+        ordered.at(-1)!,
+        new MouseEvent("click", { bubbles: true, shiftKey: true }),
+      );
+      expect([...state.selectedKeys].sort()).toEqual(
+        [...scenario.expected].sort(),
+      );
+    }
+  });
+
+  it("retains hidden selection while select-all changes matching rows", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.filterText = "txt";
+    state.prefixes = ["txt-folder/", "hidden-folder/"];
+    state.objects = [
+      {
+        key: "visible.txt",
+        size: 1,
+        last_modified: "",
+        is_folder: false,
+      },
+      {
+        key: "hidden.json",
+        size: 1,
+        last_modified: "",
+        is_folder: false,
+      },
+    ];
+    browser.renderObjectTable();
+    // Idle filter status names matching and loaded counts and explains scope.
+    expect(
+      (document.getElementById("batch-count") as HTMLSpanElement).textContent,
+    ).toContain("1 folder, 1 file matching · 2 folders, 2 files loaded");
+    expect(
+      (document.getElementById("batch-count") as HTMLSpanElement).textContent,
+    ).toContain("Filter searches loaded listing only");
+    // Selection is retained across filters; hidden rows stay selected.
+    state.selectedKeys.add("hidden.json");
+    browser.updateSelectionUI();
+    expect(state.selectedKeys.has("hidden.json")).toBe(true);
+    browser.pruneStaleSelection();
+    expect(state.selectedKeys.has("hidden.json")).toBe(true);
+    expect(
+      (document.getElementById("batch-count") as HTMLSpanElement).textContent,
+    ).toContain("1 hidden by filter");
+    const batchCount = document.getElementById(
+      "batch-count",
+    ) as HTMLSpanElement;
+    expect(batchCount.dataset.compactCount).toBe("1 selected · 1 hidden");
+    expect(batchCount.getAttribute("aria-label")).toContain(
+      "1 hidden by filter",
+    );
+    browser.handleSelectAll(true);
+    expect(
+      [
+        ...state.selectedKeys,
+        ...[...state.selectedPrefixes].map((prefix) => "prefix:" + prefix),
+      ].sort(),
+    ).toEqual(["hidden.json", "prefix:txt-folder/", "visible.txt"]);
+
+    // Select-all only changes matching loaded entries; hidden selection stays
+    // selected when the matching rows are cleared.
+    browser.handleSelectAll(false);
+    expect(state.selectedKeys.has("hidden.json")).toBe(true);
+    expect(state.selectedKeys.has("visible.txt")).toBe(false);
+    expect(state.selectedPrefixes.has("txt-folder/")).toBe(false);
+  });
+
   it("updates sort indicators and handles empty state", async () => {
     const browser = await import("../browser.ts");
     const { state } = await import("../state.ts");
@@ -397,5 +737,118 @@ describe("browser core rendering and selection", () => {
     expect(() => browser.renderObjectTable()).not.toThrow();
     document.getElementById("status")?.remove();
     expect(() => browser.showEmptyState()).not.toThrow();
+  });
+
+  it("separates visual repaint from semantic inspector selection sync", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.objects = [
+      {
+        key: "selected.txt",
+        size: 10,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+      {
+        key: "other.txt",
+        size: 20,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    state.selectedKeys.add("selected.txt");
+
+    browser.renderObjectTable();
+    expect(syncInspectorMock).toHaveBeenCalledTimes(1);
+    const selectionSnapshot = syncInspectorMock.mock
+      .calls[0]?.[0] as Set<string>;
+    expect([...selectionSnapshot]).toEqual(["selected.txt"]);
+
+    browser.updateSelectionUI();
+    browser.renderObjectTable();
+    browser.toggleSort("size");
+    expect(syncInspectorMock).toHaveBeenCalledTimes(1);
+
+    state.objects[0].size = 11;
+    browser.renderObjectTable();
+    expect(syncInspectorMock).toHaveBeenCalledTimes(2);
+
+    browser.invalidateInspectorSelectionSync();
+    browser.renderObjectTable();
+    expect(syncInspectorMock).toHaveBeenCalledTimes(3);
+
+    state.filterText = "other";
+    browser.renderObjectTable();
+    // Filtering hides but retains selection.
+    expect(state.selectedKeys.size).toBe(1);
+    expect(state.selectedKeys.has("selected.txt")).toBe(true);
+    // Retained selection keeps the inspector signature stable: no resync.
+    expect(syncInspectorMock).toHaveBeenCalledTimes(3);
+    expect([...selectionSnapshot]).toEqual(["selected.txt"]);
+  });
+
+  it("benchmarks a 50k-object virtual window with bounded keyed DOM work", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    const panel = document.getElementById("object-panel") as HTMLDivElement;
+    Object.defineProperty(panel, "clientHeight", {
+      configurable: true,
+      value: 360,
+    });
+    state.objects = Array.from({ length: 50_000 }, (_, index) => ({
+      key: `file-${String(index).padStart(5, "0")}.txt`,
+      size: index,
+      last_modified: "2024-01-01T00:00:00Z",
+      is_folder: false,
+    }));
+
+    const started = performance.now();
+    browser.renderObjectTable();
+    const elapsedMs = performance.now() - started;
+    const initialRows = document.querySelectorAll("#object-tbody .object-row");
+    expect(initialRows.length).toBeLessThanOrEqual(30);
+    expect(
+      document.querySelector(".object-table")?.getAttribute("aria-rowcount") ??
+        document.querySelector("table")?.getAttribute("aria-rowcount"),
+    ).toBe("50001");
+    expect(elapsedMs).toBeLessThan(5_000);
+
+    const retained = document.querySelector<HTMLElement>(
+      '[data-key="file-00010.txt"]',
+    );
+    panel.scrollTop = 5 * 36;
+    browser.renderObjectTable();
+    expect(document.querySelector('[data-key="file-00010.txt"]')).toBe(
+      retained,
+    );
+    retained?.focus();
+
+    panel.scrollTop = 50_000 * 36;
+    browser.renderObjectTable();
+    const finalRows = document.querySelectorAll("#object-tbody .object-row");
+    expect(finalRows.length).toBeLessThanOrEqual(30);
+    expect(document.querySelector('[data-key="file-49999.txt"]')).toBeTruthy();
+    expect(
+      document
+        .querySelector('[data-key="file-49999.txt"]')
+        ?.getAttribute("aria-rowindex"),
+    ).toBe("50001");
+    expect(
+      (document.activeElement as HTMLElement | null)?.classList.contains(
+        "object-row",
+      ),
+    ).toBe(true);
+
+    state.objects = state.objects.slice(0, 300);
+    browser.renderObjectTable();
+    const shrunkRows = document.querySelectorAll("#object-tbody .object-row");
+    expect(shrunkRows.length).toBeGreaterThan(0);
+    expect(shrunkRows.length).toBeLessThanOrEqual(30);
+    expect(document.querySelector('[data-key="file-00299.txt"]')).toBeTruthy();
+    expect(
+      (document.activeElement as HTMLElement | null)?.classList.contains(
+        "object-row",
+      ),
+    ).toBe(true);
   });
 });

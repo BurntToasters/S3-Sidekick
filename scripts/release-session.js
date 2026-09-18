@@ -2,7 +2,8 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
-import { fileURLToPath, pathToFileURL } from "url";
+import { fileURLToPath } from "url";
+import { isDirectExecution } from "./direct-execution.js";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultRoot = path.resolve(scriptDirectory, "..");
@@ -24,11 +25,62 @@ function command(commandName, args, root) {
   }).trim();
 }
 
+/** Porcelain status; preserve leading XY spaces (do not trim). */
+function gitPorcelainStatus(root = defaultRoot) {
+  return execFileSync(
+    "git",
+    ["status", "--porcelain=v1", "--untracked-files=all"],
+    {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  ).replace(/(?:\r?\n)+$/, "");
+}
+
 function sha256File(filePath) {
   return crypto
     .createHash("sha256")
     .update(fs.readFileSync(filePath))
     .digest("hex");
+}
+
+function gitFileList(root, args) {
+  return execFileSync("git", ["ls-files", ...args, "-z"], {
+    cwd: root,
+    encoding: "buffer",
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean);
+}
+
+function sha256WorkingTree(root) {
+  const files = [
+    ...gitFileList(root, []),
+    ...gitFileList(root, ["--others", "--exclude-standard"]),
+  ].sort();
+  const digest = crypto.createHash("sha256");
+  for (const filePath of files) {
+    const normalizedPath = filePath.replace(/\\/g, "/");
+    digest.update(normalizedPath);
+    digest.update("\0");
+    try {
+      const stat = fs.lstatSync(path.join(root, filePath));
+      if (stat.isSymbolicLink()) {
+        digest.update("symlink\0");
+        digest.update(fs.readlinkSync(path.join(root, filePath)));
+      } else {
+        digest.update("file\0");
+        digest.update(fs.readFileSync(path.join(root, filePath)));
+      }
+    } catch {
+      digest.update("missing\0");
+    }
+    digest.update("\0");
+  }
+  return digest.digest("hex");
 }
 
 function currentReleaseIdentity(root = defaultRoot) {
@@ -44,6 +96,7 @@ function currentReleaseIdentity(root = defaultRoot) {
     rustc: command("rustc", ["--version"], root),
     packageLockSha256: sha256File(path.join(root, "package-lock.json")),
     cargoLockSha256: sha256File(path.join(root, "src-tauri", "Cargo.lock")),
+    sourceTreeSha256: sha256WorkingTree(root),
   };
 }
 
@@ -106,22 +159,88 @@ function validateQualityGate(
   return qualityGate;
 }
 
+const RELEASE_BOOTSTRAP_PATHS = new Set([
+  "run.rosie.s3-sidekick.metainfo.xml",
+  "src-tauri/tauri.conf.json",
+  "src-tauri/Cargo.toml",
+  "src-tauri/Cargo.lock",
+  "package-lock.json",
+]);
+const RELEASE_BOOTSTRAP_PREFIXES = ["src-tauri/gen/schemas/"];
+
+function normalizePorcelainPath(value) {
+  let normalized = String(value).replace(/\\/g, "/");
+  if (
+    normalized.startsWith('"') &&
+    normalized.endsWith('"') &&
+    normalized.length >= 2
+  ) {
+    normalized = normalized.slice(1, -1).replace(/\\"/g, '"');
+  }
+  return normalized;
+}
+
+function parsePorcelainPaths(status) {
+  return status
+    .split("\n")
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      // XY (2 chars) + space + path. Leading space in XY must be preserved;
+      // callers must not trim() the porcelain blob before parsing.
+      const match = line.match(/^(.{2}) (.*)$/);
+      if (!match) return "";
+      const rest = match[2];
+      const renameArrow = rest.indexOf(" -> ");
+      return normalizePorcelainPath(
+        renameArrow >= 0 ? rest.slice(renameArrow + 4) : rest,
+      );
+    })
+    .filter(Boolean);
+}
+
+function isAllowedBootstrapPath(filePath) {
+  if (RELEASE_BOOTSTRAP_PATHS.has(filePath)) return true;
+  return RELEASE_BOOTSTRAP_PREFIXES.some((prefix) =>
+    filePath.startsWith(prefix),
+  );
+}
+
+/** Clean tree, or only files that workspace:bootstrap / cargo check may touch before proof. */
+function isAcceptableReleaseWorkingTree(status) {
+  if (!status.trim()) return true;
+  const paths = parsePorcelainPaths(status);
+  if (paths.length === 0) return false;
+  return paths.every((filePath) => isAllowedBootstrapPath(filePath));
+}
+
 function clearQualityGateProof(root = defaultRoot) {
   fs.rmSync(path.join(root, QUALITY_GATE_RELATIVE_PATH), { force: true });
+}
+
+function blockingReleaseWorkingTreePaths(root = defaultRoot) {
+  let status;
+  try {
+    status = gitPorcelainStatus(root);
+  } catch {
+    return ["<git status failed>"];
+  }
+  if (isAcceptableReleaseWorkingTree(status)) {
+    return [];
+  }
+  return parsePorcelainPaths(status).filter(
+    (filePath) => !isAllowedBootstrapPath(filePath),
+  );
 }
 
 function recordSuccessfulQualityGate(root = defaultRoot) {
   let status;
   try {
-    status = command(
-      "git",
-      ["status", "--porcelain=v1", "--untracked-files=all"],
-      root,
-    );
+    status = gitPorcelainStatus(root);
   } catch {
     return false;
   }
-  if (status) {
+  if (!isAcceptableReleaseWorkingTree(status)) {
     return false;
   }
   const proofPath = path.join(root, QUALITY_GATE_RELATIVE_PATH);
@@ -141,10 +260,31 @@ function verifyQualityGate(root = defaultRoot, options) {
     proof = JSON.parse(fs.readFileSync(proofPath, "utf8"));
   } catch (error) {
     throw new Error(
-      `Release quality-gate proof is missing or invalid. Run test:all first: ${error instanceof Error ? error.message : String(error)}`,
+      `Release quality-gate proof is missing or invalid. On a clean checkout, run "npm run test:all" (or "npm run workspace:prepare") before release:prepare. ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!isAcceptableReleaseWorkingTree(gitPorcelainStatus(root))) {
+    const blockers = blockingReleaseWorkingTreePaths(root);
+    throw new Error(
+      `Release quality-gate verification requires a clean working tree or bootstrap-only drift: ${blockers.join(", ")}`,
     );
   }
   return validateQualityGate(proof, currentReleaseIdentity(root), options);
+}
+
+function writeReleaseSession(session, root = defaultRoot) {
+  const sessionPath = path.join(root, RELEASE_SESSION_RELATIVE_PATH);
+  fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
+  fs.writeFileSync(sessionPath, `${JSON.stringify(session, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  return session;
+}
+
+function startReleaseSession(root = defaultRoot) {
+  const session = createReleaseSession(root);
+  writeReleaseSession(session, root);
+  return session;
 }
 
 function createReleaseSession(root = defaultRoot) {
@@ -157,24 +297,41 @@ function createReleaseSession(root = defaultRoot) {
 }
 
 function verifyReleaseSession(root = defaultRoot, options) {
+  if (!isAcceptableReleaseWorkingTree(gitPorcelainStatus(root))) {
+    const blockers = blockingReleaseWorkingTreePaths(root);
+    throw new Error(
+      `Release build session verification requires a clean working tree or bootstrap-only drift: ${blockers.join(", ")}`,
+    );
+  }
   const sessionPath = path.join(root, RELEASE_SESSION_RELATIVE_PATH);
   let session;
   try {
     session = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
   } catch (error) {
     throw new Error(
-      `Release build session is missing or invalid. Run release:prepare first: ${error instanceof Error ? error.message : String(error)}`,
+      `Release build session is missing or invalid. On this machine run "npm run release:prepare" (or the full "npm run release:win" / "release:mac" / "release:linux:*" script), not *:continue alone. ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   return validateReleaseSession(session, currentReleaseIdentity(root), options);
 }
 
-function isDirectExecution() {
-  if (!process.argv[1]) return false;
-  return pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-}
+if (isDirectExecution(import.meta.url)) {
+  const subcommand = process.argv[2];
+  if (subcommand === "start") {
+    try {
+      const session = startReleaseSession();
+      console.log(
+        `release-session: started (${session.version}, ${session.commit.slice(0, 12)}, ${session.platform}-${session.arch})`,
+      );
+    } catch (error) {
+      console.error(
+        `release-session: FAILED: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exit(1);
+    }
+    process.exit(0);
+  }
 
-if (isDirectExecution()) {
   try {
     const session = verifyReleaseSession();
     console.log(
@@ -191,13 +348,20 @@ if (isDirectExecution()) {
 export {
   DEFAULT_MAX_AGE_MS,
   QUALITY_GATE_RELATIVE_PATH,
+  RELEASE_BOOTSTRAP_PATHS,
   RELEASE_SESSION_RELATIVE_PATH,
+  blockingReleaseWorkingTreePaths,
   clearQualityGateProof,
   createReleaseSession,
   currentReleaseIdentity,
+  gitPorcelainStatus,
+  isAcceptableReleaseWorkingTree,
+  parsePorcelainPaths,
   recordSuccessfulQualityGate,
+  startReleaseSession,
   validateQualityGate,
   validateReleaseSession,
   verifyQualityGate,
   verifyReleaseSession,
+  sha256WorkingTree,
 };

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { escapeHtml, getIconHtml } from "./utils.ts";
+import { escapeHtml, getIconHtml, parseJsonArray } from "./utils.ts";
 
 export interface Bookmark {
   name: string;
@@ -7,11 +7,20 @@ export interface Bookmark {
   region: string;
   access_key: string;
   secret_key: string;
+  session_token?: string;
 }
 
 let bookmarks: Bookmark[] = [];
 let persistPromise: Promise<void> = Promise.resolve();
 let onChangeCallback: (() => void) | null = null;
+export const MAX_IMPORT_BYTES = 1_048_576;
+const MAX_IMPORT_BOOKMARKS = 1_000;
+const MAX_BOOKMARK_NAME_LENGTH = 256;
+const MAX_BOOKMARK_ENDPOINT_LENGTH = 2_048;
+const MAX_BOOKMARK_REGION_LENGTH = 128;
+const MAX_BOOKMARK_ACCESS_KEY_LENGTH = 256;
+const MAX_BOOKMARK_SECRET_KEY_LENGTH = 4_096;
+const MAX_BOOKMARK_SESSION_TOKEN_LENGTH = 16_384;
 
 export function setBookmarkChangeHandler(handler: () => void): void {
   onChangeCallback = handler;
@@ -25,7 +34,16 @@ export function clearBookmarks(): void {
   bookmarks = [];
 }
 
-export function isEndpointBookmarked(endpoint: string): boolean {
+export function isEndpointBookmarked(
+  endpoint: string,
+  accessKey?: string,
+): boolean {
+  // Composite key: same endpoint with different credentials is distinct.
+  if (accessKey !== undefined) {
+    return bookmarks.some(
+      (b) => b.endpoint === endpoint && b.access_key === accessKey,
+    );
+  }
   return bookmarks.some((b) => b.endpoint === endpoint);
 }
 
@@ -34,24 +52,34 @@ function isBookmark(value: unknown): value is Bookmark {
   const row = value as Bookmark;
   return (
     typeof row.name === "string" &&
+    row.name.length > 0 &&
+    row.name.length <= MAX_BOOKMARK_NAME_LENGTH &&
     typeof row.endpoint === "string" &&
+    row.endpoint.length > 0 &&
+    row.endpoint.length <= MAX_BOOKMARK_ENDPOINT_LENGTH &&
     typeof row.region === "string" &&
+    row.region.length <= MAX_BOOKMARK_REGION_LENGTH &&
     typeof row.access_key === "string" &&
-    typeof row.secret_key === "string"
+    row.access_key.length > 0 &&
+    row.access_key.length <= MAX_BOOKMARK_ACCESS_KEY_LENGTH &&
+    typeof row.secret_key === "string" &&
+    row.secret_key.length <= MAX_BOOKMARK_SECRET_KEY_LENGTH &&
+    (row.session_token === undefined ||
+      (typeof row.session_token === "string" &&
+        row.session_token.length <= MAX_BOOKMARK_SESSION_TOKEN_LENGTH))
   );
 }
 
 function parseBookmarksArray(raw: string): Bookmark[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(parsed) || !parsed.every(isBookmark)) {
-    return null;
-  }
-  return [...parsed];
+  const parsed = parseJsonArray(raw);
+  if (parsed === null) return null;
+  // Filter out invalid entries instead of rejecting the whole file so one
+  // corrupt bookmark doesn't wipe the rest. A non-empty file where every
+  // entry is invalid is corruption, not an empty list: returning [] here
+  // would overwrite the good backup with nothing.
+  const valid = parsed.filter(isBookmark);
+  if (parsed.length > 0 && valid.length === 0) return null;
+  return valid;
 }
 
 async function loadBackupBookmarks(): Promise<Bookmark[] | null> {
@@ -88,35 +116,53 @@ export async function loadBookmarks(): Promise<void> {
   bookmarks = (await loadBackupBookmarks()) ?? [];
 }
 
-async function persistBookmarks(): Promise<void> {
+async function persistBookmarksSnapshot(next: Bookmark[]): Promise<void> {
+  const serialized = JSON.stringify(next, null, 2);
   persistPromise = persistPromise
-    .catch(() => {})
+    // Prior persist failure must not break the chain; it was already surfaced.
+    .catch(() => undefined)
     .then(async () => {
-      await invoke("save_bookmarks", {
-        json: JSON.stringify(bookmarks, null, 2),
-      });
-      await saveBookmarksBackupSafe(bookmarks);
+      await invoke("save_bookmarks", { json: serialized });
+      await saveBookmarksBackupSafe(next);
     });
   await persistPromise;
 }
 
-export async function addBookmark(bookmark: Bookmark): Promise<boolean> {
-  const exists = bookmarks.some(
-    (b) =>
-      b.endpoint === bookmark.endpoint && b.access_key === bookmark.access_key,
+let mutationQueue: Promise<void> = Promise.resolve();
+
+function enqueueBookmarkMutation<T>(work: () => Promise<T>): Promise<T> {
+  const run = mutationQueue.then(work, work);
+  mutationQueue = run.then(
+    () => undefined,
+    () => undefined,
   );
-  if (exists) return false;
-  bookmarks.push(bookmark);
-  await persistBookmarks();
-  onChangeCallback?.();
-  return true;
+  return run;
+}
+
+export async function addBookmark(bookmark: Bookmark): Promise<boolean> {
+  return enqueueBookmarkMutation(async () => {
+    const exists = bookmarks.some(
+      (b) =>
+        b.endpoint === bookmark.endpoint &&
+        b.access_key === bookmark.access_key,
+    );
+    if (exists) return false;
+    const next = [...bookmarks, bookmark];
+    await persistBookmarksSnapshot(next);
+    bookmarks = next;
+    onChangeCallback?.();
+    return true;
+  });
 }
 
 export async function removeBookmark(index: number): Promise<void> {
-  if (index < 0 || index >= bookmarks.length) return;
-  bookmarks.splice(index, 1);
-  await persistBookmarks();
-  onChangeCallback?.();
+  return enqueueBookmarkMutation(async () => {
+    if (index < 0 || index >= bookmarks.length) return;
+    const next = bookmarks.filter((_, i) => i !== index);
+    await persistBookmarksSnapshot(next);
+    bookmarks = next;
+    onChangeCallback?.();
+  });
 }
 
 export function renderBookmarkBar(
@@ -136,11 +182,8 @@ export function renderBookmarkBar(
     chip.className = isActive
       ? "bookmark-chip bookmark-chip--active"
       : "bookmark-chip";
-    chip.title = b.endpoint;
-    const regionSuffix = b.region
-      ? ` <span class="bookmark-chip__region">${escapeHtml(b.region)}</span>`
-      : "";
-    chip.innerHTML = escapeHtml(b.name) + regionSuffix;
+    chip.textContent = b.name;
+    chip.title = b.region ? `${b.endpoint} (${b.region})` : b.endpoint;
     chip.addEventListener("click", () => onSelect(b));
     barEl.appendChild(chip);
   }
@@ -155,13 +198,23 @@ export function renderBookmarkBar(
   }
 }
 
-export function exportBookmarksJson(): string {
-  return JSON.stringify(bookmarks, null, 2);
+export function exportBookmarksJson(includeSecrets = false): string {
+  const exported = includeSecrets
+    ? bookmarks
+    : bookmarks.map(({ secret_key: _secretKey, ...bookmark }) => ({
+        ...bookmark,
+        secret_key: "",
+      }));
+  return JSON.stringify(exported, null, 2);
 }
 
 export async function importBookmarksJson(
   json: string,
 ): Promise<{ imported: number; skipped: number; error?: string }> {
+  if (typeof json !== "string" || json.length > MAX_IMPORT_BYTES) {
+    return { imported: 0, skipped: 0, error: "Bookmark import is too large" };
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -172,50 +225,73 @@ export async function importBookmarksJson(
   if (!Array.isArray(parsed)) {
     return { imported: 0, skipped: 0, error: "Expected a JSON array" };
   }
+  if (parsed.length > MAX_IMPORT_BOOKMARKS) {
+    return {
+      imported: 0,
+      skipped: 0,
+      error: `Bookmark import is limited to ${MAX_IMPORT_BOOKMARKS} entries`,
+    };
+  }
 
   const valid = parsed.filter(isBookmark);
   if (valid.length === 0) {
     return { imported: 0, skipped: parsed.length };
   }
 
-  let imported = 0;
-  let skipped = 0;
-  for (const b of valid) {
-    const exists = bookmarks.some(
-      (existing) =>
-        existing.endpoint === b.endpoint &&
-        existing.access_key === b.access_key,
-    );
-    if (exists) {
-      skipped++;
-    } else {
-      bookmarks.push(b);
-      imported++;
-    }
-  }
+  try {
+    return await enqueueBookmarkMutation(async () => {
+      let imported = 0;
+      let skipped = 0;
+      const nextBookmarks = [...bookmarks];
+      for (const b of valid) {
+        const exists = nextBookmarks.some(
+          (existing) =>
+            existing.endpoint === b.endpoint &&
+            existing.access_key === b.access_key,
+        );
+        if (exists) {
+          skipped++;
+        } else {
+          nextBookmarks.push(b);
+          imported++;
+        }
+      }
 
-  if (imported > 0) {
-    await persistBookmarks();
-    onChangeCallback?.();
-  }
+      if (imported > 0) {
+        await persistBookmarksSnapshot(nextBookmarks);
+        bookmarks = nextBookmarks;
+        onChangeCallback?.();
+      }
 
-  return { imported, skipped };
+      return { imported, skipped };
+    });
+  } catch (err) {
+    return {
+      imported: 0,
+      skipped: parsed.length,
+      error: `Failed to save imported bookmarks: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 export function renderBookmarkList(
   listEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
   onDelete: (index: number) => void,
+  options: { emptyMessage?: string } = {},
 ): void {
   if (bookmarks.length === 0) {
-    listEl.innerHTML = `<li class="bookmark-empty">No bookmarks saved</li>`;
+    const message = options.emptyMessage ?? "No bookmarks saved";
+    listEl.innerHTML = `<li class="bookmark-empty">${escapeHtml(message)}</li>`;
+    listEl.onkeydown = null;
+    listEl.onclick = null;
     return;
   }
 
   listEl.innerHTML = bookmarks
     .map((b, i) => {
       const regionPart = b.region ? ` (${escapeHtml(b.region)})` : "";
-      return `<li class="bookmark-item" data-index="${i}">
+      return `<li class="bookmark-item" data-index="${i}" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
           <div style="flex:1;min-width:0">
             <div class="bookmark__name">${escapeHtml(b.name)}</div>
             <div class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</div>
@@ -241,10 +317,34 @@ export function renderBookmarkList(
       ".bookmark-item",
     );
     if (item) {
+      highlightBookmarkListItem(listEl, item);
       const idx = parseInt(item.dataset.index!, 10);
       if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
         onSelect(bookmarks[idx]);
       }
     }
   };
+
+  listEl.onkeydown = (e) => {
+    if (e.key !== "Enter") return;
+    const item = (e.target as HTMLElement).closest<HTMLElement>(
+      ".bookmark-item",
+    );
+    if (!item) return;
+    e.preventDefault();
+    highlightBookmarkListItem(listEl, item);
+    const idx = parseInt(item.dataset.index!, 10);
+    if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
+      onSelect(bookmarks[idx]);
+    }
+  };
+}
+
+function highlightBookmarkListItem(
+  listEl: HTMLElement,
+  active: HTMLElement,
+): void {
+  listEl.querySelectorAll(".bookmark-item").forEach((el) => {
+    el.classList.toggle("bookmark-item--selected", el === active);
+  });
 }

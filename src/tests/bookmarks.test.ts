@@ -160,11 +160,11 @@ describe("renderBookmarkBar", () => {
     bookmarks.renderBookmarkBar(container, () => {});
 
     const chips = container.querySelectorAll("button.bookmark-chip");
-    expect(chips[0].textContent).toContain("alpha");
-    expect(chips[1].textContent).toContain("beta");
+    expect(chips[0].textContent).toBe("alpha");
+    expect(chips[1].textContent).toBe("beta");
   });
 
-  it("includes a region span when the bookmark has a region", async () => {
+  it("sets tooltip to endpoint and region without region label in chip text", async () => {
     standardMock([alphaBookmark]);
     const bookmarks = await loadBookmarksModule();
     await bookmarks.loadBookmarks();
@@ -172,9 +172,12 @@ describe("renderBookmarkBar", () => {
     const container = document.createElement("div");
     bookmarks.renderBookmarkBar(container, () => {});
 
-    const regionSpan = container.querySelector(".bookmark-chip__region");
-    expect(regionSpan).not.toBeNull();
-    expect(regionSpan!.textContent).toBe("us-east-1");
+    const chip = container.querySelector(
+      "button.bookmark-chip",
+    ) as HTMLButtonElement;
+    expect(chip.querySelector(".bookmark-chip__region")).toBeNull();
+    expect(chip.textContent).toBe("alpha");
+    expect(chip.title).toBe("https://alpha.example.com (us-east-1)");
   });
 
   it("calls onSelect with the correct bookmark when a chip is clicked", async () => {
@@ -240,6 +243,9 @@ describe("bookmark import/export/list rendering", () => {
     await bookmarks.loadBookmarks();
 
     expect(JSON.parse(bookmarks.exportBookmarksJson())).toEqual([
+      { ...alphaBookmark, secret_key: "" },
+    ]);
+    expect(JSON.parse(bookmarks.exportBookmarksJson(true))).toEqual([
       alphaBookmark,
     ]);
 
@@ -274,6 +280,82 @@ describe("bookmark import/export/list rendering", () => {
     });
     expect(bookmarks.getBookmarks()).toEqual([alphaBookmark, betaBookmark]);
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("imports a redacted export that has empty secrets", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const redacted = JSON.stringify([{ ...alphaBookmark, secret_key: "" }]);
+    await expect(bookmarks.importBookmarksJson(redacted)).resolves.toEqual({
+      imported: 1,
+      skipped: 0,
+    });
+    expect(bookmarks.getBookmarks()).toEqual([
+      { ...alphaBookmark, secret_key: "" },
+    ]);
+  });
+
+  it("rolls memory back when addBookmark persist fails", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "save_bookmarks") throw new Error("disk full");
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+
+    await expect(bookmarks.addBookmark(alphaBookmark)).rejects.toThrow(
+      "disk full",
+    );
+    expect(bookmarks.getBookmarks()).toEqual([]);
+  });
+
+  it("rolls memory back when removeBookmark persist fails", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "save_bookmarks") throw new Error("disk full");
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+
+    await expect(bookmarks.removeBookmark(0)).rejects.toThrow("disk full");
+    expect(bookmarks.getBookmarks()).toEqual([alphaBookmark]);
+  });
+
+  it("does not roll a later mutation back when an earlier persist fails", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    let releaseFirstSave: (() => void) | undefined;
+    const firstSaveGate = new Promise<void>((resolve) => {
+      releaseFirstSave = resolve;
+    });
+    let saveCalls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "save_bookmarks") {
+        saveCalls += 1;
+        if (saveCalls === 1) {
+          await firstSaveGate;
+          throw new Error("disk full");
+        }
+        return undefined;
+      }
+      if (command === "save_bookmarks_backup") return undefined;
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+
+    const first = bookmarks.addBookmark(alphaBookmark);
+    await Promise.resolve();
+    await Promise.resolve();
+    const second = bookmarks.addBookmark(betaBookmark);
+    releaseFirstSave?.();
+    await expect(first).rejects.toThrow("disk full");
+    await second;
+    expect(bookmarks.getBookmarks()).toEqual([betaBookmark]);
   });
 
   it("renders bookmark list and routes select/delete callbacks", async () => {
@@ -378,7 +460,9 @@ describe("bookmark import/export/list rendering", () => {
 
     const bar = document.createElement("div");
     bookmarks.renderBookmarkBar(bar, () => {});
-    expect(bar.querySelector(".bookmark-chip__region")).toBeNull();
+    const chip = bar.querySelector("button.bookmark-chip") as HTMLButtonElement;
+    expect(chip.querySelector(".bookmark-chip__region")).toBeNull();
+    expect(chip.title).toBe(alphaBookmark.endpoint);
 
     const list = document.createElement("ul");
     bookmarks.renderBookmarkList(

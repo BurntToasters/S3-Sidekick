@@ -1,9 +1,10 @@
 import { state } from "./state.ts";
+import { selectionCount } from "./app-selection.ts";
 import { isEditableElement } from "./utils.ts";
 import { hideContextMenu } from "./context-menu.ts";
 import { isDialogActive } from "./dialogs.ts";
 import { closePreview } from "./preview.ts";
-import { closeInfoPanel } from "./info-panel.ts";
+import { requestCloseInfoPanel } from "./info-panel.ts";
 import { closeLicensesModal } from "./licenses.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
 import { closeSettingsModal } from "./settings.ts";
@@ -12,9 +13,13 @@ import {
   navigateUp,
   navigateBack,
   navigateForward,
-  getSelectableKeys,
-  updateSelectionUI,
+  handleSelectAll,
 } from "./browser.ts";
+import {
+  isInspectorOpen,
+  requestCloseInspector,
+  toggleInspector,
+} from "./inspector.ts";
 
 export interface KeyboardHandlers {
   setSidebarOpen: (open: boolean) => void;
@@ -45,12 +50,25 @@ function isSupportOverlayVisible(): boolean {
   return !!overlay && !overlay.hasAttribute("hidden");
 }
 
-export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
-  document.addEventListener("keydown", (e) => {
+function isSetupWizardVisible(): boolean {
+  const overlay = document.getElementById("setup-wizard-overlay");
+  return !!overlay && !overlay.hasAttribute("hidden");
+}
+
+export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
+  const onKeyDown = (e: KeyboardEvent) => {
+    // A more specific layer (for example a dialog or context menu) may have
+    // already consumed this key while listening in capture/target phase.
+    if (e.defaultPrevented) return;
+
     if (e.key === "Escape") {
-      hideContextMenu();
+      if (hideContextMenu()) {
+        e.preventDefault();
+        return;
+      }
 
       if (isPaletteOpen()) {
+        e.preventDefault();
         closePalette();
         return;
       }
@@ -68,47 +86,73 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
 
       const previewOverlay = document.getElementById("preview-overlay");
       if (previewOverlay?.classList.contains("active")) {
+        e.preventDefault();
         closePreview();
         return;
       }
 
       const infoOverlay = document.getElementById("info-overlay");
       if (infoOverlay?.classList.contains("active")) {
-        closeInfoPanel();
+        e.preventDefault();
+        void requestCloseInfoPanel();
         return;
       }
 
       const copyMoveOverlay = document.getElementById("copy-move-overlay");
       if (copyMoveOverlay?.classList.contains("active")) {
+        e.preventDefault();
         copyMoveOverlay.classList.remove("active");
         return;
       }
 
       const licensesOverlay = document.getElementById("licenses-overlay");
       if (licensesOverlay?.classList.contains("active")) {
+        e.preventDefault();
         closeLicensesModal();
         return;
       }
 
+      const settingsOverlay = document.getElementById("settings-overlay");
+      if (settingsOverlay?.classList.contains("active")) {
+        e.preventDefault();
+        void closeSettingsModal(false);
+        return;
+      }
+
       if (isDrawerOpen()) {
+        e.preventDefault();
         closeDrawer();
         return;
       }
 
       const layout = document.getElementById("main-layout");
       if (layout?.classList.contains("main-layout--sidebar-open")) {
+        e.preventDefault();
         handlers.setSidebarOpen(false);
         return;
       }
 
-      const overlay = document.getElementById("settings-overlay");
-      if (overlay?.classList.contains("active")) {
-        void closeSettingsModal(false);
+      if (isInspectorOpen()) {
+        e.preventDefault();
+        const previewBody = document.getElementById("inspector-preview-body");
+        const usingDockedPreview =
+          document.documentElement.dataset.inspectorOpen === "1" &&
+          previewBody &&
+          previewBody.childElementCount > 0;
+        if (usingDockedPreview) {
+          closePreview();
+          return;
+        }
+        void requestCloseInspector();
+        return;
       }
     }
 
     const inInput = isEditableElement(document.activeElement);
-    const modalOpen = isModalLayerActive() || isSupportOverlayVisible();
+    const modalOpen =
+      isModalLayerActive() ||
+      isSupportOverlayVisible() ||
+      isSetupWizardVisible();
     const accel = hasAccelModifier(e);
     const key = e.key.toLowerCase();
 
@@ -120,7 +164,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
       return;
     }
 
-    if (e.key === "Delete" && state.selectedKeys.size > 0) {
+    if (e.key === "Delete" && selectionCount() > 0) {
       if (inInput || modalOpen) return;
       e.preventDefault();
       void handlers.handleDelete();
@@ -136,7 +180,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
     if (modalOpen) return;
 
     if (!inInput) {
-      if (e.key === "F2" && state.selectedKeys.size === 1) {
+      if (e.key === "F2" && selectionCount() === 1) {
         e.preventDefault();
         void handlers.handleRename();
       }
@@ -167,9 +211,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
 
       if (key === "a" && !inInput) {
         e.preventDefault();
-        const allKeys = getSelectableKeys();
-        for (const k of allKeys) state.selectedKeys.add(k);
-        updateSelectionUI();
+        handleSelectAll(true);
       }
 
       if (key === "u" && !inInput) {
@@ -186,6 +228,12 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
         void handlers.handleCreateFolder();
       }
 
+      if (key === "i" && e.shiftKey && !inInput && state.connected) {
+        e.preventDefault();
+        toggleInspector();
+        return;
+      }
+
       if (key === "f") {
         e.preventDefault();
         const filterEl = document.getElementById(
@@ -197,5 +245,8 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): void {
         }
       }
     }
-  });
+  };
+
+  document.addEventListener("keydown", onKeyDown);
+  return () => document.removeEventListener("keydown", onKeyDown);
 }

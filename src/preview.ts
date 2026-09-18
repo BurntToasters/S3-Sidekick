@@ -1,6 +1,18 @@
-import { invoke } from "@tauri-apps/api/core";
-import { $, escapeHtml, formatSize, basename } from "./utils.ts";
+import { invokeS3 } from "./connection.ts";
+import { escapeHtml, formatSize, basename, friendlyError } from "./utils.ts";
 import { state } from "./state.ts";
+import {
+  getPreviewTitleEl,
+  getPreviewBodyEl,
+  showPreviewOverlay,
+  hidePreviewOverlay,
+  shouldUseInspectorMount,
+} from "./inspector-mount.ts";
+import {
+  ensureInspectorOpenForPane,
+  focusInspectorPreviewPane,
+  markInspectorHasContent,
+} from "./inspector.ts";
 
 interface PreviewResponse {
   content_type: string;
@@ -20,53 +32,13 @@ const PREVIEWABLE_IMAGE_TYPES = new Set([
   "image/x-icon",
 ]);
 
-const PREVIEWABLE_TEXT_EXTS = new Set([
-  "txt",
-  "md",
-  "json",
-  "xml",
-  "html",
-  "htm",
-  "css",
-  "js",
-  "ts",
-  "csv",
-  "yaml",
-  "yml",
-  "toml",
-  "ini",
-  "cfg",
-  "log",
-  "sh",
-  "bat",
-  "py",
-  "rs",
-  "go",
-  "java",
-  "c",
-  "cpp",
-  "h",
-  "hpp",
-  "svg",
-]);
-
-const PREVIEWABLE_IMAGE_EXTS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "bmp",
-  "ico",
-  "svg",
-]);
-
 let activePreviewObjectUrl: string | null = null;
 let previewSeq = 0;
 
 function canPreview(name: string): boolean {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  return PREVIEWABLE_TEXT_EXTS.has(ext) || PREVIEWABLE_IMAGE_EXTS.has(ext);
+  // Always offer Preview; rendering is decided by content_type/is_text
+  // below, not by extension. Keep a non-empty guard for menu affordance.
+  return name.trim().length > 0;
 }
 
 export { canPreview };
@@ -78,35 +50,77 @@ function clearActivePreviewObjectUrl(): void {
   }
 }
 
+function mediaType(contentType: string): string {
+  return contentType.split(";", 1)[0].trim().toLowerCase();
+}
+
+function base64ToBlobUrl(base64: string, type: string): string {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const blob = new Blob([bytes.buffer as ArrayBuffer], { type });
+  return URL.createObjectURL(blob);
+}
+
 export async function openPreview(key: string): Promise<void> {
-  const overlay = $("preview-overlay");
-  const title = $("preview-title");
-  const body = $("preview-body");
+  ensureInspectorOpenForPane("preview");
+  if (shouldUseInspectorMount()) {
+    focusInspectorPreviewPane();
+    markInspectorHasContent();
+  }
+
+  const title = getPreviewTitleEl();
+  const body = getPreviewBodyEl();
   const seq = ++previewSeq;
+  const bucket = state.currentBucket;
+  const connectionId = state.connectionId;
+  const connectionIdentity = state.connectionIdentity;
+  const previewKey = key;
 
   clearActivePreviewObjectUrl();
   title.textContent = basename(key);
-  overlay.classList.add("active");
-  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading preview&#8230;</div>`;
+  showPreviewOverlay(true);
+  body.setAttribute("aria-busy", "true");
+  body.innerHTML = `<div class="metadata-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading preview&#8230;</div>`;
 
   try {
-    const resp = await invoke<PreviewResponse>("preview_object", {
-      bucket: state.currentBucket,
+    const resp = await invokeS3<PreviewResponse>("preview_object", {
+      bucket,
       key,
     });
 
-    if (seq !== previewSeq) return;
+    if (
+      seq !== previewSeq ||
+      previewKey !== key ||
+      state.currentBucket !== bucket ||
+      state.connectionId !== connectionId ||
+      state.connectionIdentity !== connectionIdentity
+    )
+      return;
 
     let html = "";
+    const type = mediaType(resp.content_type);
 
-    if (PREVIEWABLE_IMAGE_TYPES.has(resp.content_type)) {
-      if (resp.content_type === "image/svg+xml") {
+    if (PREVIEWABLE_IMAGE_TYPES.has(type)) {
+      if (type === "image/svg+xml") {
         const blob = new Blob([resp.data], { type: "image/svg+xml" });
         const url = URL.createObjectURL(blob);
         activePreviewObjectUrl = url;
         html += `<div class="preview-image"><img src="${url}" alt="${escapeHtml(basename(key))}" /></div>`;
       } else {
-        html += `<div class="preview-image"><img src="data:${resp.content_type};base64,${resp.data}" alt="${escapeHtml(basename(key))}" /></div>`;
+        // Blob URLs (same pattern as SVG above) keep large base64 payloads
+        // out of the DOM; fall back to a data URL if decoding fails.
+        let src = `data:${type};base64,${resp.data}`;
+        try {
+          const url = base64ToBlobUrl(resp.data, type);
+          activePreviewObjectUrl = url;
+          src = url;
+        } catch {
+          // Keep the data-URL fallback.
+        }
+        html += `<div class="preview-image"><img src="${src}" alt="${escapeHtml(basename(key))}" /></div>`;
       }
     } else if (resp.is_text) {
       html += `<pre class="preview-text">${escapeHtml(resp.data)}</pre>`;
@@ -118,13 +132,32 @@ export async function openPreview(key: string): Promise<void> {
       html += `<div class="preview-truncated">Showing first 1 MB of ${formatSize(resp.total_size)}</div>`;
     }
 
+    body.setAttribute("aria-busy", "false");
     body.innerHTML = html;
   } catch (err) {
-    body.innerHTML = `<div class="metadata-loading">Failed to load preview: ${escapeHtml(String(err))}</div>`;
+    if (
+      seq !== previewSeq ||
+      previewKey !== key ||
+      state.currentBucket !== bucket ||
+      state.connectionId !== connectionId ||
+      state.connectionIdentity !== connectionIdentity
+    )
+      return;
+    body.setAttribute("aria-busy", "false");
+    body.innerHTML =
+      `<div class="metadata-loading" role="alert">Failed to load preview: ${escapeHtml(friendlyError(err))} ` +
+      `<button type="button" class="btn btn--sm" data-preview-retry>Retry</button></div>`;
+    body
+      .querySelector("[data-preview-retry]")
+      ?.addEventListener("click", () => void openPreview(previewKey));
   }
 }
 
 export function closePreview(): void {
+  previewSeq += 1;
   clearActivePreviewObjectUrl();
-  $("preview-overlay").classList.remove("active");
+  for (const id of ["inspector-preview-body", "preview-body"]) {
+    document.getElementById(id)?.replaceChildren();
+  }
+  hidePreviewOverlay();
 }

@@ -11,7 +11,15 @@ import { basename, friendlyError } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
 import { closeSidebarOnMobile } from "./app-layout.ts";
-import { getSelectedFileKeys } from "./app-selection.ts";
+import {
+  addSelection,
+  clearAllSelection,
+  getSelectedFileKeys,
+  getSelectedPrefixes,
+  getSelectionEntries,
+  isSelected,
+  selectionCount,
+} from "./app-selection.ts";
 import {
   handleDelete,
   handleCopyUrl,
@@ -59,24 +67,23 @@ export function handleContextMenu(e: MouseEvent): void {
   const isFolder = row.classList.contains("object-row--folder");
   const itemKey = isFolder ? "prefix:" + prefix : key;
 
-  if (!state.selectedKeys.has(itemKey)) {
-    state.selectedKeys.clear();
-    state.selectedKeys.add(itemKey);
+  if (!isSelected(itemKey)) {
+    clearAllSelection();
+    addSelection(itemKey);
     updateSelectionUI();
   }
 
-  const selectedCount = state.selectedKeys.size;
+  const selectedCount = selectionCount();
   const fileKeys = getSelectedFileKeys();
   const hasFiles = fileKeys.length > 0;
 
-  const folderKeys = Array.from(state.selectedKeys).filter((k) =>
-    k.startsWith("prefix:"),
-  );
+  const folderKeys = getSelectedPrefixes();
   const hasFolders = folderKeys.length > 0;
   const items: MenuItem[] = [];
 
   if (isFolder && selectedCount === 1) {
     items.push({ label: "Open", action: "open-folder" });
+    items.push({ label: "Properties", action: "info" });
     items.push({ label: "Copy Path", action: "copy-key" });
     items.push({ label: "Copy ARN", action: "copy-arn" });
     items.push({ label: "Rename", action: "rename" });
@@ -121,13 +128,28 @@ export function handleContextMenu(e: MouseEvent): void {
         ? "Delete"
         : `Delete ${fileKeys.length} items`;
     items.push({ label: deleteLabel, action: "delete" });
+  } else if (hasFolders && !hasFiles) {
+    items.push({
+      label: `Properties (${folderKeys.length} folder${folderKeys.length === 1 ? "" : "s"})`,
+      action: "info",
+    });
+    items.push({ label: "Copy Paths", action: "copy-key" });
+    items.push({ label: "Copy ARNs", action: "copy-arn" });
+    items.push({ label: "Copy / Move to...", action: "copy-move" });
+    items.push({ separator: true });
+    items.push({
+      label: `Delete ${folderKeys.length} folder${folderKeys.length === 1 ? "" : "s"}`,
+      action: "delete",
+    });
   }
 
   if (items.length === 0) return;
 
+  const selectedKeys = Array.from(getSelectionEntries());
+
   showContextMenu(e.clientX, e.clientY, items, (action) => {
     if (action === "preview") void openPreview(fileKeys[0]);
-    else if (action === "info") void openInfoPanel(fileKeys);
+    else if (action === "info") void openInfoPanel(selectedKeys);
     else if (action === "download") void handleDownload();
     else if (action === "copy-url") void handleCopyUrl();
     else if (action === "copy-presigned-url") void handleCopyPresignedUrl();
@@ -136,7 +158,12 @@ export function handleContextMenu(e: MouseEvent): void {
     else if (action === "rename") void handleRename();
     else if (action === "copy-move") openCopyMoveDialog();
     else if (action === "delete") void handleDelete();
-    else if (action === "open-folder") void navigateToFolder(prefix);
+    else if (action === "open-folder") {
+      void navigateToFolder(prefix).catch((err) => {
+        setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+        logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
+      });
+    }
   });
 }
 

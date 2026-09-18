@@ -1,4 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import {
+  invokeS3,
+  invokeS3For,
+  captureConnectionSnapshot,
+  connectionIdentityChanged,
+} from "./connection.ts";
+import type { ConnectionSnapshot } from "./connection.ts";
 import {
   $,
   escapeHtml,
@@ -6,8 +12,23 @@ import {
   formatDate,
   basename,
   getIconHtml,
+  friendlyError,
 } from "./utils.ts";
 import { state } from "./state.ts";
+import { showConfirm } from "./dialogs.ts";
+import {
+  getInfoTitleEl,
+  getInfoBodyEl,
+  getInfoSaveBtn,
+  setInfoOverlayActive,
+  clearInfoOverlayActive,
+  shouldUseInspectorMount,
+} from "./inspector-mount.ts";
+import {
+  ensureInspectorOpenForPane,
+  focusInspectorPropertiesPane,
+  markInspectorHasContent,
+} from "./inspector.ts";
 
 interface HeadObjectResponse {
   content_type: string;
@@ -125,6 +146,16 @@ function deriveAclVisibility(data: AclResponse): ObjectVisibility {
   return hasPublicRead ? "public-read" : "private";
 }
 
+function setInspectorFooterVisible(visible: boolean): void {
+  if (!shouldUseInspectorMount()) return;
+  const footer = document
+    .getElementById("inspector-info-save")
+    ?.closest(".inspector-panel__footer");
+  if (footer instanceof HTMLElement) {
+    footer.hidden = !visible;
+  }
+}
+
 function resetEditorState(): void {
   metadataDirty = false;
   aclDirty = false;
@@ -133,9 +164,14 @@ function resetEditorState(): void {
 }
 
 export async function openInfoPanel(keys: string[]): Promise<void> {
-  const overlay = $("info-overlay");
-  const title = $("info-title");
-  const saveBtn = $<HTMLButtonElement>("info-save");
+  ensureInspectorOpenForPane("properties");
+  if (shouldUseInspectorMount()) {
+    focusInspectorPropertiesPane();
+    markInspectorHasContent();
+  }
+
+  const title = getInfoTitleEl();
+  const saveBtn = getInfoSaveBtn();
   saveBtn.textContent = "Save";
 
   if (keys.length > 1) {
@@ -149,10 +185,11 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
 
     if (batchKeys.length === 0) {
       title.textContent = `${keys.length} items selected`;
-      overlay.classList.add("active");
+      setInfoOverlayActive(true);
       saveBtn.style.display = "none";
+      setInspectorFooterVisible(false);
       setTabsVisible(false);
-      const body = $("info-body");
+      const body = getInfoBodyEl();
       body.innerHTML =
         `<div class="metadata-batch-info">` +
         `<p>Selected ${keys.length} folder(s). Properties editing applies to files only.</p>` +
@@ -161,22 +198,44 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     }
 
     title.textContent = `${batchKeys.length} items selected`;
-    overlay.classList.add("active");
+    setInfoOverlayActive(true);
     saveBtn.style.display = "";
+    setInspectorFooterVisible(true);
     saveBtn.disabled = false;
     setTabsVisible(false);
-    renderBatchView($("info-body"), batchKeys);
+    renderBatchView(getInfoBodyEl(), batchKeys);
     return;
   }
 
   batchKeys = [];
 
+  if (keys.length === 1 && keys[0].startsWith("prefix:")) {
+    panelRequestToken += 1;
+    currentKey = "";
+    headData = null;
+    aclData = null;
+    metadataRows = [];
+    resetEditorState();
+    const folderPrefix = keys[0].slice("prefix:".length);
+    title.textContent = basename(folderPrefix) || folderPrefix;
+    setInfoOverlayActive(true);
+    saveBtn.style.display = "none";
+    setInspectorFooterVisible(false);
+    setTabsVisible(false);
+    getInfoBodyEl().innerHTML =
+      `<div class="metadata-batch-info">` +
+      `<p>Folder selected. Properties editing applies to files only.</p>` +
+      `</div>`;
+    return;
+  }
+
   const requestToken = ++panelRequestToken;
   currentKey = keys[0];
   const selectedKey = currentKey;
   title.textContent = basename(currentKey);
-  overlay.classList.add("active");
+  setInfoOverlayActive(true);
   saveBtn.style.display = "";
+  setInspectorFooterVisible(true);
   saveBtn.disabled = true;
   setTabsVisible(true);
   activeTab = "general";
@@ -187,11 +246,11 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   metadataRows = [];
   resetEditorState();
 
-  const body = $("info-body");
+  const body = getInfoBodyEl();
   body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
 
   try {
-    const nextHeadData = await invoke<HeadObjectResponse>("head_object", {
+    const nextHeadData = await invokeS3<HeadObjectResponse>("head_object", {
       bucket: state.currentBucket,
       key: selectedKey,
     });
@@ -211,17 +270,28 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     if (requestToken !== panelRequestToken || currentKey !== selectedKey) {
       return;
     }
-    body.innerHTML = `<div class="metadata-loading">Failed to load: ${escapeHtml(String(err))}</div>`;
+    body.innerHTML = `<div class="metadata-loading">Failed to load: ${escapeHtml(friendlyError(err))}</div>`;
   }
 }
 
+function infoTabRoot(): ParentNode | null {
+  if (shouldUseInspectorMount()) {
+    return document.getElementById("inspector-pane-info");
+  }
+  return document.getElementById("info-overlay");
+}
+
 function setTabsVisible(visible: boolean): void {
-  const tabs = document.querySelector(".info-tabs") as HTMLElement | null;
-  if (tabs) tabs.style.display = visible ? "" : "none";
+  const root = infoTabRoot();
+  const tabs = root?.querySelector<HTMLElement>(".info-tabs");
+  if (tabs) {
+    tabs.style.display = visible ? "" : "none";
+  }
 }
 
 function updateTabUI(): void {
-  const tabs = document.querySelectorAll<HTMLElement>(".info-tab");
+  const root = infoTabRoot();
+  const tabs = root?.querySelectorAll<HTMLElement>(".info-tab") ?? [];
   for (const tab of tabs) {
     const isActive = tab.dataset.tab === activeTab;
     tab.classList.toggle("info-tab--active", isActive);
@@ -238,7 +308,7 @@ export function switchTab(tab: string): void {
 
 function renderTab(): void {
   if (!headData) return;
-  const body = $("info-body");
+  const body = getInfoBodyEl();
 
   if (activeTab === "general") {
     renderGeneral(body);
@@ -283,7 +353,7 @@ async function buildUrlAsync(
   requestToken: number,
 ): Promise<void> {
   try {
-    const url = await invoke<string>("build_object_url", {
+    const url = await invokeS3<string>("build_object_url", {
       bucket: state.currentBucket,
       key: expectedKey,
     });
@@ -312,7 +382,7 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
 
   if (!aclData) {
     try {
-      const nextAclData = await invoke<AclResponse>("get_object_acl", {
+      const nextAclData = await invokeS3<AclResponse>("get_object_acl", {
         bucket: state.currentBucket,
         key: selectedKey,
       });
@@ -332,7 +402,7 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
       ) {
         return;
       }
-      body.innerHTML = `<div class="metadata-loading">Failed to load permissions: ${escapeHtml(String(err))}</div>`;
+      body.innerHTML = `<div class="metadata-loading">Failed to load permissions: ${escapeHtml(friendlyError(err))}</div>`;
       return;
     }
   }
@@ -394,13 +464,21 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
 }
 
 function renderBatchView(body: HTMLElement, keys: string[]): void {
-  const listItems = keys
+  // Ctrl+A on a capped listing can select thousands of keys; rendering one
+  // list item each froze the panel. It is informational, so cap the preview.
+  const MAX_LISTED = 100;
+  const shown = keys.slice(0, MAX_LISTED);
+  const listItems = shown
     .map((k) => `<li>${escapeHtml(basename(k))}</li>`)
     .join("");
+  const more =
+    keys.length > shown.length
+      ? `<li class="metadata-batch-more">+${keys.length - shown.length} more…</li>`
+      : "";
   body.innerHTML =
     `<div class="metadata-batch-info">` +
     `<p>Selected ${keys.length} file(s):</p>` +
-    `<ul class="metadata-batch-list">${listItems}</ul>` +
+    `<ul class="metadata-batch-list">${listItems}${more}</ul>` +
     `</div>` +
     `<div class="setting-section">Permissions</div>` +
     `<div class="metadata-permissions-editor">` +
@@ -581,7 +659,26 @@ function infoRow(label: string, value: string, mono = false): string {
 }
 
 function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return friendlyError(err);
+}
+
+export function hasUnsavedInfoChanges(): boolean {
+  return metadataDirty || aclDirty;
+}
+
+export async function confirmDiscardInfoProperties(): Promise<boolean> {
+  if (!hasUnsavedInfoChanges()) return true;
+  return showConfirm("Discard changes?", "You have unsaved property changes.", {
+    okLabel: "Discard",
+    okDanger: true,
+    cancelLabel: "Keep editing",
+  });
+}
+
+export async function requestCloseInfoPanel(): Promise<boolean> {
+  if (!(await confirmDiscardInfoProperties())) return false;
+  closeInfoPanel();
+  return true;
 }
 
 function collectSingleMetadata(): {
@@ -620,7 +717,20 @@ export async function saveInfoPanel(): Promise<void> {
 
 async function saveSingleChanges(): Promise<void> {
   const selectedKey = currentKey;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    setStatus("Save cancelled: not connected.", 5000);
+    return;
+  }
+  const requestToken = panelRequestToken;
   if (!selectedKey) return;
+
+  const isCurrentRequest = () =>
+    requestToken === panelRequestToken &&
+    currentKey === selectedKey &&
+    !connectionIdentityChanged(target);
 
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl =
@@ -634,70 +744,104 @@ async function saveSingleChanges(): Promise<void> {
     return;
   }
 
-  const saveBtn = $<HTMLButtonElement>("info-save");
+  if (
+    shouldApplyAcl &&
+    requestedVisibility === "public-read" &&
+    initialSingleVisibility !== "public-read"
+  ) {
+    const confirmed = await showConfirm(
+      "Make object public?",
+      `Anyone with the object URL will be able to read ${target.bucket}/${selectedKey}. Continue?`,
+      { okLabel: "Make public", cancelLabel: "Cancel", okDanger: true },
+    );
+    if (!confirmed || !isCurrentRequest()) return;
+  }
+
+  const saveBtn = getInfoSaveBtn();
   saveBtn.disabled = true;
   saveBtn.textContent = "Saving\u2026";
 
   let metadataError: string | null = null;
   let aclError: string | null = null;
 
-  if (shouldApplyMetadata) {
-    try {
-      const payload = collectSingleMetadata();
-      await invoke("update_metadata", {
-        bucket: state.currentBucket,
-        key: selectedKey,
-        contentType: payload.contentType,
-        metadata: payload.metadata,
-      });
-    } catch (err) {
-      metadataError = errorText(err);
+  try {
+    if (shouldApplyMetadata) {
+      try {
+        if (!isCurrentRequest()) return;
+        const payload = collectSingleMetadata();
+        await invokeS3For(target.connectionId, "update_metadata", {
+          bucket: target.bucket,
+          key: selectedKey,
+          contentType: payload.contentType,
+          metadata: payload.metadata,
+        });
+        if (!isCurrentRequest()) return;
+      } catch (err) {
+        metadataError = errorText(err);
+      }
+    }
+
+    if (shouldApplyAcl && requestedVisibility) {
+      try {
+        if (!isCurrentRequest()) return;
+        await invokeS3For(target.connectionId, "set_object_acl", {
+          bucket: target.bucket,
+          key: selectedKey,
+          visibility: requestedVisibility,
+        });
+        if (!isCurrentRequest()) return;
+      } catch (err) {
+        aclError = errorText(err);
+      }
+    }
+
+    if (!isCurrentRequest()) return;
+
+    if (!metadataError && !aclError) {
+      closeInfoPanel();
+      if (shouldApplyMetadata && shouldApplyAcl) {
+        setStatus("Properties updated.", 5000);
+      } else if (shouldApplyAcl) {
+        setStatus("Permissions updated.", 5000);
+      } else {
+        setStatus("Metadata updated.", 5000);
+      }
+      return;
+    }
+
+    if (metadataError && aclError) {
+      setStatus(
+        `Failed to update properties: metadata (${metadataError}); permissions (${aclError})`,
+      );
+      return;
+    }
+
+    if (metadataError) {
+      setStatus(`Failed to update metadata: ${metadataError}`);
+      return;
+    }
+
+    setStatus(`Failed to update permissions: ${aclError ?? "Unknown error"}`);
+  } finally {
+    if (isCurrentRequest()) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save";
     }
   }
-
-  if (shouldApplyAcl && requestedVisibility) {
-    try {
-      await invoke("set_object_acl", {
-        bucket: state.currentBucket,
-        key: selectedKey,
-        visibility: requestedVisibility,
-      });
-    } catch (err) {
-      aclError = errorText(err);
-    }
-  }
-
-  saveBtn.disabled = false;
-  saveBtn.textContent = "Save";
-
-  if (!metadataError && !aclError) {
-    closeInfoPanel();
-    if (shouldApplyMetadata && shouldApplyAcl) {
-      setStatus("Properties updated.", 5000);
-    } else if (shouldApplyAcl) {
-      setStatus("Permissions updated.", 5000);
-    } else {
-      setStatus("Metadata updated.", 5000);
-    }
-    return;
-  }
-
-  if (metadataError && aclError) {
-    setStatus(
-      `Failed to update properties: metadata (${metadataError}); permissions (${aclError})`,
-    );
-    return;
-  }
-
-  if (metadataError) {
-    setStatus(`Failed to update metadata: ${metadataError}`);
-    return;
-  }
-
-  setStatus(`Failed to update permissions: ${aclError ?? "Unknown error"}`);
 }
 
 async function saveBatchChanges(): Promise<void> {
+  const requestToken = panelRequestToken;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    setStatus("Save cancelled: not connected.", 5000);
+    return;
+  }
+  const targetKeys = [...batchKeys];
+  const isCurrentRequest = () =>
+    requestToken === panelRequestToken && !connectionIdentityChanged(target);
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl = aclDirty && requestedVisibility !== null;
 
@@ -714,7 +858,16 @@ async function saveBatchChanges(): Promise<void> {
     return;
   }
 
-  const saveBtn = $<HTMLButtonElement>("info-save");
+  if (shouldApplyAcl && requestedVisibility === "public-read") {
+    const confirmed = await showConfirm(
+      "Make selected objects public?",
+      `This will allow anonymous read access to ${targetKeys.length} object(s) in bucket ${target.bucket}. Continue?`,
+      { okLabel: "Make public", cancelLabel: "Cancel", okDanger: true },
+    );
+    if (!confirmed || !isCurrentRequest()) return;
+  }
+
+  const saveBtn = getInfoSaveBtn();
   saveBtn.disabled = true;
   let succeeded = 0;
   let failed = 0;
@@ -723,8 +876,9 @@ async function saveBatchChanges(): Promise<void> {
   const BATCH_CONCURRENCY = 6;
   let processed = 0;
 
-  for (let i = 0; i < batchKeys.length; i += BATCH_CONCURRENCY) {
-    const chunk = batchKeys.slice(i, i + BATCH_CONCURRENCY);
+  for (let i = 0; i < targetKeys.length; i += BATCH_CONCURRENCY) {
+    if (!isCurrentRequest()) return;
+    const chunk = targetKeys.slice(i, i + BATCH_CONCURRENCY);
     const results = await Promise.allSettled(
       chunk.map(async (key) => {
         let metadataFailed = false;
@@ -732,16 +886,20 @@ async function saveBatchChanges(): Promise<void> {
 
         if (shouldApplyMetadata) {
           try {
-            const head = await invoke<HeadObjectResponse>("head_object", {
-              bucket: state.currentBucket,
-              key,
-            });
+            const head = await invokeS3For<HeadObjectResponse>(
+              target.connectionId,
+              "head_object",
+              {
+                bucket: target.bucket,
+                key,
+              },
+            );
             const merged: Record<string, string> = {
               ...head.metadata,
               ...newMeta,
             };
-            await invoke("update_metadata", {
-              bucket: state.currentBucket,
+            await invokeS3For(target.connectionId, "update_metadata", {
+              bucket: target.bucket,
               key,
               contentType: head.content_type,
               metadata: merged,
@@ -753,8 +911,8 @@ async function saveBatchChanges(): Promise<void> {
 
         if (shouldApplyAcl && requestedVisibility) {
           try {
-            await invoke("set_object_acl", {
-              bucket: state.currentBucket,
+            await invokeS3For(target.connectionId, "set_object_acl", {
+              bucket: target.bucket,
               key,
               visibility: requestedVisibility,
             });
@@ -767,9 +925,10 @@ async function saveBatchChanges(): Promise<void> {
       }),
     );
 
+    if (!isCurrentRequest()) return;
     for (const result of results) {
       processed++;
-      saveBtn.textContent = `Saving ${processed}/${batchKeys.length}\u2026`;
+      saveBtn.textContent = `Saving ${processed}/${targetKeys.length}\u2026`;
       if (result.status === "rejected") {
         failed++;
       } else {
@@ -790,6 +949,7 @@ async function saveBatchChanges(): Promise<void> {
     }
   }
 
+  if (!isCurrentRequest()) return;
   saveBtn.disabled = false;
   saveBtn.textContent = "Save";
 
@@ -819,19 +979,22 @@ async function saveBatchChanges(): Promise<void> {
 
 export function closeInfoPanel(): void {
   panelRequestToken += 1;
-  $("info-overlay").classList.remove("active");
+  clearInfoOverlayActive();
+  for (const id of ["inspector-info-body", "info-body"]) {
+    document.getElementById(id)?.replaceChildren();
+  }
   headData = null;
   aclData = null;
   metadataRows = [];
   currentKey = "";
   batchKeys = [];
   resetEditorState();
-  const saveBtn = document.getElementById(
-    "info-save",
-  ) as HTMLButtonElement | null;
-  if (saveBtn) {
-    saveBtn.disabled = false;
-    saveBtn.textContent = "Save";
+  for (const id of ["inspector-info-save", "info-save"]) {
+    const saveBtn = document.getElementById(id) as HTMLButtonElement | null;
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save";
+    }
   }
 }
 
@@ -844,9 +1007,10 @@ function setStatus(text: string, autoResetMs?: number): void {
   if (el) el.textContent = text;
   if (autoResetMs && autoResetMs > 0) {
     state.statusTimeout = setTimeout(() => {
+      state.statusTimeout = undefined;
+      if (typeof document === "undefined") return;
       const el2 = document.getElementById("status");
       if (el2) el2.textContent = "";
-      state.statusTimeout = undefined;
     }, autoResetMs);
   }
 }

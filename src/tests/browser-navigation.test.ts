@@ -1,32 +1,46 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 let failNextRefresh = false;
+let supersedeNextRefresh = false;
 let stateModule: typeof import("../state.ts") | null = null;
 
-const refreshObjectsMock = vi.fn(async (bucket: string, prefix: string) => {
-  if (stateModule) {
-    stateModule.state.currentBucket = bucket;
-    stateModule.state.currentPrefix = prefix;
-    stateModule.state.objects = [];
-    stateModule.state.prefixes = [];
-    stateModule.state.continuationToken = "";
-    stateModule.state.hasMore = false;
-  }
-  if (failNextRefresh) {
-    failNextRefresh = false;
-    throw new Error("simulated navigation failure");
-  }
-});
+const refreshObjectsMock = vi.fn(
+  async (bucket: string, prefix: string): Promise<boolean> => {
+    if (supersedeNextRefresh) {
+      supersedeNextRefresh = false;
+      return false;
+    }
+    if (failNextRefresh) {
+      failNextRefresh = false;
+      throw new Error("simulated navigation failure");
+    }
+    if (stateModule) {
+      stateModule.state.currentBucket = bucket;
+      stateModule.state.currentPrefix = prefix;
+      stateModule.state.objects = [];
+      stateModule.state.prefixes = [];
+      stateModule.state.continuationToken = "";
+      stateModule.state.hasMore = false;
+      stateModule.state.selectedKeys.clear();
+    }
+    return true;
+  },
+);
 
 vi.mock("../connection.ts", () => ({
   refreshObjects: refreshObjectsMock,
+}));
+
+vi.mock("../info-panel.ts", () => ({
+  hasUnsavedInfoChanges: () => false,
+  confirmDiscardInfoProperties: async () => true,
 }));
 
 function renderFixture(): void {
   document.body.innerHTML = `
     <input id="filter-input" />
     <ul id="bucket-list"></ul>
-    <nav id="breadcrumb"></nav>
+    <nav id="location-omnibar-browse" class="breadcrumb"></nav>
     <div id="object-panel" style="display:none"></div>
     <div id="empty-state"></div>
     <table>
@@ -40,12 +54,15 @@ function renderFixture(): void {
       <tbody id="object-tbody"></tbody>
     </table>
     <input id="select-all" type="checkbox" />
-    <div id="batch-toolbar" hidden><span id="batch-count"></span></div>
+    <div id="batch-toolbar"><span id="batch-count"></span></div>
     <div id="load-more-row"></div>
     <span id="statusbar-count"></span>
     <span id="object-count"></span>
     <button id="nav-back"></button>
     <button id="nav-forward"></button>
+    <button id="nav-up"></button>
+    <input id="location-omnibar-edit" type="text" hidden />
+    <button id="btn-download" disabled></button>
     <span id="status"></span>
   `;
 }
@@ -55,6 +72,7 @@ describe("browser navigation recovery", () => {
     vi.resetModules();
     refreshObjectsMock.mockClear();
     failNextRefresh = false;
+    supersedeNextRefresh = false;
     renderFixture();
     stateModule = await import("../state.ts");
     stateModule.state.selectedKeys.clear();
@@ -73,7 +91,7 @@ describe("browser navigation recovery", () => {
     await browser.selectBucket("bucket-a");
     await browser.navigateToFolder("x/");
 
-    failNextRefresh = true;
+    supersedeNextRefresh = true;
     await browser.navigateBack();
 
     await browser.navigateToFolder("y/");
@@ -113,13 +131,59 @@ describe("browser navigation recovery", () => {
 
     await browser.selectBucket("bucket-a");
     await browser.navigateToFolder("a/b/c/");
+    expect(
+      (document.getElementById("nav-up") as HTMLButtonElement).disabled,
+    ).toBe(false);
     await browser.navigateUp();
     expect(stateModule?.state.currentPrefix).toBe("a/b/");
 
     await browser.navigateToFolder("");
+    expect(
+      (document.getElementById("nav-up") as HTMLButtonElement).disabled,
+    ).toBe(true);
     const beforeCalls = refreshObjectsMock.mock.calls.length;
     await browser.navigateUp();
     expect(refreshObjectsMock.mock.calls.length).toBe(beforeCalls);
+  });
+
+  it("parses location paths and navigates via path input", async () => {
+    const browser = await import("../browser.ts");
+    stateModule!.state.buckets = [
+      { name: "bucket-a", creation_date: "2024-01-01" },
+      { name: "bucket-b", creation_date: "2024-01-02" },
+    ];
+
+    expect(browser.parseLocationPath("")).toBeNull();
+    expect(browser.parseLocationPath("bucket-a")).toEqual({
+      bucket: "bucket-a",
+      prefix: "",
+    });
+    expect(browser.parseLocationPath("s3://bucket-a/docs/sub")).toEqual({
+      bucket: "bucket-a",
+      prefix: "docs/sub/",
+    });
+    expect(browser.formatLocationPath("bucket-a", "docs/")).toBe(
+      "bucket-a/docs/",
+    );
+
+    await browser.selectBucket("bucket-a");
+    await browser.navigateToLocationPath("bucket-a/x/y/");
+    expect(stateModule?.state.currentBucket).toBe("bucket-a");
+    expect(stateModule?.state.currentPrefix).toBe("x/y/");
+    expect(
+      (document.getElementById("location-omnibar-edit") as HTMLInputElement)
+        .value,
+    ).toBe("bucket-a/x/y/");
+
+    await browser.navigateToLocationPath("bucket-b/");
+    expect(stateModule?.state.currentBucket).toBe("bucket-b");
+    expect(stateModule?.state.currentPrefix).toBe("");
+
+    const ok = await browser.navigateToLocationPath("missing-bucket/");
+    expect(ok).toBe(false);
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("Unknown bucket");
   });
 
   it("clears nav history and disables nav controls", async () => {
@@ -133,6 +197,45 @@ describe("browser navigation recovery", () => {
     const fwdBtn = document.getElementById("nav-forward") as HTMLButtonElement;
     expect(backBtn.disabled).toBe(true);
     expect(fwdBtn.disabled).toBe(true);
+  });
+
+  it("restores the prior listing when folder navigation fails", async () => {
+    const browser = await import("../browser.ts");
+
+    await browser.selectBucket("bucket-a");
+    await browser.navigateToFolder("x/");
+    stateModule!.state.objects = [
+      { key: "x/kept.txt", size: 1, last_modified: "", is_folder: false },
+    ];
+
+    failNextRefresh = true;
+    await expect(browser.navigateToFolder("y/")).rejects.toThrow(
+      "simulated navigation failure",
+    );
+
+    expect(stateModule?.state.currentPrefix).toBe("x/");
+    expect(stateModule?.state.objects).toEqual([
+      { key: "x/kept.txt", size: 1, last_modified: "", is_folder: false },
+    ]);
+  });
+
+  it("restores the prior listing when bucket selection fails", async () => {
+    const browser = await import("../browser.ts");
+
+    await browser.selectBucket("bucket-a");
+    stateModule!.state.objects = [
+      { key: "kept.txt", size: 1, last_modified: "", is_folder: false },
+    ];
+
+    failNextRefresh = true;
+    await expect(browser.selectBucket("bucket-b")).rejects.toThrow(
+      "simulated navigation failure",
+    );
+
+    expect(stateModule?.state.currentBucket).toBe("bucket-a");
+    expect(stateModule?.state.objects).toEqual([
+      { key: "kept.txt", size: 1, last_modified: "", is_folder: false },
+    ]);
   });
 
   it("restores snapshot and sets status when forward navigation fails", async () => {
@@ -165,9 +268,9 @@ describe("browser navigation recovery", () => {
     await browser.navigateToFolder("x/");
     await browser.navigateToFolder("y/");
 
-    failNextRefresh = true;
+    supersedeNextRefresh = true;
     await browser.navigateBack();
-    failNextRefresh = true;
+    supersedeNextRefresh = true;
     await browser.navigateBack();
 
     document.getElementById("status")?.remove();

@@ -43,8 +43,22 @@ fi
 echo "Preparing keychain for non-GUI codesign..."
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-security list-keychains -d user -s "$KEYCHAIN_PATH"
-security default-keychain -d user -s "$KEYCHAIN_PATH"
+# Append the signing keychain instead of replacing the search list: setting
+# `list-keychains -s` to exactly one keychain permanently hides every other
+# keychain from codesign/git/security on this host.
+declare -a EXISTING_KEYCHAINS=()
+while IFS= read -r keychain_line; do
+  keychain_line="${keychain_line#"${keychain_line%%[![:space:]]*}"}"
+  keychain_line="${keychain_line%\"}"
+  keychain_line="${keychain_line#\"}"
+  [[ -n "$keychain_line" ]] && EXISTING_KEYCHAINS+=("$keychain_line")
+done < <(security list-keychains -d user)
+if ! printf '%s\n' "${EXISTING_KEYCHAINS[@]}" | grep -qxF "$KEYCHAIN_PATH"; then
+  security list-keychains -d user -s "$KEYCHAIN_PATH" "${EXISTING_KEYCHAINS[@]}"
+fi
+# The default keychain is deliberately left untouched: the signing identity is
+# resolved through the search list, and changing the user's default is a
+# persistent side effect this release step does not need.
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
 echo "Keychain ready for SSH signing."

@@ -154,6 +154,28 @@ describe("command palette", () => {
     expect(action).not.toHaveBeenCalled();
   });
 
+  it("restores focus to the opener on close", async () => {
+    const palette = await import("../command-palette.ts");
+    palette.registerCommands([
+      { id: "run", label: "Run", icon: "25b6", action: vi.fn() },
+    ]);
+    palette.initPalette();
+
+    const opener = document.createElement("button");
+    opener.id = "opener";
+    document.body.appendChild(opener);
+    opener.focus();
+    expect(document.activeElement).toBe(opener);
+
+    palette.openPalette();
+    expect(
+      (document.getElementById("palette-overlay") as HTMLDivElement).hidden,
+    ).toBe(false);
+
+    palette.closePalette();
+    expect(document.activeElement).toBe(opener);
+  });
+
   it("gracefully handles missing palette elements", async () => {
     document.body.innerHTML = "";
     const palette = await import("../command-palette.ts");

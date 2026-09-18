@@ -1,5 +1,24 @@
 /* Sort triggers, load-more row, object counts */
 
+/* Keep native table cells aligned while the name cell's inner wrapper handles
+   flex layout and ellipsis. The table remains horizontally scrollable below
+   its 520px minimum width. */
+.object-table col.col-object-check {
+  width: 36px;
+}
+
+.object-table col.col-object-size {
+  width: 100px;
+}
+
+.object-table col.col-object-modified {
+  width: 180px;
+}
+
+.object-table col.col-object-name {
+  width: auto;
+}
+
 .col-sortable {
   user-select: none;
 }

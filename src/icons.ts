@@ -38,6 +38,11 @@ import save from "lucide-static/icons/save.svg?raw";
 import checkSquare from "lucide-static/icons/check-square.svg?raw";
 import xSquare from "lucide-static/icons/x-square.svg?raw";
 import check from "lucide-static/icons/check.svg?raw";
+import panelRight from "lucide-static/icons/panel-right.svg?raw";
+import moreHorizontal from "lucide-static/icons/more-horizontal.svg?raw";
+import minus from "lucide-static/icons/minus.svg?raw";
+import square from "lucide-static/icons/square.svg?raw";
+import plus from "lucide-static/icons/plus.svg?raw";
 
 const registry: Record<string, string> = {
   settings,
@@ -80,6 +85,12 @@ const registry: Record<string, string> = {
   "check-square": checkSquare,
   "x-square": xSquare,
   check,
+  sidebar: panelRight,
+  "panel-right": panelRight,
+  "more-horizontal": moreHorizontal,
+  minus,
+  square,
+  plus,
 };
 
 export function getIconHtml(

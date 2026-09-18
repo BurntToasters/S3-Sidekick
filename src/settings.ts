@@ -16,13 +16,17 @@ import {
   getBookmarks,
   exportBookmarksJson,
   importBookmarksJson,
+  MAX_IMPORT_BYTES,
   type Bookmark,
 } from "./bookmarks.ts";
 import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
 import { refreshSecuritySettingsUI } from "./security.ts";
 import { showConfirm, showAlert } from "./dialogs.ts";
+import { friendlyError } from "./utils.ts";
 
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
+let settingsSaveTail: Promise<void> = Promise.resolve();
+let settingsModalSaveOperation: Promise<void> | null = null;
 
 export function setBookmarkSelectHandler(handler: (b: Bookmark) => void): void {
   onBookmarkSelect = handler;
@@ -103,13 +107,48 @@ export async function loadSettings(): Promise<boolean> {
   return !result.malformed;
 }
 
-export async function saveSettings(): Promise<void> {
-  const payload = mergeSettingsPayload(
-    state.currentSettings,
-    state.settingsExtras,
+function clampWindowSize(settingsSnapshot: UserSettings): void {
+  // Clamp pre-save so a corrupt in-memory size never persists an
+  // off-screen/unusable window. Bounds match settings-model validation.
+  if (
+    !Number.isInteger(settingsSnapshot.windowWidth) ||
+    settingsSnapshot.windowWidth < 400 ||
+    settingsSnapshot.windowWidth > 10000
+  ) {
+    settingsSnapshot.windowWidth = SETTING_DEFAULTS.windowWidth;
+  }
+  if (
+    !Number.isInteger(settingsSnapshot.windowHeight) ||
+    settingsSnapshot.windowHeight < 300 ||
+    settingsSnapshot.windowHeight > 10000
+  ) {
+    settingsSnapshot.windowHeight = SETTING_DEFAULTS.windowHeight;
+  }
+}
+
+function enqueueSettingsSnapshot(
+  settingsSnapshot: UserSettings,
+  extrasSnapshot: typeof state.settingsExtras,
+): Promise<void> {
+  clampWindowSize(settingsSnapshot);
+  const payload = mergeSettingsPayload(settingsSnapshot, extrasSnapshot);
+  const persistSnapshot = async () => {
+    await invoke("save_settings", { json: payload });
+    state.lastPersistedSettings = { ...settingsSnapshot };
+  };
+  const result = settingsSaveTail.then(persistSnapshot);
+  settingsSaveTail = result.catch(() => undefined);
+  return result;
+}
+
+export function saveSettings(): Promise<void> {
+  if (settingsModalSaveOperation) {
+    return settingsModalSaveOperation.then(() => saveSettings());
+  }
+  return enqueueSettingsSnapshot(
+    { ...state.currentSettings },
+    { ...state.settingsExtras },
   );
-  await invoke("save_settings", { json: payload });
-  state.lastPersistedSettings = { ...state.currentSettings };
 }
 
 export function switchSettingsTab(tab: string): void {
@@ -385,6 +424,14 @@ export function populateSettingsModal(): void {
       state.currentSettings.rememberDownloadPath;
   }
 
+  const openTransferDrawerCheckbox = document.getElementById(
+    "setting-open-transfer-drawer",
+  ) as HTMLInputElement | null;
+  if (openTransferDrawerCheckbox) {
+    openTransferDrawerCheckbox.checked =
+      state.currentSettings.openTransferDrawerOnStart;
+  }
+
   const presetSelect = document.getElementById(
     "setting-transfer-performance-preset",
   ) as HTMLSelectElement | null;
@@ -615,6 +662,14 @@ export function readSettingsModal(): void {
       rememberDownloadCheckbox.checked;
   }
 
+  const openTransferDrawerCheckbox = document.getElementById(
+    "setting-open-transfer-drawer",
+  ) as HTMLInputElement | null;
+  if (openTransferDrawerCheckbox) {
+    state.currentSettings.openTransferDrawerOnStart =
+      openTransferDrawerCheckbox.checked;
+  }
+
   const presetSelect = document.getElementById(
     "setting-transfer-performance-preset",
   ) as HTMLSelectElement | null;
@@ -719,26 +774,83 @@ export function openSettingsModal(): void {
   if (overlay) overlay.classList.add("active");
 }
 
-export async function closeSettingsModal(save: boolean): Promise<void> {
-  if (save) {
-    readSettingsModal();
-    applyTheme(state.currentSettings.theme);
-    try {
-      await saveSettings();
-    } catch (err) {
-      applyTheme(state.lastPersistedSettings.theme);
-      state.currentSettings = { ...state.lastPersistedSettings };
-      const statusEl = document.getElementById("status");
-      if (statusEl)
-        statusEl.textContent = `Failed to save settings: ${String(err)}`;
-      return;
+function setSettingsSaveBusy(busy: boolean): void {
+  const button = document.getElementById(
+    "settings-save",
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  button.disabled = busy;
+  button.setAttribute("aria-busy", String(busy));
+  button.textContent = busy ? "Saving\u2026" : "Save";
+}
+
+function settingsMatchSnapshotExceptWindowSize(
+  snapshot: UserSettings,
+): boolean {
+  const current = { ...state.currentSettings };
+  current.windowWidth = snapshot.windowWidth;
+  current.windowHeight = snapshot.windowHeight;
+  return JSON.stringify(current) === JSON.stringify(snapshot);
+}
+
+async function saveAndCloseSettingsModal(): Promise<void> {
+  readSettingsModal();
+  const attemptedSettings = { ...state.currentSettings };
+  const attemptedExtras = { ...state.settingsExtras };
+  applyTheme(attemptedSettings.theme);
+  setSettingsSaveBusy(true);
+  try {
+    await enqueueSettingsSnapshot(attemptedSettings, attemptedExtras);
+  } catch (err) {
+    if (settingsMatchSnapshotExceptWindowSize(attemptedSettings)) {
+      const latestWindowWidth = state.currentSettings.windowWidth;
+      const latestWindowHeight = state.currentSettings.windowHeight;
+      const rollback = {
+        ...state.lastPersistedSettings,
+        windowWidth: latestWindowWidth,
+        windowHeight: latestWindowHeight,
+      };
+      applyTheme(rollback.theme);
+      state.currentSettings = rollback;
+      setUpdateChannel(rollback.updateChannel);
     }
-  } else {
+    const statusEl = document.getElementById("status");
+    if (statusEl)
+      statusEl.textContent = `Failed to save settings: ${String(err)}`;
+    // The modal overlay makes #status inert, so the failure must be visible
+    // inside the modal (and the draft must stay open so nothing is lost).
+    const errorEl = document.getElementById("settings-save-error");
+    if (errorEl) {
+      errorEl.textContent = `Failed to save settings: ${String(err)}`;
+      errorEl.hidden = false;
+    }
+    return;
+  }
+  const errorEl = document.getElementById("settings-save-error");
+  if (errorEl) {
+    errorEl.textContent = "";
+    errorEl.hidden = true;
+  }
+  document.getElementById("settings-overlay")?.classList.remove("active");
+}
+
+export function closeSettingsModal(save: boolean): Promise<void> {
+  if (settingsModalSaveOperation) return settingsModalSaveOperation;
+  if (!save) {
     applyTheme(state.lastPersistedSettings.theme);
     state.currentSettings = { ...state.lastPersistedSettings };
+    document.getElementById("settings-overlay")?.classList.remove("active");
+    return Promise.resolve();
   }
-  const overlay = document.getElementById("settings-overlay");
-  if (overlay) overlay.classList.remove("active");
+
+  const operation = saveAndCloseSettingsModal().finally(() => {
+    if (settingsModalSaveOperation === operation) {
+      settingsModalSaveOperation = null;
+      setSettingsSaveBusy(false);
+    }
+  });
+  settingsModalSaveOperation = operation;
+  return operation;
 }
 
 export async function resetSettings(): Promise<void> {
@@ -751,38 +863,64 @@ export async function resetSettings(): Promise<void> {
 
   const fullReset = await showConfirm(
     "Reset Scope",
-    "Keep your bookmarks, or factory reset everything?\n\nFactory reset removes all settings, bookmarks, saved connections, and encryption — a completely clean slate.",
+    "Keep your bookmarks, or factory reset everything?\n\nFactory reset removes all settings, bookmarks, saved connections, transfer recovery data, and encryption — a completely clean slate.",
     { okLabel: "Factory Reset", cancelLabel: "Keep Bookmarks", okDanger: true },
   );
 
-  const extras = fullReset ? {} : { _setupComplete: true };
-  const defaults = mergeSettingsPayload(SETTING_DEFAULTS, extras);
-  try {
-    await invoke("save_settings", { json: defaults });
-  } catch {
-    /* best effort */
-  }
-  try {
-    await invoke("save_connection", { json: "" });
-  } catch {
-    /* best effort */
-  }
-
   if (fullReset) {
+    const finalConfirmation = await showConfirm(
+      "Permanently Delete All App Data?",
+      "This permanently deletes bookmarks, saved connections, encrypted storage, transfer checkpoints, and partial download files. Active transfers will be stopped. This cannot be undone.",
+      {
+        okLabel: "Delete Everything",
+        cancelLabel: "Cancel Reset",
+        okDanger: true,
+      },
+    );
+    if (!finalConfirmation) return;
+
+    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
     try {
-      await invoke("save_bookmarks", { json: "[]" });
-    } catch {
-      /* vault may be locked; backup handles it */
+      await invoke("factory_reset", { settingsJson: defaults });
+    } catch (err) {
+      await showAlert("Factory Reset Failed", friendlyError(err));
+      return;
     }
+
+    // The backend transaction is the commit point. Browser storage cleanup is
+    // best-effort only: a disabled/unavailable localStorage implementation must
+    // not misreport a completed destructive reset as failed or suppress relaunch.
     try {
-      await invoke("save_bookmarks_backup", { json: "[]" });
+      localStorage.clear();
     } catch {
-      /* best effort */
+      // Reads will generally be unavailable under the same policy; the backend
+      // remains authoritative and the relaunch below must still happen.
     }
+  } else {
+    // Partial reset: settings go to defaults but engagement extras survive
+    // so launchCount/support prompts do not re-fire after a routine reset.
+    const { launchCount, supportPromptDismissed, transfersHintDismissed } =
+      state.settingsExtras as {
+        launchCount?: unknown;
+        supportPromptDismissed?: unknown;
+        transfersHintDismissed?: unknown;
+      };
+    const carriedExtras: Record<string, unknown> = {
+      _setupComplete: true,
+    };
+    if (typeof launchCount === "number")
+      carriedExtras.launchCount = launchCount;
+    if (typeof supportPromptDismissed === "boolean")
+      carriedExtras.supportPromptDismissed = supportPromptDismissed;
+    if (typeof transfersHintDismissed === "boolean")
+      carriedExtras.transfersHintDismissed = transfersHintDismissed;
+    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, carriedExtras);
     try {
-      await invoke("reset_security");
-    } catch {
-      /* best effort */
+      await invoke("save_settings", { json: defaults });
+      await invoke("clear_saved_connection");
+    } catch (err) {
+      await showAlert("Reset Failed", friendlyError(err));
+      return;
     }
   }
 
@@ -806,6 +944,15 @@ export async function incrementLaunchCount(): Promise<number> {
 
 export async function markSupportPromptDismissed(): Promise<void> {
   state.settingsExtras.supportPromptDismissed = true;
+  await saveSettings();
+}
+
+export function isTransfersHintDismissed(): boolean {
+  return state.settingsExtras.transfersHintDismissed === true;
+}
+
+export async function markTransfersHintDismissed(): Promise<void> {
+  state.settingsExtras.transfersHintDismissed = true;
   await saveSettings();
 }
 
@@ -836,7 +983,12 @@ async function refreshBookmarkListUI(): Promise<void> {
         { okLabel: "Delete", okDanger: true },
       );
       if (!confirmed) return;
-      await removeBookmark(index);
+      try {
+        await removeBookmark(index);
+      } catch (err) {
+        void showAlert("Delete Failed", friendlyError(err));
+        return;
+      }
       void refreshBookmarkListUI();
     },
   );
@@ -855,14 +1007,38 @@ function wireBookmarkImportExport(): void {
   ) as HTMLInputElement | null;
 
   exportBtn?.addEventListener("click", () => {
-    const json = exportBookmarksJson();
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "s3-sidekick-bookmarks.json";
-    a.click();
-    URL.revokeObjectURL(url);
+    // Tri-state: Export? -> secrets or redacted? Cancel aborts without writing.
+    void showConfirm(
+      "Export bookmarks?",
+      "Download bookmarks as a JSON file?",
+      {
+        okLabel: "Export",
+        cancelLabel: "Cancel",
+      },
+    ).then((confirmed) => {
+      if (!confirmed) return;
+      void showConfirm(
+        "Export bookmark secrets?",
+        "Including secret keys writes them to a plaintext file. Choose redacted export to leave secrets out.",
+        {
+          okLabel: "Include secrets",
+          cancelLabel: "Export redacted",
+          okDanger: true,
+        },
+      ).then((includeSecrets) => {
+        const json = exportBookmarksJson(includeSecrets);
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "s3-sidekick-bookmarks.json";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Revoking synchronously can cancel the download in WebKit.
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      });
+    });
   });
 
   importBtn?.addEventListener("click", () => {
@@ -872,6 +1048,11 @@ function wireBookmarkImportExport(): void {
   importInput?.addEventListener("change", () => {
     const file = importInput.files?.[0];
     if (!file) return;
+    if (file.size > MAX_IMPORT_BYTES) {
+      importInput.value = "";
+      void showAlert("Import Failed", "Bookmark import is too large");
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const text = reader.result as string;

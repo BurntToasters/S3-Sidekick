@@ -45,6 +45,11 @@ flatpak-repo/
 # Test coverage
 coverage/
 
+# Playwright browser test artifacts
+playwright-report/
+test-results/
+blob-report/
+
 # Generated files
 licenses.json
 public/licenses.json

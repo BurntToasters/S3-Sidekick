@@ -64,6 +64,42 @@
   gap: 2px;
 }
 
+.settings-support-btn {
+  margin-top: auto;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition:
+    background var(--transition-smooth),
+    color var(--transition-smooth);
+}
+
+.settings-support-btn:hover,
+.settings-support-btn:focus-visible {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.settings-support-btn:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
+}
+
+.settings-support-btn .lucide-icon {
+  width: 14px;
+  height: 14px;
+}
+
 .settings-tab {
   display: block;
   width: 100%;
@@ -379,5 +415,8 @@
   }
   .settings-tab {
     width: auto;
+  }
+  .settings-support-btn {
+    margin-top: 4px;
   }
 }

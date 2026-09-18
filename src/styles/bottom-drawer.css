@@ -36,6 +36,10 @@
   min-height: 0;
 }
 
+.bottom-drawer--minimized .bottom-drawer__resize-handle {
+  display: none;
+}
+
 .bottom-drawer--minimized .bottom-drawer__body {
   display: none;
 }
@@ -66,6 +70,11 @@
 .bottom-drawer__resize-handle:hover::after {
   opacity: 1;
   background: var(--accent);
+}
+
+.bottom-drawer__resize-handle:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
 }
 
 .bottom-drawer__header {

@@ -1,11 +1,5 @@
 import { escapeHtml, getIconHtml } from "./utils.ts";
-import {
-  toggleDrawer,
-  openDrawer,
-  closeDrawer,
-  isDrawerOpen,
-  getActiveTab,
-} from "./bottom-drawer.ts";
+import { toggleDrawer } from "./bottom-drawer.ts";
 
 export type ActivityType = "info" | "success" | "error" | "warning";
 
@@ -42,16 +36,6 @@ export function logActivity(
 
 export function toggleActivityLog(): void {
   toggleDrawer("activity");
-}
-
-export function hideActivityLog(): void {
-  if (isDrawerOpen() && getActiveTab() === "activity") {
-    closeDrawer();
-  }
-}
-
-export function showActivityLog(): void {
-  openDrawer("activity");
 }
 
 export function clearActivityLog(): void {

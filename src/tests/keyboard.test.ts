@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 function renderFixture(): void {
   document.body.innerHTML = `
@@ -23,10 +23,37 @@ function renderFixture(): void {
 }
 
 describe("keyboard shortcuts", () => {
+  let unwireKeyboard: (() => void) | null = null;
+
   beforeEach(() => {
     vi.resetModules();
     renderFixture();
+    unwireKeyboard = null;
   });
+
+  afterEach(() => {
+    unwireKeyboard?.();
+    unwireKeyboard = null;
+  });
+
+  const defaultHandlers = () => ({
+    setSidebarOpen: vi.fn(),
+    handleDelete: vi.fn(async () => {}),
+    handleRefresh: vi.fn(async () => {}),
+    handleRename: vi.fn(async () => {}),
+    handleUploadButton: vi.fn(async () => {}),
+    handleUploadFolderButton: vi.fn(async () => {}),
+    handleCreateFolder: vi.fn(async () => {}),
+  });
+
+  async function wireKeyboard(
+    handlers = defaultHandlers(),
+  ): Promise<typeof import("../keyboard.ts")> {
+    const keyboard = await import("../keyboard.ts");
+    unwireKeyboard?.();
+    unwireKeyboard = keyboard.wireKeyboardShortcuts(handlers);
+    return keyboard;
+  }
 
   it("does not fire global refresh while command palette is open", async () => {
     const stateModule = await import("../state.ts");
@@ -36,17 +63,8 @@ describe("keyboard shortcuts", () => {
     palette.initPalette();
     palette.openPalette();
 
-    const keyboard = await import("../keyboard.ts");
-    const handlers = {
-      setSidebarOpen: vi.fn(),
-      handleDelete: vi.fn(async () => {}),
-      handleRefresh: vi.fn(async () => {}),
-      handleRename: vi.fn(async () => {}),
-      handleUploadButton: vi.fn(async () => {}),
-      handleUploadFolderButton: vi.fn(async () => {}),
-      handleCreateFolder: vi.fn(async () => {}),
-    };
-    keyboard.wireKeyboardShortcuts(handlers);
+    const handlers = defaultHandlers();
+    await wireKeyboard(handlers);
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "F5" }));
     expect(handlers.handleRefresh).not.toHaveBeenCalled();
@@ -61,20 +79,71 @@ describe("keyboard shortcuts", () => {
     palette.openPalette();
     expect(palette.isPaletteOpen()).toBe(true);
 
-    const keyboard = await import("../keyboard.ts");
-    const handlers = {
-      setSidebarOpen: vi.fn(),
-      handleDelete: vi.fn(async () => {}),
-      handleRefresh: vi.fn(async () => {}),
-      handleRename: vi.fn(async () => {}),
-      handleUploadButton: vi.fn(async () => {}),
-      handleUploadFolderButton: vi.fn(async () => {}),
-      handleCreateFolder: vi.fn(async () => {}),
-    };
-    keyboard.wireKeyboardShortcuts(handlers);
+    await wireKeyboard();
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(palette.isPaletteOpen()).toBe(false);
+  });
+
+  it("closes docked inspector with Escape", async () => {
+    document.body.innerHTML += `
+      <aside id="inspector-panel"></aside>
+      <button id="btn-inspector"></button>
+    `;
+    const inspector = await import("../inspector.ts");
+    inspector.setInspectorOpen(true);
+    expect(inspector.isInspectorOpen()).toBe(true);
+
+    await wireKeyboard();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(inspector.isInspectorOpen()).toBe(false);
+  });
+
+  it("clears docked preview on Escape before closing inspector", async () => {
+    document.body.innerHTML += `
+      <aside id="inspector-panel"></aside>
+      <button id="btn-inspector"></button>
+      <div id="inspector-preview-body"></div>
+    `;
+    const { state } = await import("../state.ts");
+    const inspector = await import("../inspector.ts");
+    inspector.setInspectorOpen(true);
+    await inspector.syncInspectorFromSelection(state.selectedKeys);
+    const previewBody = document.getElementById("inspector-preview-body");
+    previewBody?.appendChild(document.createElement("pre"));
+    inspector.markInspectorHasContent();
+
+    await wireKeyboard();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(
+      document.getElementById("inspector-preview-body")?.childElementCount,
+    ).toBe(0);
+    expect(inspector.isInspectorOpen()).toBe(true);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(inspector.isInspectorOpen()).toBe(false);
+  });
+
+  it("toggles inspector with Ctrl+Shift+I when connected", async () => {
+    document.body.innerHTML += `
+      <aside id="inspector-panel" hidden></aside>
+      <button id="btn-inspector"></button>
+    `;
+    const { state } = await import("../state.ts");
+    state.platformName = "windows";
+    state.connected = true;
+
+    const inspector = await import("../inspector.ts");
+    await wireKeyboard();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "I", ctrlKey: true, shiftKey: true }),
+    );
+    expect(inspector.isInspectorOpen()).toBe(true);
   });
 
   it("blocks global refresh while support prompt is visible", async () => {
@@ -84,17 +153,8 @@ describe("keyboard shortcuts", () => {
     const overlay = document.getElementById("support-overlay");
     overlay?.removeAttribute("hidden");
 
-    const keyboard = await import("../keyboard.ts");
-    const handlers = {
-      setSidebarOpen: vi.fn(),
-      handleDelete: vi.fn(async () => {}),
-      handleRefresh: vi.fn(async () => {}),
-      handleRename: vi.fn(async () => {}),
-      handleUploadButton: vi.fn(async () => {}),
-      handleUploadFolderButton: vi.fn(async () => {}),
-      handleCreateFolder: vi.fn(async () => {}),
-    };
-    keyboard.wireKeyboardShortcuts(handlers);
+    const handlers = defaultHandlers();
+    await wireKeyboard(handlers);
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "F5" }));
     expect(handlers.handleRefresh).not.toHaveBeenCalled();

@@ -1,0 +1,537 @@
+import { basename, escapeHtml } from "./utils.ts";
+import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
+import { syncPanelWidths } from "./app-layout.ts";
+import { getSelectionEntries } from "./app-selection.ts";
+import { canPreview, closePreview, openPreview } from "./preview.ts";
+import {
+  closeInfoPanel,
+  confirmDiscardInfoProperties,
+  hasUnsavedInfoChanges,
+  openInfoPanel,
+  requestCloseInfoPanel,
+  saveInfoPanel,
+} from "./info-panel.ts";
+
+export type InspectorPaneTab = "preview" | "properties";
+
+type InspectorSyncReason = "selection" | "tab";
+
+let inspectorOpen = false;
+let inspectorTab: InspectorPaneTab = "preview";
+let inspectorEmptyActive = true;
+let inspectorSyncGeneration = 0;
+
+const INSPECTOR_OPEN_STORAGE_KEY = "s3-sidekick.inspector.open";
+const INSPECTOR_FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+let mobileInspectorModalActive = false;
+let focusBeforeMobileInspector: HTMLElement | null = null;
+const mobileInspectorBackgroundState = new Map<
+  HTMLElement,
+  { inert: boolean; ariaHidden: string | null }
+>();
+
+function setElementInert(element: HTMLElement, inert: boolean): void {
+  (element as HTMLElement & { inert: boolean }).inert = inert;
+}
+
+function getMobileInspectorBackgroundTargets(
+  panel: HTMLElement,
+  backdrop: HTMLElement | null,
+): HTMLElement[] {
+  const targets: HTMLElement[] = [];
+  const appRoot = document.getElementById("app");
+  let branch: HTMLElement = panel;
+  while (branch.parentElement && branch !== appRoot) {
+    const parent = branch.parentElement;
+    for (const sibling of parent.children) {
+      if (
+        sibling instanceof HTMLElement &&
+        sibling !== branch &&
+        sibling !== backdrop
+      ) {
+        targets.push(sibling);
+      }
+    }
+    branch = parent;
+  }
+  return targets;
+}
+
+function getMobileInspectorFocusable(panel: HTMLElement): HTMLElement[] {
+  return Array.from(
+    panel.querySelectorAll<HTMLElement>(INSPECTOR_FOCUSABLE_SELECTOR),
+  ).filter(
+    (element) =>
+      !element.closest("[hidden]") &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      !element.hasAttribute("disabled"),
+  );
+}
+
+function hasOverlayAboveInspector(): boolean {
+  return (
+    document.querySelector(
+      ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden]), .setup-wizard-overlay:not([hidden]), #palette-overlay:not([hidden])",
+    ) !== null
+  );
+}
+
+function trapMobileInspectorFocus(event: KeyboardEvent): void {
+  if (
+    !mobileInspectorModalActive ||
+    event.key !== "Tab" ||
+    hasOverlayAboveInspector()
+  ) {
+    return;
+  }
+  const panel = document.getElementById("inspector-panel");
+  if (!panel) return;
+  const focusable = getMobileInspectorFocusable(panel);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    panel.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  if (event.shiftKey) {
+    if (!active || active === first || !panel.contains(active)) {
+      event.preventDefault();
+      last.focus();
+    }
+  } else if (!active || active === last || !panel.contains(active)) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function acquireMobileInspectorModal(): void {
+  if (mobileInspectorModalActive) return;
+  const panel = document.getElementById("inspector-panel");
+  if (!panel) return;
+  const backdrop = document.getElementById("inspector-backdrop");
+  const active = document.activeElement;
+  focusBeforeMobileInspector =
+    active instanceof HTMLElement && !panel.contains(active) ? active : null;
+
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", "inspector-header-title");
+  panel.removeAttribute("aria-label");
+  if (panel.tabIndex < 0) panel.tabIndex = -1;
+
+  for (const target of getMobileInspectorBackgroundTargets(panel, backdrop)) {
+    if (mobileInspectorBackgroundState.has(target)) continue;
+    mobileInspectorBackgroundState.set(target, {
+      inert: Boolean((target as HTMLElement & { inert?: boolean }).inert),
+      ariaHidden: target.getAttribute("aria-hidden"),
+    });
+    setElementInert(target, true);
+    target.setAttribute("aria-hidden", "true");
+  }
+
+  mobileInspectorModalActive = true;
+  document.addEventListener("keydown", trapMobileInspectorFocus, true);
+  const activeTab = panel.querySelector<HTMLElement>(
+    '.inspector-tab[aria-selected="true"]',
+  );
+  const close = panel.querySelector<HTMLElement>("#inspector-close");
+  (activeTab ?? close ?? panel).focus();
+}
+
+function releaseMobileInspectorModal(restoreFocus: boolean): void {
+  const panel = document.getElementById("inspector-panel");
+  if (panel) {
+    panel.setAttribute("role", "complementary");
+    panel.setAttribute("aria-label", "Inspector");
+    panel.removeAttribute("aria-modal");
+    panel.removeAttribute("aria-labelledby");
+  }
+  if (!mobileInspectorModalActive) return;
+  document.removeEventListener("keydown", trapMobileInspectorFocus, true);
+  for (const [target, previous] of mobileInspectorBackgroundState) {
+    setElementInert(target, previous.inert);
+    if (previous.ariaHidden === null) {
+      target.removeAttribute("aria-hidden");
+    } else {
+      target.setAttribute("aria-hidden", previous.ariaHidden);
+    }
+  }
+  mobileInspectorBackgroundState.clear();
+  mobileInspectorModalActive = false;
+  const restore = focusBeforeMobileInspector;
+  focusBeforeMobileInspector = null;
+  if (restoreFocus && restore?.isConnected) restore.focus();
+}
+
+/** Opens the docked inspector before preview/properties render (desktop slide-out or narrow overlay). */
+export function ensureInspectorOpenForPane(tab: InspectorPaneTab): void {
+  inspectorTab = tab;
+  // Cancel in-flight selection sync so auto-preview cannot steal an explicit
+  // Properties/Preview request after the inspector opens.
+  inspectorSyncGeneration += 1;
+  if (!inspectorOpen) {
+    setInspectorOpen(true, { syncSelection: false });
+  } else {
+    syncInspectorPaneVisibility();
+  }
+}
+
+export function restoreInspectorOpenState(): void {
+  if (isMobileInspectorMode()) {
+    setInspectorOpen(false);
+    return;
+  }
+  const stored = window.localStorage.getItem(INSPECTOR_OPEN_STORAGE_KEY);
+  if (stored === "1") {
+    setInspectorOpen(true);
+  } else if (stored === "0") {
+    setInspectorOpen(false);
+  } else if (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(min-width: 901px)").matches
+  ) {
+    setInspectorOpen(true);
+  }
+}
+
+export function isInspectorOpen(): boolean {
+  return inspectorOpen;
+}
+
+export function getInspectorTab(): InspectorPaneTab {
+  return inspectorTab;
+}
+
+export function focusInspectorPreviewPane(): void {
+  inspectorTab = "preview";
+  syncInspectorPaneVisibility();
+}
+
+export function focusInspectorPropertiesPane(): void {
+  inspectorTab = "properties";
+  syncInspectorPaneVisibility();
+}
+
+export function setInspectorTab(tab: InspectorPaneTab): void {
+  if (inspectorTab === tab) {
+    syncInspectorPaneVisibility();
+    void syncInspectorFromSelection(undefined, { reason: "tab" });
+    return;
+  }
+  inspectorTab = tab;
+  syncInspectorPaneVisibility();
+  void syncInspectorFromSelection(undefined, { reason: "tab" });
+}
+
+export function markInspectorHasContent(): void {
+  inspectorEmptyActive = false;
+  syncInspectorPaneVisibility();
+}
+
+function updatePreviewTabAffordance(previewAvailable: boolean): void {
+  const tab = document.querySelector<HTMLElement>(
+    '[data-inspector-tab="preview"]',
+  );
+  if (!tab) return;
+  tab.classList.toggle("inspector-tab--unavailable", !previewAvailable);
+  tab.setAttribute("aria-disabled", String(!previewAvailable));
+  tab.title = previewAvailable
+    ? "Preview"
+    : "Preview is not available for this selection";
+}
+
+function showPreviewUnavailable(message: string): void {
+  markInspectorHasContent();
+  focusInspectorPreviewPane();
+  const body = document.getElementById("inspector-preview-body");
+  if (body) {
+    body.innerHTML = `<p class="inspector-preview-unavailable">${escapeHtml(message)}</p>`;
+  }
+}
+
+function syncInspectorPaneVisibility(): void {
+  const previewPane = document.getElementById("inspector-pane-preview");
+  const infoPane = document.getElementById("inspector-pane-info");
+  const empty = document.getElementById("inspector-empty");
+  if (!previewPane || !infoPane || !empty) return;
+
+  if (!inspectorOpen) {
+    empty.hidden = true;
+    previewPane.hidden = true;
+    infoPane.hidden = true;
+    return;
+  }
+
+  if (inspectorEmptyActive) {
+    empty.hidden = false;
+    previewPane.hidden = true;
+    infoPane.hidden = true;
+  } else {
+    const onPreview = inspectorTab === "preview";
+    const onInfo = inspectorTab === "properties";
+    empty.hidden = true;
+    previewPane.hidden = !onPreview;
+    infoPane.hidden = !onInfo;
+  }
+
+  const tabs = document.querySelectorAll<HTMLElement>("[data-inspector-tab]");
+  for (const tab of tabs) {
+    const active = tab.dataset.inspectorTab === inspectorTab;
+    tab.classList.toggle("inspector-tab--active", active);
+    tab.setAttribute("aria-selected", String(active));
+  }
+}
+
+export function setInspectorOpen(
+  open: boolean,
+  options?: { syncSelection?: boolean },
+): void {
+  const panel = document.getElementById("inspector-panel");
+  const resizer = document.getElementById("inspector-resizer");
+  const backdrop = document.getElementById("inspector-backdrop");
+  const layout = document.getElementById("main-layout");
+  const toggle = document.getElementById("btn-inspector");
+  const mobile = isMobileInspectorMode();
+
+  if (!open) releaseMobileInspectorModal(true);
+  inspectorOpen = open;
+  if (!mobile) {
+    window.localStorage.setItem(INSPECTOR_OPEN_STORAGE_KEY, open ? "1" : "0");
+  }
+  if (open && mobile && isDrawerOpen()) {
+    closeDrawer();
+  }
+
+  if (panel) panel.hidden = !open;
+  if (resizer) resizer.hidden = !open || mobile;
+  if (backdrop) backdrop.hidden = !open || !mobile;
+  layout?.classList.toggle("main-layout--inspector-open", open && mobile);
+  layout?.classList.toggle("main-layout--inspector-docked", open && !mobile);
+  toggle?.classList.toggle("btn--active", open);
+  toggle?.setAttribute("aria-pressed", String(open));
+  toggle?.setAttribute("aria-expanded", String(open));
+  document.documentElement.dataset.inspectorOpen = open ? "1" : "0";
+
+  if (open && mobile) {
+    acquireMobileInspectorModal();
+  } else if (open) {
+    releaseMobileInspectorModal(false);
+  }
+
+  syncInspectorPaneVisibility();
+  syncPanelWidths();
+  if (open) {
+    if (options?.syncSelection !== false) {
+      void syncInspectorFromSelection();
+    }
+  } else {
+    inspectorEmptyActive = true;
+    showInspectorEmpty("Select an object to inspect.");
+    closePreview();
+    closeInfoPanel();
+  }
+}
+
+export function toggleInspector(): void {
+  if (inspectorOpen) {
+    void requestCloseInspector();
+  } else {
+    setInspectorOpen(true);
+  }
+}
+
+export async function requestCloseInspector(): Promise<boolean> {
+  if (!inspectorOpen) return true;
+  if (hasUnsavedInfoChanges() && !(await confirmDiscardInfoProperties())) {
+    return false;
+  }
+  setInspectorOpen(false);
+  return true;
+}
+
+export function isMobileInspectorMode(): boolean {
+  if (typeof window.matchMedia !== "function") return false;
+  return window.matchMedia("(max-width: 900px)").matches;
+}
+
+export function closeInspectorOnMobile(): void {
+  if (isMobileInspectorMode()) {
+    setInspectorOpen(false);
+  }
+}
+
+function showInspectorEmpty(message: string): void {
+  inspectorEmptyActive = true;
+  updatePreviewTabAffordance(false);
+  const empty = document.getElementById("inspector-empty");
+  if (empty) {
+    empty.textContent = message;
+  }
+  syncInspectorPaneVisibility();
+}
+
+function previewUnavailableMessage(fileKeys: string[]): string {
+  if (fileKeys.length === 1) {
+    return "Preview is not available for this file type.";
+  }
+  if (fileKeys.length === 0) {
+    return "Preview is available for files only.";
+  }
+  return "Preview is available for a single previewable file.";
+}
+
+export async function syncInspectorFromSelection(
+  selectedKeys?: Set<string>,
+  options?: { reason?: InspectorSyncReason },
+): Promise<void> {
+  if (!inspectorOpen) return;
+
+  const reason: InspectorSyncReason = options?.reason ?? "selection";
+  const syncGen = ++inspectorSyncGeneration;
+  await Promise.resolve();
+  if (syncGen !== inspectorSyncGeneration) return;
+
+  const keysSet = selectedKeys ?? getSelectionEntries();
+  const keys = Array.from(keysSet);
+
+  if (keys.length === 0) {
+    showInspectorEmpty("Select an object to inspect.");
+    document.getElementById("inspector-preview-body")?.replaceChildren();
+    document.getElementById("preview-body")?.replaceChildren();
+    return;
+  }
+
+  // Selection exists — never leave the global empty placeholder visible while
+  // async preview/properties work loads (or fails mid-flight).
+  markInspectorHasContent();
+
+  const headerTitle = document.getElementById("inspector-header-title");
+  if (headerTitle) {
+    headerTitle.textContent =
+      keys.length === 1
+        ? basename(keys[0].startsWith("prefix:") ? keys[0].slice(7) : keys[0])
+        : `${keys.length} selected`;
+  }
+
+  try {
+    const fileKeys = keys.filter((k) => !k.startsWith("prefix:"));
+    if (syncGen !== inspectorSyncGeneration) return;
+
+    const singlePreviewable =
+      fileKeys.length === 1 && canPreview(basename(fileKeys[0]));
+    updatePreviewTabAffordance(singlePreviewable);
+
+    if (reason === "selection") {
+      // Selection change picks the useful default pane.
+      if (singlePreviewable) {
+        focusInspectorPreviewPane();
+        // Debounce: rapid keyboard/mouse selection would otherwise fetch a
+        // preview body for every intermediate row. A newer sync bumps
+        // `syncGen`, so the pending fetch is abandoned instead of racing.
+        const previewKey = fileKeys[0];
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+        if (syncGen !== inspectorSyncGeneration) return;
+        await openPreview(previewKey);
+        return;
+      }
+      focusInspectorPropertiesPane();
+      if (syncGen !== inspectorSyncGeneration) return;
+      await openInfoPanel(keys);
+      return;
+    }
+
+    // Explicit tab click: respect the chosen tab.
+    if (inspectorTab === "preview") {
+      if (singlePreviewable) {
+        await openPreview(fileKeys[0]);
+        return;
+      }
+      showPreviewUnavailable(previewUnavailableMessage(fileKeys));
+      return;
+    }
+
+    if (syncGen !== inspectorSyncGeneration) return;
+    await openInfoPanel(keys);
+  } catch (err) {
+    if (syncGen !== inspectorSyncGeneration) return;
+    console.error("Inspector sync failed:", err);
+    showInspectorEmpty("Could not load selection in the inspector.");
+  }
+}
+
+export function wireInspectorChrome(): void {
+  if (document.documentElement.dataset.inspectorChromeWired === "1") return;
+  document.documentElement.dataset.inspectorChromeWired = "1";
+
+  document.getElementById("btn-inspector")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleInspector();
+  });
+  document.getElementById("inspector-close")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void requestCloseInspector();
+  });
+  document
+    .getElementById("inspector-backdrop")
+    ?.addEventListener("click", () => void requestCloseInspector());
+
+  document
+    .querySelectorAll<HTMLElement>("[data-inspector-tab]")
+    .forEach((tab) => {
+      tab.addEventListener("click", () => {
+        const id = tab.dataset.inspectorTab as InspectorPaneTab | undefined;
+        if (id) setInspectorTab(id);
+      });
+    });
+
+  document
+    .getElementById("inspector-info-save")
+    ?.addEventListener("click", () => {
+      void saveInfoPanel();
+    });
+  document
+    .getElementById("inspector-info-cancel")
+    ?.addEventListener("click", () => {
+      void (async () => {
+        if (await requestCloseInfoPanel()) {
+          void syncInspectorFromSelection();
+        }
+      })();
+    });
+
+  window.addEventListener("resize", () => {
+    const mobile = isMobileInspectorMode();
+    const layout = document.getElementById("main-layout");
+    if (!layout || !inspectorOpen) return;
+    layout.classList.toggle("main-layout--inspector-open", mobile);
+    layout.classList.toggle("main-layout--inspector-docked", !mobile);
+    const resizer = document.getElementById("inspector-resizer");
+    const backdrop = document.getElementById("inspector-backdrop");
+    if (resizer) resizer.hidden = !inspectorOpen || mobile;
+    if (backdrop) backdrop.hidden = !inspectorOpen || !mobile;
+    if (mobile) {
+      if (isDrawerOpen()) closeDrawer();
+      acquireMobileInspectorModal();
+    } else {
+      releaseMobileInspectorModal(false);
+    }
+    syncPanelWidths();
+  });
+
+  restoreInspectorOpenState();
+}
+
+// Re-export mount helpers for consumers that need them.
+export {
+  setInfoOverlayActive,
+  clearInfoOverlayActive,
+} from "./inspector-mount.ts";

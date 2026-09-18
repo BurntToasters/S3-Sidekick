@@ -1,4 +1,8 @@
 import { type UserSettings, SETTING_DEFAULTS } from "./settings-model.ts";
+import {
+  FULL_CREATE_ONLY_CAPABILITIES,
+  type CreateOnlyCapabilities,
+} from "./create-only-capabilities.ts";
 import { $ } from "./utils.ts";
 
 export interface BucketInfo {
@@ -21,12 +25,19 @@ export const state = {
   connecting: false,
   endpoint: "",
   region: "",
+  connectionId: "",
+  connectionIdentity: "",
+  createOnlyCapabilities: {
+    ...FULL_CREATE_ONLY_CAPABILITIES,
+  } as CreateOnlyCapabilities,
   currentBucket: "",
   currentPrefix: "",
   buckets: [] as BucketInfo[],
   objects: [] as ObjectInfo[],
   prefixes: [] as string[],
   selectedKeys: new Set<string>(),
+  selectedPrefixes: new Set<string>(),
+  listingCapped: false,
   continuationToken: "",
   hasMore: false,
   sortColumn: "name" as "name" | "size" | "modified",
@@ -48,6 +59,8 @@ export const dom = {
     return $("object-tbody");
   },
   get breadcrumb() {
+    const omnibar = document.getElementById("location-omnibar-browse");
+    if (omnibar) return omnibar as HTMLElement;
     return $("breadcrumb");
   },
   get statusEl() {

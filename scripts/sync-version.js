@@ -3,9 +3,12 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { run as updateMetainfo } from "./update-metainfo.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const version = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8")).version;
+const version = JSON.parse(
+  fs.readFileSync(path.join(root, "package.json"), "utf-8"),
+).version;
 
 const tauriConf = path.join(root, "src-tauri", "tauri.conf.json");
 const conf = JSON.parse(fs.readFileSync(tauriConf, "utf-8"));
@@ -35,4 +38,38 @@ if (packageSectionMatch) {
 if (updated !== cargo) {
   fs.writeFileSync(cargoPath, updated);
   console.log(`Cargo.toml      → ${version}`);
+}
+
+// Keep the workspace package entry in Cargo.lock aligned so `cargo … --locked`
+// (used by license generation / CI) does not fail after a version bump.
+const cargoLockPath = path.join(root, "src-tauri", "Cargo.lock");
+if (fs.existsSync(cargoLockPath)) {
+  const cargoLock = fs.readFileSync(cargoLockPath, "utf-8");
+  const packageNameMatch = cargo.match(/^name\s*=\s*"([^"]+)"/m);
+  const packageName = packageNameMatch?.[1] ?? "s3-sidekick";
+  const lockPackagePattern = new RegExp(
+    `(name = "${packageName}"\\nversion = )"([^"]*)"`,
+  );
+  const lockMatch = cargoLock.match(lockPackagePattern);
+  if (lockMatch && lockMatch[2] !== version) {
+    const nextLock = cargoLock.replace(lockPackagePattern, `$1"${version}"`);
+    fs.writeFileSync(cargoLockPath, nextLock);
+    console.log(`Cargo.lock      → ${version}`);
+  }
+}
+
+try {
+  const metainfo = updateMetainfo();
+  if (metainfo.updated) {
+    console.log(
+      `AppStream metadata → ${metainfo.version} (${metainfo.date})`,
+    );
+  }
+} catch (error) {
+  const message =
+    error && typeof error === "object" && "message" in error
+      ? String(error.message)
+      : String(error);
+  console.error(`Failed to update AppStream metadata: ${message}`);
+  process.exit(1);
 }

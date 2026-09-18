@@ -1,8 +1,25 @@
-use crate::validate_existing_path;
+use crate::{detect_case_fold_collision, strip_extended_windows_prefix, validate_existing_path};
 use std::collections::HashMap;
 
 const MAX_LOCAL_SCAN_FILES: usize = 20_000;
 const MAX_LOCAL_SCAN_DEPTH: usize = 64;
+const MAX_LOCAL_SCAN_ENTRIES: usize = 100_000;
+const MAX_LOCAL_SCAN_WARNING_SAMPLES: usize = 3;
+
+#[derive(Default)]
+struct ScanWarnings {
+    total: usize,
+    samples: Vec<String>,
+}
+
+impl ScanWarnings {
+    fn push(&mut self, warning: String) {
+        self.total = self.total.saturating_add(1);
+        if self.samples.len() < MAX_LOCAL_SCAN_WARNING_SAMPLES {
+            self.samples.push(warning);
+        }
+    }
+}
 
 #[derive(serde::Serialize)]
 pub(crate) struct LocalFileEntry {
@@ -12,19 +29,26 @@ pub(crate) struct LocalFileEntry {
 }
 
 pub(crate) fn normalize_slashes(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let text = path.to_string_lossy();
+    // Backslashes are separators only on Windows. On Unix a backslash is a
+    // legal filename character and must survive into the object key.
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
 }
 
 pub(crate) fn absolute_path_string(path: &std::path::Path) -> String {
     if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical.to_string_lossy().to_string();
+        return strip_extended_windows_prefix(&canonical.to_string_lossy());
     }
     if path.is_absolute() {
-        return path.to_string_lossy().to_string();
+        return strip_extended_windows_prefix(&path.to_string_lossy());
     }
     match std::env::current_dir() {
-        Ok(cwd) => cwd.join(path).to_string_lossy().to_string(),
-        Err(_) => path.to_string_lossy().to_string(),
+        Ok(cwd) => strip_extended_windows_prefix(&cwd.join(path).to_string_lossy()),
+        Err(_) => strip_extended_windows_prefix(&path.to_string_lossy()),
     }
 }
 
@@ -48,9 +72,10 @@ fn collect_local_files_from_root(
     root: &std::path::Path,
     label: &str,
     entries: &mut Vec<LocalFileEntry>,
-    warnings: &mut Vec<String>,
+    warnings: &mut ScanWarnings,
+    visited_entries: &mut usize,
 ) {
-    let root_meta = match std::fs::metadata(root) {
+    let root_meta = match std::fs::symlink_metadata(root) {
         Ok(meta) => meta,
         Err(err) => {
             warnings.push(format!(
@@ -61,6 +86,13 @@ fn collect_local_files_from_root(
             return;
         }
     };
+    if root_meta.file_type().is_symlink() {
+        warnings.push(format!(
+            "Skipping selected root '{}' because it is a symbolic link.",
+            root.to_string_lossy()
+        ));
+        return;
+    }
 
     if root_meta.is_file() {
         if entries.len() >= MAX_LOCAL_SCAN_FILES {
@@ -96,6 +128,15 @@ fn collect_local_files_from_root(
         };
 
         for entry_result in iter {
+            if *visited_entries >= MAX_LOCAL_SCAN_ENTRIES {
+                warnings.push(format!(
+                    "Stopped scanning after visiting {} directory entries.",
+                    MAX_LOCAL_SCAN_ENTRIES
+                ));
+                return;
+            }
+            *visited_entries += 1;
+
             let entry = match entry_result {
                 Ok(entry) => entry,
                 Err(err) => {
@@ -133,6 +174,16 @@ fn collect_local_files_from_root(
                 continue;
             }
             if !file_type.is_file() {
+                // `file_type` comes from the directory entry, so it does not follow
+                // symlinks: links are neither traversed (no loops, no escaping the
+                // selected root) nor uploaded. Say so, because a folder upload that
+                // silently omits linked files is surprising.
+                if file_type.is_symlink() {
+                    warnings.push(format!(
+                        "Skipping '{}' because it is a symbolic link.",
+                        path.to_string_lossy()
+                    ));
+                }
                 continue;
             }
 
@@ -161,6 +212,17 @@ fn collect_local_files_from_root(
             };
             let rel_with_root = std::path::Path::new(label).join(rel_under_root);
 
+            // Rust paths are byte strings; every S3 key is UTF-8. Carrying a
+            // lossy U+FFFD name to the frontend would mint the wrong key and
+            // can collapse distinct files, so skip and say so instead.
+            if path.to_str().is_none() || rel_with_root.to_str().is_none() {
+                warnings.push(format!(
+                    "Skipping '{}' because its name is not valid UTF-8.",
+                    path.to_string_lossy()
+                ));
+                continue;
+            }
+
             if entries.len() >= MAX_LOCAL_SCAN_FILES {
                 warnings.push(format!(
                     "Stopped scanning after reaching file limit ({}).",
@@ -177,10 +239,7 @@ fn collect_local_files_from_root(
     }
 }
 
-#[tauri::command]
-pub(crate) fn list_local_files_recursive(
-    roots: Vec<String>,
-) -> Result<Vec<LocalFileEntry>, String> {
+fn list_local_files_recursive_inner(roots: Vec<String>) -> Result<Vec<LocalFileEntry>, String> {
     let mut normalized_roots = Vec::new();
     for root in roots {
         let trimmed = root.trim();
@@ -202,9 +261,13 @@ pub(crate) fn list_local_files_recursive(
 
     let mut duplicate_positions: HashMap<String, usize> = HashMap::new();
     let mut entries = Vec::new();
-    let mut warnings = Vec::new();
+    let mut warnings = ScanWarnings::default();
+    let mut visited_entries = 0usize;
 
     for root in &normalized_roots {
+        if visited_entries >= MAX_LOCAL_SCAN_ENTRIES {
+            break;
+        }
         let base = root_label(root);
         let total = *base_counts.get(&base).unwrap_or(&1);
         let label = if total > 1 {
@@ -214,7 +277,13 @@ pub(crate) fn list_local_files_recursive(
         } else {
             base
         };
-        collect_local_files_from_root(root, &label, &mut entries, &mut warnings);
+        collect_local_files_from_root(
+            root,
+            &label,
+            &mut entries,
+            &mut warnings,
+            &mut visited_entries,
+        );
     }
 
     entries.sort_by(|a, b| {
@@ -223,28 +292,40 @@ pub(crate) fn list_local_files_recursive(
             .then(a.file_path.cmp(&b.file_path))
     });
 
-    if !warnings.is_empty() {
-        let sample = warnings
+    // Distinct local files differing only by case would upload as distinct
+    // S3 keys but collide on case-insensitive download volumes. Fail closed.
+    detect_case_fold_collision(
+        entries
             .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" | ");
+            .map(|entry| (entry.relative_path.clone(), entry.file_path.clone())),
+        "upload paths",
+    )?;
+
+    if warnings.total > 0 {
         eprintln!(
             "list_local_files_recursive skipped {} path(s). Sample: {}",
-            warnings.len(),
-            sample
+            warnings.total,
+            warnings.samples.join(" | ")
         );
     }
 
-    if entries.is_empty() && !warnings.is_empty() {
+    if entries.is_empty() && warnings.total > 0 {
         return Err(format!(
             "No readable files were found. {} additional path error(s) occurred.",
-            warnings.len()
+            warnings.total
         ));
     }
 
     Ok(entries)
+}
+
+#[tauri::command]
+pub(crate) async fn list_local_files_recursive(
+    roots: Vec<String>,
+) -> Result<Vec<LocalFileEntry>, String> {
+    tokio::task::spawn_blocking(move || list_local_files_recursive_inner(roots))
+        .await
+        .map_err(|err| format!("Local file scan task failed: {}", err))?
 }
 
 #[cfg(test)]
@@ -253,9 +334,16 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn normalize_slashes_converts_backslashes() {
+    fn normalize_slashes_converts_backslashes_only_on_windows() {
         let path = Path::new("foo\\bar\\baz.txt");
-        assert_eq!(normalize_slashes(path), "foo/bar/baz.txt");
+        let normalized = normalize_slashes(path);
+        if cfg!(windows) {
+            assert_eq!(normalized, "foo/bar/baz.txt");
+        } else {
+            // On Unix a backslash is a legal filename character and must stay
+            // part of the object key.
+            assert_eq!(normalized, "foo\\bar\\baz.txt");
+        }
     }
 
     #[test]

@@ -108,7 +108,9 @@ function buildCargoLicenses(metadata) {
     entries[key] = toLicenseEntry(pkg);
   }
 
-  return Object.fromEntries(Object.entries(entries).sort(([a], [b]) => a.localeCompare(b)));
+  return Object.fromEntries(
+    Object.entries(entries).sort(([a], [b]) => a.localeCompare(b)),
+  );
 }
 
 function main() {

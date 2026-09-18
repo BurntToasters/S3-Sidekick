@@ -3,6 +3,7 @@
 import fs from "fs";
 import path from "path";
 import { verifyQualityGate } from "./release-session.js";
+import { isDirectExecution } from "./direct-execution.js";
 
 const FLATPAK_BUILD_DIR_PREFIX = "flatpak-build";
 const TAURI_TARGET_DIR = path.join("src-tauri", "target");
@@ -11,8 +12,14 @@ const CLEAN_TARGETS = {
   clean: ["dist"],
   "clean-release": ["release"],
   "clean-release-artifacts": ["release", "dist"],
-  "clean-flatpak": ["flatpak-repo"],
-  "clean-all": ["dist", "release", "flatpak-repo"],
+  "clean-flatpak": ["flatpak-repo", ".flatpak-builder", ".flatpak-source"],
+  "clean-all": [
+    "dist",
+    "release",
+    "flatpak-repo",
+    ".flatpak-builder",
+    ".flatpak-source",
+  ],
 };
 
 function listFlatpakBuildDirs(cwd) {
@@ -42,7 +49,9 @@ function listTauriBundleDirs(cwd) {
       if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
         results.push(path.relative(cwd, fullPath));
       }
-    } catch {}
+    } catch {
+      // Best-effort cleanup probe; unreadable paths are simply skipped.
+    }
   };
 
   addIfDir(path.join(targetRoot, "release", "bundle"));
@@ -56,7 +65,9 @@ function listTauriBundleDirs(cwd) {
       addIfDir(path.join(base, "debug", "bundle"));
       addIfDir(path.join(base, "bundle"));
     }
-  } catch {}
+  } catch {
+    // Best-effort cleanup probe; unreadable target roots are skipped.
+  }
 
   return Array.from(new Set(results));
 }
@@ -121,20 +132,23 @@ function cleanDirs(mode) {
   }
 }
 
-const mode = process.argv[2];
+export { CLEAN_TARGETS, getCleanTargets };
 
-if (
-  mode === "clean" ||
-  mode === "clean-release" ||
-  mode === "clean-release-artifacts" ||
-  mode === "clean-flatpak" ||
-  mode === "clean-all"
-) {
-  cleanDirs(mode);
-  process.exit(0);
+if (isDirectExecution(import.meta.url)) {
+  const mode = process.argv[2];
+  if (
+    mode === "clean" ||
+    mode === "clean-release" ||
+    mode === "clean-release-artifacts" ||
+    mode === "clean-flatpak" ||
+    mode === "clean-all"
+  ) {
+    cleanDirs(mode);
+    process.exit(0);
+  }
+
+  console.error(
+    "Usage: node scripts/dist-tools.js <clean|clean-release|clean-release-artifacts|clean-flatpak|clean-all>",
+  );
+  process.exit(1);
 }
-
-console.error(
-  "Usage: node scripts/dist-tools.js <clean|clean-release|clean-release-artifacts|clean-flatpak|clean-all>",
-);
-process.exit(1);

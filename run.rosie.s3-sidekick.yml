@@ -1,9 +1,9 @@
 app-id: run.rosie.s3-sidekick
 runtime: org.gnome.Platform
-runtime-version: '49'
+runtime-version: "49"
 sdk: org.gnome.Sdk
 sdk-extensions:
-  - org.freedesktop.Sdk.Extension.node22
+  - org.freedesktop.Sdk.Extension.node24
   - org.freedesktop.Sdk.Extension.rust-stable
 command: s3-sidekick
 separate-locales: false
@@ -12,8 +12,14 @@ finish-args:
   - --share=ipc
   - --socket=x11
   - --socket=wayland
+  # Forced X11: WebKitGTK under Wayland still shows blank-surface/input-grab
+  # regressions on some compositors. Re-evaluate native Wayland once
+  # webkit2gtk 4.1 + Tauri v2 stabilize (track upstream Tauri wayland issue).
   - --env=GDK_BACKEND=x11
   - --share=network
+  # notify-rust talks to org.freedesktop.Notifications directly; Flatpak's
+  # default bus policy allows only portals and the app's own name.
+  - --talk-name=org.freedesktop.Notifications
   - --device=dri
   - --filesystem=xdg-download:rw
   - --filesystem=xdg-documents:rw
@@ -23,37 +29,53 @@ modules:
   - name: s3-sidekick
     buildsystem: simple
     build-options:
+      # The release wrapper reconstructs lockfile-verified node_modules with a
+      # disposable cache and stages Cargo vendor sources without secrets.
+      # Build-only network access is needed to install the pinned release npm;
+      # npm dependencies and Cargo sources remain locked and offline.
       build-args:
         - --share=network
-      append-path: /run/build/s3-sidekick/cargo/bin:/usr/lib/sdk/node22/bin:/usr/lib/sdk/rust-stable/bin
+      append-path: /run/build/s3-sidekick/npm-global/bin:/usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
       env:
-        CARGO_HOME: /run/build/s3-sidekick/cargo
-        RUSTUP_HOME: /run/build/s3-sidekick/rustup
-        npm_config_cache: /run/build/s3-sidekick/npm-cache
-        HUSKY: '0'
+        CARGO_NET_OFFLINE: "true"
+        HUSKY: "0"
+        npm_config_ignore_scripts: "true"
+        npm_config_offline: "true"
     build-commands:
-      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-      - npm ci
+      - node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major !== 24 || minor < 18) { console.error('Node 24.18+ required, found', process.version); process.exit(1); }"
+      # The Node 24 SDK ships npm 11.x, while packageManager requires npm 12.0.2.
+      # npm_config_offline stays on for later lockfile-only commands; --no-offline
+      # is required here or the CLI uses only-if-cached and fails with ENOTCACHED.
+      - npm install --global npm@12.0.2 --no-offline --ignore-scripts --engine-strict=false --no-audit --no-fund --prefix /run/build/s3-sidekick/npm-global
+      - test "$(npm --version)" = "12.0.2"
+      - rustc --version
+      - test ! -e .env && test ! -e .env.local && test ! -e .env.production
       - npm run sync-version
       - npm run licenses
       - npm run build
-      - unset CFLAGS CXXFLAGS CFLAGS_x86_64_unknown_linux_gnu && npx tauri build --no-bundle
+      - unset CFLAGS CXXFLAGS CFLAGS_x86_64_unknown_linux_gnu && npx --no-install tauri build --no-bundle -- --locked
       - install -Dm755 src-tauri/target/release/s3-sidekick /app/bin/s3-sidekick
       - install -Dm644 run.rosie.s3-sidekick.desktop /app/share/applications/run.rosie.s3-sidekick.desktop
       - install -Dm644 run.rosie.s3-sidekick.metainfo.xml /app/share/metainfo/run.rosie.s3-sidekick.metainfo.xml
       - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/run.rosie.s3-sidekick.png
+      - install -Dm644 src-tauri/icons/64x64.png /app/share/icons/hicolor/64x64/apps/run.rosie.s3-sidekick.png
       - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/run.rosie.s3-sidekick.png
       - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/run.rosie.s3-sidekick.png
     sources:
       - type: dir
-        path: .
+        path: .flatpak-source
         skip:
+          - .env
+          - .env.*
           - .git
           - .github
-          - node_modules
+          - .flatpak-builder
+          - .flatpak-source
           - release
           - release-artifacts
           - dist
+          - flatpak-build
+          - flatpak-repo
           - src-tauri/target
           - target
           - "*.log"

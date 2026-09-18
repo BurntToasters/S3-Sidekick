@@ -2,9 +2,15 @@ import { state } from "./state.ts";
 import { hideContextMenu } from "./context-menu.ts";
 import { renderObjectTable } from "./browser.ts";
 
-const SIDEBAR_MIN = 180;
+const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 420;
 const SIDEBAR_STORAGE_KEY = "s3-sidekick.sidebar.width";
+const INSPECTOR_MIN = 280;
+const INSPECTOR_MAX = 560;
+const INSPECTOR_STORAGE_KEY = "s3-sidekick.inspector.width";
+const DESKTOP_BREAKPOINT = 900;
+const LISTING_MIN_WIDTH = 360;
+const RESIZER_WIDTH_FALLBACK = 8;
 export const FILTER_INPUT_DEBOUNCE_MS = 120;
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -13,6 +19,14 @@ let filterInputDebounce: ReturnType<typeof setTimeout> | undefined;
 let modalLayerObserver: MutationObserver | null = null;
 let modalLayerActive = false;
 let focusBeforeModal: HTMLElement | null = null;
+let focusBeforeSidebar: HTMLElement | null = null;
+const sidebarBackgroundInert = new Map<HTMLElement, boolean>();
+
+// Stored widths represent the user's preference. Desktop fit adjustments use
+// temporary CSS values and leave these preferences untouched so a wider
+// window can restore the requested layout.
+let preferredSidebarWidth = 240;
+let preferredInspectorWidth = 360;
 
 export function clearFilterInputDebounce(): void {
   if (filterInputDebounce !== undefined) {
@@ -31,6 +45,8 @@ export function wireObjectFilterInput(): void {
   ) as HTMLInputElement;
   filterInput.addEventListener("input", () => {
     state.filterText = filterInput.value;
+    // Do not prune on filter input: selection is retained across filters and
+    // only pruned against the full listing inside updateSelectionUI.
     clearFilterInputDebounce();
     filterInputDebounce = setTimeout(() => {
       renderObjectTable();
@@ -56,31 +72,158 @@ export function updateShortcutChips(): void {
   for (const chip of chips) {
     const text = chip.textContent ?? "";
     if (isMac) {
-      chip.textContent = text
-        .replace(/^Ctrl\+/i, "\u2318")
-        .replace(/^\u2303/, "\u2318");
+      chip.textContent = text.replace(/^Ctrl\+/i, "⌘").replace(/^⌃/, "⌘");
     } else {
       chip.textContent = text
-        .replace(/^\u2318/, "Ctrl+")
-        .replace(/^\u2303/, "Ctrl+")
-        .replace(/\u21e7/, "Shift+");
+        .replace(/^⌘/, "Ctrl+")
+        .replace(/^⌃/, "Ctrl+")
+        .replace(/⇧/, "Shift+");
     }
   }
+  updateToolbarShortcutTitles(isMac);
+  updateInspectorToggleShortcutLabel();
+}
+
+function setTitle(id: string, title: string): void {
+  const btn = document.getElementById(id) as HTMLButtonElement | null;
+  if (btn) btn.title = title;
+}
+
+function updateToolbarShortcutTitles(isMac: boolean): void {
+  const accel = isMac ? "⌘" : "Ctrl+";
+  const accelShift = isMac ? "⌘⇧" : "Ctrl+Shift+";
+  setTitle("btn-new-folder", `New Folder (${accel}N)`);
+  setTitle("btn-upload", `Upload Files (${accel}U)`);
+  setTitle("btn-upload-folder", `Upload Folder (${accelShift}U)`);
+  setTitle("btn-palette", `Commands (${accel}K)`);
+  setTitle("palette-hint", `Commands (${accel}K)`);
+}
+
+export function updateInspectorToggleShortcutLabel(): void {
+  const isMac = state.platformName === "macos";
+  const accel = isMac ? "\u2318\u21e7I" : "Ctrl+Shift+I";
+  const btn = document.getElementById("btn-inspector");
+  if (!btn) return;
+  btn.title = `Inspector (${accel})`;
+  btn.setAttribute("aria-label", `Toggle inspector (${accel})`);
 }
 
 function isMobileSidebarMode(): boolean {
-  return window.matchMedia("(max-width: 900px)").matches;
+  return (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia(`(max-width: ${DESKTOP_BREAKPOINT}px)`).matches
+  );
+}
+
+function setElementInert(element: HTMLElement, inert: boolean): void {
+  if ("inert" in element) {
+    (element as HTMLElement & { inert: boolean }).inert = inert;
+  }
+}
+
+function getSidebarBackgroundTargets(
+  layout: HTMLElement,
+  sidebar: HTMLElement,
+  backdrop: HTMLElement,
+): HTMLElement[] {
+  const targets = Array.from(layout.children).filter(
+    (child): child is HTMLElement =>
+      child instanceof HTMLElement && child !== sidebar && child !== backdrop,
+  );
+  const parent = layout.parentElement;
+  if (parent) {
+    for (const sibling of parent.children) {
+      if (sibling instanceof HTMLElement && sibling !== layout) {
+        targets.push(sibling);
+      }
+    }
+  }
+  return targets;
+}
+
+function setSidebarBackgroundInert(
+  layout: HTMLElement,
+  sidebar: HTMLElement,
+  backdrop: HTMLElement,
+  inert: boolean,
+): void {
+  if (inert) {
+    if (sidebarBackgroundInert.size > 0) return;
+    for (const target of getSidebarBackgroundTargets(
+      layout,
+      sidebar,
+      backdrop,
+    )) {
+      const wasInert =
+        "inert" in target
+          ? (target as HTMLElement & { inert: boolean }).inert
+          : false;
+      sidebarBackgroundInert.set(target, wasInert);
+      setElementInert(target, true);
+    }
+    return;
+  }
+
+  for (const [target, wasInert] of sidebarBackgroundInert) {
+    setElementInert(target, wasInert);
+  }
+  sidebarBackgroundInert.clear();
 }
 
 export function setSidebarOpen(open: boolean): void {
   const layout = document.getElementById("main-layout");
+  const sidebar = document.getElementById("bucket-panel");
+  const toggle = document.getElementById("sidebar-toggle");
   const backdrop = document.getElementById(
     "sidebar-backdrop",
   ) as HTMLButtonElement | null;
-  if (!layout || !backdrop) return;
+  if (!layout || !sidebar || !backdrop) return;
+
+  const mobile = isMobileSidebarMode();
+  const wasOpen = layout.classList.contains("main-layout--sidebar-open");
+  if (mobile && open && !wasOpen) {
+    const active = document.activeElement;
+    focusBeforeSidebar =
+      active instanceof HTMLElement && !sidebar.contains(active)
+        ? active
+        : toggle;
+  }
 
   layout.classList.toggle("main-layout--sidebar-open", open);
   backdrop.hidden = !open;
+  toggle?.setAttribute("aria-expanded", String(mobile && open));
+
+  if (mobile) {
+    if (open) {
+      sidebar.removeAttribute("aria-hidden");
+    } else {
+      sidebar.setAttribute("aria-hidden", "true");
+    }
+    setElementInert(sidebar, !open);
+    setSidebarBackgroundInert(layout, sidebar, backdrop, open);
+  } else {
+    sidebar.removeAttribute("aria-hidden");
+    setElementInert(sidebar, false);
+    setSidebarBackgroundInert(layout, sidebar, backdrop, false);
+  }
+
+  if (mobile && open) {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !sidebar.contains(active)) {
+      const filter = sidebar.querySelector<HTMLInputElement>(
+        "#bucket-filter-input",
+      );
+      (filter ?? sidebar).focus();
+    }
+  } else if (!open && wasOpen) {
+    const restore = focusBeforeSidebar;
+    focusBeforeSidebar = null;
+    if (restore && document.contains(restore)) {
+      restore.focus();
+    }
+  }
+
+  syncPanelWidths();
 }
 
 function toggleSidebar(): void {
@@ -106,10 +249,17 @@ function applySidebarWidth(width: number): void {
 }
 
 export function getActiveModalOverlay(): HTMLElement | null {
-  const overlays = document.querySelectorAll<HTMLElement>(
-    ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden])",
+  const overlays = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      ".modal-overlay.active, .dialog-overlay.active, .support-overlay:not([hidden]), .setup-wizard-overlay:not([hidden]), #palette-overlay:not([hidden])",
+    ),
   );
-  return overlays.length > 0 ? overlays[overlays.length - 1] : null;
+  if (overlays.length === 0) return null;
+  return overlays.reduce((top, overlay) => {
+    const topZ = Number.parseInt(getComputedStyle(top).zIndex, 10) || 0;
+    const overlayZ = Number.parseInt(getComputedStyle(overlay).zIndex, 10) || 0;
+    return overlayZ >= topZ ? overlay : top;
+  });
 }
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {
@@ -255,6 +405,247 @@ export function handleTabListArrowKey(
   nextTab.focus();
 }
 
+function clampInspectorWidth(width: number): number {
+  return Math.max(INSPECTOR_MIN, Math.min(INSPECTOR_MAX, width));
+}
+
+function applyInspectorWidth(width: number): void {
+  document.documentElement.style.setProperty(
+    "--inspector-width",
+    `${clampInspectorWidth(width)}px`,
+  );
+}
+
+function readCssPixelVariable(name: string, fallback: number): number {
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readElementWidth(
+  element: HTMLElement | null,
+  fallback: number,
+): number {
+  if (!element) return fallback;
+  const measured = element.getBoundingClientRect().width;
+  if (Number.isFinite(measured) && measured > 0) return measured;
+  const declared = Number.parseFloat(getComputedStyle(element).width);
+  return Number.isFinite(declared) && declared > 0 ? declared : fallback;
+}
+
+function setResizerAria(
+  resizer: HTMLElement | null,
+  min: number,
+  max: number,
+  width: number,
+): void {
+  if (!resizer) return;
+  const rounded = Math.round(Math.max(min, Math.min(max, width)));
+  resizer.setAttribute("aria-valuemin", String(min));
+  resizer.setAttribute("aria-valuemax", String(max));
+  resizer.setAttribute("aria-valuenow", String(rounded));
+  resizer.setAttribute("aria-valuetext", `${rounded} pixels`);
+}
+
+/**
+ * Fits the docked panels around a usable object listing on desktop.
+ *
+ * Automatic fit is deliberately recomputed from the preferred widths on every
+ * call. That lets a resize or a panel reopen restore the user's saved values,
+ * while the effective CSS widths temporarily shrink the inspector first and
+ * then the sidebar when the viewport is tight.
+ */
+export function syncPanelWidths(): void {
+  if (isMobileSidebarMode()) return;
+
+  const layout = document.getElementById("main-layout");
+  const sidebar = document.getElementById("bucket-panel");
+  if (!layout || !sidebar) return;
+
+  const inspector = document.getElementById("inspector-panel");
+  const sidebarResizer = document.getElementById("sidebar-resizer");
+  const inspectorResizer = document.getElementById("inspector-resizer");
+  const contentMain = document.querySelector<HTMLElement>(".content-main");
+  const inspectorOpen = Boolean(inspector && !inspector.hidden);
+
+  const storedSidebar = Number.isFinite(preferredSidebarWidth)
+    ? preferredSidebarWidth
+    : readCssPixelVariable("--sidebar-width", 240);
+  const storedInspector = Number.isFinite(preferredInspectorWidth)
+    ? preferredInspectorWidth
+    : readCssPixelVariable("--inspector-width", 360);
+  const requestedSidebar = clampSidebarWidth(storedSidebar);
+  const requestedInspector = clampInspectorWidth(storedInspector);
+
+  // Restore the requested values before measuring. Without this step a
+  // temporary fit from a previous narrow viewport would compound on every
+  // resize and never recover the saved preference.
+  applySidebarWidth(requestedSidebar);
+  applyInspectorWidth(requestedInspector);
+
+  const viewportWidth = readElementWidth(
+    layout,
+    Number.isFinite(window.innerWidth) ? window.innerWidth : 0,
+  );
+  const sidebarWidth = clampSidebarWidth(
+    readElementWidth(sidebar, requestedSidebar),
+  );
+  const sidebarResizerWidth =
+    sidebarResizer && !sidebarResizer.hidden
+      ? readElementWidth(sidebarResizer, RESIZER_WIDTH_FALLBACK)
+      : 0;
+  const inspectorWidth = inspectorOpen
+    ? clampInspectorWidth(readElementWidth(inspector, requestedInspector))
+    : 0;
+  const inspectorResizerWidth =
+    inspectorOpen && inspectorResizer && !inspectorResizer.hidden
+      ? readElementWidth(inspectorResizer, RESIZER_WIDTH_FALLBACK)
+      : 0;
+
+  let effectiveSidebar = sidebarWidth;
+  let effectiveInspector = inspectorWidth;
+  const calculatedListingWidth =
+    viewportWidth -
+    effectiveSidebar -
+    sidebarResizerWidth -
+    effectiveInspector -
+    inspectorResizerWidth;
+  const measuredListingWidth = contentMain
+    ? contentMain.getBoundingClientRect().width
+    : 0;
+  const listingWidth =
+    measuredListingWidth > 0
+      ? Math.min(calculatedListingWidth, measuredListingWidth)
+      : calculatedListingWidth;
+  let deficit = Math.max(0, LISTING_MIN_WIDTH - listingWidth);
+
+  if (deficit > 0 && inspectorOpen) {
+    const inspectorReduction = Math.min(
+      deficit,
+      Math.max(0, effectiveInspector - INSPECTOR_MIN),
+    );
+    effectiveInspector -= inspectorReduction;
+    deficit -= inspectorReduction;
+  }
+
+  if (deficit > 0) {
+    const sidebarReduction = Math.min(
+      deficit,
+      Math.max(0, effectiveSidebar - SIDEBAR_MIN),
+    );
+    effectiveSidebar -= sidebarReduction;
+    deficit -= sidebarReduction;
+  }
+
+  applySidebarWidth(effectiveSidebar);
+  if (inspector) applyInspectorWidth(effectiveInspector || requestedInspector);
+  setResizerAria(sidebarResizer, SIDEBAR_MIN, SIDEBAR_MAX, effectiveSidebar);
+  setResizerAria(
+    inspectorResizer,
+    INSPECTOR_MIN,
+    INSPECTOR_MAX,
+    effectiveInspector || requestedInspector,
+  );
+}
+
+export function wireInspectorControls(): void {
+  const panel = document.getElementById("inspector-panel");
+  const resizer = document.getElementById("inspector-resizer");
+  if (!panel || !resizer) return;
+
+  const readInspectorWidth = () => panel.getBoundingClientRect().width;
+  const savedWidthRaw = window.localStorage.getItem(INSPECTOR_STORAGE_KEY);
+  const savedWidth = savedWidthRaw ? Number(savedWidthRaw) : NaN;
+  const updateInspectorResizerAria = (width: number) => {
+    const rounded = Math.round(clampInspectorWidth(width));
+    resizer.setAttribute("aria-valuemin", String(INSPECTOR_MIN));
+    resizer.setAttribute("aria-valuemax", String(INSPECTOR_MAX));
+    resizer.setAttribute("aria-valuenow", String(rounded));
+    resizer.setAttribute("aria-valuetext", `${rounded} pixels`);
+  };
+  if (Number.isFinite(savedWidth)) {
+    preferredInspectorWidth = clampInspectorWidth(savedWidth);
+    applyInspectorWidth(savedWidth);
+    updateInspectorResizerAria(savedWidth);
+  } else {
+    preferredInspectorWidth = clampInspectorWidth(
+      readInspectorWidth() ||
+        readCssPixelVariable("--inspector-width", preferredInspectorWidth),
+    );
+    updateInspectorResizerAria(preferredInspectorWidth);
+  }
+
+  const persistInspectorWidth = (width: number) => {
+    preferredInspectorWidth = clampInspectorWidth(width);
+    window.localStorage.setItem(
+      INSPECTOR_STORAGE_KEY,
+      String(clampInspectorWidth(width)),
+    );
+  };
+
+  let dragStartX = 0;
+  let dragStartWidth = 0;
+  let dragging = false;
+
+  const onMouseMove = (event: MouseEvent) => {
+    if (!dragging) return;
+    const delta = dragStartX - event.clientX;
+    preferredInspectorWidth = clampInspectorWidth(dragStartWidth + delta);
+    syncPanelWidths();
+  };
+
+  const onMouseUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove("inspector-resizer--active");
+    document.body.style.cursor = "";
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    // Persist the requested width, rather than the temporarily fitted width
+    // shown while the viewport is tight. The next wider layout can restore
+    // this preference through syncPanelWidths().
+    persistInspectorWidth(preferredInspectorWidth);
+    syncPanelWidths();
+  };
+
+  resizer.addEventListener("mousedown", (event) => {
+    if (isMobileSidebarMode()) return;
+    event.preventDefault();
+    dragging = true;
+    dragStartX = event.clientX;
+    dragStartWidth = readInspectorWidth();
+    resizer.classList.add("inspector-resizer--active");
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  });
+
+  resizer.addEventListener("keydown", (event) => {
+    if (isMobileSidebarMode()) return;
+    const currentWidth = readInspectorWidth();
+    const step = event.shiftKey ? 40 : 16;
+    let nextWidth: number | null = null;
+    if (event.key === "ArrowLeft") {
+      nextWidth = currentWidth + step;
+    } else if (event.key === "ArrowRight") {
+      nextWidth = currentWidth - step;
+    } else if (event.key === "Home") {
+      nextWidth = INSPECTOR_MAX;
+    } else if (event.key === "End") {
+      nextWidth = INSPECTOR_MIN;
+    }
+    if (nextWidth === null) return;
+    event.preventDefault();
+    const clamped = clampInspectorWidth(nextWidth);
+    persistInspectorWidth(clamped);
+    syncPanelWidths();
+  });
+
+  syncPanelWidths();
+}
+
 export function wireLayoutControls(): void {
   const toggleBtn = document.getElementById("sidebar-toggle");
   const backdrop = document.getElementById("sidebar-backdrop");
@@ -274,17 +665,27 @@ export function wireLayoutControls(): void {
   const readSidebarWidth = () => sidebar.getBoundingClientRect().width;
   const persistSidebarWidth = (width: number) => {
     const clamped = clampSidebarWidth(width);
+    preferredSidebarWidth = clamped;
     window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(clamped));
   };
   if (Number.isFinite(savedWidth)) {
+    preferredSidebarWidth = clampSidebarWidth(savedWidth);
     applySidebarWidth(savedWidth);
     updateResizerAria(savedWidth);
   } else {
-    updateResizerAria(readSidebarWidth());
+    preferredSidebarWidth = clampSidebarWidth(
+      readSidebarWidth() ||
+        readCssPixelVariable("--sidebar-width", preferredSidebarWidth),
+    );
+    updateResizerAria(preferredSidebarWidth);
   }
 
   const syncSidebarMode = () => {
-    if (!isMobileSidebarMode()) {
+    const layout = document.getElementById("main-layout");
+    if (!layout) return;
+    if (isMobileSidebarMode()) {
+      setSidebarOpen(layout.classList.contains("main-layout--sidebar-open"));
+    } else {
       setSidebarOpen(false);
     }
   };
@@ -301,9 +702,8 @@ export function wireLayoutControls(): void {
   const onMouseMove = (event: MouseEvent) => {
     if (!dragging) return;
     const delta = event.clientX - dragStartX;
-    const nextWidth = clampSidebarWidth(dragStartWidth + delta);
-    applySidebarWidth(nextWidth);
-    updateResizerAria(nextWidth);
+    preferredSidebarWidth = clampSidebarWidth(dragStartWidth + delta);
+    syncPanelWidths();
   };
 
   const onMouseUp = () => {
@@ -313,9 +713,11 @@ export function wireLayoutControls(): void {
     document.body.style.cursor = "";
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mouseup", onMouseUp);
-    const width = readSidebarWidth();
-    persistSidebarWidth(width);
-    updateResizerAria(width);
+    // Persist the requested width, rather than the temporarily fitted width
+    // shown while the viewport is tight. The next wider layout can restore
+    // this preference through syncPanelWidths().
+    persistSidebarWidth(preferredSidebarWidth);
+    syncPanelWidths();
   };
 
   resizer.addEventListener("mousedown", (event) => {
@@ -323,7 +725,7 @@ export function wireLayoutControls(): void {
     event.preventDefault();
     dragging = true;
     dragStartX = event.clientX;
-    dragStartWidth = sidebar.getBoundingClientRect().width;
+    dragStartWidth = readSidebarWidth();
     resizer.classList.add("sidebar-resizer--active");
     document.body.style.cursor = "col-resize";
     document.addEventListener("mousemove", onMouseMove);
@@ -348,10 +750,21 @@ export function wireLayoutControls(): void {
     if (nextWidth === null) return;
     event.preventDefault();
     const clamped = clampSidebarWidth(nextWidth);
-    applySidebarWidth(clamped);
     persistSidebarWidth(clamped);
-    updateResizerAria(clamped);
+    syncPanelWidths();
   });
+
+  resizer.addEventListener("dblclick", () => {
+    if (isMobileSidebarMode()) return;
+    // Reset to the CSS default (--sidebar-width: 240px in tokens.css).
+    window.localStorage.removeItem(SIDEBAR_STORAGE_KEY);
+    preferredSidebarWidth = 240;
+    applySidebarWidth(240);
+    updateResizerAria(240);
+    syncPanelWidths();
+  });
+
+  syncPanelWidths();
 }
 
 export function initModalLayerObserver(): void {
@@ -361,7 +774,7 @@ export function initModalLayerObserver(): void {
   });
   document
     .querySelectorAll<HTMLElement>(
-      ".modal-overlay, .dialog-overlay, .support-overlay",
+      ".modal-overlay, .dialog-overlay, .support-overlay, .setup-wizard-overlay, #palette-overlay",
     )
     .forEach((overlay) => {
       modalLayerObserver!.observe(overlay, {

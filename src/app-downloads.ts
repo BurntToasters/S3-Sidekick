@@ -1,15 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  captureConnectionSnapshot,
+  connectionSnapshotChanged,
+  invokeS3For,
+  type ConnectionSnapshot,
+} from "./connection.ts";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { state } from "./state.ts";
-import { enqueueDownloads } from "./transfers.ts";
+import { enqueueDownloads, type TransferEnqueueTarget } from "./transfers.ts";
 import { showConfirm } from "./dialogs.ts";
 import { logActivity } from "./activity-log.ts";
 import {
-  basename,
   formatSize,
   splitNameExt,
   joinPath,
   friendlyError,
+  safeFileName,
 } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
@@ -108,16 +114,17 @@ function saveRememberedDownloadDirectoryValue(dir: string): void {
 async function uniqueDownloadEntries(
   keys: string[],
   destinationDir: string,
+  bucket: string,
 ): Promise<DownloadQueueEntry[]> {
   const taken = new Set<string>();
   const entries: DownloadQueueEntry[] = [];
   const caseInsensitive =
     state.platformName === "windows" || state.platformName === "macos";
   const dedupeKey = (name: string) =>
-    caseInsensitive ? name.toLowerCase() : name;
+    caseInsensitive ? name.normalize("NFC").toLowerCase() : name;
 
   for (const key of keys) {
-    const base = basename(key);
+    const base = safeFileName(key, state.platformName);
     const { stem, ext } = splitNameExt(base);
     let candidate = base;
     let n = 2;
@@ -127,7 +134,7 @@ async function uniqueDownloadEntries(
     }
     taken.add(dedupeKey(candidate));
     entries.push({
-      bucket: state.currentBucket,
+      bucket,
       key,
       destination: joinPath(destinationDir, candidate, state.platformName),
     });
@@ -145,34 +152,48 @@ function estimateKnownObjectSize(entry: DownloadQueueEntry): number | null {
 
 async function estimateDownloadEntryBytes(
   entry: DownloadQueueEntry,
-): Promise<number> {
+  connectionId: string,
+): Promise<number | null> {
   const known = estimateKnownObjectSize(entry);
   if (known !== null) return known;
   try {
-    const head = await invoke<HeadObjectSummary>("head_object", {
-      bucket: entry.bucket,
-      key: entry.key,
-    });
+    const head = await invokeS3For<HeadObjectSummary>(
+      connectionId,
+      "head_object",
+      {
+        bucket: entry.bucket,
+        key: entry.key,
+      },
+    );
     if (!Number.isFinite(head.content_length) || head.content_length < 0)
-      return 0;
+      return null;
     return head.content_length;
   } catch {
-    return 0;
+    // Unknown, not zero: a zero would silently skip the disk preflight below.
+    return null;
   }
 }
 
 async function preflightDownloadDiskSpace(
   entries: DownloadQueueEntry[],
+  connectionId: string,
 ): Promise<boolean> {
   if (entries.length === 0) return true;
 
   const estimatedBytes = await Promise.all(
-    entries.map((entry) => estimateDownloadEntryBytes(entry)),
+    entries.map((entry) => estimateDownloadEntryBytes(entry, connectionId)),
   );
-  const totalEstimatedBytes = estimatedBytes.reduce(
-    (sum, bytes) => sum + bytes,
-    0,
-  );
+  if (estimatedBytes.some((bytes) => bytes === null)) {
+    // Fail open and say so: proceeding without a preflight is honest, while a
+    // zero estimate would pretend small downloads need no disk check.
+    logActivity(
+      "Disk preflight skipped: could not determine every download size.",
+      "warning",
+    );
+    return true;
+  }
+  const knownBytes = estimatedBytes as number[];
+  const totalEstimatedBytes = knownBytes.reduce((sum, bytes) => sum + bytes, 0);
   if (totalEstimatedBytes < DOWNLOAD_DISK_PREFLIGHT_THRESHOLD_BYTES) {
     return true;
   }
@@ -181,7 +202,7 @@ async function preflightDownloadDiskSpace(
   for (let i = 0; i < entries.length; i += 1) {
     const dir = parentDirectory(entries[i].destination);
     if (!dir) continue;
-    const size = estimatedBytes[i];
+    const size = knownBytes[i];
     if (!Number.isFinite(size) || size <= 0) continue;
     requiredByDirectory.set(dir, (requiredByDirectory.get(dir) ?? 0) + size);
   }
@@ -227,91 +248,130 @@ async function preflightDownloadDiskSpace(
   return proceed;
 }
 
-function enqueueDownloadTransfers(entries: DownloadQueueEntry[]): boolean {
-  enqueueDownloads(entries);
-  return true;
+function enqueueTargetFromSnapshot(
+  snap: ConnectionSnapshot,
+): TransferEnqueueTarget {
+  return {
+    bucket: snap.bucket,
+    connectionId: snap.connectionId,
+    connectionIdentity: snap.connectionIdentity,
+  };
+}
+
+function enqueueDownloadTransfers(
+  entries: DownloadQueueEntry[],
+  target: TransferEnqueueTarget,
+): void {
+  enqueueDownloads(entries, target);
 }
 
 export async function handleDownload(): Promise<void> {
   const keys = getSelectedFileKeys();
   if (keys.length === 0) return;
+  let snap: ConnectionSnapshot;
+  try {
+    snap = captureConnectionSnapshot();
+  } catch {
+    setStatus("Connect to a bucket first.", 5000);
+    return;
+  }
+  const capturedKeys = [...keys];
   const entries: DownloadQueueEntry[] = [];
   const rememberedDir = getRememberedDownloadDir();
 
-  if (keys.length === 1) {
-    const fileName = basename(keys[0]);
-    const destination = await save({
-      defaultPath: rememberedDir
-        ? joinPath(rememberedDir, fileName, state.platformName)
-        : fileName,
-      title: `Save ${fileName}`,
-    });
+  if (capturedKeys.length === 1) {
+    const fileName = safeFileName(capturedKeys[0], state.platformName);
+    let destination: string | null;
+    try {
+      destination = await save({
+        defaultPath: rememberedDir
+          ? joinPath(rememberedDir, fileName, state.platformName)
+          : fileName,
+        title: `Save ${fileName}`,
+      });
+    } catch (err) {
+      setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
+      return;
+    }
     if (!destination) return;
+    if (connectionSnapshotChanged(snap)) {
+      setStatus(
+        "Download cancelled because connection or location changed.",
+        5000,
+      );
+      return;
+    }
     saveRememberedDownloadDir(destination);
     entries.push({
-      bucket: state.currentBucket,
-      key: keys[0],
+      bucket: snap.bucket,
+      key: capturedKeys[0],
       destination,
     });
   } else {
-    const selected = await open({
-      title: "Select destination folder",
-      multiple: false,
-      directory: true,
-      defaultPath: rememberedDir || undefined,
-    });
+    let selected: string | string[] | null;
+    try {
+      selected = await open({
+        title: "Select destination folder",
+        multiple: false,
+        directory: true,
+        defaultPath: rememberedDir || undefined,
+      });
+    } catch (err) {
+      setStatus(`Failed to open folder picker: ${friendlyError(err)}`);
+      return;
+    }
     if (!selected || Array.isArray(selected)) return;
+    if (connectionSnapshotChanged(snap)) {
+      setStatus(
+        "Download cancelled because connection or location changed.",
+        5000,
+      );
+      return;
+    }
     saveRememberedDownloadDirectoryValue(selected);
-    entries.push(...(await uniqueDownloadEntries(keys, selected)));
+    entries.push(
+      ...(await uniqueDownloadEntries(capturedKeys, selected, snap.bucket)),
+    );
   }
 
   if (entries.length === 0) return;
+  if (connectionSnapshotChanged(snap)) {
+    setStatus(
+      "Download cancelled because connection or location changed.",
+      5000,
+    );
+    return;
+  }
   const resolvedEntries = await resolveDownloadEntriesWithConflicts(entries);
+  if (connectionSnapshotChanged(snap)) {
+    setStatus(
+      "Download cancelled because connection or location changed.",
+      5000,
+    );
+    return;
+  }
   if (resolvedEntries.length === 0) {
     setStatus("No downloads queued (all conflicts were skipped).", 5000);
     return;
   }
-  if (!(await preflightDownloadDiskSpace(resolvedEntries))) {
+  if (!(await preflightDownloadDiskSpace(resolvedEntries, snap.connectionId))) {
+    return;
+  }
+  if (connectionSnapshotChanged(snap)) {
+    setStatus(
+      "Download cancelled because connection or location changed.",
+      5000,
+    );
     return;
   }
 
-  if (enqueueDownloadTransfers(resolvedEntries)) {
-    setStatus(`Queued ${resolvedEntries.length} download(s).`, 5000);
-    logActivity(`Queued ${resolvedEntries.length} download(s).`, "info");
-    return;
-  }
-
-  for (const entry of resolvedEntries) {
-    try {
-      setStatus(`Downloading ${basename(entry.key)}...`);
-      const size = await invoke<number>("download_object", {
-        bucket: entry.bucket,
-        key: entry.key,
-        destination: entry.destination,
-        overwrite: entry.conflictResolution === "replace",
-        tempPath: `${entry.destination}.s3-sidekick.download.tmp`,
-        attempt: 1,
-        checksumVerification:
-          state.currentSettings.enableTransferChecksumVerification,
-      });
-      setStatus(
-        `Downloaded ${basename(entry.key)} (${formatSize(size)}).`,
-        5000,
-      );
-      logActivity(
-        `Downloaded ${basename(entry.key)} (${formatSize(size)}).`,
-        "success",
-      );
-    } catch (err) {
-      setStatus(
-        `Download failed for ${basename(entry.key)}: ${friendlyError(err)}`,
-      );
-      logActivity(
-        `Download failed for ${basename(entry.key)}: ${friendlyError(err)}`,
-        "error",
-      );
-    }
-  }
+  // Downloads always go through the transfer queue, which owns transfer ids,
+  // progress, cancellation and resume. The direct `download_object` loop that
+  // used to follow this was unreachable (its guard could not be false) and had
+  // drifted out of sync with the command, omitting the required transfer id.
+  enqueueDownloadTransfers(resolvedEntries, enqueueTargetFromSnapshot(snap));
+  setStatus(`Queued ${resolvedEntries.length} download(s).`, 5000);
+  logActivity(`Queued ${resolvedEntries.length} download(s).`, "info");
 }
 
 export async function handleOpenLastDownloadFolder(): Promise<void> {

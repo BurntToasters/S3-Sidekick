@@ -1,14 +1,15 @@
 <!-- > [!NOTE]
-> 🅱️ This is a Beta build. -->
+> 🅱️ This is a beta build.
+-->
 
 # ⬇️ Downloads
 
-| <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows                                                                                                                                | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS          | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux                                                                                                                                                      |
-| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> -->                                          | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-arm64.deb) -->                |
-|                                                                                                                                                                                                                                                  |                                                                                                                          | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-arm64.rpm) -->                |
-|                                                                                                                                                                                                                                                  |                                                                                                                          | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.10.2/S3-Sidekick-Linux-arm64.flatpak) -->    |
+| <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux |
+| :--- | :--- | :--- |
+| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-arm64.AppImage) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-arm64.deb) --> |
+| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-arm64.rpm) --> |
+| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-arm64.flatpak) --> |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
@@ -19,24 +20,75 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
-## Changes in `v0.10.2:`
+## Changes in `v0.11.0:`
 
-- **NEW - Windows code signing:** WOO HOO!! Windows Codesigning is here!
-  - After a good while of not having it, Windows Binaries are now signed by Azure Artifact Signing!
-- **Release workflow:** Added resilient GitHub draft-release creation and wait steps so Windows creates one shared draft and macOS/Linux reuse it instead of creating duplicate drafts.
-- **Build performance:** Switched the Rust release profile to thin LTO with parallel code generation for faster release builds.
-- **UI:** Restored the missing upload icon in the file-upload toolbar and command palette.
+Its finally here! v0.11.0 is a major reliability and UX release: a docked **Inspector** pane, custom desktop chrome, stronger data safety across uploads/downloads/moves, encrypted-vault hardening, and a long polish pass over browsing, transfers, and keyboard flow.
 
-## Changes in `v0.10.1:`
+### Desktop chrome & window
 
-- **Security:** Bumped PBKDF2-HMAC-SHA256 iterations from `210,000` to `600,000` to match current OWASP recommendations. Existing vaults auto-migrate on next unlock.
-- **Security:** Added cleartext HTTP warning when connecting to non-local endpoints over plain `http://`. Credentials are sent unencrypted in that scenario.
-- **Security:** Documented biometric unlock limitations (key stored in OS credential store is not hardware-bound to Touch ID / Windows Hello).
-- **UI:** Fixed WCAG 1.4.3 AA contrast failures in `--text-muted`, `--text-secondary`, and `--badge-off-text` tokens across both light and dark themes. All text now meets the 4.5:1 minimum.
-- **UI:** Removed dead `.connection-bar` CSS left over from the v0.10.0 redesign and added a responsive breakpoint for `#connection-screen` at narrow widths (≤700px).
-- **UI:** Consolidated duplicate dark-theme token blocks into a single source of truth per selector.
-- **UI:** Added full ARIA support to the command palette — `role="dialog"`, `role="combobox"`, `role="listbox"`/`role="option"`, `aria-activedescendant`, and a keyboard focus trap.
-- **Codebase:** Cleaned up dead responsive CSS targeting the removed `.connection-bar` element.
+- **Custom titlebar (macOS & Windows):** macOS uses Tauri overlay title bar with traffic-light spacing; Windows uses frameless chrome with in-app minimize/maximize/close. Linux keeps native window decorations.
+- **Draggable regions:** Top drag strip, `data-tauri-drag-region`, selective `-webkit-app-region`, and a `startDragging` fallback so the header moves the window without blocking bookmark chips and buttons.
+- **Window size:** First launch opens at the default medium size (`1100×720`, centered). Relaunch restores the last saved window size, and user resizes persist correctly without saving a maximized frame or overwriting settings during startup restore.
+
+### Connection & browsing
+
+- **Saved connections & bookmarks:** Saved connections and header bookmark chips share the same data; one-click connect from chips and the saved list. Inline connect errors, connecting spinner, Enter-to-connect in credential fields, bookmark tooltips, and a saved-list empty state.
+- **Connection UI:** Successful connections keep the fetched bucket sidebar visible when no saved bucket can be restored; failed last-bucket restores also leave the sidebar available for retry or another selection.
+- **Location omnibar:** Replaces separate breadcrumb + path field (browse vs edit path).
+- **Object browsing:** The selection toolbar keeps a permanent 36px action row, table columns and row dividers stay aligned across the native table geometry, and compact selection actions fit beside a docked inspector. Checkbox double-clicks no longer navigate into folders accidentally.
+- **Selection & filtering:** Shift-click ranges follow sorted filtered listings, including virtualized rows. Selections hidden by a filter remain selected and are disclosed in the count; object filters are clearable in one click, and sidebar filtering keeps keyboard focus on a visible bucket. Checkbox/Space updates the shift-click anchor; selection is stored structurally so a key named `prefix:…` can no longer be treated as a folder.
+- **Toolbar:** Up navigation, download action, batch bar at one or more selected items with action tooltips (e.g. download files-only). **Download** disables when only folders are selected.
+
+### Inspector (Preview | Properties)
+
+- **Docked pane:** Preview and Properties render in a resizable panel beside the object list, off-canvas below 900px; open state is persisted and wide first visit defaults to open. Modal **File Info** tabs remain the fallback when the inspector is closed.
+- **Reliable chrome:** Toggle, close (X), backdrop, and **Escape** show/hide the panel; selection sync uses a generation counter so updates are not dropped while preview/properties load.
+- **Preview:** Previewable files render in the docked pane; non-previewable selections show a dedicated “not available” message and the Preview tab is dimmed when preview cannot apply. A native stack overflow while previewing JSON and other objects is fixed.
+- **Properties:** Non-previewable files, folders, and multi-select route to Properties instead of an empty placeholder. Choosing **Properties** from the context menu or batch toolbar opens the Properties pane instead of auto-switching to Preview. Folder-only selections show a clear message instead of a failed `head_object` call. Unsaved edits prompt **Discard / Keep editing** when closing the inspector or dismissing File Info.
+- **Layout:** Properties pane scrolls reliably, drops the redundant “File Info” header, tightens docked padding, hides Save/Cancel for folder-only views, and allows a wider panel (default ~360px, up to 560px). Batch toolbar wraps and collapses to icons when the docked panel steals width.
+- **Keyboard & commands:** Inspector resize gutter supports keyboard adjustment (arrow keys). Command palette: **Toggle Inspector**, **Preview Selected File**, **Open Properties for Selection**; **⌘/Ctrl+Shift+I** toggles the inspector when connected. **Escape** dismisses one transient layer at a time (settings and modal overlays before drawer/sidebar/inspector). Disconnect closes the inspector panel.
+
+### Transfers & activity
+
+- **Drawer UI:** Queue summary, Pause/Resume all, overflow menu for prioritize/retry/clear; row presentation with operation chips, indeterminate progress, and failure badges. Status bar **Transfers** control is always visible (muted when idle).
+- **Progress & errors:** Progress indicators distinguish queued, active, paused, completed, and failed transfers; transfer rows expose full source and destination paths and wrap readable error messages. Stalled uploads show a stalled state.
+- **Setting:** Open transfer drawer when a transfer starts (default on); one-time toast pointing users to the transfers control.
+- **Reliability:** Transfer IDs persist across webview reloads. Queue-manifest writes are serialized and failures surface in the activity log. Pause and cancel are re-checked at each step so a cancelled move cannot fall through to deletion. Download scratch paths are derived in the backend. Part retries honor error classification; failed checkpoints are written off the async coordinator; the recovery sweep reclaims orphaned scratch leases.
+
+### Data safety (uploads, downloads, moves, conflicts)
+
+- **Create-only writes:** Uploads, copies, moves, and renames use provider-supported atomic create-only requests when overwrite is disabled, preventing a concurrent writer from being silently replaced after the initial conflict check. Create-only support is detected per operation for AWS S3, Cloudflare R2, MinIO, Wasabi, Backblaze B2, and DigitalOcean Spaces.
+- **Conflict UX:** Providers that cannot guarantee a create-only write require an explicit **Write anyway** confirmation. Apply-to-all consent is serialized, cancellations are distinguished from destination conflicts, and queued copies retain source size so multipart safety is evaluated correctly. A failed “does this already exist?” check now counts as a conflict and prompts for both downloads and object writes.
+- **Upload integrity:** Single `PUT`s, browser-byte uploads, every multipart part, and multipart completion send a precalculated SHA-256 and the response checksum is checked against it.
+- **Downloads:** Parallel downloads pin every range to one object generation (version ID where versioned, `If-Match` otherwise). Before publishing a completed parallel download, the pinned generation is re-checked; if the object changed, the destination is left untouched and scratch data is kept for resume. Resume checkpoints record version ID as well as ETag; native S3 checksums are preferred when verifying finished downloads. Checkpoint garbage collection no longer expires resume state for queued transfers.
+- **Moves:** A move records a durable copy receipt (key, ETag, version ID for both sides) before anything is deleted; a crash between copy and delete resumes the delete instead of duplicating. Source deletion re-verifies both sides against the receipt. On versioned buckets the source is retired with a conditional delete marker. Prefix copies keep rollback backups and name any backup that could not be cleaned up.
+- **Filesystem safety:** S3 keys map to local file names structurally — traversal segments are rejected, Windows-illegal characters are percent-encoded with collision detection, and Unicode is folded to NFC. Create-only downloads fall back to exclusive reservation or atomic no-replace move on filesystems without hard links.
+- **Publishing & cleanup:** Removing unusable scratch data flushes the parent directory entry, including a native Windows directory flush, so cleanup survives interruption and power loss.
+
+### S3 & connection
+
+- **Endpoints & listings:** Virtual-hosted AWS endpoints are normalized; listings request `encoding-type=url` so keys with XML-hostile characters no longer break pages.
+- **Multipart & timeouts:** `CompleteMultipartUpload` retries 200-with-error-body responses instead of aborting a possibly live upload. Request-body timeouts scale with part size; download bodies have a stall timeout.
+- **Session tokens:** Optional STS session tokens are supported in the connection form.
+- **Connection safety:** Rename and conflict checks stay bound to the connection that initiated them; late async results cannot act on a newly selected connection or location.
+
+### Security & settings
+
+- **Encrypted vault:** Payloads carry a key-check value so unlocking with the wrong key is detected. Migrations (enabling encryption, password change, rekeying) are staged and journaled; interruption restores originals or completes on next launch. Plaintext adoption from older versions is proven by a key-derived value that cannot be re-armed by editing config. Disabling biometric unlock and factory reset are journaled and replay to completion if interrupted.
+- **Windows:** Biometric credential checks handle sessions without an interactive Credential Manager (e.g. RDP).
+- **Factory reset:** Requires a second explicit confirmation, states what it destroys (including transfer checkpoints and partial download files), and stops running transfers first.
+- **Settings:** Failed saves surface inside the modal. The sidebar includes a **Support Me** button (Lucide heart) that opens `https://rosie.run/support` in the browser.
+
+### UI, accessibility & onboarding
+
+- **Panels & keyboard flow:** Sidebar and inspector widths fit available desktop space while preserving preferred sizes. The activity drawer collapses and restores cleanly with focus returned to its opener. Opening the inspector on narrow layouts closes the bottom transfers drawer.
+- **Feedback & dialogs:** Disabled controls have consistent states, toast countdowns pause while hovered or focused, sticky messages stay available until dismissed, and long confirmation dialogs fit within the viewport. Destructive confirmations focus the safe choice. Queued confirmation dialogs cannot overlap or reorder.
+- **Onboarding:** Setup wizard ends with **Connect to storage** and focuses the connection form; wizard uses the same modal focus trap as settings. Skip link to main content, `<main>` landmark, modal overlays inset below custom titlebar on macOS/Windows.
+
+## Click below for the full `v0.X` Changelog
+
+<details>
+<summary>Full v0.X changelog</summary>
 
 ## Changes in `v0.10.0:`
 
@@ -60,28 +112,6 @@ v0.10.0 introduces a comprehensive UI/UX modernization, window size memory on re
 - **Misc:** Cleaned up all Clippy warnings across the Rust codebase; the build now enforces `-D warnings`.
 - **PKG:** Updated packages.
 
-## Changes in `v0.9.5:`
-
-- **NEW - Settings UI:** The settings UI has been fully re-designed with vertical tabs!
-  - This was a goal of mine for a while; the settings UI for S3 Sidekick was too cramped and chaotic and needed a functional re-design :)
-- **PKG:** Updated packages.
-
-## Full v0.9 changelog:
-
-<details>
-<summary>Full v0.9 changelog</summary>
-
-## Changes in `v0.9.3:`
-
-_Releases before v0.9.2 require a manual update._
-
-- **Security:** Updated Tauri V2 updater signer key.
-  - I accidentally leaked the (still encrypted) private key via a package.json entry. Rookie mistake — I am very sorry, I know how annoying this is. You will have to manually download and install `v0.9.2 (or later)` from this release to update the pubkey.
-  - Since the private key that was leaked was still encrypted with a password, it is a better state than if it was the full unencrypted privkey.
-  - All previous releases and accompanying binaries have been removed from GitHub and my mirror. The tags still remain.
-- **S3:** A bunch of new S3 additions (unstable as I was still testing; better release notes to come).
-- **PKG:** Updated packages.
-
 ## Changes in `v0.9.0:`
 
 - **Large file uploads:** Fixed an issue where larger files experienced slower uploads.
@@ -92,10 +122,10 @@ _Releases before v0.9.2 require a manual update._
 
 </details>
 
+## ℹ️ Release Info
+
 > [!IMPORTANT]
 > **Note:** MSI builds are NOT provided for beta releases. Use the EXE installer.
-
-## ℹ️ Release Info
 
 - **GPG Signed:** My public key is attached to every release to ensure authenticity.
 - **GPG Key:** You can get my public GPG key here: https://tuxedo.rosie.run/GPG/BurntToasters_0xF2FBC20F_public.asc
