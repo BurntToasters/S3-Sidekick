@@ -3008,6 +3008,22 @@ describe("main integration", () => {
     vi.useRealTimers();
   });
 
+  it("opens the support URL from the settings sidebar button", async () => {
+    await import("../main.ts");
+    await flushMicrotasks();
+
+    const supportBtn = document.getElementById(
+      "settings-support-me",
+    ) as HTMLButtonElement;
+    expect(supportBtn.textContent).toMatch(/Support Me/);
+    mockInvoke.mockClear();
+    supportBtn.click();
+    await flushMicrotasks(4);
+    expect(mockInvoke).toHaveBeenCalledWith("open_external_url", {
+      url: "https://rosie.run/support",
+    });
+  });
+
   it("closes support prompt when clicking the overlay backdrop", async () => {
     vi.useFakeTimers();
     mockIncrementLaunchCount.mockResolvedValue(2);

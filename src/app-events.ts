@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { state, dom } from "./state.ts";
 import {
@@ -274,6 +275,15 @@ export function wireEvents(): void {
       });
     });
 
+  document
+    .getElementById("settings-support-me")!
+    .addEventListener("click", () => {
+      void invoke("open_external_url", {
+        url: "https://rosie.run/support",
+      }).catch((err) =>
+        logActivity(`Failed to open support page: ${String(err)}`, "warning"),
+      );
+    });
   document
     .getElementById("show-licenses")!
     .addEventListener("click", openLicensesModal);

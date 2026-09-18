@@ -21,11 +21,12 @@
 
 ## Changes in `v0.11.0-beta.9:`
 
-Beta 9 fixes inspector Properties routing and window size restore/persistence.
+Beta 9 fixes inspector Properties routing and window size restore/persistence, and adds a settings Support Me link.
 
 - **Inspector:** Choosing **Properties** from the context menu or batch toolbar now opens the Properties pane instead of auto-switching to Preview for previewable files.
 - **Window size:** First launch opens at the default medium size (`1100×720`, centered). Relaunch restores the last saved window size, and user resizes persist correctly without saving a maximized frame or overwriting settings during startup restore.
-- **Testing:** Added regression coverage for explicit Properties pane selection and window-size restore/persistence.
+- **Settings:** The sidebar now includes a **Support Me** button (Lucide heart) that opens `https://rosie.run/support` in the browser.
+- **Testing:** Added regression coverage for explicit Properties pane selection, window-size restore/persistence, and the settings Support Me action.
 - **Ver:** Bumped version to `v0.11.0-beta.9`.
 
 ## Changes in `v0.11.0-beta.8:`
