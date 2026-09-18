@@ -1,14 +1,15 @@
-> [!NOTE]
+<!-- > [!NOTE]
 > 🅱️ This is a beta build.
+-->
 
 # ⬇️ Downloads
 
 | <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux |
 | :--- | :--- | :--- |
-| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Linux-arm64.deb) --> |
-| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Linux-arm64.rpm) --> |
-| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0-beta.9/S3-Sidekick-Linux-arm64.flatpak) --> |
+| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-arm64.AppImage) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-arm64.deb) --> |
+| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-arm64.rpm) --> |
+| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.0/S3-Sidekick-Linux-arm64.flatpak) --> |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
@@ -19,188 +20,75 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
-## Changes in `v0.11.0-beta.9:`
+## Changes in `v0.11.0:`
 
-Beta 9 fixes inspector Properties routing and window size restore/persistence, and adds a settings Support Me link.
+Its finally here! v0.11.0 is a major reliability and UX release: a docked **Inspector** pane, custom desktop chrome, stronger data safety across uploads/downloads/moves, encrypted-vault hardening, and a long polish pass over browsing, transfers, and keyboard flow.
 
-- **Inspector:** Choosing **Properties** from the context menu or batch toolbar now opens the Properties pane instead of auto-switching to Preview for previewable files.
+### Desktop chrome & window
+
+- **Custom titlebar (macOS & Windows):** macOS uses Tauri overlay title bar with traffic-light spacing; Windows uses frameless chrome with in-app minimize/maximize/close. Linux keeps native window decorations.
+- **Draggable regions:** Top drag strip, `data-tauri-drag-region`, selective `-webkit-app-region`, and a `startDragging` fallback so the header moves the window without blocking bookmark chips and buttons.
 - **Window size:** First launch opens at the default medium size (`1100×720`, centered). Relaunch restores the last saved window size, and user resizes persist correctly without saving a maximized frame or overwriting settings during startup restore.
-- **Settings:** The sidebar now includes a **Support Me** button (Lucide heart) that opens `https://rosie.run/support` in the browser.
-- **Testing:** Added regression coverage for explicit Properties pane selection, window-size restore/persistence, and the settings Support Me action.
-- **Ver:** Bumped version to `v0.11.0-beta.9`.
 
-## Changes in `v0.11.0-beta.8:`
+### Connection & browsing
 
-Beta 8 is a UI polish pass for object browsing, responsive panels, transfers, and feedback.
-
-- **Object browsing:** The selection toolbar keeps a permanent 36px action row, table columns and row dividers stay aligned across the native table geometry, and compact selection actions fit beside a docked inspector. Checkbox double-clicks no longer navigate into folders accidentally.
-- **Selection and filtering:** Shift-click ranges follow sorted filtered listings, including virtualized rows. Selections hidden by a filter remain selected and are disclosed in the count; object filters are clearable in one click, and sidebar filtering keeps keyboard focus on a visible bucket.
-- **Panels and keyboard flow:** Sidebar and inspector widths fit the available desktop space while preserving preferred sizes. The activity drawer collapses and restores cleanly with focus returned to its opener, and Escape dismisses one transient layer at a time while restoring focus.
-- **Feedback and dialogs:** Disabled controls have consistent states, toast countdowns pause while hovered or focused, sticky messages stay available until dismissed, and long confirmation dialogs fit within the viewport with scrollable messages and visible actions.
-- **Transfers:** Progress indicators distinguish queued, active, paused, completed, and failed transfers; transfer rows expose full source and destination paths and wrap readable error messages.
-- **Testing:** Added Playwright Chromium and WebKit UI regression coverage for table geometry, virtualization and selection, responsive panel layout, drawer behavior, listing states, and long dialogs; CI runs the browser suite.
-
-## Changes in `v0.11.0-beta.7:`
-
-Beta 7 fixes a native process crash that could occur while previewing JSON and other objects.
-
-- **Preview:** Prevented a native stack overflow from terminating the app by boxing the Tauri preview command future and heap-allocating its bounded read buffer. Preview size limits, content handling, and cancellation behavior are unchanged.
-
-## Changes in `v0.11.0-beta.6:`
-
-Beta 6 is a corrective follow-up to Beta 5 and restores the connection and release-note workflows.
-
+- **Saved connections & bookmarks:** Saved connections and header bookmark chips share the same data; one-click connect from chips and the saved list. Inline connect errors, connecting spinner, Enter-to-connect in credential fields, bookmark tooltips, and a saved-list empty state.
 - **Connection UI:** Successful connections keep the fetched bucket sidebar visible when no saved bucket can be restored; failed last-bucket restores also leave the sidebar available for retry or another selection.
-- **Release workflow:** GitHub draft releases now receive the complete `CHANGELOG.md`, including downloads and the remaining release information, instead of only the current beta section.
-- **Testing:** Added connection-flow regression coverage for missing, stale, and failed saved-bucket restores.
-- **Ver:** Bumped version to `v0.11.0-beta.6`.
+- **Location omnibar:** Replaces separate breadcrumb + path field (browse vs edit path).
+- **Object browsing:** The selection toolbar keeps a permanent 36px action row, table columns and row dividers stay aligned across the native table geometry, and compact selection actions fit beside a docked inspector. Checkbox double-clicks no longer navigate into folders accidentally.
+- **Selection & filtering:** Shift-click ranges follow sorted filtered listings, including virtualized rows. Selections hidden by a filter remain selected and are disclosed in the count; object filters are clearable in one click, and sidebar filtering keeps keyboard focus on a visible bucket. Checkbox/Space updates the shift-click anchor; selection is stored structurally so a key named `prefix:…` can no longer be treated as a folder.
+- **Toolbar:** Up navigation, download action, batch bar at one or more selected items with action tooltips (e.g. download files-only). **Download** disables when only folders are selected.
 
-## Changes in `v0.11.0-beta.5:`
+### Inspector (Preview | Properties)
 
-Beta 5 is the release candidate for v0.11.0 stable. It closes the remaining concurrent-write gaps across S3-compatible providers, makes risky fallbacks require explicit consent, and hardens connection, dialog, and filesystem durability boundaries.
+- **Docked pane:** Preview and Properties render in a resizable panel beside the object list, off-canvas below 900px; open state is persisted and wide first visit defaults to open. Modal **File Info** tabs remain the fallback when the inspector is closed.
+- **Reliable chrome:** Toggle, close (X), backdrop, and **Escape** show/hide the panel; selection sync uses a generation counter so updates are not dropped while preview/properties load.
+- **Preview:** Previewable files render in the docked pane; non-previewable selections show a dedicated “not available” message and the Preview tab is dimmed when preview cannot apply. A native stack overflow while previewing JSON and other objects is fixed.
+- **Properties:** Non-previewable files, folders, and multi-select route to Properties instead of an empty placeholder. Choosing **Properties** from the context menu or batch toolbar opens the Properties pane instead of auto-switching to Preview. Folder-only selections show a clear message instead of a failed `head_object` call. Unsaved edits prompt **Discard / Keep editing** when closing the inspector or dismissing File Info.
+- **Layout:** Properties pane scrolls reliably, drops the redundant “File Info” header, tightens docked padding, hides Save/Cancel for folder-only views, and allows a wider panel (default ~360px, up to 560px). Batch toolbar wraps and collapses to icons when the docked panel steals width.
+- **Keyboard & commands:** Inspector resize gutter supports keyboard adjustment (arrow keys). Command palette: **Toggle Inspector**, **Preview Selected File**, **Open Properties for Selection**; **⌘/Ctrl+Shift+I** toggles the inspector when connected. **Escape** dismisses one transient layer at a time (settings and modal overlays before drawer/sidebar/inspector). Disconnect closes the inspector panel.
 
-- **Data safety:** Uploads, copies, moves, and renames use provider-supported atomic create-only requests when overwrite is disabled, preventing a concurrent writer from being silently replaced after the initial conflict check.
-- **S3 compatibility:** Create-only support is detected per operation for AWS S3, Cloudflare R2, MinIO, Wasabi, Backblaze B2, and DigitalOcean Spaces. Provider detection requires real hostname boundaries, and unsupported operations fail closed in the backend.
-- **Conflict UX:** Providers that cannot guarantee a create-only write require an explicit **Write anyway** confirmation. Apply-to-all consent is serialized, cancellations are distinguished from destination conflicts, and queued copies retain source size so multipart safety is evaluated correctly.
+### Transfers & activity
+
+- **Drawer UI:** Queue summary, Pause/Resume all, overflow menu for prioritize/retry/clear; row presentation with operation chips, indeterminate progress, and failure badges. Status bar **Transfers** control is always visible (muted when idle).
+- **Progress & errors:** Progress indicators distinguish queued, active, paused, completed, and failed transfers; transfer rows expose full source and destination paths and wrap readable error messages. Stalled uploads show a stalled state.
+- **Setting:** Open transfer drawer when a transfer starts (default on); one-time toast pointing users to the transfers control.
+- **Reliability:** Transfer IDs persist across webview reloads. Queue-manifest writes are serialized and failures surface in the activity log. Pause and cancel are re-checked at each step so a cancelled move cannot fall through to deletion. Download scratch paths are derived in the backend. Part retries honor error classification; failed checkpoints are written off the async coordinator; the recovery sweep reclaims orphaned scratch leases.
+
+### Data safety (uploads, downloads, moves, conflicts)
+
+- **Create-only writes:** Uploads, copies, moves, and renames use provider-supported atomic create-only requests when overwrite is disabled, preventing a concurrent writer from being silently replaced after the initial conflict check. Create-only support is detected per operation for AWS S3, Cloudflare R2, MinIO, Wasabi, Backblaze B2, and DigitalOcean Spaces.
+- **Conflict UX:** Providers that cannot guarantee a create-only write require an explicit **Write anyway** confirmation. Apply-to-all consent is serialized, cancellations are distinguished from destination conflicts, and queued copies retain source size so multipart safety is evaluated correctly. A failed “does this already exist?” check now counts as a conflict and prompts for both downloads and object writes.
+- **Upload integrity:** Single `PUT`s, browser-byte uploads, every multipart part, and multipart completion send a precalculated SHA-256 and the response checksum is checked against it.
+- **Downloads:** Parallel downloads pin every range to one object generation (version ID where versioned, `If-Match` otherwise). Before publishing a completed parallel download, the pinned generation is re-checked; if the object changed, the destination is left untouched and scratch data is kept for resume. Resume checkpoints record version ID as well as ETag; native S3 checksums are preferred when verifying finished downloads. Checkpoint garbage collection no longer expires resume state for queued transfers.
+- **Moves:** A move records a durable copy receipt (key, ETag, version ID for both sides) before anything is deleted; a crash between copy and delete resumes the delete instead of duplicating. Source deletion re-verifies both sides against the receipt. On versioned buckets the source is retired with a conditional delete marker. Prefix copies keep rollback backups and name any backup that could not be cleaned up.
+- **Filesystem safety:** S3 keys map to local file names structurally — traversal segments are rejected, Windows-illegal characters are percent-encoded with collision detection, and Unicode is folded to NFC. Create-only downloads fall back to exclusive reservation or atomic no-replace move on filesystems without hard links.
+- **Publishing & cleanup:** Removing unusable scratch data flushes the parent directory entry, including a native Windows directory flush, so cleanup survives interruption and power loss.
+
+### S3 & connection
+
+- **Endpoints & listings:** Virtual-hosted AWS endpoints are normalized; listings request `encoding-type=url` so keys with XML-hostile characters no longer break pages.
+- **Multipart & timeouts:** `CompleteMultipartUpload` retries 200-with-error-body responses instead of aborting a possibly live upload. Request-body timeouts scale with part size; download bodies have a stall timeout.
+- **Session tokens:** Optional STS session tokens are supported in the connection form.
 - **Connection safety:** Rename and conflict checks stay bound to the connection that initiated them; late async results cannot act on a newly selected connection or location.
-- **Downloads:** Removing unusable scratch data now flushes the parent directory entry, including a native Windows directory flush, so cleanup survives interruption and power loss.
-- **Dialogs:** Queued confirmation dialogs reserve the active slot between presentations, preventing follow-up consent prompts from overlapping or being reordered.
-- **Release workflow:** GitHub draft titles use the exact package version (`0.11.0-beta.5`), and reused drafts have both their title and `CHANGELOG.md` body refreshed.
-- **Testing:** **610** frontend tests, **141** Rust tests, **183** release-asset tests, and **19** icon tests passing.
-- **Ver:** Bumped version to `v0.11.0-beta.5`.
 
-### Release-candidate hardening
+### Security & settings
 
-- **Filesystem safety:** S3 keys are mapped to local file names structurally — `..`/`.` segments and names that would traverse out of the chosen folder are rejected, and Windows-illegal characters (`< > : " \ | ? *`, control characters, trailing dots/spaces, reserved device names) are percent-encoded deterministically with collision detection. Unicode is folded to NFC so APFS cannot silently collapse distinct keys.
-- **Publishing:** Create-only downloads no longer depend on hard links; filesystems without them (exFAT/FAT32, some SMB/FUSE mounts) fall back to an exclusive reservation or an atomic no-replace move. Directory `fsync` is treated as best-effort where the filesystem rejects it.
-- **S3:** Virtual-hosted AWS endpoints are normalized instead of misrouting keys; listings request `encoding-type=url` so keys with XML-hostile characters no longer break pages; `CompleteMultipartUpload` retries 200-with-error-body responses instead of aborting a possibly live upload; request-body timeouts scale with part size so slow links can complete; download bodies have a stall timeout; optional STS **session tokens** are supported in the connection form.
-- **Transfers:** Part retries honor error classification, failed checkpoints are written off the async coordinator, the recovery sweep reclaims orphaned scratch leases, and the queue drains items enqueued while workers were finishing.
-- **UI:** Destructive confirmations focus the safe choice, selection is stored structurally (a key named `prefix:…` can no longer be treated as a folder), Escape closes only the palette, failed settings saves surface inside the modal, and stalled uploads show a stalled state.
-- **Release:** Signed Windows bundles suppress duplicate updater-artifact signing (the isolated signing phase owns it), the DMG ships the `/Applications` alias and warns when running translocated, the keychain setup no longer replaces the user's search list, RPM declares its runtime dependencies, Flatpak can post notifications, and CI re-audits dependencies weekly.
+- **Encrypted vault:** Payloads carry a key-check value so unlocking with the wrong key is detected. Migrations (enabling encryption, password change, rekeying) are staged and journaled; interruption restores originals or completes on next launch. Plaintext adoption from older versions is proven by a key-derived value that cannot be re-armed by editing config. Disabling biometric unlock and factory reset are journaled and replay to completion if interrupted.
+- **Windows:** Biometric credential checks handle sessions without an interactive Credential Manager (e.g. RDP).
+- **Factory reset:** Requires a second explicit confirmation, states what it destroys (including transfer checkpoints and partial download files), and stops running transfers first.
+- **Settings:** Failed saves surface inside the modal. The sidebar includes a **Support Me** button (Lucide heart) that opens `https://rosie.run/support` in the browser.
 
-## Changes in `v0.11.0-beta.4:`
+### UI, accessibility & onboarding
 
-Beta 4 is a polish-and-unbreak pass: the docked inspector behaves for files that cannot preview, release VMs stop dying on a false quality-gate miss, and Windows security tests no longer wedge on Credential Manager when there is no interactive logon session.
-
-- **Inspector:** Selecting anything that is not previewable (`.flatpak`, `.exe`, `.zip`, folders, multi-select, … — anything outside the image/text allowlist) opens **Properties** instead of leaving the empty “Select an object to inspect.” placeholder.
-- **Inspector:** Clicking the **Preview** tab on a non-previewable selection stays on Preview and shows a dedicated “not available” message; the Preview tab is dimmed (`aria-disabled`) when the current selection cannot preview.
-- **Inspector:** Batch selection toolbar wraps and collapses to icons when the docked panel steals width, so **Deselect** / **Copy URLs** no longer clip off the edge.
-- **Inspector:** Properties pane scrolls reliably (`min-height: 0`), drops the redundant “File Info” header, tightens docked padding, hides Save/Cancel for folder-only views, and allows a wider panel (default ~360px, up to 560px).
-- **Release pipeline:** Quality-gate recording no longer trims git porcelain XY columns. Bootstrap-only metainfo drift (` M path`) was being misparsed as an empty dirty set, so `coverage/.release-quality.json` was never written and `release:prepare` failed with ENOENT on clean release VMs.
-- **Release pipeline / CI:** Rust toolchain and CI install `clippy` + `rustfmt` with the stable toolchain (CI was failing after tests on “clippy not installed”).
-- **Testing:** `test:all` prints failed Rust test names instead of only the last log lines; security tests clear the process-global migration-recovery latch between cases so one failure cannot poison the rest of the suite.
-- **Windows:** Biometric credential presence checks treat `ERROR_NO_SUCH_LOGON_SESSION` (`0x80070520`) as “no usable key” so vault migration cleanup does not fail closed on headless/RDP/test VMs without an interactive Credential Manager session.
-- **Testing:** Frontend suite at **339** tests passing.
-- **Ver:** Bumped version to `v0.11.0-beta.4`.
-
-## Changes in `v0.11.0-beta.3:`
-
-Beta 3 is a correctness pass over the parts of the app that can lose data: moves, downloads, uploads, and the encrypted vault. A lot of this is invisible when everything goes right, and the whole point is what happens when it doesn't :)
-
-- **Security:** Encrypted payloads now carry a key-check value, so unlocking with the wrong key is detected instead of producing garbage, and PBKDF2 parameters are validated before use.
-- **Security:** Migrations (enabling encryption, changing your password, rekeying) are staged and journaled. An interruption mid-migration now either restores the originals or completes the commit on next launch rather than leaving a half-converted vault.
-- **Security:** The one-time adoption of files left in plaintext by an older version is now proven by a key-derived, constant-time-checked value instead of a plain boolean, so the sweep cannot be re-armed by editing the config file. The proof is regenerated on password/KDF rekey and cleared when key material is discarded.
-- **Security:** Disabling biometric unlock is journaled, so a credential is still removed from the OS credential store if the app is killed part way through. A stale `enrolled` flag no longer leaves the key behind.
-- **Security:** Factory reset is journaled too, and a partially applied reset is replayed to completion on next launch.
-- **Uploads:** Upload integrity is now verified by S3 itself. Single `PUT`s, browser-byte uploads, every multipart part, and the multipart completion all send a precalculated SHA-256 and the response checksum is checked against it. Previously the check could be satisfied by metadata the app had written itself.
-- **Downloads:** Parallel downloads pin every range to one object generation (version ID where the bucket is versioned, `If-Match` otherwise), so ranges can no longer be mixed across a concurrent overwrite.
-- **Downloads:** Right before a completed parallel download is published, the pinned generation is re-checked against what is current. If the object changed while downloading, the destination is left untouched and the downloaded data is kept for resuming instead of overwriting your file with a stale copy.
-- **Downloads:** Resume checkpoints record the version ID as well as the ETag, and native S3 checksums are preferred over the app's own metadata hint when verifying a finished download.
-- **Downloads:** Checkpoint garbage collection no longer expires the resume state (or the scratch file) of a transfer that is still queued.
-- **Moves:** A move now records a copy receipt — key, ETag and version ID for both sides — and that receipt is made durable *before* anything is deleted. A crash between the copy and the delete resumes the delete instead of duplicating or re-copying the object.
-- **Moves:** Source deletion re-verifies both the destination and the source against the receipt and refuses to delete on any mismatch. On versioned buckets the source is retired with a conditional delete marker rather than a permanent version-targeted delete, so a write that races the deletion is recoverable instead of destroyed.
-- **Moves:** Prefix copies keep rollback backups and name every backup they could not clean up, so a partial failure is always recoverable and never silently leaves stray objects.
-- **Transfers:** Transfer IDs persist across webview reloads. They are the handle the backend uses to cancel work, and restarting them at 1 could point a new transfer at an old one.
-- **Transfers:** Queue-manifest writes are serialized and their failures are surfaced in the activity log instead of being swallowed. Recovery data is loaded once secure storage is unlocked.
-- **Transfers:** Pause and cancel are re-checked at each step of a transfer, so a cancelled move cannot fall through to the deletion phase.
-- **Transfers:** Download scratch paths are derived in the backend instead of being passed in from the webview.
-- **Conflicts:** A failed "does this already exist?" check now counts as a conflict and prompts, for both downloads and object writes. A throttle, a `403`, or a transient error used to read as "not there" and quietly authorise an overwrite.
-- **Settings:** Factory reset asks for a second, explicit confirmation and now states what it destroys, including transfer checkpoints and partial download files. Running transfers are stopped first.
-- **UI:** The dev build opens at the same default window size as the release build.
-- **Codebase:** Removed an unreachable direct-download path in the download handler, the stale `src-tauri/tree.txt` dump, and an unused legacy `.icns`.
-- **Logo:** The iconset normalizer decodes PNGs to verify dimensions and opacity rather than trusting file names, with tests covering the checks.
-- **Release workflow:** GitHub release titles are generated from one shared helper and follow the BurntToasters Changelog Standard, so this release is titled `0.11.0 Beta 3` while the tag stays `v0.11.0-beta.3`.
-- **Testing:** Added coverage for checksum verification, generation pinning, move receipts and resume classification, the adoption proof, migration recovery, and release titling (**338** frontend and **114** Rust tests passing).
-- **Ver:** Bumped version to `v0.11.0-beta.3`.
-- **PKG:** Pinned every Rust dependency to an exact version and use the stable Rust toolchain in the repo and CI, so dependency resolution stays explicit while Rust receives current stable fixes.
-
-## Changes in `v0.11.0-beta.2:`
-
-Inspector pane fixes and release-pipeline hardening for VM builds (`npm run b && npm run release:*`).
-
-- **Inspector pane (Preview | Properties):**
-  - Toggle, close (X), backdrop, and **Escape** reliably show/hide the panel; duplicate event wiring guarded.
-  - Selection sync uses a generation counter (no dropped updates while preview/properties load); empty vs. active pane state fixed so content is not stacked with the placeholder.
-  - Preview and properties render in the **open docked/slide-out panel** on all widths when the inspector is open (no duplicate full-screen modals on narrow layouts).
-  - Resizable gutter on desktop; layout/CSS fixes for clipped headers and panel height; default first-visit open aligned to **901px** (matches mobile breakpoint).
-  - Non-previewable single files stay on Preview with an inline message; multi-select and folders route to Properties; modal **File Info** tabs work when the inspector is closed.
-  - Batch toolbar **Properties** opens the panel for a single selected item (not only multi-select); folder-only selections included.
-  - Single selected **folders** show a clear properties message instead of a failed `head_object` call.
-  - Toolbar **Download** disables when only folders are selected (files-only, matching batch download).
-  - Disconnect closes the inspector panel.
-  - Inspector resize gutter supports keyboard adjustment (arrow keys) and platform-aware toggle shortcut labels (⌘⇧I on macOS).
-  - Command palette: **Toggle Inspector**, **Preview Selected File**, **Open Properties for Selection**; **⌘/Ctrl+Shift+I** toggles the inspector when connected.
-  - Closing the inspector clears preview and properties content; mobile inspector closes on bucket/folder navigation.
-  - **Escape** order: settings and modal overlays close before drawer/sidebar/inspector; docked preview clears before the panel closes.
-  - Unsaved property edits prompt **Discard / Keep editing** when closing the inspector or dismissing File Info (X, Cancel, backdrop, Escape).
-  - Opening the inspector on narrow layouts closes the bottom activity/transfers drawer; resizing into the mobile breakpoint does the same.
-  - Context menu: multi-folder selection and single-folder **Properties**; properties use the full selection (files + folders).
-  - Selection: checkbox/Space updates shift-click anchor; preview/properties errors use friendly messages; **Load more** reports failures in the status bar.
-- **Release pipeline:**
-  - `release:prepare` writes `release/.build-session.json` via `release:session:start` (fixes ENOENT on `release:session:verify`).
-  - Quality-gate proof tolerates bootstrap-only git drift (`sync-version` / metainfo / Cargo lockfiles); porcelain parsing fix for `git status`.
-- **Tests:** Inspector sync, keyboard shortcuts, release-session, and info-panel discard flows (**335** tests passing).
-
-## Changes in `v0.10.2:`
-
-- **NEW - Windows code signing:** WOO HOO!! Windows Codesigning is here!
-  - After a good while of not having it, Windows Binaries are now signed by Azure Artifact Signing!
-- **Release workflow:** Added resilient GitHub draft-release creation and wait steps so Windows creates one shared draft and macOS/Linux reuse it instead of creating duplicate drafts.
-- **Build performance:** Switched the Rust release profile to thin LTO with parallel code generation for faster release builds.
-- **UI:** Restored the missing upload icon in the file-upload toolbar and command palette.
+- **Panels & keyboard flow:** Sidebar and inspector widths fit available desktop space while preserving preferred sizes. The activity drawer collapses and restores cleanly with focus returned to its opener. Opening the inspector on narrow layouts closes the bottom transfers drawer.
+- **Feedback & dialogs:** Disabled controls have consistent states, toast countdowns pause while hovered or focused, sticky messages stay available until dismissed, and long confirmation dialogs fit within the viewport. Destructive confirmations focus the safe choice. Queued confirmation dialogs cannot overlap or reorder.
+- **Onboarding:** Setup wizard ends with **Connect to storage** and focuses the connection form; wizard uses the same modal focus trap as settings. Skip link to main content, `<main>` landmark, modal overlays inset below custom titlebar on macOS/Windows.
 
 ## Click below for the full `v0.X` Changelog
 
 <details>
 <summary>Full v0.X changelog</summary>
-
-## Changes in `v0.11.0-beta.1:`
-
-Focused UX polish for connection flow, browsing chrome, transfers, and desktop window framing—without a full redesign.
-
-- **Custom titlebar (macOS & Windows):**
-  - macOS uses Tauri overlay title bar with traffic-light spacing; Windows uses frameless chrome with in-app minimize/maximize/close.
-  - Linux keeps native window decorations (unchanged).
-  - Draggable regions: top drag strip, `data-tauri-drag-region`, selective `-webkit-app-region`, and `startDragging` fallback so the header can move the window without blocking bookmark chips and buttons.
-- **Connection & bookmarks:**
-  - Saved connections and header bookmark chips share the same data; one-click connect from chips and saved list.
-  - Inline connect errors, connecting spinner, Enter-to-connect in credential fields, bookmark tooltips (name in bar, endpoint on hover).
-  - Saved-list empty state, row selection/focus/Enter, form disabled while connecting; copy links saved connections to title-bar bookmarks.
-- **Browser chrome:**
-  - **Location omnibar** replaces separate breadcrumb + path field (browse vs edit path).
-  - **Inspector pane** (Preview | Properties) docked beside the object list, resizable, off-canvas below 900px; open state persisted; wide first visit defaults to open; Preview/Properties open the inspector on desktop (modals remain fallback on narrow layouts).
-  - Toolbar: Up navigation, download action, batch bar at one or more selected items with action tooltips (e.g. download files-only).
-- **Transfers & activity:**
-  - Drawer header: queue summary, Pause/Resume all, overflow menu for prioritize/retry/clear (legacy toolbar buttons removed).
-  - Row presentation: operation chips, indeterminate progress, failure badge; status bar **Transfers** control always visible (muted when idle).
-  - Setting: open transfer drawer when a transfer starts (default on); one-time toast pointing users to the transfers control.
-- **Onboarding & accessibility:**
-  - Setup wizard ends with **Connect to storage** and focuses the connection form; wizard uses the same modal focus trap as settings.
-  - Skip link to main content, `<main>` landmark, modal overlays inset below custom titlebar on macOS/Windows.
-- **Dev / tooling:**
-  - `scripts/sync-version.js` updates the workspace package version in `Cargo.lock` when the npm version changes (fixes `cargo metadata --locked` after version bumps).
-- **Tests:** Vitest coverage for connection UX, omnibar/inspector, transfers UI, titlebar, and related browser/bookmark updates (**321** tests passing).
-
-## Changes in `v0.10.1:`
-
-- **Security:** Bumped PBKDF2-HMAC-SHA256 iterations from `210,000` to `600,000` to match current OWASP recommendations. Existing vaults auto-migrate on next unlock.
-- **Security:** Added cleartext HTTP warning when connecting to non-local endpoints over plain `http://`. Credentials are sent unencrypted in that scenario.
-- **Security:** Documented biometric unlock limitations (key stored in OS credential store is not hardware-bound to Touch ID / Windows Hello).
-- **UI:** Fixed WCAG 1.4.3 AA contrast failures in `--text-muted`, `--text-secondary`, and `--badge-off-text` tokens across both light and dark themes. All text now meets the 4.5:1 minimum.
-- **UI:** Removed dead `.connection-bar` CSS left over from the v0.10.0 redesign and added a responsive breakpoint for `#connection-screen` at narrow widths (≤700px).
-- **UI:** Consolidated duplicate dark-theme token blocks into a single source of truth per selector.
-- **UI:** Added full ARIA support to the command palette — `role="dialog"`, `role="combobox"`, `role="listbox"`/`role="option"`, `aria-activedescendant`, and a keyboard focus trap.
-- **Codebase:** Cleaned up dead responsive CSS targeting the removed `.connection-bar` element.
 
 ## Changes in `v0.10.0:`
 
@@ -234,10 +122,10 @@ v0.10.0 introduces a comprehensive UI/UX modernization, window size memory on re
 
 </details>
 
+## ℹ️ Release Info
+
 > [!IMPORTANT]
 > **Note:** MSI builds are NOT provided for beta releases. Use the EXE installer.
-
-## ℹ️ Release Info
 
 - **GPG Signed:** My public key is attached to every release to ensure authenticity.
 - **GPG Key:** You can get my public GPG key here: https://tuxedo.rosie.run/GPG/BurntToasters_0xF2FBC20F_public.asc
