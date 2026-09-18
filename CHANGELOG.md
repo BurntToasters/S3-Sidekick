@@ -22,7 +22,7 @@
 
 ## Changes in `v0.11.0:`
 
-Its finally here! v0.11.0 is a major reliability and UX release: a docked **Inspector** pane, custom desktop chrome, stronger data safety across uploads/downloads/moves, encrypted-vault hardening, and a long polish pass over browsing, transfers, and keyboard flow.
+It's finally here! v0.11.0 is a major reliability and UX release: a docked **Inspector** pane, custom desktop chrome, stronger data safety across uploads/downloads/moves, encrypted-vault hardening, and a long polish pass over browsing, transfers, and keyboard flow.
 
 ### Desktop chrome & window
 
