@@ -98,7 +98,7 @@ test("FORCE_UPLOAD bypasses draft commit mismatch", () => {
   const release = { target_commitish: "aaa" };
   assert.throws(
     () => assertReleaseTargetsCommit(release, "bbb", {}),
-    /not checked-out commit/,
+    /not HEAD bbb/,
   );
   const warnings = [];
   assert.equal(

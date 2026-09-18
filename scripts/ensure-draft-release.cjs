@@ -10,16 +10,14 @@ const {
   githubApi,
   githubStatusCode,
 } = require("./github-cli.cjs");
-const {
-  assertStableReleaseOverridesAllowed,
-  isExplicitTruthy,
-} = require("./release-policy.cjs");
+const { assertStableReleaseOverridesAllowed } = require("./release-policy.cjs");
 const { assertReleaseToolVersions } = require("./release-integrity.cjs");
 const {
   assertExpectedRelease,
   assertNoMisnamedVersionDrafts,
   isExpectedRelease,
 } = require("./release-draft-metadata.cjs");
+const { assertReleaseTargetsHead } = require("./release-draft-target.cjs");
 
 const ROOT = path.resolve(__dirname, "..");
 const packageJson = require("../package.json");
@@ -152,16 +150,14 @@ function matchingReleases(releases) {
 }
 
 function assertCommit(release, commit, env = process.env, log = console) {
-  if (release?.target_commitish === commit) return release;
-  if (isExplicitTruthy(env.FORCE_UPLOAD)) {
-    log.warn(
-      `WARNING: Draft ${TAG} targets ${release?.target_commitish || "unknown"}, not HEAD ${commit}. FORCE_UPLOAD=1 bypassing commit check.`,
-    );
-    return release;
-  }
-  throw new Error(
-    `Draft ${TAG} targets ${release?.target_commitish || "unknown"}, not HEAD ${commit}. Delete or retarget stale draft before continuing. Or set FORCE_UPLOAD=1 to bypass.`,
-  );
+  return assertReleaseTargetsHead(release, commit, {
+    action: "continuing",
+    env,
+    isPrerelease: IS_PRERELEASE,
+    log,
+    root: ROOT,
+    tag: TAG,
+  });
 }
 
 async function syncDraft(release, body, commit) {

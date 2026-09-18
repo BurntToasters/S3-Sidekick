@@ -23,6 +23,7 @@ const {
   assertNoMisnamedVersionDrafts,
   isExpectedRelease,
 } = require("./release-draft-metadata.cjs");
+const { releaseTargetMatchesCommit } = require("./release-draft-target.cjs");
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const packageJson = JSON.parse(
@@ -111,7 +112,13 @@ export function assertDraftReleaseShape({
   if (Boolean(release.prerelease) !== expectedPrerelease) {
     throw new Error(`Release ${tag} has incorrect prerelease state.`);
   }
-  if (headCommit && release.target_commitish !== headCommit) {
+  if (
+    headCommit &&
+    !releaseTargetMatchesCommit(release.target_commitish, headCommit, {
+      isPrerelease: expectedPrerelease,
+      root,
+    })
+  ) {
     throw new Error(`Release ${tag} does not target HEAD ${headCommit}.`);
   }
   const present = new Set(assetNames);

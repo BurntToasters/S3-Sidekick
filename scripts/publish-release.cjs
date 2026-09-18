@@ -9,6 +9,7 @@ const {
   assertExpectedRelease,
   isExpectedRelease,
 } = require("./release-draft-metadata.cjs");
+const { releaseTargetMatchesCommit } = require("./release-draft-target.cjs");
 
 const ROOT = path.resolve(__dirname, "..");
 const packageJson = require("../package.json");
@@ -68,7 +69,12 @@ function main() {
   const commit = currentCommit();
   verifyDraft();
   const draft = findDraft();
-  if (draft.target_commitish !== commit) {
+  if (
+    !releaseTargetMatchesCommit(draft.target_commitish, commit, {
+      isPrerelease: IS_PRERELEASE,
+      root: ROOT,
+    })
+  ) {
     throw new Error(
       `Draft ${TAG} targets ${draft.target_commitish}, not HEAD ${commit}.`,
     );
