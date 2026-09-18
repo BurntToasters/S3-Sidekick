@@ -85,6 +85,12 @@ test("release metadata accepts beta and stable drafts only", () => {
 
 test("stable release rejects recovery overrides", () => {
   assert.doesNotThrow(() => assertStableReleaseOverridesAllowed({}, "0.11.0"));
+  assert.doesNotThrow(() =>
+    assertStableReleaseOverridesAllowed(
+      { ENFORCE_LINUX_X64_PACKAGE_SET: "0" },
+      "0.11.0",
+    ),
+  );
   assert.throws(
     () =>
       assertStableReleaseOverridesAllowed(
