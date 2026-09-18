@@ -1,5 +1,6 @@
 import { basename, escapeHtml } from "./utils.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
+import { syncPanelWidths } from "./app-layout.ts";
 import { getSelectionEntries } from "./app-selection.ts";
 import { canPreview, closePreview, openPreview } from "./preview.ts";
 import {
@@ -321,6 +322,7 @@ export function setInspectorOpen(open: boolean): void {
   }
 
   syncInspectorPaneVisibility();
+  syncPanelWidths();
   if (open) {
     void syncInspectorFromSelection();
   } else {
@@ -516,6 +518,7 @@ export function wireInspectorChrome(): void {
     } else {
       releaseMobileInspectorModal(false);
     }
+    syncPanelWidths();
   });
 
   restoreInspectorOpenState();

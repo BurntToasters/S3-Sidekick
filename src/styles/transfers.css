@@ -47,7 +47,12 @@
 }
 
 .transfer-name {
-  max-width: min(280px, 42vw);
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(360px, 42vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .transfer-progress-wrap--indeterminate .transfer-progress__bar {
@@ -127,14 +132,6 @@
   color: var(--danger);
 }
 
-.transfer-name {
-  flex-shrink: 1;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .transfer-main {
   flex: 1;
   min-width: 0;
@@ -154,12 +151,16 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .transfer-attempt,
 .transfer-phase {
   font-size: 10px;
   color: var(--text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .transfer-arrow {
@@ -208,13 +209,15 @@
 }
 
 .transfer-error {
-  flex-shrink: 0;
+  display: block;
+  min-width: 0;
+  max-width: 100%;
   color: var(--danger);
   font-size: 11px;
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 
 .transfer-progress-wrap {

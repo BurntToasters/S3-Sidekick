@@ -5,6 +5,12 @@ import { renderObjectTable } from "./browser.ts";
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 420;
 const SIDEBAR_STORAGE_KEY = "s3-sidekick.sidebar.width";
+const INSPECTOR_MIN = 280;
+const INSPECTOR_MAX = 560;
+const INSPECTOR_STORAGE_KEY = "s3-sidekick.inspector.width";
+const DESKTOP_BREAKPOINT = 900;
+const LISTING_MIN_WIDTH = 360;
+const RESIZER_WIDTH_FALLBACK = 8;
 export const FILTER_INPUT_DEBOUNCE_MS = 120;
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -15,6 +21,12 @@ let modalLayerActive = false;
 let focusBeforeModal: HTMLElement | null = null;
 let focusBeforeSidebar: HTMLElement | null = null;
 const sidebarBackgroundInert = new Map<HTMLElement, boolean>();
+
+// Stored widths represent the user's preference. Desktop fit adjustments use
+// temporary CSS values and leave these preferences untouched so a wider
+// window can restore the requested layout.
+let preferredSidebarWidth = 240;
+let preferredInspectorWidth = 360;
 
 export function clearFilterInputDebounce(): void {
   if (filterInputDebounce !== undefined) {
@@ -97,7 +109,10 @@ export function updateInspectorToggleShortcutLabel(): void {
 }
 
 function isMobileSidebarMode(): boolean {
-  return window.matchMedia("(max-width: 900px)").matches;
+  return (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia(`(max-width: ${DESKTOP_BREAKPOINT}px)`).matches
+  );
 }
 
 function setElementInert(element: HTMLElement, inert: boolean): void {
@@ -207,6 +222,8 @@ export function setSidebarOpen(open: boolean): void {
       restore.focus();
     }
   }
+
+  syncPanelWidths();
 }
 
 function toggleSidebar(): void {
@@ -388,10 +405,6 @@ export function handleTabListArrowKey(
   nextTab.focus();
 }
 
-const INSPECTOR_MIN = 280;
-const INSPECTOR_MAX = 560;
-const INSPECTOR_STORAGE_KEY = "s3-sidekick.inspector.width";
-
 function clampInspectorWidth(width: number): number {
   return Math.max(INSPECTOR_MIN, Math.min(INSPECTOR_MAX, width));
 }
@@ -400,6 +413,140 @@ function applyInspectorWidth(width: number): void {
   document.documentElement.style.setProperty(
     "--inspector-width",
     `${clampInspectorWidth(width)}px`,
+  );
+}
+
+function readCssPixelVariable(name: string, fallback: number): number {
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readElementWidth(
+  element: HTMLElement | null,
+  fallback: number,
+): number {
+  if (!element) return fallback;
+  const measured = element.getBoundingClientRect().width;
+  if (Number.isFinite(measured) && measured > 0) return measured;
+  const declared = Number.parseFloat(getComputedStyle(element).width);
+  return Number.isFinite(declared) && declared > 0 ? declared : fallback;
+}
+
+function setResizerAria(
+  resizer: HTMLElement | null,
+  min: number,
+  max: number,
+  width: number,
+): void {
+  if (!resizer) return;
+  const rounded = Math.round(Math.max(min, Math.min(max, width)));
+  resizer.setAttribute("aria-valuemin", String(min));
+  resizer.setAttribute("aria-valuemax", String(max));
+  resizer.setAttribute("aria-valuenow", String(rounded));
+  resizer.setAttribute("aria-valuetext", `${rounded} pixels`);
+}
+
+/**
+ * Fits the docked panels around a usable object listing on desktop.
+ *
+ * Automatic fit is deliberately recomputed from the preferred widths on every
+ * call. That lets a resize or a panel reopen restore the user's saved values,
+ * while the effective CSS widths temporarily shrink the inspector first and
+ * then the sidebar when the viewport is tight.
+ */
+export function syncPanelWidths(): void {
+  if (isMobileSidebarMode()) return;
+
+  const layout = document.getElementById("main-layout");
+  const sidebar = document.getElementById("bucket-panel");
+  if (!layout || !sidebar) return;
+
+  const inspector = document.getElementById("inspector-panel");
+  const sidebarResizer = document.getElementById("sidebar-resizer");
+  const inspectorResizer = document.getElementById("inspector-resizer");
+  const contentMain = document.querySelector<HTMLElement>(".content-main");
+  const inspectorOpen = Boolean(inspector && !inspector.hidden);
+
+  const storedSidebar = Number.isFinite(preferredSidebarWidth)
+    ? preferredSidebarWidth
+    : readCssPixelVariable("--sidebar-width", 240);
+  const storedInspector = Number.isFinite(preferredInspectorWidth)
+    ? preferredInspectorWidth
+    : readCssPixelVariable("--inspector-width", 360);
+  const requestedSidebar = clampSidebarWidth(storedSidebar);
+  const requestedInspector = clampInspectorWidth(storedInspector);
+
+  // Restore the requested values before measuring. Without this step a
+  // temporary fit from a previous narrow viewport would compound on every
+  // resize and never recover the saved preference.
+  applySidebarWidth(requestedSidebar);
+  applyInspectorWidth(requestedInspector);
+
+  const viewportWidth = readElementWidth(
+    layout,
+    Number.isFinite(window.innerWidth) ? window.innerWidth : 0,
+  );
+  const sidebarWidth = clampSidebarWidth(
+    readElementWidth(sidebar, requestedSidebar),
+  );
+  const sidebarResizerWidth =
+    sidebarResizer && !sidebarResizer.hidden
+      ? readElementWidth(sidebarResizer, RESIZER_WIDTH_FALLBACK)
+      : 0;
+  const inspectorWidth = inspectorOpen
+    ? clampInspectorWidth(readElementWidth(inspector, requestedInspector))
+    : 0;
+  const inspectorResizerWidth =
+    inspectorOpen && inspectorResizer && !inspectorResizer.hidden
+      ? readElementWidth(inspectorResizer, RESIZER_WIDTH_FALLBACK)
+      : 0;
+
+  let effectiveSidebar = sidebarWidth;
+  let effectiveInspector = inspectorWidth;
+  const calculatedListingWidth =
+    viewportWidth -
+    effectiveSidebar -
+    sidebarResizerWidth -
+    effectiveInspector -
+    inspectorResizerWidth;
+  const measuredListingWidth = contentMain
+    ? contentMain.getBoundingClientRect().width
+    : 0;
+  const listingWidth =
+    measuredListingWidth > 0
+      ? Math.min(calculatedListingWidth, measuredListingWidth)
+      : calculatedListingWidth;
+  let deficit = Math.max(0, LISTING_MIN_WIDTH - listingWidth);
+
+  if (deficit > 0 && inspectorOpen) {
+    const inspectorReduction = Math.min(
+      deficit,
+      Math.max(0, effectiveInspector - INSPECTOR_MIN),
+    );
+    effectiveInspector -= inspectorReduction;
+    deficit -= inspectorReduction;
+  }
+
+  if (deficit > 0) {
+    const sidebarReduction = Math.min(
+      deficit,
+      Math.max(0, effectiveSidebar - SIDEBAR_MIN),
+    );
+    effectiveSidebar -= sidebarReduction;
+    deficit -= sidebarReduction;
+  }
+
+  applySidebarWidth(effectiveSidebar);
+  if (inspector) applyInspectorWidth(effectiveInspector || requestedInspector);
+  setResizerAria(sidebarResizer, SIDEBAR_MIN, SIDEBAR_MAX, effectiveSidebar);
+  setResizerAria(
+    inspectorResizer,
+    INSPECTOR_MIN,
+    INSPECTOR_MAX,
+    effectiveInspector || requestedInspector,
   );
 }
 
@@ -419,13 +566,19 @@ export function wireInspectorControls(): void {
     resizer.setAttribute("aria-valuetext", `${rounded} pixels`);
   };
   if (Number.isFinite(savedWidth)) {
+    preferredInspectorWidth = clampInspectorWidth(savedWidth);
     applyInspectorWidth(savedWidth);
     updateInspectorResizerAria(savedWidth);
   } else {
-    updateInspectorResizerAria(readInspectorWidth());
+    preferredInspectorWidth = clampInspectorWidth(
+      readInspectorWidth() ||
+        readCssPixelVariable("--inspector-width", preferredInspectorWidth),
+    );
+    updateInspectorResizerAria(preferredInspectorWidth);
   }
 
   const persistInspectorWidth = (width: number) => {
+    preferredInspectorWidth = clampInspectorWidth(width);
     window.localStorage.setItem(
       INSPECTOR_STORAGE_KEY,
       String(clampInspectorWidth(width)),
@@ -439,9 +592,8 @@ export function wireInspectorControls(): void {
   const onMouseMove = (event: MouseEvent) => {
     if (!dragging) return;
     const delta = dragStartX - event.clientX;
-    const nextWidth = clampInspectorWidth(dragStartWidth + delta);
-    applyInspectorWidth(nextWidth);
-    updateInspectorResizerAria(nextWidth);
+    preferredInspectorWidth = clampInspectorWidth(dragStartWidth + delta);
+    syncPanelWidths();
   };
 
   const onMouseUp = () => {
@@ -451,9 +603,11 @@ export function wireInspectorControls(): void {
     document.body.style.cursor = "";
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mouseup", onMouseUp);
-    const width = readInspectorWidth();
-    persistInspectorWidth(width);
-    updateInspectorResizerAria(width);
+    // Persist the requested width, rather than the temporarily fitted width
+    // shown while the viewport is tight. The next wider layout can restore
+    // this preference through syncPanelWidths().
+    persistInspectorWidth(preferredInspectorWidth);
+    syncPanelWidths();
   };
 
   resizer.addEventListener("mousedown", (event) => {
@@ -485,10 +639,11 @@ export function wireInspectorControls(): void {
     if (nextWidth === null) return;
     event.preventDefault();
     const clamped = clampInspectorWidth(nextWidth);
-    applyInspectorWidth(clamped);
     persistInspectorWidth(clamped);
-    updateInspectorResizerAria(clamped);
+    syncPanelWidths();
   });
+
+  syncPanelWidths();
 }
 
 export function wireLayoutControls(): void {
@@ -510,13 +665,19 @@ export function wireLayoutControls(): void {
   const readSidebarWidth = () => sidebar.getBoundingClientRect().width;
   const persistSidebarWidth = (width: number) => {
     const clamped = clampSidebarWidth(width);
+    preferredSidebarWidth = clamped;
     window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(clamped));
   };
   if (Number.isFinite(savedWidth)) {
+    preferredSidebarWidth = clampSidebarWidth(savedWidth);
     applySidebarWidth(savedWidth);
     updateResizerAria(savedWidth);
   } else {
-    updateResizerAria(readSidebarWidth());
+    preferredSidebarWidth = clampSidebarWidth(
+      readSidebarWidth() ||
+        readCssPixelVariable("--sidebar-width", preferredSidebarWidth),
+    );
+    updateResizerAria(preferredSidebarWidth);
   }
 
   const syncSidebarMode = () => {
@@ -541,9 +702,8 @@ export function wireLayoutControls(): void {
   const onMouseMove = (event: MouseEvent) => {
     if (!dragging) return;
     const delta = event.clientX - dragStartX;
-    const nextWidth = clampSidebarWidth(dragStartWidth + delta);
-    applySidebarWidth(nextWidth);
-    updateResizerAria(nextWidth);
+    preferredSidebarWidth = clampSidebarWidth(dragStartWidth + delta);
+    syncPanelWidths();
   };
 
   const onMouseUp = () => {
@@ -553,9 +713,11 @@ export function wireLayoutControls(): void {
     document.body.style.cursor = "";
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mouseup", onMouseUp);
-    const width = readSidebarWidth();
-    persistSidebarWidth(width);
-    updateResizerAria(width);
+    // Persist the requested width, rather than the temporarily fitted width
+    // shown while the viewport is tight. The next wider layout can restore
+    // this preference through syncPanelWidths().
+    persistSidebarWidth(preferredSidebarWidth);
+    syncPanelWidths();
   };
 
   resizer.addEventListener("mousedown", (event) => {
@@ -563,7 +725,7 @@ export function wireLayoutControls(): void {
     event.preventDefault();
     dragging = true;
     dragStartX = event.clientX;
-    dragStartWidth = sidebar.getBoundingClientRect().width;
+    dragStartWidth = readSidebarWidth();
     resizer.classList.add("sidebar-resizer--active");
     document.body.style.cursor = "col-resize";
     document.addEventListener("mousemove", onMouseMove);
@@ -588,18 +750,21 @@ export function wireLayoutControls(): void {
     if (nextWidth === null) return;
     event.preventDefault();
     const clamped = clampSidebarWidth(nextWidth);
-    applySidebarWidth(clamped);
     persistSidebarWidth(clamped);
-    updateResizerAria(clamped);
+    syncPanelWidths();
   });
 
   resizer.addEventListener("dblclick", () => {
     if (isMobileSidebarMode()) return;
     // Reset to the CSS default (--sidebar-width: 240px in tokens.css).
     window.localStorage.removeItem(SIDEBAR_STORAGE_KEY);
+    preferredSidebarWidth = 240;
     applySidebarWidth(240);
     updateResizerAria(240);
+    syncPanelWidths();
   });
+
+  syncPanelWidths();
 }
 
 export function initModalLayerObserver(): void {

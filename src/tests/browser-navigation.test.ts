@@ -54,7 +54,7 @@ function renderFixture(): void {
       <tbody id="object-tbody"></tbody>
     </table>
     <input id="select-all" type="checkbox" />
-    <div id="batch-toolbar" hidden><span id="batch-count"></span></div>
+    <div id="batch-toolbar"><span id="batch-count"></span></div>
     <div id="load-more-row"></div>
     <span id="statusbar-count"></span>
     <span id="object-count"></span>

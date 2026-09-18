@@ -43,6 +43,14 @@
 
 .sidebar__filter {
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* The compact field utility is used elsewhere, but a filter must consume the
+   sidebar's available width even when both classes are present. */
+.sidebar__header .sidebar__filter {
+  width: 100%;
 }
 
 .content {

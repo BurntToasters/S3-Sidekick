@@ -22,11 +22,11 @@
   -webkit-app-region: no-drag;
 }
 
-.btn:hover {
+.btn:hover:not(:disabled) {
   background: var(--bg-hover);
 }
 
-.btn:active {
+.btn:active:not(:disabled) {
   transform: scale(0.98);
 }
 
@@ -36,17 +36,12 @@
   border-color: var(--accent);
 }
 
-.btn--primary:hover {
+.btn--primary:hover:not(:disabled) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
   box-shadow:
     0 0 0 1px var(--accent-hover),
     0 4px 16px var(--glow-accent);
-}
-
-.btn--primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .btn--ghost {
@@ -56,11 +51,6 @@
 
 .btn--ghost:hover:not(:disabled) {
   background: var(--bg-hover);
-}
-
-.btn--ghost:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
 }
 
 .btn--disconnect {
@@ -84,8 +74,21 @@
   cursor: pointer;
 }
 
-.btn--icon:hover {
+.btn--icon:hover:not(:disabled) {
   color: var(--text);
+}
+
+/* Keep every button variant visibly inert while disabled. This selector is
+   deliberately more specific than a single variant class so later variants
+   cannot restore active colors, hover effects, or press transforms. */
+.btn:disabled {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.55;
+  box-shadow: none;
+  transform: none;
 }
 
 .btn:focus-visible,

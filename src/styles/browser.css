@@ -9,6 +9,14 @@
   backdrop-filter: blur(var(--glass-blur-light));
   -webkit-backdrop-filter: blur(var(--glass-blur-light));
   min-height: 34px;
+  container-type: inline-size;
+  container-name: content-toolbar;
+}
+
+@container content-toolbar (max-width: 950px) {
+  .content-toolbar .shortcut-chip {
+    display: none;
+  }
 }
 
 .content-toolbar__left {
@@ -31,6 +39,32 @@
   padding: 4px 8px;
   font-size: 12px;
   flex-shrink: 0;
+}
+
+.filter-control {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  gap: 2px;
+}
+
+.filter-clear {
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.filter-clear--visible {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.filter-clear .lucide-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .path-input {
@@ -172,11 +206,15 @@
 
 .object-panel {
   flex: 1;
-  overflow-y: auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
 }
 
 .object-table {
   width: 100%;
+  min-width: 520px;
+  table-layout: fixed;
   border-collapse: collapse;
 }
 
@@ -199,7 +237,8 @@
 }
 
 .object-table td {
-  padding: 6px 14px;
+  height: 36px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   overflow: hidden;
@@ -223,14 +262,19 @@
 }
 
 .object-row--folder:hover {
-  background: var(--bg-active);
+  background: var(--bg-hover);
 }
 
 .object-name {
+  overflow: hidden;
+}
+
+.object-name__inner {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: min(500px, 50vw);
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
 }
 
@@ -380,6 +424,10 @@
 }
 
 .object-row {
+  height: 36px;
+}
+
+.object-table tbody .object-row > td {
   height: 36px;
 }
 
