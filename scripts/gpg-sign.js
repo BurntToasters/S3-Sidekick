@@ -33,6 +33,7 @@ const {
   assertNoMisnamedVersionDrafts,
   isExpectedRelease,
 } = require("./release-draft-metadata.cjs");
+const { assertReleaseTargetsHead } = require("./release-draft-target.cjs");
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const releaseDir = path.join(root, "release");
@@ -103,16 +104,14 @@ function assertReleaseTargetsCommit(
   env = process.env,
   log = console,
 ) {
-  if (release?.target_commitish === commit) return release;
-  if (isExplicitTruthy(env.FORCE_UPLOAD)) {
-    log.warn(
-      `WARNING: Draft release ${TAG} targets ${release?.target_commitish || "an unknown commit"}, not checked-out commit ${commit}. FORCE_UPLOAD=1 bypassing commit check.`,
-    );
-    return release;
-  }
-  throw new Error(
-    `Draft release ${TAG} targets ${release?.target_commitish || "an unknown commit"}, not checked-out commit ${commit}. Delete or retarget stale draft before uploading assets. Or set FORCE_UPLOAD=1 to bypass.`,
-  );
+  return assertReleaseTargetsHead(release, commit, {
+    action: "uploading assets",
+    env,
+    isPrerelease: IS_PRERELEASE,
+    log,
+    root,
+    tag: TAG,
+  });
 }
 
 function isArtifact(name) {
