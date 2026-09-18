@@ -26,6 +26,7 @@ const {
 const {
   assertStableReleaseOverridesAllowed,
   isExplicitTruthy,
+  isStableReleaseVersion,
 } = require("./release-policy.cjs");
 const {
   assertExpectedRelease,
@@ -69,9 +70,11 @@ const RELEASE_BASE_URL = (
   process.env.RELEASE_DOWNLOAD_BASE_URL || TAG_DOWNLOAD_BASE_URL
 ).replace(/\/+$/, "");
 const ALLOW_ASSET_REPLACE = isExplicitTruthy(process.env.ALLOW_ASSET_REPLACE);
-const ENFORCE_LINUX_X64_PACKAGE_SET = !/^(0|false|no|off)$/i.test(
-  String(process.env.ENFORCE_LINUX_X64_PACKAGE_SET || "").trim(),
-);
+const ENFORCE_LINUX_X64_PACKAGE_SET =
+  isStableReleaseVersion(VERSION) ||
+  !/^(0|false|no|off)$/i.test(
+    String(process.env.ENFORCE_LINUX_X64_PACKAGE_SET || "").trim(),
+  );
 const BETA_SYNC_LOCK_NAME = "s3-sidekick-beta-manifest-sync-lock";
 const BETA_SYNC_LOCK_RETRIES = 30;
 const ARTIFACT_RULES = [

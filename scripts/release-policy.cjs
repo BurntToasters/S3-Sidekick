@@ -9,7 +9,6 @@ const STABLE_FORBIDDEN_ENV = [
   "SKIP_RELEASE_MIRROR",
   "ALLOW_ASSET_REPLACE",
 ];
-const STABLE_FORBIDDEN_FALSY_ENV = ["ENFORCE_LINUX_X64_PACKAGE_SET"];
 const STABLE_CANONICAL_ENV = Object.freeze({
   GH_REPO_NAME: "S3-Sidekick",
   GH_REPO_OWNER: "BurntToasters",
@@ -44,11 +43,6 @@ function assertStableReleaseOverridesAllowed(
   const blocked = STABLE_FORBIDDEN_ENV.filter((name) =>
     isExplicitTruthy(environment[name]),
   );
-  for (const name of STABLE_FORBIDDEN_FALSY_ENV) {
-    if (environment[name] !== undefined && isExplicitFalsy(environment[name])) {
-      blocked.push(name);
-    }
-  }
   if (blocked.length > 0) {
     throw new Error(
       `Stable release ${version} refuses ${blocked.join(", ")}. Those overrides are beta recovery paths only.`,
@@ -68,7 +62,6 @@ function assertStableReleaseOverridesAllowed(
 
 module.exports = {
   STABLE_FORBIDDEN_ENV,
-  STABLE_FORBIDDEN_FALSY_ENV,
   STABLE_CANONICAL_ENV,
   assertStableReleaseOverridesAllowed,
   isExplicitFalsy,
