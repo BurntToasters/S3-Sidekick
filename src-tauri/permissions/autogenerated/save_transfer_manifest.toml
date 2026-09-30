@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-transfer-manifest"
+description = "Enables the save_transfer_manifest command without any pre-configured scope."
+commands.allow = ["save_transfer_manifest"]
+
+[[permission]]
+identifier = "deny-save-transfer-manifest"
+description = "Denies the save_transfer_manifest command without any pre-configured scope."
+commands.deny = ["save_transfer_manifest"]

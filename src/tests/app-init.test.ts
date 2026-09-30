@@ -81,6 +81,7 @@ vi.mock("../connection.ts", () => ({
 vi.mock("../bookmarks.ts", () => ({
   loadBookmarks: mockLoadBookmarks,
   setBookmarkChangeHandler: mockSetBookmarkChangeHandler,
+  getBookmarkLoadError: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock("../updater.ts", () => ({
@@ -94,6 +95,7 @@ vi.mock("../activity-log.ts", () => ({
 
 vi.mock("../security.ts", () => ({
   ensureSecurityReady: mockEnsureSecurityReady,
+  startAutoLockWatcher: vi.fn(),
 }));
 
 vi.mock("../dialogs.ts", () => ({
@@ -129,6 +131,7 @@ vi.mock("../app-connection.ts", () => ({
 
 vi.mock("../app-events.ts", () => ({
   wireEvents: mockWireEvents,
+  clearSessionAfterAutoLock: vi.fn(),
 }));
 
 vi.mock("../transfers.ts", () => ({

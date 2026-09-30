@@ -23,6 +23,7 @@ test("createInitialResults includes cargo quality and frontend build keys", () =
   const results = createInitialResults();
   assert.equal(results.cargoSafeUpdate.status, "pending");
   assert.equal(results.cargoUpdatePolicy.status, "pending");
+  assert.equal(results.tauriAlignment.status, "pending");
   assert.equal(results.cargoFmt.status, "pending");
   assert.equal(results.frontendBuild.status, "pending");
   assert.equal(results.nativeBuild.status, "pending");
@@ -61,7 +62,32 @@ test("package.json scripts define cargo safe update test and policy check", () =
     scripts["check:cargo-update-policy"],
     "node scripts/check-cargo-update-policy.mjs",
   );
+  assert.equal(
+    scripts["check:tauri-alignment"],
+    "node scripts/check-tauri-alignment.mjs",
+  );
   assert.match(scripts["test:all"], /node scripts\/test-all\.js/);
+});
+
+test("main fails when tauriAlignment fails", () => {
+  const calls = [];
+  const exitCode = main({
+    root: repoRoot,
+    clearProof: () => calls.push("clearProof"),
+    runner: (name, _cmd, args, _parser, results) => {
+      calls.push(`run:${name}`);
+      if (name === "tauriAlignment") {
+        assert.deepEqual(args, ["run", "check:tauri-alignment"]);
+        results[name].status = "failed";
+        return false;
+      }
+      results[name].status = "passed";
+      return true;
+    },
+  });
+
+  assert.ok(calls.includes("run:tauriAlignment"));
+  assert.equal(exitCode, 1);
 });
 
 test("main fails when cargoFmt fails", () => {

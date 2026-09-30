@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-generate-presigned-url"
+description = "Enables the generate_presigned_url command without any pre-configured scope."
+commands.allow = ["generate_presigned_url"]
+
+[[permission]]
+identifier = "deny-generate-presigned-url"
+description = "Denies the generate_presigned_url command without any pre-configured scope."
+commands.deny = ["generate_presigned_url"]

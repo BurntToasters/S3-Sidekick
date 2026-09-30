@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-object-exists"
+description = "Enables the object_exists command without any pre-configured scope."
+commands.allow = ["object_exists"]
+
+[[permission]]
+identifier = "deny-object-exists"
+description = "Denies the object_exists command without any pre-configured scope."
+commands.deny = ["object_exists"]

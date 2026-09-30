@@ -18,6 +18,14 @@ Stable:
 npm run r
 ```
 
+Both commands hard-reset and clean the checkout, so they refuse to run when
+the tree has local changes. On a dedicated release VM where leftovers are
+expected, discard them explicitly:
+
+```sh
+ALLOW_DISCARD_LOCAL_CHANGES=1 npm run r
+```
+
 Authenticate GitHub CLI on each VM:
 
 ```sh
@@ -91,6 +99,16 @@ Perform clean-machine checks before publishing:
 2. Launch app and verify basic connection UI.
 3. Update from immediately previous public version.
 4. Verify x64 Linux Flatpak installation and launch.
+5. Biometric unlock (CI only compiles these paths; the OS credential stores
+   are never exercised automatically). On macOS (Touch ID) and Windows
+   (Windows Hello), with encryption on:
+   - Enable biometric unlock; confirm the OS prompt appears.
+   - Lock, then unlock with biometrics; saved connections reappear.
+   - Cancel the OS prompt; the password prompt appears and still unlocks.
+   - Disable biometric unlock; the next unlock asks for the password only.
+   - Windows, when upgrading from a pre-0.11.1 enrollment: unlock once with
+     Windows Hello, then confirm the credential in Credential Manager is
+     stored for the local computer, not the roaming profile.
 
 Record results in release checklist or issue. Release scripts do not treat
 self-attested local JSON reports as publication authority.

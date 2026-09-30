@@ -1,5 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { showConfirm, showPrompt, showAlert } from "./dialogs.ts";
+import { state } from "./state.ts";
 
 export interface SecurityStatus {
   initialized: boolean;
@@ -36,9 +37,12 @@ async function initializeSecurity(
   return status;
 }
 
-async function unlockSecurity(password: string): Promise<SecurityStatus> {
+async function unlockSecurity(
+  password: string,
+  announce = true,
+): Promise<SecurityStatus> {
   const status = await invoke<SecurityStatus>("unlock_security", { password });
-  announceSecurityReady(status);
+  if (announce) announceSecurityReady(status);
   return status;
 }
 
@@ -127,6 +131,15 @@ export function isSecurityUpgradeRequiredError(err: unknown): boolean {
     text.includes("one-time password unlock is required") ||
     text.includes("upgrade encrypted storage")
   );
+}
+
+/// Unlock prompt validation: a wrong password re-prompts with the standard
+/// message; anything else (disk error, interrupted migration, bad KDF data)
+/// is shown as-is so it is not mistaken for a typo.
+function unlockFailureMessage(err: unknown): false | string {
+  const text = errorText(err);
+  if (/invalid password/i.test(text)) return false;
+  return `Unlock failed: ${text}`;
 }
 
 function extractErrorCode(err: unknown): string | null {
@@ -302,20 +315,30 @@ export async function ensureSecurityReady(): Promise<boolean> {
             ? `Biometric authentication was not completed (${biometricErrorCode}).\nEnter your password to unlock encrypted credentials:`
             : "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
     : "Enter your password to unlock encrypted credentials:";
-  const password = await showPrompt("Unlock", unlockMessage, {
+  // An unlock can still be running when the user presses Cancel. The backend
+  // may then finish unlocking; report that state rather than claiming the
+  // vault is locked while it is not.
+  let pendingUnlock: Promise<unknown> | null = null;
+  await showPrompt("Unlock", unlockMessage, {
     inputType: "password",
     inputPlaceholder: "Password",
+    validationMessage: "Incorrect password. Try again.",
     validate: async (value) => {
       if (!value) return false;
+      const attempt = unlockSecurity(value);
+      pendingUnlock = attempt;
       try {
-        status = await unlockSecurity(value);
+        status = await attempt;
         return status.unlocked;
-      } catch {
-        return false;
+      } catch (err) {
+        return unlockFailureMessage(err);
       }
     },
   });
-  return password !== null && status.unlocked;
+  if (pendingUnlock) {
+    await (pendingUnlock as Promise<unknown>).catch(() => undefined);
+  }
+  return status.unlocked;
 }
 
 export async function refreshSecuritySettingsUI(): Promise<void> {
@@ -410,7 +433,7 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
 
 export async function handleSecurityToggle(
   setStatus: StatusSetter,
-): Promise<void> {
+): Promise<boolean> {
   const toggleBtn = document.getElementById(
     "security-toggle",
   ) as HTMLButtonElement | null;
@@ -422,7 +445,7 @@ export async function handleSecurityToggle(
   } catch (err) {
     if (toggleBtn) toggleBtn.disabled = false;
     await showAlert("Error", `Failed to read security status: ${err}`);
-    return;
+    return false;
   }
 
   try {
@@ -434,7 +457,7 @@ export async function handleSecurityToggle(
       );
       if (enable) {
         const password = await promptForNewPassword();
-        if (!password) return;
+        if (!password) return false;
         await initializeSecurity(true, password);
         setStatus("Credential encryption enabled.");
       } else {
@@ -442,7 +465,7 @@ export async function handleSecurityToggle(
         setStatus("Security initialized without encryption.");
       }
       await refreshSecuritySettingsUI();
-      return;
+      return true;
     }
 
     if (status.encryption_enabled && !status.unlocked) {
@@ -451,30 +474,42 @@ export async function handleSecurityToggle(
           await unlockBiometric();
           setStatus("Credentials unlocked.");
           await refreshSecuritySettingsUI();
-          return;
+          return true;
         } catch {
           // biometric failed — fall through to password
         }
       }
 
+      let pendingUnlock: Promise<SecurityStatus> | null = null;
+      let unlockResult: SecurityStatus | null = null;
       const password = await showPrompt(
         "Unlock",
         "Enter your password to unlock encrypted credentials:",
         {
           inputType: "password",
           inputPlaceholder: "Password",
+          validationMessage: "Incorrect password. Try again.",
           validate: async (value) => {
             if (!value) return false;
             try {
-              await unlockSecurity(value);
-              return true;
-            } catch {
-              return false;
+              const attempt = unlockSecurity(value, false);
+              pendingUnlock = attempt;
+              unlockResult = await attempt;
+              return unlockResult.unlocked;
+            } catch (err) {
+              return unlockFailureMessage(err);
             }
           },
         },
       );
-      if (password === null) return;
+      if (password === null) {
+        const completed = pendingUnlock
+          ? await (pendingUnlock as Promise<SecurityStatus>).catch(() => null)
+          : null;
+        if (completed?.unlocked) await lockSecurity();
+        return false;
+      }
+      if (unlockResult) announceSecurityReady(unlockResult);
       setStatus("Credentials unlocked.");
     } else if (status.encryption_enabled) {
       const shouldDisable = await showConfirm(
@@ -482,17 +517,17 @@ export async function handleSecurityToggle(
         "Disable encryption?\n\nSaved credentials and bookmarks will be stored unencrypted.",
         { okLabel: "Disable", okDanger: true },
       );
-      if (!shouldDisable) return;
+      if (!shouldDisable) return false;
 
       const currentPassword = await showPrompt(
         "Current Password",
         "Enter your current password to decrypt stored credentials:",
         { inputType: "password", inputPlaceholder: "Current password" },
       );
-      if (currentPassword === null) return;
+      if (currentPassword === null) return false;
       if (!currentPassword) {
         await showAlert("Error", "Current password is required.");
-        return;
+        return false;
       }
 
       await setSecurityEncryption(false, currentPassword, null);
@@ -501,15 +536,17 @@ export async function handleSecurityToggle(
       );
     } else {
       const newPassword = await promptForNewPassword();
-      if (!newPassword) return;
+      if (!newPassword) return false;
 
       await setSecurityEncryption(true, null, newPassword);
       setStatus("Credential encryption enabled.");
     }
 
     await refreshSecuritySettingsUI();
+    return true;
   } catch (err) {
     await showAlert("Error", `Security update failed: ${err}`);
+    return false;
   } finally {
     if (toggleBtn) toggleBtn.disabled = false;
   }
@@ -544,6 +581,7 @@ export async function handleSecurityChangePassword(
 export async function handleLockNow(setStatus: StatusSetter): Promise<boolean> {
   try {
     await lockSecurity();
+    noteManualLock();
     setStatus("Encrypted storage locked.");
     await refreshSecuritySettingsUI();
     return true;
@@ -592,4 +630,68 @@ export async function handleBiometricToggle(
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+const AUTO_LOCK_POLL_MS = 15_000;
+const ACTIVITY_TOUCH_INTERVAL_MS = 30_000;
+let autoLockTimer: ReturnType<typeof setInterval> | null = null;
+/** Last lock state the watcher saw; null until the first poll. */
+let lastSeenUnlocked: boolean | null = null;
+
+/**
+ * Tell the watcher a lock was requested by the user, so it does not treat
+ * the change as an inactivity timeout.
+ */
+export function noteManualLock(): void {
+  lastSeenUnlocked = false;
+}
+
+/**
+ * Enforce the auto-lock timeout in the running app.
+ *
+ * The backend expires the vault key lazily, which on its own locks nothing
+ * the user can see: decrypted bookmarks stay in memory and the S3 session
+ * stays live. This polls the vault state and runs `onLocked` (disconnect,
+ * clear secrets, re-prompt) when an inactivity timeout has locked it. User
+ * input and running transfers count as activity, so the timeout measures
+ * idle time.
+ */
+export function startAutoLockWatcher(onLocked: () => Promise<void>): void {
+  if (autoLockTimer !== null) return;
+  let lastTouch = 0;
+  let handling = false;
+  const touch = (): void => {
+    const now = Date.now();
+    if (now - lastTouch < ACTIVITY_TOUCH_INTERVAL_MS) return;
+    lastTouch = now;
+    void invoke("touch_security_activity").catch(() => undefined);
+  };
+  document.addEventListener("pointerdown", touch, true);
+  document.addEventListener("keydown", touch, true);
+
+  autoLockTimer = setInterval(() => {
+    if (handling) return;
+    // A running transfer counts as activity. Locking would disconnect the
+    // session and interrupt it (uploads restart from zero); the timeout
+    // starts once the queue is idle.
+    const keepAlive: Promise<unknown> =
+      state.runningTransferCount > 0
+        ? invoke("touch_security_activity").catch(() => undefined)
+        : Promise.resolve();
+    void keepAlive
+      .then(() => getSecurityStatus())
+      .then(async (status) => {
+        const unlocked = !status.encryption_enabled || status.unlocked;
+        const wasUnlocked = lastSeenUnlocked;
+        lastSeenUnlocked = unlocked;
+        if (unlocked || wasUnlocked !== true) return;
+        handling = true;
+        try {
+          await onLocked();
+        } finally {
+          handling = false;
+        }
+      })
+      .catch(() => undefined);
+  }, AUTO_LOCK_POLL_MS);
 }

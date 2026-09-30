@@ -163,7 +163,22 @@ function resetEditorState(): void {
   initialSingleVisibility = null;
 }
 
+function isShowingKeys(keys: string[]): boolean {
+  if (keys.length === 1) return currentKey !== "" && currentKey === keys[0];
+  const files = keys.filter((k) => !k.startsWith("prefix:"));
+  return (
+    currentKey === "" &&
+    files.length === batchKeys.length &&
+    files.every((key, i) => key === batchKeys[i])
+  );
+}
+
 export async function openInfoPanel(keys: string[]): Promise<void> {
+  // Switching to another object would reset the editor; ask first instead of
+  // silently dropping unsaved metadata or visibility edits.
+  if (!isShowingKeys(keys) && !(await confirmDiscardInfoProperties())) {
+    return;
+  }
   ensureInspectorOpenForPane("properties");
   if (shouldUseInspectorMount()) {
     focusInspectorPropertiesPane();
@@ -668,11 +683,19 @@ export function hasUnsavedInfoChanges(): boolean {
 
 export async function confirmDiscardInfoProperties(): Promise<boolean> {
   if (!hasUnsavedInfoChanges()) return true;
-  return showConfirm("Discard changes?", "You have unsaved property changes.", {
-    okLabel: "Discard",
-    okDanger: true,
-    cancelLabel: "Keep editing",
-  });
+  const discard = await showConfirm(
+    "Discard changes?",
+    "You have unsaved property changes.",
+    {
+      okLabel: "Discard",
+      okDanger: true,
+      cancelLabel: "Keep editing",
+    },
+  );
+  // Once discarded the edits are gone; leaving the dirty flags set would
+  // re-ask on every later navigation or close for changes no longer shown.
+  if (discard) resetEditorState();
+  return discard;
 }
 
 export async function requestCloseInfoPanel(): Promise<boolean> {

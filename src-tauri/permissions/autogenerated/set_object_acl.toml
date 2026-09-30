@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-object-acl"
+description = "Enables the set_object_acl command without any pre-configured scope."
+commands.allow = ["set_object_acl"]
+
+[[permission]]
+identifier = "deny-set-object-acl"
+description = "Denies the set_object_acl command without any pre-configured scope."
+commands.deny = ["set_object_acl"]

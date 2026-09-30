@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-object"
+description = "Enables the preview_object command without any pre-configured scope."
+commands.allow = ["preview_object"]
+
+[[permission]]
+identifier = "deny-preview-object"
+description = "Denies the preview_object command without any pre-configured scope."
+commands.deny = ["preview_object"]

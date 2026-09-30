@@ -751,7 +751,7 @@ describe("security flows", () => {
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "get_security_status") return status;
       if (cmd === "get_platform_info") return "linux";
-      if (cmd === "unlock_security") throw new Error("bad password");
+      if (cmd === "unlock_security") throw new Error("Invalid password");
       return status;
     });
     await expect(security.ensureSecurityReady()).resolves.toBe(false);

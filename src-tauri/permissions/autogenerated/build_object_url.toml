@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-build-object-url"
+description = "Enables the build_object_url command without any pre-configured scope."
+commands.allow = ["build_object_url"]
+
+[[permission]]
+identifier = "deny-build-object-url"
+description = "Denies the build_object_url command without any pre-configured scope."
+commands.deny = ["build_object_url"]

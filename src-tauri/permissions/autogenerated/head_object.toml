@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-head-object"
+description = "Enables the head_object command without any pre-configured scope."
+commands.allow = ["head_object"]
+
+[[permission]]
+identifier = "deny-head-object"
+description = "Denies the head_object command without any pre-configured scope."
+commands.deny = ["head_object"]

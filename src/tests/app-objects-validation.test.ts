@@ -20,6 +20,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("../dialogs.ts", () => ({
   showConfirm: (...args: unknown[]) => mockShowConfirm(...args),
+  showConfirmWithCheckbox: (...args: unknown[]) =>
+    mockShowConfirm(...args).then((confirmed) => ({
+      confirmed,
+      checked: false,
+    })),
   showPrompt: (...args: unknown[]) => mockShowPrompt(...args),
   showAlert: vi.fn(async () => undefined),
   isDialogActive: vi.fn(() => false),

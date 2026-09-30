@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { state, dom } from "./state.ts";
@@ -9,10 +9,14 @@ import {
   isSupportPromptDismissed,
 } from "./settings.ts";
 import { loadConnection } from "./connection.ts";
-import { loadBookmarks, setBookmarkChangeHandler } from "./bookmarks.ts";
+import {
+  getBookmarkLoadError,
+  loadBookmarks,
+  setBookmarkChangeHandler,
+} from "./bookmarks.ts";
 import { initUpdater, autoCheckUpdates } from "./updater.ts";
 import { logActivity } from "./activity-log.ts";
-import { ensureSecurityReady } from "./security.ts";
+import { ensureSecurityReady, startAutoLockWatcher } from "./security.ts";
 import { showAlert, isDialogActive } from "./dialogs.ts";
 import { isPaletteOpen } from "./command-palette.ts";
 import {
@@ -31,7 +35,7 @@ import {
   refreshBookmarkBar,
   setConnectionUI,
 } from "./app-connection.ts";
-import { wireEvents } from "./app-events.ts";
+import { clearSessionAfterAutoLock, wireEvents } from "./app-events.ts";
 import {
   prepareTransferRecovery,
   recoverPendingTransfers,
@@ -157,11 +161,31 @@ function scheduleAutoCheckUpdates(): void {
   }
 }
 
+function startAutoLock(): void {
+  startAutoLockWatcher(async () => {
+    await clearSessionAfterAutoLock();
+    setStatus("Encrypted storage locked after inactivity.");
+    logActivity("Encrypted storage locked after inactivity.", "info");
+    if (await ensureSecurityReady()) {
+      await Promise.all([
+        loadBookmarksIntoBar(),
+        loadSavedConnectionIntoInputs(),
+      ]);
+    }
+  });
+}
+
 async function loadBookmarksIntoBar(): Promise<void> {
   try {
     await loadBookmarks();
     setBookmarkChangeHandler(refreshBookmarkBar);
     refreshBookmarkBar();
+    const loadError = getBookmarkLoadError();
+    if (loadError) {
+      const message = `Saved bookmarks could not be loaded (${loadError}) Bookmark changes are disabled so the stored copy is not overwritten.`;
+      logActivity(message, "warning");
+      setStatus(message, 10000);
+    }
   } catch (err) {
     console.warn("Failed to load bookmarks:", err);
     logActivity("Failed to load bookmarks.", "warning");
@@ -289,6 +313,7 @@ export async function init(): Promise<void> {
 
     await initUpdater();
     scheduleAutoCheckUpdates();
+    startAutoLock();
     return;
   }
 
@@ -320,4 +345,5 @@ export async function init(): Promise<void> {
 
   await initUpdater();
   scheduleAutoCheckUpdates();
+  startAutoLock();
 }

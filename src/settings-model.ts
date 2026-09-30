@@ -24,6 +24,7 @@ export interface UserSettings {
   transferCheckpointTtlHours: number;
   bandwidthLimitMbps: number;
   openTransferDrawerOnStart: boolean;
+  confirmUnguardedWrites: boolean;
   windowWidth: number;
   windowHeight: number;
 }
@@ -49,6 +50,7 @@ export const SETTING_DEFAULTS: UserSettings = {
   transferCheckpointTtlHours: 168,
   bandwidthLimitMbps: 0,
   openTransferDrawerOnStart: true,
+  confirmUnguardedWrites: true,
   windowWidth: 1100,
   windowHeight: 720,
 };
@@ -204,6 +206,11 @@ export function normalizeUserSettings(
       ? raw.openTransferDrawerOnStart
       : SETTING_DEFAULTS.openTransferDrawerOnStart;
 
+  const confirmUnguardedWrites =
+    typeof raw.confirmUnguardedWrites === "boolean"
+      ? raw.confirmUnguardedWrites
+      : SETTING_DEFAULTS.confirmUnguardedWrites;
+
   const rawWidth = raw.windowWidth;
   const windowWidth =
     typeof rawWidth === "number" &&
@@ -243,6 +250,7 @@ export function normalizeUserSettings(
     transferCheckpointTtlHours,
     bandwidthLimitMbps,
     openTransferDrawerOnStart,
+    confirmUnguardedWrites,
     windowWidth,
     windowHeight,
   };

@@ -1,7 +1,7 @@
 import { state } from "./state.ts";
 import { selectionCount } from "./app-selection.ts";
 import { isEditableElement } from "./utils.ts";
-import { hideContextMenu } from "./context-menu.ts";
+import { hideContextMenu, isContextMenuOpen } from "./context-menu.ts";
 import { isDialogActive } from "./dialogs.ts";
 import { closePreview } from "./preview.ts";
 import { requestCloseInfoPanel } from "./info-panel.ts";
@@ -147,6 +147,11 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
         return;
       }
     }
+
+    // The context menu owns the keyboard while open (its own handler covers
+    // arrows, Tab and Escape). Global shortcuts would otherwise act on a
+    // changed selection while stale menu actions stay clickable.
+    if (isContextMenuOpen()) return;
 
     const inInput = isEditableElement(document.activeElement);
     const modalOpen =

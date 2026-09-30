@@ -6,7 +6,14 @@ use crate::security::{
     require_unlocked_key, save_security_config, security_status, set_unlocked_key, SecurityStatus,
     KEY_LEN, PBKDF2_ITERATIONS,
 };
-use crate::{atomic_write, fsync_parent, lock_storage_ops, security_journal_path};
+use crate::{
+    atomic_write, fsync_parent, lock_storage_ops, security_journal_path, try_lock_storage_ops,
+};
+
+/// Prefix of the error a platform backend returns when the credential store
+/// has no biometric key. Only this means "removed"; transient prompt errors
+/// (Windows Hello can also report 0x80070490) must never unenroll the user.
+const BIOMETRIC_KEY_MISSING: &str = "Biometric credential is missing";
 
 // Security limitation: biometric prompts gate the UI before the AES key is read
 // from the OS credential store, but the key is not cryptographically bound to
@@ -59,7 +66,7 @@ mod test_backend {
         stored
             .as_ref()
             .map(|key| **key)
-            .ok_or_else(|| "No test biometric credential found".to_string())
+            .ok_or_else(|| super::BIOMETRIC_KEY_MISSING.to_string())
     }
 
     pub fn remove_key() {
@@ -273,14 +280,31 @@ fn disable_biometric_durably<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Re
     crate::security::recover_interrupted_migration(app)
 }
 
-#[tauri::command]
-pub(crate) fn biometric_available() -> bool {
-    is_available()
+/// Enrollments made before 0.11.1 used a roaming (ENTERPRISE) credential on
+/// Windows. Rewrite it with the local-only policy after a verified unlock.
+fn refresh_key_persistence(key: &[u8; KEY_LEN]) -> Result<(), String> {
+    #[cfg(all(target_os = "windows", not(test)))]
+    {
+        platform::rewrite_key(key)
+            .map_err(|err| format!("Failed to make the biometric credential local-only: {err}"))
+    }
+    #[cfg(not(all(target_os = "windows", not(test))))]
+    {
+        let _ = key;
+        Ok(())
+    }
 }
 
+// The biometric commands take the blocking storage lock and may wait on an OS
+// prompt, so they run on the blocking pool rather than a Tokio worker thread.
 #[tauri::command]
 pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
-    let _guard = lock_storage_ops()?;
+    crate::security::run_blocking(move || enable_biometric_inner(&app)).await
+}
+
+fn enable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, String> {
+    let app = app.clone();
+    let _guard = try_lock_storage_ops()?;
     ensure_migration_recovered()?;
     let mut config = load_security_config(&app)?;
     if !config.encryption_enabled {
@@ -327,7 +351,12 @@ pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecuritySt
 
 #[tauri::command]
 pub(crate) async fn disable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
-    let _guard = lock_storage_ops()?;
+    crate::security::run_blocking(move || disable_biometric_inner(&app)).await
+}
+
+fn disable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, String> {
+    let app = app.clone();
+    let _guard = try_lock_storage_ops()?;
     ensure_migration_recovered()?;
     // Persist intent first. Recovery commits `biometric_enrolled = false`,
     // removes the key, verifies absence, and only then clears the journal.
@@ -341,8 +370,10 @@ pub(crate) async fn unlock_biometric(
     app: tauri::AppHandle,
     window: tauri::Window,
 ) -> Result<SecurityStatus, String> {
-    let _guard = lock_storage_ops()?;
-    let config = load_security_config(&app)?;
+    crate::security::run_blocking(move || unlock_biometric_inner(&app, &window)).await
+}
+
+fn check_biometric_unlock_config(config: &crate::security::SecurityConfig) -> Result<(), String> {
     if !config.encryption_enabled || !config.biometric_enrolled {
         return Err("Biometric unlock is not configured".to_string());
     }
@@ -352,14 +383,36 @@ pub(crate) async fn unlock_biometric(
                 .to_string(),
         );
     }
+    Ok(())
+}
 
-    let key = Zeroizing::new(match retrieve_key(Some(&window)) {
+fn unlock_biometric_inner(
+    app: &tauri::AppHandle,
+    window: &tauri::Window,
+) -> Result<SecurityStatus, String> {
+    let app = app.clone();
+    // Show the OS prompt before taking the global storage lock: holding it
+    // through Touch ID / Windows Hello would stall every other storage command
+    // for as long as the prompt stays open.
+    {
+        let _meta = crate::lock_storage_meta()?;
+        check_biometric_unlock_config(&load_security_config(&app)?)?;
+    }
+    let retrieved = retrieve_key(Some(window));
+
+    // Wait for the lock like password unlock does (this runs on the blocking
+    // pool). The non-blocking form is for settings changes; for an unlock it
+    // would refuse with a settings error whenever a transfer is running.
+    let _guard = lock_storage_ops()?;
+    // Re-read under the lock: enrollment or the vault may have changed while
+    // the prompt was open.
+    let config = load_security_config(&app)?;
+    check_biometric_unlock_config(&config)?;
+
+    let key = Zeroizing::new(match retrieved {
         Ok(k) => k,
         Err(err) => {
-            let is_not_found = err.contains("0x80070490")
-                || err.contains("Element not found")
-                || err.contains("OSStatus -34018");
-            if is_not_found {
+            if err.starts_with(BIOMETRIC_KEY_MISSING) {
                 disable_biometric_durably(&app)?;
                 return Err(
                     "Biometric credential was removed from the system. Please unlock with your password and re-enable biometric unlock."
@@ -390,6 +443,7 @@ pub(crate) async fn unlock_biometric(
         );
     }
 
+    refresh_key_persistence(&key)?;
     let timeout = config.lock_timeout_minutes as u64 * 60;
     set_unlocked_key(Some(*key), timeout)?;
     if let Err(err) = crate::security::recover_interrupted_migration(&app) {
@@ -715,6 +769,11 @@ mod platform {
                 let msg = match status {
                     -128 => "Authentication was canceled".to_string(),
                     -25293 => "Authentication failed".to_string(),
+                    // errSecItemNotFound, and errSecMissingEntitlement (-34018)
+                    // which an unsigned build hits when the item is unreadable.
+                    -25300 | -34018 => {
+                        format!("{} (OSStatus {})", super::BIOMETRIC_KEY_MISSING, status)
+                    }
                     _ => format!("Biometric authentication failed (OSStatus {})", status),
                 };
                 return Err(msg);
@@ -791,7 +850,7 @@ mod platform {
     use windows::Win32::Foundation::{FILETIME, HWND};
     use windows::Win32::Security::Credentials::{
         CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST,
-        CRED_PERSIST_ENTERPRISE, CRED_TYPE_GENERIC,
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
     };
     use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
 
@@ -888,7 +947,16 @@ mod platform {
 
     pub fn store_key(key: &[u8; KEY_LEN]) -> Result<(), String> {
         remove_key();
-        write_credential(key, CRED_PERSIST_ENTERPRISE)
+        // LOCAL_MACHINE: the vault key must never roam with a roaming profile
+        // to other domain machines, where any process running as this user
+        // could read it without Windows Hello.
+        write_credential(key, CRED_PERSIST_LOCAL_MACHINE)
+    }
+
+    /// Overwrite the enrolled credential in place (no delete first, so a
+    /// failure cannot unenroll) with the current persistence policy.
+    pub fn rewrite_key(key: &[u8; KEY_LEN]) -> Result<(), String> {
+        write_credential(key, CRED_PERSIST_LOCAL_MACHINE)
     }
 
     fn write_credential(key: &[u8; KEY_LEN], persist: CRED_PERSIST) -> Result<(), String> {
@@ -948,12 +1016,15 @@ mod platform {
         }
 
         if let Some(err) = read_err {
+            if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT {
+                return Err(format!("{} ({})", super::BIOMETRIC_KEY_MISSING, err));
+            }
             return Err(format!("Failed to read credential: {}", err));
         }
 
         unsafe {
             if pcred.is_null() {
-                return Err("No biometric credential found".to_string());
+                return Err(super::BIOMETRIC_KEY_MISSING.to_string());
             }
 
             let cred = &*pcred;

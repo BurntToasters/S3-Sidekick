@@ -130,6 +130,36 @@ pub(crate) fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
+/// Whether a directory is a macOS bundle that `open` would launch or install
+/// rather than display.
+fn is_macos_bundle(path: &std::path::Path) -> bool {
+    const BUNDLE_EXTENSIONS: &[&str] = &[
+        "app",
+        "appex",
+        "bundle",
+        "framework",
+        "plugin",
+        "kext",
+        "prefpane",
+        "xpc",
+        "qlgenerator",
+        "mdimporter",
+        "saver",
+        "workflow",
+        "action",
+        "pkg",
+        "mpkg",
+    ];
+    let extension_is_bundle = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| BUNDLE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false);
+    // Any directory with a bundle Info.plist is treated as one, whatever its
+    // name, since Launch Services decides by the bundle structure.
+    extension_is_bundle || path.join("Contents").join("Info.plist").is_file()
+}
+
 /// Reveal a folder in the system file manager.
 ///
 /// Restricted to directories on purpose. Handing an arbitrary existing file to
@@ -175,6 +205,15 @@ pub(crate) fn open_local_path(path: String) -> Result<(), String> {
             .status()
             .map_err(|e| format!("Failed to open local path: {}", e))?;
         return Ok(());
+    }
+
+    // On macOS a bundle (e.g. `Foo.app`) is a directory, and `open` launches
+    // it instead of showing it. Refuse bundles so this cannot run code.
+    if cfg!(target_os = "macos") && is_macos_bundle(&parsed) {
+        return Err(format!(
+            "Refusing to open an application or bundle: {}",
+            parsed.display()
+        ));
     }
 
     let status = if cfg!(target_os = "macos") {

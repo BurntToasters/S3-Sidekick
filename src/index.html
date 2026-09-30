@@ -1260,6 +1260,25 @@
               </div>
               <div class="setting-item">
                 <span class="setting-label">
+                  <label class="toggle-row">
+                    <input
+                      id="setting-confirm-unguarded-writes"
+                      type="checkbox"
+                    />
+                    <span>Warn before unconditional writes</span>
+                  </label>
+                  <button
+                    type="button"
+                    class="setting-help"
+                    aria-label="Help"
+                    data-tooltip="Some providers cannot enforce create-only writes, so another client could create the same key before a transfer finishes. When on, S3 Sidekick asks before writing to those providers."
+                  >
+                    ?
+                  </button>
+                </span>
+              </div>
+              <div class="setting-item">
+                <span class="setting-label">
                   <label for="setting-bandwidth-limit-mbps"
                     >Bandwidth cap</label
                   >
@@ -1808,6 +1827,14 @@
           aria-live="assertive"
           hidden
         ></p>
+        <label
+          id="dialog-checkbox-wrapper"
+          class="toggle-row dialog-checkbox"
+          hidden
+        >
+          <input id="dialog-checkbox" type="checkbox" />
+          <span id="dialog-checkbox-label"></span>
+        </label>
         <div class="dialog-box__actions">
           <button id="dialog-cancel" class="btn btn--ghost">Cancel</button>
           <button id="dialog-ok" class="btn btn--primary">OK</button>

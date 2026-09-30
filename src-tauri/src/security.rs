@@ -13,6 +13,7 @@ use crate::{
     atomic_write, bookmarks_backup_path, bookmarks_path, collect_transfer_checkpoint_scratch_paths,
     connection_path, fsync_parent, lock_storage_meta, lock_storage_ops, lock_vault_file,
     purge_transfer_checkpoints, security_journal_path, security_path, transfer_manifest_path,
+    try_lock_storage_ops,
 };
 
 #[cfg(not(test))]
@@ -199,7 +200,25 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.ct_eq(right).into()
 }
 
-fn key_state() -> &'static Mutex<KeyState> {
+/// The vault key, locked through the global lock order (innermost rank).
+struct KeyStateLock(&'static Mutex<KeyState>);
+
+impl KeyStateLock {
+    fn lock(
+        &self,
+    ) -> Result<
+        crate::lock_order::OrderedGuard<'static, KeyState>,
+        std::sync::PoisonError<std::sync::MutexGuard<'static, KeyState>>,
+    > {
+        crate::lock_order::OrderedGuard::lock(self.0, crate::lock_order::LockRank::KeyState)
+    }
+}
+
+fn key_state() -> KeyStateLock {
+    KeyStateLock(key_state_mutex())
+}
+
+fn key_state_mutex() -> &'static Mutex<KeyState> {
     KEY_STATE.get_or_init(|| {
         Mutex::new(KeyState {
             key: None,
@@ -1353,12 +1372,25 @@ pub(crate) async fn initialize_security(
 fn initialize_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
     enable_encryption: bool,
-    password: Option<String>,
+    mut password: Option<String>,
 ) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     ensure_migration_recovered()?;
     let current = load_security_config(app)?;
     if current.initialized {
+        // Initialization never changes an existing vault. Reporting success
+        // for a different request (another password, or the other encryption
+        // mode) would tell the user their new password was set when it was
+        // silently ignored.
+        let differs = enable_encryption != current.encryption_enabled
+            || (enable_encryption && password.as_deref().is_some_and(|p| !p.is_empty()));
+        password.zeroize();
+        if differs {
+            return Err(
+                "Secure storage is already set up. Change encryption or the password in Settings > Security."
+                    .to_string(),
+            );
+        }
         return Ok(security_status(&current));
     }
 
@@ -1450,9 +1482,13 @@ fn unlock_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
             return Err(err);
         }
     };
-    let expected_verifier = B64
-        .decode(&config.verifier)
-        .map_err(|e| format!("Invalid security verifier: {}", e))?;
+    let expected_verifier = match B64.decode(&config.verifier) {
+        Ok(verifier) => verifier,
+        Err(e) => {
+            password.zeroize();
+            return Err(format!("Invalid security verifier: {}", e));
+        }
+    };
     if expected_verifier.len() != KEY_LEN {
         password.zeroize();
         return Err("Invalid security verifier length".to_string());
@@ -1491,11 +1527,15 @@ fn unlock_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
         let new_key = derive_key(&password, &new_salt, PBKDF2_ITERATIONS);
         let mut new_verifier = key_verifier(&new_key);
 
+        // Every failure below reports an error to the unlock prompt, so it
+        // must also relock: the UI would otherwise show "locked" while the
+        // backend holds the old key.
         let legacy_plaintext_allowed = match legacy_plaintext_adoption_completed(&config, &key) {
             Ok(completed) => !completed,
             Err(err) => {
                 new_verifier.zeroize();
                 password.zeroize();
+                let _ = set_unlocked_key(None, 0);
                 return Err(err);
             }
         };
@@ -1504,6 +1544,7 @@ fn unlock_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
             Err(err) => {
                 new_verifier.zeroize();
                 password.zeroize();
+                let _ = set_unlocked_key(None, 0);
                 return Err(err);
             }
         };
@@ -1520,10 +1561,15 @@ fn unlock_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
 
         if let Err(err) = run_biometric_invalidating_migration(app, &plans, &previous, &config) {
             password.zeroize();
+            let _ = set_unlocked_key(None, 0);
             return Err(err);
         }
 
-        set_unlocked_key(Some(*new_key), timeout_secs)?;
+        if let Err(err) = set_unlocked_key(Some(*new_key), timeout_secs) {
+            password.zeroize();
+            let _ = set_unlocked_key(None, 0);
+            return Err(err);
+        }
     }
     password.zeroize();
 
@@ -1549,7 +1595,14 @@ fn set_security_encryption_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     mut current_password: Option<String>,
     mut new_password: Option<String>,
 ) -> Result<SecurityStatus, String> {
-    let _storage_guard = lock_storage_ops()?;
+    let _storage_guard = match try_lock_storage_ops() {
+        Ok(guard) => guard,
+        Err(err) => {
+            current_password.zeroize();
+            new_password.zeroize();
+            return Err(err);
+        }
+    };
     ensure_migration_recovered()?;
     let mut config = load_security_config(app)?;
     if !config.initialized {
@@ -1643,7 +1696,14 @@ fn change_security_password_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     mut current_password: String,
     mut new_password: String,
 ) -> Result<SecurityStatus, String> {
-    let _storage_guard = lock_storage_ops()?;
+    let _storage_guard = match try_lock_storage_ops() {
+        Ok(guard) => guard,
+        Err(err) => {
+            current_password.zeroize();
+            new_password.zeroize();
+            return Err(err);
+        }
+    };
     ensure_migration_recovered()?;
     let mut config = load_security_config(app)?;
     if !config.initialized || !config.encryption_enabled {
@@ -1751,10 +1811,30 @@ pub(crate) async fn set_lock_timeout(
             .lock()
             .map_err(|_| "Internal key state error".to_string())?;
         guard.lock_timeout_secs = minutes as u64 * 60;
+        // Measure the new timeout from now. Against the old activity stamp,
+        // shortening or enabling it could lock the vault the moment it is set.
+        if guard.key.is_some() {
+            guard.last_activity = Some(Instant::now());
+        }
         drop(guard);
         Ok(security_status(&config))
     })
     .await
+}
+
+/// Record user activity in the app so the auto-lock timeout measures idle time,
+/// not time since the last vault read. Never unlocks: an expired or locked
+/// key stays locked.
+#[tauri::command(async)]
+pub(crate) fn touch_security_activity() {
+    if !is_unlocked() {
+        return;
+    }
+    if let Ok(mut guard) = key_state().lock() {
+        if guard.key.is_some() {
+            guard.last_activity = Some(Instant::now());
+        }
+    }
 }
 
 pub(crate) fn remove_file_if_present(path: &std::path::Path) -> Result<(), String> {
@@ -2001,14 +2081,10 @@ fn factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
 /// on disk with no key: the next read handed that ciphertext to the frontend as
 /// though it were plaintext, and the next save overwrote it with defaults. The
 /// reset now either refuses, or removes the unreadable files deliberately.
-#[tauri::command]
-pub(crate) async fn reset_security(
-    app: tauri::AppHandle,
-    destroy_encrypted_data: Option<bool>,
-) -> Result<SecurityStatus, String> {
-    run_blocking(move || reset_security_inner(&app, destroy_encrypted_data.unwrap_or(false))).await
-}
-
+// Not exposed over IPC: it can wipe encrypted data without a password and the
+// UI never used it. Factory reset is the supported path; the tests keep
+// exercising this core.
+#[cfg(test)]
 fn reset_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
     destroy_encrypted_data: bool,

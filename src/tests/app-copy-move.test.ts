@@ -15,6 +15,11 @@ vi.mock("../browser.ts", () => ({
 
 vi.mock("../dialogs.ts", () => ({
   showConfirm: (...args: unknown[]) => mockShowConfirm(...args),
+  showConfirmWithCheckbox: (...args: unknown[]) =>
+    mockShowConfirm(...args).then((confirmed) => ({
+      confirmed,
+      checked: false,
+    })),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -656,7 +661,8 @@ describe("copy/move conflict routing", () => {
     const raw = localStorage.getItem(
       "s3-sidekick.recent-copy-move-destinations.v1",
     );
-    expect(raw).toContain("archive/file.txt");
+    // Recents store the destination folder, not the full key.
+    expect(raw).toContain('"path":"archive/"');
   });
 });
 
@@ -749,7 +755,7 @@ describe("copy/move browser and recents", () => {
     )?.click();
     expect(
       (document.getElementById("copy-move-path") as HTMLInputElement).value,
-    ).toBe("archive/");
+    ).toBe("archive/file.txt");
   });
 
   it("browses subfolders and picks a destination on click", async () => {

@@ -1,13 +1,13 @@
 {
   "name": "s3-sidekick",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "private": true,
   "packageManager": "npm@12.0.2",
   "description": "A Cross-Platform Desktop client for S3-compatible Object Storage.",
   "type": "module",
   "engines": {
-    "node": "^22.22.2 || ^24.15.0 || >=26.0.0",
-    "npm": ">=12.0.1"
+    "node": "^24.18.0 || >=26.0.0",
+    "npm": ">=12.0.2"
   },
   "releaseToolchain": {
     "node": ">=24.18.0",
@@ -19,6 +19,12 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:ui": "playwright test",
+    "test:e2e:sync-version": "node tests/scripts/sync-version.e2e.mjs",
+    "test:e2e:minio": "node scripts/e2e-minio.mjs",
+    "test:e2e:tauri-alignment": "node tests/scripts/check-tauri-alignment.e2e.mjs",
+    "test:e2e:clean-tree": "node tests/scripts/require-clean-tree.e2e.mjs",
+    "test:e2e:scripts": "npm run test:e2e:sync-version && npm run test:e2e:tauri-alignment && npm run test:e2e:clean-tree",
+    "test:e2e:fullstack": "node scripts/e2e-fullstack.mjs",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:cov:watch": "vitest --coverage",
@@ -26,6 +32,7 @@
     "test:release-assets": "node --test \"scripts/*.test.js\" \"scripts/*.test.cjs\"",
     "test:cargo-safe-update": "node --test scripts/cargo-safe-update.test.mjs scripts/check-cargo-update-policy.test.mjs",
     "check:cargo-update-policy": "node scripts/check-cargo-update-policy.mjs",
+    "check:tauri-alignment": "node scripts/check-tauri-alignment.mjs",
     "audit:cargo": "node scripts/verify-cargo-audit.js && cargo audit --file src-tauri/Cargo.lock",
     "setup:cargo-audit": "cargo install cargo-audit --version 0.22.2 --locked",
     "release:supply-chain": "npm run setup:cargo-audit && npm audit --audit-level=high --ignore-scripts && npm audit signatures && npm run audit:cargo && npm run licenses",
@@ -51,9 +58,9 @@
     "dist:clean-all": "node scripts/dist-tools.js clean-all",
     "wc": "npm run win-compiler:x64",
     "vi": "node scripts/vi.js",
-    "b": "git fetch origin && git reset --hard && git clean -fd && git switch -C beta origin/beta && git reset --hard origin/beta && git clean -fd && npm run vi",
-    "r": "git fetch origin && git reset --hard && git clean -fd && git switch -C main origin/main && git reset --hard origin/main && git clean -fd && npm run vi && npm run gitprune:force",
-    "u": "npm run sync-version && node scripts/npm-safe-update.mjs && node scripts/cargo-safe-update.mjs --manifest-path src-tauri/Cargo.toml",
+    "b": "node scripts/require-clean-tree.mjs && git fetch origin && git reset --hard && git clean -fd && git switch -C beta origin/beta && git reset --hard origin/beta && git clean -fd && npm run vi",
+    "r": "node scripts/require-clean-tree.mjs && git fetch origin && git reset --hard && git clean -fd && git switch -C main origin/main && git reset --hard origin/main && git clean -fd && npm run vi && npm run gitprune:force",
+    "u": "npm run sync-version && node scripts/npm-safe-update.mjs && node scripts/cargo-safe-update.mjs --manifest-path src-tauri/Cargo.toml && npm run check:tauri-alignment",
     "win-compiler:x64": "powershell -NoProfile -ExecutionPolicy Bypass -NoExit -Command \"& 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Launch-VsDevShell.ps1' -SkipAutomaticLocation",
     "win-compiler:arm64": "powershell -NoProfile -ExecutionPolicy Bypass -NoExit -Command \"& 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Launch-VsDevShell.ps1' -SkipAutomaticLocation -Arch arm64 -HostArch amd64\"",
     "setup:win:artifact-signing": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/setup-windows-artifact-signing.ps1",
@@ -123,27 +130,28 @@
     "release:linux:x64:resume": "npm run prerelease:prepare && npm run release:linux:x64:continue"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-dialog": "~2.7.2",
-    "@tauri-apps/plugin-notification": "~2.3.3",
-    "@tauri-apps/plugin-process": "~2.3.1",
-    "@tauri-apps/plugin-updater": "~2.10.1"
+    "@tauri-apps/api": "~2.12.0",
+    "@tauri-apps/plugin-dialog": "~2.8.0",
+    "@tauri-apps/plugin-notification": "~2.5.0",
+    "@tauri-apps/plugin-process": "~2.4.0",
+    "@tauri-apps/plugin-updater": "~2.13.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
-    "@tauri-apps/cli": "^2.0.0",
-    "@types/node": "^25.2.1",
+    "@tauri-apps/cli": "~2.12.0",
+    "@types/node": "^24.19.0",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
-    "@vitest/coverage-v8": "^4.1.11",
-    "dotenv-cli": "^8.0.0",
+    "@vitest/coverage-v8": "^5.0.2",
+    "dotenv-cli": "^11.0.0",
     "eslint": "^10.0.3",
-    "jsdom": "^29.0.0",
+    "jsdom": "^30.1.1",
     "license-checker": "^25.0.1",
     "lucide-static": "^1.17.0",
     "prettier": "^3.8.1",
-    "typescript": "^5.6.0",
-    "vite": "^7.3.1",
-    "vitest": "^4.1.11"
+    "selenium-webdriver": "^4.49.0",
+    "typescript": "~6.0.0",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
   }
 }

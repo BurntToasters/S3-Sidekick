@@ -4,6 +4,15 @@ interface ConfirmOptions {
   okDanger?: boolean;
 }
 
+interface CheckboxConfirmOptions extends ConfirmOptions {
+  checkboxLabel: string;
+}
+
+export interface CheckboxConfirmResult {
+  confirmed: boolean;
+  checked: boolean;
+}
+
 interface PromptOptions {
   okLabel?: string;
   cancelLabel?: string;
@@ -11,7 +20,9 @@ interface PromptOptions {
   inputPlaceholder?: string;
   inputDefault?: string;
   validationMessage?: string;
-  validate?: (value: string) => Promise<boolean>;
+  /** Resolve true to accept, false to show `validationMessage`, or a string to
+   * show that specific error (e.g. a failure that is not a wrong value). */
+  validate?: (value: string) => Promise<boolean | string>;
 }
 
 interface AlertOptions {
@@ -30,7 +41,8 @@ interface DialogConfig {
   inputPlaceholder: string;
   inputDefault: string;
   validationMessage?: string;
-  validate?: (value: string) => Promise<boolean>;
+  validate?: (value: string) => Promise<boolean | string>;
+  checkboxLabel?: string;
 }
 
 const queue: (() => void)[] = [];
@@ -54,6 +66,15 @@ function els() {
       "dialog-validation-error",
     ) as HTMLElement | null,
     reveal: document.getElementById("dialog-input-reveal") as HTMLButtonElement,
+    checkboxWrapper: document.getElementById(
+      "dialog-checkbox-wrapper",
+    ) as HTMLElement | null,
+    checkbox: document.getElementById(
+      "dialog-checkbox",
+    ) as HTMLInputElement | null,
+    checkboxLabel: document.getElementById(
+      "dialog-checkbox-label",
+    ) as HTMLElement | null,
     cancel: document.getElementById("dialog-cancel") as HTMLButtonElement,
     ok: document.getElementById("dialog-ok") as HTMLButtonElement,
   };
@@ -81,7 +102,9 @@ function shakeDialogBox(box: HTMLElement) {
   );
 }
 
-function present(config: DialogConfig): Promise<string | boolean | null> {
+function present(
+  config: DialogConfig,
+): Promise<string | boolean | CheckboxConfirmResult | null> {
   return new Promise((resolve) => {
     const el = els();
 
@@ -89,6 +112,15 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
     el.message.textContent = config.message;
 
     el.inputWrapper.style.display = config.showInput ? "" : "none";
+
+    const showCheckbox =
+      config.checkboxLabel !== undefined &&
+      el.checkbox !== null &&
+      el.checkboxWrapper !== null;
+    if (el.checkbox) el.checkbox.checked = false;
+    if (el.checkboxWrapper) el.checkboxWrapper.hidden = !showCheckbox;
+    if (el.checkboxLabel)
+      el.checkboxLabel.textContent = config.checkboxLabel ?? "";
     el.input.type = config.inputType;
     el.input.placeholder = config.inputPlaceholder;
     el.input.value = config.inputDefault;
@@ -160,6 +192,7 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       const candidates: (HTMLElement | null)[] = [
         config.showInput ? el.input : null,
         config.showInput && isPassword ? el.reveal : null,
+        showCheckbox ? el.checkbox : null,
         config.showCancel ? el.cancel : null,
         el.ok,
       ];
@@ -175,15 +208,18 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      const current = document.activeElement;
+      // Move focus explicitly instead of relying on native Tab order: WebKit
+      // (and so the macOS webview) skips checkboxes and buttons by default,
+      // which left keyboard users unable to reach them.
+      e.preventDefault();
+      const index = focusable.indexOf(document.activeElement as HTMLElement);
       if (e.shiftKey) {
-        if (current === first || !el.box.contains(current)) {
-          e.preventDefault();
-          last.focus();
-        }
-      } else if (current === last || !el.box.contains(current)) {
-        e.preventDefault();
-        first.focus();
+        (index <= 0 ? last : focusable[index - 1]).focus();
+      } else {
+        (index === -1 || index === focusable.length - 1
+          ? first
+          : focusable[index + 1]
+        ).focus();
       }
     }
 
@@ -210,9 +246,12 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       el.input.removeEventListener("input", clearValidationError);
       el.reveal.removeEventListener("click", onReveal);
       clearValidationError();
+      // Never leave a typed password sitting in the hidden input.
+      el.input.value = "";
       el.input.type = "text";
       el.reveal.hidden = true;
       el.ok.disabled = false;
+      if (el.checkboxWrapper) el.checkboxWrapper.hidden = true;
       document.removeEventListener("keydown", onEscape, true);
       document.removeEventListener("keydown", onTrapFocus, true);
       // Restore focus to whatever was focused before the dialog opened, unless
@@ -238,7 +277,13 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
       validateGeneration += 1;
       validating = false;
       el.ok.disabled = false;
+      const checked = el.checkbox?.checked ?? false;
       cleanup();
+      if (el.checkbox) el.checkbox.checked = false;
+      if (showCheckbox) {
+        resolve({ confirmed: false, checked });
+        return;
+      }
       resolve(config.showInput ? null : false);
     }
 
@@ -251,10 +296,12 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
         try {
           const ok = await config.validate(el.input.value);
           if (generation !== validateGeneration) return;
-          if (!ok) {
+          if (ok !== true) {
             el.input.value = "";
             showValidationError(
-              config.validationMessage ?? "Please enter a valid value.",
+              typeof ok === "string"
+                ? ok
+                : (config.validationMessage ?? "Please enter a valid value."),
             );
             return;
           }
@@ -271,8 +318,15 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
           }
         }
       }
+      const checked = el.checkbox?.checked ?? false;
+      const value = el.input.value;
       cleanup();
-      resolve(config.showInput ? el.input.value : true);
+      if (el.checkbox) el.checkbox.checked = false;
+      if (showCheckbox) {
+        resolve({ confirmed: true, checked });
+        return;
+      }
+      resolve(config.showInput ? value : true);
     }
 
     function onInputKey(e: KeyboardEvent) {
@@ -316,9 +370,9 @@ function present(config: DialogConfig): Promise<string | boolean | null> {
 
 function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   if (!active) return fn();
-  return new Promise<T>((resolve) => {
+  return new Promise<T>((resolve, reject) => {
     queue.push(() => {
-      void fn().then(resolve);
+      fn().then(resolve, reject);
     });
   });
 }
@@ -342,6 +396,33 @@ export function showConfirm(
         inputPlaceholder: "",
         inputDefault: "",
       }) as Promise<boolean>,
+  );
+}
+
+/**
+ * Confirm with an extra checkbox (e.g. "Don't ask again"). The checkbox state
+ * is reported for both choices; callers decide which choice honors it.
+ */
+export function showConfirmWithCheckbox(
+  title: string,
+  message: string,
+  options: CheckboxConfirmOptions,
+): Promise<CheckboxConfirmResult> {
+  return enqueue(
+    () =>
+      present({
+        title,
+        message,
+        showInput: false,
+        showCancel: true,
+        okLabel: options.okLabel ?? "OK",
+        cancelLabel: options.cancelLabel ?? "Cancel",
+        okDanger: options.okDanger ?? false,
+        inputType: "text",
+        inputPlaceholder: "",
+        inputDefault: "",
+        checkboxLabel: options.checkboxLabel,
+      }) as Promise<CheckboxConfirmResult>,
   );
 }
 

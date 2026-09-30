@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-security-encryption"
+description = "Enables the set_security_encryption command without any pre-configured scope."
+commands.allow = ["set_security_encryption"]
+
+[[permission]]
+identifier = "deny-set-security-encryption"
+description = "Denies the set_security_encryption command without any pre-configured scope."
+commands.deny = ["set_security_encryption"]

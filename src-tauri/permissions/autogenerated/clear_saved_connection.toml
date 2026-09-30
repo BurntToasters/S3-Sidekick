@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clear-saved-connection"
+description = "Enables the clear_saved_connection command without any pre-configured scope."
+commands.allow = ["clear_saved_connection"]
+
+[[permission]]
+identifier = "deny-clear-saved-connection"
+description = "Denies the clear_saved_connection command without any pre-configured scope."
+commands.deny = ["clear_saved_connection"]

@@ -270,6 +270,7 @@ vi.mock("../bookmarks.ts", () => ({
   renderBookmarkBar: mockRenderBookmarkBar,
   loadBookmarks: mockLoadBookmarks,
   setBookmarkChangeHandler: mockSetBookmarkChangeHandler,
+  getBookmarkLoadError: vi.fn().mockReturnValue(null),
   isEndpointBookmarked: vi.fn().mockReturnValue(false),
   clearBookmarks: vi.fn(),
   renderBookmarkList: vi.fn(),
@@ -339,10 +340,16 @@ vi.mock("../security.ts", () => ({
   handleLockNow: mockHandleLockNow,
   handleLockTimeoutChange: mockHandleLockTimeoutChange,
   handleBiometricToggle: mockHandleBiometricToggle,
+  startAutoLockWatcher: vi.fn(),
 }));
 
 vi.mock("../dialogs.ts", () => ({
   showConfirm: mockShowConfirm,
+  showConfirmWithCheckbox: (...args: unknown[]) =>
+    mockShowConfirm(...args).then((confirmed) => ({
+      confirmed,
+      checked: false,
+    })),
   showPrompt: mockShowPrompt,
   showAlert: mockShowAlert,
   isDialogActive: mockIsDialogActive,
@@ -1711,14 +1718,15 @@ describe("main integration", () => {
       },
     });
     await flushMicrotasks();
-    expect(mockEnqueuePaths).toHaveBeenCalledWith(
+    // A failed scan is also a failed safety check: nothing is queued.
+    expect(mockEnqueuePaths).not.toHaveBeenCalledWith(
       ["C:\\tmp\\a.txt"],
       "docs/",
       expect.anything(),
     );
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Dropped 1 file(s). Queued for upload.");
+    ).toContain("Upload not started");
 
     const sidebar = document.getElementById("bucket-panel") as HTMLElement;
     vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
@@ -3298,11 +3306,15 @@ describe("main integration", () => {
       },
     });
     await flushMicrotasks(6);
-    expect(mockEnqueuePaths).toHaveBeenCalledWith(
+    // An empty scan means no readable files, not "fall back to raw paths".
+    expect(mockEnqueuePaths).not.toHaveBeenCalledWith(
       ["C:\\tmp\\dropped.txt"],
       "docs/",
       expect.anything(),
     );
+    expect(
+      (document.getElementById("status") as HTMLSpanElement).textContent,
+    ).toContain("Nothing to upload");
 
     capturedDragDropHandler!({
       payload: {
@@ -3312,7 +3324,7 @@ describe("main integration", () => {
       },
     });
     await flushMicrotasks(6);
-    expect(mockEnqueuePaths).toHaveBeenCalledWith(
+    expect(mockEnqueuePaths).not.toHaveBeenCalledWith(
       ["/home/user/from-tauri.txt"],
       "docs/",
       expect.anything(),

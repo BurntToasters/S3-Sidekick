@@ -10,6 +10,11 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("../dialogs.ts", () => ({
   showConfirm: mockShowConfirm,
+  showConfirmWithCheckbox: (...args: unknown[]) =>
+    mockShowConfirm(...args).then((confirmed) => ({
+      confirmed,
+      checked: false,
+    })),
 }));
 
 describe("app-conflicts", () => {

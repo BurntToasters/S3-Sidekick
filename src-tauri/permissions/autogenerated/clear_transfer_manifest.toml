@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clear-transfer-manifest"
+description = "Enables the clear_transfer_manifest command without any pre-configured scope."
+commands.allow = ["clear_transfer_manifest"]
+
+[[permission]]
+identifier = "deny-clear-transfer-manifest"
+description = "Denies the clear_transfer_manifest command without any pre-configured scope."
+commands.deny = ["clear_transfer_manifest"]

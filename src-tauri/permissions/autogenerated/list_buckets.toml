@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-buckets"
+description = "Enables the list_buckets command without any pre-configured scope."
+commands.allow = ["list_buckets"]
+
+[[permission]]
+identifier = "deny-list-buckets"
+description = "Denies the list_buckets command without any pre-configured scope."
+commands.deny = ["list_buckets"]

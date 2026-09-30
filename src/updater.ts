@@ -7,8 +7,9 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { state } from "./state.ts";
+import { logActivity } from "./activity-log.ts";
 import { type UpdateChannel } from "./settings-model.ts";
 
 type UpdaterMode = "native" | "flatpak" | "manual";
@@ -152,6 +153,28 @@ async function promptInstallAndRestart(
       cancelLabel: "Later",
     },
   );
+  if (restart && state.activeTransferCount > 0) {
+    const count = state.activeTransferCount;
+    const interrupt = await ask(
+      `${count} transfer(s) are still running or queued. Restarting now interrupts them: downloads can resume, but in-progress uploads start over.
+
+Restart anyway?`,
+      {
+        title: "Transfers in progress",
+        kind: "warning",
+        okLabel: "Restart anyway",
+        cancelLabel: "Later",
+      },
+    );
+    if (!interrupt) {
+      await notify(
+        "S3 Sidekick",
+        "Update downloaded. Restart the app when your transfers finish.",
+      );
+      setStatus("");
+      return;
+    }
+  }
   if (restart) {
     setStatus("Installing update...");
     await install();
@@ -430,7 +453,11 @@ async function checkUpdatesImpl(): Promise<void> {
     await update.download();
     await promptInstallAndRestart(update.version, () => update.install());
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     if (channel === "beta") {
+      // The release-page fallback answers the user, so keep the real
+      // updater failure visible instead of letting the fallback hide it.
+      logActivity(`In-app beta update failed: ${msg}`, "warning");
       try {
         await checkReleasePageUpdate(channel, "manual");
         return;
@@ -438,7 +465,6 @@ async function checkUpdatesImpl(): Promise<void> {
         // fall through to normal error below
       }
     }
-    const msg = err instanceof Error ? err.message : String(err);
     setStatus("");
     await message(`Failed to check for updates.\n\n${msg}`, {
       title: "Update error",

@@ -1,7 +1,8 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { invokeS3For } from "./connection.ts";
 import { state } from "./state.ts";
-import { showConfirm } from "./dialogs.ts";
+import { showConfirm, showConfirmWithCheckbox } from "./dialogs.ts";
+import { saveSettings } from "./settings.ts";
 import { logActivity } from "./activity-log.ts";
 import { friendlyError, basename } from "./utils.ts";
 import type { ConflictPolicy } from "./settings-model.ts";
@@ -16,18 +17,59 @@ export interface ConflictPromptSession {
   unguardedWriteAuthorized?: boolean;
 }
 
+export interface UnguardedWriteDecision {
+  proceed: boolean;
+  /// True when no further prompt should follow for this write, because the
+  /// warning is turned off or the user just chose "Don't ask again".
+  suppressed: boolean;
+}
+
+/**
+ * Ask before a write the provider cannot make create-only. Honors the
+ * `confirmUnguardedWrites` setting; "Don't ask again" is persisted only when
+ * the user also chooses "Write anyway".
+ */
+export async function promptUnguardedWrite(): Promise<UnguardedWriteDecision> {
+  if (state.currentSettings.confirmUnguardedWrites === false) {
+    return { proceed: true, suppressed: true };
+  }
+  const { confirmed, checked } = await showConfirmWithCheckbox(
+    "Unconditional Write",
+    "This storage provider cannot enforce create-only writes. Another client could create the same key before this transfer finishes. Write anyway?",
+    {
+      okLabel: "Write anyway",
+      cancelLabel: "Cancel",
+      okDanger: true,
+      checkboxLabel: "Don't ask again",
+    },
+  );
+  if (!confirmed) return { proceed: false, suppressed: false };
+  if (!checked) return { proceed: true, suppressed: false };
+
+  state.currentSettings.confirmUnguardedWrites = false;
+  try {
+    await saveSettings();
+    logActivity(
+      "Unconditional write warnings turned off. Turn them back on in Settings > Transfers.",
+      "info",
+    );
+  } catch (err) {
+    logActivity(
+      `Could not save "Don't ask again" (${friendlyError(err)}). The warning is off until restart.`,
+      "warning",
+    );
+  }
+  return { proceed: true, suppressed: true };
+}
+
 async function confirmUnguardedWrite(
   session: ConflictPromptSession,
   hasBatchRemainder: boolean,
 ): Promise<boolean> {
   if (session.unguardedWriteAuthorized) return true;
-  const proceed = await showConfirm(
-    "Unconditional Write",
-    "This storage provider cannot enforce create-only writes. Another client could create the same key before this transfer finishes. Write anyway?",
-    { okLabel: "Write anyway", cancelLabel: "Cancel" },
-  );
+  const { proceed, suppressed } = await promptUnguardedWrite();
   if (!proceed) return false;
-  if (hasBatchRemainder) {
+  if (hasBatchRemainder && !suppressed) {
     const applyAll = await showConfirm(
       "Apply Choice",
       'Apply "Write anyway" to remaining new destinations on this provider?',

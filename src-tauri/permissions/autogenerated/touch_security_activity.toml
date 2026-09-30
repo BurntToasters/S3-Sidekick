@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-touch-security-activity"
+description = "Enables the touch_security_activity command without any pre-configured scope."
+commands.allow = ["touch_security_activity"]
+
+[[permission]]
+identifier = "deny-touch-security-activity"
+description = "Denies the touch_security_activity command without any pre-configured scope."
+commands.deny = ["touch_security_activity"]

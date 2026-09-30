@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discard-download-scratch"
+description = "Enables the discard_download_scratch command without any pre-configured scope."
+commands.allow = ["discard_download_scratch"]
+
+[[permission]]
+identifier = "deny-discard-download-scratch"
+description = "Denies the discard_download_scratch command without any pre-configured scope."
+commands.deny = ["discard_download_scratch"]

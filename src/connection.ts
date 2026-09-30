@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, type InvokeCall, type S3InvokeCall } from "./ipc.ts";
 import { clearAllSelection } from "./app-selection.ts";
 import { state } from "./state.ts";
 import { showToast } from "./toast.ts";
@@ -170,20 +170,19 @@ export function connectionSnapshotChanged(snap: ConnectionSnapshot): boolean {
 
 export function invokeS3For<T>(
   connectionId: string,
-  cmd: string,
-  args: Record<string, unknown> = {},
+  ...call: S3InvokeCall
 ): Promise<T> {
   if (!connectionId) {
     throw new Error("Connection id is required");
   }
-  return invoke<T>(cmd, { ...args, connectionId });
+  const [cmd, args] = call;
+  // The spread keeps each command's own argument check; connectionId is the
+  // one key the contract requires that callers never pass themselves.
+  return invoke<T>(...([cmd, { ...args, connectionId }] as InvokeCall));
 }
 
-export function invokeS3<T>(
-  cmd: string,
-  args: Record<string, unknown> = {},
-): Promise<T> {
-  return invokeS3For(currentConnectionId(), cmd, args);
+export function invokeS3<T>(...call: S3InvokeCall): Promise<T> {
+  return invokeS3For<T>(currentConnectionId(), ...call);
 }
 
 export async function connect(
@@ -250,9 +249,13 @@ export async function disconnect(connectionId?: string): Promise<boolean> {
   // invalidated only after the backend confirms this exact session closed.
   const generation = ++connectionGeneration;
   state.connecting = false;
+  // Park the transfer queue before the backend closes the session: running
+  // items then requeue instead of failing on "Transfer cancelled".
+  state.transfersHeldForDisconnect = true;
   try {
     await invoke("disconnect", { connectionId: expectedId ?? "" });
   } catch (error) {
+    state.transfersHeldForDisconnect = false;
     // The native command rejects a stale session as "Connection changed".
     // Once a newer frontend workflow or session owns state, that rejection is
     // a benign supersession and must not be reported as a failed disconnect.

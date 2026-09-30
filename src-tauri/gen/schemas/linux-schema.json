@@ -177,6 +177,792 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Persist settings, bookmarks and the saved connection.\n#### This permission set includes:\n\n- `allow-load-settings`\n- `allow-save-settings`\n- `allow-load-bookmarks`\n- `allow-save-bookmarks`\n- `allow-load-bookmarks-backup`\n- `allow-save-bookmarks-backup`\n- `allow-load-connection`\n- `allow-save-connection`\n- `allow-clear-saved-connection`",
+          "type": "string",
+          "const": "app-storage",
+          "markdownDescription": "Persist settings, bookmarks and the saved connection.\n#### This permission set includes:\n\n- `allow-load-settings`\n- `allow-save-settings`\n- `allow-load-bookmarks`\n- `allow-save-bookmarks`\n- `allow-load-bookmarks-backup`\n- `allow-save-bookmarks-backup`\n- `allow-load-connection`\n- `allow-save-connection`\n- `allow-clear-saved-connection`"
+        },
+        {
+          "description": "Read local folders and write exported text files.\n#### This permission set includes:\n\n- `allow-list-local-files-recursive`\n- `allow-path-exists`\n- `allow-write-text-file`\n- `allow-open-local-path`",
+          "type": "string",
+          "const": "local-files",
+          "markdownDescription": "Read local folders and write exported text files.\n#### This permission set includes:\n\n- `allow-list-local-files-recursive`\n- `allow-path-exists`\n- `allow-write-text-file`\n- `allow-open-local-path`"
+        },
+        {
+          "description": "Platform details, updater support and external links.\n#### This permission set includes:\n\n- `allow-get-platform-info`\n- `allow-is-app-translocated`\n- `allow-updater-supported`\n- `allow-updater-support-info`\n- `allow-open-external-url`",
+          "type": "string",
+          "const": "platform",
+          "markdownDescription": "Platform details, updater support and external links.\n#### This permission set includes:\n\n- `allow-get-platform-info`\n- `allow-is-app-translocated`\n- `allow-updater-supported`\n- `allow-updater-support-info`\n- `allow-open-external-url`"
+        },
+        {
+          "description": "Change objects in a bucket.\n#### This permission set includes:\n\n- `allow-update-metadata`\n- `allow-delete-objects`\n- `allow-set-object-acl`\n- `allow-create-folder`\n- `allow-rename-object`\n- `allow-delete-prefix`\n- `allow-rename-prefix`\n- `allow-copy-object-to`\n- `allow-copy-prefix-to`\n- `allow-delete-copied-objects`",
+          "type": "string",
+          "const": "s3-mutation",
+          "markdownDescription": "Change objects in a bucket.\n#### This permission set includes:\n\n- `allow-update-metadata`\n- `allow-delete-objects`\n- `allow-set-object-acl`\n- `allow-create-folder`\n- `allow-rename-object`\n- `allow-delete-prefix`\n- `allow-rename-prefix`\n- `allow-copy-object-to`\n- `allow-copy-prefix-to`\n- `allow-delete-copied-objects`"
+        },
+        {
+          "description": "Connect to and browse an S3 endpoint.\n#### This permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-list-buckets`\n- `allow-list-objects`\n- `allow-head-object`\n- `allow-object-exists`\n- `allow-get-object-acl`\n- `allow-build-object-url`\n- `allow-generate-presigned-url`\n- `allow-preview-object`",
+          "type": "string",
+          "const": "s3-session",
+          "markdownDescription": "Connect to and browse an S3 endpoint.\n#### This permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-list-buckets`\n- `allow-list-objects`\n- `allow-head-object`\n- `allow-object-exists`\n- `allow-get-object-acl`\n- `allow-build-object-url`\n- `allow-generate-presigned-url`\n- `allow-preview-object`"
+        },
+        {
+          "description": "Run uploads and downloads and keep their recovery state.\n#### This permission set includes:\n\n- `allow-upload-object`\n- `allow-upload-object-bytes`\n- `allow-download-object`\n- `allow-download-object-parallel`\n- `allow-cancel-transfer`\n- `allow-discard-download-scratch`\n- `allow-transfer-checkpoint-remove`\n- `allow-transfer-checkpoint-gc`\n- `allow-load-transfer-manifest`\n- `allow-save-transfer-manifest`\n- `allow-clear-transfer-manifest`\n- `allow-get-available-disk-bytes`",
+          "type": "string",
+          "const": "transfers",
+          "markdownDescription": "Run uploads and downloads and keep their recovery state.\n#### This permission set includes:\n\n- `allow-upload-object`\n- `allow-upload-object-bytes`\n- `allow-download-object`\n- `allow-download-object-parallel`\n- `allow-cancel-transfer`\n- `allow-discard-download-scratch`\n- `allow-transfer-checkpoint-remove`\n- `allow-transfer-checkpoint-gc`\n- `allow-load-transfer-manifest`\n- `allow-save-transfer-manifest`\n- `allow-clear-transfer-manifest`\n- `allow-get-available-disk-bytes`"
+        },
+        {
+          "description": "Manage encrypted storage and biometric unlock.\n#### This permission set includes:\n\n- `allow-get-security-status`\n- `allow-initialize-security`\n- `allow-unlock-security`\n- `allow-set-security-encryption`\n- `allow-change-security-password`\n- `allow-lock-security`\n- `allow-touch-security-activity`\n- `allow-set-lock-timeout`\n- `allow-factory-reset`\n- `allow-enable-biometric`\n- `allow-disable-biometric`\n- `allow-unlock-biometric`",
+          "type": "string",
+          "const": "vault",
+          "markdownDescription": "Manage encrypted storage and biometric unlock.\n#### This permission set includes:\n\n- `allow-get-security-status`\n- `allow-initialize-security`\n- `allow-unlock-security`\n- `allow-set-security-encryption`\n- `allow-change-security-password`\n- `allow-lock-security`\n- `allow-touch-security-activity`\n- `allow-set-lock-timeout`\n- `allow-factory-reset`\n- `allow-enable-biometric`\n- `allow-disable-biometric`\n- `allow-unlock-biometric`"
+        },
+        {
+          "description": "Enables the build_object_url command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-build-object-url",
+          "markdownDescription": "Enables the build_object_url command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the cancel_transfer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cancel-transfer",
+          "markdownDescription": "Enables the cancel_transfer command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the change_security_password command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-change-security-password",
+          "markdownDescription": "Enables the change_security_password command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the clear_saved_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clear-saved-connection",
+          "markdownDescription": "Enables the clear_saved_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the clear_transfer_manifest command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clear-transfer-manifest",
+          "markdownDescription": "Enables the clear_transfer_manifest command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-connect",
+          "markdownDescription": "Enables the connect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the copy_object_to command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-copy-object-to",
+          "markdownDescription": "Enables the copy_object_to command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the copy_prefix_to command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-copy-prefix-to",
+          "markdownDescription": "Enables the copy_prefix_to command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the create_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-create-folder",
+          "markdownDescription": "Enables the create_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the delete_copied_objects command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-delete-copied-objects",
+          "markdownDescription": "Enables the delete_copied_objects command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the delete_objects command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-delete-objects",
+          "markdownDescription": "Enables the delete_objects command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the delete_prefix command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-delete-prefix",
+          "markdownDescription": "Enables the delete_prefix command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the disable_biometric command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-disable-biometric",
+          "markdownDescription": "Enables the disable_biometric command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the discard_download_scratch command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-discard-download-scratch",
+          "markdownDescription": "Enables the discard_download_scratch command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the disconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-disconnect",
+          "markdownDescription": "Enables the disconnect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the download_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-download-object",
+          "markdownDescription": "Enables the download_object command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the download_object_parallel command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-download-object-parallel",
+          "markdownDescription": "Enables the download_object_parallel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the enable_biometric command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-enable-biometric",
+          "markdownDescription": "Enables the enable_biometric command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the factory_reset command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-factory-reset",
+          "markdownDescription": "Enables the factory_reset command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the generate_presigned_url command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-generate-presigned-url",
+          "markdownDescription": "Enables the generate_presigned_url command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_available_disk_bytes command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-available-disk-bytes",
+          "markdownDescription": "Enables the get_available_disk_bytes command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_object_acl command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-object-acl",
+          "markdownDescription": "Enables the get_object_acl command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_platform_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-platform-info",
+          "markdownDescription": "Enables the get_platform_info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_security_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-security-status",
+          "markdownDescription": "Enables the get_security_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the head_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-head-object",
+          "markdownDescription": "Enables the head_object command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the initialize_security command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-initialize-security",
+          "markdownDescription": "Enables the initialize_security command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the is_app_translocated command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-is-app-translocated",
+          "markdownDescription": "Enables the is_app_translocated command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_buckets command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-buckets",
+          "markdownDescription": "Enables the list_buckets command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_local_files_recursive command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-local-files-recursive",
+          "markdownDescription": "Enables the list_local_files_recursive command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_objects command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-objects",
+          "markdownDescription": "Enables the list_objects command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the load_bookmarks command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-load-bookmarks",
+          "markdownDescription": "Enables the load_bookmarks command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the load_bookmarks_backup command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-load-bookmarks-backup",
+          "markdownDescription": "Enables the load_bookmarks_backup command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the load_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-load-connection",
+          "markdownDescription": "Enables the load_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the load_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-load-settings",
+          "markdownDescription": "Enables the load_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the load_transfer_manifest command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-load-transfer-manifest",
+          "markdownDescription": "Enables the load_transfer_manifest command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the lock_security command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-lock-security",
+          "markdownDescription": "Enables the lock_security command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the object_exists command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-object-exists",
+          "markdownDescription": "Enables the object_exists command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_external_url command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-external-url",
+          "markdownDescription": "Enables the open_external_url command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_local_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-local-path",
+          "markdownDescription": "Enables the open_local_path command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the path_exists command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-path-exists",
+          "markdownDescription": "Enables the path_exists command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the preview_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-preview-object",
+          "markdownDescription": "Enables the preview_object command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the rename_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-rename-object",
+          "markdownDescription": "Enables the rename_object command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the rename_prefix command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-rename-prefix",
+          "markdownDescription": "Enables the rename_prefix command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_bookmarks command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-bookmarks",
+          "markdownDescription": "Enables the save_bookmarks command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_bookmarks_backup command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-bookmarks-backup",
+          "markdownDescription": "Enables the save_bookmarks_backup command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-connection",
+          "markdownDescription": "Enables the save_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-settings",
+          "markdownDescription": "Enables the save_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_transfer_manifest command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-transfer-manifest",
+          "markdownDescription": "Enables the save_transfer_manifest command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_lock_timeout command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-lock-timeout",
+          "markdownDescription": "Enables the set_lock_timeout command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_object_acl command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-object-acl",
+          "markdownDescription": "Enables the set_object_acl command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_security_encryption command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-security-encryption",
+          "markdownDescription": "Enables the set_security_encryption command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the touch_security_activity command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-touch-security-activity",
+          "markdownDescription": "Enables the touch_security_activity command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the transfer_checkpoint_gc command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-transfer-checkpoint-gc",
+          "markdownDescription": "Enables the transfer_checkpoint_gc command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the transfer_checkpoint_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-transfer-checkpoint-remove",
+          "markdownDescription": "Enables the transfer_checkpoint_remove command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the unlock_biometric command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-unlock-biometric",
+          "markdownDescription": "Enables the unlock_biometric command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the unlock_security command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-unlock-security",
+          "markdownDescription": "Enables the unlock_security command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_metadata command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-metadata",
+          "markdownDescription": "Enables the update_metadata command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the updater_support_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-updater-support-info",
+          "markdownDescription": "Enables the updater_support_info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the updater_supported command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-updater-supported",
+          "markdownDescription": "Enables the updater_supported command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the upload_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-upload-object",
+          "markdownDescription": "Enables the upload_object command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the upload_object_bytes command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-upload-object-bytes",
+          "markdownDescription": "Enables the upload_object_bytes command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the write_text_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-write-text-file",
+          "markdownDescription": "Enables the write_text_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the build_object_url command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-build-object-url",
+          "markdownDescription": "Denies the build_object_url command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel_transfer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cancel-transfer",
+          "markdownDescription": "Denies the cancel_transfer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the change_security_password command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-change-security-password",
+          "markdownDescription": "Denies the change_security_password command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clear_saved_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clear-saved-connection",
+          "markdownDescription": "Denies the clear_saved_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clear_transfer_manifest command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clear-transfer-manifest",
+          "markdownDescription": "Denies the clear_transfer_manifest command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-connect",
+          "markdownDescription": "Denies the connect command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the copy_object_to command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-copy-object-to",
+          "markdownDescription": "Denies the copy_object_to command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the copy_prefix_to command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-copy-prefix-to",
+          "markdownDescription": "Denies the copy_prefix_to command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the create_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-create-folder",
+          "markdownDescription": "Denies the create_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the delete_copied_objects command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-delete-copied-objects",
+          "markdownDescription": "Denies the delete_copied_objects command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the delete_objects command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-delete-objects",
+          "markdownDescription": "Denies the delete_objects command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the delete_prefix command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-delete-prefix",
+          "markdownDescription": "Denies the delete_prefix command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the disable_biometric command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-disable-biometric",
+          "markdownDescription": "Denies the disable_biometric command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the discard_download_scratch command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-discard-download-scratch",
+          "markdownDescription": "Denies the discard_download_scratch command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the disconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-disconnect",
+          "markdownDescription": "Denies the disconnect command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the download_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-download-object",
+          "markdownDescription": "Denies the download_object command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the download_object_parallel command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-download-object-parallel",
+          "markdownDescription": "Denies the download_object_parallel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the enable_biometric command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-enable-biometric",
+          "markdownDescription": "Denies the enable_biometric command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the factory_reset command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-factory-reset",
+          "markdownDescription": "Denies the factory_reset command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the generate_presigned_url command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-generate-presigned-url",
+          "markdownDescription": "Denies the generate_presigned_url command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_available_disk_bytes command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-available-disk-bytes",
+          "markdownDescription": "Denies the get_available_disk_bytes command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_object_acl command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-object-acl",
+          "markdownDescription": "Denies the get_object_acl command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_platform_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-platform-info",
+          "markdownDescription": "Denies the get_platform_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_security_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-security-status",
+          "markdownDescription": "Denies the get_security_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the head_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-head-object",
+          "markdownDescription": "Denies the head_object command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the initialize_security command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-initialize-security",
+          "markdownDescription": "Denies the initialize_security command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the is_app_translocated command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-is-app-translocated",
+          "markdownDescription": "Denies the is_app_translocated command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_buckets command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-buckets",
+          "markdownDescription": "Denies the list_buckets command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_local_files_recursive command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-local-files-recursive",
+          "markdownDescription": "Denies the list_local_files_recursive command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_objects command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-objects",
+          "markdownDescription": "Denies the list_objects command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the load_bookmarks command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-load-bookmarks",
+          "markdownDescription": "Denies the load_bookmarks command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the load_bookmarks_backup command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-load-bookmarks-backup",
+          "markdownDescription": "Denies the load_bookmarks_backup command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the load_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-load-connection",
+          "markdownDescription": "Denies the load_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the load_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-load-settings",
+          "markdownDescription": "Denies the load_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the load_transfer_manifest command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-load-transfer-manifest",
+          "markdownDescription": "Denies the load_transfer_manifest command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the lock_security command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-lock-security",
+          "markdownDescription": "Denies the lock_security command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the object_exists command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-object-exists",
+          "markdownDescription": "Denies the object_exists command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_external_url command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-external-url",
+          "markdownDescription": "Denies the open_external_url command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_local_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-local-path",
+          "markdownDescription": "Denies the open_local_path command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the path_exists command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-path-exists",
+          "markdownDescription": "Denies the path_exists command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the preview_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-preview-object",
+          "markdownDescription": "Denies the preview_object command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the rename_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-rename-object",
+          "markdownDescription": "Denies the rename_object command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the rename_prefix command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-rename-prefix",
+          "markdownDescription": "Denies the rename_prefix command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_bookmarks command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-bookmarks",
+          "markdownDescription": "Denies the save_bookmarks command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_bookmarks_backup command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-bookmarks-backup",
+          "markdownDescription": "Denies the save_bookmarks_backup command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-connection",
+          "markdownDescription": "Denies the save_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-settings",
+          "markdownDescription": "Denies the save_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_transfer_manifest command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-transfer-manifest",
+          "markdownDescription": "Denies the save_transfer_manifest command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_lock_timeout command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-lock-timeout",
+          "markdownDescription": "Denies the set_lock_timeout command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_object_acl command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-object-acl",
+          "markdownDescription": "Denies the set_object_acl command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_security_encryption command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-security-encryption",
+          "markdownDescription": "Denies the set_security_encryption command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the touch_security_activity command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-touch-security-activity",
+          "markdownDescription": "Denies the touch_security_activity command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the transfer_checkpoint_gc command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-transfer-checkpoint-gc",
+          "markdownDescription": "Denies the transfer_checkpoint_gc command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the transfer_checkpoint_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-transfer-checkpoint-remove",
+          "markdownDescription": "Denies the transfer_checkpoint_remove command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the unlock_biometric command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-unlock-biometric",
+          "markdownDescription": "Denies the unlock_biometric command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the unlock_security command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-unlock-security",
+          "markdownDescription": "Denies the unlock_security command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_metadata command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-metadata",
+          "markdownDescription": "Denies the update_metadata command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the updater_support_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-updater-support-info",
+          "markdownDescription": "Denies the updater_support_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the updater_supported command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-updater-supported",
+          "markdownDescription": "Denies the updater_supported command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the upload_object command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-upload-object",
+          "markdownDescription": "Denies the upload_object command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the upload_object_bytes command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-upload-object-bytes",
+          "markdownDescription": "Denies the upload_object_bytes command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the write_text_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-write-text-file",
+          "markdownDescription": "Denies the write_text_file command without any pre-configured scope."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",
@@ -211,6 +997,12 @@
           "type": "string",
           "const": "core:app:allow-default-window-icon",
           "markdownDescription": "Enables the default_window_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the exit command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:app:allow-exit",
+          "markdownDescription": "Enables the exit command without any pre-configured scope."
         },
         {
           "description": "Enables the fetch_data_store_identifiers command without any pre-configured scope.",
@@ -301,6 +1093,12 @@
           "type": "string",
           "const": "core:app:deny-default-window-icon",
           "markdownDescription": "Denies the default_window_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the exit command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:app:deny-exit",
+          "markdownDescription": "Denies the exit command without any pre-configured scope."
         },
         {
           "description": "Denies the fetch_data_store_identifiers command without any pre-configured scope.",
@@ -1563,6 +2361,12 @@
           "markdownDescription": "Enables the set_fullscreen command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_fullscreen_on_monitor command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:allow-set-fullscreen-on-monitor",
+          "markdownDescription": "Enables the set_fullscreen_on_monitor command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_icon command without any pre-configured scope.",
           "type": "string",
           "const": "core:window:allow-set-icon",
@@ -2031,6 +2835,12 @@
           "markdownDescription": "Denies the set_fullscreen command without any pre-configured scope."
         },
         {
+          "description": "Denies the set_fullscreen_on_monitor command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:deny-set-fullscreen-on-monitor",
+          "markdownDescription": "Denies the set_fullscreen_on_monitor command without any pre-configured scope."
+        },
+        {
           "description": "Denies the set_icon command without any pre-configured scope.",
           "type": "string",
           "const": "core:window:deny-set-icon",
@@ -2259,10 +3069,10 @@
           "markdownDescription": "Denies the save command without any pre-configured scope."
         },
         {
-          "description": "This permission set configures which\nnotification features are by default exposed.\n\n#### Granted Permissions\n\nIt allows all notification related features.\n\n\n#### This default permission set includes:\n\n- `allow-is-permission-granted`\n- `allow-request-permission`\n- `allow-notify`\n- `allow-register-action-types`\n- `allow-register-listener`\n- `allow-cancel`\n- `allow-get-pending`\n- `allow-remove-active`\n- `allow-get-active`\n- `allow-check-permissions`\n- `allow-show`\n- `allow-batch`\n- `allow-list-channels`\n- `allow-delete-channel`\n- `allow-create-channel`\n- `allow-permission-state`",
+          "description": "This permission set configures which\nnotification features are by default exposed.\n\n#### Granted Permissions\n\nIt allows all notification related features.\n\n\n#### This default permission set includes:\n\n- `allow-is-permission-granted`\n- `allow-request-permission`\n- `allow-notify`\n- `allow-register-action-types`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-cancel`\n- `allow-get-pending`\n- `allow-remove-active`\n- `allow-get-active`\n- `allow-check-permissions`\n- `allow-show`\n- `allow-batch`\n- `allow-list-channels`\n- `allow-delete-channel`\n- `allow-create-channel`\n- `allow-permission-state`",
           "type": "string",
           "const": "notification:default",
-          "markdownDescription": "This permission set configures which\nnotification features are by default exposed.\n\n#### Granted Permissions\n\nIt allows all notification related features.\n\n\n#### This default permission set includes:\n\n- `allow-is-permission-granted`\n- `allow-request-permission`\n- `allow-notify`\n- `allow-register-action-types`\n- `allow-register-listener`\n- `allow-cancel`\n- `allow-get-pending`\n- `allow-remove-active`\n- `allow-get-active`\n- `allow-check-permissions`\n- `allow-show`\n- `allow-batch`\n- `allow-list-channels`\n- `allow-delete-channel`\n- `allow-create-channel`\n- `allow-permission-state`"
+          "markdownDescription": "This permission set configures which\nnotification features are by default exposed.\n\n#### Granted Permissions\n\nIt allows all notification related features.\n\n\n#### This default permission set includes:\n\n- `allow-is-permission-granted`\n- `allow-request-permission`\n- `allow-notify`\n- `allow-register-action-types`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-cancel`\n- `allow-get-pending`\n- `allow-remove-active`\n- `allow-get-active`\n- `allow-check-permissions`\n- `allow-show`\n- `allow-batch`\n- `allow-list-channels`\n- `allow-delete-channel`\n- `allow-create-channel`\n- `allow-permission-state`"
         },
         {
           "description": "Enables the batch command without any pre-configured scope.",
@@ -2347,6 +3157,12 @@
           "type": "string",
           "const": "notification:allow-remove-active",
           "markdownDescription": "Enables the remove_active command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "notification:allow-remove-listener",
+          "markdownDescription": "Enables the remove_listener command without any pre-configured scope."
         },
         {
           "description": "Enables the request_permission command without any pre-configured scope.",
@@ -2443,6 +3259,12 @@
           "type": "string",
           "const": "notification:deny-remove-active",
           "markdownDescription": "Denies the remove_active command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "notification:deny-remove-listener",
+          "markdownDescription": "Denies the remove_listener command without any pre-configured scope."
         },
         {
           "description": "Denies the request_permission command without any pre-configured scope.",

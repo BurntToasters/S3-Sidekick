@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-upload-object-bytes"
+description = "Enables the upload_object_bytes command without any pre-configured scope."
+commands.allow = ["upload_object_bytes"]
+
+[[permission]]
+identifier = "deny-upload-object-bytes"
+description = "Denies the upload_object_bytes command without any pre-configured scope."
+commands.deny = ["upload_object_bytes"]

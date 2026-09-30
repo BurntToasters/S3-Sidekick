@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { escapeHtml, getIconHtml, parseJsonArray } from "./utils.ts";
 
 export interface Bookmark {
@@ -11,6 +11,13 @@ export interface Bookmark {
 }
 
 let bookmarks: Bookmark[] = [];
+/**
+ * Why the last load could not read the stored bookmarks, or null when it
+ * could. While set, mutations are refused: saving the in-memory (empty) list
+ * would overwrite the only stored copies, including encrypted ones the
+ * backend deliberately refused to read.
+ */
+let loadError: string | null = null;
 let persistPromise: Promise<void> = Promise.resolve();
 let onChangeCallback: (() => void) | null = null;
 export const MAX_IMPORT_BYTES = 1_048_576;
@@ -32,6 +39,29 @@ export function getBookmarks(): Bookmark[] {
 
 export function clearBookmarks(): void {
   bookmarks = [];
+  // Cleared on lock: nothing is loaded, so nothing may be saved over storage.
+  loadError = "Encrypted storage is locked.";
+}
+
+export function getBookmarkLoadError(): string | null {
+  return loadError;
+}
+
+function requireBookmarksLoaded(): void {
+  if (loadError !== null) {
+    throw new Error(
+      `Saved bookmarks could not be loaded (${loadError}) Resolve that before changing bookmarks.`,
+    );
+  }
+}
+
+function sameBookmark(
+  left: Pick<Bookmark, "endpoint" | "access_key">,
+  right: Pick<Bookmark, "endpoint" | "access_key">,
+): boolean {
+  return (
+    left.endpoint === right.endpoint && left.access_key === right.access_key
+  );
 }
 
 export function isEndpointBookmarked(
@@ -102,18 +132,29 @@ async function saveBookmarksBackupSafe(next: Bookmark[]): Promise<void> {
 }
 
 export async function loadBookmarks(): Promise<void> {
+  let primaryError: string | null = null;
   try {
     const raw = await invoke<string>("load_bookmarks");
     const primary = parseBookmarksArray(raw);
     if (primary !== null) {
       bookmarks = primary;
+      loadError = null;
       await saveBookmarksBackupSafe(bookmarks);
       return;
     }
-  } catch {
-    // primary unavailable (vault locked or IO error) — fall through to backup
+    if (raw.trim().length > 0) primaryError = "the bookmark file is corrupt.";
+  } catch (err) {
+    // Primary unavailable (vault locked or IO error): fall through to backup.
+    primaryError = `${err instanceof Error ? err.message : String(err)}`;
   }
-  bookmarks = (await loadBackupBookmarks()) ?? [];
+  const backup = await loadBackupBookmarks();
+  if (backup !== null) {
+    bookmarks = backup;
+    loadError = null;
+    return;
+  }
+  bookmarks = [];
+  loadError = primaryError;
 }
 
 async function persistBookmarksSnapshot(next: Bookmark[]): Promise<void> {
@@ -141,6 +182,7 @@ function enqueueBookmarkMutation<T>(work: () => Promise<T>): Promise<T> {
 
 export async function addBookmark(bookmark: Bookmark): Promise<boolean> {
   return enqueueBookmarkMutation(async () => {
+    requireBookmarksLoaded();
     const exists = bookmarks.some(
       (b) =>
         b.endpoint === bookmark.endpoint &&
@@ -155,10 +197,16 @@ export async function addBookmark(bookmark: Bookmark): Promise<boolean> {
   });
 }
 
-export async function removeBookmark(index: number): Promise<void> {
+/// Remove by identity, not list position: a queued second delete (or a
+/// render older than the list) must never hit whichever bookmark shifted
+/// into the clicked slot.
+export async function removeBookmark(
+  target: Pick<Bookmark, "endpoint" | "access_key">,
+): Promise<void> {
   return enqueueBookmarkMutation(async () => {
-    if (index < 0 || index >= bookmarks.length) return;
-    const next = bookmarks.filter((_, i) => i !== index);
+    requireBookmarksLoaded();
+    if (!bookmarks.some((b) => sameBookmark(b, target))) return;
+    const next = bookmarks.filter((b) => !sameBookmark(b, target));
     await persistBookmarksSnapshot(next);
     bookmarks = next;
     onChangeCallback?.();
@@ -240,6 +288,7 @@ export async function importBookmarksJson(
 
   try {
     return await enqueueBookmarkMutation(async () => {
+      requireBookmarksLoaded();
       let imported = 0;
       let skipped = 0;
       const nextBookmarks = [...bookmarks];
@@ -277,10 +326,13 @@ export async function importBookmarksJson(
 export function renderBookmarkList(
   listEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
-  onDelete: (index: number) => void,
+  onDelete: (bookmark: Bookmark) => void,
   options: { emptyMessage?: string } = {},
 ): void {
-  if (bookmarks.length === 0) {
+  // Handlers resolve rows against this render's snapshot, so a click on a
+  // list rendered before a change still names the bookmark it shows.
+  const rendered = [...bookmarks];
+  if (rendered.length === 0) {
     const message = options.emptyMessage ?? "No bookmarks saved";
     listEl.innerHTML = `<li class="bookmark-empty">${escapeHtml(message)}</li>`;
     listEl.onkeydown = null;
@@ -288,7 +340,7 @@ export function renderBookmarkList(
     return;
   }
 
-  listEl.innerHTML = bookmarks
+  listEl.innerHTML = rendered
     .map((b, i) => {
       const regionPart = b.region ? ` (${escapeHtml(b.region)})` : "";
       return `<li class="bookmark-item" data-index="${i}" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
@@ -308,8 +360,8 @@ export function renderBookmarkList(
     if (deleteBtn) {
       e.stopPropagation();
       const idx = parseInt(deleteBtn.dataset.delete!, 10);
-      if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
-        onDelete(idx);
+      if (Number.isInteger(idx) && idx >= 0 && idx < rendered.length) {
+        onDelete(rendered[idx]);
       }
       return;
     }
@@ -319,8 +371,8 @@ export function renderBookmarkList(
     if (item) {
       highlightBookmarkListItem(listEl, item);
       const idx = parseInt(item.dataset.index!, 10);
-      if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
-        onSelect(bookmarks[idx]);
+      if (Number.isInteger(idx) && idx >= 0 && idx < rendered.length) {
+        onSelect(rendered[idx]);
       }
     }
   };
@@ -334,8 +386,8 @@ export function renderBookmarkList(
     e.preventDefault();
     highlightBookmarkListItem(listEl, item);
     const idx = parseInt(item.dataset.index!, 10);
-    if (Number.isInteger(idx) && idx >= 0 && idx < bookmarks.length) {
-      onSelect(bookmarks[idx]);
+    if (Number.isInteger(idx) && idx >= 0 && idx < rendered.length) {
+      onSelect(rendered[idx]);
     }
   };
 }

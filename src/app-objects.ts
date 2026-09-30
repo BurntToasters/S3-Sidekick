@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { save } from "@tauri-apps/plugin-dialog";
 import { state } from "./state.ts";
 import {
@@ -30,11 +30,16 @@ import {
   getSelectedPrefixes,
 } from "./app-selection.ts";
 import {
+  promptUnguardedWrite,
   resolveAbsentObjectWriteIntent,
   resolveObjectConflict,
   resolveConflictChoice,
   type ConflictPromptSession,
 } from "./app-conflicts.ts";
+import {
+  SMALL_OBJECT_BYTE_LENGTH,
+  isCreateOnlyUnsupportedError,
+} from "./create-only-capabilities.ts";
 
 interface DeleteResult {
   deleted: number;
@@ -552,7 +557,7 @@ export async function handleRename(): Promise<void> {
       const intent = await resolveAbsentObjectWriteIntent(
         conflictSession,
         false,
-        { operation: "copy" },
+        { operation: "copy", byteLength: SMALL_OBJECT_BYTE_LENGTH },
       );
       if (targetLocationChanged()) {
         setStatus("Folder rename cancelled because location changed.", 5000);
@@ -575,12 +580,31 @@ export async function handleRename(): Promise<void> {
 
     try {
       setStatus(`Renaming folder "${folderName}"...`);
-      await invokeS3For(target.connectionId, "rename_prefix", {
-        bucket: targetBucket,
-        oldPrefix,
-        newPrefix,
-        overwrite,
-      });
+      const renamePrefix = (withOverwrite: boolean): Promise<unknown> =>
+        invokeS3For(target.connectionId, "rename_prefix", {
+          bucket: targetBucket,
+          oldPrefix,
+          newPrefix,
+          overwrite: withOverwrite,
+        });
+      try {
+        await renamePrefix(overwrite);
+      } catch (err) {
+        // The folder holds an object too large for this provider's
+        // create-only copy; the backend rolled back, so ask and retry.
+        if (overwrite || !isCreateOnlyUnsupportedError(err)) throw err;
+        if (targetLocationChanged()) return;
+        const { proceed } = await promptUnguardedWrite();
+        if (targetLocationChanged()) return;
+        if (!proceed) {
+          setStatus(
+            "Folder rename cancelled: unconditional write was not authorized.",
+            5000,
+          );
+          return;
+        }
+        await renamePrefix(true);
+      }
       if (targetLocationChanged()) return;
       setStatus(`Renamed folder to "${newName}".`, 5000);
       logActivity(`Renamed folder "${folderName}" to "${newName}".`, "success");
@@ -648,7 +672,9 @@ export async function handleCreateFolder(): Promise<void> {
     folderKey,
     conflictSession,
     false,
-    { operation: "upload" },
+    // A folder marker is always zero bytes, so only single-PUT create-only
+    // support matters (MinIO and others guard it even without multipart).
+    { operation: "upload", byteLength: SMALL_OBJECT_BYTE_LENGTH },
   );
   if (targetLocationChanged()) {
     setStatus("Folder creation cancelled because location changed.", 5000);
@@ -686,24 +712,29 @@ export async function handleCreateFolder(): Promise<void> {
   } catch (err) {
     if (targetLocationChanged()) return;
     const message = friendlyError(err);
+    // Match the raw backend error: the friendly form can be rewritten by
+    // words inside the folder name itself (e.g. "error-500-logs").
+    const rawMessage = err instanceof Error ? err.message : String(err);
     // A create-only probe can lose a race, or the provider may lack atomic
     // create-only support: surface the same overwrite-retry consent used by
     // Put/Copy instead of failing silently.
+    const unsupported = isCreateOnlyUnsupportedError(err);
     const needsOverwriteRetry =
-      !intent.overwrite &&
-      (/already exists/i.test(message) ||
-        /cannot enforce a create-only/i.test(message) ||
-        /unconditional write/i.test(message));
+      !intent.overwrite && (unsupported || /already exists/i.test(rawMessage));
     if (needsOverwriteRetry) {
-      const replace = await showConfirm(
-        "Folder Exists",
-        `${targetBucket}/${folderKey} already exists or cannot be created without overwrite. Replace it?`,
-        { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
-      );
+      const replace = unsupported
+        ? (await promptUnguardedWrite()).proceed
+        : await showConfirm(
+            "Folder Exists",
+            `${targetBucket}/${folderKey} already exists. Replace it?`,
+            { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
+          );
       if (targetLocationChanged()) return;
       if (!replace) {
         setStatus(
-          `Folder creation skipped: "${trimmed}" already exists.`,
+          unsupported
+            ? "Folder creation cancelled: unconditional write was not authorized."
+            : `Folder creation skipped: "${trimmed}" already exists.`,
           5000,
         );
         return;

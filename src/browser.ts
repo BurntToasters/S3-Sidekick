@@ -1282,12 +1282,15 @@ export function renderBreadcrumb(): void {
   );
 
   if (state.currentPrefix) {
-    const segments = state.currentPrefix.split("/").filter(Boolean);
+    // Keep empty segments: S3 keys may contain "//", and dropping the empty
+    // part would build crumbs for prefixes that do not exist.
+    const segments = state.currentPrefix.replace(/\/$/, "").split("/");
     let accumulated = "";
     for (const seg of segments) {
       accumulated += seg + "/";
+      const label = seg === "" ? "(empty)" : seg;
       parts.push(
-        `<span class="breadcrumb__sep">/</span><button type="button" class="breadcrumb__segment" data-prefix="${escapeHtml(accumulated)}" title="${escapeHtml(accumulated)}" aria-label="Open folder ${escapeHtml(seg)}">${escapeHtml(seg)}</button>`,
+        `<span class="breadcrumb__sep">/</span><button type="button" class="breadcrumb__segment" data-prefix="${escapeHtml(accumulated)}" title="${escapeHtml(accumulated)}" aria-label="Open folder ${escapeHtml(label)}">${escapeHtml(label)}</button>`,
       );
     }
   }

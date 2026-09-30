@@ -24,6 +24,7 @@ const mockUpdateSelectionUI = vi.fn();
 
 vi.mock("../context-menu.ts", () => ({
   hideContextMenu: mockHideContextMenu,
+  isContextMenuOpen: () => false,
 }));
 
 vi.mock("../dialogs.ts", () => ({
