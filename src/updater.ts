@@ -7,7 +7,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { state } from "./state.ts";
 import { logActivity } from "./activity-log.ts";
 import { type UpdateChannel } from "./settings-model.ts";

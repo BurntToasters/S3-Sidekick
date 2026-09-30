@@ -134,6 +134,9 @@ jobs:
       - name: Run browser layout harness
         run: npm run test:ui
 
+      - name: Run script E2E suites
+        run: npm run test:e2e:scripts
+
       - name: Upload browser diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -144,3 +147,192 @@ jobs:
             playwright-report/
           if-no-files-found: ignore
           retention-days: 7
+
+  minio-e2e:
+    name: S3 command layer E2E (MinIO)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install pinned npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          cache-targets: false
+          prefix-key: v2-minio-e2e
+          key: ${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libdbus-1-dev
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # The Tauri context embeds the built frontend at compile time.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run MinIO E2E suite
+        run: npm run test:e2e:minio
+
+      - name: Upload MinIO E2E report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: minio-e2e-report
+          path: test-results/minio-e2e/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  fullstack-e2e:
+    name: Full-stack E2E (real app + MinIO)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install pinned npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          cache-targets: false
+          prefix-key: v2-fullstack-e2e
+          key: ${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install Linux dependencies and WebDriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libdbus-1-dev \
+            webkit2gtk-driver \
+            xvfb
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --version 2.1.0 --locked
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build debug app
+        run: npm run tauri -- build --debug --no-bundle -- --locked
+
+      - name: Run full-stack E2E
+        run: xvfb-run --auto-servernum npm run test:e2e:fullstack
+
+      - name: Upload full-stack report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fullstack-e2e-report
+          path: test-results/fullstack/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  rust-coverage:
+    name: Rust coverage (report only)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install pinned npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: llvm-tools-preview
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libdbus-1-dev
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --version 0.9.1 --locked
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # The Tauri context embeds the built frontend at compile time.
+      - name: Build frontend
+        run: npm run build
+
+      # Report only: no threshold yet. Establish a baseline before gating.
+      - name: Measure Rust coverage
+        run: |
+          cargo llvm-cov --locked --manifest-path src-tauri/Cargo.toml --summary-only | tee rust-coverage.txt
+          cargo llvm-cov report --manifest-path src-tauri/Cargo.toml --lcov --output-path rust-coverage.lcov
+          tail -n 3 rust-coverage.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Rust coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-coverage
+          path: |
+            rust-coverage.txt
+            rust-coverage.lcov
+          retention-days: 14

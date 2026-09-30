@@ -54,7 +54,7 @@ export function closePalette(): void {
   // keyboard users land back where they were instead of losing focus).
   const restore = previouslyFocused;
   previouslyFocused = null;
-  if (restore && restore.isConnected) {
+  if (restore?.isConnected) {
     restore.focus();
   }
 }

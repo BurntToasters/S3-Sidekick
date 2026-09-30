@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { invokeS3For } from "./connection.ts";
 import { state } from "./state.ts";
 import { showConfirm, showConfirmWithCheckbox } from "./dialogs.ts";

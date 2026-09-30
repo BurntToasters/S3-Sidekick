@@ -1,5 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { showConfirm, showPrompt, showAlert } from "./dialogs.ts";
+import { state } from "./state.ts";
 
 export interface SecurityStatus {
   initialized: boolean;
@@ -652,7 +653,8 @@ export function noteManualLock(): void {
  * the user can see: decrypted bookmarks stay in memory and the S3 session
  * stays live. This polls the vault state and runs `onLocked` (disconnect,
  * clear secrets, re-prompt) when an inactivity timeout has locked it. User
- * input counts as activity, so the timeout measures idle time.
+ * input and running transfers count as activity, so the timeout measures
+ * idle time.
  */
 export function startAutoLockWatcher(onLocked: () => Promise<void>): void {
   if (autoLockTimer !== null) return;
@@ -669,7 +671,15 @@ export function startAutoLockWatcher(onLocked: () => Promise<void>): void {
 
   autoLockTimer = setInterval(() => {
     if (handling) return;
-    void getSecurityStatus()
+    // A running transfer counts as activity. Locking would disconnect the
+    // session and interrupt it (uploads restart from zero); the timeout
+    // starts once the queue is idle.
+    const keepAlive: Promise<unknown> =
+      state.runningTransferCount > 0
+        ? invoke("touch_security_activity").catch(() => undefined)
+        : Promise.resolve();
+    void keepAlive
+      .then(() => getSecurityStatus())
       .then(async (status) => {
         const unlocked = !status.encryption_enabled || status.unlocked;
         const wasUnlocked = lastSeenUnlocked;

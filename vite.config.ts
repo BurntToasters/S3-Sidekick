@@ -1,5 +1,5 @@
 import { defineConfig } from "vite";
-import { resolve } from "path";
+import { resolve } from "node:path";
 
 export default defineConfig({
   root: "src",
@@ -12,9 +12,9 @@ export default defineConfig({
     // trivial split point — manualChunks would only add file:// fetch hops
     // in the Tauri webview without shrinking the initial parse. Revisit if a
     // second heavy route (e.g. a standalone viewer) lands.
-    rollupOptions: {
+    rolldownOptions: {
       input: {
-        main: resolve(__dirname, "src/index.html"),
+        main: resolve(import.meta.dirname, "src/index.html"),
       },
     },
   },

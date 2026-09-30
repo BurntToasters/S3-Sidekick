@@ -42,6 +42,28 @@ export default [
       ],
       // Empty catches hide failures; require a reason comment or logging.
       "no-empty": ["error", { allowEmptyCatch: false }],
+      // Native calls go through the typed wrapper so command names and
+      // argument keys are checked against the generated Rust contract.
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@tauri-apps/api/core",
+              importNames: ["invoke"],
+              message:
+                "Import invoke from ./ipc.ts; it is typed against src/generated/ipc-contract.ts.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // The typed wrapper itself, and unit tests that mock the raw module.
+    files: ["src/ipc.ts", "src/tests/**/*.ts"],
+    rules: {
+      "no-restricted-imports": "off",
     },
   },
   {

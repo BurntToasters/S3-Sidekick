@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { applyTheme, saveSettings } from "./settings.ts";
 import { state } from "./state.ts";
 import type { ThemePreference } from "./settings-model.ts";

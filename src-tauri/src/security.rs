@@ -200,7 +200,25 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.ct_eq(right).into()
 }
 
-fn key_state() -> &'static Mutex<KeyState> {
+/// The vault key, locked through the global lock order (innermost rank).
+struct KeyStateLock(&'static Mutex<KeyState>);
+
+impl KeyStateLock {
+    fn lock(
+        &self,
+    ) -> Result<
+        crate::lock_order::OrderedGuard<'static, KeyState>,
+        std::sync::PoisonError<std::sync::MutexGuard<'static, KeyState>>,
+    > {
+        crate::lock_order::OrderedGuard::lock(self.0, crate::lock_order::LockRank::KeyState)
+    }
+}
+
+fn key_state() -> KeyStateLock {
+    KeyStateLock(key_state_mutex())
+}
+
+fn key_state_mutex() -> &'static Mutex<KeyState> {
     KEY_STATE.get_or_init(|| {
         Mutex::new(KeyState {
             key: None,

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { state, dom } from "./state.ts";
 import {
@@ -148,7 +148,8 @@ export async function clearSessionAfterAutoLock(): Promise<void> {
   refreshBookmarkBar();
 }
 
-export function wireEvents(): void {
+/** Connection form: connect, credentials, provider presets, saved list. */
+function wireConnectionForm(): void {
   dom.connectBtn.addEventListener("click", handleConnect);
   dom.disconnectBtn.addEventListener("click", handleDisconnect);
 
@@ -245,6 +246,10 @@ export function wireEvents(): void {
   document
     .getElementById("settings-btn")!
     .addEventListener("click", openSettingsModal);
+}
+
+/** Settings modal tabs and fields. */
+function wireSettingsModal(): void {
   const settingsTabs = document.querySelector<HTMLElement>(".settings-tabs");
   settingsTabs!.addEventListener("click", (e) => {
     const tab = (e.target as HTMLElement).closest<HTMLElement>(".settings-tab");
@@ -324,6 +329,10 @@ export function wireEvents(): void {
   document
     .getElementById("info-save")!
     .addEventListener("click", saveInfoPanel);
+}
+
+/** Info overlay and the bottom activity drawer. */
+function wireOverlaysAndDrawer(): void {
   document.getElementById("info-overlay")!.addEventListener("click", (e) => {
     if (e.target === e.currentTarget) void requestCloseInfoPanel();
   });
@@ -366,6 +375,10 @@ export function wireEvents(): void {
     console.error("Failed to initialize transfer queue UI:", err);
     logActivity(`Transfer queue events unavailable: ${String(err)}`, "warning");
   });
+}
+
+/** Security-ready and unload hooks. */
+function wireAppLifecycle(): void {
   window.addEventListener("s3-sidekick:security-ready", () => {
     void recoverPendingTransfers().catch((err) => {
       console.error("Failed to recover pending transfers:", err);
@@ -386,6 +399,10 @@ export function wireEvents(): void {
   document
     .getElementById("preview-close")!
     .addEventListener("click", closePreview);
+}
+
+/** Preview overlay and batch selection actions. */
+function wireSelectionActions(): void {
   document.getElementById("preview-overlay")!.addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closePreview();
   });
@@ -465,7 +482,10 @@ export function wireEvents(): void {
       batchMore.setAttribute("aria-expanded", "true");
     });
   }
+}
 
+/** Vault, biometric and lock controls in Settings. */
+function wireSecuritySettings(): void {
   document.getElementById("security-toggle")!.addEventListener("click", () => {
     void (async () => {
       const changed = await handleSecurityToggle(setStatus);
@@ -531,7 +551,10 @@ export function wireEvents(): void {
   document
     .getElementById("nav-up")
     ?.addEventListener("click", () => void navigateUp());
+}
 
+/** Location omnibar, path input, filters and paging. */
+function wireLocationAndFilters(): void {
   const pathInput = document.getElementById(
     "location-omnibar-edit",
   ) as HTMLInputElement | null;
@@ -638,7 +661,10 @@ export function wireEvents(): void {
       if (col) toggleSort(col);
     });
   });
+}
 
+/** Bucket list selection and context menu. */
+function wireBucketList(): void {
   dom.bucketList.addEventListener("click", (e) => {
     const button = (e.target as HTMLElement).closest<HTMLElement>(
       ".list__item-btn",
@@ -683,7 +709,10 @@ export function wireEvents(): void {
       });
   });
   dom.bucketPanel.addEventListener("contextmenu", handleBucketContextMenu);
+}
 
+/** Object table clicks, keys, selection and breadcrumb. */
+function wireObjectTable(): void {
   dom.objectTbody.addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
     const row = target.closest<HTMLElement>(".object-row");
@@ -824,7 +853,10 @@ export function wireEvents(): void {
       });
     }
   });
+}
 
+/** Drag-and-drop uploads onto the object panel. */
+function wireDropUpload(): void {
   const objectPanel = dom.objectPanel;
   const dropOverlay = document.getElementById(
     "drop-zone-overlay",
@@ -884,7 +916,10 @@ export function wireEvents(): void {
         "warning",
       );
     });
+}
 
+/** Transfer completion refresh and notifications. */
+function wireTransferCompletion(): void {
   setTransferCompleteHandler(async (summary) => {
     if (
       (summary.hadUpload || summary.hadListingChange) &&
@@ -960,11 +995,10 @@ export function wireEvents(): void {
       );
     }
   });
+}
 
-  wireLayoutControls();
-  wireInspectorControls();
-  wireInspectorChrome();
-
+/** Command palette entries and their shortcuts. */
+function wireCommandPalette(): void {
   initPalette();
   const isMac = state.platformName === "macos";
   const accelLabel = isMac ? "⌘" : "Ctrl+";
@@ -1137,6 +1171,26 @@ export function wireEvents(): void {
       available: () => state.connected && state.currentPrefix.length > 0,
     },
   ]);
+}
+
+export function wireEvents(): void {
+  wireConnectionForm();
+  wireSettingsModal();
+  wireOverlaysAndDrawer();
+  wireAppLifecycle();
+  wireSelectionActions();
+  wireSecuritySettings();
+  wireLocationAndFilters();
+  wireBucketList();
+  wireObjectTable();
+  wireDropUpload();
+  wireTransferCompletion();
+
+  wireLayoutControls();
+  wireInspectorControls();
+  wireInspectorChrome();
+
+  wireCommandPalette();
 
   initModalLayerObserver();
 

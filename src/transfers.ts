@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { invokeS3For } from "./connection.ts";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { escapeHtml, getIconHtml, isLocalEndpoint } from "./utils.ts";
@@ -13,6 +13,21 @@ import {
 } from "./bottom-drawer.ts";
 import { showConfirm } from "./dialogs.ts";
 import { promptUnguardedWrite } from "./app-conflicts.ts";
+import {
+  claim,
+  holdAfterCancelFailure,
+  isClaimable,
+  markCancelled,
+  markDone,
+  markFailed,
+  markSkipped,
+  park,
+  pause,
+  releaseHold,
+  requeueAfterPause,
+  resetForRetry,
+  resume,
+} from "./transfer-state.ts";
 import { showContextMenu } from "./context-menu.ts";
 import {
   isTransfersHintDismissed,
@@ -625,6 +640,11 @@ function offlineHoldActive(): boolean {
   return offlineHold && !isLocalEndpoint(state.endpoint);
 }
 
+/// Nothing may start: paused queue, offline hold, or a disconnect in progress.
+function queueHeld(): boolean {
+  return queuePaused || offlineHoldActive() || state.transfersHeldForDisconnect;
+}
+
 function syncOfflineHold(): void {
   if (
     typeof navigator !== "undefined" &&
@@ -697,12 +717,7 @@ function delayCancellable(ms: number, item: TransferItem): Promise<void> {
   return new Promise<void>((resolve) => {
     const timer = setTimeout(cleanupAndResolve, ms);
     const probe = setInterval(() => {
-      if (
-        item.cancelRequested ||
-        item.paused ||
-        queuePaused ||
-        offlineHoldActive()
-      ) {
+      if (item.cancelRequested || item.paused || queueHeld()) {
         cleanupAndResolve();
       }
     }, 50);
@@ -1232,7 +1247,9 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
     size: item.size,
     status: item.failed ? "error" : "queued",
     error: item.failed
-      ? item.error || "Transfer failed before the previous session ended."
+      ? item.error?.trim()
+        ? item.error
+        : "Transfer failed before the previous session ended."
       : undefined,
     progress: 0,
     totalBytes: item.totalBytes,
@@ -1630,10 +1647,7 @@ async function resumeRecoveredTransfersOnce(): Promise<void> {
       // Keep them parked, not queued: unbound rows cannot run, and a worker
       // claiming them would fail them for a missing account identity.
       for (const item of legacyItems) {
-        if (item.status === "queued") {
-          item.paused = true;
-          item.phase = "paused";
-        }
+        if (item.status === "queued") pause(item);
       }
       writeQueueManifest();
       queueRender();
@@ -1654,8 +1668,7 @@ async function resumeRecoveredTransfersOnce(): Promise<void> {
       item.legacyConnectionUnbound = false;
       if (item.status === "queued" && item.paused) {
         // Parked by an earlier "Keep for later"; binding releases them.
-        item.paused = false;
-        item.phase = "running";
+        releaseHold(item);
       }
     }
     try {
@@ -1678,8 +1691,7 @@ async function resumeRecoveredTransfersOnce(): Promise<void> {
   for (const item of queue) {
     if (item.status !== "queued" || item.paused) continue;
     if (item.connectionIdentity !== state.connectionIdentity) {
-      item.paused = true;
-      item.phase = "paused";
+      pause(item);
       mismatched += 1;
       continue;
     }
@@ -1832,10 +1844,7 @@ function pauseAllTransfers(): void {
     // them run to completion. Downloads resume cleanly, so cancelling them to
     // pause is safe; queued items simply stay queued.
     if (item.operation === "upload" && item.status === "uploading") continue;
-    item.paused = true;
-    item.phase = "paused";
-    if (item.status === "uploading") {
-      item.pauseCancelInFlight = true;
+    if (pause(item)) {
       void invoke("cancel_transfer", { transferId: item.id }).catch(
         () => undefined,
       );
@@ -1848,19 +1857,7 @@ function pauseAllTransfers(): void {
 function resumeAllTransfers(): void {
   queuePaused = false;
   for (const item of queue) {
-    if (!item.paused) continue;
-    item.paused = false;
-    item.cancelRequested = false;
-    if (
-      item.status === "error" &&
-      item.error?.toLowerCase().includes("cancel")
-    ) {
-      item.status = "queued";
-      item.error = undefined;
-    }
-    if (item.status === "queued") {
-      item.phase = "resuming";
-    }
+    if (item.paused) resume(item);
   }
   queueRender();
   writeQueueManifest();
@@ -1873,17 +1870,7 @@ function togglePauseTransferItem(id: number): void {
   const item = queue.find((row) => row.id === id);
   if (!item) return;
   if (item.paused) {
-    item.paused = false;
-    item.cancelRequested = false;
-    if (
-      item.status === "error" &&
-      item.error?.toLowerCase().includes("cancel")
-    ) {
-      item.status = "queued";
-      item.error = undefined;
-    }
-    if (item.status === "queued") {
-      item.phase = "resuming";
+    if (resume(item)) {
       void processQueue().catch((err) =>
         logActivity(
           `Transfer processing error: ${normalizeError(err)}`,
@@ -1898,10 +1885,7 @@ function togglePauseTransferItem(id: number): void {
     if (item.operation === "upload" && item.status === "uploading") {
       return;
     }
-    item.paused = true;
-    item.phase = "paused";
-    if (item.status === "uploading") {
-      item.pauseCancelInFlight = true;
+    if (pause(item)) {
       void invoke("cancel_transfer", { transferId: item.id }).catch(
         () => undefined,
       );
@@ -1914,14 +1898,7 @@ function togglePauseTransferItem(id: number): void {
 export function retryFailedTransfers(): void {
   for (const item of queue) {
     if (item.status !== "error") continue;
-    item.status = "queued";
-    item.error = undefined;
-    item.progress = 0;
-    item.speedBps = 0;
-    item.etaSeconds = null;
-    item.paused = false;
-    item.cancelRequested = false;
-    item.phase = "running";
+    resetForRetry(item, { clearPause: true });
   }
   queueRender();
   writeQueueManifest();
@@ -1933,13 +1910,7 @@ export function retryFailedTransfers(): void {
 export function retrySkippedTransfers(): void {
   for (const item of queue) {
     if (item.status !== "skipped") continue;
-    item.status = "queued";
-    item.error = undefined;
-    item.progress = 0;
-    item.speedBps = 0;
-    item.etaSeconds = null;
-    item.cancelRequested = false;
-    item.phase = "running";
+    resetForRetry(item, { clearPause: false });
   }
   queueRender();
   writeQueueManifest();
@@ -2430,24 +2401,11 @@ async function processQueue(): Promise<void> {
   }
 
   function claimNextItem(): TransferItem | null {
-    if (
-      queuePaused ||
-      offlineHoldActive() ||
-      state.transfersHeldForDisconnect
-    ) {
-      return null;
-    }
+    if (queueHeld()) return null;
     // A queued row being cancelled stays "queued" while its cleanup IPC runs;
     // claiming it then would run (or prompt for) a transfer the user dropped.
-    const item = queue.find(
-      (t) => t.status === "queued" && !t.paused && !t.cancelRequested,
-    );
-    if (item) {
-      item.status = "uploading";
-      item.pauseCancelInFlight = false;
-      item.phase = item.phase === "resuming" ? "resuming" : "running";
-      item.error = undefined;
-    }
+    const item = queue.find(isClaimable);
+    if (item) claim(item);
     return item ?? null;
   }
 
@@ -2466,6 +2424,9 @@ async function processQueue(): Promise<void> {
 
       try {
         const completed = await runItemWithRetry(item);
+        // A run that parked before reaching the backend (paused again,
+        // offline) has not consumed the pending cancel yet; keep the flag.
+        if (completed) item.pauseCancelInFlight = false;
         if (completed && item.operation === "download") {
           completedDownloadThisRun = true;
           downloadCount += 1;
@@ -2492,28 +2453,18 @@ async function processQueue(): Promise<void> {
         }
       } catch (err) {
         const errorText = normalizeError(err);
+        const pauseCancelled = item.pauseCancelInFlight === true;
+        item.pauseCancelInFlight = false;
         if (item.cancelRequested) {
           try {
             await discardTransferRecoveryState(item);
-            item.status = "error";
-            item.phase = "finalizing";
-            item.error = "Cancelled";
-            item.browserFile = undefined;
+            markCancelled(item, "finalizing");
           } catch (cleanupErr) {
             if (isNothingToDiscardError(cleanupErr)) {
-              item.status = "error";
-              item.phase = "finalizing";
-              item.error = "Cancelled";
-              item.browserFile = undefined;
+              markCancelled(item, "finalizing");
             } else {
               const cleanupMessage = `Cancellation cleanup failed: ${normalizeError(cleanupErr)}`;
-              // Keep this item recoverable and cancellable. Excluding it from the
-              // manifest here would orphan scratch/checkpoint state.
-              item.status = "queued";
-              item.phase = "paused";
-              item.paused = true;
-              item.cancelRequested = false;
-              item.error = cleanupMessage;
+              holdAfterCancelFailure(item, cleanupMessage);
               logActivity(
                 `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(cleanupErr)}`,
                 "error",
@@ -2528,22 +2479,16 @@ async function processQueue(): Promise<void> {
         ) {
           // Interrupted by disconnect: park it for the next connection
           // instead of failing every queued item at once.
-          item.status = "queued";
-          item.phase = "paused";
-          item.error = "Disconnected — waiting to reconnect";
+          park(item, "disconnected");
         } else if (
-          (item.paused || item.pauseCancelInFlight) &&
+          (item.paused || pauseCancelled) &&
           /cancel/i.test(errorText)
         ) {
           // Stopped by a pause. If the user already resumed, requeue it to
           // run again instead of reporting the expected cancellation.
-          item.status = "queued";
-          item.phase = item.paused ? "paused" : "resuming";
-          item.error = item.paused ? "Paused" : undefined;
+          requeueAfterPause(item);
         } else {
-          item.status = "error";
-          item.error = errorText;
-          item.browserFile = undefined;
+          markFailed(item, errorText);
           errorCount += 1;
           const opLabel =
             item.operation === "download"
@@ -2569,11 +2514,7 @@ async function processQueue(): Promise<void> {
   // An enqueue continuation can land after the last worker claimed null but
   // before `processing` is cleared; without this drain loop that item would sit
   // queued until an unrelated pause/resume/online event arrived.
-  while (
-    !queuePaused &&
-    !offlineHoldActive() &&
-    queue.some((t) => t.status === "queued" && !t.paused)
-  ) {
+  while (!queueHeld() && queue.some(isClaimable)) {
     const drain: Promise<void>[] = [];
     for (let i = 0; i < maxConcurrent; i += 1) {
       drain.push(runWorker());
@@ -2627,19 +2568,15 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
   item.maxAttempts = maxAttempts;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (
-      item.paused ||
-      queuePaused ||
-      offlineHoldActive() ||
-      state.transfersHeldForDisconnect
-    ) {
-      item.status = "queued";
-      item.phase = "paused";
-      if (offlineHoldActive() && !item.paused && !queuePaused) {
-        item.error = "Offline — waiting for connection";
-      } else if (state.transfersHeldForDisconnect && !item.paused) {
-        item.error = "Disconnected — waiting to reconnect";
-      }
+    if (item.paused || queueHeld()) {
+      park(
+        item,
+        offlineHoldActive() && !item.paused && !queuePaused
+          ? "offline"
+          : state.transfersHeldForDisconnect && !item.paused
+            ? "disconnected"
+            : undefined,
+      );
       return false;
     }
     item.attempt = attempt;
@@ -2689,14 +2626,12 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
       }
       if (outcome === "skip" || outcome === "cancel") {
         const cancelled = outcome === "cancel";
-        item.overwrite = undefined;
-        item.overwriteScope = undefined;
-        item.status = "skipped";
-        item.error = cancelled
-          ? "Cancelled (unconditional write not authorized)"
-          : "Skipped (destination exists)";
-        item.speedBps = 0;
-        item.etaSeconds = null;
+        markSkipped(
+          item,
+          cancelled
+            ? "Cancelled (unconditional write not authorized)"
+            : "Skipped (destination exists)",
+        );
         logActivity(
           `${
             item.operation === "download"
@@ -2727,11 +2662,7 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
         await verifyUploadedObject(item, connectionId);
       }
 
-      item.progress = 100;
-      item.verified = true;
-      item.status = "done";
-      item.speedBps = 0;
-      item.etaSeconds = 0;
+      markDone(item);
 
       if (item.operation === "download") {
         logActivity(`Downloaded ${item.fileName}.`, "success");
@@ -3045,7 +2976,7 @@ async function executeTransfer(
     await invokeS3For(connectionId, "upload_object_bytes", {
       bucket: item.bucket,
       key: item.key,
-      bytes_base64: bytesBase64,
+      bytesBase64,
       contentType,
       transferId: item.id,
       attempt,
@@ -3548,6 +3479,7 @@ function renderQueue(): void {
 
 interface QueueAggregates {
   active: number;
+  running: number;
   failed: number;
   skipped: number;
   attention: number;
@@ -3557,6 +3489,7 @@ interface QueueAggregates {
 function computeQueueAggregates(): QueueAggregates {
   const aggregates: QueueAggregates = {
     active: 0,
+    running: 0,
     failed: 0,
     skipped: 0,
     attention: 0,
@@ -3575,6 +3508,7 @@ function computeQueueAggregates(): QueueAggregates {
       aggregates.attention += 1;
     }
     if (item.status === "uploading") {
+      aggregates.running += 1;
       aggregates.totalSpeed += Math.max(0, item.speedBps);
     }
   }
@@ -3619,6 +3553,7 @@ function updateBadge(
   aggregates: QueueAggregates = computeQueueAggregates(),
 ): void {
   state.activeTransferCount = aggregates.active;
+  state.runningTransferCount = aggregates.running;
   const badgeText =
     aggregates.active > 0
       ? String(aggregates.active)
@@ -3694,25 +3629,18 @@ async function cancelTransferItem(id: number): Promise<void> {
   if (item.status === "queued") {
     try {
       await discardTransferRecoveryState(item);
-      item.status = "error";
-      item.error = "Cancelled";
-      item.browserFile = undefined;
+      markCancelled(item);
     } catch (err) {
       if (isNothingToDiscardError(err)) {
-        item.status = "error";
-        item.error = "Cancelled";
-        item.browserFile = undefined;
+        markCancelled(item);
       } else {
-        item.status = "queued";
-        item.phase = "paused";
-        item.paused = true;
-        item.cancelRequested = false;
-        item.error = `Cancellation cleanup failed: ${normalizeError(err)}`;
+        const cleanupMessage = `Cancellation cleanup failed: ${normalizeError(err)}`;
+        holdAfterCancelFailure(item, cleanupMessage);
         logActivity(
           `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(err)}`,
           "error",
         );
-        showToast(item.error, { type: "error", duration: 0 });
+        showToast(cleanupMessage, { type: "error", duration: 0 });
       }
     }
     renderQueue();

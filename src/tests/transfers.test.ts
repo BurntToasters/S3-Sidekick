@@ -655,7 +655,7 @@ describe("transfers queue UI", () => {
       "upload_object_bytes",
       expect.objectContaining({
         key: "web/small.txt",
-        bytes_base64: "aGVsbG8=",
+        bytesBase64: "aGVsbG8=",
       }),
     );
     await new Promise((resolve) => setTimeout(resolve, 40));
@@ -2346,7 +2346,7 @@ describe("transfer coverage lift", () => {
     const call = mockInvoke.mock.calls.find(
       ([cmd]) => cmd === "upload_object_bytes",
     )?.[1] as Record<string, unknown>;
-    const encoded = call?.bytes_base64 as string;
+    const encoded = call?.bytesBase64 as string;
     expect(typeof encoded).toBe("string");
     const decoded = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
     expect(decoded.length).toBe(40000);

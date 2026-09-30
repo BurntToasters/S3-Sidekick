@@ -21,19 +21,30 @@ function currentHead() {
   }).trim();
 }
 
+/// Tip of the stable release branch. Branch-name assertions resolve against
+/// it rather than HEAD, so they hold on any checked-out branch.
+function stableTip() {
+  return resolveGitRef("main", ROOT) ?? resolveGitRef("origin/main", ROOT);
+}
+
 test("expected release branch maps stable to main and beta to beta", () => {
   assert.equal(expectedReleaseBranch(false), "main");
   assert.equal(expectedReleaseBranch(true), "beta");
 });
 
-test("release target accepts exact commit and canonical branch names", () => {
+test("release target accepts exact commit and canonical branch names", (t) => {
   const head = currentHead();
   assert.equal(
     releaseTargetMatchesCommit(head, head, { isPrerelease: false }),
     true,
   );
+  const mainTip = stableTip();
+  if (!mainTip) {
+    t.skip("no main branch in this clone");
+    return;
+  }
   assert.equal(
-    releaseTargetMatchesCommit("main", head, { isPrerelease: false }),
+    releaseTargetMatchesCommit("main", mainTip, { isPrerelease: false }),
     true,
   );
   const betaTip = resolveGitRef("origin/beta", ROOT);
@@ -61,10 +72,15 @@ test("release target rejects wrong branch for release channel", () => {
   );
 });
 
-test("assertReleaseTargetsHead accepts branch target and FORCE_UPLOAD bypass", () => {
+test("assertReleaseTargetsHead accepts branch target and FORCE_UPLOAD bypass", (t) => {
   const head = currentHead();
+  const mainTip = stableTip();
+  if (!mainTip) {
+    t.skip("no main branch in this clone");
+    return;
+  }
   assert.equal(
-    assertReleaseTargetsHead({ target_commitish: "main" }, head, {
+    assertReleaseTargetsHead({ target_commitish: "main" }, mainTip, {
       isPrerelease: false,
       tag: "v0.11.0",
     }).target_commitish,

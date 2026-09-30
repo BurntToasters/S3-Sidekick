@@ -1,4 +1,11 @@
 import { expect, type Page } from "@playwright/test";
+import type { IpcCommand } from "../../src/generated/ipc-contract.ts";
+
+/**
+ * Commands the mock answers. Typed against the generated Rust contract, so
+ * a renamed or removed native command fails the type check here too.
+ */
+type MockedCommand = IpcCommand | `plugin:${string}`;
 
 export type LayoutScenario = "normal" | "empty" | "loading" | "error";
 
@@ -48,6 +55,23 @@ export interface LayoutMockOptions {
   endpoint?: string;
   /** Native command failures, keyed by command name. */
   errors?: Record<string, string>;
+  /**
+   * Emulate the native transfer registry for `copy_object_to`: running
+   * commands can be cancelled, and a cancel that arrives while nothing is
+   * registered stays pending for 30s and cancels the next command with
+   * that transfer ID (the Rust `pending_cancels` contract).
+   */
+  transferBackend?: {
+    /** Fail this many `copy_object_to` calls with a retryable 503 first. */
+    copyFailures?: number;
+    /** Hold each `copy_object_to` until `releaseMockCopies` is called. */
+    holdCopies?: boolean;
+  };
+  /**
+   * Emulate the native auto-lock: the vault reports locked once this many
+   * ms pass without `touch_security_activity` or an unlock.
+   */
+  autoLockAfterMs?: number;
 }
 
 export interface MockCall {
@@ -69,6 +93,9 @@ interface LayoutMockInit {
   unlockPasswords: string[];
   deferUnlock: boolean;
   errors: Record<string, string>;
+  copyFailures: number;
+  holdCopies: boolean;
+  autoLockAfterMs: number;
 }
 
 /**
@@ -111,6 +138,9 @@ export async function installLayoutTauriMock(
     unlockPasswords: options.unlockPasswords ?? [],
     deferUnlock: options.deferUnlock ?? false,
     errors: options.errors ?? {},
+    copyFailures: options.transferBackend?.copyFailures ?? 0,
+    holdCopies: options.transferBackend?.holdCopies ?? false,
+    autoLockAfterMs: options.autoLockAfterMs ?? 0,
   };
 
   await page.addInitScript(
@@ -128,6 +158,9 @@ export async function installLayoutTauriMock(
       unlockPasswords,
       deferUnlock,
       errors,
+      copyFailures,
+      holdCopies,
+      autoLockAfterMs,
     }: LayoutMockInit) => {
       const callbacks = new Map<number, (value: unknown) => void>();
       const listeners = new Map<string, Set<number>>();
@@ -165,6 +198,7 @@ export async function installLayoutTauriMock(
         callLog: [] as { command: string; args: unknown }[],
         releaseListing: undefined as (() => void) | undefined,
         releaseUnlock: undefined as (() => void) | undefined,
+        releaseCopies: [] as (() => void)[],
         emit: undefined as
           ((event: string, payload: unknown) => void) | undefined,
       };
@@ -187,7 +221,55 @@ export async function installLayoutTauriMock(
         }
       };
 
-      const invoke = async (command: string, args: Record<string, unknown>) => {
+      const PENDING_CANCEL_TTL_MS = 30_000;
+      const runningTransfers = new Map<number, (reason: Error) => void>();
+      const pendingCancels = new Map<number, number>();
+      let copyFailuresLeft = copyFailures;
+      let lastVaultActivity = Date.now();
+      const logEvent = (command: string, args: unknown): void => {
+        testState.callLog.push({ command, args });
+      };
+      const vaultExpired = (): boolean =>
+        autoLockAfterMs > 0 &&
+        securityState.encryption_enabled &&
+        securityState.unlocked &&
+        Date.now() - lastVaultActivity >= autoLockAfterMs;
+      const expireVaultIfIdle = (): void => {
+        if (vaultExpired()) {
+          securityState.unlocked = false;
+          logEvent("mock:auto-locked", null);
+        }
+      };
+      /** Register a native command the way `TransferGuard::register` does. */
+      const runTransfer = async <T>(
+        transferId: number,
+        work: () => Promise<T>,
+      ): Promise<T> => {
+        const pendingAt = pendingCancels.get(transferId);
+        pendingCancels.delete(transferId);
+        if (
+          pendingAt !== undefined &&
+          Date.now() - pendingAt <= PENDING_CANCEL_TTL_MS
+        ) {
+          logEvent("mock:pending-cancel-consumed", { transferId });
+          throw new Error("Transfer cancelled");
+        }
+        let cancel: (reason: Error) => void = () => undefined;
+        const cancelled = new Promise<never>((_, reject) => {
+          cancel = reject;
+        });
+        runningTransfers.set(transferId, cancel);
+        try {
+          return await Promise.race([work(), cancelled]);
+        } finally {
+          runningTransfers.delete(transferId);
+        }
+      };
+
+      const invoke = async (
+        command: MockedCommand,
+        args: Record<string, unknown>,
+      ) => {
         testState.calls.push(command);
         if (!command.startsWith("plugin:")) {
           testState.callLog.push({
@@ -249,7 +331,30 @@ export async function installLayoutTauriMock(
             return null;
           }
           case "get_security_status":
+            expireVaultIfIdle();
             return { ...securityState };
+          case "touch_security_activity":
+            expireVaultIfIdle();
+            if (securityState.unlocked) lastVaultActivity = Date.now();
+            return null;
+          case "disconnect": {
+            // The native disconnect cancels every registered transfer.
+            for (const cancel of runningTransfers.values()) {
+              cancel(new Error("Transfer cancelled"));
+            }
+            return null;
+          }
+          case "cancel_transfer": {
+            const transferId = Number(args.transferId);
+            const cancel = runningTransfers.get(transferId);
+            if (cancel) {
+              cancel(new Error("Transfer cancelled"));
+            } else {
+              pendingCancels.set(transferId, Date.now());
+              logEvent("mock:pending-cancel-recorded", { transferId });
+            }
+            return null;
+          }
           case "unlock_security": {
             const password = String(args.password ?? "");
             if (
@@ -263,6 +368,13 @@ export async function installLayoutTauriMock(
                 testState.releaseUnlock = resolve;
               });
             }
+            securityState.unlocked = true;
+            lastVaultActivity = Date.now();
+            return { ...securityState };
+          }
+          case "initialize_security": {
+            securityState.initialized = true;
+            securityState.encryption_enabled = args.enableEncryption === true;
             securityState.unlocked = true;
             return { ...securityState };
           }
@@ -328,6 +440,20 @@ export async function installLayoutTauriMock(
             const sourceKey = String(args.srcKey ?? "source");
             const destinationKey = String(args.dstKey ?? "destination");
             const fingerprint = "a".repeat(64);
+            const transferId = Number(args.transferId);
+            if (Number.isFinite(transferId)) {
+              await runTransfer(transferId, async () => {
+                if (copyFailuresLeft > 0) {
+                  copyFailuresLeft -= 1;
+                  throw new Error("HTTP 503 SlowDown: mock transient failure");
+                }
+                if (holdCopies) {
+                  await new Promise<void>((resolve) => {
+                    testState.releaseCopies.push(resolve);
+                  });
+                }
+              });
+            }
             return {
               source_key: sourceKey,
               source_etag: "mock-source-etag",
@@ -453,6 +579,17 @@ export async function releaseMockListing(page: Page): Promise<void> {
       }
     ).__S3_LAYOUT_TEST__;
     state?.releaseListing?.();
+  });
+}
+
+export async function releaseMockCopies(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const state = (
+      window as typeof window & {
+        __S3_LAYOUT_TEST__?: { releaseCopies: (() => void)[] };
+      }
+    ).__S3_LAYOUT_TEST__;
+    for (const release of state?.releaseCopies.splice(0) ?? []) release();
   });
 }
 

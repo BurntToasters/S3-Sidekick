@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rename-object"
+description = "Enables the rename_object command without any pre-configured scope."
+commands.allow = ["rename_object"]
+
+[[permission]]
+identifier = "deny-rename-object"
+description = "Denies the rename_object command without any pre-configured scope."
+commands.deny = ["rename_object"]

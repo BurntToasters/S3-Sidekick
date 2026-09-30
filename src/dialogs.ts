@@ -208,15 +208,18 @@ function present(
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      const current = document.activeElement;
+      // Move focus explicitly instead of relying on native Tab order: WebKit
+      // (and so the macOS webview) skips checkboxes and buttons by default,
+      // which left keyboard users unable to reach them.
+      e.preventDefault();
+      const index = focusable.indexOf(document.activeElement as HTMLElement);
       if (e.shiftKey) {
-        if (current === first || !el.box.contains(current)) {
-          e.preventDefault();
-          last.focus();
-        }
-      } else if (current === last || !el.box.contains(current)) {
-        e.preventDefault();
-        first.focus();
+        (index <= 0 ? last : focusable[index - 1]).focus();
+      } else {
+        (index === -1 || index === focusable.length - 1
+          ? first
+          : focusable[index + 1]
+        ).focus();
       }
     }
 

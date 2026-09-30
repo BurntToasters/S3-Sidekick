@@ -1,0 +1,106 @@
+# Permission sets for the app's own commands, grouped by area.
+# Each command is also listed in build.rs; src/ipc_acl.rs checks both.
+
+[[set]]
+identifier = "s3-session"
+description = "Connect to and browse an S3 endpoint."
+permissions = [
+  "allow-connect",
+  "allow-disconnect",
+  "allow-list-buckets",
+  "allow-list-objects",
+  "allow-head-object",
+  "allow-object-exists",
+  "allow-get-object-acl",
+  "allow-build-object-url",
+  "allow-generate-presigned-url",
+  "allow-preview-object",
+]
+
+[[set]]
+identifier = "s3-mutation"
+description = "Change objects in a bucket."
+permissions = [
+  "allow-update-metadata",
+  "allow-delete-objects",
+  "allow-set-object-acl",
+  "allow-create-folder",
+  "allow-rename-object",
+  "allow-delete-prefix",
+  "allow-rename-prefix",
+  "allow-copy-object-to",
+  "allow-copy-prefix-to",
+  "allow-delete-copied-objects",
+]
+
+[[set]]
+identifier = "transfers"
+description = "Run uploads and downloads and keep their recovery state."
+permissions = [
+  "allow-upload-object",
+  "allow-upload-object-bytes",
+  "allow-download-object",
+  "allow-download-object-parallel",
+  "allow-cancel-transfer",
+  "allow-discard-download-scratch",
+  "allow-transfer-checkpoint-remove",
+  "allow-transfer-checkpoint-gc",
+  "allow-load-transfer-manifest",
+  "allow-save-transfer-manifest",
+  "allow-clear-transfer-manifest",
+  "allow-get-available-disk-bytes",
+]
+
+[[set]]
+identifier = "local-files"
+description = "Read local folders and write exported text files."
+permissions = [
+  "allow-list-local-files-recursive",
+  "allow-path-exists",
+  "allow-write-text-file",
+  "allow-open-local-path",
+]
+
+[[set]]
+identifier = "app-storage"
+description = "Persist settings, bookmarks and the saved connection."
+permissions = [
+  "allow-load-settings",
+  "allow-save-settings",
+  "allow-load-bookmarks",
+  "allow-save-bookmarks",
+  "allow-load-bookmarks-backup",
+  "allow-save-bookmarks-backup",
+  "allow-load-connection",
+  "allow-save-connection",
+  "allow-clear-saved-connection",
+]
+
+[[set]]
+identifier = "vault"
+description = "Manage encrypted storage and biometric unlock."
+permissions = [
+  "allow-get-security-status",
+  "allow-initialize-security",
+  "allow-unlock-security",
+  "allow-set-security-encryption",
+  "allow-change-security-password",
+  "allow-lock-security",
+  "allow-touch-security-activity",
+  "allow-set-lock-timeout",
+  "allow-factory-reset",
+  "allow-enable-biometric",
+  "allow-disable-biometric",
+  "allow-unlock-biometric",
+]
+
+[[set]]
+identifier = "platform"
+description = "Platform details, updater support and external links."
+permissions = [
+  "allow-get-platform-info",
+  "allow-is-app-translocated",
+  "allow-updater-supported",
+  "allow-updater-support-info",
+  "allow-open-external-url",
+]

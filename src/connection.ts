@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, type InvokeCall, type S3InvokeCall } from "./ipc.ts";
 import { clearAllSelection } from "./app-selection.ts";
 import { state } from "./state.ts";
 import { showToast } from "./toast.ts";
@@ -170,20 +170,19 @@ export function connectionSnapshotChanged(snap: ConnectionSnapshot): boolean {
 
 export function invokeS3For<T>(
   connectionId: string,
-  cmd: string,
-  args: Record<string, unknown> = {},
+  ...call: S3InvokeCall
 ): Promise<T> {
   if (!connectionId) {
     throw new Error("Connection id is required");
   }
-  return invoke<T>(cmd, { ...args, connectionId });
+  const [cmd, args] = call;
+  // The spread keeps each command's own argument check; connectionId is the
+  // one key the contract requires that callers never pass themselves.
+  return invoke<T>(...([cmd, { ...args, connectionId }] as InvokeCall));
 }
 
-export function invokeS3<T>(
-  cmd: string,
-  args: Record<string, unknown> = {},
-): Promise<T> {
-  return invokeS3For(currentConnectionId(), cmd, args);
+export function invokeS3<T>(...call: S3InvokeCall): Promise<T> {
+  return invokeS3For<T>(currentConnectionId(), ...call);
 }
 
 export async function connect(

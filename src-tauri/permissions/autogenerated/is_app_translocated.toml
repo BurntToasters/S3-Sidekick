@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-is-app-translocated"
+description = "Enables the is_app_translocated command without any pre-configured scope."
+commands.allow = ["is_app_translocated"]
+
+[[permission]]
+identifier = "deny-is-app-translocated"
+description = "Denies the is_app_translocated command without any pre-configured scope."
+commands.deny = ["is_app_translocated"]

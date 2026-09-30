@@ -29,6 +29,7 @@ function createInitialResults() {
     format: { status: "pending" },
     cargoSafeUpdate: { status: "pending" },
     cargoUpdatePolicy: { status: "pending" },
+    tauriAlignment: { status: "pending" },
     clippy: { status: "pending" },
     cargoFmt: { status: "pending" },
     frontendBuild: { status: "pending" },
@@ -214,6 +215,13 @@ ${colors.reset}`);
     }${colors.reset}`,
   );
   console.log(
+    `${colors.bold}Tauri Alignment:${colors.reset}   ${
+      results.tauriAlignment?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
     `${colors.bold}Clippy:${colors.reset}     ${
       results.clippy.status === "passed"
         ? `${colors.green}✓ PASS`
@@ -316,6 +324,13 @@ function main({
     "cargoUpdatePolicy",
     npm,
     ["run", "check:cargo-update-policy"],
+    null,
+    results,
+  );
+  runner(
+    "tauriAlignment",
+    npm,
+    ["run", "check:tauri-alignment"],
     null,
     results,
   );

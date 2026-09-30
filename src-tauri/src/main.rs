@@ -4,6 +4,11 @@ mod biometric;
 #[cfg(test)]
 mod e2e_minio;
 mod files;
+#[cfg(test)]
+mod ipc_acl;
+#[cfg(test)]
+mod ipc_contract;
+mod lock_order;
 mod platform;
 mod s3;
 mod security;
@@ -267,12 +272,14 @@ pub(crate) async fn acquire_transfer_storage() -> Result<StorageTransferGuard, S
 }
 
 pub(crate) struct StorageMetaGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: lock_order::OrderedGuard<'static, ()>,
 }
 
+/// Fields drop in order: the storage gate, then the mutex, then the rank.
 pub(crate) struct StorageOpsGuard {
     _exclusive: StorageExclusiveGuard,
     _lock: std::sync::MutexGuard<'static, ()>,
+    _order: lock_order::LockOrderToken,
 }
 
 pub(crate) struct S3State {
@@ -303,8 +310,8 @@ pub(crate) struct AppState(pub Mutex<S3State>);
 
 pub(crate) fn lock_s3_state<'a>(
     state: &'a tauri::State<'a, AppState>,
-) -> Result<std::sync::MutexGuard<'a, S3State>, String> {
-    match state.0.lock() {
+) -> Result<lock_order::OrderedGuard<'a, S3State>, String> {
+    match lock_order::OrderedGuard::lock(&state.0, lock_order::LockRank::S3State) {
         Ok(guard) => Ok(guard),
         Err(err) => Err(format!("Mutex poisoned: {}", err)),
     }
@@ -316,14 +323,17 @@ pub(crate) fn lock_s3_state<'a>(
 /// multi-hour upload. Rekey and factory reset still take [`lock_storage_ops`],
 /// which waits for transfers and then the same mutex.
 pub(crate) fn lock_storage_meta() -> Result<StorageMetaGuard, String> {
-    let lock = STORAGE_OP_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|err| err.to_string())?;
+    let lock = lock_order::OrderedGuard::lock(
+        STORAGE_OP_LOCK.get_or_init(|| Mutex::new(())),
+        lock_order::LockRank::Storage,
+    )
+    .map_err(|err| err.to_string())?;
     Ok(StorageMetaGuard { _lock: lock })
 }
 
 pub(crate) fn lock_storage_ops() -> Result<StorageOpsGuard, String> {
+    // One rank covers the gate and the mutex: both are the storage lock.
+    let order = lock_order::LockOrderToken::acquire(lock_order::LockRank::Storage);
     let exclusive = acquire_storage_exclusive()?;
     let lock = STORAGE_OP_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -332,6 +342,7 @@ pub(crate) fn lock_storage_ops() -> Result<StorageOpsGuard, String> {
     let guard = StorageOpsGuard {
         _exclusive: exclusive,
         _lock: lock,
+        _order: order,
     };
     Ok(guard)
 }
@@ -340,6 +351,7 @@ pub(crate) fn lock_storage_ops() -> Result<StorageOpsGuard, String> {
 /// Security UI actions use this after an OS prompt so a transfer that started
 /// meanwhile produces a useful busy error instead of an unbounded wait.
 pub(crate) fn try_lock_storage_ops() -> Result<StorageOpsGuard, String> {
+    let order = lock_order::LockOrderToken::acquire(lock_order::LockRank::Storage);
     let exclusive = try_acquire_storage_exclusive()?.ok_or_else(|| {
         "Wait for active transfers to finish (or pause them) before changing security settings."
             .to_string()
@@ -351,6 +363,7 @@ pub(crate) fn try_lock_storage_ops() -> Result<StorageOpsGuard, String> {
     Ok(StorageOpsGuard {
         _exclusive: exclusive,
         _lock: lock,
+        _order: order,
     })
 }
 
@@ -994,10 +1007,12 @@ pub(crate) fn detect_case_fold_collision(
 /// SDDL if threat review requires it.
 pub(crate) struct VaultFileGuard {
     _file: std::fs::File,
+    _order: lock_order::LockOrderToken,
 }
 
 pub(crate) fn lock_vault_file(app_data_dir: &Path) -> Result<VaultFileGuard, String> {
     use fs2::FileExt;
+    let order = lock_order::LockOrderToken::acquire(lock_order::LockRank::VaultFile);
     let lock_path = app_data_dir.join("security.json.lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -1006,7 +1021,10 @@ pub(crate) fn lock_vault_file(app_data_dir: &Path) -> Result<VaultFileGuard, Str
         .open(&lock_path)
         .map_err(|e| e.to_string())?;
     file.lock_exclusive().map_err(|e| e.to_string())?;
-    Ok(VaultFileGuard { _file: file })
+    Ok(VaultFileGuard {
+        _file: file,
+        _order: order,
+    })
 }
 
 pub(crate) fn validate_existing_path(raw: &str, label: &str) -> Result<PathBuf, String> {

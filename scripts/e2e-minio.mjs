@@ -18,8 +18,11 @@ import { fileURLToPath } from "node:url";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const outDir = path.join(root, "test-results", "minio-e2e");
+// Pinned by digest so every run exercises the same server build. Override
+// with S3_SIDEKICK_E2E_MINIO_IMAGE to try another release.
 const image =
-  process.env.S3_SIDEKICK_E2E_MINIO_IMAGE ?? "bitnamilegacy/minio:latest";
+  process.env.S3_SIDEKICK_E2E_MINIO_IMAGE ??
+  "bitnamilegacy/minio:2025.5.24-debian-12-r5@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c";
 const container = `s3sk-e2e-minio-${process.pid}`;
 const bindHost = process.env.S3_SIDEKICK_E2E_HOST?.trim() || "127.0.0.1";
 const endpointMinio = `http://${bindHost}:9000`;

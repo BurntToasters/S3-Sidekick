@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { save } from "@tauri-apps/plugin-dialog";
 import { state } from "./state.ts";
 import {

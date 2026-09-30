@@ -6,7 +6,9 @@ use crate::security::{
     require_unlocked_key, save_security_config, security_status, set_unlocked_key, SecurityStatus,
     KEY_LEN, PBKDF2_ITERATIONS,
 };
-use crate::{atomic_write, fsync_parent, security_journal_path, try_lock_storage_ops};
+use crate::{
+    atomic_write, fsync_parent, lock_storage_ops, security_journal_path, try_lock_storage_ops,
+};
 
 /// Prefix of the error a platform backend returns when the credential store
 /// has no biometric key. Only this means "removed"; transient prompt errors
@@ -398,7 +400,10 @@ fn unlock_biometric_inner(
     }
     let retrieved = retrieve_key(Some(window));
 
-    let _guard = try_lock_storage_ops()?;
+    // Wait for the lock like password unlock does (this runs on the blocking
+    // pool). The non-blocking form is for settings changes; for an unlock it
+    // would refuse with a settings error whenever a transfer is running.
+    let _guard = lock_storage_ops()?;
     // Re-read under the lock: enrollment or the vault may have changed while
     // the prompt was open.
     let config = load_security_config(&app)?;

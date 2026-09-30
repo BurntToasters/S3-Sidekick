@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-copy-prefix-to"
+description = "Enables the copy_prefix_to command without any pre-configured scope."
+commands.allow = ["copy_prefix_to"]
+
+[[permission]]
+identifier = "deny-copy-prefix-to"
+description = "Denies the copy_prefix_to command without any pre-configured scope."
+commands.deny = ["copy_prefix_to"]

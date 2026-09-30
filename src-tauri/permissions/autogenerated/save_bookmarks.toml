@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-bookmarks"
+description = "Enables the save_bookmarks command without any pre-configured scope."
+commands.allow = ["save_bookmarks"]
+
+[[permission]]
+identifier = "deny-save-bookmarks"
+description = "Denies the save_bookmarks command without any pre-configured scope."
+commands.deny = ["save_bookmarks"]

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { escapeHtml, getIconHtml, parseJsonArray } from "./utils.ts";
 
 export interface Bookmark {

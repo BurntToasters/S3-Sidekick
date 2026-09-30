@@ -13,6 +13,9 @@
 // - Tests share state: give every test its own bucket and connection.
 // - Skipped assertion looks like pass: record every check and reject empty sets.
 // - Pre-registration cancel still commits: confirm error and object absence.
+// - A 412 matched to an identical destination looks like our own retried
+//   copy; rollback must keep that destination (it may belong to another
+//   client), so re-read it after rollback and require a retained notice.
 
 use std::sync::Mutex;
 
@@ -493,5 +496,59 @@ async fn e2e_cancel_before_backend_registration_prevents_write() {
             .is_some_and(|err| err.to_ascii_lowercase().contains("cancel"))
             && stored.is_none(),
         serde_json::json!({"result": format!("{:?}", result), "stored": stored}),
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the MinIO E2E runner (npm run test:e2e:minio)"]
+async fn e2e_ambiguous_copy_conflict_is_never_rolled_back() {
+    let test = "ambiguous_copy_rollback";
+    let env = env();
+    let raw = raw_client(&env.endpoint_minio, &env);
+    let bucket = fresh_bucket(&raw, "ambiguous-copy").await;
+    put(&raw, &bucket, "src/a.txt", "same bytes").await;
+    // Another client's identical copy lands after the absence check and
+    // before this create-only copy: same bytes, same single-part ETag.
+    raw.copy_object()
+        .bucket(&bucket)
+        .copy_source(format!("{}/src/a.txt", bucket))
+        .key("dst/a.txt")
+        .send()
+        .await
+        .expect("seed concurrent identical destination");
+
+    let cancel: s3::CancelToken = Default::default();
+    let receipt = s3::e2e_copy_with_receipt(
+        &raw,
+        &bucket,
+        "src/a.txt",
+        "dst/a.txt",
+        StorageProviderKind::Minio,
+        &cancel,
+    )
+    .await;
+    record(
+        test,
+        "a create-only copy that meets an identical destination succeeds with ambiguous ownership",
+        receipt
+            .as_ref()
+            .is_ok_and(|receipt| receipt.ownership_ambiguous),
+        serde_json::json!(format!("{:?}", receipt)),
+    );
+
+    let failures = s3::e2e_rollback_created_destinations(
+        &raw,
+        &bucket,
+        &[receipt.expect("receipt")],
+        StorageProviderKind::Minio,
+    )
+    .await;
+    let stored = read(&raw, &bucket, "dst/a.txt").await;
+    record(
+        test,
+        "rollback keeps a destination it cannot prove it created and reports it",
+        stored.as_deref() == Some("same bytes")
+            && failures.iter().any(|failure| failure.contains("dst/a.txt")),
+        serde_json::json!({"stored": stored, "failures": failures}),
     );
 }

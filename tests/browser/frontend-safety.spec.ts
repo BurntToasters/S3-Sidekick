@@ -18,27 +18,18 @@
 // - Cancel during async unlock validation lets the backend unlock later, then
 //   reloads secrets while the UI claims the vault stayed locked.
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import path from "node:path";
+import { expect, test } from "@playwright/test";
 import {
-  expect,
-  test,
-  type Locator,
-  type Page,
-  type TestInfo,
-} from "@playwright/test";
+  FULL_CREATE_ONLY,
+  commandCalls,
+  openCopyMoveFromRow,
+  saveArtifact as saveSuiteArtifact,
+} from "./helpers";
 import {
   openMockListing,
   readMockCallLog,
   releaseMockUnlock,
-  type MockCall,
 } from "./tauri-layout";
-
-const FULL_CREATE_ONLY = {
-  put_object: true,
-  complete_multipart: true,
-  copy_object: true,
-};
 
 const BOOKMARK_A = {
   name: "Alpha",
@@ -55,77 +46,6 @@ const BOOKMARK_B = {
   access_key: "beta-access",
   secret_key: "beta-secret",
 };
-
-function artifactDir(testInfo: TestInfo, name: string): string {
-  const dir = path.join(
-    "test-results",
-    "frontend-safety",
-    testInfo.project.name,
-    name,
-  );
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-function redactValue(value: unknown, key = ""): unknown {
-  if (/(?:access|secret|session|password|token)/i.test(key)) {
-    return "<redacted>";
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactValue(entry));
-  }
-  if (!value || typeof value !== "object") {
-    if (key === "json" && typeof value === "string") {
-      try {
-        return JSON.stringify(redactValue(JSON.parse(value)));
-      } catch {
-        return "<redacted>";
-      }
-    }
-    return value;
-  }
-  return Object.fromEntries(
-    Object.entries(value).map(([childKey, childValue]) => [
-      childKey,
-      redactValue(childValue, childKey),
-    ]),
-  );
-}
-
-function redactCalls(calls: MockCall[]): MockCall[] {
-  return calls.map((call) => ({
-    command: call.command,
-    args: redactValue(call.args),
-  }));
-}
-
-async function saveArtifact(
-  page: Page,
-  testInfo: TestInfo,
-  name: string,
-  calls: MockCall[],
-): Promise<void> {
-  const dir = artifactDir(testInfo, name);
-  await page.screenshot({ path: path.join(dir, "final.png"), fullPage: true });
-  writeFileSync(
-    path.join(dir, "ipc-log.json"),
-    `${JSON.stringify(redactCalls(calls), null, 2)}\n`,
-  );
-}
-
-function commandCalls(calls: MockCall[], command: string): MockCall[] {
-  return calls.filter((call) => call.command === command);
-}
-
-async function openCopyMoveFromRow(page: Page, row: Locator): Promise<void> {
-  await row.click({ button: "right" });
-  await page
-    .locator('.context-menu [role="menuitem"]', {
-      hasText: "Copy / Move to...",
-    })
-    .click();
-  await expect(page.locator("#copy-move-overlay")).toHaveClass(/active/);
-}
 
 test.describe("frontend mutation and recovery safety", () => {
   test("copies a folder as a prefix and never deletes its source", async ({
@@ -167,7 +87,13 @@ test.describe("frontend mutation and recovery safety", () => {
       overwrite: false,
     });
     expect(commandCalls(calls, "delete_copied_objects")).toHaveLength(0);
-    await saveArtifact(page, testInfo, "folder-copy", calls);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "folder-copy",
+      calls,
+    );
   });
 
   test("moves a file into a folder by appending its basename, then deletes exact receipts", async ({
@@ -218,7 +144,13 @@ test.describe("frontend mutation and recovery safety", () => {
     expect(
       (deletion.args as { receipts: Array<{ source_key: string }> }).receipts,
     ).toEqual([expect.objectContaining({ source_key: sourceKey })]);
-    await saveArtifact(page, testInfo, "file-move", calls);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "file-move",
+      calls,
+    );
   });
 
   test("turns provider permission failures into friendly actionable status", async ({
@@ -241,7 +173,13 @@ test.describe("frontend mutation and recovery safety", () => {
     await expect(page.locator("#dialog-overlay")).not.toHaveClass(/active/);
     const calls = await readMockCallLog(page);
     expect(commandCalls(calls, "create_folder")).toHaveLength(1);
-    await saveArtifact(page, testInfo, "friendly-error", calls);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "friendly-error",
+      calls,
+    );
   });
 
   test("keeps the unlock prompt open after a wrong password and updates state after retry", async ({
@@ -282,7 +220,13 @@ test.describe("frontend mutation and recovery safety", () => {
     const calls = await readMockCallLog(page);
     expect(commandCalls(calls, "lock_security")).toHaveLength(1);
     expect(commandCalls(calls, "unlock_security")).toHaveLength(2);
-    await saveArtifact(page, testInfo, "unlock-state", calls);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "unlock-state",
+      calls,
+    );
   });
 
   test("refuses bookmark import when stored bookmarks could not be loaded", async ({
@@ -315,7 +259,13 @@ test.describe("frontend mutation and recovery safety", () => {
     const calls = await readMockCallLog(page);
     expect(commandCalls(calls, "save_bookmarks")).toHaveLength(0);
     expect(commandCalls(calls, "save_bookmarks_backup")).toHaveLength(0);
-    await saveArtifact(page, testInfo, "bookmark-load-failure", calls);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "bookmark-load-failure",
+      calls,
+    );
   });
 
   test("mutates bookmarks by identity and preserves the shifted row", async ({
@@ -352,7 +302,13 @@ test.describe("frontend mutation and recovery safety", () => {
     expect(saves.length).toBeGreaterThanOrEqual(2);
     const payload = (saves[saves.length - 1].args as { json: string }).json;
     expect(JSON.parse(payload)).toEqual([]);
-    await saveArtifact(page, testInfo, "bookmark-mutation", calls);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "bookmark-mutation",
+      calls,
+    );
   });
 
   test("runs queued work for a local endpoint while the browser reports offline", async ({
@@ -389,7 +345,13 @@ test.describe("frontend mutation and recovery safety", () => {
       })
       .toBe(1);
     const calls = await readMockCallLog(page);
-    await saveArtifact(page, testInfo, "offline-local-endpoint", calls);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "offline-local-endpoint",
+      calls,
+    );
   });
 
   test("connects to bracketed IPv6 loopback without a remote-HTTP warning", async ({
@@ -400,9 +362,10 @@ test.describe("frontend mutation and recovery safety", () => {
     await expect(page.locator("#dialog-title")).not.toHaveText(
       "Insecure connection",
     );
-    await saveArtifact(
+    await saveSuiteArtifact(
       page,
       testInfo,
+      "frontend-safety",
       "ipv6-loopback-connect",
       await readMockCallLog(page),
     );
@@ -457,6 +420,12 @@ test.describe("frontend mutation and recovery safety", () => {
     expect(commandCalls(calls, "load_connection")).toHaveLength(
       connectionLoadsBefore,
     );
-    await saveArtifact(page, testInfo, "cancel-unlock", calls);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "cancel-unlock",
+      calls,
+    );
   });
 });

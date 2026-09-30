@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc.ts";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   captureConnectionSnapshot,
@@ -188,7 +188,10 @@ export async function queueDroppedPaths(
     // unreadable entries). Queueing the raw paths instead would skip those
     // checks and send dropped folders as single-file uploads that then fail.
     const message = friendlyError(err);
-    logActivity(`Could not prepare dropped items for upload: ${message}`, "error");
+    logActivity(
+      `Could not prepare dropped items for upload: ${message}`,
+      "error",
+    );
     setStatus(`Upload not started: ${message}`, 8000);
   }
 }

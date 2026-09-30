@@ -15,7 +15,10 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "allowJs": true,
-    "checkJs": false
+    "checkJs": false,
+    // TypeScript 6 no longer loads every @types package implicitly. The
+    // unit tests read fixtures through node:fs, as they did under TS 5.
+    "types": ["node"]
   },
   "include": ["src"]
 }
