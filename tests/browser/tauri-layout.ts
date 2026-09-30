@@ -2,16 +2,73 @@ import { expect, type Page } from "@playwright/test";
 
 export type LayoutScenario = "normal" | "empty" | "loading" | "error";
 
+export interface CreateOnlyCapabilities {
+  put_object: boolean;
+  complete_multipart: boolean;
+  copy_object: boolean;
+}
+
+export interface MockListOverride {
+  objects?: Array<Record<string, unknown>>;
+  prefixes?: string[];
+}
+
+export interface MockSecurityStatus {
+  initialized: boolean;
+  encryption_enabled: boolean;
+  unlocked: boolean;
+  lock_timeout_minutes: number;
+  biometric_available: boolean;
+  biometric_enrolled: boolean;
+}
+
 export interface LayoutMockOptions {
   objectCount?: number;
   longFileCount?: number;
   scenario?: LayoutScenario;
+  /** Provider create-only support reported by `connect`. Default: all true. */
+  createOnlyCapabilities?: CreateOnlyCapabilities;
+  /** Extra persisted settings merged into the `load_settings` response. */
+  settings?: Record<string, unknown>;
+  /** Prefixes rendered in the root listing. */
+  prefixes?: string[];
+  /** Responses for delimiter-less destination existence/listing probes. */
+  listObjectsByPrefix?: Record<string, MockListOverride>;
+  /** Persisted bookmark rows returned by the mock backend. */
+  bookmarks?: unknown[];
+  /** Optional independent backup rows. Defaults to `bookmarks`. */
+  bookmarkBackup?: unknown[];
+  /** Security state returned by the mock backend. */
+  security?: Partial<MockSecurityStatus>;
+  /** Passwords accepted by `unlock_security`; an empty list accepts any. */
+  unlockPasswords?: string[];
+  /** Hold a successful unlock until `releaseMockUnlock` is called. */
+  deferUnlock?: boolean;
+  /** Endpoint entered by `openMockListing`. */
+  endpoint?: string;
+  /** Native command failures, keyed by command name. */
+  errors?: Record<string, string>;
+}
+
+export interface MockCall {
+  command: string;
+  args: unknown;
 }
 
 interface LayoutMockInit {
   objectCount: number;
   longFileCount: number;
   scenario: LayoutScenario;
+  createOnlyCapabilities: CreateOnlyCapabilities;
+  settings: Record<string, unknown>;
+  prefixes: string[];
+  listObjectsByPrefix: Record<string, MockListOverride>;
+  bookmarks: unknown[];
+  bookmarkBackup: unknown[];
+  security: MockSecurityStatus;
+  unlockPasswords: string[];
+  deferUnlock: boolean;
+  errors: Record<string, string>;
 }
 
 /**
@@ -31,10 +88,47 @@ export async function installLayoutTauriMock(
       Math.min(options.longFileCount ?? 1, options.objectCount ?? 12),
     ),
     scenario: options.scenario ?? "normal",
+    createOnlyCapabilities: options.createOnlyCapabilities ?? {
+      put_object: true,
+      complete_multipart: true,
+      copy_object: true,
+    },
+    settings: options.settings ?? {},
+    prefixes:
+      options.prefixes ?? ((options.objectCount ?? 12) > 0 ? ["archive/"] : []),
+    listObjectsByPrefix: options.listObjectsByPrefix ?? {},
+    bookmarks: options.bookmarks ?? [],
+    bookmarkBackup: options.bookmarkBackup ?? options.bookmarks ?? [],
+    security: {
+      initialized: true,
+      encryption_enabled: false,
+      unlocked: true,
+      lock_timeout_minutes: 30,
+      biometric_available: false,
+      biometric_enrolled: false,
+      ...options.security,
+    },
+    unlockPasswords: options.unlockPasswords ?? [],
+    deferUnlock: options.deferUnlock ?? false,
+    errors: options.errors ?? {},
   };
 
   await page.addInitScript(
-    ({ objectCount, longFileCount, scenario }: LayoutMockInit) => {
+    ({
+      objectCount,
+      longFileCount,
+      scenario,
+      createOnlyCapabilities,
+      settings,
+      prefixes,
+      listObjectsByPrefix,
+      bookmarks,
+      bookmarkBackup,
+      security,
+      unlockPasswords,
+      deferUnlock,
+      errors,
+    }: LayoutMockInit) => {
       const callbacks = new Map<number, (value: unknown) => void>();
       const listeners = new Map<string, Set<number>>();
       let callbackId = 1;
@@ -57,15 +151,20 @@ export async function installLayoutTauriMock(
       );
       const listing = {
         objects,
-        prefixes: objectCount > 0 ? ["archive/"] : [],
+        prefixes,
         truncated: false,
         next_continuation_token: "",
       };
+      let storedBookmarks = [...bookmarks];
+      let storedBookmarkBackup = [...bookmarkBackup];
+      const securityState = { ...security };
       const testState = {
         scenario,
         objectCount,
         calls: [] as string[],
+        callLog: [] as { command: string; args: unknown }[],
         releaseListing: undefined as (() => void) | undefined,
+        releaseUnlock: undefined as (() => void) | undefined,
         emit: undefined as
           ((event: string, payload: unknown) => void) | undefined,
       };
@@ -90,6 +189,12 @@ export async function installLayoutTauriMock(
 
       const invoke = async (command: string, args: Record<string, unknown>) => {
         testState.calls.push(command);
+        if (!command.startsWith("plugin:")) {
+          testState.callLog.push({
+            command,
+            args: JSON.parse(JSON.stringify(args ?? null)) as unknown,
+          });
+        }
 
         if (command === "plugin:event|listen") {
           const id = Number(args.handler);
@@ -108,6 +213,11 @@ export async function installLayoutTauriMock(
           return null;
         }
 
+        const configuredError = errors[command];
+        if (configuredError !== undefined) {
+          throw new Error(configuredError);
+        }
+
         switch (command) {
           case "get_platform_info":
             return "linux";
@@ -120,21 +230,45 @@ export async function installLayoutTauriMock(
               supportPromptDismissed: true,
               autoCheckUpdates: false,
               openTransferDrawerOnStart: false,
+              ...settings,
             });
           case "load_connection":
             return "";
           case "load_bookmarks":
+            return JSON.stringify(storedBookmarks);
           case "load_bookmarks_backup":
-            return "[]";
+            return JSON.stringify(storedBookmarkBackup);
+          case "save_bookmarks": {
+            const parsed = JSON.parse(String(args.json ?? "[]")) as unknown;
+            storedBookmarks = Array.isArray(parsed) ? parsed : [];
+            return null;
+          }
+          case "save_bookmarks_backup": {
+            const parsed = JSON.parse(String(args.json ?? "[]")) as unknown;
+            storedBookmarkBackup = Array.isArray(parsed) ? parsed : [];
+            return null;
+          }
           case "get_security_status":
-            return {
-              initialized: true,
-              encryption_enabled: false,
-              unlocked: true,
-              lock_timeout_minutes: 30,
-              biometric_available: false,
-              biometric_enrolled: false,
-            };
+            return { ...securityState };
+          case "unlock_security": {
+            const password = String(args.password ?? "");
+            if (
+              unlockPasswords.length > 0 &&
+              !unlockPasswords.includes(password)
+            ) {
+              throw new Error("Invalid password");
+            }
+            if (deferUnlock) {
+              await new Promise<void>((resolve) => {
+                testState.releaseUnlock = resolve;
+              });
+            }
+            securityState.unlocked = true;
+            return { ...securityState };
+          }
+          case "lock_security":
+            securityState.unlocked = false;
+            return { ...securityState };
           case "load_transfer_manifest":
             return {
               recovery_session: "a".repeat(64),
@@ -148,11 +282,7 @@ export async function installLayoutTauriMock(
               region: "us-east-1",
               connection_id: "browser-layout-connection",
               connection_identity: "browser-layout-identity",
-              create_only_capabilities: {
-                put_object: true,
-                complete_multipart: true,
-                copy_object: true,
-              },
+              create_only_capabilities: createOnlyCapabilities,
             };
           case "list_buckets":
             return [
@@ -170,6 +300,17 @@ export async function installLayoutTauriMock(
                 testState.releaseListing = resolve;
               });
             }
+            if (String(args.delimiter ?? "") === "") {
+              const override = listObjectsByPrefix[String(args.prefix ?? "")];
+              if (override) {
+                return {
+                  objects: override.objects ?? [],
+                  prefixes: override.prefixes ?? [],
+                  truncated: false,
+                  next_continuation_token: "",
+                };
+              }
+            }
             return listing;
           case "updater_support_info":
             return {
@@ -183,10 +324,51 @@ export async function installLayoutTauriMock(
             return false;
           case "head_object":
             return { content_length: 1024 };
+          case "copy_object_to": {
+            const sourceKey = String(args.srcKey ?? "source");
+            const destinationKey = String(args.dstKey ?? "destination");
+            const fingerprint = "a".repeat(64);
+            return {
+              source_key: sourceKey,
+              source_etag: "mock-source-etag",
+              source_fingerprint: fingerprint,
+              source_acl_fingerprint: fingerprint,
+              source_tag_fingerprint: fingerprint,
+              source_version_id: null,
+              destination_key: destinationKey,
+              destination_etag: "mock-destination-etag",
+              destination_fingerprint: fingerprint,
+              destination_acl_fingerprint: fingerprint,
+              destination_tag_fingerprint: fingerprint,
+              destination_version_id: null,
+            };
+          }
+          case "copy_prefix_to": {
+            const sourcePrefix = String(args.srcPrefix ?? "source/");
+            const destinationPrefix = String(args.dstPrefix ?? "destination/");
+            const fingerprint = "a".repeat(64);
+            return [
+              {
+                source_key: `${sourcePrefix}sample.txt`,
+                source_etag: "mock-source-etag",
+                source_fingerprint: fingerprint,
+                source_acl_fingerprint: fingerprint,
+                source_tag_fingerprint: fingerprint,
+                source_version_id: null,
+                destination_key: `${destinationPrefix}sample.txt`,
+                destination_etag: "mock-destination-etag",
+                destination_fingerprint: fingerprint,
+                destination_acl_fingerprint: fingerprint,
+                destination_tag_fingerprint: fingerprint,
+                destination_version_id: null,
+              },
+            ];
+          }
+          case "delete_copied_objects":
+            return null;
+          case "create_folder":
           case "save_settings":
           case "save_connection":
-          case "save_bookmarks":
-          case "save_bookmarks_backup":
           case "clear_transfer_manifest":
           case "transfer_checkpoint_remove":
           case "plugin:window|set_size":
@@ -252,6 +434,17 @@ export async function installLayoutTauriMock(
   );
 }
 
+export async function readMockCallLog(page: Page): Promise<MockCall[]> {
+  return page.evaluate(() => {
+    const state = (
+      window as typeof window & {
+        __S3_LAYOUT_TEST__?: { callLog: { command: string; args: unknown }[] };
+      }
+    ).__S3_LAYOUT_TEST__;
+    return state ? [...state.callLog] : [];
+  });
+}
+
 export async function releaseMockListing(page: Page): Promise<void> {
   await page.evaluate(() => {
     const state = (
@@ -263,6 +456,17 @@ export async function releaseMockListing(page: Page): Promise<void> {
   });
 }
 
+export async function releaseMockUnlock(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const state = (
+      window as typeof window & {
+        __S3_LAYOUT_TEST__?: { releaseUnlock?: () => void };
+      }
+    ).__S3_LAYOUT_TEST__;
+    state?.releaseUnlock?.();
+  });
+}
+
 export async function openMockListing(
   page: Page,
   options: LayoutMockOptions = {},
@@ -270,7 +474,15 @@ export async function openMockListing(
   await installLayoutTauriMock(page, options);
   await page.goto("/");
   await expect(page.locator("#connection-screen")).toBeVisible();
-  await page.locator("#conn-endpoint").fill("https://layout-test.invalid");
+  await connectMockListing(page, options.endpoint);
+}
+
+/** Connect after a test has handled a startup security prompt. */
+export async function connectMockListing(
+  page: Page,
+  endpoint = "https://layout-test.invalid",
+): Promise<void> {
+  await page.locator("#conn-endpoint").fill(endpoint);
   await page.locator("#conn-access-key").fill("layout-access-key");
   await page.locator("#conn-secret-key").fill("layout-secret-key");
   await page.locator("#connect-btn").click();

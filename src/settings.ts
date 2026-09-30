@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { save } from "@tauri-apps/plugin-dialog";
 import { state } from "./state.ts";
 import {
   type TransferPerformancePreset,
@@ -13,7 +14,6 @@ import {
   loadBookmarks,
   renderBookmarkList,
   removeBookmark,
-  getBookmarks,
   exportBookmarksJson,
   importBookmarksJson,
   MAX_IMPORT_BYTES,
@@ -432,6 +432,14 @@ export function populateSettingsModal(): void {
       state.currentSettings.openTransferDrawerOnStart;
   }
 
+  const confirmUnguardedWritesCheckbox = document.getElementById(
+    "setting-confirm-unguarded-writes",
+  ) as HTMLInputElement | null;
+  if (confirmUnguardedWritesCheckbox) {
+    confirmUnguardedWritesCheckbox.checked =
+      state.currentSettings.confirmUnguardedWrites;
+  }
+
   const presetSelect = document.getElementById(
     "setting-transfer-performance-preset",
   ) as HTMLSelectElement | null;
@@ -533,9 +541,13 @@ export function populateSettingsModal(): void {
 
   const versionEl = document.getElementById("settings-version");
   if (versionEl) {
-    void getVersion().then((v) => {
-      versionEl.textContent = `v${v}`;
-    });
+    void getVersion()
+      .then((v) => {
+        versionEl.textContent = `v${v}`;
+      })
+      .catch(() => {
+        versionEl.textContent = "";
+      });
   }
   const platformEl = document.getElementById("settings-platform");
   if (platformEl) {
@@ -668,6 +680,14 @@ export function readSettingsModal(): void {
   if (openTransferDrawerCheckbox) {
     state.currentSettings.openTransferDrawerOnStart =
       openTransferDrawerCheckbox.checked;
+  }
+
+  const confirmUnguardedWritesCheckbox = document.getElementById(
+    "setting-confirm-unguarded-writes",
+  ) as HTMLInputElement | null;
+  if (confirmUnguardedWritesCheckbox) {
+    state.currentSettings.confirmUnguardedWrites =
+      confirmUnguardedWritesCheckbox.checked;
   }
 
   const presetSelect = document.getElementById(
@@ -916,8 +936,10 @@ export async function resetSettings(): Promise<void> {
       carriedExtras.transfersHintDismissed = transfersHintDismissed;
     const defaults = mergeSettingsPayload(SETTING_DEFAULTS, carriedExtras);
     try {
-      await invoke("save_settings", { json: defaults });
+      // Credentials first: if clearing them fails, nothing is reset and the
+      // user is not left with default settings but surviving credentials.
       await invoke("clear_saved_connection");
+      await invoke("save_settings", { json: defaults });
     } catch (err) {
       await showAlert("Reset Failed", friendlyError(err));
       return;
@@ -974,17 +996,15 @@ async function refreshBookmarkListUI(): Promise<void> {
       const overlay = document.getElementById("settings-overlay");
       if (overlay) overlay.classList.remove("active");
     },
-    async (index) => {
-      const b = getBookmarks()[index];
-      const name = b?.name ?? "this bookmark";
+    async (bookmark) => {
       const confirmed = await showConfirm(
         "Delete Bookmark",
-        `Delete bookmark "${name}"?`,
+        `Delete bookmark "${bookmark.name}"?`,
         { okLabel: "Delete", okDanger: true },
       );
       if (!confirmed) return;
       try {
-        await removeBookmark(index);
+        await removeBookmark(bookmark);
       } catch (err) {
         void showAlert("Delete Failed", friendlyError(err));
         return;
@@ -1007,37 +1027,8 @@ function wireBookmarkImportExport(): void {
   ) as HTMLInputElement | null;
 
   exportBtn?.addEventListener("click", () => {
-    // Tri-state: Export? -> secrets or redacted? Cancel aborts without writing.
-    void showConfirm(
-      "Export bookmarks?",
-      "Download bookmarks as a JSON file?",
-      {
-        okLabel: "Export",
-        cancelLabel: "Cancel",
-      },
-    ).then((confirmed) => {
-      if (!confirmed) return;
-      void showConfirm(
-        "Export bookmark secrets?",
-        "Including secret keys writes them to a plaintext file. Choose redacted export to leave secrets out.",
-        {
-          okLabel: "Include secrets",
-          cancelLabel: "Export redacted",
-          okDanger: true,
-        },
-      ).then((includeSecrets) => {
-        const json = exportBookmarksJson(includeSecrets);
-        const blob = new Blob([json], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "s3-sidekick-bookmarks.json";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        // Revoking synchronously can cancel the download in WebKit.
-        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      });
+    void exportBookmarksToFile().catch((err: unknown) => {
+      void showAlert("Export Failed", friendlyError(err));
     });
   });
 
@@ -1048,19 +1039,30 @@ function wireBookmarkImportExport(): void {
   importInput?.addEventListener("change", () => {
     const file = importInput.files?.[0];
     if (!file) return;
+    // Reset now so choosing the same file again fires "change" again.
+    importInput.value = "";
     if (file.size > MAX_IMPORT_BYTES) {
-      importInput.value = "";
       void showAlert("Import Failed", "Bookmark import is too large");
       return;
     }
     const reader = new FileReader();
+    reader.onerror = () => {
+      void showAlert(
+        "Import Failed",
+        `Could not read "${file.name}": ${reader.error?.message ?? "unknown error"}`,
+      );
+    };
+    reader.onabort = () => {
+      void showAlert("Import Failed", `Reading "${file.name}" was aborted.`);
+    };
     reader.onload = () => {
-      const text = reader.result as string;
-      void importBookmarksJson(text).then((result) => {
-        importInput.value = "";
-        if (result.error) {
-          void showAlert("Import Failed", result.error);
-        } else {
+      const text = typeof reader.result === "string" ? reader.result : "";
+      void importBookmarksJson(text)
+        .then((result) => {
+          if (result.error) {
+            void showAlert("Import Failed", result.error);
+            return;
+          }
           const msg =
             `Imported ${result.imported} bookmark(s)` +
             (result.skipped > 0
@@ -1069,9 +1071,47 @@ function wireBookmarkImportExport(): void {
             ".";
           void showAlert("Import Complete", msg);
           void refreshBookmarkListUI();
-        }
-      });
+        })
+        .catch((err: unknown) => {
+          void showAlert("Import Failed", friendlyError(err));
+        });
     };
     reader.readAsText(file);
   });
+}
+
+/// Export through a native save dialog. A browser download would drop the
+/// file (possibly with plaintext secrets) in the default Downloads folder
+/// without letting the user choose where it goes.
+async function exportBookmarksToFile(): Promise<void> {
+  const confirmed = await showConfirm(
+    "Export bookmarks?",
+    "Save bookmarks to a JSON file?",
+    { okLabel: "Export", cancelLabel: "Cancel" },
+  );
+  if (!confirmed) return;
+  const includeSecrets = await showConfirm(
+    "Export bookmark secrets?",
+    "Including secret keys writes them to a plaintext file. Choose redacted export to leave secrets out.",
+    {
+      okLabel: "Include secrets",
+      cancelLabel: "Export redacted",
+      okDanger: true,
+    },
+  );
+  const path = await save({
+    title: includeSecrets
+      ? "Save bookmarks (includes secret keys)"
+      : "Save bookmarks",
+    defaultPath: "s3-sidekick-bookmarks.json",
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  if (!path) return;
+  await invoke("write_text_file", {
+    path,
+    text: exportBookmarksJson(includeSecrets),
+    // The save dialog already asked before replacing an existing file.
+    overwrite: true,
+  });
+  await showAlert("Export Complete", `Saved bookmarks to ${path}.`);
 }

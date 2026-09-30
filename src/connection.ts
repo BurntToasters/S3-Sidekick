@@ -250,9 +250,13 @@ export async function disconnect(connectionId?: string): Promise<boolean> {
   // invalidated only after the backend confirms this exact session closed.
   const generation = ++connectionGeneration;
   state.connecting = false;
+  // Park the transfer queue before the backend closes the session: running
+  // items then requeue instead of failing on "Transfer cancelled".
+  state.transfersHeldForDisconnect = true;
   try {
     await invoke("disconnect", { connectionId: expectedId ?? "" });
   } catch (error) {
+    state.transfersHeldForDisconnect = false;
     // The native command rejects a stale session as "Connection changed".
     // Once a newer frontend workflow or session owns state, that rejection is
     // a benign supersession and must not be reported as a failed disconnect.

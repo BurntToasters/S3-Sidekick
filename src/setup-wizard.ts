@@ -70,14 +70,18 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
     let selectedTheme: ThemePreference = "system";
     let securityAlreadyInitialized = false;
+    let securityStatusError: string | null = null;
 
-    const securityCheckDone = invoke<SecurityStatus>("get_security_status")
-      .then((secStatus) => {
-        securityAlreadyInitialized = secStatus.initialized;
-      })
-      .catch(() => {
-        /* assume not initialized */
-      });
+    const checkSecurityStatus = (): Promise<void> =>
+      invoke<SecurityStatus>("get_security_status")
+        .then((secStatus) => {
+          securityAlreadyInitialized = secStatus.initialized;
+          securityStatusError = null;
+        })
+        .catch((err: unknown) => {
+          securityStatusError = String(err);
+        });
+    let securityCheckDone = checkSecurityStatus();
 
     showStep(0);
 
@@ -249,11 +253,22 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
     async function onThemeNext(): Promise<void> {
       await securityCheckDone;
+      if (securityStatusError) {
+        securityCheckDone = checkSecurityStatus();
+        await securityCheckDone;
+      }
       if (securityAlreadyInitialized) {
         goTo(3);
         return;
       }
       goTo(2);
+      if (securityStatusError) {
+        // Not knowing is not the same as "not set up". The backend refuses
+        // to re-initialize an existing vault, so say why a step may fail.
+        showEncError(
+          `Could not read the current security setup (${securityStatusError}). If encryption is already configured, skip this step and manage it in Settings.`,
+        );
+      }
     }
 
     function onEncBack(): void {

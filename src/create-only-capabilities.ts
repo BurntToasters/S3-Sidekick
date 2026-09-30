@@ -47,3 +47,17 @@ export function lacksAtomicCreateForCopy(
   }
   return !caps.copy_object;
 }
+
+/**
+ * Size to evaluate for a write whose bytes are not known up front but are
+ * almost always small: folder markers (always zero bytes) and prefix
+ * operations (per-object copies). The backend still fails closed for any
+ * object it cannot guard; callers recover via `isCreateOnlyUnsupportedError`.
+ */
+export const SMALL_OBJECT_BYTE_LENGTH = 0;
+
+/** The backend refused a create-only write this provider cannot enforce. */
+export function isCreateOnlyUnsupportedError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /cannot enforce a create-only/i.test(message);
+}

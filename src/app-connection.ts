@@ -23,7 +23,7 @@ import {
   renderBookmarkList,
   removeBookmark,
 } from "./bookmarks.ts";
-import { friendlyError } from "./utils.ts";
+import { friendlyError, isLocalEndpoint } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
 import { clearFilterInputDebounce, setSidebarOpen } from "./app-layout.ts";
@@ -105,8 +105,22 @@ export function refreshSavedConnectionsList(): void {
         bookmark.session_token ?? "",
       );
     },
-    (index) => {
-      void removeBookmark(index);
+    (bookmark) => {
+      void (async () => {
+        const confirmed = await showConfirm(
+          "Delete Saved Connection",
+          `Delete saved connection "${bookmark.name}"? Its stored credentials are removed.`,
+          { okLabel: "Delete", okDanger: true },
+        );
+        if (!confirmed) return;
+        try {
+          await removeBookmark(bookmark);
+        } catch (err) {
+          const message = `Could not delete "${bookmark.name}": ${friendlyError(err)}`;
+          logActivity(message, "error");
+          setStatus(message, 8000);
+        }
+      })();
     },
     {
       emptyMessage:
@@ -283,12 +297,7 @@ export async function handleConnect(): Promise<void> {
     if (/^http:\/\//i.test(endpoint)) {
       try {
         const host = new URL(endpoint).hostname;
-        const isLocal =
-          host === "localhost" ||
-          host === "127.0.0.1" ||
-          host === "::1" ||
-          host.endsWith(".local");
-        if (!isLocal) {
+        if (!isLocalEndpoint(endpoint)) {
           logActivity(
             `Warning: connecting over plain HTTP to ${host}. Credentials will be sent in cleartext.`,
             "warning",
@@ -533,7 +542,7 @@ export async function handleBookmarkSave(): Promise<void> {
       setStatus(`Bookmark for this endpoint already exists.`, 5000);
     }
   } catch (err) {
-    setStatus(`Failed to save bookmark: ${err}`);
+    setStatus(`Failed to save bookmark: ${friendlyError(err)}`);
   }
   updateBookmarkBtn();
 }

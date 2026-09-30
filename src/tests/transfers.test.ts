@@ -60,6 +60,11 @@ async function loadTransfersModule() {
   }));
   vi.doMock("../dialogs.ts", () => ({
     showConfirm: mockShowConfirm,
+    showConfirmWithCheckbox: (...args: unknown[]) =>
+      mockShowConfirm(...args).then((confirmed) => ({
+        confirmed,
+        checked: false,
+      })),
   }));
   const drawer = await import("../bottom-drawer.ts");
   drawer.initDrawer();
@@ -677,11 +682,12 @@ describe("transfers queue UI", () => {
     state.currentSettings.maxConcurrentTransfers = 1;
     await transfers.initTransferQueueUI();
 
-    let resolveUpload = () => {};
+    // The backend honors cancel_transfer by rejecting the running command.
+    let rejectUpload = (_err: Error) => {};
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "upload_object") {
-        return new Promise<void>((resolve) => {
-          resolveUpload = resolve;
+        return new Promise<void>((_resolve, reject) => {
+          rejectUpload = reject;
         });
       }
       if (cmd === "cancel_transfer") return undefined;
@@ -702,7 +708,7 @@ describe("transfers queue UI", () => {
       }),
     );
 
-    resolveUpload();
+    rejectUpload(new Error("Transfer cancelled"));
     await flushMicrotasks(8);
     await vi.waitFor(() => {
       expect(

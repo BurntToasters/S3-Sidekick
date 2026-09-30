@@ -60,6 +60,8 @@ const MULTIPART_COPY_THRESHOLD: i64 = 5_368_709_120;
 const MULTIPART_ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PREFIX_TRANSACTION_OBJECTS: usize = 100_000;
 const MAX_KEY_LEN: usize = 1024;
+const PENDING_CANCEL_TTL: Duration = Duration::from_secs(30);
+const MAX_PENDING_CANCELS: usize = 4096;
 
 fn multipart_copy_part_size(object_size: u64) -> Result<u64, String> {
     if object_size == 0 || object_size > MAX_OBJECT_SIZE {
@@ -274,15 +276,10 @@ fn validate_bucket_name(bucket: &str) -> Result<(), String> {
 
 /// Cooperative cancellation signal shared by a transfer and its workers.
 ///
-/// Replaces the previous `HashSet<u32>` of cancelled ids. That design latched:
-/// an id was inserted by `cancel_transfer` and only removed if the transfer
-/// happened to observe it, so ids belonging to already-finished transfers stayed
-/// behind forever. Because the frontend restarts its id counter at 1 on every
-/// webview reload, a later transfer could be assigned a latched id and abort
-/// before moving a single byte.
-///
-/// Now an entry exists only while a transfer is actually running (created by
-/// `TransferGuard`, removed on drop), so cancelling an unknown id is a no-op.
+/// Running registrations carry their own token. A bounded, short-lived pending
+/// map also bridges the IPC race where `cancel_transfer` reaches Rust just
+/// before the corresponding command registers. Frontend IDs persist across
+/// reloads, and expiry prevents an abandoned cancel from latching forever.
 #[derive(Default)]
 pub(crate) struct CancelFlag {
     cancelled: std::sync::atomic::AtomicBool,
@@ -337,6 +334,7 @@ struct TransferRegistryState {
     disabled: bool,
     next_registration_id: u64,
     registrations: HashMap<u64, ActiveTransfer>,
+    pending_cancels: HashMap<u32, Instant>,
 }
 
 static TRANSFER_REGISTRY: OnceLock<Mutex<TransferRegistryState>> = OnceLock::new();
@@ -374,6 +372,16 @@ impl TransferGuard {
         let mut registry = lock_transfer_registry()?;
         if registry.disabled {
             return Err(cancelled_error());
+        }
+        let now = Instant::now();
+        registry
+            .pending_cancels
+            .retain(|_, created| now.duration_since(*created) <= PENDING_CANCEL_TTL);
+        let cancelled_before_registration = transfer_id
+            .and_then(|id| registry.pending_cancels.remove(&id))
+            .is_some();
+        if cancelled_before_registration {
+            token.cancel();
         }
         let start = registry.next_registration_id;
         let mut candidate = start;
@@ -437,17 +445,44 @@ impl Drop for TransferGuard {
 pub(crate) fn cancel_transfer(transfer_id: u32) {
     let tokens = transfer_registry()
         .lock()
-        .map(|registry| {
-            registry
+        .map(|mut registry| {
+            let tokens = registry
                 .registrations
                 .values()
                 .filter(|active| active.transfer_id == Some(transfer_id))
                 .map(|active| Arc::clone(&active.token))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            if tokens.is_empty() {
+                let now = Instant::now();
+                registry
+                    .pending_cancels
+                    .retain(|_, created| now.duration_since(*created) <= PENDING_CANCEL_TTL);
+                if registry.pending_cancels.len() >= MAX_PENDING_CANCELS {
+                    if let Some(oldest) = registry
+                        .pending_cancels
+                        .iter()
+                        .min_by_key(|(_, created)| *created)
+                        .map(|(id, _)| *id)
+                    {
+                        registry.pending_cancels.remove(&oldest);
+                    }
+                }
+                registry.pending_cancels.insert(transfer_id, now);
+            }
+            tokens
         })
         .unwrap_or_default();
     for token in tokens {
         token.cancel();
+    }
+}
+
+async fn acquire_transfer_storage_cancellable(
+    cancel: &CancelToken,
+) -> Result<crate::StorageTransferGuard, String> {
+    tokio::select! {
+        _ = cancel.cancelled() => Err(cancelled_error()),
+        guard = crate::acquire_transfer_storage() => guard,
     }
 }
 
@@ -729,6 +764,36 @@ fn map_create_only_write_error<E: std::fmt::Debug>(
     format!("Failed to {} '{}': {:?}", action, key, err)
 }
 
+/// A create-only write can commit while its response is lost. The SDK (or the
+/// multipart completion loop) then retries with the same `If-None-Match: *`
+/// and gets 412 against the object it just wrote. Recognise that case by the
+/// exact size and SHA-256 ownership marker the write carried.
+async fn destination_is_own_write(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    checksum_hex: &str,
+    size: u64,
+    cancel: &CancelToken,
+) -> bool {
+    let request = client.head_object().bucket(bucket).key(key).send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return false,
+        result = request => match result {
+            Ok(head) => head,
+            Err(_) => return false,
+        },
+    };
+    let size_matches = head
+        .content_length()
+        .is_some_and(|length| u64::try_from(length).ok() == Some(size));
+    let marker_matches = head
+        .metadata()
+        .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(checksum_hex));
+    size_matches && marker_matches
+}
+
 fn detect_storage_provider(endpoint: &str) -> StorageProviderKind {
     let host = parse_endpoint_host(endpoint).unwrap_or_default();
     let is_domain = |domain: &str| {
@@ -752,14 +817,32 @@ fn detect_storage_provider(endpoint: &str) -> StorageProviderKind {
     if is_domain("digitaloceanspaces.com") {
         return StorageProviderKind::DigitalOcean;
     }
-    if host == "localhost"
-        || host == "127.0.0.1"
-        || host == "::1"
+    // Loopback endpoints host many S3 emulators (LocalStack, Garage,
+    // SeaweedFS, Ceph dev clusters). Only MinIO's default API port is trusted
+    // to honor If-None-Match; anything else stays Generic and asks first.
+    let is_loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if (is_loopback && parse_endpoint_port(endpoint) == Some(9000))
         || host.split('.').any(|label| label == "minio")
     {
         return StorageProviderKind::Minio;
     }
     StorageProviderKind::Generic
+}
+
+fn parse_endpoint_port(endpoint: &str) -> Option<u16> {
+    let trimmed = endpoint.trim();
+    let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    let authority = after_scheme.split('/').next()?.trim();
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let port = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split_once("]:")?.1
+    } else {
+        host_port.split_once(':')?.1
+    };
+    port.parse().ok()
 }
 
 fn apply_aws_copy_create_only_guard(
@@ -845,7 +928,11 @@ async fn prefix_has_content(
         result = request => result,
     }
     .map_err(|e| format!("Failed to check destination prefix '{}': {}", prefix, e))?;
-    Ok(output.key_count().unwrap_or(0) > 0 || !output.common_prefixes().is_empty())
+    // Some S3-compatible providers omit KeyCount, so the returned entries are
+    // authoritative when present.
+    Ok(output.key_count().unwrap_or(0) > 0
+        || !output.contents().is_empty()
+        || !output.common_prefixes().is_empty())
 }
 
 #[derive(serde::Serialize)]
@@ -1092,6 +1179,35 @@ fn compute_speed_eta(
     (Some(speed), eta)
 }
 
+/// Bytes a transfer already had when this attempt began (a resumed download's
+/// completed parts). Speed and ETA count only bytes moved by this attempt, or
+/// resuming 9 of 10 GB would report ~9 GB/s and an ETA of zero.
+fn progress_baselines() -> &'static Mutex<HashMap<u32, u64>> {
+    static BASELINES: OnceLock<Mutex<HashMap<u32, u64>>> = OnceLock::new();
+    BASELINES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct ProgressBaseline {
+    transfer_id: u32,
+}
+
+impl ProgressBaseline {
+    fn set(transfer_id: u32, resumed_bytes: u64) -> Self {
+        if let Ok(mut baselines) = progress_baselines().lock() {
+            baselines.insert(transfer_id, resumed_bytes);
+        }
+        Self { transfer_id }
+    }
+}
+
+impl Drop for ProgressBaseline {
+    fn drop(&mut self) {
+        if let Ok(mut baselines) = progress_baselines().lock() {
+            baselines.remove(&self.transfer_id);
+        }
+    }
+}
+
 fn emit_transfer_progress(
     app: &tauri::AppHandle,
     event: &str,
@@ -1106,7 +1222,17 @@ fn emit_transfer_progress(
     checkpoint_id: Option<&str>,
     resumable: Option<bool>,
 ) {
-    let (speed_bps, eta_seconds) = compute_speed_eta(bytes_sent, total_bytes, started_at);
+    let baseline = progress_baselines()
+        .lock()
+        .ok()
+        .and_then(|baselines| baselines.get(&transfer_id).copied())
+        .unwrap_or(0)
+        .min(bytes_sent);
+    let (speed_bps, eta_seconds) = compute_speed_eta(
+        bytes_sent - baseline,
+        total_bytes.saturating_sub(baseline),
+        started_at,
+    );
     let _ = app.emit(
         event,
         UploadProgress {
@@ -1659,10 +1785,15 @@ fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), String> {
 /// Without it S3 emits keys raw inside XML, and a key containing a character
 /// XML 1.0 forbids (for example a control byte) makes the whole page
 /// unparseable. Continuation tokens are opaque and must never be decoded.
+///
+/// S3 form-encodes these values: a space arrives as `+` and a literal plus as
+/// `%2B`. Percent-decoding alone would turn the key `a b` into `a+b`, which
+/// then addresses a different (or missing) object.
 fn decode_listed(value: &str) -> String {
-    urlencoding::decode(value)
+    let form = value.replace('+', " ");
+    urlencoding::decode(&form)
         .map(|decoded| decoded.into_owned())
-        .unwrap_or_else(|_| value.to_string())
+        .unwrap_or(form)
 }
 
 fn format_sdk_error<E: std::fmt::Debug>(
@@ -1896,6 +2027,18 @@ async fn get_object_acl_output(
         request = request.version_id(version_id);
     }
     match request.send().await {
+        // MinIO (and other providers without object ACLs) answer with a stub
+        // policy whose owner has no ID. There is no ACL identity to confirm or
+        // carry, which is the same as a provider rejecting the call; treating
+        // it as a hard error made every prefix copy, move and rename fail.
+        Ok(output)
+            if output
+                .owner()
+                .and_then(|owner| owner.id())
+                .is_none_or(|id| id.is_empty()) =>
+        {
+            Ok(None)
+        }
         Ok(output) => Ok(Some(output)),
         Err(err) => {
             let message = format!("{:?}", err);
@@ -2675,13 +2818,14 @@ pub(crate) async fn update_metadata(
     let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_bucket_name(&bucket)?;
     validate_mutating_key(&key, "Object key")?;
-    let _mutation_guard = crate::acquire_s3_mutation(vec![crate::S3MutationScope::key(
-        &connection_id,
-        &bucket,
-        &key,
-    )])
-    .await?;
+    // Resolve the client first so a disconnect cancels a lease wait behind a
+    // long-running operation on the same key or prefix.
     let client = require_client(&state, &connection_id, None)?;
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![crate::S3MutationScope::key(&connection_id, &bucket, &key)],
+        &client.token(),
+    )
+    .await?;
     let provider = client.provider();
     let cancel = client.token();
 
@@ -2814,13 +2958,16 @@ pub(crate) async fn delete_objects(
     if keys.is_empty() {
         return Ok(DeleteResult::default());
     }
-    let _mutation_guard = crate::acquire_s3_mutation(
+    // Resolve the client first so a disconnect cancels a lease wait behind a
+    // long-running operation on the same key or prefix.
+    let client = require_client(&state, &connection_id, None)?;
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
         keys.iter()
             .map(|key| crate::S3MutationScope::key(&connection_id, &bucket, key))
             .collect(),
+        &client.token(),
     )
     .await?;
-    let client = require_client(&state, &connection_id, None)?;
     let cancel = client.token();
 
     let mut result = DeleteResult::default();
@@ -2926,11 +3073,13 @@ pub(crate) async fn upload_object(
     bandwidth_limit_mbps: Option<u32>,
     checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
-    let _storage_guard = crate::acquire_transfer_storage().await?;
+    // Register before waiting for the storage gate so a pause or cancel
+    // sent during the wait reaches this transfer instead of being dropped.
+    let client = require_client(&state, &connection_id, Some(transfer_id))?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     validate_mutating_key(&key, "Object key")?;
     let upload_path = validate_existing_path(&file_path, "Upload file")?;
-    let client = require_client(&state, &connection_id, Some(transfer_id))?;
     let provider = client.provider();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
@@ -2951,7 +3100,9 @@ pub(crate) async fn upload_object(
     // Multipart safety always needs a baseline digest, even when remote checksum
     // headers are disabled for provider compatibility. This extra local read is
     // what detects same-size rewrites before CompleteMultipartUpload publishes.
-    let expected_checksum = if checksum_enabled || file_size >= MULTIPART_THRESHOLD {
+    // Create-only writes also carry the digest as an ownership marker so a
+    // retried request that hits 412 can recognise its own committed object.
+    let expected_checksum = if checksum_enabled || file_size >= MULTIPART_THRESHOLD || !overwrite {
         let digest = sha256_file(&upload_path, &cancel).await?;
         Some(sha256_checksum_from_digest(&digest))
     } else {
@@ -3023,10 +3174,12 @@ pub(crate) async fn upload_object(
             req = req.content_type(&content_type);
         }
         if let Some(checksum) = expected_checksum.as_ref() {
-            req = req
-                .metadata(CHECKSUM_METADATA_KEY, &checksum.hex)
-                .checksum_algorithm(ChecksumAlgorithm::Sha256)
-                .checksum_sha256(&checksum.base64);
+            req = req.metadata(CHECKSUM_METADATA_KEY, &checksum.hex);
+            if checksum_enabled {
+                req = req
+                    .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                    .checksum_sha256(&checksum.base64);
+            }
         }
         if !overwrite {
             req = apply_put_create_only_guard(req, provider, &key)?;
@@ -3036,22 +3189,48 @@ pub(crate) async fn upload_object(
         // against the cancel signal instead of only checking before it starts.
         // Without this, cancelling a sub-threshold upload had no effect at all
         // until the whole body had been transmitted.
-        let output = tokio::select! {
+        let result = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
             result = req
                 .customize()
                 .config_override(body_attempt_timeout_override(file_size))
-                .send() => {
-                result.map_err(|e| {
-                    if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
-                        return map_create_only_write_error(&key, &e, overwrite, "upload");
-                    }
-                    structured_transfer_sdk_error("Failed to upload", &e, "upload", true)
-                })?
-            }
+                .send() => result,
         };
-        if let Some(checksum) = expected_checksum.as_ref() {
-            verify_upload_checksum_response(output.checksum_sha256(), checksum, "Upload")?;
+        match result {
+            Ok(output) => {
+                if let (true, Some(checksum)) = (checksum_enabled, expected_checksum.as_ref()) {
+                    verify_upload_checksum_response(output.checksum_sha256(), checksum, "Upload")?;
+                }
+            }
+            Err(e) => {
+                let own_write = match expected_checksum.as_ref() {
+                    Some(checksum) if !overwrite && is_destination_occupied(&e) => {
+                        destination_is_own_write(
+                            &client,
+                            &bucket,
+                            &key,
+                            &checksum.hex,
+                            file_size,
+                            &cancel,
+                        )
+                        .await
+                    }
+                    _ => false,
+                };
+                if !own_write {
+                    if !overwrite
+                        && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e))
+                    {
+                        return Err(map_create_only_write_error(&key, &e, overwrite, "upload"));
+                    }
+                    return Err(structured_transfer_sdk_error(
+                        "Failed to upload",
+                        &e,
+                        "upload",
+                        true,
+                    ));
+                }
+            }
         }
     }
 
@@ -3270,7 +3449,11 @@ async fn upload_multipart(
             // part number beyond `total_parts` would index `completed_parts`
             // out of bounds. Abort the upload cleanly instead of panicking.
             if (part_number as usize) > total_parts {
+                // Drain first, like every other abort path: an in-flight part
+                // could otherwise land after AbortMultipartUpload and linger
+                // as a billed orphan part.
                 join_set.abort_all();
+                while join_set.join_next().await.is_some() {}
                 abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
                 return Err(
                     "File changed during upload (grew larger than expected). Upload aborted."
@@ -3462,6 +3645,22 @@ async fn upload_multipart(
                 break;
             }
             Err(e) => {
+                if !overwrite
+                    && is_destination_occupied(&e)
+                    && destination_is_own_write(
+                        client,
+                        bucket,
+                        key,
+                        &baseline_checksum.hex,
+                        file_size,
+                        cancel,
+                    )
+                    .await
+                {
+                    // An earlier completion attempt committed; this retry hit
+                    // our own object. Completion is done.
+                    return Ok(());
+                }
                 if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
                     abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
                     return Err(map_create_only_write_error(
@@ -3526,7 +3725,10 @@ pub(crate) async fn upload_object_bytes(
     overwrite: Option<bool>,
     checksum_verification: Option<bool>,
 ) -> Result<(), String> {
-    let _storage_guard = crate::acquire_transfer_storage().await?;
+    // Register before waiting for the storage gate so a pause or cancel
+    // sent during the wait reaches this transfer instead of being dropped.
+    let client = require_client(&state, &connection_id, Some(transfer_id))?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     validate_mutating_key(&key, "Object key")?;
     // Base64 keeps the browser-file IPC payload near 1.4x instead of the 3-4x
@@ -3549,7 +3751,6 @@ pub(crate) async fn upload_object_bytes(
         ));
     }
 
-    let client = require_client(&state, &connection_id, Some(transfer_id))?;
     let provider = client.provider();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
@@ -3563,7 +3764,7 @@ pub(crate) async fn upload_object_bytes(
     let overwrite = overwrite.unwrap_or(false);
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
-    let expected_checksum = checksum_enabled.then(|| sha256_checksum_bytes(&bytes));
+    let expected_checksum = (checksum_enabled || !overwrite).then(|| sha256_checksum_bytes(&bytes));
     emit_transfer_progress(
         &app,
         "upload-progress",
@@ -3596,27 +3797,46 @@ pub(crate) async fn upload_object_bytes(
         req = req.content_type(&content_type);
     }
     if let Some(checksum) = expected_checksum.as_ref() {
-        req = req
-            .metadata(CHECKSUM_METADATA_KEY, &checksum.hex)
-            .checksum_algorithm(ChecksumAlgorithm::Sha256)
-            .checksum_sha256(&checksum.base64);
+        req = req.metadata(CHECKSUM_METADATA_KEY, &checksum.hex);
+        if checksum_enabled {
+            req = req
+                .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                .checksum_sha256(&checksum.base64);
+        }
     }
     if !overwrite {
         req = apply_put_create_only_guard(req, provider, &key)?;
     }
 
-    let output = tokio::select! {
+    let result = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
         result = req
             .customize()
             .config_override(body_attempt_timeout_override(total))
-            .send() => {
-            result.map_err(|e| {
-                if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
-                    return map_create_only_write_error(&key, &e, overwrite, "upload");
+            .send() => result,
+    };
+    let output = match result {
+        Ok(output) => Some(output),
+        Err(e) => {
+            let own_write = match expected_checksum.as_ref() {
+                Some(checksum) if !overwrite && is_destination_occupied(&e) => {
+                    destination_is_own_write(&client, &bucket, &key, &checksum.hex, total, &cancel)
+                        .await
                 }
-                structured_transfer_sdk_error("Failed to upload", &e, "upload", true)
-            })?
+                _ => false,
+            };
+            if !own_write {
+                if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
+                    return Err(map_create_only_write_error(&key, &e, overwrite, "upload"));
+                }
+                return Err(structured_transfer_sdk_error(
+                    "Failed to upload",
+                    &e,
+                    "upload",
+                    true,
+                ));
+            }
+            None
         }
     };
 
@@ -3624,7 +3844,11 @@ pub(crate) async fn upload_object_bytes(
         return Err(cancelled_error());
     }
 
-    if let Some(checksum) = expected_checksum.as_ref() {
+    if let (true, Some(output), Some(checksum)) = (
+        checksum_enabled,
+        output.as_ref(),
+        expected_checksum.as_ref(),
+    ) {
         verify_upload_checksum_response(output.checksum_sha256(), checksum, "Upload")?;
     }
 
@@ -3710,13 +3934,14 @@ pub(crate) async fn set_object_acl(
     let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_bucket_name(&bucket)?;
     validate_mutating_key(&key, "Object key")?;
-    let _mutation_guard = crate::acquire_s3_mutation(vec![crate::S3MutationScope::key(
-        &connection_id,
-        &bucket,
-        &key,
-    )])
-    .await?;
+    // Resolve the client first so a disconnect cancels a lease wait behind a
+    // long-running operation on the same key or prefix.
     let client = require_client(&state, &connection_id, None)?;
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![crate::S3MutationScope::key(&connection_id, &bucket, &key)],
+        &client.token(),
+    )
+    .await?;
     let cancel = client.token();
 
     let acl = match visibility.trim().to_ascii_lowercase().as_str() {
@@ -3752,7 +3977,10 @@ pub(crate) async fn download_object(
     attempt: Option<u32>,
     checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
-    let _storage_guard = crate::acquire_transfer_storage().await?;
+    // Register before waiting for the storage gate so a pause or cancel
+    // sent during the wait reaches this transfer instead of being dropped.
+    let client = require_client(&state, &connection_id, Some(transfer_id))?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     validate_readable_key(&key, "Object key")?;
     let destination_path = if overwrite {
@@ -3767,7 +3995,6 @@ pub(crate) async fn download_object(
     if temp_path == destination_path {
         return Err("Temp path must be different from destination".to_string());
     }
-    let client = require_client(&state, &connection_id, Some(transfer_id))?;
     let cancel = client.token();
     let _temp_guard = claim_download_temp_async(&temp_path, &destination_path).await?;
     let download_lease_nonce =
@@ -3928,7 +4155,7 @@ pub(crate) async fn download_object(
         ));
     }
 
-    publish_completed_download_file(&temp_path, &destination_path, overwrite).await?;
+    publish_completed_download_file(&temp_path, &destination_path, overwrite, false).await?;
     release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;
 
     emit_transfer_progress(
@@ -4086,6 +4313,7 @@ async fn publish_completed_download_file(
     temp_path: &Path,
     destination_path: &Path,
     overwrite: bool,
+    keep_temp_on_failure: bool,
 ) -> Result<(), String> {
     // publish_temp_file performs rename/hard_link/fsync — blocking syscalls
     // on potentially large files — so run it on the blocking pool following
@@ -4093,7 +4321,12 @@ async fn publish_completed_download_file(
     let temp_path = temp_path.to_path_buf();
     let destination_path = destination_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        crate::publish_temp_file(&temp_path, &destination_path, overwrite)
+        crate::publish_temp_file(
+            &temp_path,
+            &destination_path,
+            overwrite,
+            keep_temp_on_failure,
+        )
     })
     .await
     .map_err(|err| format!("Download finalize task failed: {}", err))?
@@ -4160,7 +4393,7 @@ async fn finalize_download_file(
     // a separate step lets network downloads perform their final remote
     // generation check after disk flush and immediately before publication.
     sync_completed_download_file(temp_path).await?;
-    publish_completed_download_file(temp_path, destination_path, overwrite).await
+    publish_completed_download_file(temp_path, destination_path, overwrite, false).await
 }
 
 /// Confirm a response actually honoured the byte range that was requested.
@@ -4331,7 +4564,10 @@ pub(crate) async fn download_object_parallel(
     enable_resume: Option<bool>,
     checksum_verification: Option<bool>,
 ) -> Result<u64, String> {
-    let _storage_guard = crate::acquire_transfer_storage().await?;
+    // Register before waiting for the storage gate so a pause or cancel
+    // sent during the wait reaches this transfer instead of being dropped.
+    let client = require_client(&state, &connection_id, Some(transfer_id))?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     let checkpoint_enabled = enable_resume.unwrap_or(true)
         && checkpoint_id
@@ -4355,7 +4591,6 @@ pub(crate) async fn download_object_parallel(
     if temp_path == destination_path {
         return Err("Temp path must be different from destination".to_string());
     }
-    let client = require_client(&state, &connection_id, Some(transfer_id))?;
     let cancel = client.token();
     let _temp_guard = claim_download_temp_async(&temp_path, &destination_path).await?;
     let download_lease_nonce =
@@ -4592,6 +4827,7 @@ pub(crate) async fn download_object_parallel(
         }
     }
 
+    let _progress_baseline = ProgressBaseline::set(transfer_id, completed_bytes);
     emit_transfer_progress(
         &app,
         "download-progress",
@@ -4890,7 +5126,11 @@ pub(crate) async fn download_object_parallel(
         ));
     }
 
-    publish_completed_download_file(&temp_path, &destination_path, overwrite).await?;
+    // A checkpointed download keeps its finished scratch if publication fails
+    // (for example the old destination is open in another app), so a retry
+    // publishes it instead of downloading every byte again.
+    publish_completed_download_file(&temp_path, &destination_path, overwrite, checkpoint_enabled)
+        .await?;
     release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;
 
     emit_transfer_progress(
@@ -4946,13 +5186,18 @@ pub(crate) async fn create_folder(
     } else {
         format!("{}/", key)
     };
-    let _mutation_guard = crate::acquire_s3_mutation(vec![crate::S3MutationScope::key(
-        &connection_id,
-        &bucket,
-        &folder_key,
-    )])
-    .await?;
+    // Resolve the client first so a disconnect cancels a lease wait behind a
+    // long-running operation on the same key or prefix.
     let client = require_client(&state, &connection_id, None)?;
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![crate::S3MutationScope::key(
+            &connection_id,
+            &bucket,
+            &folder_key,
+        )],
+        &client.token(),
+    )
+    .await?;
     let provider = client.provider();
     let cancel = client.token();
     let overwrite = overwrite.unwrap_or(false);
@@ -4981,17 +5226,36 @@ pub(crate) async fn create_folder(
         request = apply_put_create_only_guard(request, provider, &folder_key)?;
     }
     let send = request.send();
-    tokio::select! {
-        _ = cancel.cancelled() => Err(cancelled_error()),
-        result = send => result
-            .map(|_| ())
-            .map_err(|e| {
-                if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
-                    return map_create_only_write_error(&folder_key, &e, overwrite, "create folder");
-                }
-                format!("Failed to create folder: {}", e)
-            }),
+    let result = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = send => result,
+    };
+    let err = match result {
+        Ok(_) => return Ok(()),
+        Err(err) => err,
+    };
+    if !overwrite && is_destination_occupied(&err) {
+        // A folder marker carries no data: if a retried request hit a
+        // zero-byte marker (ours or another client's), the folder exists as
+        // requested and nothing was replaced.
+        let head = client.head_object().bucket(&bucket).key(&folder_key).send();
+        let marker_exists = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = head => matches!(result, Ok(ref head) if head.content_length() == Some(0)),
+        };
+        if marker_exists {
+            return Ok(());
+        }
     }
+    if !overwrite && (is_destination_occupied(&err) || is_concurrent_write_conflict(&err)) {
+        return Err(map_create_only_write_error(
+            &folder_key,
+            &err,
+            overwrite,
+            "create folder",
+        ));
+    }
+    Err(format!("Failed to create folder: {}", err))
 }
 
 /// Everything about a source object that a copy has to carry forward.
@@ -5562,15 +5826,24 @@ async fn copy_one(
                     include_acl = false;
                     continue;
                 }
-                if !overwrite
-                    && (is_destination_occupied(err.as_ref())
-                        || is_concurrent_write_conflict(err.as_ref()))
-                {
+                if !overwrite && is_destination_occupied(err.as_ref()) {
+                    return resolve_copy_precondition_failure(
+                        client, dst_bucket, dst_key, src_key, &info, cancel,
+                    )
+                    .await;
+                }
+                if !overwrite && is_concurrent_write_conflict(err.as_ref()) {
                     return Err(map_create_only_write_error(
                         dst_key,
                         err.as_ref(),
                         overwrite,
                         "copy",
+                    ));
+                }
+                if is_destination_occupied(err.as_ref()) {
+                    return Err(format!(
+                        "Source '{}' changed after it was inspected. Refresh and retry.",
+                        src_key
                     ));
                 }
                 return Err(format!("Failed to copy '{}': {}", src_key, err));
@@ -5595,6 +5868,71 @@ async fn copy_one(
         cancel,
     )
     .await
+}
+
+/// A single-part create-only copy failed with 412. That status has three
+/// causes, told apart by the destination:
+/// - absent: `x-amz-copy-source-if-match` failed, so the source changed;
+/// - same ETag as the source: an earlier attempt of this copy committed and
+///   the SDK retry hit it (a single-part copy preserves the source ETag);
+/// - anything else: the destination really is occupied.
+async fn resolve_copy_precondition_failure(
+    client: &Client,
+    dst_bucket: &str,
+    dst_key: &str,
+    src_key: &str,
+    info: &SourceObjectInfo,
+    cancel: &CancelToken,
+) -> Result<DestinationIdentity, String> {
+    let request = client.head_object().bucket(dst_bucket).key(dst_key).send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = request => result,
+    };
+    match head {
+        Err(err) if is_not_found(&err) => Err(format!(
+            "Source '{}' changed after it was inspected. Refresh and retry.",
+            src_key
+        )),
+        Ok(head) => {
+            let own_copy = matches!(
+                (head.e_tag(), info.etag.as_deref()),
+                (Some(dst), Some(src)) if !dst.is_empty() && dst == src
+            );
+            if own_copy {
+                Ok(DestinationIdentity {
+                    etag: head.e_tag().unwrap_or_default().to_string(),
+                    version_id: head.version_id().map(|value| value.to_string()),
+                })
+            } else {
+                Err(destination_conflict_error(dst_key))
+            }
+        }
+        Err(_) => Err(destination_conflict_error(dst_key)),
+    }
+}
+
+/// A create-only CompleteMultipartUpload failed with 412. If the upload ID is
+/// gone, an earlier completion attempt of this upload committed; a real
+/// conflict rejects the request without consuming the upload.
+async fn multipart_upload_already_completed(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    cancel: &CancelToken,
+) -> bool {
+    let request = client
+        .list_parts()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .max_parts(1)
+        .send();
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        result = request => matches!(result, Err(ref err) if is_not_found(err)),
+    }
 }
 
 async fn copy_object_multipart(
@@ -5786,6 +6124,16 @@ async fn copy_object_multipart(
     let complete_output = match complete_result {
         Ok(output) => output,
         Err(e) => {
+            if !overwrite
+                && is_destination_occupied(&e)
+                && multipart_upload_already_completed(
+                    client, dst_bucket, dest_key, &upload_id, cancel,
+                )
+                .await
+            {
+                return destination_identity_from_head(client, dst_bucket, dest_key, None, cancel)
+                    .await;
+            }
             abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
             if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
                 return Err(map_create_only_write_error(
@@ -5917,7 +6265,10 @@ pub(crate) async fn rename_object(
     overwrite: bool,
     transfer_id: Option<u32>,
 ) -> Result<(), String> {
-    let _storage_guard = crate::acquire_transfer_storage().await?;
+    // Register before waiting for the storage gate so a pause or cancel
+    // sent during the wait reaches this transfer instead of being dropped.
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     // The source is only ever deleted, never mapped to a local path, so
     // dot-segment keys (legal in S3) must not strand it here after a
@@ -5928,7 +6279,6 @@ pub(crate) async fn rename_object(
     if old_key == new_key {
         return Err("Source and destination keys are identical.".to_string());
     }
-    let client = require_client(&state, &connection_id, transfer_id)?;
     let provider = client.provider();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
@@ -6153,13 +6503,18 @@ pub(crate) async fn delete_prefix(
     let _storage_guard = crate::acquire_transfer_storage().await?;
     validate_bucket_name(&bucket)?;
     validate_mutating_prefix(&prefix, "Prefix")?;
-    let _mutation_guard = crate::acquire_s3_mutation(vec![crate::S3MutationScope::prefix(
-        &connection_id,
-        &bucket,
-        &prefix,
-    )])
-    .await?;
+    // Resolve the client first so a disconnect cancels a lease wait behind a
+    // long-running operation on the same key or prefix.
     let client = require_client(&state, &connection_id, None)?;
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        vec![crate::S3MutationScope::prefix(
+            &connection_id,
+            &bucket,
+            &prefix,
+        )],
+        &client.token(),
+    )
+    .await?;
     let cancel = client.token();
 
     let mut result = DeleteResult::default();
@@ -6474,6 +6829,15 @@ async fn remove_backup_object(
     Ok(())
 }
 
+/// The version ID a rollback may delete by version. `"null"` pins a read
+/// (see `immutable_version_id`), but in a bucket with versioning suspended a
+/// write replaces the null version in place, so a version-targeted delete of
+/// `"null"` would destroy data instead of undoing one write. Those receipts
+/// take the unversioned (conditional delete + recreate) restore path.
+fn rollback_version_id(version_id: Option<&str>) -> Option<&str> {
+    immutable_version_id(version_id).filter(|value| *value != "null")
+}
+
 async fn rollback_prefix_copy_unbounded(
     client: &Client,
     bucket: &str,
@@ -6490,6 +6854,44 @@ async fn rollback_prefix_copy_unbounded(
     // backup for manual recovery instead of overwriting somebody else's data.
     for backup in backups.iter().rev() {
         let Some(replacement) = backup.replacement.as_ref() else {
+            // The replacement write failed or was cancelled. If the destination
+            // is still exactly the original, nothing was replaced and the
+            // backup is redundant; keeping it would block every later prefix
+            // operation in this bucket.
+            let original_unchanged = match backup
+                .original_info
+                .etag
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(original_etag) => matches!(
+                    current_source_identity_matches(
+                        client,
+                        bucket,
+                        &backup.destination_key,
+                        original_etag,
+                        None,
+                        backup.original_info.version_id.as_deref(),
+                        &source_generation_fingerprint(&backup.original_info),
+                        &backup.original_info.acl_fingerprint,
+                        &backup.original_info.tag_fingerprint,
+                        &rollback_cancel,
+                    )
+                    .await,
+                    Ok(Some(true))
+                ),
+                None => false,
+            };
+            if original_unchanged {
+                if let Err(err) = remove_backup_object(client, bucket, backup).await {
+                    failures.push(format!(
+                        "'{}' was not replaced, but {}",
+                        backup.destination_key, err
+                    ));
+                }
+                continue;
+            }
             failures.push(format!(
                 "could not safely restore '{}' because the replacement write has no response-owned identity; retained backup '{}'",
                 backup.destination_key, backup.backup_key
@@ -6527,7 +6929,8 @@ async fn rollback_prefix_copy_unbounded(
             }
         }
 
-        if let Some(version_id) = replacement.destination_version_id.as_deref() {
+        if let Some(version_id) = rollback_version_id(replacement.destination_version_id.as_deref())
+        {
             let result = client
                 .delete_object()
                 .bucket(bucket)
@@ -6681,7 +7084,7 @@ async fn rollback_prefix_copy_unbounded(
             .bucket(bucket)
             .key(&receipt.destination_key)
             .if_match(&receipt.destination_etag);
-        if let Some(version_id) = receipt.destination_version_id.as_deref() {
+        if let Some(version_id) = rollback_version_id(receipt.destination_version_id.as_deref()) {
             request = request.version_id(version_id);
         }
         if let Err(err) = request.send().await {
@@ -7504,7 +7907,10 @@ pub(crate) async fn delete_copied_objects(
     receipts: Vec<CopyReceipt>,
     transfer_id: Option<u32>,
 ) -> Result<u32, String> {
-    let _storage_guard = crate::acquire_transfer_storage().await?;
+    // Register before waiting for the storage gate so a pause or cancel
+    // sent during the wait reaches this transfer instead of being dropped.
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&src_bucket)?;
     validate_bucket_name(&dst_bucket)?;
     if receipts.is_empty() {
@@ -7539,7 +7945,6 @@ pub(crate) async fn delete_copied_objects(
             ]
         })
         .collect();
-    let client = require_client(&state, &connection_id, transfer_id)?;
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(mutation_scopes, &cancel).await?;
     delete_move_receipts_checked(&client, &src_bucket, &dst_bucket, &receipts, &cancel).await
@@ -7555,14 +7960,16 @@ pub(crate) async fn rename_prefix(
     overwrite: bool,
     transfer_id: Option<u32>,
 ) -> Result<u32, String> {
-    let _storage_guard = crate::acquire_transfer_storage().await?;
+    // Register before waiting for the storage gate so a pause or cancel
+    // sent during the wait reaches this transfer instead of being dropped.
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     validate_mutating_prefix(&old_prefix, "Source prefix")?;
     validate_mutating_prefix(&new_prefix, "Destination prefix")?;
     if prefixes_overlap(&old_prefix, &new_prefix) {
         return Err("Source and destination prefixes overlap; move was refused.".to_string());
     }
-    let client = require_client(&state, &connection_id, transfer_id)?;
     let provider = client.provider();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
@@ -7610,14 +8017,16 @@ pub(crate) async fn copy_object_to(
     transfer_id: Option<u32>,
     require_immutable_source_version: Option<bool>,
 ) -> Result<CopyReceipt, String> {
-    let _storage_guard = crate::acquire_transfer_storage().await?;
+    // Register before waiting for the storage gate so a pause or cancel
+    // sent during the wait reaches this transfer instead of being dropped.
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&src_bucket)?;
     validate_bucket_name(&dst_bucket)?;
     validate_readable_key(&src_key, "Source key")?;
     // Copying out of the backup namespace is how a user restores data from an
     // interrupted operation, so only the destination is restricted.
     validate_mutating_key(&dst_key, "Destination key")?;
-    let client = require_client(&state, &connection_id, transfer_id)?;
     let provider = client.provider();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
@@ -7670,7 +8079,10 @@ pub(crate) async fn copy_prefix_to(
     transfer_id: Option<u32>,
     collect_receipts: Option<bool>,
 ) -> Result<Vec<CopyReceipt>, String> {
-    let _storage_guard = crate::acquire_transfer_storage().await?;
+    // Register before waiting for the storage gate so a pause or cancel
+    // sent during the wait reaches this transfer instead of being dropped.
+    let client = require_client(&state, &connection_id, transfer_id)?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&src_bucket)?;
     validate_bucket_name(&dst_bucket)?;
     validate_mutating_prefix(&src_prefix, "Source prefix")?;
@@ -7678,7 +8090,6 @@ pub(crate) async fn copy_prefix_to(
     if src_bucket == dst_bucket && prefixes_overlap(&src_prefix, &dst_prefix) {
         return Err("Source and destination prefixes overlap; copy was refused.".to_string());
     }
-    let client = require_client(&state, &connection_id, transfer_id)?;
     let provider = client.provider();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
@@ -8431,16 +8842,15 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn cancelling_an_unknown_transfer_is_a_noop() {
-        // The old design latched cancelled ids forever, so a reused id aborted a
-        // brand new transfer instantly. Cancelling an id that is not running must
-        // leave no trace.
+    fn cancelling_just_before_registration_cancels_that_transfer() {
+        // Two IPC handlers can be scheduled in reverse order. A short-lived
+        // pending cancel must bridge that gap without latching forever.
         let id = 990_001;
         cancel_transfer(id);
         let guard = TransferGuard::register(id).expect("registration should succeed");
         assert!(
-            !guard.is_cancelled(),
-            "a stale cancel must not affect a later transfer with the same id"
+            guard.is_cancelled(),
+            "a pre-registration cancel must reach the command that follows it"
         );
     }
 
@@ -8459,8 +8869,6 @@ mod tests {
         {
             let _guard = TransferGuard::register(id).expect("registration should succeed");
         }
-        // Nothing is registered any more, so this cancel goes nowhere.
-        cancel_transfer(id);
         let next = TransferGuard::register(id).expect("registration should succeed");
         assert!(
             !next.is_cancelled(),

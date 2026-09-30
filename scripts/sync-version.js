@@ -4,11 +4,31 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { run as updateMetainfo } from "./update-metainfo.js";
+import {
+  syncChangelogForVersion,
+  syncNpmLockfileVersion,
+} from "./sync-version-helpers.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const version = JSON.parse(
   fs.readFileSync(path.join(root, "package.json"), "utf-8"),
 ).version;
+
+// Compute the CHANGELOG and lockfile rewrites before touching any file, so
+// marker drift or a malformed lockfile aborts without a half-synced tree.
+const changelogPath = path.join(root, "CHANGELOG.md");
+const npmLockPath = path.join(root, "package-lock.json");
+const changelog = fs.readFileSync(changelogPath, "utf8");
+const npmLock = fs.readFileSync(npmLockPath, "utf8");
+let syncedChangelog;
+let syncedNpmLock;
+try {
+  syncedChangelog = syncChangelogForVersion(changelog, version);
+  syncedNpmLock = syncNpmLockfileVersion(npmLock, version);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
 
 const tauriConf = path.join(root, "src-tauri", "tauri.conf.json");
 const conf = JSON.parse(fs.readFileSync(tauriConf, "utf-8"));
@@ -72,4 +92,22 @@ try {
       : String(error);
   console.error(`Failed to update AppStream metadata: ${message}`);
   process.exit(1);
+}
+
+if (syncedChangelog !== changelog) {
+  fs.writeFileSync(changelogPath, syncedChangelog);
+  console.log(`CHANGELOG.md    → v${version} (download URLs + section)`);
+}
+
+if (syncedNpmLock !== npmLock) {
+  fs.writeFileSync(npmLockPath, syncedNpmLock);
+  const lockVerify = JSON.parse(fs.readFileSync(npmLockPath, "utf8"));
+  if (
+    lockVerify.version !== version ||
+    lockVerify.packages?.[""]?.version !== version
+  ) {
+    console.error("package-lock.json write verification failed");
+    process.exit(1);
+  }
+  console.log(`package-lock.json → ${version}`);
 }

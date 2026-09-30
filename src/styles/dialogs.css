@@ -71,6 +71,16 @@ body.modal-open .dialog-overlay.active {
   word-break: break-word;
 }
 
+.dialog-checkbox {
+  margin-bottom: 20px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.dialog-checkbox[hidden] {
+  display: none;
+}
+
 .dialog-input-wrapper {
   position: relative;
   margin-bottom: 20px;

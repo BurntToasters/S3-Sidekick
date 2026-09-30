@@ -174,26 +174,21 @@ export async function queueDroppedPaths(
       setStatus("Upload cancelled because destination changed.", 5000);
       return;
     }
-    if (entries.length > 0) {
-      enqueueFolderTransfers(entries, destPrefix, target);
-      setStatus(
-        `Dropped ${cleaned.length} item(s). Queued ${entries.length} file(s) for upload.`,
-        5000,
-      );
+    if (entries.length === 0) {
+      setStatus("Nothing to upload: the dropped items contain no files.", 5000);
       return;
     }
-  } catch (err) {
-    logActivity(
-      `Folder structure scan failed for dropped files: ${err}`,
-      "error",
+    enqueueFolderTransfers(entries, destPrefix, target);
+    setStatus(
+      `Dropped ${cleaned.length} item(s). Queued ${entries.length} file(s) for upload.`,
+      5000,
     );
+  } catch (err) {
+    // The scan is also the safety check (case-fold collisions, symlinks,
+    // unreadable entries). Queueing the raw paths instead would skip those
+    // checks and send dropped folders as single-file uploads that then fail.
+    const message = friendlyError(err);
+    logActivity(`Could not prepare dropped items for upload: ${message}`, "error");
+    setStatus(`Upload not started: ${message}`, 8000);
   }
-
-  if (!targetUnchanged()) {
-    setStatus("Upload cancelled because destination changed.", 5000);
-    return;
-  }
-
-  enqueuePaths(cleaned, destPrefix, target);
-  setStatus(`Dropped ${cleaned.length} file(s). Queued for upload.`, 5000);
 }

@@ -22,10 +22,23 @@ import {
   type ConflictPromptSession,
 } from "./app-conflicts.ts";
 import type { ConflictPolicy } from "./settings-model.ts";
+import { SMALL_OBJECT_BYTE_LENGTH } from "./create-only-capabilities.ts";
 
 interface RecentCopyMoveDestination {
   bucket: string;
+  /// Destination location: a prefix, or "" for the bucket root.
   path: string;
+}
+
+/// The folder a destination path points into. Recents store locations only,
+/// so a single-file key, a renamed folder and a multi-item prefix can be
+/// reused by any later dialog mode without writing a file onto a folder key
+/// or nesting items under a file name. Older entries that hold a full key
+/// normalize to their parent folder.
+function destinationLocation(path: string): string {
+  const trimmed = path.trim().replace(/^\/+/, "");
+  if (trimmed === "" || trimmed.endsWith("/")) return trimmed;
+  return trimmed.slice(0, trimmed.lastIndexOf("/") + 1);
 }
 
 const RECENT_COPY_MOVE_DESTS_STORAGE_KEY =
@@ -46,8 +59,10 @@ function readRecentCopyMoveDestinations(): RecentCopyMoveDestination[] {
       const bucket = String(
         (entry as { bucket?: unknown }).bucket ?? "",
       ).trim();
-      const path = String((entry as { path?: unknown }).path ?? "").trim();
-      if (!bucket || !path) continue;
+      const path = destinationLocation(
+        String((entry as { path?: unknown }).path ?? ""),
+      );
+      if (!bucket) continue;
       const key = `${bucket}\n${path}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -73,10 +88,10 @@ function writeRecentCopyMoveDestinations(
   }
 }
 
-function rememberCopyMoveDestination(bucket: string, path: string): void {
+function rememberCopyMoveDestination(bucket: string, location: string): void {
   const normalizedBucket = bucket.trim();
-  const normalizedPath = path.trim().replace(/^\/+/, "");
-  if (!normalizedBucket || !normalizedPath) return;
+  const normalizedPath = destinationLocation(location);
+  if (!normalizedBucket) return;
   const current = readRecentCopyMoveDestinations().filter(
     (entry) =>
       !(entry.bucket === normalizedBucket && entry.path === normalizedPath),
@@ -162,6 +177,17 @@ export function openCopyMoveDialog(): void {
 
   const isSingleFile = fileKeys.length === 1 && prefixes.length === 0;
   const isSingleFolder = prefixes.length === 1 && fileKeys.length === 0;
+  const singleFolderName = isSingleFolder
+    ? basename(prefixes[0].replace(/\/$/, ""))
+    : "";
+
+  /// Fill the path input from a destination location (a browsed folder or a
+  /// recent entry) in the shape the current mode expects.
+  function pathForLocation(location: string): string {
+    if (isSingleFile) return location + basename(fileKeys[0]);
+    if (isSingleFolder) return location + singleFolderName + "/";
+    return location;
+  }
 
   if (isSingleFile) {
     descEl.textContent = `File: ${fileKeys[0]}`;
@@ -225,7 +251,7 @@ export function openCopyMoveDialog(): void {
       button.title = `${entry.bucket}/${entry.path}`;
       button.addEventListener("click", () => {
         bucketSelect.value = entry.bucket;
-        pathInput.value = entry.path;
+        pathInput.value = pathForLocation(entry.path);
         pathInput.focus();
       });
       recentList.appendChild(button);
@@ -284,7 +310,7 @@ export function openCopyMoveDialog(): void {
         btn.textContent = "\uD83D\uDCC1 " + name;
         btn.addEventListener("dblclick", () => void loadFolders(p));
         btn.addEventListener("click", () => {
-          pathInput.value = isSingleFile ? p + basename(fileKeys[0]) : p;
+          pathInput.value = pathForLocation(p);
         });
         btn.addEventListener("keydown", (e) => {
           if (e.key === "Enter") void loadFolders(p);
@@ -292,7 +318,11 @@ export function openCopyMoveDialog(): void {
         browserList.appendChild(btn);
       }
     } catch {
-      if (dialogGeneration !== copyMoveDialogGeneration) return;
+      if (
+        dialogGeneration !== copyMoveDialogGeneration ||
+        seq !== loadFolderSeq
+      )
+        return;
       browserList.innerHTML =
         '<div class="copy-move-browser-empty">Failed to load folders</div>';
     }
@@ -382,7 +412,14 @@ export function openCopyMoveDialog(): void {
     conflictSession.applyAll = null;
     conflictSession.unguardedWriteAuthorized = false;
     const dstBucket = bucketSelect.value;
-    const dstPath = pathInput.value.trim();
+    const typedPath = pathInput.value.trim();
+    // A single file sent to "folder/" goes inside that folder. Written
+    // verbatim it would become the folder marker's bytes and, on a move, the
+    // source would be deleted while the file hid behind an empty folder.
+    const dstPath =
+      isSingleFile && typedPath.endsWith("/")
+        ? typedPath + basename(fileKeys[0])
+        : typedPath;
     if (!dstPath) {
       setStatus("Destination path is required.", 5000);
       pathInput.focus();
@@ -539,6 +576,7 @@ export function openCopyMoveDialog(): void {
               ? { overwrite: true }
               : await resolveAbsentObjectWriteIntent(conflictSession, true, {
                   operation: "copy",
+                  byteLength: SMALL_OBJECT_BYTE_LENGTH,
                 });
           if (!runIsCurrent(runGeneration)) return;
           if (absentIntent === "cancel") {
@@ -578,7 +616,15 @@ export function openCopyMoveDialog(): void {
       }
 
       enqueueCopyMoveEntries(queuedEntries, sourceTarget);
-      rememberCopyMoveDestination(dstBucket, dstPath);
+      const destinationPrefix = dstPath.endsWith("/") ? dstPath : `${dstPath}/`;
+      rememberCopyMoveDestination(
+        dstBucket,
+        isSingleFile
+          ? destinationLocation(dstPath)
+          : isSingleFolder
+            ? destinationLocation(destinationPrefix.replace(/\/+$/, ""))
+            : destinationPrefix,
+      );
       const skippedTotal = skippedFiles + skippedFolders;
       const skippedLabel =
         skippedTotal > 0

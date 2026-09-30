@@ -137,6 +137,17 @@ import { openCopyMoveDialog } from "./app-copy-move.ts";
 
 let dragDropUnlisten: (() => void) | null = null;
 
+/**
+ * After an inactivity auto-lock: end the S3 session and drop decrypted
+ * credentials and bookmarks from memory, as the manual lock button does.
+ */
+export async function clearSessionAfterAutoLock(): Promise<void> {
+  if (state.connected) await handleDisconnect();
+  setConnectionInputs("", "", "", "");
+  clearBookmarks();
+  refreshBookmarkBar();
+}
+
 export function wireEvents(): void {
   dom.connectBtn.addEventListener("click", handleConnect);
   dom.disconnectBtn.addEventListener("click", handleDisconnect);
@@ -457,7 +468,8 @@ export function wireEvents(): void {
 
   document.getElementById("security-toggle")!.addEventListener("click", () => {
     void (async () => {
-      await handleSecurityToggle(setStatus);
+      const changed = await handleSecurityToggle(setStatus);
+      if (!changed) return;
       try {
         await loadBookmarks();
         refreshBookmarkBar();

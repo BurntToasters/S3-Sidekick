@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod biometric;
+#[cfg(test)]
+mod e2e_minio;
 mod files;
 mod platform;
 mod s3;
@@ -147,6 +149,9 @@ async fn acquire_s3_mutation_inner(
     }
 }
 
+// Commands take leases with their client token so disconnect can cancel the
+// wait; the uncancellable form remains for lease-ordering tests.
+#[cfg(test)]
 pub(crate) async fn acquire_s3_mutation(
     scopes: Vec<S3MutationScope>,
 ) -> Result<S3MutationGuard, String> {
@@ -242,6 +247,19 @@ fn acquire_storage_exclusive() -> Result<StorageExclusiveGuard, String> {
     Ok(StorageExclusiveGuard { activity })
 }
 
+fn try_acquire_storage_exclusive() -> Result<Option<StorageExclusiveGuard>, String> {
+    let activity = storage_activity();
+    let mut state = activity
+        .state
+        .lock()
+        .map_err(|err| format!("Storage activity state unavailable: {}", err))?;
+    if state.exclusive || state.active_transfers > 0 || state.exclusive_waiters > 0 {
+        return Ok(None);
+    }
+    state.exclusive = true;
+    Ok(Some(StorageExclusiveGuard { activity }))
+}
+
 pub(crate) async fn acquire_transfer_storage() -> Result<StorageTransferGuard, String> {
     tokio::task::spawn_blocking(acquire_storage_transfer)
         .await
@@ -316,6 +334,24 @@ pub(crate) fn lock_storage_ops() -> Result<StorageOpsGuard, String> {
         _lock: lock,
     };
     Ok(guard)
+}
+
+/// Take exclusive storage access only when it is immediately available.
+/// Security UI actions use this after an OS prompt so a transfer that started
+/// meanwhile produces a useful busy error instead of an unbounded wait.
+pub(crate) fn try_lock_storage_ops() -> Result<StorageOpsGuard, String> {
+    let exclusive = try_acquire_storage_exclusive()?.ok_or_else(|| {
+        "Wait for active transfers to finish (or pause them) before changing security settings."
+            .to_string()
+    })?;
+    let lock = STORAGE_OP_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|err| err.to_string())?;
+    Ok(StorageOpsGuard {
+        _exclusive: exclusive,
+        _lock: lock,
+    })
 }
 
 /// Resolve the app data directory, honouring the test-only override.
@@ -785,12 +821,6 @@ pub(crate) fn purge_transfer_checkpoints<R: tauri::Runtime, M: tauri::Manager<R>
     purge_download_leases(app)
 }
 
-#[derive(serde::Serialize)]
-struct TransferCheckpointEntry {
-    id_hash: String,
-    updated_at_ms: i64,
-}
-
 fn parse_user_path(raw: &str, label: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -1043,7 +1073,7 @@ pub(crate) fn validate_destination_path_allow_overwrite(raw: &str) -> Result<Pat
     Ok(destination)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn path_exists(path: String) -> Result<bool, String> {
     let parsed = parse_user_path(&path, "Path")?;
     Ok(parsed.exists())
@@ -1346,8 +1376,21 @@ fn discard_download_scratch_for_destination<R: tauri::Runtime>(
 ) -> Result<(), String> {
     let destination = parse_user_path(destination, "Destination")?;
     let temp_path = download_temp_path(&destination);
-    let lease_path = download_lease_path(app, &destination)?;
+    let lease_path = match download_lease_path(app, &destination) {
+        Ok(path) => path,
+        // The destination folder is gone (unplugged drive, deleted folder), so
+        // no scratch file can exist beside it. Any orphaned lease is reclaimed
+        // by the recovery sweep; failing here would block transfer recovery.
+        Err(_) if !temp_path.exists() => return Ok(()),
+        Err(err) => return Err(err),
+    };
     if !temp_path.exists() && !lease_path.exists() {
+        return Ok(());
+    }
+    // A running download owns this scratch and its lease. Removing them would
+    // fail that download (and its resume state); its own completion or
+    // cancellation path cleans up instead.
+    if is_claimed_download_temp(&temp_path, &destination) {
         return Ok(());
     }
     let lease_authorizes = if lease_path.exists() {
@@ -1364,7 +1407,7 @@ fn discard_download_scratch_for_destination<R: tauri::Runtime>(
     } else {
         false
     };
-    if !lease_authorizes && !is_claimed_download_temp(&temp_path, &destination) {
+    if !lease_authorizes {
         return Err(format!(
             "Refusing to remove an unregistered download scratch path: {}",
             temp_path.display()
@@ -1377,10 +1420,23 @@ fn discard_download_scratch_for_destination<R: tauri::Runtime>(
     Ok(())
 }
 
-#[tauri::command]
-fn discard_download_scratch(app: tauri::AppHandle, destination: String) -> Result<(), String> {
+fn discard_download_scratch_blocking(
+    app: tauri::AppHandle,
+    destination: String,
+) -> Result<(), String> {
     let _storage_guard = lock_storage_meta()?;
     discard_download_scratch_for_destination(&app, &destination)
+}
+
+// Runs on the blocking pool: plain sync commands run on the main thread,
+// where waiting for the storage lock (held through PBKDF2 during a password
+// change) or disk I/O would freeze the window.
+#[tauri::command]
+async fn discard_download_scratch(
+    app: tauri::AppHandle,
+    destination: String,
+) -> Result<(), String> {
+    security::run_blocking(move || discard_download_scratch_blocking(app, destination)).await
 }
 
 /// Extensions `write_text_file` is permitted to produce.
@@ -1390,7 +1446,9 @@ fn discard_download_scratch(app: tauri::AppHandle, destination: String) -> Resul
 /// script onto disk if the webview is ever compromised.
 const WRITABLE_TEXT_EXTENSIONS: &[&str] = &["txt", "log", "json", "csv", "md"];
 
-#[tauri::command]
+// Only the ownership tests exercise this now; production cleanup goes through
+// `discard_download_scratch`.
+#[cfg(test)]
 fn remove_owned_download_temp(
     path: &str,
     destination: &str,
@@ -1428,32 +1486,7 @@ fn remove_owned_download_temp(
     std::fs::remove_file(&parsed).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn remove_path_if_exists(
-    app: tauri::AppHandle,
-    path: String,
-    destination: String,
-    checkpoint_id: Option<String>,
-    recovery_session: Option<String>,
-) -> Result<(), String> {
-    let _storage_guard = lock_storage_meta()?;
-    let checkpoint_authorized = if let Some(id) = checkpoint_id {
-        require_transfer_recovery_session_unchecked(
-            &app,
-            recovery_session.as_deref().unwrap_or_default(),
-        )?;
-        let json = load_transfer_checkpoint_json_unchecked(&app, &id)?
-            .ok_or_else(|| "Download checkpoint was not found".to_string())?;
-        let scratch = checkpoint_scratch_path(&json)?
-            .ok_or_else(|| "Download checkpoint has no scratch path".to_string())?;
-        scratch.temp_path == path && scratch.destination == destination
-    } else {
-        false
-    };
-    remove_owned_download_temp(&path, &destination, checkpoint_authorized)
-}
-
-#[tauri::command]
+#[tauri::command(async)]
 fn write_text_file(path: String, text: String, overwrite: bool) -> Result<(), String> {
     let parsed = validate_destination_path_allow_overwrite(&path)?;
     let extension = parsed
@@ -1483,66 +1516,44 @@ fn write_text_file(path: String, text: String, overwrite: bool) -> Result<(), St
     atomic_write_with_overwrite(&parsed, &text, overwrite)
 }
 
-#[tauri::command]
-fn transfer_checkpoint_load(
-    app: tauri::AppHandle,
-    checkpoint_id: String,
-    recovery_session: String,
-) -> Result<Option<String>, String> {
-    load_transfer_checkpoint_json(&app, &checkpoint_id, &recovery_session)
-}
-
-#[tauri::command]
-fn transfer_checkpoint_remove(
+fn transfer_checkpoint_remove_blocking(
     app: tauri::AppHandle,
     checkpoint_id: String,
     recovery_session: String,
 ) -> Result<(), String> {
+    {
+        let _storage_guard = lock_storage_meta()?;
+        require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
+        // Checkpoint IDs derive from bucket/key/destination, so a stale queue
+        // row can name the checkpoint of a download running right now. That
+        // download owns it; removing it would discard live resume state.
+        if let Ok(Some(json)) = load_transfer_checkpoint_json_unchecked(&app, &checkpoint_id) {
+            if let Ok(Some(scratch)) = checkpoint_scratch_path(&json) {
+                if is_claimed_download_temp(
+                    Path::new(&scratch.temp_path),
+                    Path::new(&scratch.destination),
+                ) {
+                    return Ok(());
+                }
+            }
+        }
+    }
     remove_transfer_checkpoint(&app, &checkpoint_id, &recovery_session)
 }
 
+// Runs on the blocking pool: plain sync commands run on the main thread,
+// where waiting for the storage lock (held through PBKDF2 during a password
+// change) or disk I/O would freeze the window.
 #[tauri::command]
-fn transfer_checkpoint_list(
+async fn transfer_checkpoint_remove(
     app: tauri::AppHandle,
+    checkpoint_id: String,
     recovery_session: String,
-) -> Result<Vec<TransferCheckpointEntry>, String> {
-    let _storage_guard = lock_storage_meta()?;
-    require_transfer_recovery_session_unchecked(&app, &recovery_session)?;
-    let dir = transfer_checkpoint_dir(&app)?;
-    let mut entries: Vec<TransferCheckpointEntry> = Vec::new();
-
-    let iter = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
-    for entry in iter {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        let ext = path.extension().and_then(|v| v.to_str()).unwrap_or("");
-        if ext != "json" {
-            continue;
-        }
-        let id_hash = path
-            .file_stem()
-            .and_then(|v| v.to_str())
-            .unwrap_or("")
-            .to_string();
-        if id_hash.is_empty() {
-            continue;
-        }
-
-        let updated_at_ms = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-
-        entries.push(TransferCheckpointEntry {
-            id_hash,
-            updated_at_ms,
-        });
-    }
-
-    Ok(entries)
+) -> Result<(), String> {
+    security::run_blocking(move || {
+        transfer_checkpoint_remove_blocking(app, checkpoint_id, recovery_session)
+    })
+    .await
 }
 
 /// Reclaim expired checkpoints and the scratch files they reference.
@@ -1553,8 +1564,7 @@ fn transfer_checkpoint_list(
 /// also deletes the temp file recorded inside it, because once the checkpoint is
 /// gone nothing else can map back to that path — the scratch file is sized to the
 /// full object, so it would otherwise leak permanently.
-#[tauri::command]
-fn transfer_checkpoint_gc(
+fn transfer_checkpoint_gc_blocking(
     app: tauri::AppHandle,
     ttl_hours: u32,
     keep_checkpoint_ids: Option<Vec<String>>,
@@ -1620,16 +1630,22 @@ fn transfer_checkpoint_gc(
         match checkpoint_scratch_path(&json) {
             Ok(Some(scratch)) => {
                 let temp_path = PathBuf::from(scratch.temp_path);
+                // The webview can reload while the backend keeps downloading;
+                // a live download's scratch is not garbage however old its
+                // checkpoint looks.
+                if is_claimed_download_temp(&temp_path, Path::new(&scratch.destination)) {
+                    kept_destinations.insert(scratch.destination);
+                    continue;
+                }
                 match std::fs::remove_file(&temp_path) {
-                    Ok(()) => fsync_parent(&temp_path)?,
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(err) => {
-                        return Err(format!(
-                            "Failed to remove checkpoint scratch file '{}': {}",
-                            temp_path.display(),
-                            err
-                        ));
+                    Ok(()) => {
+                        let _ = fsync_parent(&temp_path);
                     }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    // A locked or unremovable scratch file keeps its record for
+                    // the next sweep. One stuck file must not fail recovery
+                    // and block every transfer.
+                    Err(_) => continue,
                 }
             }
             Ok(None) => {}
@@ -1638,17 +1654,33 @@ fn transfer_checkpoint_gc(
 
         match std::fs::remove_file(&path) {
             Ok(()) => {
-                fsync_parent(&path)?;
+                let _ = fsync_parent(&path);
                 removed += 1;
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.to_string()),
+            Err(_) => continue,
         }
     }
 
     sweep_unreferenced_download_leases(&app, &kept_destinations)?;
 
     Ok(removed)
+}
+
+// Runs on the blocking pool: plain sync commands run on the main thread,
+// where waiting for the storage lock (held through PBKDF2 during a password
+// change) or disk I/O would freeze the window.
+#[tauri::command]
+async fn transfer_checkpoint_gc(
+    app: tauri::AppHandle,
+    ttl_hours: u32,
+    keep_checkpoint_ids: Option<Vec<String>>,
+    recovery_session: String,
+) -> Result<u32, String> {
+    security::run_blocking(move || {
+        transfer_checkpoint_gc_blocking(app, ttl_hours, keep_checkpoint_ids, recovery_session)
+    })
+    .await
 }
 
 /// Remove download leases (and their derived scratch) that no surviving
@@ -1686,26 +1718,24 @@ fn sweep_unreferenced_download_leases<R: tauri::Runtime, M: tauri::Manager<R>>(
             continue;
         }
         if let Ok(temp_path) = parse_user_path(&lease.temp_path, "Lease scratch") {
-            if temp_path.exists() {
-                clear_unusable_download_scratch(&temp_path)?;
+            // Leases are written before the first checkpoint, so a running
+            // download (possibly started before a webview reload) can have a
+            // lease that no checkpoint references yet.
+            if is_claimed_download_temp(&temp_path, Path::new(&lease.destination)) {
+                continue;
+            }
+            // Per-entry failures keep the lease for the next sweep instead of
+            // failing recovery.
+            if temp_path.exists() && clear_unusable_download_scratch(&temp_path).is_err() {
+                continue;
             }
         }
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(format!(
-                    "Failed to remove download lease '{}': {}",
-                    path.display(),
-                    err
-                ));
-            }
-        }
+        let _ = std::fs::remove_file(&path);
     }
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_available_disk_bytes(path: String) -> Result<u64, String> {
     let parsed = parse_user_path(&path, "Path")?;
     let target = if parsed.exists() {
@@ -1812,21 +1842,19 @@ async fn load_connection(app: tauri::AppHandle) -> Result<String, String> {
     .await
 }
 
-#[tauri::command]
-fn save_connection(
+fn save_connection_blocking(
     app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
     connection_id: String,
     json: String,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
     // Global lock order is storage -> S3: the storage guard is always acquired
     // first, so credential persistence can never deadlock against vault paths
     // that take the storage lock and then inspect the session. The session
     // lock is still held through persistence, so an older workflow can never
     // write credentials after the session it belongs to has been superseded.
-    // This stays a sync command (with inline fs) because `State` borrows with
-    // a non-'static lifetime and cannot cross into `spawn_blocking`; sync
-    // Tauri commands already run on the blocking pool, off the async executor.
+    // Runs on the blocking pool (see the `save_connection` command), with
+    // `State` resolved from the app handle there.
     let _storage_guard = lock_storage_meta()?;
     let s3 = lock_s3_state(&state)?;
     s3::require_connection_session(&s3, &connection_id)?;
@@ -1835,23 +1863,41 @@ fn save_connection(
     write_protected_file(&path, &json, &security)
 }
 
+// Runs on the blocking pool: plain sync commands run on the main thread,
+// where waiting for the storage lock (held through PBKDF2 during a password
+// change) or disk I/O would freeze the window.
 #[tauri::command]
-fn clear_saved_connection(
+async fn save_connection(
     app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    connection_id: String,
+    json: String,
 ) -> Result<(), String> {
+    security::run_blocking(move || save_connection_blocking(app, connection_id, json)).await
+}
+
+fn clear_saved_connection_blocking(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
     // Same global order as `save_connection` (storage -> S3). Serializing
     // against credential saves and invalidating the session after the write
     // guarantees an older in-flight connect workflow cannot restore the
-    // credentials that this reset removed. Sync for the same `State`
-    // lifetime reason as above.
+    // credentials that this reset removed.
     let _storage_guard = lock_storage_meta()?;
     let mut s3 = lock_s3_state(&state)?;
     let path = connection_path(&app)?;
-    let security = load_security_config(&app)?;
-    write_protected_file(&path, "", &security)?;
+    // Delete rather than write an empty (encrypted) payload: removal needs no
+    // vault key, so "Reset settings" works while storage is locked instead of
+    // failing halfway with the credentials still on disk.
+    security::remove_file_if_present(&path)?;
     s3::invalidate_connection_session(&mut s3);
     Ok(())
+}
+
+// Runs on the blocking pool: plain sync commands run on the main thread,
+// where waiting for the storage lock (held through PBKDF2 during a password
+// change) or disk I/O would freeze the window.
+#[tauri::command]
+async fn clear_saved_connection(app: tauri::AppHandle) -> Result<(), String> {
+    security::run_blocking(move || clear_saved_connection_blocking(app)).await
 }
 
 #[tauri::command]
@@ -2152,11 +2198,20 @@ fn publish_exclusive(
         .map_err(|err| format!("Destination was not published without overwrite: {}", err))
 }
 
+/// `keep_temp_on_failure` retains the scratch when publication fails, for a
+/// checkpointed download whose complete bytes a retry can publish without
+/// downloading them again (e.g. a destination briefly locked by another app).
 pub(crate) fn publish_temp_file(
     temp_path: &std::path::Path,
     destination_path: &std::path::Path,
     overwrite: bool,
+    keep_temp_on_failure: bool,
 ) -> Result<(), String> {
+    let discard_temp = || {
+        if !keep_temp_on_failure {
+            let _ = std::fs::remove_file(temp_path);
+        }
+    };
     if overwrite {
         // Windows AV/indexer briefly opens the temp file after close, making
         // the rename fail with PermissionDenied. Retry twice before giving up.
@@ -2172,17 +2227,17 @@ pub(crate) fn publish_temp_file(
                 }
             }
         }
-        let _ = std::fs::remove_file(temp_path);
+        discard_temp();
         return Err(last_err);
     }
 
     if let Err(err) = publish_exclusive(temp_path, destination_path) {
-        let _ = std::fs::remove_file(temp_path);
+        discard_temp();
         return Err(err);
     }
     if let Err(err) = fsync_parent(destination_path) {
         let _ = std::fs::remove_file(destination_path);
-        let _ = std::fs::remove_file(temp_path);
+        discard_temp();
         return Err(err);
     }
     if let Err(err) = std::fs::remove_file(temp_path) {
@@ -2219,7 +2274,7 @@ fn atomic_write_with_overwrite(
         let _ = std::fs::remove_file(&tmp_path);
         return Err(err.to_string());
     }
-    publish_temp_file(&tmp_path, path, overwrite)
+    publish_temp_file(&tmp_path, path, overwrite, false)
 }
 
 pub(crate) fn atomic_write(path: &std::path::Path, data: &str) -> Result<(), String> {
@@ -2359,12 +2414,9 @@ fn main() {
             s3::preview_object,
             files::list_local_files_recursive,
             path_exists,
-            remove_path_if_exists,
             discard_download_scratch,
             write_text_file,
-            transfer_checkpoint_load,
             transfer_checkpoint_remove,
-            transfer_checkpoint_list,
             transfer_checkpoint_gc,
             get_available_disk_bytes,
             load_settings,
@@ -2385,10 +2437,9 @@ fn main() {
             security::set_security_encryption,
             security::change_security_password,
             security::lock_security,
+            security::touch_security_activity,
             security::set_lock_timeout,
-            security::reset_security,
             security::factory_reset,
-            biometric::biometric_available,
             biometric::enable_biometric,
             biometric::disable_biometric,
             biometric::unlock_biometric,

@@ -113,7 +113,7 @@ describe("bookmarks fallback and backup sync", () => {
     const bookmarks = await loadBookmarksModule();
     await bookmarks.loadBookmarks();
     await bookmarks.addBookmark(alphaBookmark);
-    await bookmarks.removeBookmark(0);
+    await bookmarks.removeBookmark(bookmarks.getBookmarks()[0]);
 
     expect(primaryPayload).toEqual([]);
     const backupSaves = commandCalls("save_bookmarks_backup");
@@ -230,7 +230,7 @@ describe("setBookmarkChangeHandler", () => {
 
     const handler = vi.fn();
     bookmarks.setBookmarkChangeHandler(handler);
-    await bookmarks.removeBookmark(0);
+    await bookmarks.removeBookmark(bookmarks.getBookmarks()[0]);
 
     expect(handler).toHaveBeenCalledTimes(1);
   });
@@ -321,7 +321,9 @@ describe("bookmark import/export/list rendering", () => {
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
 
-    await expect(bookmarks.removeBookmark(0)).rejects.toThrow("disk full");
+    await expect(
+      bookmarks.removeBookmark(bookmarks.getBookmarks()[0]),
+    ).rejects.toThrow("disk full");
     expect(bookmarks.getBookmarks()).toEqual([alphaBookmark]);
   });
 
@@ -378,7 +380,7 @@ describe("bookmark import/export/list rendering", () => {
       '[data-delete="0"]',
     ) as HTMLButtonElement;
     deleteBtn.click();
-    expect(onDelete).toHaveBeenCalledWith(0);
+    expect(onDelete).toHaveBeenCalledWith(alphaBookmark);
 
     standardMock([]);
     const bookmarksEmpty = await loadBookmarksModule();
@@ -392,14 +394,16 @@ describe("bookmark import/export/list rendering", () => {
     expect(emptyList.textContent).toContain("No bookmarks saved");
   });
 
-  it("ignores removeBookmark when index is out of range", async () => {
+  it("ignores removeBookmark for a bookmark that is not saved", async () => {
     standardMock([alphaBookmark]);
     const bookmarks = await loadBookmarksModule();
     await bookmarks.loadBookmarks();
     mockInvoke.mockClear();
 
-    await bookmarks.removeBookmark(-1);
-    await bookmarks.removeBookmark(5);
+    await bookmarks.removeBookmark({
+      endpoint: "https://missing.invalid",
+      access_key: "missing",
+    });
 
     expect(commandCalls("save_bookmarks")).toHaveLength(0);
     expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);

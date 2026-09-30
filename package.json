@@ -19,6 +19,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:ui": "playwright test",
+    "test:e2e:sync-version": "node tests/scripts/sync-version.e2e.mjs",
+    "test:e2e:minio": "node scripts/e2e-minio.mjs",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:cov:watch": "vitest --coverage",

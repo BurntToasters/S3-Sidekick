@@ -2,6 +2,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests/browser",
+  // Keep Playwright's automatic cleanup away from repeatable MinIO and script
+  // E2E artifacts stored directly under test-results/.
+  outputDir: "test-results/playwright",
   testMatch: "**/*.spec.ts",
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

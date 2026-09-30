@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { invokeS3For } from "./connection.ts";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { escapeHtml, getIconHtml } from "./utils.ts";
+import { escapeHtml, getIconHtml, isLocalEndpoint } from "./utils.ts";
 import { state } from "./state.ts";
 import { logActivity } from "./activity-log.ts";
 import {
@@ -12,6 +12,7 @@ import {
   toggleDrawer,
 } from "./bottom-drawer.ts";
 import { showConfirm } from "./dialogs.ts";
+import { promptUnguardedWrite } from "./app-conflicts.ts";
 import { showContextMenu } from "./context-menu.ts";
 import {
   isTransfersHintDismissed,
@@ -23,6 +24,8 @@ import {
   lacksAtomicCreateForUpload,
   MULTIPART_COPY_THRESHOLD_BYTES,
   MULTIPART_UPLOAD_THRESHOLD_BYTES,
+  SMALL_OBJECT_BYTE_LENGTH,
+  isCreateOnlyUnsupportedError,
 } from "./create-only-capabilities.ts";
 
 export interface CopyReceipt {
@@ -104,6 +107,12 @@ export interface TransferItem {
   overwriteScope?: string;
   /** Transient user intent; never written to the recovery manifest. */
   cancelRequested?: boolean;
+  /**
+   * A pause asked the backend to stop the running attempt and its
+   * cancellation error has not arrived yet. Resuming before it arrives must
+   * not turn that expected error into a failure.
+   */
+  pauseCancelInFlight?: boolean;
 }
 
 export interface DownloadQueueEntry {
@@ -328,7 +337,10 @@ function transferByteLength(item: TransferItem): number | undefined {
     return undefined;
   }
   if (item.operation === "copy" || item.operation === "move") {
-    if (item.sourcePrefix) return undefined;
+    // Prefix copies write objects one by one, nearly always below the
+    // multipart threshold. Judge them by the single-object capability; the
+    // backend fails closed on any large object and the worker then asks.
+    if (item.sourcePrefix) return SMALL_OBJECT_BYTE_LENGTH;
     if (Number.isFinite(item.size) && item.size > 0) return item.size;
   }
   return undefined;
@@ -383,12 +395,9 @@ async function confirmUnguardedTransferWrite(
   if (authorizationKey && unguardedWriteAuthorizations.has(authorizationKey)) {
     return true;
   }
-  const proceed = await showConfirm(
-    "Unconditional Write",
-    "This storage provider cannot enforce create-only writes. Another client could create the same key before this transfer finishes. Write anyway?",
-    { okLabel: "Write anyway", cancelLabel: "Cancel", okDanger: true },
-  );
+  const { proceed, suppressed } = await promptUnguardedWrite();
   if (!proceed) return false;
+  if (suppressed) return true;
   const remaining = queue.filter(
     (entry) =>
       (entry.status === "queued" || entry.status === "uploading") &&
@@ -610,6 +619,12 @@ function scalePartConcurrencyForGlobalBudget(
   return Math.max(1, Math.min(safeRequested, budgeted));
 }
 
+/// The OS reports offline. Local and LAN endpoints (e.g. MinIO on this
+/// machine) keep working without internet, so they are not held.
+function offlineHoldActive(): boolean {
+  return offlineHold && !isLocalEndpoint(state.endpoint);
+}
+
 function syncOfflineHold(): void {
   if (
     typeof navigator !== "undefined" &&
@@ -682,7 +697,12 @@ function delayCancellable(ms: number, item: TransferItem): Promise<void> {
   return new Promise<void>((resolve) => {
     const timer = setTimeout(cleanupAndResolve, ms);
     const probe = setInterval(() => {
-      if (item.cancelRequested || item.paused || queuePaused || offlineHold) {
+      if (
+        item.cancelRequested ||
+        item.paused ||
+        queuePaused ||
+        offlineHoldActive()
+      ) {
         cleanupAndResolve();
       }
     }, 50);
@@ -725,6 +745,9 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
     connectionIdentity: item.connectionIdentity,
     failed: item.status === "error",
     error: item.status === "error" ? item.error : undefined,
+    // Rows the user kept unbound must stay recognisably legacy after a v6
+    // rewrite, or the next session would try to run them without an account.
+    legacyConnectionUnbound: item.legacyConnectionUnbound === true || undefined,
   };
 }
 
@@ -1082,7 +1105,7 @@ function parseQueueManifest(
         failed: row.failed === true,
         error: typeof row.error === "string" ? row.error : undefined,
         legacyConnectionUnbound:
-          version < 4 &&
+          (version < 4 || row.legacyConnectionUnbound === true) &&
           !(
             typeof row.connectionIdentity === "string" &&
             row.connectionIdentity.length > 0
@@ -1153,8 +1176,28 @@ async function discardTransferRecoveryState(
 /// actions below. Unlike terminal success, cleared error/skipped rows never
 /// pass through the cancel path, so discard here or orphan the state.
 function discardClearedRecoveryState(removed: TransferItem[]): void {
+  // Checkpoint IDs and scratch paths derive from bucket/key/destination, so a
+  // cleared failed row can share them with a live row that downloads the same
+  // object to the same place. That live row owns the state.
+  const live = queue.filter(
+    (entry) => entry.status === "queued" || entry.status === "uploading",
+  );
+  const liveDestinations = new Set(
+    live
+      .filter((entry) => entry.operation === "download" && entry.destination)
+      .map((entry) => entry.destination),
+  );
+  const liveCheckpoints = new Set(
+    live.map((entry) => entry.checkpointId).filter(Boolean),
+  );
   for (const item of removed) {
     if (item.operation !== "download" && !item.checkpointId) continue;
+    if (
+      (item.destination && liveDestinations.has(item.destination)) ||
+      (item.checkpointId && liveCheckpoints.has(item.checkpointId))
+    ) {
+      continue;
+    }
     void discardTransferRecoveryState(item).catch(() => undefined);
   }
 }
@@ -1312,11 +1355,21 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     .filter((id): id is string => typeof id === "string" && id.length > 0);
 
   const effective = getEffectiveTransferSettings();
-  await invoke("transfer_checkpoint_gc", {
-    ttlHours: effective.transferCheckpointTtlHours,
-    keepCheckpointIds: liveCheckpointIds,
-    recoverySession: hydratedRecoverySession,
-  });
+  try {
+    await invoke("transfer_checkpoint_gc", {
+      ttlHours: effective.transferCheckpointTtlHours,
+      keepCheckpointIds: liveCheckpointIds,
+      recoverySession: hydratedRecoverySession,
+    });
+  } catch (err) {
+    // Garbage collection only reclaims disk space. A locked scratch file or
+    // an unreadable lease must not leave every transfer blocked behind an
+    // unresolved recovery; the next launch tries again.
+    logActivity(
+      `Could not reclaim expired transfer checkpoints: ${normalizeError(err)}`,
+      "warning",
+    );
+  }
   if (!manifest || manifest.items.length === 0) {
     await invoke("clear_transfer_manifest", {
       recoverySession: hydratedRecoverySession,
@@ -1335,10 +1388,12 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
 
   const tempCleanupFailures = await cleanupRecoveredTempFiles(manifest.items);
   if (tempCleanupFailures.length > 0) {
-    const message = `Could not clean ${tempCleanupFailures.length} interrupted download(s); recovery state was retained.`;
-    logActivity(`${message} ${tempCleanupFailures.join("; ")}`, "error");
-    showToast(message, { type: "error", duration: 0 });
-    throw new Error(message);
+    // Leftover scratch only costs disk space: its lease stays on disk and the
+    // recovery sweep reclaims it later. Refusing to recover would instead
+    // block every transfer until the files could be removed.
+    const message = `Could not clean ${tempCleanupFailures.length} interrupted download(s); their scratch files will be retried later.`;
+    logActivity(`${message} ${tempCleanupFailures.join("; ")}`, "warning");
+    showToast(message, { type: "warning" });
   }
 
   const shouldResume = await showConfirm(
@@ -1357,10 +1412,11 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
       }
     }
     if (failures.length > 0) {
-      const message = `Could not discard ${failures.length} transfer(s); recovery state was retained.`;
-      logActivity(`${message} ${failures.join("; ")}`, "error");
-      showToast(message, { type: "error", duration: 0 });
-      throw new Error(message);
+      // Their download leases remain on disk, so the recovery sweep reclaims
+      // any scratch left behind once no checkpoint references it.
+      const message = `Could not fully discard ${failures.length} transfer(s); leftover files will be cleaned up later.`;
+      logActivity(`${message} ${failures.join("; ")}`, "warning");
+      showToast(message, { type: "warning" });
     }
     await invoke("clear_transfer_manifest", {
       recoverySession: hydratedRecoverySession,
@@ -1510,7 +1566,27 @@ export function recoverPendingTransfers(): Promise<void> {
  * record that identity, so they require explicit account binding and a durable
  * v5 rewrite before any S3 command is allowed to run.
  */
-export async function resumeRecoveredTransfersAfterConnect(): Promise<void> {
+let resumeAfterConnectInFlight: Promise<void> | null = null;
+/// Connection that already answered the legacy binding prompt. Recovery and
+/// the connect flow both resume, so without this "Keep for later" would be
+/// asked again moments later on the same connection.
+let legacyBindingPromptedConnectionId: string | null = null;
+
+export function resumeRecoveredTransfersAfterConnect(): Promise<void> {
+  // A connection is established again; transfers parked by a disconnect may
+  // run (items for another account are paused below).
+  if (state.connected && state.connectionIdentity) {
+    state.transfersHeldForDisconnect = false;
+  }
+  // Recovery and the connect flow both call this; one pass must not show the
+  // legacy binding prompt twice.
+  resumeAfterConnectInFlight ??= resumeRecoveredTransfersOnce().finally(() => {
+    resumeAfterConnectInFlight = null;
+  });
+  return resumeAfterConnectInFlight;
+}
+
+async function resumeRecoveredTransfersOnce(): Promise<void> {
   if (
     !recoveredQueue ||
     !state.connected ||
@@ -1521,7 +1597,11 @@ export async function resumeRecoveredTransfersAfterConnect(): Promise<void> {
   }
 
   const legacyItems = queue.filter((item) => item.legacyConnectionUnbound);
-  if (legacyItems.length > 0) {
+  if (
+    legacyItems.length > 0 &&
+    legacyBindingPromptedConnectionId !== state.connectionId
+  ) {
+    legacyBindingPromptedConnectionId = state.connectionId;
     const buckets = Array.from(
       new Set(
         legacyItems.flatMap((item) =>
@@ -1546,18 +1626,37 @@ export async function resumeRecoveredTransfersAfterConnect(): Promise<void> {
         okDanger: includesMove,
       },
     );
-    if (!confirmed) return;
+    if (!confirmed) {
+      // Keep them parked, not queued: unbound rows cannot run, and a worker
+      // claiming them would fail them for a missing account identity.
+      for (const item of legacyItems) {
+        if (item.status === "queued") {
+          item.paused = true;
+          item.phase = "paused";
+        }
+      }
+      writeQueueManifest();
+      queueRender();
+      return;
+    }
 
     const previous = legacyItems.map((item) => ({
       item,
       connectionId: item.connectionId,
       connectionIdentity: item.connectionIdentity,
       legacyConnectionUnbound: item.legacyConnectionUnbound,
+      paused: item.paused,
+      phase: item.phase,
     }));
     for (const item of legacyItems) {
       item.connectionId = state.connectionId;
       item.connectionIdentity = state.connectionIdentity;
       item.legacyConnectionUnbound = false;
+      if (item.status === "queued" && item.paused) {
+        // Parked by an earlier "Keep for later"; binding releases them.
+        item.paused = false;
+        item.phase = "running";
+      }
     }
     try {
       await persistQueueManifestCritical();
@@ -1566,6 +1665,8 @@ export async function resumeRecoveredTransfersAfterConnect(): Promise<void> {
         saved.item.connectionId = saved.connectionId;
         saved.item.connectionIdentity = saved.connectionIdentity;
         saved.item.legacyConnectionUnbound = saved.legacyConnectionUnbound;
+        saved.item.paused = saved.paused;
+        saved.item.phase = saved.phase;
       }
       throw new Error(
         `Recovered transfers were not bound because the durable manifest update failed: ${normalizeError(error)}`,
@@ -1591,7 +1692,14 @@ export async function resumeRecoveredTransfersAfterConnect(): Promise<void> {
     writeQueueManifest();
   }
 
-  await processQueue();
+  // The queue can run for hours. Callers (the connect flow) must not stay
+  // busy until it drains, so start it and return.
+  void processQueue().catch((err: unknown) => {
+    logActivity(
+      `Transfer queue stopped unexpectedly: ${normalizeError(err)}`,
+      "error",
+    );
+  });
 }
 
 export async function initTransferQueueUI(): Promise<void> {
@@ -1727,6 +1835,7 @@ function pauseAllTransfers(): void {
     item.paused = true;
     item.phase = "paused";
     if (item.status === "uploading") {
+      item.pauseCancelInFlight = true;
       void invoke("cancel_transfer", { transferId: item.id }).catch(
         () => undefined,
       );
@@ -1792,6 +1901,7 @@ function togglePauseTransferItem(id: number): void {
     item.paused = true;
     item.phase = "paused";
     if (item.status === "uploading") {
+      item.pauseCancelInFlight = true;
       void invoke("cancel_transfer", { transferId: item.id }).catch(
         () => undefined,
       );
@@ -2320,10 +2430,21 @@ async function processQueue(): Promise<void> {
   }
 
   function claimNextItem(): TransferItem | null {
-    if (queuePaused || offlineHold) return null;
-    const item = queue.find((t) => t.status === "queued" && !t.paused);
+    if (
+      queuePaused ||
+      offlineHoldActive() ||
+      state.transfersHeldForDisconnect
+    ) {
+      return null;
+    }
+    // A queued row being cancelled stays "queued" while its cleanup IPC runs;
+    // claiming it then would run (or prompt for) a transfer the user dropped.
+    const item = queue.find(
+      (t) => t.status === "queued" && !t.paused && !t.cancelRequested,
+    );
     if (item) {
       item.status = "uploading";
+      item.pauseCancelInFlight = false;
       item.phase = item.phase === "resuming" ? "resuming" : "running";
       item.error = undefined;
     }
@@ -2401,10 +2522,24 @@ async function processQueue(): Promise<void> {
             }
           }
           errorCount += 1;
-        } else if (item.paused && /cancel/i.test(errorText)) {
+        } else if (
+          state.transfersHeldForDisconnect &&
+          /cancel|not connected|connection changed/i.test(errorText)
+        ) {
+          // Interrupted by disconnect: park it for the next connection
+          // instead of failing every queued item at once.
           item.status = "queued";
           item.phase = "paused";
-          item.error = "Paused";
+          item.error = "Disconnected — waiting to reconnect";
+        } else if (
+          (item.paused || item.pauseCancelInFlight) &&
+          /cancel/i.test(errorText)
+        ) {
+          // Stopped by a pause. If the user already resumed, requeue it to
+          // run again instead of reporting the expected cancellation.
+          item.status = "queued";
+          item.phase = item.paused ? "paused" : "resuming";
+          item.error = item.paused ? "Paused" : undefined;
         } else {
           item.status = "error";
           item.error = errorText;
@@ -2436,7 +2571,7 @@ async function processQueue(): Promise<void> {
   // queued until an unrelated pause/resume/online event arrived.
   while (
     !queuePaused &&
-    !offlineHold &&
+    !offlineHoldActive() &&
     queue.some((t) => t.status === "queued" && !t.paused)
   ) {
     const drain: Promise<void>[] = [];
@@ -2492,11 +2627,18 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
   item.maxAttempts = maxAttempts;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (item.paused || queuePaused || offlineHold) {
+    if (
+      item.paused ||
+      queuePaused ||
+      offlineHoldActive() ||
+      state.transfersHeldForDisconnect
+    ) {
       item.status = "queued";
       item.phase = "paused";
-      if (offlineHold && !item.paused && !queuePaused) {
+      if (offlineHoldActive() && !item.paused && !queuePaused) {
         item.error = "Offline — waiting for connection";
+      } else if (state.transfersHeldForDisconnect && !item.paused) {
+        item.error = "Disconnected — waiting to reconnect";
       }
       return false;
     }
@@ -2518,8 +2660,35 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
         ? { overwrite: false }
         : await resolveConflict(item, connectionId);
       ensureTransferActive(item);
-      if (conflictOutcome === "skip" || conflictOutcome === "cancel") {
-        const cancelled = conflictOutcome === "cancel";
+      let outcome = conflictOutcome;
+      if (outcome !== "skip" && outcome !== "cancel") {
+        item.overwrite = outcome.overwrite;
+        item.overwriteScope = outcome.overwrite
+          ? (unguardedAuthorizationKey(item, connectionId) ?? undefined)
+          : undefined;
+        try {
+          await executeTransfer(item, attempt, outcome.overwrite, connectionId);
+        } catch (err) {
+          // The backend refused a create-only write it cannot guard (e.g. a
+          // large object inside a prefix copy). Ask, then write unguarded.
+          if (outcome.overwrite || !isCreateOnlyUnsupportedError(err)) {
+            throw err;
+          }
+          const authorized = await withConflictPromptLock(() =>
+            confirmUnguardedTransferWrite(item, connectionId),
+          );
+          ensureTransferActive(item);
+          outcome = authorized ? { overwrite: true } : "cancel";
+          if (authorized) {
+            item.overwrite = true;
+            item.overwriteScope =
+              unguardedAuthorizationKey(item, connectionId) ?? undefined;
+            await executeTransfer(item, attempt, true, connectionId);
+          }
+        }
+      }
+      if (outcome === "skip" || outcome === "cancel") {
+        const cancelled = outcome === "cancel";
         item.overwrite = undefined;
         item.overwriteScope = undefined;
         item.status = "skipped";
@@ -2546,25 +2715,17 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
         );
         return false;
       }
-      item.overwrite = conflictOutcome.overwrite;
-      item.overwriteScope = conflictOutcome.overwrite
-        ? (unguardedAuthorizationKey(item, connectionId) ?? undefined)
-        : undefined;
-
-      await executeTransfer(
-        item,
-        attempt,
-        conflictOutcome.overwrite,
-        connectionId,
-      );
-      ensureTransferActive(item);
+      // The backend command has committed the write. A pause or cancel that
+      // arrived meanwhile (possibly dropped before the backend registered the
+      // transfer) must not relabel finished work: a paused finished download
+      // would re-prompt "Replace?" for its own file, and a finished move would
+      // re-copy a source that no longer exists.
       item.phase = "verifying";
       queueRender();
 
       if (item.operation === "upload") {
         await verifyUploadedObject(item, connectionId);
       }
-      ensureTransferActive(item);
 
       item.progress = 100;
       item.verified = true;
@@ -2590,6 +2751,9 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
       }
       return true;
     } catch (err) {
+      // A disconnect is not a transient failure to back off from; the worker
+      // parks the item until the next connection.
+      if (state.transfersHeldForDisconnect) throw err;
       if (attempt < maxAttempts && shouldRetryError(err)) {
         const waitMs = computeRetryDelayMs(attempt);
         item.phase = "retry_wait";
@@ -2909,7 +3073,6 @@ async function verifyUploadedObject(
       key: item.key,
     },
   );
-  ensureTransferActive(item);
   if (head.content_length !== expected) {
     throw new Error(
       `Verification failed: expected ${expected} bytes, found ${head.content_length} bytes in bucket.`,
@@ -3434,6 +3597,15 @@ function updateQueueSummary(
   if (!el) return;
 
   const parts: string[] = [];
+  // Held rows only say "Queued"; say why the queue is not moving.
+  const waiting = queue.some(
+    (item) => item.status === "queued" && !item.paused,
+  );
+  if (waiting && state.transfersHeldForDisconnect) {
+    parts.push("Waiting to reconnect");
+  } else if (waiting && offlineHoldActive()) {
+    parts.push("Offline — waiting for network");
+  }
   if (aggregates.active > 0) parts.push(`${aggregates.active} active`);
   if (aggregates.failed > 0) parts.push(`${aggregates.failed} failed`);
   if (aggregates.skipped > 0) parts.push(`${aggregates.skipped} skipped`);
@@ -3446,6 +3618,7 @@ function updateQueueSummary(
 function updateBadge(
   aggregates: QueueAggregates = computeQueueAggregates(),
 ): void {
+  state.activeTransferCount = aggregates.active;
   const badgeText =
     aggregates.active > 0
       ? String(aggregates.active)
@@ -3544,13 +3717,16 @@ async function cancelTransferItem(id: number): Promise<void> {
     }
     renderQueue();
   } else if (item.status === "uploading") {
+    // Shown before the IPC: an upload's worker can finish its cancel path
+    // before this call returns, and its final "Cancelled" must not be
+    // overwritten afterwards.
+    item.error = "Cancelling...";
+    renderQueue();
     try {
       await invoke("cancel_transfer", { transferId: id });
-      item.error = "Cancelling...";
-      renderQueue();
     } catch (err) {
       item.cancelRequested = false;
-      item.error = undefined;
+      if (item.status === "uploading") item.error = undefined;
       const message = `Could not cancel ${item.fileName}: ${normalizeError(err)}`;
       logActivity(message, "error");
       showToast(message, { type: "error" });

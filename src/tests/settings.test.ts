@@ -15,6 +15,7 @@ const mockSetUpdateChannel = vi.fn();
 const mockRefreshSecuritySettingsUI = vi.fn<() => Promise<void>>();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockShowAlert = vi.fn<(...args: unknown[]) => Promise<void>>();
+const mockSave = vi.fn<(...args: unknown[]) => Promise<string | null>>();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: mockInvoke,
@@ -26,6 +27,10 @@ vi.mock("@tauri-apps/api/app", () => ({
 
 vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: mockRelaunch,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: mockSave,
 }));
 
 vi.mock("../bookmarks.ts", () => ({
@@ -62,6 +67,8 @@ describe("settings module", () => {
   beforeEach(async () => {
     vi.resetModules();
     mockInvoke.mockReset();
+    mockSave.mockReset();
+    mockSave.mockResolvedValue("C:\exports\s3-sidekick-bookmarks.json");
     mockGetVersion.mockReset();
     mockRelaunch.mockReset();
     mockLoadBookmarks.mockReset();
@@ -615,27 +622,30 @@ describe("settings module", () => {
     await flushMicrotasks();
 
     expect(mockRenderBookmarkList).toHaveBeenCalledTimes(1);
-    const onDelete = mockRenderBookmarkList.mock.calls[0][2] as (
-      index: number,
-    ) => Promise<void>;
+    const onDelete = mockRenderBookmarkList.mock.calls[0][2] as (bookmark: {
+      name: string;
+      endpoint: string;
+      access_key: string;
+    }) => Promise<void>;
+    const saved = {
+      name: "Saved One",
+      endpoint: "https://saved.invalid",
+      access_key: "AKIA",
+    };
 
     mockShowConfirm.mockResolvedValueOnce(false);
-    await onDelete(0);
+    await onDelete(saved);
     expect(mockRemoveBookmark).not.toHaveBeenCalled();
-
-    mockGetBookmarks.mockReturnValue([{}]);
-    mockShowConfirm.mockResolvedValueOnce(false);
-    await onDelete(0);
     expect(mockShowConfirm).toHaveBeenLastCalledWith(
       "Delete Bookmark",
-      'Delete bookmark "this bookmark"?',
+      'Delete bookmark "Saved One"?',
       expect.objectContaining({ okLabel: "Delete", okDanger: true }),
     );
 
     mockShowConfirm.mockResolvedValueOnce(true);
-    await onDelete(0);
+    await onDelete(saved);
     await flushMicrotasks();
-    expect(mockRemoveBookmark).toHaveBeenCalledWith(0);
+    expect(mockRemoveBookmark).toHaveBeenCalledWith(saved);
     expect(mockRenderBookmarkList).toHaveBeenCalledTimes(2);
   });
 
@@ -784,22 +794,6 @@ describe("settings module", () => {
       .mockResolvedValueOnce({ imported: 2, skipped: 1 })
       .mockResolvedValueOnce({ imported: 1, skipped: 0 });
 
-    const createObjectURL = vi.fn(() => "blob:test");
-    const revokeObjectURL = vi.fn();
-    Object.defineProperty(URL, "createObjectURL", {
-      value: createObjectURL,
-      configurable: true,
-      writable: true,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      value: revokeObjectURL,
-      configurable: true,
-      writable: true,
-    });
-    const anchorClick = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => undefined);
-
     class MockFileReader {
       result: string | ArrayBuffer | null = null;
       onload:
@@ -824,18 +818,15 @@ describe("settings module", () => {
     (
       document.getElementById("bookmarks-export-btn") as HTMLButtonElement
     ).click();
-    await flushMicrotasks(2);
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("write_text_file", {
+        path: "C:\exports\s3-sidekick-bookmarks.json",
+        text: '[{"name":"x"}]',
+        overwrite: true,
+      });
+    });
     expect(mockExportBookmarksJson).toHaveBeenCalledTimes(1);
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
-    expect(anchorClick).toHaveBeenCalledTimes(1);
-    // Revocation is deferred so Safari/WebKit does not cancel the download;
-    // wait for the timer rather than asserting synchronously.
-    await vi.waitFor(
-      () => {
-        expect(revokeObjectURL).toHaveBeenCalledTimes(1);
-      },
-      { timeout: 3000 },
-    );
+    expect(mockSave).toHaveBeenCalledTimes(1);
 
     const importInput = document.getElementById(
       "bookmarks-import-input",
@@ -1068,7 +1059,11 @@ describe("settings module", () => {
       }),
     );
     const payload = JSON.parse(
-      (mockInvoke.mock.calls[0]?.[1] as { json: string }).json,
+      (
+        mockInvoke.mock.calls.find(([cmd]) => cmd === "save_settings")?.[1] as {
+          json: string;
+        }
+      ).json,
     ) as Record<string, unknown>;
     expect(payload.launchCount).toBe(7);
     expect(payload.supportPromptDismissed).toBe(true);
@@ -1094,7 +1089,11 @@ describe("settings module", () => {
     await settings.resetSettings();
 
     const payload = JSON.parse(
-      (mockInvoke.mock.calls[0]?.[1] as { json: string }).json,
+      (
+        mockInvoke.mock.calls.find(([cmd]) => cmd === "save_settings")?.[1] as {
+          json: string;
+        }
+      ).json,
     ) as Record<string, unknown>;
     expect(payload._setupComplete).toBe(true);
     expect(payload.launchCount).toBeUndefined();
@@ -1181,19 +1180,8 @@ describe("settings module", () => {
       <input id="bookmarks-import-input" type="file" />
     `;
     const settings = await import("../settings.ts");
-    Object.defineProperty(URL, "createObjectURL", {
-      value: vi.fn(() => "blob:test"),
-      configurable: true,
-      writable: true,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      value: vi.fn(),
-      configurable: true,
-      writable: true,
-    });
-    const anchorClick = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => undefined);
+    const writes = (): unknown[][] =>
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "write_text_file");
     settings.openSettingsModal();
     await flushMicrotasks();
     const exportBtn = document.getElementById(
@@ -1211,22 +1199,28 @@ describe("settings module", () => {
       expect.objectContaining({ okLabel: "Export" }),
     );
     expect(mockExportBookmarksJson).not.toHaveBeenCalled();
-    expect(anchorClick).not.toHaveBeenCalled();
+    expect(writes()).toHaveLength(0);
 
     // Include secrets.
     mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
     exportBtn.click();
     await flushMicrotasks(4);
     expect(mockExportBookmarksJson).toHaveBeenLastCalledWith(true);
-    expect(anchorClick).toHaveBeenCalledTimes(1);
+    expect(writes()).toHaveLength(1);
 
     // Redacted: second confirm false still exports with false.
     mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     exportBtn.click();
     await flushMicrotasks(4);
     expect(mockExportBookmarksJson).toHaveBeenLastCalledWith(false);
-    expect(anchorClick).toHaveBeenCalledTimes(2);
-    anchorClick.mockRestore();
+    expect(writes()).toHaveLength(2);
+
+    // Cancelling the save dialog writes nothing.
+    mockSave.mockResolvedValueOnce(null);
+    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    exportBtn.click();
+    await flushMicrotasks(4);
+    expect(writes()).toHaveLength(2);
   });
 
   it("tracks transfers hint and recovers launch count from corrupt extras", async () => {

@@ -23,6 +23,10 @@ export const state = {
   settingsExtras: {} as Record<string, unknown>,
   connected: false,
   connecting: false,
+  /** The session is being torn down; queued transfers park until reconnect. */
+  transfersHeldForDisconnect: false,
+  /** Running or queued transfers, kept current by the transfer queue. */
+  activeTransferCount: 0,
   endpoint: "",
   region: "",
   connectionId: "",
