@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Backend E2E: runs the S3 command layer against a real MinIO server.
 //
-// Starts a throwaway MinIO container, runs the ignored `e2e_` Rust tests in
+// Starts a throwaway MinIO container, runs only the ignored Rust tests in
 // src-tauri/src/e2e_minio.rs, and writes test-results/minio-e2e/report.json
 // (every check with its observed value, plus the server image and version).
 // The container is always removed. Rerun: npm run test:e2e:minio
@@ -101,10 +101,11 @@ async function main() {
     const cargo = run(
       "cargo",
       [
-        "test",
-        "--manifest-path",
-        path.join(root, "src-tauri", "Cargo.toml"),
-        "e2e_",
+      "test",
+      "--locked",
+      "--manifest-path",
+      path.join(root, "src-tauri", "Cargo.toml"),
+      "e2e_minio::",
         "--",
         "--ignored",
         "--test-threads=1",

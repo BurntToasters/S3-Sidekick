@@ -2851,12 +2851,12 @@ async function executeTransfer(
             dstKey: item.destinationKey,
             overwrite,
             transferId: item.id,
-            // Moves no longer demand a versioned source up front: on
-            // versioned buckets the receipt still carries the immutable
-            // version and deletion takes the exact-version path, while on
-            // unversioned buckets the backend falls back to an ETag-pinned
-            // copy plus a fingerprinted conditional delete.
+            // Preserve unversioned support on providers whose conditional
+            // DeleteObject behavior is verified. The backend uses this intent
+            // to refuse unsupported moves before it mutates the destination;
+            // a resumed move is checked again by delete_copied_objects.
             requireImmutableSourceVersion: false,
+            automaticMove: item.operation === "move",
           },
         );
         receipts = [receipt];

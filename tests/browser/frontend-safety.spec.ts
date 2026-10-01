@@ -85,6 +85,7 @@ test.describe("frontend mutation and recovery safety", () => {
       dstBucket: "layout-test-bucket",
       dstPrefix: "target/archive/",
       overwrite: false,
+      collectReceipts: false,
     });
     expect(commandCalls(calls, "delete_copied_objects")).toHaveLength(0);
     await saveSuiteArtifact(
@@ -134,6 +135,7 @@ test.describe("frontend mutation and recovery safety", () => {
       dstBucket: "layout-test-bucket",
       dstKey: `destination/${sourceName}`,
       overwrite: false,
+      automaticMove: true,
     });
     const deletion = commandCalls(calls, "delete_copied_objects")[0];
     expect(deletion.args).toMatchObject({

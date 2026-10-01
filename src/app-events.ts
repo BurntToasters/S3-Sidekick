@@ -100,7 +100,9 @@ import {
   updateBookmarkBtn,
   handleNewConnection,
   awsRegionalEndpoint,
+  setConnectionUI,
 } from "./app-connection.ts";
+import { setConnectionAccessLocked } from "./connection.ts";
 import {
   addSelection,
   getSelectedFileKeys,
@@ -141,11 +143,21 @@ let dragDropUnlisten: (() => void) | null = null;
  * After an inactivity auto-lock: end the S3 session and drop decrypted
  * credentials and bookmarks from memory, as the manual lock button does.
  */
-export async function clearSessionAfterAutoLock(): Promise<void> {
-  if (state.connected) await handleDisconnect();
+export async function clearSessionAfterAutoLock(): Promise<boolean> {
+  const hadSession = state.connected || Boolean(state.connectionId);
+  setConnectionAccessLocked(true);
+  setConnectionUI(false);
+  closePreview();
   setConnectionInputs("", "", "", "");
   clearBookmarks();
   refreshBookmarkBar();
+  if (hadSession && !(await handleDisconnect())) {
+    // A failed drain leaves the backend client retained for a safe retry. Keep
+    // the browsing surface closed and retain only the session ID for retirement.
+    setConnectionUI(false);
+    return false;
+  }
+  return true;
 }
 
 /** Connection form: connect, credentials, provider presets, saved list. */
@@ -380,6 +392,9 @@ function wireOverlaysAndDrawer(): void {
 /** Security-ready and unload hooks. */
 function wireAppLifecycle(): void {
   window.addEventListener("s3-sidekick:security-ready", () => {
+    if (!state.connectionId && !state.connected) {
+      setConnectionAccessLocked(false);
+    }
     void recoverPendingTransfers().catch((err) => {
       console.error("Failed to recover pending transfers:", err);
       logActivity(

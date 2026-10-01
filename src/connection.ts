@@ -32,6 +32,8 @@ interface ListObjectsResponse {
 }
 
 let connectionGeneration = 0;
+let connectionAccessLocked = false;
+let connectionAccessGeneration = 0;
 let listingGeneration = 0;
 let activeListingRequest: number | null = null;
 let paginationRequest = 0;
@@ -87,6 +89,22 @@ export function currentConnectionId(): string {
 
 export function currentConnectionGeneration(): number {
   return connectionGeneration;
+}
+
+/** Close every frontend S3 admission path after encrypted storage locks. */
+export function setConnectionAccessLocked(locked: boolean): void {
+  if (connectionAccessLocked === locked) return;
+  connectionAccessLocked = locked;
+  connectionAccessGeneration += 1;
+  if (locked) {
+    connectionGeneration += 1;
+    state.connecting = false;
+    state.connected = false;
+  }
+}
+
+export function isConnectionAccessLocked(): boolean {
+  return connectionAccessLocked;
 }
 
 export function currentBucketRequest(): number {
@@ -172,6 +190,9 @@ export function invokeS3For<T>(
   connectionId: string,
   ...call: S3InvokeCall
 ): Promise<T> {
+  if (connectionAccessLocked) {
+    throw new Error("Encrypted storage is locked; S3 access is unavailable.");
+  }
   if (!connectionId) {
     throw new Error("Connection id is required");
   }
@@ -192,6 +213,10 @@ export async function connect(
   secretKey: string,
   sessionToken = "",
 ): Promise<string> {
+  if (connectionAccessLocked) {
+    throw new Error("Encrypted storage is locked; unlock before connecting.");
+  }
+  const accessGeneration = connectionAccessGeneration;
   const generation = ++connectionGeneration;
   invalidateListingOwnership();
   state.connecting = true;
@@ -203,7 +228,11 @@ export async function connect(
       secretKey,
       sessionToken: sessionToken || null,
     });
-    if (generation !== connectionGeneration) {
+    if (
+      generation !== connectionGeneration ||
+      accessGeneration !== connectionAccessGeneration ||
+      connectionAccessLocked
+    ) {
       throw new Error("Connection attempt superseded");
     }
     if (

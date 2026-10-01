@@ -270,6 +270,7 @@ describe("transfers queue UI", () => {
           dstKey: "new.txt",
           overwrite: true,
           requireImmutableSourceVersion: false,
+          automaticMove: false,
         }),
       );
     });
@@ -1215,6 +1216,7 @@ describe("transfers queue UI", () => {
       expect.objectContaining({
         transferId: expect.any(Number),
         requireImmutableSourceVersion: false,
+        automaticMove: true,
       }),
     );
     expect(mockInvoke).toHaveBeenCalledWith("delete_copied_objects", {
@@ -1368,7 +1370,10 @@ describe("transfers queue UI", () => {
     });
     expect(mockInvoke).toHaveBeenCalledWith(
       "copy_object_to",
-      expect.objectContaining({ requireImmutableSourceVersion: false }),
+      expect.objectContaining({
+        requireImmutableSourceVersion: false,
+        automaticMove: true,
+      }),
     );
     expect(
       mockInvoke.mock.calls.some(
@@ -1447,6 +1452,7 @@ describe("transfers queue UI", () => {
       overwrite: false,
       transferId: expect.any(Number),
       requireImmutableSourceVersion: false,
+      automaticMove: true,
       connectionId: "test-connection",
     });
     expect(mockInvoke).toHaveBeenCalledWith("delete_copied_objects", {

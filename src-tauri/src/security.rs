@@ -4,6 +4,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
@@ -55,6 +56,8 @@ impl Drop for KeyState {
 
 static KEY_STATE: OnceLock<Mutex<KeyState>> = OnceLock::new();
 static MIGRATION_RECOVERY_FAILURE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static SECURITY_ENCRYPTION_ENABLED: AtomicBool = AtomicBool::new(true);
+static S3_SESSION_RETIREMENT_REQUIRED: AtomicBool = AtomicBool::new(false);
 
 fn migration_recovery_failure() -> &'static Mutex<Option<String>> {
     MIGRATION_RECOVERY_FAILURE.get_or_init(|| Mutex::new(None))
@@ -237,6 +240,57 @@ pub(crate) fn vault_is_readable(security: &SecurityConfig) -> bool {
     !security.encryption_enabled || is_unlocked()
 }
 
+fn check_s3_access_state(
+    encryption_enabled: bool,
+    unlocked: bool,
+    retirement_required: &AtomicBool,
+) -> Result<(), &'static str> {
+    if retirement_required.load(Ordering::Acquire) {
+        return Err("S3 session is waiting for secure retirement");
+    }
+    if encryption_enabled && !unlocked {
+        retirement_required.store(true, Ordering::Release);
+        return Err("Encrypted storage is locked");
+    }
+    Ok(())
+}
+
+/// Admit S3 commands only while encrypted storage is open and the previous
+/// locked session has completed its native retirement drain.
+pub(crate) fn require_s3_access() -> Result<(), String> {
+    let encryption_enabled = SECURITY_ENCRYPTION_ENABLED.load(Ordering::Acquire);
+    let unlocked = !encryption_enabled || is_unlocked();
+    check_s3_access_state(
+        encryption_enabled,
+        unlocked,
+        &S3_SESSION_RETIREMENT_REQUIRED,
+    )
+    .map_err(str::to_string)
+}
+
+/// A fresh native connection may clear the retirement latch only when no old
+/// session remains and the vault is open. An existing client must be drained
+/// through `disconnect` first.
+pub(crate) fn prepare_s3_connect(has_active_session: bool) -> Result<(), String> {
+    let encryption_enabled = SECURITY_ENCRYPTION_ENABLED.load(Ordering::Acquire);
+    if encryption_enabled && !is_unlocked() {
+        S3_SESSION_RETIREMENT_REQUIRED.store(true, Ordering::Release);
+        return Err("Encrypted storage is locked".to_string());
+    }
+    if has_active_session {
+        if S3_SESSION_RETIREMENT_REQUIRED.load(Ordering::Acquire) {
+            return Err("S3 session is waiting for secure retirement".to_string());
+        }
+    } else {
+        S3_SESSION_RETIREMENT_REQUIRED.store(false, Ordering::Release);
+    }
+    Ok(())
+}
+
+pub(crate) fn clear_s3_retirement_required() {
+    S3_SESSION_RETIREMENT_REQUIRED.store(false, Ordering::Release);
+}
+
 fn is_unlocked() -> bool {
     let mut guard = match key_state().lock() {
         Ok(g) => g,
@@ -253,6 +307,7 @@ fn is_unlocked() -> bool {
                 }
                 guard.key = None;
                 guard.last_activity = None;
+                S3_SESSION_RETIREMENT_REQUIRED.store(true, Ordering::Release);
                 return false;
             }
         }
@@ -297,6 +352,7 @@ pub(crate) fn require_unlocked_key() -> Result<Zeroizing<[u8; KEY_LEN]>, String>
                 }
                 guard.key = None;
                 guard.last_activity = None;
+                S3_SESSION_RETIREMENT_REQUIRED.store(true, Ordering::Release);
             }
         }
     }
@@ -375,14 +431,14 @@ pub(crate) fn load_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     let path = security_path(app)?;
     if !path.exists() {
         if fresh_install_has_legacy_plaintext(app) {
-            return Ok(uninitialized_plaintext_config());
+            return Ok(remember_security_config(uninitialized_plaintext_config()));
         }
-        return Ok(default_security_config());
+        return Ok(remember_security_config(default_security_config()));
     }
 
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     match serde_json::from_str::<SecurityConfig>(&raw) {
-        Ok(config) => Ok(config),
+        Ok(config) => Ok(remember_security_config(config)),
         Err(e) => {
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -416,6 +472,11 @@ pub(crate) fn load_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     }
 }
 
+fn remember_security_config(config: SecurityConfig) -> SecurityConfig {
+    SECURITY_ENCRYPTION_ENABLED.store(config.encryption_enabled, Ordering::Release);
+    config
+}
+
 pub(crate) fn save_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
     config: &SecurityConfig,
@@ -425,7 +486,9 @@ pub(crate) fn save_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     // Cross-process guard: STORAGE_OP_LOCK is in-process only. Hold an OS
     // exclusive lock so a second instance cannot interleave vault writes.
     let _vault_guard = path.parent().map(lock_vault_file).transpose()?;
-    atomic_write(&path, &json)
+    atomic_write(&path, &json)?;
+    SECURITY_ENCRYPTION_ENABLED.store(config.encryption_enabled, Ordering::Release);
+    Ok(())
 }
 
 /// Validate the key-derivation parameters read from disk before using them.
@@ -1319,6 +1382,7 @@ pub(crate) fn recover_interrupted_migration<R: tauri::Runtime, M: tauri::Manager
 }
 
 pub(crate) fn security_status(config: &SecurityConfig) -> SecurityStatus {
+    SECURITY_ENCRYPTION_ENABLED.store(config.encryption_enabled, Ordering::Release);
     SecurityStatus {
         initialized: config.initialized,
         encryption_enabled: config.encryption_enabled,
@@ -1787,6 +1851,7 @@ pub(crate) async fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatu
         let _storage_guard = lock_storage_meta()?;
         let config = load_security_config(&app)?;
         if config.encryption_enabled {
+            S3_SESSION_RETIREMENT_REQUIRED.store(true, Ordering::Release);
             set_unlocked_key(None, 0)?;
         }
         Ok(security_status(&config))
@@ -3605,5 +3670,22 @@ mod tests {
         assert!(!looks_encrypted("{\"name\":\"prod\"}"));
         assert!(!looks_encrypted(""));
         assert!(!looks_encrypted("   "));
+    }
+
+    #[test]
+    fn s3_access_stays_blocked_after_unlock_until_session_retirement() {
+        let retirement_required = std::sync::atomic::AtomicBool::new(false);
+
+        assert!(check_s3_access_state(true, true, &retirement_required).is_ok());
+        assert!(check_s3_access_state(true, false, &retirement_required).is_err());
+        assert!(retirement_required.load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            check_s3_access_state(true, true, &retirement_required).is_err(),
+            "unlock must not revive the previous S3 session"
+        );
+
+        retirement_required.store(false, std::sync::atomic::Ordering::Release);
+        assert!(check_s3_access_state(true, true, &retirement_required).is_ok());
+        assert!(check_s3_access_state(false, false, &retirement_required).is_ok());
     }
 }

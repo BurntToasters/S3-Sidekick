@@ -88,9 +88,9 @@ pub(super) async fn preflight_prefix_copy_sources(
                     key
                 ));
             }
-            // Best-effort: versioned sources bind their immutable version,
-            // unversioned ones record `None` and rely on the ETag-pinned
-            // fallback at deletion time. Only genuine failures abort here.
+            // Move plans bind immutable versions; truly unversioned sources
+            // record `None` and may use the provider-gated ETag fallback.
+            // A suspended bucket's mutable `null` version is a hard refusal.
             let immutable_version_id = if require_immutable_versions {
                 preflight_optional_move_version(client, src_bucket, &key, cancel).await?
             } else {

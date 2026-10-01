@@ -108,6 +108,24 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Run multipart response-loss E2E
+        run: npm run test:e2e:multipart-recovery
+
+      - name: Run Windows publication E2E
+        if: runner.os == 'Windows'
+        run: npm run test:e2e:windows-publication
+
+      - name: Upload native transfer regression reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: transfer-regressions-${{ matrix.os }}
+          path: |
+            test-results/fixes-0.11.1/transfer-publication/multipart-recovery/
+            test-results/fixes-0.11.1/transfer-publication/windows-publication/
+          if-no-files-found: ignore
+          retention-days: 14
+
   browser-layout:
     name: Browser layout (Chromium + WebKit)
     runs-on: ubuntu-22.04
@@ -136,6 +154,18 @@ jobs:
 
       - name: Run script E2E suites
         run: npm run test:e2e:scripts
+
+      - name: Run full-stack deadline and artifact E2E
+        run: npm run test:e2e:fullstack-harness
+
+      - name: Upload full-stack harness reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fullstack-harness-report
+          path: test-results/fixes-0.11.1/transfer-publication/fullstack-harness/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload browser diagnostics
         if: failure()

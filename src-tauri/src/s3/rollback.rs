@@ -136,20 +136,28 @@ pub(super) async fn remove_backup_object(
     client: &Client,
     bucket: &str,
     backup: &DestinationBackup,
+    provider: StorageProviderKind,
 ) -> Result<(), String> {
     let mut request = client
         .delete_object()
         .bucket(bucket)
         .key(&backup.backup_key);
-    if let Some(version_id) = backup.source_info.version_id.as_deref() {
+    if let Some(version_id) = rollback_version_id(backup.source_info.version_id.as_deref()) {
         request = request.version_id(version_id);
-    } else if let Some(etag) = backup
-        .source_info
-        .etag
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    } else {
+        require_conditional_delete_support(provider, &backup.backup_key)?;
+        let etag = backup
+            .source_info
+            .etag
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "cannot safely remove backup '{}' without an ETag; it was retained",
+                    backup.backup_key
+                )
+            })?;
         request = request.if_match(etag);
     }
     request
@@ -159,13 +167,11 @@ pub(super) async fn remove_backup_object(
     Ok(())
 }
 
-/// The version ID a rollback may delete by version. `"null"` pins a read
-/// (see `immutable_version_id`), but in a bucket with versioning suspended a
-/// write replaces the null version in place, so a version-targeted delete of
-/// `"null"` would destroy data instead of undoing one write. Those receipts
-/// take the unversioned (conditional delete + recreate) restore path.
+/// The version ID a rollback may delete by version. A literal `"null"` remains
+/// readable, but it can be replaced in place and cannot authorize a versioned
+/// delete; it takes the conditional unversioned path instead.
 pub(super) fn rollback_version_id(version_id: Option<&str>) -> Option<&str> {
-    immutable_version_id(version_id).filter(|value| *value != "null")
+    immutable_version_id(version_id)
 }
 
 /// MinIO E2E entry points for the private copy and rollback internals.
@@ -182,16 +188,6 @@ pub(crate) async fn e2e_copy_with_receipt(
         client, bucket, src_key, bucket, dst_key, None, false, provider, cancel,
     )
     .await
-}
-
-#[cfg(test)]
-pub(crate) async fn e2e_rollback_created_destinations(
-    client: &Client,
-    bucket: &str,
-    created_destinations: &[CopyReceipt],
-    provider: StorageProviderKind,
-) -> Vec<String> {
-    rollback_prefix_copy_unbounded(client, bucket, created_destinations, &[], provider).await
 }
 
 pub(super) async fn rollback_prefix_copy_unbounded(
@@ -240,7 +236,7 @@ pub(super) async fn rollback_prefix_copy_unbounded(
                 None => false,
             };
             if original_unchanged {
-                if let Err(err) = remove_backup_object(client, bucket, backup).await {
+                if let Err(err) = remove_backup_object(client, bucket, backup, provider).await {
                     failures.push(format!(
                         "'{}' was not replaced, but {}",
                         backup.destination_key, err
@@ -359,6 +355,14 @@ pub(super) async fn rollback_prefix_copy_unbounded(
                 ));
                 continue;
             }
+            if let Err(err) = require_conditional_delete_support(provider, &backup.destination_key)
+            {
+                failures.push(format!(
+                    "could not safely restore unversioned destination '{}': {}; retained backup '{}'",
+                    backup.destination_key, err, backup.backup_key
+                ));
+                continue;
+            }
             let delete_result = client
                 .delete_object()
                 .bucket(bucket)
@@ -394,7 +398,7 @@ pub(super) async fn rollback_prefix_copy_unbounded(
             }
         }
 
-        if let Err(err) = remove_backup_object(client, bucket, backup).await {
+        if let Err(err) = remove_backup_object(client, bucket, backup, provider).await {
             failures.push(format!("restored '{}' but {}", backup.destination_key, err));
         }
     }
@@ -442,12 +446,23 @@ pub(super) async fn rollback_prefix_copy_unbounded(
                 continue;
             }
         }
+        let version_id = rollback_version_id(receipt.destination_version_id.as_deref());
+        if version_id.is_none() {
+            if let Err(err) = require_conditional_delete_support(provider, &receipt.destination_key)
+            {
+                failures.push(format!(
+                    "kept destination '{}': {}; the unversioned rollback delete was refused",
+                    receipt.destination_key, err
+                ));
+                continue;
+            }
+        }
         let mut request = client
             .delete_object()
             .bucket(bucket)
             .key(&receipt.destination_key)
             .if_match(&receipt.destination_etag);
-        if let Some(version_id) = rollback_version_id(receipt.destination_version_id.as_deref()) {
+        if let Some(version_id) = version_id {
             request = request.version_id(version_id);
         }
         if let Err(err) = request.send().await {
