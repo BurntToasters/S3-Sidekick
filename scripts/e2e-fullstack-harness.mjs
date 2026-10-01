@@ -1,18 +1,12 @@
 #!/usr/bin/env node
-// Failure-first E2E for the full-stack runner itself. Every run uses a fake
-// app marker, local HTTP servers, fake Docker/tauri-driver processes, and
-// per-case output directories. It never starts Docker or opens app data.
-// Session-timeout failure modes: the timeout artifact must exist before
-// cleanup stops the process group; each native-state command stays bounded,
-// and a missing optional X11/listener tool remains visible in the artifact.
-// HTTP-response failure mode: `/status` can flush 200 headers and then stall
-// its JSON body; readiness must remain bounded by the same fetch deadline.
-// Readiness failure mode: the proxied WebDriver status can be HTTP 200 while
-// value.ready is false. The client must poll again and send exactly one
-// POST /session only after a later status says ready=true.
-// Recovery failure modes: malformed JSON and one stalled response body must
-// not poison later polls, and the stalled response must close before session
-// creation so no polling socket leaks into the application session.
+// Failure-first runner E2E uses fake app, Docker/driver processes, local HTTP,
+// and isolated outputs; it never starts Docker or opens app data. Timeout
+// evidence must exist before process cleanup; native diagnostics stay bounded,
+// and missing X11/listener tools remain visible. A `/status` body can stall
+// after HTTP 200 headers but must remain inside the fetch deadline. A false
+// ready value must delay the sole POST /session until a later true value.
+// Malformed or stalled bodies must not poison later polls, and a stalled body
+// must close before session creation so no polling socket leaks.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";

@@ -5,22 +5,14 @@
 //   xvfb-run npm run test:e2e:fullstack
 // Writes test-results/fullstack/report.json and final.png incrementally.
 
-// Failure modes checked before implementation: capabilities deny a command
-// the UI needs (only the real runtime shows it); first-run setup cannot finish;
-// the real client cannot list buckets; a folder create never reaches the
-// server; a silent step still passes (every check recorded, incomplete sets
-// fail); the run touches real app data or leaves MinIO running; a driver,
-// screenshot, quit, Docker, or fetch operation outlives its own deadline; a
-// failure/cancellation is not saved before cleanup begins.
-// Session-timeout evidence failure modes: diagnostics must be collected before
-// the driver/app process group is stopped; missing or stalled system tools
-// must not hide the original timeout or make diagnostic collection unbounded;
-// retained driver output must stay size limited while still reaching CI logs.
-// Readiness failure mode: HTTP 200 headers with a stalled status body must
-// remain inside the fetch deadline and retain the driver-ready timeout phase.
-// Readiness regression mode: a standards-compliant native driver can return
-// HTTP 200 with value.ready=false while it cannot yet accept a new session;
-// the runner must keep polling and must not send a premature POST /session.
+// Failure modes checked first: runtime capabilities deny required UI commands;
+// setup, bucket listing, or folder persistence fails; missing checks still pass;
+// real app data changes or MinIO remains; operations exceed their deadlines;
+// failure evidence is not saved before cleanup. Session timeouts must capture
+// evidence before process stop; diagnostic commands stay bounded, missing tools
+// stay visible, and retained driver logs stay capped while reaching CI output.
+// A stalled status body stays within the fetch deadline and driver-ready phase.
+// HTTP 200 with value.ready=false must poll without premature POST /session.
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
