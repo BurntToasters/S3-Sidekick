@@ -564,6 +564,66 @@ function captureSessionDiagnostics(error) {
   persistReport();
 }
 
+async function captureAcceptanceDiagnostics() {
+  // Connect submitted but main layout never visible. Record error text,
+  // button state, and layout display before cleanup. Bounded, never throws.
+  const lines = [`Captured at ${new Date().toISOString()} during acceptance`];
+  try {
+    const snapshot = await withDeadline(
+      driver.executeScript(() => {
+        const text = (id) =>
+          document.getElementById(id)?.textContent?.trim() ?? "<absent>";
+        const display = (id) =>
+          document.getElementById(id)?.style?.display ?? "<absent>";
+        return {
+          formError: text("conn-form-error"),
+          connectBtn: text("connect-btn"),
+          connectDisabled:
+            document.getElementById("connect-btn")?.disabled ?? null,
+          connectBusy:
+            document.getElementById("connect-btn")?.dataset?.busy ?? null,
+          status: text("connection-status"),
+          mainLayoutDisplay: display("main-layout"),
+          connScreenDisplay: display("connection-screen"),
+          endpoint:
+            document.getElementById("conn-endpoint")?.value ?? "<absent>",
+          url: location.href,
+          title: document.title,
+        };
+      }),
+      15_000,
+      "acceptance DOM snapshot",
+    );
+    lines.push(JSON.stringify(snapshot, null, 2));
+  } catch (error) {
+    lines.push(
+      `DOM snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    const source = await withDeadline(
+      driver.getPageSource(),
+      15_000,
+      "acceptance page source",
+    );
+    lines.push(`--- page source (${source.length} chars, first 4000) ---`);
+    lines.push(source.slice(0, 4000));
+  } catch (error) {
+    lines.push(
+      `Page source failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    fs.writeFileSync(
+      path.join(outDir, "acceptance-failure.txt"),
+      `${lines.join("\n")}\n`,
+    );
+  } catch {
+    // Artifact best effort; CI log below still carries the snapshot.
+  }
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
 function forwardDriverOutput(channel, chunk) {
   const output = channel === "stdout" ? process.stdout : process.stderr;
   output.write(chunk);
@@ -894,6 +954,9 @@ async function main() {
       failureDetails.kind === "timeout"
     ) {
       captureSessionDiagnostics(caught);
+    }
+    if (failureDetails.phase === "acceptance" && driver) {
+      await captureAcceptanceDiagnostics();
     }
   } finally {
     if (driver) {
