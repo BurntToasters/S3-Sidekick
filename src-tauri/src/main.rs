@@ -2394,6 +2394,17 @@ fn e2e_startup_trace(message: &str) {
     }
 }
 
+fn e2e_inspector_server_trace_value() -> String {
+    match std::env::var("WEBKIT_INSPECTOR_SERVER") {
+        Ok(value) => match value.parse::<std::net::SocketAddr>() {
+            Ok(address) if address.ip().is_loopback() && address.port() != 0 => address.to_string(),
+            _ => "<invalid-or-non-loopback>".to_string(),
+        },
+        Err(std::env::VarError::NotPresent) => "<unset>".to_string(),
+        Err(std::env::VarError::NotUnicode(_)) => "<invalid-or-non-loopback>".to_string(),
+    }
+}
+
 fn e2e_startup_entry_trace() {
     if !e2e_startup_trace_enabled() {
         return;
@@ -2404,8 +2415,9 @@ fn e2e_startup_entry_trace() {
             .unwrap_or_else(|| "<unset>".to_string())
     };
     eprintln!(
-        "[s3-sidekick-e2e-startup] main-entry TAURI_WEBVIEW_AUTOMATION={} DISPLAY={} XDG_DATA_HOME={} XDG_CONFIG_HOME={} XDG_CACHE_HOME={} XDG_STATE_HOME={}",
+        "[s3-sidekick-e2e-startup] main-entry TAURI_WEBVIEW_AUTOMATION={} WEBKIT_INSPECTOR_SERVER={} DISPLAY={} XDG_DATA_HOME={} XDG_CONFIG_HOME={} XDG_CACHE_HOME={} XDG_STATE_HOME={}",
         value("TAURI_WEBVIEW_AUTOMATION"),
+        e2e_inspector_server_trace_value(),
         value("DISPLAY"),
         value("XDG_DATA_HOME"),
         value("XDG_CONFIG_HOME"),

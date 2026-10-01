@@ -844,7 +844,7 @@ async fn e2e_suspended_null_version_is_copyable_but_not_move_authority() {
 
     let copied = s3::copy_object_to(
         app.state::<AppState>(),
-        session.connection_id,
+        session.connection_id.clone(),
         bucket.clone(),
         "source.txt".to_string(),
         bucket.clone(),
@@ -868,14 +868,13 @@ async fn e2e_suspended_null_version_is_copyable_but_not_move_authority() {
 
     let null_receipt_delete = match copied.as_ref() {
         Ok(receipt) => {
-            let cancel: s3::CancelToken = Default::default();
-            s3::e2e_delete_move_receipts_checked(
-                &raw,
-                &bucket,
-                &bucket,
-                std::slice::from_ref(receipt),
-                StorageProviderKind::Aws,
-                &cancel,
+            s3::delete_copied_objects(
+                app.state::<AppState>(),
+                session.connection_id,
+                bucket.clone(),
+                bucket.clone(),
+                vec![receipt.clone()],
+                None,
             )
             .await
         }
@@ -885,12 +884,12 @@ async fn e2e_suspended_null_version_is_copyable_but_not_move_authority() {
     let copy_after_null_receipt_delete = read(&raw, &bucket, "copy.txt").await;
     record(
         test,
-        "ordinary copy receipt without immutable version authority cannot delete even on the supported-provider route",
+        "ordinary copy receipt cannot authorize source deletion on the actual MinIO provider route",
         is_suspended_null_or_unreported
             && null_receipt_delete
                 .as_ref()
                 .err()
-                .is_some_and(|err| err.contains("no immutable version ID"))
+                .is_some_and(|err| err.contains("conditional DELETE"))
             && source_after_null_receipt_delete.as_deref() == Some("current null version")
             && copy_after_null_receipt_delete.as_deref() == Some("current null version"),
         serde_json::json!({"head_version_id": null_version, "delete": format!("{:?}", null_receipt_delete), "source": source_after_null_receipt_delete, "copy": copy_after_null_receipt_delete}),
