@@ -314,6 +314,11 @@ jobs:
       - name: Build debug app
         run: npm run tauri -- build --debug --no-bundle -- --locked
 
+      - name: Warm font cache for first GTK paint
+        run: |
+          fc-cache -f >/dev/null 2>&1 || true
+          fc-list | wc -l
+
       - name: Run full-stack E2E
         env:
           S3_SIDEKICK_E2E_STARTUP_TRACE: "1"

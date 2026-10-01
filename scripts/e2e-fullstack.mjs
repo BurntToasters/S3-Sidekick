@@ -75,7 +75,9 @@ const ACCEPTANCE_TIMEOUT_MS = testValue(
 );
 const SESSION_TIMEOUT_MS = testValue(
   "S3_SIDEKICK_FULLSTACK_SESSION_TIMEOUT_MS",
-  30_000,
+  // CI debug build needs ~36s main-entry to setup on cold fontconfig
+  // (main thread blocked in pango_fc_font_map_get_config). Keep 120s.
+  120_000,
 );
 const DRIVER_READY_TIMEOUT_MS = testValue(
   "S3_SIDEKICK_FULLSTACK_DRIVER_READY_TIMEOUT_MS",
