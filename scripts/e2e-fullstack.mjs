@@ -12,6 +12,15 @@
 // fail); the run touches real app data or leaves MinIO running; a driver,
 // screenshot, quit, Docker, or fetch operation outlives its own deadline; a
 // failure/cancellation is not saved before cleanup begins.
+// Session-timeout evidence failure modes: diagnostics must be collected before
+// the driver/app process group is stopped; missing or stalled system tools
+// must not hide the original timeout or make diagnostic collection unbounded;
+// retained driver output must stay size limited while still reaching CI logs.
+// Readiness failure mode: HTTP 200 headers with a stalled status body must
+// remain inside the fetch deadline and retain the driver-ready timeout phase.
+// Readiness regression mode: a standards-compliant native driver can return
+// HTTP 200 with value.ready=false while it cannot yet accept a new session;
+// the runner must keep polling and must not send a premature POST /session.
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -97,6 +106,7 @@ const CLEANUP_TIMEOUT_MS = testValue(
   10_000,
 );
 const POLL_INTERVAL_MS = testValue("S3_SIDEKICK_FULLSTACK_POLL_MS", 500);
+const DRIVER_LOG_MAX_BYTES = 512 * 1024;
 const checks = [];
 const cleanup = [];
 const abortController = new AbortController();
@@ -110,6 +120,11 @@ let driverProcessGroup = false;
 let dockerLaunchAttempted = false;
 let xdgHome;
 let cleanupComplete = false;
+let driverLogPath;
+let driverLogBytes = 0;
+let driverLogTruncated = false;
+let driverLogWriteError = null;
+let sessionDiagnostics = null;
 
 function normalizedError(error, phase = currentPhase) {
   if (error && typeof error === "object" && error.kind && error.phase) {
@@ -150,11 +165,31 @@ function persistReport() {
     checkCount: checks.length,
     expectedCheckCount: EXPECTED_CHECKS,
     cleanupComplete,
+    failureDiagnostics: sessionDiagnostics
+      ? {
+          captured: sessionDiagnostics.captured,
+          file: sessionDiagnostics.file ?? null,
+          triggerPhase: sessionDiagnostics.triggerPhase,
+          commandCount: sessionDiagnostics.commands?.length ?? 0,
+          driverLogBytes: sessionDiagnostics.driverLogBytes,
+          driverLogTruncated: sessionDiagnostics.driverLogTruncated,
+          error: sessionDiagnostics.error ?? null,
+        }
+      : null,
     missingChecks,
     checks,
     cleanup,
     artifacts: {
       report: "report.json",
+      tauriDriverLog:
+        driverLogPath && fs.existsSync(driverLogPath)
+          ? path.basename(driverLogPath)
+          : null,
+      sessionDiagnostics: fs.existsSync(
+        path.join(outDir, "session-diagnostics.txt"),
+      )
+        ? "session-diagnostics.txt"
+        : null,
       screenshot: fs.existsSync(path.join(outDir, "final.png"))
         ? "final.png"
         : null,
@@ -260,23 +295,39 @@ function docker(...args) {
   return result.stdout.trim();
 }
 
-async function fetchOnce(url, signal) {
+async function fetchOnce(url, signal, isReady = (response) => response?.ok) {
   const requestController = new AbortController();
   const timer = setTimeout(() => requestController.abort(), FETCH_TIMEOUT_MS);
   const stop = () => requestController.abort();
+  let response;
   signal?.addEventListener("abort", stop, { once: true });
   try {
-    return await fetch(url, { signal: requestController.signal });
+    response = await fetch(url, { signal: requestController.signal });
+    return response?.ok && (await isReady(response));
   } catch (error) {
     if (signal?.aborted) throw interruption ?? error;
-    return null;
+    return false;
   } finally {
+    if (response?.body && !response.bodyUsed) {
+      try {
+        await response.body.cancel();
+      } catch {
+        // An abort may already have closed the response body.
+      }
+    }
+    requestController.abort();
     clearTimeout(timer);
     signal?.removeEventListener("abort", stop);
   }
 }
 
-async function waitFor(url, timeoutMs, signal, childProcess = undefined) {
+async function waitFor(
+  url,
+  timeoutMs,
+  signal,
+  childProcess = undefined,
+  isReady = (response) => response?.ok,
+) {
   const poll = async () => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -289,8 +340,7 @@ async function waitFor(url, timeoutMs, signal, childProcess = undefined) {
         error.phase = currentPhase;
         throw error;
       }
-      const response = await fetchOnce(url, signal);
-      if (response?.ok) return;
+      if (await fetchOnce(url, signal, isReady)) return;
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
     const error = new Error(
@@ -306,6 +356,174 @@ async function waitFor(url, timeoutMs, signal, childProcess = undefined) {
     `waiting for ${url}`,
     signal,
   );
+}
+
+async function webDriverStatusReady(response) {
+  try {
+    const status = await response.json();
+    return status?.value?.ready === true;
+  } catch {
+    return false;
+  }
+}
+
+function runDiagnosticCommand(
+  command,
+  args,
+  filterOutput = (output) => output,
+  timeoutMs = 600,
+) {
+  try {
+    const result = spawnSync(command, args, {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    });
+    const output = filterOutput(`${result.stdout ?? ""}${result.stderr ?? ""}`);
+    return {
+      command: [command, ...args].join(" "),
+      exitCode: result.status,
+      signal: result.signal,
+      error: result.error?.message ?? null,
+      output: output.slice(0, 24_000),
+      truncated: result.error?.code === "ENOBUFS" || output.length > 24_000,
+    };
+  } catch (error) {
+    return {
+      command: [command, ...args].join(" "),
+      exitCode: null,
+      signal: null,
+      error: error instanceof Error ? error.message : String(error),
+      output: "",
+      truncated: false,
+    };
+  }
+}
+
+function captureSessionDiagnostics(error) {
+  const capturedAt = new Date().toISOString();
+  const trackedPids = new Set(
+    [process.pid, driverProcess?.pid].filter(Number.isInteger).map(String),
+  );
+  const processPattern =
+    /s3-sidekick|tauri-driver|WebKit(?:WebDriver|NetworkProcess|WebProcess)|Xvfb|dbus-daemon/i;
+  const filterProcessOutput = (output) =>
+    output
+      .split("\n")
+      .filter(
+        (line, index) =>
+          index === 0 ||
+          trackedPids.has(line.trim().split(/\s+/, 1)[0]) ||
+          processPattern.test(line),
+      )
+      .join("\n");
+  const commands = [
+    runDiagnosticCommand(
+      "ps",
+      ["-eo", "pid,ppid,pgid,stat,etime,comm,args"],
+      filterProcessOutput,
+    ),
+    runDiagnosticCommand("ss", ["-ltnp"]),
+    runDiagnosticCommand("xwininfo", ["-root", "-tree"]),
+  ];
+
+  const profile = {
+    DISPLAY: process.env.DISPLAY ?? null,
+    WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY ?? null,
+    XDG_DATA_HOME: xdgHome ? path.join(xdgHome, "data") : null,
+    XDG_CONFIG_HOME: xdgHome ? path.join(xdgHome, "config") : null,
+    XDG_CACHE_HOME: xdgHome ? path.join(xdgHome, "cache") : null,
+    XDG_STATE_HOME: xdgHome ? path.join(xdgHome, "state") : null,
+  };
+  const driverLogSize =
+    driverLogPath && fs.existsSync(driverLogPath)
+      ? fs.statSync(driverLogPath).size
+      : 0;
+  const detail = {
+    capturedAt,
+    triggerPhase: currentPhase,
+    failure: normalizedError(error, currentPhase),
+    runnerPid: process.pid,
+    tauriDriverPid: driverProcess?.pid ?? null,
+    tauriDriverProcessGroup: driverProcessGroup,
+    isolatedXdgProfile: xdgHome ?? null,
+    profile,
+    driverLog: {
+      file: driverLogPath ? path.basename(driverLogPath) : null,
+      bytes: driverLogSize,
+      truncated: driverLogTruncated,
+      writeError: driverLogWriteError,
+    },
+    commands,
+  };
+  const contents = [
+    `Captured before process cleanup at ${capturedAt}`,
+    `Failure: ${detail.failure.kind} during ${detail.failure.phase}: ${detail.failure.message}`,
+    `Runner PID: ${detail.runnerPid}`,
+    `tauri-driver PID: ${detail.tauriDriverPid ?? "unavailable"}`,
+    `tauri-driver process group: ${detail.tauriDriverProcessGroup}`,
+    `Isolated XDG profile: ${detail.isolatedXdgProfile ?? "unavailable"}`,
+    `Display/profile environment: ${JSON.stringify(profile)}`,
+    `tauri-driver log: ${detail.driverLog.file ?? "unavailable"} (${driverLogSize} bytes; truncated=${driverLogTruncated}; writeError=${driverLogWriteError ?? "none"})`,
+    ...commands.flatMap((entry) => [
+      "",
+      `$ ${entry.command}`,
+      `exit=${entry.exitCode ?? "unavailable"} signal=${entry.signal ?? "none"} error=${entry.error ?? "none"} truncated=${entry.truncated}`,
+      entry.output.trimEnd() || "<no output>",
+    ]),
+  ];
+  const file = "session-diagnostics.txt";
+  let writeError = null;
+  try {
+    fs.writeFileSync(path.join(outDir, file), `${contents.join("\n")}\n`);
+  } catch (writeFailure) {
+    writeError =
+      writeFailure instanceof Error
+        ? writeFailure.message
+        : String(writeFailure);
+  }
+  sessionDiagnostics = {
+    captured: writeError === null,
+    file: writeError === null ? file : null,
+    triggerPhase: currentPhase,
+    commands: commands.map(
+      ({ command, exitCode, signal, error, truncated }) => ({
+        command,
+        exitCode,
+        signal,
+        error,
+        truncated,
+      }),
+    ),
+    driverLogBytes: driverLogSize,
+    driverLogTruncated,
+    error: writeError,
+  };
+  persistReport();
+}
+
+function forwardDriverOutput(channel, chunk) {
+  const output = channel === "stdout" ? process.stdout : process.stderr;
+  output.write(chunk);
+  if (!driverLogPath || driverLogTruncated || driverLogWriteError) return;
+
+  const content = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+  const tagged = Buffer.concat([Buffer.from(`[${channel}] `), content]);
+  const remaining = DRIVER_LOG_MAX_BYTES - driverLogBytes;
+  if (remaining <= 0) {
+    driverLogTruncated = true;
+    return;
+  }
+  const retained = tagged.subarray(0, remaining);
+  try {
+    fs.appendFileSync(driverLogPath, retained);
+    driverLogBytes += retained.length;
+    if (retained.length < tagged.length) driverLogTruncated = true;
+  } catch (error) {
+    driverLogWriteError =
+      error instanceof Error ? error.message : String(error);
+  }
 }
 
 async function click(webDriver, id) {
@@ -483,6 +701,8 @@ async function stopDriverProcessTree() {
 async function main() {
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
+  driverLogPath = path.join(outDir, "tauri-driver.log");
+  fs.writeFileSync(driverLogPath, "");
   persistReport();
 
   try {
@@ -544,7 +764,7 @@ async function main() {
     driverProcessGroup = process.platform !== "win32";
     driverProcess = spawn(driverBin, [], {
       detached: driverProcessGroup,
-      stdio: ["ignore", "inherit", "inherit"],
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       env: {
         ...process.env,
@@ -554,6 +774,12 @@ async function main() {
         XDG_STATE_HOME: path.join(xdgHome, "state"),
       },
     });
+    driverProcess.stdout.on("data", (chunk) =>
+      forwardDriverOutput("stdout", chunk),
+    );
+    driverProcess.stderr.on("data", (chunk) =>
+      forwardDriverOutput("stderr", chunk),
+    );
     const driverSpawnFailure = new Promise((_, reject) => {
       driverProcess.once("error", (error) => {
         error.kind = "spawn";
@@ -569,6 +795,7 @@ async function main() {
         DRIVER_READY_TIMEOUT_MS,
         abortController.signal,
         driverProcess,
+        webDriverStatusReady,
       ),
       driverSpawnFailure,
     ]);
@@ -597,7 +824,16 @@ async function main() {
       abortController.signal,
     );
   } catch (error) {
-    setFailure(interruption ?? error, interruption?.phase ?? currentPhase);
+    const caught = interruption ?? error;
+    const phase = interruption?.phase ?? currentPhase;
+    setFailure(caught, phase);
+    const failureDetails = normalizedError(caught, phase);
+    if (
+      failureDetails.phase === "session-create" &&
+      failureDetails.kind === "timeout"
+    ) {
+      captureSessionDiagnostics(caught);
+    }
   } finally {
     if (driver) {
       await cleanupStep("WebDriver screenshot", async () => {

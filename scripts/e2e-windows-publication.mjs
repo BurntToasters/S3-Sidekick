@@ -9,26 +9,38 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const outDir = path.join(
-  root,
-  "test-results",
-  "fixes-0.11.1",
-  "transfer-publication",
-  "windows-publication",
-);
+const testMode = process.env.S3_SIDEKICK_WINDOWS_PUBLICATION_TEST_MODE === "1";
+const testOutDir = process.env.S3_SIDEKICK_WINDOWS_PUBLICATION_OUT_DIR;
+const testCargoFixture =
+  process.env.S3_SIDEKICK_WINDOWS_PUBLICATION_CARGO_FIXTURE;
+const outDir = testMode
+  ? testOutDir
+  : path.join(
+      root,
+      "test-results",
+      "fixes-0.11.1",
+      "transfer-publication",
+      "windows-publication",
+    );
+if (testMode && (!testOutDir || !testCargoFixture)) {
+  process.stderr.write(
+    "Windows publication test mode requires an isolated output directory and cargo fixture.\n",
+  );
+  process.exit(2);
+}
 const expected = [
   "publish_move_consumed_temp_keeps_the_successful_destination",
   "publish_hard_link_path_retains_source_until_cleanup",
   "publish_copy_fallback_preserves_create_only_bytes",
   "publish_existing_destination_is_preserved_and_temp_is_retained_for_checkpoint",
-  "publish_copy_error_cleans_reservation_and_retains_checkpoint",
+  "publish_copy_error_cleans_its_reservation",
   "publish_sync_error_removes_destination_and_retains_checkpoint",
 ];
 
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
 
-if (process.platform !== "win32") {
+if (process.platform !== "win32" && !testMode) {
   const report = {
     suite: "windows-create-only-publication",
     status: "not_run",
@@ -49,11 +61,13 @@ if (process.platform !== "win32") {
 }
 
 const result = spawnSync(
-  "cargo",
+  testMode ? process.execPath : "cargo",
   [
+    ...(testMode ? [testCargoFixture] : []),
     "test",
     "--manifest-path",
     path.join(root, "src-tauri", "Cargo.toml"),
+    "--locked",
     "publish_",
     "--",
     "--nocapture",
@@ -86,11 +100,13 @@ const report = {
   suite: "windows-create-only-publication",
   passed,
   platform: process.platform,
+  testMode,
   temporaryRootIsolated: true,
-  exercisedRealMoveFileW: true,
-  forcedHardLinkFailureThroughTestSeam: true,
-  filesystem:
-    "reported by Windows host; this runner does not format or mount volumes",
+  exercisedRealMoveFileW: !testMode,
+  forcedHardLinkFailureThroughTestSeam: !testMode,
+  filesystem: testMode
+    ? "fixture output only; native filesystem publication was not exercised"
+    : "reported by Windows host; this runner does not format or mount volumes",
   limitation:
     "This uses the Windows host temp filesystem. FAT/exFAT behavior requires a separate disposable-volume run.",
   exitCode: result.status ?? null,

@@ -300,7 +300,10 @@ export function setInspectorOpen(
   const toggle = document.getElementById("btn-inspector");
   const mobile = isMobileInspectorMode();
 
-  if (!open) releaseMobileInspectorModal(true);
+  if (!open) {
+    inspectorSyncGeneration += 1;
+    releaseMobileInspectorModal(true);
+  }
   inspectorOpen = open;
   if (!mobile) {
     window.localStorage.setItem(INSPECTOR_OPEN_STORAGE_KEY, open ? "1" : "0");

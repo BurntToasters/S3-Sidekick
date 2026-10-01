@@ -19,9 +19,12 @@
 //   client), so re-read it after rollback and require a retained notice.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use aws_sdk_s3::primitives::ByteStream;
 use tauri::Manager;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 use crate::security::SecurityConfig;
 use crate::{s3, AppState, S3State, StorageProviderKind};
@@ -782,6 +785,12 @@ async fn e2e_suspended_null_version_is_copyable_but_not_move_authority() {
         .send()
         .await
         .expect("suspend bucket versioning");
+    let versioning = raw
+        .get_bucket_versioning()
+        .bucket(&bucket)
+        .send()
+        .await
+        .expect("read suspended bucket versioning");
     put(&raw, &bucket, "source.txt", "current null version").await;
     let null_head = raw
         .head_object()
@@ -791,6 +800,12 @@ async fn e2e_suspended_null_version_is_copyable_but_not_move_authority() {
         .await
         .expect("head null version");
     let null_version = null_head.version_id().map(str::to_string);
+    let is_suspended_null_or_unreported = versioning.status()
+        == Some(&aws_sdk_s3::types::BucketVersioningStatus::Suspended)
+        && match null_version.as_deref() {
+            None => true,
+            Some(value) => value.eq_ignore_ascii_case("null"),
+        };
 
     let app = make_app();
     let session = connect(&app, &env.endpoint_minio, &env).await;
@@ -806,17 +821,25 @@ async fn e2e_suspended_null_version_is_copyable_but_not_move_authority() {
     .await;
     let source_after_refusal = read(&raw, &bucket, "source.txt").await;
     let moved_after_refusal = read(&raw, &bucket, "moved.txt").await;
+    let refusal_matches_observation = match null_version.as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("null") => refused_move
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.contains("mutable null version")),
+        None => refused_move
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.contains("conditional DELETE")),
+        _ => false,
+    };
     record(
         test,
-        "a literal null version is mutable and cannot authorize rename",
-        null_version.as_deref() == Some("null")
-            && refused_move
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.contains("mutable null version"))
+        "MinIO suspended write is copyable and rename refuses safely with its reported version identity",
+        is_suspended_null_or_unreported
+            && refusal_matches_observation
             && source_after_refusal.as_deref() == Some("current null version")
             && moved_after_refusal.is_none(),
-        serde_json::json!({"version_id": null_version, "result": format!("{:?}", refused_move), "source": source_after_refusal, "destination": moved_after_refusal}),
+        serde_json::json!({"versioning_status": format!("{:?}", versioning.status()), "head_version_id": null_version, "result": format!("{:?}", refused_move), "source": source_after_refusal, "destination": moved_after_refusal}),
     );
 
     let copied = s3::copy_object_to(
@@ -862,15 +885,147 @@ async fn e2e_suspended_null_version_is_copyable_but_not_move_authority() {
     let copy_after_null_receipt_delete = read(&raw, &bucket, "copy.txt").await;
     record(
         test,
-        "ordinary copy receipt for mutable null cannot authorize deletion even on the supported-provider route",
-        null_version.as_deref() == Some("null")
+        "ordinary copy receipt without immutable version authority cannot delete even on the supported-provider route",
+        is_suspended_null_or_unreported
             && null_receipt_delete
                 .as_ref()
                 .err()
                 .is_some_and(|err| err.contains("no immutable version ID"))
             && source_after_null_receipt_delete.as_deref() == Some("current null version")
             && copy_after_null_receipt_delete.as_deref() == Some("current null version"),
-        serde_json::json!({"delete": format!("{:?}", null_receipt_delete), "source": source_after_null_receipt_delete, "copy": copy_after_null_receipt_delete}),
+        serde_json::json!({"head_version_id": null_version, "delete": format!("{:?}", null_receipt_delete), "source": source_after_null_receipt_delete, "copy": copy_after_null_receipt_delete}),
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the local HTTP E2E runner (npm run test:e2e:aws-null-version)"]
+async fn e2e_aws_null_version_http_fixture_refuses_rename() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local S3 HTTP fixture");
+    let endpoint = format!("http://{}", listener.local_addr().expect("fixture address"));
+    let requests = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+    let server_requests = requests.clone();
+    let server = tokio::spawn(async move {
+        let mut first_request = true;
+        loop {
+            let wait = if first_request {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(200)
+            };
+            let Ok(Ok((mut stream, _))) = tokio::time::timeout(wait, listener.accept()).await
+            else {
+                break;
+            };
+            first_request = false;
+
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut chunk).await.expect("read S3 request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request).into_owned();
+            let request_line = request.lines().next().unwrap_or_default();
+            let is_expected_head = request_line == "HEAD /e2e-null-version/source.txt HTTP/1.1";
+            server_requests
+                .lock()
+                .expect("lock fixture request log")
+                .push(request);
+
+            let response = if is_expected_head {
+                "HTTP/1.1 200 OK\r\nx-amz-version-id: null\r\nETag: \"fixture-etag\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            } else {
+                "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            };
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write S3 fixture response");
+        }
+    });
+
+    let creds =
+        aws_sdk_s3::config::Credentials::new("e2e-access-key", "e2e-secret-key", None, None, "e2e");
+    let config = aws_sdk_s3::config::Builder::new()
+        .endpoint_url(&endpoint)
+        .region(aws_sdk_s3::config::Region::new("us-east-1"))
+        .credentials_provider(creds)
+        .force_path_style(true)
+        .behavior_version_latest()
+        .build();
+    let client = aws_sdk_s3::Client::from_conf(config);
+
+    let app = make_app();
+    save_plaintext_e2e_security_config(&app);
+    let connection_id = "e2e-aws-null-version".to_string();
+    {
+        let state = app.state::<AppState>();
+        let mut s3_state = state.0.lock().expect("lock mock S3 state");
+        s3_state.client = Some(client);
+        s3_state.endpoint = endpoint.clone();
+        s3_state.region = "us-east-1".to_string();
+        s3_state.connection_generation = 1;
+        s3_state.connection_id = Some(connection_id.clone());
+        s3_state.connection_identity = Some("local-http-fixture".to_string());
+        s3_state.storage_provider = StorageProviderKind::Aws;
+    }
+
+    let result = s3::rename_object(
+        app.state::<AppState>(),
+        connection_id,
+        "e2e-null-version".to_string(),
+        "source.txt".to_string(),
+        "moved.txt".to_string(),
+        true,
+        None,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(6), server)
+        .await
+        .expect("local S3 fixture server timed out")
+        .expect("local S3 fixture server panicked");
+
+    let observed_requests = requests.lock().expect("lock fixture request log").clone();
+    let request_lines: Vec<&str> = observed_requests
+        .iter()
+        .filter_map(|request| request.lines().next())
+        .collect();
+    let signed_head_observed = observed_requests.len() == 1
+        && request_lines == ["HEAD /e2e-null-version/source.txt HTTP/1.1"]
+        && observed_requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: aws4-hmac-sha256");
+    let mutable_null_refused = result
+        .as_ref()
+        .err()
+        .is_some_and(|err| err.contains("mutable null version ID"));
+    let no_mutation_requests = observed_requests.iter().all(|request| {
+        request
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with("HEAD "))
+    });
+    record(
+        "aws_null_version_http_fixture",
+        "real AWS SDK HEAD parses literal null and rename refuses before any mutation request",
+        signed_head_observed && mutable_null_refused && no_mutation_requests,
+        serde_json::json!({
+            "provider": "Aws",
+            "endpoint": endpoint,
+            "fixture_response_version_id": "null",
+            "requests": request_lines,
+            "signed_head_observed": signed_head_observed,
+            "result": format!("{:?}", result),
+            "no_mutation_requests": no_mutation_requests,
+        }),
     );
 }
 
