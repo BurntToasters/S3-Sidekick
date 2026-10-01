@@ -40,6 +40,11 @@ pub(crate) async fn delete_copied_objects(
         }
     }
 
+    let provider = client.provider();
+    if let Some(receipt) = receipts.first() {
+        require_conditional_delete_support(provider, &receipt.source_key)?;
+    }
+
     let mutation_scopes = receipts
         .iter()
         .flat_map(|receipt| {
@@ -51,7 +56,15 @@ pub(crate) async fn delete_copied_objects(
         .collect();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(mutation_scopes, &cancel).await?;
-    delete_move_receipts_checked(&client, &src_bucket, &dst_bucket, &receipts, &cancel).await
+    delete_move_receipts_checked(
+        &client,
+        &src_bucket,
+        &dst_bucket,
+        &receipts,
+        provider,
+        &cancel,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -75,6 +88,7 @@ pub(crate) async fn rename_prefix(
         return Err("Source and destination prefixes overlap; move was refused.".to_string());
     }
     let provider = client.provider();
+    require_conditional_delete_support(provider, &old_prefix)?;
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
         vec![
@@ -105,7 +119,7 @@ pub(crate) async fn rename_prefix(
     )
     .await?;
 
-    delete_move_receipts_checked(&client, &bucket, &bucket, &receipts, &cancel).await
+    delete_move_receipts_checked(&client, &bucket, &bucket, &receipts, provider, &cancel).await
 }
 
 /// Copy a single object to a (possibly different) bucket/key without deleting the source.
@@ -120,6 +134,7 @@ pub(crate) async fn copy_object_to(
     overwrite: Option<bool>,
     transfer_id: Option<u32>,
     require_immutable_source_version: Option<bool>,
+    automatic_move: Option<bool>,
 ) -> Result<CopyReceipt, String> {
     // Register before waiting for the storage gate so a pause or cancel
     // sent during the wait reaches this transfer instead of being dropped.
@@ -132,6 +147,11 @@ pub(crate) async fn copy_object_to(
     // interrupted operation, so only the destination is restricted.
     validate_mutating_key(&dst_key, "Destination key")?;
     let provider = client.provider();
+    let require_immutable_source_version = require_immutable_source_version.unwrap_or(false);
+    let automatic_move = automatic_move.unwrap_or(false);
+    if require_immutable_source_version || automatic_move {
+        require_conditional_delete_support(provider, &src_key)?;
+    }
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
         vec![
@@ -150,8 +170,21 @@ pub(crate) async fn copy_object_to(
         ));
     }
 
-    let source_info = if require_immutable_source_version.unwrap_or(false) {
+    let source_info = if require_immutable_source_version {
         Some(describe_immutable_move_source(&client, &src_bucket, &src_key, &cancel).await?)
+    } else if automatic_move {
+        let source_version =
+            preflight_optional_move_version(&client, &src_bucket, &src_key, &cancel).await?;
+        Some(
+            describe_object(
+                &client,
+                &src_bucket,
+                &src_key,
+                source_version.as_deref(),
+                &cancel,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -195,6 +228,9 @@ pub(crate) async fn copy_prefix_to(
         return Err("Source and destination prefixes overlap; copy was refused.".to_string());
     }
     let provider = client.provider();
+    if collect_receipts.unwrap_or(false) {
+        require_conditional_delete_support(provider, &src_prefix)?;
+    }
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
         vec![

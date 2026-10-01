@@ -1,6 +1,7 @@
 import { invoke } from "./ipc.ts";
 import { showConfirm, showPrompt, showAlert } from "./dialogs.ts";
 import { state } from "./state.ts";
+import { setConnectionAccessLocked } from "./connection.ts";
 
 export interface SecurityStatus {
   initialized: boolean;
@@ -656,10 +657,11 @@ export function noteManualLock(): void {
  * input and running transfers count as activity, so the timeout measures
  * idle time.
  */
-export function startAutoLockWatcher(onLocked: () => Promise<void>): void {
+export function startAutoLockWatcher(onLocked: () => Promise<boolean>): void {
   if (autoLockTimer !== null) return;
   let lastTouch = 0;
   let handling = false;
+  let pendingAutoLockCleanup = false;
   const touch = (): void => {
     const now = Date.now();
     if (now - lastTouch < ACTIVITY_TOUCH_INTERVAL_MS) return;
@@ -668,6 +670,21 @@ export function startAutoLockWatcher(onLocked: () => Promise<void>): void {
   };
   document.addEventListener("pointerdown", touch, true);
   document.addEventListener("keydown", touch, true);
+
+  const retryLockedCleanup = async (): Promise<void> => {
+    if (handling || !pendingAutoLockCleanup) return;
+    handling = true;
+    try {
+      if (await onLocked()) {
+        pendingAutoLockCleanup = false;
+        lastSeenUnlocked = false;
+      }
+    } catch {
+      // Keep the fail-closed state and retry on the next poll.
+    } finally {
+      handling = false;
+    }
+  };
 
   autoLockTimer = setInterval(() => {
     if (handling) return;
@@ -679,18 +696,36 @@ export function startAutoLockWatcher(onLocked: () => Promise<void>): void {
         ? invoke("touch_security_activity").catch(() => undefined)
         : Promise.resolve();
     void keepAlive
-      .then(() => getSecurityStatus())
-      .then(async (status) => {
+      .then(async () => {
+        let status: SecurityStatus;
+        try {
+          status = await getSecurityStatus();
+        } catch {
+          if (lastSeenUnlocked === true) {
+            pendingAutoLockCleanup = true;
+            setConnectionAccessLocked(true);
+            await retryLockedCleanup();
+          }
+          return;
+        }
+
         const unlocked = !status.encryption_enabled || status.unlocked;
         const wasUnlocked = lastSeenUnlocked;
-        lastSeenUnlocked = unlocked;
-        if (unlocked || wasUnlocked !== true) return;
-        handling = true;
-        try {
-          await onLocked();
-        } finally {
-          handling = false;
+        if (unlocked) {
+          lastSeenUnlocked = true;
+        } else if (
+          wasUnlocked === true ||
+          (wasUnlocked === null &&
+            (state.connected || Boolean(state.connectionId)))
+        ) {
+          pendingAutoLockCleanup = true;
+          setConnectionAccessLocked(true);
+        } else if (!pendingAutoLockCleanup) {
+          lastSeenUnlocked = false;
+          return;
         }
+
+        await retryLockedCleanup();
       })
       .catch(() => undefined);
   }, AUTO_LOCK_POLL_MS);

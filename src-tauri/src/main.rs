@@ -2201,19 +2201,105 @@ fn copy_file_exclusive(
 /// Prefers an atomic hard link (same directory), then the Windows exclusive
 /// move, then a reservation-and-copy fallback so downloads work on filesystems
 /// that support neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TempPublication {
+    Retained,
+    Consumed,
+}
+
+fn publish_exclusive_with(
+    temp_path: &std::path::Path,
+    destination_path: &std::path::Path,
+    mut hard_link: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    mut move_file: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    copy_file: impl FnOnce(&Path, &Path) -> Result<(), String>,
+) -> Result<TempPublication, String> {
+    if hard_link(temp_path, destination_path).is_ok() {
+        return Ok(TempPublication::Retained);
+    }
+    if move_file(temp_path, destination_path).is_ok() {
+        return Ok(TempPublication::Consumed);
+    }
+
+    copy_file(temp_path, destination_path)
+        .map(|()| TempPublication::Retained)
+        .map_err(|err| format!("Destination was not published without overwrite: {}", err))
+}
+
+/// Publish a temp path while keeping the Windows move fallback observable to
+/// the caller. Checkpointed downloads avoid the consuming fallback so their
+/// complete bytes remain available if the destination sync fails.
 fn publish_exclusive(
     temp_path: &std::path::Path,
     destination_path: &std::path::Path,
+    allow_consuming_move: bool,
+) -> Result<TempPublication, String> {
+    publish_exclusive_with(
+        temp_path,
+        destination_path,
+        |source: &Path, destination: &Path| std::fs::hard_link(source, destination),
+        |source, destination| {
+            #[cfg(windows)]
+            {
+                if allow_consuming_move {
+                    move_file_noreplace(source, destination).map_err(std::io::Error::other)
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (source, destination, allow_consuming_move);
+                Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+            }
+        },
+        copy_file_exclusive,
+    )
+}
+
+fn publish_temp_file_create_only_with(
+    temp_path: &Path,
+    destination_path: &Path,
+    keep_temp_on_failure: bool,
+    publish: impl FnOnce(&Path, &Path, bool) -> Result<TempPublication, String>,
+    mut sync_parent: impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    if std::fs::hard_link(temp_path, destination_path).is_ok() {
-        return Ok(());
+    let discard_temp = || {
+        if !keep_temp_on_failure {
+            let _ = std::fs::remove_file(temp_path);
+        }
+    };
+    let publication = match publish(temp_path, destination_path, !keep_temp_on_failure) {
+        Ok(publication) => publication,
+        Err(error) => {
+            discard_temp();
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = sync_parent(destination_path) {
+        let _ = std::fs::remove_file(destination_path);
+        discard_temp();
+        return Err(error);
     }
-    #[cfg(windows)]
-    if move_file_noreplace(temp_path, destination_path).is_ok() {
-        return Ok(());
+
+    if publication == TempPublication::Retained {
+        if let Err(error) = std::fs::remove_file(temp_path) {
+            let rollback = std::fs::remove_file(destination_path);
+            return Err(match rollback {
+                Ok(()) => format!(
+                    "Failed to remove temporary file after publication: {}",
+                    error
+                ),
+                Err(rollback_error) => format!(
+                    "Destination was published, but temporary-file cleanup failed: {}; rollback also failed: {}",
+                    error, rollback_error
+                ),
+            });
+        }
     }
-    copy_file_exclusive(temp_path, destination_path)
-        .map_err(|err| format!("Destination was not published without overwrite: {}", err))
+
+    sync_parent(destination_path)
 }
 
 /// `keep_temp_on_failure` retains the scratch when publication fails, for a
@@ -2249,26 +2335,13 @@ pub(crate) fn publish_temp_file(
         return Err(last_err);
     }
 
-    if let Err(err) = publish_exclusive(temp_path, destination_path) {
-        discard_temp();
-        return Err(err);
-    }
-    if let Err(err) = fsync_parent(destination_path) {
-        let _ = std::fs::remove_file(destination_path);
-        discard_temp();
-        return Err(err);
-    }
-    if let Err(err) = std::fs::remove_file(temp_path) {
-        let rollback = std::fs::remove_file(destination_path);
-        return Err(match rollback {
-            Ok(()) => format!("Failed to remove temporary file after publication: {}", err),
-            Err(rollback_err) => format!(
-                "Destination was published, but temporary-file cleanup failed: {}; rollback also failed: {}",
-                err, rollback_err
-            ),
-        });
-    }
-    fsync_parent(destination_path)
+    publish_temp_file_create_only_with(
+        temp_path,
+        destination_path,
+        keep_temp_on_failure,
+        publish_exclusive,
+        fsync_parent,
+    )
 }
 
 fn atomic_write_with_overwrite(
@@ -2825,5 +2898,188 @@ mod tests {
         assert!(checkpoint_scratch_path(&foreign).is_err());
         assert!(checkpoint_scratch_path("not-json").is_err());
         assert_eq!(checkpoint_scratch_path("{}").unwrap(), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Create-only download publication (A05)
+    // -----------------------------------------------------------------------
+
+    fn publication_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = scratch_dir(label);
+        let temp = dir.join("download.tmp");
+        let destination = dir.join("result.bin");
+        std::fs::write(&temp, b"download payload").unwrap();
+        (dir, temp, destination)
+    }
+
+    fn publication_move_for_test(source: &Path, destination: &Path) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            move_file_noreplace(source, destination).map_err(std::io::Error::other)
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::rename(source, destination)
+        }
+    }
+
+    #[test]
+    fn publish_move_consumed_temp_keeps_the_successful_destination() {
+        let (dir, temp, destination) = publication_fixture("publish-move-consumed");
+        let publish = |source: &Path, target: &Path, allow_move: bool| {
+            publish_exclusive_with(
+                source,
+                target,
+                |_, _| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+                |source, target| {
+                    assert!(
+                        allow_move,
+                        "checkpoint publication must not consume its source"
+                    );
+                    publication_move_for_test(source, target)
+                },
+                copy_file_exclusive,
+            )
+        };
+
+        publish_temp_file_create_only_with(&temp, &destination, false, publish, |_| Ok(()))
+            .unwrap();
+
+        assert!(
+            !temp.exists(),
+            "a successful move must consume the temp path"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"download payload");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn publish_hard_link_path_retains_source_until_cleanup() {
+        let (dir, temp, destination) = publication_fixture("publish-hard-link");
+        let publish = |source: &Path, target: &Path, _allow_move: bool| {
+            publish_exclusive_with(
+                source,
+                target,
+                |source: &Path, target: &Path| std::fs::hard_link(source, target),
+                |_, _| panic!("move fallback must not run after hard-link success"),
+                |_, _| panic!("copy fallback must not run after hard-link success"),
+            )
+        };
+
+        publish_temp_file_create_only_with(&temp, &destination, false, publish, |_| Ok(()))
+            .unwrap();
+
+        assert!(
+            !temp.exists(),
+            "retained link source is removed after commit"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"download payload");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn publish_copy_fallback_preserves_create_only_bytes() {
+        let (dir, temp, destination) = publication_fixture("publish-copy-fallback");
+        let publish = |source: &Path, target: &Path, _allow_move: bool| {
+            publish_exclusive_with(
+                source,
+                target,
+                |_, _| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+                |_, _| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+                copy_file_exclusive,
+            )
+        };
+
+        publish_temp_file_create_only_with(&temp, &destination, false, publish, |_| Ok(()))
+            .unwrap();
+
+        assert!(!temp.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"download payload");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn publish_existing_destination_is_preserved_and_temp_is_retained_for_checkpoint() {
+        let (dir, temp, destination) = publication_fixture("publish-occupied");
+        std::fs::write(&destination, b"another writer").unwrap();
+        let publish = |source: &Path, target: &Path, allow_move: bool| {
+            publish_exclusive_with(
+                source,
+                target,
+                |source: &Path, target: &Path| std::fs::hard_link(source, target),
+                |_, _| {
+                    assert!(!allow_move, "checkpoint publication must retain its source");
+                    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+                },
+                copy_file_exclusive,
+            )
+        };
+
+        assert!(
+            publish_temp_file_create_only_with(&temp, &destination, true, publish, |_| Ok(()))
+                .is_err()
+        );
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"another writer");
+        assert_eq!(std::fs::read(&temp).unwrap(), b"download payload");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn publish_copy_error_cleans_its_reservation() {
+        let (dir, temp, destination) = publication_fixture("publish-copy-error");
+        std::fs::remove_file(&temp).unwrap();
+        let publish = |source: &Path, target: &Path, allow_move: bool| {
+            publish_exclusive_with(
+                source,
+                target,
+                |_, _| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+                |_, _| {
+                    assert!(!allow_move);
+                    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+                },
+                copy_file_exclusive,
+            )
+        };
+
+        assert!(
+            publish_temp_file_create_only_with(&temp, &destination, true, publish, |_| Ok(()))
+                .is_err()
+        );
+
+        assert!(
+            !destination.exists(),
+            "failed publication must remove its destination"
+        );
+        assert!(!temp.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn publish_sync_error_removes_destination_and_retains_checkpoint() {
+        let (dir, temp, destination) = publication_fixture("publish-sync-error");
+        let publish = |source: &Path, target: &Path, allow_move: bool| {
+            publish_exclusive_with(
+                source,
+                target,
+                |_, _| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+                |_, _| {
+                    assert!(!allow_move);
+                    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+                },
+                copy_file_exclusive,
+            )
+        };
+
+        assert!(
+            publish_temp_file_create_only_with(&temp, &destination, true, publish, |_| Err(
+                "injected directory sync failure".to_string()
+            ),)
+            .is_err()
+        );
+
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(&temp).unwrap(), b"download payload");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

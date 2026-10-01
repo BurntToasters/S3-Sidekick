@@ -36,6 +36,7 @@ export interface IpcCommandArgs {
     overwrite?: boolean | null;
     transferId?: number | null;
     requireImmutableSourceVersion?: boolean | null;
+    automaticMove?: boolean | null;
   };
   copy_prefix_to: {
     connectionId: string;

@@ -8,7 +8,7 @@ import {
   markSupportPromptDismissed,
   isSupportPromptDismissed,
 } from "./settings.ts";
-import { loadConnection } from "./connection.ts";
+import { loadConnection, setConnectionAccessLocked } from "./connection.ts";
 import {
   getBookmarkLoadError,
   loadBookmarks,
@@ -163,15 +163,23 @@ function scheduleAutoCheckUpdates(): void {
 
 function startAutoLock(): void {
   startAutoLockWatcher(async () => {
-    await clearSessionAfterAutoLock();
+    const retired = await clearSessionAfterAutoLock();
+    if (!retired) {
+      setStatus(
+        "Encrypted storage is locked. Waiting to close the S3 session.",
+      );
+      return false;
+    }
     setStatus("Encrypted storage locked after inactivity.");
     logActivity("Encrypted storage locked after inactivity.", "info");
     if (await ensureSecurityReady()) {
+      setConnectionAccessLocked(false);
       await Promise.all([
         loadBookmarksIntoBar(),
         loadSavedConnectionIntoInputs(),
       ]);
     }
+    return true;
   });
 }
 

@@ -196,8 +196,8 @@ impl Drop for ProgressBaseline {
     }
 }
 
-pub(super) fn emit_transfer_progress(
-    app: &tauri::AppHandle,
+pub(super) fn emit_transfer_progress<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     event: &str,
     transfer_id: u32,
     bytes_sent: u64,

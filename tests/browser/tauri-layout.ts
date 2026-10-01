@@ -55,6 +55,10 @@ export interface LayoutMockOptions {
   endpoint?: string;
   /** Native command failures, keyed by command name. */
   errors?: Record<string, string>;
+  /** Fail this many disconnect attempts before allowing retirement to finish. */
+  disconnectFailures?: number;
+  /** Hold disconnect until `releaseMockDisconnect` is called. */
+  holdDisconnect?: boolean;
   /**
    * Emulate the native transfer registry for `copy_object_to`: running
    * commands can be cancelled, and a cancel that arrives while nothing is
@@ -93,6 +97,8 @@ interface LayoutMockInit {
   unlockPasswords: string[];
   deferUnlock: boolean;
   errors: Record<string, string>;
+  disconnectFailures: number;
+  holdDisconnect: boolean;
   copyFailures: number;
   holdCopies: boolean;
   autoLockAfterMs: number;
@@ -138,6 +144,8 @@ export async function installLayoutTauriMock(
     unlockPasswords: options.unlockPasswords ?? [],
     deferUnlock: options.deferUnlock ?? false,
     errors: options.errors ?? {},
+    disconnectFailures: Math.max(0, options.disconnectFailures ?? 0),
+    holdDisconnect: options.holdDisconnect ?? false,
     copyFailures: options.transferBackend?.copyFailures ?? 0,
     holdCopies: options.transferBackend?.holdCopies ?? false,
     autoLockAfterMs: options.autoLockAfterMs ?? 0,
@@ -158,6 +166,8 @@ export async function installLayoutTauriMock(
       unlockPasswords,
       deferUnlock,
       errors,
+      disconnectFailures,
+      holdDisconnect,
       copyFailures,
       holdCopies,
       autoLockAfterMs,
@@ -198,7 +208,10 @@ export async function installLayoutTauriMock(
         callLog: [] as { command: string; args: unknown }[],
         releaseListing: undefined as (() => void) | undefined,
         releaseUnlock: undefined as (() => void) | undefined,
+        releaseDisconnect: undefined as (() => void) | undefined,
         releaseCopies: [] as (() => void)[],
+        setCommandError: undefined as
+          ((command: string, error: string | null) => void) | undefined,
         emit: undefined as
           ((event: string, payload: unknown) => void) | undefined,
       };
@@ -225,6 +238,10 @@ export async function installLayoutTauriMock(
       const runningTransfers = new Map<number, (reason: Error) => void>();
       const pendingCancels = new Map<number, number>();
       let copyFailuresLeft = copyFailures;
+      let disconnectFailuresLeft = disconnectFailures;
+      let disconnectHeld = holdDisconnect;
+      let connectSequence = 0;
+      const commandErrors = { ...errors };
       let lastVaultActivity = Date.now();
       const logEvent = (command: string, args: unknown): void => {
         testState.callLog.push({ command, args });
@@ -295,8 +312,8 @@ export async function installLayoutTauriMock(
           return null;
         }
 
-        const configuredError = errors[command];
-        if (configuredError !== undefined) {
+        const configuredError = commandErrors[command];
+        if (command !== "disconnect" && configuredError !== undefined) {
           throw new Error(configuredError);
         }
 
@@ -341,6 +358,22 @@ export async function installLayoutTauriMock(
             // The native disconnect cancels every registered transfer.
             for (const cancel of runningTransfers.values()) {
               cancel(new Error("Transfer cancelled"));
+            }
+            if (disconnectFailuresLeft > 0) {
+              disconnectFailuresLeft -= 1;
+              throw new Error(
+                commandErrors.disconnect ??
+                  "Timed out while stopping active transfers for disconnect",
+              );
+            }
+            if (configuredError !== undefined) {
+              throw new Error(configuredError);
+            }
+            if (disconnectHeld) {
+              await new Promise<void>((resolve) => {
+                testState.releaseDisconnect = resolve;
+              });
+              disconnectHeld = false;
             }
             return null;
           }
@@ -390,9 +423,10 @@ export async function installLayoutTauriMock(
           case "transfer_checkpoint_gc":
             return 0;
           case "connect":
+            connectSequence += 1;
             return {
               region: "us-east-1",
-              connection_id: "browser-layout-connection",
+              connection_id: `browser-layout-connection-${connectSequence}`,
               connection_identity: "browser-layout-identity",
               create_only_capabilities: createOnlyCapabilities,
             };
@@ -508,6 +542,11 @@ export async function installLayoutTauriMock(
         }
       };
 
+      testState.setCommandError = (command, error) => {
+        if (error === null) delete commandErrors[command];
+        else commandErrors[command] = error;
+      };
+
       const internals = {
         metadata: {
           currentWindow: { label: "main" },
@@ -580,6 +619,37 @@ export async function releaseMockListing(page: Page): Promise<void> {
     ).__S3_LAYOUT_TEST__;
     state?.releaseListing?.();
   });
+}
+
+export async function releaseMockDisconnect(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const state = (
+      window as typeof window & {
+        __S3_LAYOUT_TEST__?: { releaseDisconnect?: () => void };
+      }
+    ).__S3_LAYOUT_TEST__;
+    state?.releaseDisconnect?.();
+  });
+}
+
+export async function setMockCommandError(
+  page: Page,
+  command: string,
+  error: string | null,
+): Promise<void> {
+  await page.evaluate(
+    ({ command, error }) => {
+      const state = (
+        window as typeof window & {
+          __S3_LAYOUT_TEST__?: {
+            setCommandError?: (command: string, error: string | null) => void;
+          };
+        }
+      ).__S3_LAYOUT_TEST__;
+      state?.setCommandError?.(command, error);
+    },
+    { command, error },
+  );
 }
 
 export async function releaseMockCopies(page: Page): Promise<void> {

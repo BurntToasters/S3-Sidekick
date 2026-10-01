@@ -32,11 +32,12 @@ impl CreateOnlyCapabilities {
                 complete_multipart: true,
                 copy_object: Some(CopyCreateOnlyStrategy::AwsIfNoneMatch),
             },
-            // MinIO documents If-None-Match on CreateMultipartUpload, not CompleteMultipartUpload.
+            // The pinned MinIO server guards PutObject but does not enforce the
+            // destination condition on CopyObject or multipart completion.
             StorageProviderKind::Minio => Self {
                 put_object: true,
                 complete_multipart: false,
-                copy_object: Some(CopyCreateOnlyStrategy::AwsIfNoneMatch),
+                copy_object: None,
             },
             StorageProviderKind::CloudflareR2 => Self {
                 put_object: true,
@@ -54,6 +55,28 @@ impl CreateOnlyCapabilities {
                 copy_object: None,
             },
         }
+    }
+}
+
+/// Automatic source retirement and unversioned rollback require a provider
+/// that enforces the S3 DeleteObject If-Match precondition. Only AWS has a
+/// verified contract in the current provider matrix; compatibility claims for
+/// other endpoints do not grant deletion authority.
+pub(super) fn supports_conditional_delete(provider: StorageProviderKind) -> bool {
+    provider == StorageProviderKind::Aws
+}
+
+pub(super) fn require_conditional_delete_support(
+    provider: StorageProviderKind,
+    key: &str,
+) -> Result<(), String> {
+    if supports_conditional_delete(provider) {
+        Ok(())
+    } else {
+        Err(format!(
+            "This storage provider cannot enforce conditional DELETE for '{}'. Automatic moves and unversioned rollback are refused; sources and destinations were retained.",
+            key
+        ))
     }
 }
 

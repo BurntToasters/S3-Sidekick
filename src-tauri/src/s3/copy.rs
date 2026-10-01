@@ -84,27 +84,34 @@ pub(super) fn is_canonical_fingerprint(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-pub(super) fn immutable_version_id(value: Option<&str>) -> Option<&str> {
-    // AWS returns the literal "null" version ID for versioning-suspended
-    // objects. It pins that generation exactly like any other version, so it
-    // must be preserved as a valid version pin, not normalized to None.
+/// A nonempty version selector is valid for reads and copies, including the
+/// literal `null` selector returned by a versioning-suspended bucket.
+pub(super) fn readable_version_id(value: Option<&str>) -> Option<&str> {
     value
         .map(str::trim)
         .filter(|version_id| !version_id.is_empty())
+}
+
+/// Only a non-null version ID is immutable enough to authorize move deletion.
+pub(super) fn immutable_version_id(value: Option<&str>) -> Option<&str> {
+    readable_version_id(value).filter(|version_id| !version_id.eq_ignore_ascii_case("null"))
 }
 
 pub(super) fn require_immutable_move_version(
     value: Option<&str>,
     key: &str,
 ) -> Result<String, String> {
-    immutable_version_id(value)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            format!(
-                "Source '{}' has no immutable version ID. Automatic move requires object versioning; no destination was changed.",
-                key
-            )
-        })
+    match readable_version_id(value) {
+        Some(version_id) if version_id.eq_ignore_ascii_case("null") => Err(format!(
+            "Source '{}' has a mutable null version ID. Automatic move requires an immutable version; no destination was changed.",
+            key
+        )),
+        Some(version_id) => Ok(version_id.to_string()),
+        None => Err(format!(
+            "Source '{}' has no immutable version ID. Automatic move requires object versioning; no destination was changed.",
+            key
+        )),
+    }
 }
 
 pub(super) async fn preflight_immutable_source_version(
@@ -129,9 +136,8 @@ pub(super) async fn preflight_immutable_source_version(
 pub(super) const MISSING_MOVE_VERSION_MARKER: &str = "no immutable version ID";
 
 /// Best-effort immutable source version: `Some` on versioned buckets, `None`
-/// on unversioned ones. Any other failure (missing object, transport error,
-/// cancellation) is still a hard error so callers can distinguish "unversioned"
-/// from "conflict/unreachable".
+/// on unversioned ones. A literal null version is readable but mutable, so it
+/// remains a hard error instead of entering the ETag-based delete path.
 pub(super) async fn preflight_optional_move_version(
     client: &Client,
     bucket: &str,
@@ -161,7 +167,7 @@ pub(super) fn validate_receipt_fingerprints(receipts: &[CopyReceipt]) -> Result<
         }
         if immutable_version_id(receipt.source_version_id.as_deref()).is_none() {
             return Err(format!(
-                "Source '{}' has no immutable version ID. Automatic move deletion requires bucket versioning; the copied destination was retained and the source was not deleted.",
+                "Source '{}' has no immutable version ID. Automatic move deletion requires bucket versioning; source deletion was refused, the copied destination was retained, and the source was not deleted.",
                 receipt.source_key
             ));
         }
@@ -1079,6 +1085,12 @@ pub(crate) async fn rename_object(
     )
     .await?;
 
+    // Reject mutable null versions before provider gating so the reason is
+    // explicit, while keeping this read under the source/destination lease.
+    let source_version =
+        preflight_optional_move_version(&client, &bucket, &old_key, &cancel).await?;
+    require_conditional_delete_support(provider, &old_key)?;
+
     if !overwrite && destination_object_exists(&client, &bucket, &new_key, &cancel).await? {
         return Err(format!(
             "Destination '{}' already exists. Rename with overwrite to replace it.",
@@ -1090,8 +1102,6 @@ pub(crate) async fn rename_object(
     // back to an ETag-pinned copy plus a HEAD-fingerprint and If-Match guarded
     // delete under the mutation lease held above. Either way the copy carries
     // `copy-source-if-match`, and deletion revalidates both ends.
-    let source_version =
-        preflight_optional_move_version(&client, &bucket, &old_key, &cancel).await?;
     let source_info = describe_object(
         &client,
         &bucket,
@@ -1112,6 +1122,6 @@ pub(crate) async fn rename_object(
         &cancel,
     )
     .await?;
-    delete_move_receipts_checked(&client, &bucket, &bucket, &[receipt], &cancel).await?;
+    delete_move_receipts_checked(&client, &bucket, &bucket, &[receipt], provider, &cancel).await?;
     Ok(())
 }

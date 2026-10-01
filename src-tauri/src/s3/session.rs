@@ -109,12 +109,14 @@ pub(super) fn require_client(
     connection_id: &str,
     transfer_id: Option<u32>,
 ) -> Result<RegisteredClient, String> {
+    crate::security::require_s3_access()?;
     let guard = TransferGuard::register_optional(transfer_id)?;
     if guard.is_cancelled() {
         return Err(cancelled_error());
     }
     let (client, provider) = {
         let s3 = lock_s3_state(state)?;
+        crate::security::require_s3_access()?;
         if guard.is_cancelled() {
             return Err(cancelled_error());
         }
@@ -127,6 +129,7 @@ pub(super) fn require_client(
     if registered.is_cancelled() {
         return Err(cancelled_error());
     }
+    crate::security::require_s3_access()?;
     Ok(registered)
 }
 
@@ -135,12 +138,14 @@ pub(super) fn require_client_and_bucket_hint(
     connection_id: &str,
     transfer_id: Option<u32>,
 ) -> Result<(RegisteredClient, Option<String>), String> {
+    crate::security::require_s3_access()?;
     let guard = TransferGuard::register_optional(transfer_id)?;
     if guard.is_cancelled() {
         return Err(cancelled_error());
     }
     let (client, provider, bucket_hint) = {
         let s3 = lock_s3_state(state)?;
+        crate::security::require_s3_access()?;
         if guard.is_cancelled() {
             return Err(cancelled_error());
         }
@@ -154,6 +159,7 @@ pub(super) fn require_client_and_bucket_hint(
     if registered.is_cancelled() {
         return Err(cancelled_error());
     }
+    crate::security::require_s3_access()?;
     Ok((registered, bucket_hint))
 }
 
@@ -161,7 +167,9 @@ pub(super) fn require_endpoint(
     state: &tauri::State<'_, AppState>,
     connection_id: &str,
 ) -> Result<String, String> {
+    crate::security::require_s3_access()?;
     let s3 = lock_s3_state(state)?;
+    crate::security::require_s3_access()?;
     if connection_id.trim().is_empty() {
         return Err("Connection id is required".to_string());
     }
@@ -202,6 +210,7 @@ pub(crate) async fn connect(
         if connect_guard.is_cancelled() {
             return Err(cancelled_error());
         }
+        crate::security::prepare_s3_connect(s3.connection_id.is_some())?;
         s3.connection_generation = s3.connection_generation.wrapping_add(1);
         s3.connection_generation
     };
@@ -294,6 +303,7 @@ pub(crate) async fn connect(
         if s3.connection_generation != connection_generation {
             return Err("Connection attempt superseded".to_string());
         }
+        crate::security::require_s3_access()?;
         s3.client = Some(client);
         s3.endpoint = normalized;
         s3.region = resolved_region.clone();
@@ -357,7 +367,9 @@ pub(crate) async fn disconnect(
     };
     let reopening = reopen_transfer_registry();
     invalidation?;
-    reopening
+    reopening?;
+    crate::security::clear_s3_retirement_required();
+    Ok(())
 }
 
 #[tauri::command]

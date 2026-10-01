@@ -1,6 +1,11 @@
 //! Prefix copy transactions and receipt-checked source deletion.
 
 use super::*;
+use std::future::Future;
+use std::pin::Pin;
+
+type PrefixCopyAfterItem =
+    Box<dyn FnMut(usize) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static>;
 
 pub(super) async fn copy_prefix_objects(
     client: &Client,
@@ -12,6 +17,33 @@ pub(super) async fn copy_prefix_objects(
     collect_receipts: bool,
     provider: StorageProviderKind,
     cancel: &CancelToken,
+) -> Result<Vec<CopyReceipt>, String> {
+    copy_prefix_objects_inner(
+        client,
+        src_bucket,
+        src_prefix,
+        dst_bucket,
+        dst_prefix,
+        overwrite,
+        collect_receipts,
+        provider,
+        cancel,
+        None,
+    )
+    .await
+}
+
+async fn copy_prefix_objects_inner(
+    client: &Client,
+    src_bucket: &str,
+    src_prefix: &str,
+    dst_bucket: &str,
+    dst_prefix: &str,
+    overwrite: bool,
+    collect_receipts: bool,
+    provider: StorageProviderKind,
+    cancel: &CancelToken,
+    mut after_item: Option<PrefixCopyAfterItem>,
 ) -> Result<Vec<CopyReceipt>, String> {
     ensure_no_orphaned_rollback_backups(client, dst_bucket, cancel).await?;
     let source_plan = preflight_prefix_copy_sources(
@@ -25,6 +57,16 @@ pub(super) async fn copy_prefix_objects(
     )
     .await?;
 
+    preflight_prefix_overwrite_rollback(
+        client,
+        dst_bucket,
+        &source_plan,
+        overwrite,
+        provider,
+        cancel,
+    )
+    .await?;
+
     let namespace_guard = RollbackNamespaceGuard::new();
     let namespace = namespace_guard.namespace.clone();
     let mut created_destinations = Vec::new();
@@ -34,7 +76,7 @@ pub(super) async fn copy_prefix_objects(
     for (index, source) in source_plan.into_iter().enumerate() {
         let key = source.source_key;
         let new_key = source.destination_key;
-        let immutable_version_id = source.immutable_version_id;
+        let source_version_id = source.immutable_version_id;
         if cancel.is_cancelled() {
             let failures = rollback_prefix_copy(
                 client,
@@ -75,6 +117,22 @@ pub(super) async fn copy_prefix_objects(
                 ));
             }
             Ok(_) => {
+                if !supports_conditional_delete(provider) {
+                    if let Err(err) =
+                        require_versioned_prefix_rollback(client, dst_bucket, &new_key, cancel)
+                            .await
+                    {
+                        let failures = rollback_prefix_copy(
+                            client,
+                            dst_bucket,
+                            &created_destinations,
+                            &backups,
+                            provider,
+                        )
+                        .await;
+                        return Err(rollback_error(err, failures));
+                    }
+                }
                 let destination_info =
                     match describe_source(client, dst_bucket, &new_key, cancel).await {
                         Ok(info) => info,
@@ -181,6 +239,30 @@ pub(super) async fn copy_prefix_objects(
                     source_info: backup_info,
                     replacement: None,
                 });
+                if !supports_conditional_delete(provider)
+                    && immutable_version_id(
+                        backups
+                            .last()
+                            .and_then(|backup| backup.source_info.version_id.as_deref()),
+                    )
+                    .is_none()
+                {
+                    let failures = rollback_prefix_copy(
+                        client,
+                        dst_bucket,
+                        &created_destinations,
+                        &backups,
+                        provider,
+                    )
+                    .await;
+                    return Err(rollback_error(
+                        format!(
+                            "Provider did not return an immutable version ID for rollback backup of '{}'; the existing destination was not replaced.",
+                            new_key
+                        ),
+                        failures,
+                    ));
+                }
                 false
             }
             Err(err) if is_not_found(&err) => true,
@@ -200,7 +282,7 @@ pub(super) async fn copy_prefix_objects(
             }
         };
 
-        let source_info_result = match immutable_version_id.as_deref() {
+        let source_info_result = match source_version_id.as_deref() {
             Some(version_id) => {
                 describe_object(client, src_bucket, &key, Some(version_id), cancel).await
             }
@@ -220,6 +302,21 @@ pub(super) async fn copy_prefix_objects(
                 return Err(rollback_error(err, failures));
             }
         };
+        if !destination_was_absent && !supports_conditional_delete(provider) {
+            if let Err(err) =
+                require_versioned_prefix_rollback(client, dst_bucket, &new_key, cancel).await
+            {
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
+                return Err(rollback_error(err, failures));
+            }
+        }
         match copy_with_receipt(
             client,
             src_bucket,
@@ -244,6 +341,9 @@ pub(super) async fn copy_prefix_objects(
                 if collect_receipts {
                     receipts.push(receipt);
                 }
+                if let Some(after_item) = after_item.as_mut() {
+                    after_item(index).await;
+                }
             }
             Err(err) => {
                 let failures = rollback_prefix_copy(
@@ -265,7 +365,7 @@ pub(super) async fn copy_prefix_objects(
     let mut cleanup_failures = Vec::new();
     let mut retained_backups = Vec::new();
     for backup in &backups {
-        if let Err(err) = remove_backup_object(client, dst_bucket, backup).await {
+        if let Err(err) = remove_backup_object(client, dst_bucket, backup, provider).await {
             cleanup_failures.push(err);
             retained_backups.push(backup.backup_key.clone());
         }
@@ -282,6 +382,122 @@ pub(super) async fn copy_prefix_objects(
     }
 
     Ok(receipts)
+}
+
+async fn preflight_prefix_overwrite_rollback(
+    client: &Client,
+    dst_bucket: &str,
+    source_plan: &[PrefixCopySource],
+    overwrite: bool,
+    provider: StorageProviderKind,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    if !overwrite || supports_conditional_delete(provider) {
+        return Ok(());
+    }
+
+    let mut has_existing_destination = false;
+    for source in source_plan {
+        let destination_head = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = client.head_object().bucket(dst_bucket).key(&source.destination_key).send() => result,
+        };
+        match destination_head {
+            Ok(_) => has_existing_destination = true,
+            Err(err) if is_not_found(&err) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Refusing prefix overwrite before mutation because destination '{}' could not be classified: {}",
+                    source.destination_key, err
+                ));
+            }
+        }
+    }
+
+    if has_existing_destination {
+        require_versioned_prefix_rollback(client, dst_bucket, "prefix destination", cancel)
+            .await
+            .map_err(|err| format!("Refusing prefix overwrite before mutation: {}", err))?;
+    }
+    Ok(())
+}
+
+async fn require_versioned_prefix_rollback(
+    client: &Client,
+    dst_bucket: &str,
+    key: &str,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    let versioning = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = client.get_bucket_versioning().bucket(dst_bucket).send() => result.map_err(|err| {
+            format!("Could not verify bucket versioning for rollback of '{}': {}", key, err)
+        })?,
+    };
+    if versioning.status() == Some(&aws_sdk_s3::types::BucketVersioningStatus::Enabled) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Prefix overwrite rollback for '{}' requires an enabled versioned bucket (bucket versioning Enabled) because this provider cannot enforce conditional DELETE; no unsafe rollback will be attempted.",
+            key
+        ))
+    }
+}
+
+/// Real-provider fault injection for rollback after one completed prefix item.
+/// The second source is removed only after the first replacement and its
+/// rollback backup have been recorded by the production transaction path.
+#[cfg(test)]
+pub(crate) async fn e2e_copy_prefix_with_failure_after_first(
+    client: &Client,
+    bucket: &str,
+    cancel: &CancelToken,
+    provider: StorageProviderKind,
+) -> Result<(), String> {
+    let fault_client = client.clone();
+    let fault_bucket = bucket.to_string();
+    let hook: PrefixCopyAfterItem = Box::new(move |index| {
+        let client = fault_client.clone();
+        let bucket = fault_bucket.clone();
+        Box::pin(async move {
+            if index == 0 {
+                let _ = client
+                    .delete_object()
+                    .bucket(bucket)
+                    .key("src/b.txt")
+                    .send()
+                    .await;
+            }
+        })
+    });
+    copy_prefix_objects_inner(
+        client,
+        bucket,
+        "src/",
+        bucket,
+        "dst/",
+        true,
+        false,
+        provider,
+        cancel,
+        Some(hook),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Exercise the unversioned transaction path against a populated provider
+/// fixture. Tests pass only when the function refuses before any DELETE.
+#[cfg(test)]
+pub(crate) async fn e2e_delete_move_receipts_checked(
+    client: &Client,
+    src_bucket: &str,
+    dst_bucket: &str,
+    receipts: &[CopyReceipt],
+    provider: StorageProviderKind,
+    cancel: &CancelToken,
+) -> Result<u32, String> {
+    delete_move_receipts_checked(client, src_bucket, dst_bucket, receipts, provider, cancel).await
 }
 
 pub(super) async fn current_identity_matches(
@@ -505,8 +721,8 @@ pub(super) async fn delete_receipts_checked(
 
     // Check the complete receipt set before the first deletion so a conflict
     // cannot leave a preventable partial move. Every receipt must bind an exact
-    // immutable source version (the literal "null" version counts); unversioned
-    // receipts fail closed.
+    // non-null immutable source version; mutable null-version and unversioned
+    // receipts use the separate, provider-gated ETag path or fail closed.
     let mut present = Vec::with_capacity(receipts.len());
     for receipt in receipts {
         match classify_receipt_source_for_delete(client, src_bucket, receipt, cancel).await? {
@@ -597,6 +813,14 @@ pub(super) fn validate_unversioned_receipt_fingerprints(
     receipts: &[CopyReceipt],
 ) -> Result<(), String> {
     for receipt in receipts {
+        if readable_version_id(receipt.source_version_id.as_deref())
+            .is_some_and(|version_id| version_id.eq_ignore_ascii_case("null"))
+        {
+            return Err(format!(
+                "Source '{}' has a mutable null version ID; source deletion was refused.",
+                receipt.source_key
+            ));
+        }
         if !is_canonical_fingerprint(&receipt.source_fingerprint)
             || !is_canonical_fingerprint(&receipt.source_acl_fingerprint)
             || !is_canonical_fingerprint(&receipt.source_tag_fingerprint)
@@ -619,15 +843,14 @@ pub(super) fn validate_unversioned_receipt_fingerprints(
     Ok(())
 }
 
-/// Delete move sources on buckets without versioning.
+/// Delete move sources on buckets without immutable versioning.
 ///
 /// The versioned path binds deletion authority to an immutable version ID.
-/// Here the ETag plus the full HEAD/ACL/tag fingerprint is the identity, and
-/// the caller's mutation lease excludes app-local writers between the copy and
-/// this check, so a mismatch means an external writer changed the object. The
-/// final delete is conditional on the ETag (`If-Match`), mirroring the
-/// unversioned rollback-restore pattern: a concurrent write between the last
-/// check and the delete fails the request instead of destroying new data.
+/// Here the ETag plus the full HEAD/ACL/tag fingerprint is the identity. The
+/// complete source set is classified before the first DELETE, then each source
+/// is rechecked immediately before deletion. A verified provider must enforce
+/// the final ETag `If-Match`; the app-local mutation lease cannot block external
+/// writers.
 pub(super) async fn delete_unversioned_receipts_checked(
     client: &Client,
     src_bucket: &str,
@@ -668,8 +891,40 @@ pub(super) async fn delete_unversioned_receipts_checked(
         }
     }
 
-    let mut deleted = 0u32;
+    // Classify every source before the first DELETE. This prevents a conflict
+    // already visible on a later receipt from leaving an avoidable partial move.
+    let mut source_present = Vec::with_capacity(receipts.len());
     for receipt in receipts {
+        match current_source_identity_matches(
+            client,
+            src_bucket,
+            &receipt.source_key,
+            &receipt.source_etag,
+            None,
+            None,
+            &receipt.source_fingerprint,
+            &receipt.source_acl_fingerprint,
+            &receipt.source_tag_fingerprint,
+            cancel,
+        )
+        .await?
+        {
+            Some(true) => source_present.push(true),
+            Some(false) => {
+                return Err(format!(
+                    "Source '{}' changed after it was copied; deletion was refused.",
+                    receipt.source_key
+                ));
+            }
+            None => source_present.push(false),
+        }
+    }
+
+    let mut deleted = 0u32;
+    for (receipt, present) in receipts.iter().zip(source_present) {
+        if !present {
+            continue;
+        }
         // Revalidate the source at the last possible point, like the versioned
         // path does. `None` means someone else already deleted it, which
         // completes the move; `Some(false)` is a concurrent change and fails
@@ -773,8 +1028,14 @@ pub(super) async fn delete_move_receipts_checked(
     src_bucket: &str,
     dst_bucket: &str,
     receipts: &[CopyReceipt],
+    provider: StorageProviderKind,
     cancel: &CancelToken,
 ) -> Result<u32, String> {
+    if receipts.is_empty() {
+        return Ok(0);
+    }
+    require_conditional_delete_support(provider, &receipts[0].source_key)?;
+
     let versioned = receipts
         .iter()
         .filter(|receipt| immutable_version_id(receipt.source_version_id.as_deref()).is_some())

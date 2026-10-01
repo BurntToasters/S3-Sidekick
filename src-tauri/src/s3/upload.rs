@@ -276,8 +276,8 @@ pub(super) async fn upload_part_with_retry(
     Err(last_error)
 }
 
-pub(super) async fn upload_multipart(
-    app: &tauri::AppHandle,
+pub(super) async fn upload_multipart<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     client: &Client,
     bucket: &str,
     key: &str,
@@ -308,9 +308,11 @@ pub(super) async fn upload_multipart(
     if !content_type.is_empty() {
         create_req = create_req.content_type(content_type);
     }
+    // Local ownership detection is required to recover a committed completion
+    // whose response was lost, independently of remote checksum verification.
+    create_req = create_req.metadata(CHECKSUM_METADATA_KEY, &baseline_checksum.hex);
     if checksum_verification {
         create_req = create_req
-            .metadata(CHECKSUM_METADATA_KEY, &baseline_checksum.hex)
             .checksum_algorithm(ChecksumAlgorithm::Sha256)
             .checksum_type(ChecksumType::Composite);
     }
@@ -814,4 +816,446 @@ pub(crate) async fn upload_object_bytes(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod e2e_multipart_recovery {
+    use super::*;
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
+
+    #[derive(Clone, Copy)]
+    enum CommitMode {
+        ThisClient,
+        CompetingWriter,
+    }
+
+    #[derive(Default)]
+    struct Observed {
+        marker_at_create: Option<String>,
+        checksum_algorithm_at_create: Option<String>,
+        checksum_type_at_create: Option<String>,
+        part_bytes: Vec<u8>,
+        completion_attempts: u32,
+        stored_marker: Option<String>,
+        stored_bytes: Vec<u8>,
+    }
+
+    struct FaultServer {
+        endpoint: String,
+        observed: Arc<Mutex<Observed>>,
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl FaultServer {
+        fn start(mode: CommitMode, expected_size: usize) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP fixture");
+            listener
+                .set_nonblocking(true)
+                .expect("set nonblocking listener");
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let observed = Arc::new(Mutex::new(Observed::default()));
+            let thread_observed = Arc::clone(&observed);
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = Arc::clone(&stop);
+            let thread = thread::spawn(move || {
+                while !thread_stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            if let Err(error) =
+                                handle_request(stream, mode, expected_size, &thread_observed)
+                            {
+                                eprintln!("multipart fault fixture request failed: {}", error);
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        Err(error) => {
+                            eprintln!("multipart fault fixture accept failed: {}", error);
+                            break;
+                        }
+                    }
+                }
+            });
+            Self {
+                endpoint,
+                observed,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn snapshot(&self) -> Observed {
+            let observed = self.observed.lock().expect("fixture observation lock");
+            Observed {
+                marker_at_create: observed.marker_at_create.clone(),
+                checksum_algorithm_at_create: observed.checksum_algorithm_at_create.clone(),
+                checksum_type_at_create: observed.checksum_type_at_create.clone(),
+                part_bytes: observed.part_bytes.clone(),
+                completion_attempts: observed.completion_attempts,
+                stored_marker: observed.stored_marker.clone(),
+                stored_bytes: observed.stored_bytes.clone(),
+            }
+        }
+    }
+
+    impl Drop for FaultServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            let _ = TcpStream::connect(self.endpoint.trim_start_matches("http://"));
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    struct Request {
+        method: String,
+        target: String,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut first_line = String::new();
+        reader.read_line(&mut first_line)?;
+        if first_line.is_empty() {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        let mut request_parts = first_line.split_whitespace();
+        let method = request_parts.next().unwrap_or_default().to_string();
+        let target = request_parts.next().unwrap_or_default().to_string();
+        let mut headers = HashMap::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            }
+        }
+        if headers
+            .get("expect")
+            .is_some_and(|value| value.eq_ignore_ascii_case("100-continue"))
+        {
+            stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+        }
+        let mut body = Vec::new();
+        if headers
+            .get("transfer-encoding")
+            .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
+        {
+            loop {
+                let mut length = String::new();
+                reader.read_line(&mut length)?;
+                let size =
+                    usize::from_str_radix(length.trim().split(';').next().unwrap_or("0"), 16)
+                        .unwrap_or(0);
+                if size == 0 {
+                    loop {
+                        let mut trailer = String::new();
+                        reader.read_line(&mut trailer)?;
+                        if trailer == "\r\n" || trailer.is_empty() {
+                            break;
+                        }
+                    }
+                    break;
+                }
+                let start = body.len();
+                body.resize(start + size, 0);
+                reader.read_exact(&mut body[start..])?;
+                let mut crlf = [0; 2];
+                reader.read_exact(&mut crlf)?;
+            }
+        } else if let Some(length) = headers.get("content-length") {
+            let length = length.parse::<usize>().unwrap_or(0);
+            body.resize(length, 0);
+            reader.read_exact(&mut body)?;
+        }
+        Ok(Request {
+            method,
+            target,
+            headers,
+            body,
+        })
+    }
+
+    fn respond(stream: &mut TcpStream, status: &str, headers: &[(&str, String)], body: &[u8]) {
+        let fallback_content_length = body.len().to_string();
+        let content_length = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
+            .map(|(_, value)| value.as_str())
+            .unwrap_or(&fallback_content_length);
+        let _ = write!(
+            stream,
+            "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            status, content_length
+        );
+        for (name, value) in headers {
+            if !name.eq_ignore_ascii_case("Content-Length") {
+                let _ = write!(stream, "{}: {}\r\n", name, value);
+            }
+        }
+        let _ = stream.write_all(b"\r\n");
+        let _ = stream.write_all(body);
+        let _ = stream.flush();
+    }
+
+    fn handle_request(
+        mut stream: TcpStream,
+        mode: CommitMode,
+        expected_size: usize,
+        observed: &Arc<Mutex<Observed>>,
+    ) -> std::io::Result<()> {
+        stream.set_nonblocking(false)?;
+        let request = read_request(&mut stream)?;
+        let path = request.target.split('?').next().unwrap_or_default();
+        let query = request
+            .target
+            .split_once('?')
+            .map(|(_, query)| query)
+            .unwrap_or_default();
+        if request.method == "POST" && query.contains("uploads") {
+            let mut observed = observed.lock().unwrap();
+            observed.marker_at_create = request
+                .headers
+                .get("x-amz-meta-s3-sidekick-sha256")
+                .cloned();
+            observed.checksum_algorithm_at_create =
+                request.headers.get("x-amz-checksum-algorithm").cloned();
+            observed.checksum_type_at_create = request.headers.get("x-amz-checksum-type").cloned();
+            respond(
+                &mut stream,
+                "200 OK",
+                &[("Content-Type", "application/xml".to_string())],
+                b"<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>object.bin</Key><UploadId>lost-response-e2e</UploadId></InitiateMultipartUploadResult>",
+            );
+            return Ok(());
+        }
+        if request.method == "PUT" && query.contains("uploadId=") {
+            let mut observed = observed.lock().unwrap();
+            observed.part_bytes = request.body;
+            let checksum = request
+                .headers
+                .get("x-amz-checksum-sha256")
+                .cloned()
+                .map(|value| ("x-amz-checksum-sha256", value));
+            let mut headers = vec![("ETag", "\"part-e2e\"".to_string())];
+            if let Some(checksum) = checksum {
+                headers.push(checksum);
+            }
+            respond(&mut stream, "200 OK", &headers, b"");
+            return Ok(());
+        }
+        if request.method == "POST" && query.contains("uploadId=") {
+            let mut observed = observed.lock().unwrap();
+            observed.completion_attempts += 1;
+            if observed.completion_attempts == 1 {
+                match mode {
+                    CommitMode::ThisClient => {
+                        observed.stored_marker = observed.marker_at_create.clone();
+                        observed.stored_bytes = observed.part_bytes.clone();
+                    }
+                    CommitMode::CompetingWriter => {
+                        observed.stored_marker = Some("external-writer-marker".to_string());
+                        observed.stored_bytes = vec![0x42; expected_size];
+                    }
+                }
+                // Simulate the server committing the request but losing its
+                // response before the client can read it.
+                return Ok(());
+            }
+            respond(
+                &mut stream,
+                "412 Precondition Failed",
+                &[("Content-Type", "application/xml".to_string())],
+                b"<Error><Code>PreconditionFailed</Code><Message>Object already exists</Message><Resource>/bucket/object.bin</Resource><RequestId>e2e</RequestId></Error>",
+            );
+            return Ok(());
+        }
+        if request.method == "HEAD" {
+            let observed = observed.lock().unwrap();
+            let mut headers = vec![
+                ("Content-Length", observed.stored_bytes.len().to_string()),
+                ("ETag", "\"committed-e2e\"".to_string()),
+            ];
+            if let Some(marker) = observed.stored_marker.as_ref() {
+                headers.push(("x-amz-meta-s3-sidekick-sha256", marker.clone()));
+            }
+            respond(&mut stream, "200 OK", &headers, b"");
+            return Ok(());
+        }
+        if request.method == "DELETE" && query.contains("uploadId=") {
+            respond(&mut stream, "204 No Content", &[], b"");
+            return Ok(());
+        }
+        eprintln!(
+            "unexpected request {} {} ({})",
+            request.method, request.target, path
+        );
+        respond(
+            &mut stream,
+            "404 Not Found",
+            &[("Content-Type", "application/xml".to_string())],
+            b"<Error><Code>NoSuchKey</Code><Message>unexpected request</Message></Error>",
+        );
+        Ok(())
+    }
+
+    fn make_mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock Tauri app")
+    }
+
+    async fn exercise(
+        mode: CommitMode,
+        checksum_verification: bool,
+    ) -> (Result<(), String>, Observed, String) {
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+        let bytes = vec![0x5a; 1024 * 1024];
+        let checksum = sha256_checksum_bytes(&bytes);
+        let suffix = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "s3-sidekick-multipart-recovery-{}-{}",
+            std::process::id(),
+            suffix
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("payload.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let server = FaultServer::start(mode, bytes.len());
+        let credentials = aws_sdk_s3::config::Credentials::new(
+            "e2e-access",
+            "e2e-secret",
+            None,
+            None,
+            "multipart-e2e",
+        );
+        let sdk_config = aws_sdk_s3::config::Builder::new()
+            .endpoint_url(&server.endpoint)
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(credentials)
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
+            .force_path_style(true)
+            .behavior_version_latest()
+            .build();
+        let client = Client::from_conf(sdk_config);
+        let app = make_mock_app();
+        let cancel: CancelToken = Arc::new(CancelFlag::default());
+        let result = upload_multipart(
+            app.handle(),
+            &client,
+            "bucket",
+            "object.bin",
+            &path,
+            "application/octet-stream",
+            17,
+            1,
+            bytes.len() as u64,
+            8 * 1024 * 1024,
+            1,
+            0,
+            Instant::now(),
+            &checksum,
+            checksum_verification,
+            false,
+            StorageProviderKind::Aws,
+            &cancel,
+        )
+        .await;
+        let observed = server.snapshot();
+        let observed_json = serde_json::json!({
+            "result": format!("{:?}", result),
+            "marker_at_create": observed.marker_at_create,
+            "checksum_algorithm_at_create": observed.checksum_algorithm_at_create,
+            "checksum_type_at_create": observed.checksum_type_at_create,
+            "part_size": observed.part_bytes.len(),
+            "completion_attempts": observed.completion_attempts,
+            "stored_marker": observed.stored_marker,
+            "stored_size": observed.stored_bytes.len(),
+            "stored_body_matches": observed.stored_bytes == bytes,
+        })
+        .to_string();
+        let _ = std::fs::remove_dir_all(dir);
+        (result, observed, observed_json)
+    }
+
+    fn record(name: &str, passed: bool, observed: &str) {
+        if let Ok(path) = std::env::var("S3_SIDEKICK_MULTIPART_E2E_REPORT") {
+            use std::io::Write;
+            let row = serde_json::json!({ "name": name, "passed": passed, "observed": observed });
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .expect("open multipart E2E report");
+            writeln!(file, "{}", row).expect("write multipart E2E report");
+        }
+        eprintln!("{} {}", if passed { "PASS" } else { "FAIL" }, name);
+    }
+
+    #[tokio::test]
+    #[ignore = "runs a local S3 HTTP fault fixture through the real SDK and multipart code"]
+    async fn e2e_multipart_lost_response_uses_ownership_marker_independent_of_checksum_mode() {
+        let (default_result, default_observed, default_json) =
+            exercise(CommitMode::ThisClient, false).await;
+        let default_ok = default_result.is_ok()
+            && default_observed.marker_at_create.is_some()
+            && default_observed.marker_at_create == default_observed.stored_marker
+            && default_observed.checksum_algorithm_at_create.is_none()
+            && default_observed.checksum_type_at_create.is_none()
+            && default_observed.completion_attempts == 2
+            && default_observed.stored_bytes == vec![0x5a; 1024 * 1024];
+        record(
+            "default checksum-off multipart completion recovers the committed own write",
+            default_ok,
+            &default_json,
+        );
+
+        let (verified_result, verified_observed, verified_json) =
+            exercise(CommitMode::ThisClient, true).await;
+        let verified_ok = verified_result.is_ok()
+            && verified_observed.marker_at_create.is_some()
+            && verified_observed.marker_at_create == verified_observed.stored_marker
+            && verified_observed.checksum_algorithm_at_create.as_deref() == Some("SHA256")
+            && verified_observed.checksum_type_at_create.as_deref() == Some("COMPOSITE")
+            && verified_observed.part_bytes == vec![0x5a; 1024 * 1024]
+            && verified_observed.completion_attempts == 2
+            && verified_observed.stored_bytes == vec![0x5a; 1024 * 1024];
+        record(
+            "checksum-on multipart recovery keeps remote checksum verification enabled",
+            verified_ok,
+            &verified_json,
+        );
+
+        let (competing_result, competing_observed, competing_json) =
+            exercise(CommitMode::CompetingWriter, false).await;
+        let competing_ok = competing_result.is_err()
+            && competing_observed.completion_attempts == 2
+            && competing_observed.stored_marker.as_deref() == Some("external-writer-marker")
+            && competing_observed.stored_bytes != vec![0x5a; 1024 * 1024];
+        record(
+            "a competing same-size object remains a create-only conflict",
+            competing_ok,
+            &competing_json,
+        );
+
+        assert!(
+            default_ok && verified_ok && competing_ok,
+            "multipart recovery E2E failed"
+        );
+    }
 }

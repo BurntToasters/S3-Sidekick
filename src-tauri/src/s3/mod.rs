@@ -92,12 +92,16 @@ pub(crate) use move_commands::*;
 pub(crate) use objects::*;
 pub(crate) use prefix::*;
 pub(crate) use preview::*;
-use rollback::*;
 #[cfg(test)]
-pub(crate) use rollback::{e2e_copy_with_receipt, e2e_rollback_created_destinations};
+pub(crate) use rollback::e2e_copy_with_receipt;
+use rollback::*;
 use sdk_errors::*;
 pub(crate) use session::*;
 use transaction::*;
+#[cfg(test)]
+pub(crate) use transaction::{
+    e2e_copy_prefix_with_failure_after_first, e2e_delete_move_receipts_checked,
+};
 use transfer_support::*;
 pub(crate) use types::*;
 pub(crate) use upload::*;
@@ -459,10 +463,7 @@ mod tests {
         let minio = CreateOnlyCapabilities::for_provider(StorageProviderKind::Minio);
         assert!(minio.put_object);
         assert!(!minio.complete_multipart);
-        assert_eq!(
-            minio.copy_object,
-            Some(CopyCreateOnlyStrategy::AwsIfNoneMatch)
-        );
+        assert_eq!(minio.copy_object, None);
 
         let r2 = CreateOnlyCapabilities::for_provider(StorageProviderKind::CloudflareR2);
         assert!(r2.put_object);
@@ -882,16 +883,16 @@ mod tests {
                 .expect("trimmed immutable version should be accepted"),
             "version-1"
         );
-        // The literal "null" version ID pins a versioning-suspended generation
-        // and must be accepted as an immutable version.
-        for pinned in [Some("null"), Some("NULL"), Some(" null ")] {
-            require_immutable_move_version(pinned, "source/key")
-                .expect("literal null version should be accepted as a pin");
-        }
         for mutable_version in [None, Some(""), Some("  ")] {
             let err = require_immutable_move_version(mutable_version, "source/key")
                 .expect_err("mutable source identity must be rejected before copy");
             assert!(err.contains("requires object versioning"), "{err}");
+            assert!(err.contains("no destination was changed"), "{err}");
+        }
+        for null_version in [Some("null"), Some("NULL"), Some(" null ")] {
+            let err = require_immutable_move_version(null_version, "source/key")
+                .expect_err("a mutable null version must not authorize an automatic move");
+            assert!(err.contains("mutable null version"), "{err}");
             assert!(err.contains("no destination was changed"), "{err}");
         }
     }
@@ -931,11 +932,11 @@ mod tests {
                 .expect_err("mutable source identity must not authorize durable deletion");
             assert!(err.contains("requires bucket versioning"), "{err}");
         }
-        // The literal "null" version ID is a valid pin for
-        // versioning-suspended objects.
         let mut null_pinned = valid.clone();
         null_pinned.source_version_id = Some("null".to_string());
-        assert!(validate_receipt_fingerprints(std::slice::from_ref(&null_pinned)).is_ok());
+        let err = validate_receipt_fingerprints(std::slice::from_ref(&null_pinned))
+            .expect_err("a mutable null source version must not authorize deletion");
+        assert!(err.contains("source deletion was refused"), "{err}");
     }
 
     #[test]
