@@ -393,6 +393,22 @@ function runDiagnosticCommand(
   }
 }
 
+function applicationPidFromProcessSnapshot(output, expectedProcessGroup) {
+  const applicationName = path.basename(application);
+  for (const line of output.split("\n")) {
+    const fields = line.trim().split(/\s+/);
+    if (
+      fields.length >= 7 &&
+      fields[5] === applicationName &&
+      Number(fields[2]) === expectedProcessGroup
+    ) {
+      const pid = Number(fields[0]);
+      if (Number.isInteger(pid) && pid > 1) return pid;
+    }
+  }
+  return null;
+}
+
 function captureSessionDiagnostics(error) {
   const capturedAt = new Date().toISOString();
   const trackedPids = new Set(
@@ -410,15 +426,62 @@ function captureSessionDiagnostics(error) {
           processPattern.test(line),
       )
       .join("\n");
+  const processSnapshot = runDiagnosticCommand(
+    "ps",
+    ["-eo", "pid,ppid,pgid,stat,etime,comm,args"],
+    filterProcessOutput,
+  );
   const commands = [
-    runDiagnosticCommand(
-      "ps",
-      ["-eo", "pid,ppid,pgid,stat,etime,comm,args"],
-      filterProcessOutput,
-    ),
+    processSnapshot,
     runDiagnosticCommand("ss", ["-ltnp"]),
     runDiagnosticCommand("xwininfo", ["-root", "-tree"]),
   ];
+  if (!testMode && process.platform === "linux") {
+    const applicationPid = applicationPidFromProcessSnapshot(
+      processSnapshot.output,
+      driverProcess?.pid,
+    );
+    if (applicationPid) {
+      commands.push(
+        runDiagnosticCommand(
+          "sudo",
+          [
+            "--non-interactive",
+            "gdb",
+            "--batch",
+            "--nx",
+            "--quiet",
+            "-iex",
+            "set auto-load off",
+            "-iex",
+            "set debuginfod enabled off",
+            "-ex",
+            "set pagination off",
+            "-ex",
+            "set width 0",
+            "-ex",
+            "set print frame-arguments none",
+            "-ex",
+            "thread apply all bt 32",
+            "-p",
+            String(applicationPid),
+          ],
+          undefined,
+          8_000,
+        ),
+      );
+    } else {
+      commands.push({
+        command: "sudo --non-interactive gdb --batch --nx --quiet -p <app-pid>",
+        exitCode: null,
+        signal: null,
+        error:
+          "s3-sidekick process not found in the tauri-driver process group",
+        output: "",
+        truncated: false,
+      });
+    }
+  }
 
   const profile = {
     DISPLAY: process.env.DISPLAY ?? null,
