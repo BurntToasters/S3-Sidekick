@@ -182,7 +182,21 @@ test.describe("production object table geometry", () => {
       element.scrollTop = 900;
       element.dispatchEvent(new Event("scroll"));
     });
-    await page.waitForTimeout(50);
+    await page.waitForFunction(
+      () => {
+        const panel = document.querySelector<HTMLElement>("#object-panel");
+        const panelRect = panel?.getBoundingClientRect();
+        if (!panelRect) return false;
+        return Array.from(
+          document.querySelectorAll<HTMLElement>(".object-row--file"),
+        ).some((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.top >= panelRect.top && rect.bottom <= panelRect.bottom;
+        });
+      },
+      null,
+      { timeout: 5000 },
+    );
     const fileRows = page.locator(".object-row--file");
     const visibleFileIndex = await fileRows.evaluateAll((rows) => {
       const panel = document.querySelector<HTMLElement>("#object-panel");

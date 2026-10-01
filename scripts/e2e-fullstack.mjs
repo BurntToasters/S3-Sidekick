@@ -682,6 +682,7 @@ async function run(webDriver) {
   check("first-run setup completes", true);
 
   await type(webDriver, "conn-endpoint", endpoint);
+  await type(webDriver, "conn-region", "us-east-1");
   await type(webDriver, "conn-access-key", accessKey);
   await type(webDriver, "conn-secret-key", secretKey);
   await click(webDriver, "connect-btn");
