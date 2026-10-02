@@ -2168,9 +2168,9 @@ fn move_file_noreplace(
 /// exclusive renames (FAT/exFAT USB drives, some SMB/FUSE mounts).
 ///
 /// The destination is reserved with `create_new` before any bytes are written,
-/// so an existing file is never replaced. A crash between reservation and
-/// completion leaves a partial file at the destination; every error path
-/// removes the reservation so the caller can retry cleanly.
+/// so an existing file is never replaced. A crash or copy error after
+/// reservation can leave a partial destination; cleanup by pathname could
+/// remove a concurrent replacement, so failures retain and report that state.
 fn copy_file_exclusive(
     source: &std::path::Path,
     destination: &std::path::Path,
@@ -2189,10 +2189,10 @@ fn copy_file_exclusive(
     drop(destination_file);
     match copy_result {
         Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = std::fs::remove_file(destination);
-            Err(err.to_string())
-        }
+        Err(err) => Err(format!(
+            "Create-only copy failed after reserving the destination; failure cleanup left the destination path untouched to avoid deleting a concurrent replacement: {}",
+            err
+        )),
     }
 }
 
@@ -2264,47 +2264,57 @@ fn publish_temp_file_create_only_with(
     publish: impl FnOnce(&Path, &Path, bool) -> Result<TempPublication, String>,
     mut sync_parent: impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    let discard_temp = || {
-        if !keep_temp_on_failure {
-            let _ = std::fs::remove_file(temp_path);
-        }
-    };
     let publication = match publish(temp_path, destination_path, !keep_temp_on_failure) {
         Ok(publication) => publication,
         Err(error) => {
-            discard_temp();
-            return Err(error);
+            return Err(format!(
+                "{}; temporary scratch path was left untouched at '{}'",
+                error,
+                temp_path.display()
+            ));
         }
     };
 
     if let Err(error) = sync_parent(destination_path) {
-        let _ = std::fs::remove_file(destination_path);
-        discard_temp();
-        return Err(error);
+        return Err(format!(
+            "Destination publication completed, but its parent directory sync failed; neither destination nor temporary scratch path was rolled back: {}",
+            error
+        ));
     }
 
     if publication == TempPublication::Retained {
         if let Err(error) = std::fs::remove_file(temp_path) {
-            let rollback = std::fs::remove_file(destination_path);
-            return Err(match rollback {
-                Ok(()) => format!(
-                    "Failed to remove temporary file after publication: {}",
-                    error
-                ),
-                Err(rollback_error) => format!(
-                    "Destination was published, but temporary-file cleanup failed: {}; rollback also failed: {}",
-                    error, rollback_error
-                ),
-            });
+            return Err(format!(
+                "Destination publication completed, but temporary-file cleanup failed; the destination path was left in place: {}",
+                error
+            ));
         }
+        if let Err(error) = sync_parent(destination_path) {
+            // The first parent sync succeeded before scratch removal, so the
+            // destination is already committed. A failed cleanup sync can only
+            // leave the scratch removal uncertain after a crash; reporting this
+            // as a failed publication would make a create-only retry collide
+            // with the completed destination.
+            eprintln!(
+                "Destination '{}' was published and synced, but syncing temporary scratch cleanup failed; cleanup may be repeated after a crash: {}",
+                destination_path.display(),
+                error
+            );
+        }
+        return Ok(());
     }
 
-    sync_parent(destination_path)
+    sync_parent(destination_path).map_err(|error| {
+        format!(
+            "Destination publication completed, but its final parent directory sync failed; the destination path was left in place: {}",
+            error
+        )
+    })
 }
 
-/// `keep_temp_on_failure` retains the scratch when publication fails, for a
-/// checkpointed download whose complete bytes a retry can publish without
-/// downloading them again (e.g. a destination briefly locked by another app).
+/// `keep_temp_on_failure` disables the consuming Windows move fallback for a
+/// checkpointed download. Ambiguous create-only publication failures retain the
+/// scratch regardless, because deleting its pathname cannot be made ownership-safe.
 pub(crate) fn publish_temp_file(
     temp_path: &std::path::Path,
     destination_path: &std::path::Path,
@@ -3079,7 +3089,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_copy_error_cleans_its_reservation() {
+    fn publish_copy_error_retains_partial_reservation_for_safe_recovery() {
         let (dir, temp, destination) = publication_fixture("publish-copy-error");
         std::fs::remove_file(&temp).unwrap();
         let publish = |source: &Path, target: &Path, allow_move: bool| {
@@ -3100,16 +3110,17 @@ mod tests {
                 .is_err()
         );
 
-        assert!(
-            !destination.exists(),
-            "failed publication must remove its destination"
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"",
+            "a failed copy may retain its create-only reservation rather than risk deleting a replacement"
         );
         assert!(!temp.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn publish_sync_error_removes_destination_and_retains_checkpoint() {
+    fn publish_sync_error_retains_destination_and_checkpoint() {
         let (dir, temp, destination) = publication_fixture("publish-sync-error");
         let publish = |source: &Path, target: &Path, allow_move: bool| {
             publish_exclusive_with(
@@ -3131,8 +3142,116 @@ mod tests {
             .is_err()
         );
 
-        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"download payload",
+            "the published file is retained when durability cannot be confirmed"
+        );
         assert_eq!(std::fs::read(&temp).unwrap(), b"download payload");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn publish_sync_error_preserves_an_unrelated_destination_replacement() {
+        let (dir, temp, destination) = publication_fixture("publish-sync-replacement");
+        let publish = |source: &Path, target: &Path, allow_move: bool| {
+            publish_exclusive_with(
+                source,
+                target,
+                |source: &Path, target: &Path| std::fs::hard_link(source, target),
+                |_, _| {
+                    assert!(!allow_move);
+                    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+                },
+                copy_file_exclusive,
+            )
+        };
+
+        let result =
+            publish_temp_file_create_only_with(&temp, &destination, true, publish, |path| {
+                std::fs::remove_file(path).unwrap();
+                std::fs::write(path, b"unrelated replacement").unwrap();
+                Err("injected directory sync failure".to_string())
+            });
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"unrelated replacement"
+        );
+        assert_eq!(std::fs::read(&temp).unwrap(), b"download payload");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retained_temp_cleanup_error_does_not_delete_destination_replacement() {
+        let (dir, temp, destination) = publication_fixture("publish-cleanup-replacement");
+        let publish = |source: &Path, target: &Path, _allow_move: bool| {
+            publish_exclusive_with(
+                source,
+                target,
+                |source: &Path, target: &Path| std::fs::hard_link(source, target),
+                |_, _| panic!("move fallback must not run after hard-link success"),
+                |_, _| panic!("copy fallback must not run after hard-link success"),
+            )
+        };
+        let mut syncs = 0;
+
+        let result = publish_temp_file_create_only_with(&temp, &destination, true, publish, |_| {
+            syncs += 1;
+            if syncs == 1 {
+                std::fs::remove_file(&destination).unwrap();
+                std::fs::write(&destination, b"unrelated replacement").unwrap();
+                std::fs::remove_file(&temp).unwrap();
+                std::fs::create_dir(&temp).unwrap();
+            }
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"unrelated replacement"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn publish_final_cleanup_sync_error_keeps_durably_published_result_successful() {
+        let (dir, temp, destination) = publication_fixture("publish-final-sync-error");
+        let publish = |source: &Path, target: &Path, allow_move: bool| {
+            publish_exclusive_with(
+                source,
+                target,
+                |source: &Path, target: &Path| std::fs::hard_link(source, target),
+                |_, _| {
+                    assert!(!allow_move);
+                    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+                },
+                copy_file_exclusive,
+            )
+        };
+        let mut syncs = 0;
+
+        let result = publish_temp_file_create_only_with(&temp, &destination, true, publish, |_| {
+            syncs += 1;
+            if syncs == 2 {
+                Err("injected scratch-removal directory sync failure".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(
+            syncs, 2,
+            "both publication and cleanup syncs must be attempted"
+        );
+        assert!(
+            result.is_ok(),
+            "cleanup durability failure must not turn a committed destination into a failed transfer: {result:?}"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"download payload");
+        assert!(!temp.exists(), "the retained scratch was already removed");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

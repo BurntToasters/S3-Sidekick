@@ -55,6 +55,10 @@ export interface LayoutMockOptions {
   endpoint?: string;
   /** Native command failures, keyed by command name. */
   errors?: Record<string, string>;
+  /** Exact transfer manifest returned during recovery hydration. */
+  transferManifestJson?: string;
+  /** Copy receipt proof shape for move-safety regressions; "missing" mimics a legacy receipt. */
+  copyReceiptOwnershipAmbiguous?: boolean | "missing";
   /** Fail this many disconnect attempts before allowing retirement to finish. */
   disconnectFailures?: number;
   /** Hold disconnect until `releaseMockDisconnect` is called. */
@@ -97,6 +101,8 @@ interface LayoutMockInit {
   unlockPasswords: string[];
   deferUnlock: boolean;
   errors: Record<string, string>;
+  transferManifestJson: string;
+  copyReceiptOwnershipAmbiguous: boolean | "missing";
   disconnectFailures: number;
   holdDisconnect: boolean;
   copyFailures: number;
@@ -144,6 +150,9 @@ export async function installLayoutTauriMock(
     unlockPasswords: options.unlockPasswords ?? [],
     deferUnlock: options.deferUnlock ?? false,
     errors: options.errors ?? {},
+    transferManifestJson: options.transferManifestJson ?? "",
+    copyReceiptOwnershipAmbiguous:
+      options.copyReceiptOwnershipAmbiguous ?? false,
     disconnectFailures: Math.max(0, options.disconnectFailures ?? 0),
     holdDisconnect: options.holdDisconnect ?? false,
     copyFailures: options.transferBackend?.copyFailures ?? 0,
@@ -166,6 +175,8 @@ export async function installLayoutTauriMock(
       unlockPasswords,
       deferUnlock,
       errors,
+      transferManifestJson,
+      copyReceiptOwnershipAmbiguous,
       disconnectFailures,
       holdDisconnect,
       copyFailures,
@@ -417,7 +428,7 @@ export async function installLayoutTauriMock(
           case "load_transfer_manifest":
             return {
               recovery_session: "a".repeat(64),
-              manifest_json: "",
+              manifest_json: transferManifestJson,
               legacy_import_allowed: false,
             };
           case "transfer_checkpoint_gc":
@@ -488,7 +499,7 @@ export async function installLayoutTauriMock(
                 }
               });
             }
-            return {
+            const receipt: Record<string, unknown> = {
               source_key: sourceKey,
               source_etag: "mock-source-etag",
               source_fingerprint: fingerprint,
@@ -502,6 +513,10 @@ export async function installLayoutTauriMock(
               destination_tag_fingerprint: fingerprint,
               destination_version_id: null,
             };
+            if (copyReceiptOwnershipAmbiguous !== "missing") {
+              receipt.ownership_ambiguous = copyReceiptOwnershipAmbiguous;
+            }
+            return receipt;
           }
           case "copy_prefix_to": {
             const sourcePrefix = String(args.srcPrefix ?? "source/");
@@ -521,11 +536,26 @@ export async function installLayoutTauriMock(
                 destination_acl_fingerprint: fingerprint,
                 destination_tag_fingerprint: fingerprint,
                 destination_version_id: null,
+                ownership_ambiguous:
+                  copyReceiptOwnershipAmbiguous === "missing"
+                    ? undefined
+                    : copyReceiptOwnershipAmbiguous,
               },
             ];
           }
-          case "delete_copied_objects":
+          case "delete_copied_objects": {
+            const receipts = Array.isArray(args.receipts)
+              ? (args.receipts as Array<Record<string, unknown>>)
+              : [];
+            if (
+              receipts.some((receipt) => receipt.ownership_ambiguous === true)
+            ) {
+              throw new Error(
+                "Copy receipt ownership is ambiguous; source deletion was refused.",
+              );
+            }
             return null;
+          }
           case "create_folder":
           case "save_settings":
           case "save_connection":

@@ -140,23 +140,40 @@ function deleteReleaseAssetById(repository, assetId) {
 
 function downloadReleaseAsset(repository, assetId, filePath) {
   const args = releaseAssetDownloadArgs(repository, assetId);
-  const result = spawnSync("gh", args, {
-    env: githubCliEnvironment(),
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 128 * 1024 * 1024,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const detail = String(result.stderr || "").trim();
-    const error = new Error(
-      `gh ${args.join(" ")} failed with status ${result.status}${detail ? `:\n${detail}` : ""}`,
-    );
-    error.statusCode = githubStatusCode(detail);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${require("node:crypto").randomUUID()}.download`;
+  const descriptor = fs.openSync(temporary, "wx", 0o600);
+  try {
+    // Installer bundles can exceed the stdout buffer limit. Stream bytes into
+    // an isolated file and replace the requested path only after gh succeeds.
+    const result = spawnSync("gh", args, {
+      env: githubCliEnvironment(),
+      stdio: ["ignore", descriptor, "pipe"],
+      timeout: 15 * 60 * 1000,
+      killSignal: "SIGKILL",
+      maxBuffer: 1024 * 1024,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      const detail = String(result.stderr || "").trim();
+      const error = new Error(
+        `gh ${args.join(" ")} failed with status ${result.status}${detail ? `:\n${detail}` : ""}`,
+      );
+      error.statusCode = githubStatusCode(detail);
+      throw error;
+    }
+  } catch (error) {
+    fs.closeSync(descriptor);
+    fs.rmSync(temporary, { force: true });
     throw error;
   }
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, result.stdout, { mode: 0o600 });
-  return filePath;
+  fs.closeSync(descriptor);
+  try {
+    fs.renameSync(temporary, filePath);
+    return filePath;
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
 }
 
 module.exports = {

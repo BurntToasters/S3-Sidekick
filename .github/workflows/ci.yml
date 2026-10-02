@@ -72,7 +72,8 @@ jobs:
             patchelf \
             libssl-dev \
             libgtk-3-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            gnupg
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
@@ -111,6 +112,13 @@ jobs:
       - name: Run multipart response-loss E2E
         run: npm run test:e2e:multipart-recovery
 
+      - name: Run move receipt safety E2E
+        run: npm run test:e2e:move-safety
+
+      - name: Run release safety E2E
+        if: runner.os == 'Linux'
+        run: npm run test:e2e:release-safety
+
       - name: Run Windows publication E2E
         if: runner.os == 'Windows'
         run: npm run test:e2e:windows-publication
@@ -123,6 +131,10 @@ jobs:
           path: |
             test-results/fixes-0.11.1/transfer-publication/multipart-recovery/
             test-results/fixes-0.11.1/transfer-publication/windows-publication/
+            test-results/move-safety-e2e/
+            test-results/release-assets-e2e/
+            test-results/release-preflight-origin-e2e/
+            test-results/aws-null-runner-e2e/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -193,6 +205,8 @@ jobs:
             test-results/playwright/**/error-context.md
             test-results/playwright/**/test-failed-*.png
             test-results/playwright/**/trace.zip
+            test-results/frontend-safety/
+            test-results/ui-security-regressions/
           if-no-files-found: ignore
           retention-days: 14
 

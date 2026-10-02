@@ -398,6 +398,10 @@ export async function syncInspectorFromSelection(
 
   const reason: InspectorSyncReason = options?.reason ?? "selection";
   const syncGen = ++inspectorSyncGeneration;
+  closePreview();
+  const previewBody = document.getElementById("inspector-preview-body");
+  previewBody?.replaceChildren();
+  previewBody?.removeAttribute("aria-busy");
   await Promise.resolve();
   if (syncGen !== inspectorSyncGeneration) return;
 

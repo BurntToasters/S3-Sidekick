@@ -24,6 +24,9 @@ const {
   isExpectedRelease,
 } = require("./release-draft-metadata.cjs");
 const { releaseTargetMatchesCommit } = require("./release-draft-target.cjs");
+const {
+  verifyReleaseAssetIntegrity,
+} = require("./release-asset-verification.cjs");
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const packageJson = JSON.parse(
@@ -310,6 +313,11 @@ async function main() {
     assetNames: [...assetNames],
     headCommit: currentHead(),
     release,
+  });
+  verifyReleaseAssetIntegrity({
+    assets,
+    repository: `${REPO_OWNER}/${REPO_NAME}`,
+    requiredNames: requiredDraftAssetNames(),
   });
   const manifests = [];
   const manifestDirectory = fs.mkdtempSync(

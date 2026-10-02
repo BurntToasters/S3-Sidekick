@@ -2,6 +2,12 @@
 
 use super::*;
 
+fn persisted_receipt_without_ownership_proof() -> bool {
+    // Receipts created before ownership was serialized cannot prove which
+    // destination generation the copy created. Treat them as unsafe to retire.
+    true
+}
+
 /// Everything about a source object that a copy has to carry forward.
 ///
 /// A single-part `CopyObject` preserves all of this implicitly (the default
@@ -28,9 +34,11 @@ pub(crate) struct CopyReceipt {
     #[serde(default)]
     pub(super) destination_tag_fingerprint: String,
     pub(super) destination_version_id: Option<String>,
-    /// See `DestinationIdentity::ownership_ambiguous`. Never serialized: a
-    /// receipt coming back from the frontend only authorizes source deletes.
-    #[serde(skip)]
+    /// True when a retry found a destination whose ownership could not be
+    /// proven. Keep this on persisted receipts so it cannot gain delete
+    /// authority after a frontend round trip. Missing legacy claims default to
+    /// ambiguous because older receipts did not preserve this identity.
+    #[serde(default = "persisted_receipt_without_ownership_proof")]
     pub(crate) ownership_ambiguous: bool,
 }
 
@@ -153,6 +161,12 @@ pub(super) async fn preflight_optional_move_version(
 
 pub(super) fn validate_receipt_fingerprints(receipts: &[CopyReceipt]) -> Result<(), String> {
     for receipt in receipts {
+        if receipt.ownership_ambiguous {
+            return Err(format!(
+                "Destination '{}' has ambiguous copy ownership; source deletion was refused and both objects were retained.",
+                receipt.destination_key
+            ));
+        }
         if !is_canonical_fingerprint(&receipt.source_fingerprint)
             || !is_canonical_fingerprint(&receipt.source_acl_fingerprint)
             || !is_canonical_fingerprint(&receipt.source_tag_fingerprint)
@@ -1002,6 +1016,12 @@ pub(super) async fn copy_with_receipt(
         cancel,
     )
     .await?;
+    if destination.ownership_ambiguous {
+        return Err(format!(
+            "Copy to '{}' may have completed, but destination ownership is ambiguous. The destination was retained; verify both objects before retrying.",
+            dst_key
+        ));
+    }
     let destination_info = describe_object(
         client,
         dst_bucket,

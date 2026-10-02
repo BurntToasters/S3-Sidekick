@@ -18,7 +18,7 @@
 // - Cancel during async unlock validation lets the backend unlock later, then
 //   reloads secrets while the UI claims the vault stayed locked.
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
   FULL_CREATE_ONLY,
   commandCalls,
@@ -26,6 +26,8 @@ import {
   saveArtifact as saveSuiteArtifact,
 } from "./helpers";
 import {
+  connectMockListing,
+  installLayoutTauriMock,
   openMockListing,
   readMockCallLog,
   releaseMockUnlock,
@@ -46,6 +48,52 @@ const BOOKMARK_B = {
   access_key: "beta-access",
   secret_key: "beta-secret",
 };
+
+const LEGACY_COPIED_MOVE_WITHOUT_OWNERSHIP_PROOF = JSON.stringify({
+  version: 6,
+  items: [
+    {
+      operation: "move",
+      bucket: "layout-test-bucket",
+      fileName: "000-sample-object.txt",
+      filePath: "",
+      key: "reports/000-sample-object.txt",
+      sourceBucket: "layout-test-bucket",
+      sourceKey: "reports/000-sample-object.txt",
+      destinationBucket: "layout-test-bucket",
+      destinationKey: "destination/000-sample-object.txt",
+      size: 512,
+      totalBytes: 512,
+      attempt: 1,
+      maxAttempts: 1,
+      conflictResolution: "ask",
+      movePhase: "copied",
+      receipts: [
+        {
+          source_key: "reports/000-sample-object.txt",
+          source_etag: "mock-source-etag",
+          source_fingerprint: "a".repeat(64),
+          source_acl_fingerprint: "a".repeat(64),
+          source_tag_fingerprint: "a".repeat(64),
+          source_version_id: null,
+          destination_key: "destination/000-sample-object.txt",
+          destination_etag: "mock-destination-etag",
+          destination_fingerprint: "a".repeat(64),
+          destination_acl_fingerprint: "a".repeat(64),
+          destination_tag_fingerprint: "a".repeat(64),
+          destination_version_id: null,
+        },
+      ],
+      connectionIdentity: "browser-layout-identity",
+    },
+  ],
+});
+
+async function showTransferList(page: Page): Promise<void> {
+  const list = page.locator("#transfer-list");
+  if (!(await list.isVisible())) await page.locator("#transfer-toggle").click();
+  await expect(list).toBeVisible();
+}
 
 test.describe("frontend mutation and recovery safety", () => {
   test("copies a folder as a prefix and never deletes its source", async ({
@@ -146,12 +194,129 @@ test.describe("frontend mutation and recovery safety", () => {
     expect(
       (deletion.args as { receipts: Array<{ source_key: string }> }).receipts,
     ).toEqual([expect.objectContaining({ source_key: sourceKey })]);
+    expect(
+      (deletion.args as { receipts: Array<{ ownership_ambiguous: boolean }> })
+        .receipts,
+    ).toEqual([expect.objectContaining({ ownership_ambiguous: false })]);
+    const durableMarker = commandCalls(calls, "save_transfer_manifest")
+      .map((call) => call.args as { json?: string })
+      .map((args) => (args.json ? JSON.parse(args.json) : null))
+      .find((manifest) => manifest?.items?.[0]?.movePhase === "copied");
+    expect(durableMarker?.items[0].receipts[0].ownership_ambiguous).toBe(false);
     await saveSuiteArtifact(
       page,
       testInfo,
       "frontend-safety",
       "file-move",
       calls,
+    );
+  });
+
+  test("keeps ambiguous fresh receipts ambiguous through persistence and delete admission", async ({
+    page,
+  }, testInfo) => {
+    await openMockListing(page, {
+      objectCount: 1,
+      prefixes: [],
+      createOnlyCapabilities: FULL_CREATE_ONLY,
+      listObjectsByPrefix: {
+        "destination/": { objects: [], prefixes: [] },
+      },
+      copyReceiptOwnershipAmbiguous: true,
+    });
+
+    await openCopyMoveFromRow(page, page.locator(".object-row--file").first());
+    await page.locator("#copy-move-path").fill("destination/");
+    await page.locator("#copy-move-move-btn").click();
+    await expect(page.locator("#copy-move-overlay")).not.toHaveClass(/active/);
+    await expect
+      .poll(async () => {
+        const calls = await readMockCallLog(page);
+        return commandCalls(calls, "save_transfer_manifest").length;
+      })
+      .toBeGreaterThan(0);
+    await expect(page.locator("#transfer-queue-summary")).toContainText(
+      "1 failed",
+    );
+
+    const calls = await readMockCallLog(page);
+    expect(commandCalls(calls, "copy_object_to")).toHaveLength(1);
+    expect(commandCalls(calls, "delete_copied_objects")).toHaveLength(0);
+    const durableMarker = commandCalls(calls, "save_transfer_manifest")
+      .map((call) => call.args as { json?: string })
+      .map((args) => (args.json ? JSON.parse(args.json) : null))
+      .find((manifest) => manifest?.items?.[0]?.movePhase === "copied");
+    expect(durableMarker?.items[0].receipts[0].ownership_ambiguous).toBe(true);
+    await showTransferList(page);
+    await page.locator("#transfer-more").click();
+    await page
+      .locator('.context-menu [role="menuitem"]', { hasText: "Retry failed" })
+      .click();
+    await expect(page.locator("#transfer-queue-summary")).toContainText(
+      "1 failed",
+    );
+    const afterRetry = await readMockCallLog(page);
+    expect(commandCalls(afterRetry, "copy_object_to")).toHaveLength(1);
+    expect(commandCalls(afterRetry, "delete_copied_objects")).toHaveLength(0);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "ambiguous-copy-receipt",
+      afterRetry,
+    );
+  });
+
+  test("hydrates legacy copied receipts as ambiguous before source deletion", async ({
+    page,
+  }, testInfo) => {
+    await installLayoutTauriMock(page, {
+      objectCount: 1,
+      prefixes: [],
+      transferManifestJson: LEGACY_COPIED_MOVE_WITHOUT_OWNERSHIP_PROOF,
+    });
+    await page.goto("/");
+    await expect(page.locator("#dialog-title")).toHaveText("Resume Transfers");
+    await page.locator("#dialog-ok").click();
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    await connectMockListing(page);
+    await expect
+      .poll(async () => {
+        const calls = await readMockCallLog(page);
+        return commandCalls(calls, "save_transfer_manifest").length;
+      })
+      .toBeGreaterThan(0);
+    await expect(page.locator("#transfer-queue-summary")).toContainText(
+      "1 failed",
+    );
+
+    const calls = await readMockCallLog(page);
+    expect(commandCalls(calls, "copy_object_to")).toHaveLength(0);
+    expect(commandCalls(calls, "delete_copied_objects")).toHaveLength(0);
+    const serializedRecovery = commandCalls(calls, "save_transfer_manifest")
+      .map((call) => call.args as { json?: string })
+      .map((args) => (args.json ? JSON.parse(args.json) : null))
+      .find((manifest) => manifest?.items?.[0]?.movePhase === "copied");
+    expect(serializedRecovery?.items[0].receipts[0].ownership_ambiguous).toBe(
+      true,
+    );
+    await showTransferList(page);
+    await page.locator("#transfer-more").click();
+    await page
+      .locator('.context-menu [role="menuitem"]', { hasText: "Retry failed" })
+      .click();
+    await expect(page.locator("#transfer-queue-summary")).toContainText(
+      "1 failed",
+    );
+    const afterRetry = await readMockCallLog(page);
+    expect(commandCalls(afterRetry, "copy_object_to")).toHaveLength(0);
+    expect(commandCalls(afterRetry, "delete_copied_objects")).toHaveLength(0);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      "frontend-safety",
+      "legacy-ambiguous-copy-receipt",
+      afterRetry,
     );
   });
 

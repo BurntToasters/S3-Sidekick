@@ -22,6 +22,8 @@
     "test:e2e:sync-version": "node tests/scripts/sync-version.e2e.mjs",
     "test:e2e:minio": "node scripts/e2e-minio.mjs",
     "test:e2e:aws-null-version": "node scripts/e2e-aws-null-version.mjs",
+    "test:e2e:move-safety": "node scripts/e2e-move-safety.mjs",
+    "test:e2e:release-safety": "node tests/scripts/release-assets.e2e.mjs && node tests/scripts/release-preflight-origin.e2e.mjs && node tests/scripts/aws-null-runner.e2e.mjs",
     "test:e2e:tauri-alignment": "node tests/scripts/check-tauri-alignment.e2e.mjs",
     "test:e2e:clean-tree": "node tests/scripts/require-clean-tree.e2e.mjs",
     "test:e2e:scripts": "npm run test:e2e:sync-version && npm run test:e2e:tauri-alignment && npm run test:e2e:clean-tree",

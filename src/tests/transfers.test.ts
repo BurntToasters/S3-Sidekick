@@ -1180,6 +1180,7 @@ describe("transfers queue UI", () => {
       destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
       destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
       destination_version_id: null,
+      ownership_ambiguous: false,
     };
 
     mockInvoke.mockImplementation(async (cmd) => {
@@ -1409,6 +1410,7 @@ describe("transfers queue UI", () => {
       destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
       destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
       destination_version_id: null,
+      ownership_ambiguous: false,
     };
 
     mockInvoke.mockImplementation(async (cmd) => {
@@ -1485,6 +1487,7 @@ describe("transfers queue UI", () => {
       destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
       destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
       destination_version_id: null,
+      ownership_ambiguous: false,
     };
 
     mockInvoke.mockImplementation(async (cmd) => {
@@ -1650,6 +1653,7 @@ describe("transfers queue UI", () => {
       destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
       destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
       destination_version_id: null,
+      ownership_ambiguous: false,
     };
 
     mockInvoke.mockImplementation(async (cmd, payload) => {
@@ -1822,6 +1826,7 @@ describe("transfer recovery ownership", () => {
     destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
     destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
     destination_version_id: null,
+    ownership_ambiguous: false,
   };
 
   const recoveredMove = (version: 1 | 2 | 3 | 4 | 5 | 6, receipt: object) => ({
