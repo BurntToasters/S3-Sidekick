@@ -1,6 +1,6 @@
 {
   "name": "s3-sidekick",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "private": true,
   "packageManager": "npm@12.0.2",
   "description": "A Cross-Platform Desktop client for S3-compatible Object Storage.",
@@ -31,6 +31,7 @@
     "test:e2e:fullstack-harness": "node scripts/e2e-fullstack-harness.mjs",
     "test:e2e:windows-publication-harness": "node scripts/e2e-windows-publication-harness.mjs",
     "test:e2e:windows-publication": "node scripts/e2e-windows-publication.mjs",
+    "test:e2e:windows-startup": "node scripts/e2e-windows-startup.mjs",
     "test:e2e:multipart-recovery": "node scripts/e2e-multipart-recovery.mjs",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",

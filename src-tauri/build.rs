@@ -67,7 +67,29 @@ const COMMANDS: &[&str] = &[
     "write_text_file",
 ];
 
+// Windows gives the main thread a 1 MiB stack. Tauri runs the
+// `generate_handler!` dispatcher on the main thread for every IPC call, and
+// its release frame holds every async command's future inline (about 2.4 MiB
+// in 0.11.1), so the first invoke overflowed with 0xC00000FD. Reserve 8 MiB,
+// the Linux/macOS main-thread default. scripts/e2e-windows-startup.mjs
+// checks the header and a real launch.
+const WINDOWS_MAIN_STACK_BYTES: u32 = 8 * 1024 * 1024;
+
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+            Ok("msvc") => println!(
+                "cargo:rustc-link-arg-bins=/STACK:{}",
+                WINDOWS_MAIN_STACK_BYTES
+            ),
+            Ok("gnu") => println!(
+                "cargo:rustc-link-arg-bins=-Wl,--stack,{}",
+                WINDOWS_MAIN_STACK_BYTES
+            ),
+            _ => {}
+        }
+    }
+
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
