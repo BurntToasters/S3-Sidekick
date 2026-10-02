@@ -97,7 +97,6 @@ export function holdAfterCancelFailure(
 export function markFailed(item: TransferItem, message: string): void {
   moveTo(item, "error");
   item.error = message;
-  item.browserFile = undefined;
 }
 
 export function markSkipped(item: TransferItem, message: string): void {
@@ -115,6 +114,7 @@ export function markDone(item: TransferItem): void {
   moveTo(item, "done");
   item.speedBps = 0;
   item.etaSeconds = 0;
+  item.browserFile = undefined;
 }
 
 /**

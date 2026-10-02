@@ -1028,6 +1028,848 @@ async fn e2e_aws_null_version_http_fixture_refuses_rename() {
     );
 }
 
+#[derive(Clone)]
+struct MoveSafetyObject {
+    body: Vec<u8>,
+    etag: String,
+    content_length: u64,
+    version_id: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MoveSafetyCopyMode {
+    Ordinary,
+    AmbiguousMultipart,
+}
+
+struct MoveSafetyState {
+    source: Option<MoveSafetyObject>,
+    destination: Option<MoveSafetyObject>,
+    bucket_versioning: Option<String>,
+    bucket_versioning_error: Option<String>,
+    mode: MoveSafetyCopyMode,
+    complete_attempts: u32,
+    copy_part_requests: u32,
+    consumed_upload_seen: bool,
+    source_delete_requests: u32,
+    requests: Vec<String>,
+}
+
+struct MoveSafetyHttpFixture {
+    endpoint: String,
+    state: std::sync::Arc<Mutex<MoveSafetyState>>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl MoveSafetyHttpFixture {
+    async fn start(
+        mode: MoveSafetyCopyMode,
+        source_version_id: Option<&str>,
+        bucket_versioning: Option<&str>,
+        bucket_versioning_error: Option<&str>,
+        source_size: u64,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind move-safety S3 HTTP fixture");
+        let endpoint = format!("http://{}", listener.local_addr().expect("fixture address"));
+        let source = MoveSafetyObject {
+            body: b"source bytes".to_vec(),
+            etag: "\"source-etag\"".to_string(),
+            content_length: source_size,
+            version_id: source_version_id.map(str::to_string),
+        };
+        let state = std::sync::Arc::new(Mutex::new(MoveSafetyState {
+            source: Some(source),
+            destination: None,
+            bucket_versioning: bucket_versioning.map(str::to_string),
+            bucket_versioning_error: bucket_versioning_error.map(str::to_string),
+            mode,
+            complete_attempts: 0,
+            copy_part_requests: 0,
+            consumed_upload_seen: false,
+            source_delete_requests: 0,
+            requests: Vec::new(),
+        }));
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            let mut first_request = true;
+            loop {
+                let quiet_period = if first_request {
+                    Duration::from_secs(20)
+                } else {
+                    Duration::from_secs(2)
+                };
+                let Ok(Ok((mut stream, _))) =
+                    tokio::time::timeout(quiet_period, listener.accept()).await
+                else {
+                    break;
+                };
+                first_request = false;
+                if let Err(err) = handle_move_safety_request(&mut stream, &server_state).await {
+                    eprintln!("move-safety fixture request failed: {err}");
+                }
+            }
+        });
+        Self {
+            endpoint,
+            state,
+            server,
+        }
+    }
+
+    fn client(&self) -> aws_sdk_s3::Client {
+        let creds = aws_sdk_s3::config::Credentials::new(
+            "move-safety-access",
+            "move-safety-secret",
+            None,
+            None,
+            "move-safety-e2e",
+        );
+        let config = aws_sdk_s3::config::Builder::new()
+            .endpoint_url(&self.endpoint)
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(creds)
+            .force_path_style(true)
+            .behavior_version_latest()
+            .build();
+        aws_sdk_s3::Client::from_conf(config)
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        let state = self.state.lock().expect("lock move-safety fixture");
+        let request_lines = state
+            .requests
+            .iter()
+            .filter_map(|request| request.lines().next())
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "requests": request_lines,
+            "source_body": state.source.as_ref().map(|object| String::from_utf8_lossy(&object.body).to_string()),
+            "destination_body": state.destination.as_ref().map(|object| String::from_utf8_lossy(&object.body).to_string()),
+            "complete_attempts": state.complete_attempts,
+            "copy_part_requests": state.copy_part_requests,
+            "consumed_upload_seen": state.consumed_upload_seen,
+            "source_delete_requests": state.source_delete_requests,
+        })
+    }
+
+    async fn finish(self) {
+        tokio::time::timeout(Duration::from_secs(25), self.server)
+            .await
+            .expect("move-safety HTTP fixture timed out")
+            .expect("move-safety HTTP fixture panicked");
+    }
+}
+
+async fn handle_move_safety_request(
+    stream: &mut tokio::net::TcpStream,
+    shared: &std::sync::Arc<Mutex<MoveSafetyState>>,
+) -> std::io::Result<()> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let count = stream.read(&mut chunk).await?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let request = String::from_utf8_lossy(&bytes).into_owned();
+    let mut lines = request.lines();
+    let request_line = lines.next().unwrap_or_default().to_string();
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default().to_string();
+    let target = request_parts.next().unwrap_or_default().to_string();
+    let path = target.split('?').next().unwrap_or_default();
+    let query = target
+        .split_once('?')
+        .map(|(_, value)| value)
+        .unwrap_or_default();
+    let headers = lines
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect::<std::collections::HashMap<_, _>>();
+    shared
+        .lock()
+        .expect("lock move-safety fixture")
+        .requests
+        .push(request.clone());
+
+    if method == "POST" && query.contains("uploads") {
+        return move_safety_response(
+            stream,
+            "200 OK",
+            "application/xml",
+            b"<InitiateMultipartUploadResult><Bucket>fixture-bucket</Bucket><Key>destination.txt</Key><UploadId>move-safety-upload</UploadId></InitiateMultipartUploadResult>",
+        )
+        .await;
+    }
+    if method == "PUT" && query.contains("uploadId=") && query.contains("partNumber=") {
+        shared
+            .lock()
+            .expect("lock move-safety fixture")
+            .copy_part_requests += 1;
+        return move_safety_response(
+            stream,
+            "200 OK",
+            "application/xml",
+            b"<CopyPartResult><ETag>\"copy-part-etag\"</ETag></CopyPartResult>",
+        )
+        .await;
+    }
+    if method == "POST" && query.contains("uploadId=") {
+        let completion = {
+            let mut state = shared.lock().expect("lock move-safety fixture");
+            state.complete_attempts += 1;
+            if state.mode == MoveSafetyCopyMode::AmbiguousMultipart && state.complete_attempts == 1
+            {
+                let mut copied = state.source.clone().expect("fixture source exists");
+                copied.etag = "\"operation-copy-etag\"".to_string();
+                state.destination = Some(copied);
+                1
+            } else if state.mode == MoveSafetyCopyMode::AmbiguousMultipart {
+                state.destination = Some(MoveSafetyObject {
+                    body: b"external replacement".to_vec(),
+                    etag: "\"external-etag\"".to_string(),
+                    content_length: b"external replacement".len() as u64,
+                    version_id: None,
+                });
+                state.consumed_upload_seen = true;
+                2
+            } else {
+                3
+            }
+        };
+        return match completion {
+            1 => Ok(()),
+            2 => {
+                // The server committed completion and dropped the response. The
+                // SDK must retry; the fixture substitutes an external write
+                // before responding to that retry.
+                move_safety_response(
+                    stream,
+                    "412 Precondition Failed",
+                    "application/xml",
+                    b"<Error><Code>PreconditionFailed</Code><Message>Destination already exists</Message><RequestId>move-safety-e2e</RequestId></Error>",
+                )
+                .await
+            }
+            _ => {
+                move_safety_error(
+                    stream,
+                    "501 Not Implemented",
+                    "NotImplemented",
+                    "ordinary copy must not use multipart completion",
+                )
+                .await
+            }
+        };
+    }
+    if method == "GET" && query.contains("uploadId=") {
+        return move_safety_error(
+            stream,
+            "404 Not Found",
+            "NoSuchUpload",
+            "completion already consumed the upload",
+        )
+        .await;
+    }
+    if method == "GET" && query.to_ascii_lowercase().contains("versioning") {
+        let (status, error) = {
+            let state = shared.lock().expect("lock move-safety fixture");
+            (
+                state.bucket_versioning.clone(),
+                state.bucket_versioning_error.clone(),
+            )
+        };
+        if let Some(error) = error {
+            return move_safety_error(stream, "403 Forbidden", "AccessDenied", &error).await;
+        }
+        let body = status.map_or_else(
+            || "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>".to_string(),
+            |status| format!("<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>{status}</Status></VersioningConfiguration>"),
+        );
+        return move_safety_response(stream, "200 OK", "application/xml", body.as_bytes()).await;
+    }
+    if method == "GET" && query.contains("acl") {
+        return move_safety_error(
+            stream,
+            "501 Not Implemented",
+            "NotImplemented",
+            "object ACL API unavailable in fixture",
+        )
+        .await;
+    }
+    if method == "GET" && query.contains("tagging") {
+        return move_safety_response(
+            stream,
+            "200 OK",
+            "application/xml",
+            b"<Tagging><TagSet/></Tagging>",
+        )
+        .await;
+    }
+    if method == "PUT" && headers.contains_key("x-amz-copy-source") {
+        {
+            let mut state = shared.lock().expect("lock move-safety fixture");
+            let mut destination = state.source.clone().expect("fixture source exists");
+            destination.etag = "\"destination-etag\"".to_string();
+            destination.version_id = None;
+            state.destination = Some(destination);
+        }
+        return move_safety_response(
+            stream,
+            "200 OK",
+            "application/xml",
+            b"<CopyObjectResult><ETag>\"destination-etag\"</ETag></CopyObjectResult>",
+        )
+        .await;
+    }
+
+    let object_key = path.strip_prefix("/fixture-bucket/").unwrap_or_default();
+    if method == "HEAD" {
+        let response_headers = {
+            let state = shared.lock().expect("lock move-safety fixture");
+            let object = match object_key {
+                "source.txt" => state.source.as_ref(),
+                "destination.txt" => state.destination.as_ref(),
+                _ => None,
+            };
+            object.map(|object| {
+                let mut headers = vec![
+                    ("ETag", object.etag.clone()),
+                    ("Content-Length", object.content_length.to_string()),
+                    ("Last-Modified", "Tue, 01 Oct 2024 00:00:00 GMT".to_string()),
+                    ("Content-Type", "text/plain".to_string()),
+                ];
+                if let Some(version_id) = object.version_id.as_ref() {
+                    headers.push(("x-amz-version-id", version_id.clone()));
+                }
+                headers
+            })
+        };
+        return match response_headers {
+            Some(headers) => {
+                move_safety_response_with_headers(stream, "200 OK", &headers, b"").await
+            }
+            None => move_safety_error(stream, "404 Not Found", "NoSuchKey", "missing object").await,
+        };
+    }
+    if method == "DELETE" && object_key == "source.txt" {
+        {
+            let mut state = shared.lock().expect("lock move-safety fixture");
+            state.source = None;
+            state.source_delete_requests += 1;
+        }
+        return move_safety_response(stream, "204 No Content", "text/plain", b"").await;
+    }
+    if method == "GET" {
+        let body = {
+            let state = shared.lock().expect("lock move-safety fixture");
+            match object_key {
+                "source.txt" => state.source.as_ref(),
+                "destination.txt" => state.destination.as_ref(),
+                _ => None,
+            }
+            .map(|object| object.body.clone())
+        };
+        return match body {
+            Some(body) => {
+                move_safety_response(stream, "200 OK", "application/octet-stream", &body).await
+            }
+            None => move_safety_error(stream, "404 Not Found", "NoSuchKey", "missing object").await,
+        };
+    }
+
+    eprintln!("unexpected move-safety fixture request: {request_line}");
+    move_safety_error(
+        stream,
+        "501 Not Implemented",
+        "NotImplemented",
+        "unexpected request",
+    )
+    .await
+}
+
+async fn move_safety_response(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    move_safety_response_with_headers(
+        stream,
+        status,
+        &[
+            ("Content-Type", content_type.to_string()),
+            ("Content-Length", body.len().to_string()),
+        ],
+        body,
+    )
+    .await
+}
+
+async fn move_safety_response_with_headers(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    headers: &[(&str, String)],
+    body: &[u8],
+) -> std::io::Result<()> {
+    let content_length = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("0");
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {content_length}\r\nConnection: close\r\n"
+            )
+            .as_bytes(),
+        )
+        .await?;
+    for (name, value) in headers {
+        if !name.eq_ignore_ascii_case("content-length") {
+            stream
+                .write_all(format!("{name}: {value}\r\n").as_bytes())
+                .await?;
+        }
+    }
+    stream.write_all(b"\r\n").await?;
+    stream.write_all(body).await?;
+    stream.flush().await
+}
+
+async fn move_safety_error(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    code: &str,
+    message: &str,
+) -> std::io::Result<()> {
+    let body = format!("<Error><Code>{code}</Code><Message>{message}</Message><RequestId>move-safety-e2e</RequestId></Error>");
+    move_safety_response(stream, status, "application/xml", body.as_bytes()).await
+}
+
+fn record_move_safety(check: &str, passed: bool, observed: serde_json::Value) {
+    if let Ok(path) = std::env::var("S3_SIDEKICK_E2E_REPORT") {
+        use std::io::Write;
+        let row = serde_json::json!({
+            "test": "move_safety_http_fixture",
+            "check": check,
+            "passed": passed,
+            "observed": observed,
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open move-safety E2E report");
+        writeln!(file, "{row}").expect("write move-safety E2E report");
+    }
+    eprintln!("{} {check}", if passed { "PASS" } else { "FAIL" });
+}
+
+#[tokio::test]
+#[ignore = "needs the local HTTP E2E runner (node scripts/e2e-move-safety.mjs)"]
+async fn e2e_move_safety_receipts_http_fixture() {
+    let source_size = 5_368_709_120_u64 + 1;
+
+    let ambiguous = MoveSafetyHttpFixture::start(
+        MoveSafetyCopyMode::AmbiguousMultipart,
+        None,
+        None,
+        None,
+        source_size,
+    )
+    .await;
+    let ambiguous_client = ambiguous.client();
+    let cancel: s3::CancelToken = Default::default();
+    let ambiguous_copy = s3::e2e_copy_with_receipt(
+        &ambiguous_client,
+        "fixture-bucket",
+        "source.txt",
+        "destination.txt",
+        StorageProviderKind::Aws,
+        &cancel,
+    )
+    .await;
+    let receipt_fingerprint = "a".repeat(64);
+    let constructed_receipt_json = serde_json::json!({
+        "source_key": "source.txt",
+        "source_etag": "\"source-etag\"",
+        "source_fingerprint": receipt_fingerprint,
+        "source_acl_fingerprint": "b".repeat(64),
+        "source_tag_fingerprint": "c".repeat(64),
+        "source_version_id": null,
+        "destination_key": "destination.txt",
+        "destination_etag": "\"external-etag\"",
+        "destination_fingerprint": "d".repeat(64),
+        "destination_acl_fingerprint": "e".repeat(64),
+        "destination_tag_fingerprint": "f".repeat(64),
+        "destination_version_id": null,
+        "ownership_ambiguous": true,
+    });
+    let constructed_receipt: s3::CopyReceipt =
+        serde_json::from_value(constructed_receipt_json).expect("restore ambiguous receipt");
+    let serialized_ambiguous_receipt =
+        serde_json::to_value(&constructed_receipt).expect("serialize ambiguous receipt");
+    let ambiguous_receipt =
+        serde_json::from_value::<s3::CopyReceipt>(serialized_ambiguous_receipt.clone())
+            .expect("restore ambiguous receipt after persisted JSON round trip");
+    let ambiguous_delete = s3::e2e_delete_move_receipts_checked(
+        &ambiguous_client,
+        "fixture-bucket",
+        "fixture-bucket",
+        std::slice::from_ref(&ambiguous_receipt),
+        StorageProviderKind::Aws,
+        &cancel,
+    )
+    .await;
+    let mut legacy_receipt_json = serialized_ambiguous_receipt.clone();
+    legacy_receipt_json
+        .as_object_mut()
+        .expect("receipt serializes as an object")
+        .remove("ownership_ambiguous");
+    let legacy_receipt = serde_json::from_value::<s3::CopyReceipt>(legacy_receipt_json.clone())
+        .expect("restore legacy receipt without ownership proof");
+    let legacy_delete = s3::e2e_delete_move_receipts_checked(
+        &ambiguous_client,
+        "fixture-bucket",
+        "fixture-bucket",
+        std::slice::from_ref(&legacy_receipt),
+        StorageProviderKind::Aws,
+        &cancel,
+    )
+    .await;
+    let ambiguous_source = read(&ambiguous_client, "fixture-bucket", "source.txt").await;
+    let ambiguous_destination = read(&ambiguous_client, "fixture-bucket", "destination.txt").await;
+    let ambiguous_snapshot = ambiguous.snapshot();
+    let ambiguous_safe = ambiguous_copy
+        .as_ref()
+        .err()
+        .is_some_and(|err| err.to_ascii_lowercase().contains("ambiguous"))
+        && serialized_ambiguous_receipt["ownership_ambiguous"] == true
+        && ambiguous_delete
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.contains("ambiguous"))
+        && legacy_delete
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.contains("ambiguous"))
+        && ambiguous_source.as_deref() == Some("source bytes")
+        && ambiguous_destination.as_deref() == Some("external replacement")
+        && ambiguous_snapshot["complete_attempts"] == 2
+        && ambiguous_snapshot["consumed_upload_seen"] == true
+        && ambiguous_snapshot["source_delete_requests"] == 0;
+    record_move_safety(
+        "ambiguous multipart recovery survives JSON receipt round trip and cannot delete the source",
+        ambiguous_safe,
+        serde_json::json!({
+            "copy_error": format!("{:?}", ambiguous_copy),
+            "serialized_ambiguous_receipt": serialized_ambiguous_receipt,
+            "delete": format!("{:?}", ambiguous_delete),
+            "legacy_receipt_without_ownership_claim": legacy_receipt_json,
+            "legacy_delete": format!("{:?}", legacy_delete),
+            "source_after": ambiguous_source,
+            "destination_after": ambiguous_destination,
+            "fixture": ambiguous_snapshot,
+        }),
+    );
+    ambiguous.finish().await;
+
+    let null_version = MoveSafetyHttpFixture::start(
+        MoveSafetyCopyMode::Ordinary,
+        Some("null"),
+        Some("Suspended"),
+        None,
+        b"source bytes".len() as u64,
+    )
+    .await;
+    let null_client = null_version.client();
+    let null_copy = s3::e2e_copy_with_receipt(
+        &null_client,
+        "fixture-bucket",
+        "source.txt",
+        "destination.txt",
+        StorageProviderKind::Aws,
+        &cancel,
+    )
+    .await;
+    let mut downgraded_json = null_copy
+        .as_ref()
+        .ok()
+        .map(|receipt| serde_json::to_value(receipt).expect("serialize null-version copy receipt"));
+    if let Some(receipt) = downgraded_json.as_mut() {
+        receipt["source_version_id"] = serde_json::Value::Null;
+    }
+    let downgraded_receipt = downgraded_json
+        .clone()
+        .map(serde_json::from_value::<s3::CopyReceipt>)
+        .transpose()
+        .expect("restore downgraded persisted receipt");
+    let null_delete = match downgraded_receipt {
+        Some(receipt) => {
+            s3::e2e_delete_move_receipts_checked(
+                &null_client,
+                "fixture-bucket",
+                "fixture-bucket",
+                std::slice::from_ref(&receipt),
+                StorageProviderKind::Aws,
+                &cancel,
+            )
+            .await
+        }
+        None => Err("ordinary copy did not return a receipt".to_string()),
+    };
+    let null_source = read(&null_client, "fixture-bucket", "source.txt").await;
+    let null_destination = read(&null_client, "fixture-bucket", "destination.txt").await;
+    let null_snapshot = null_version.snapshot();
+    let null_safe = null_copy.is_ok()
+        && null_delete
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.contains("mutable null version"))
+        && null_source.as_deref() == Some("source bytes")
+        && null_destination.as_deref() == Some("source bytes")
+        && null_snapshot["source_delete_requests"] == 0;
+    record_move_safety(
+        "JSON-null source version claim cannot retire a live suspended-bucket null version",
+        null_safe,
+        serde_json::json!({
+            "copy": format!("{:?}", null_copy),
+            "persisted_receipt": downgraded_json,
+            "delete": format!("{:?}", null_delete),
+            "source_after": null_source,
+            "destination_after": null_destination,
+            "fixture": null_snapshot,
+        }),
+    );
+    null_version.finish().await;
+
+    let omitted_version = MoveSafetyHttpFixture::start(
+        MoveSafetyCopyMode::Ordinary,
+        None,
+        Some("Suspended"),
+        None,
+        b"source bytes".len() as u64,
+    )
+    .await;
+    let omitted_client = omitted_version.client();
+    let omitted_copy = s3::e2e_copy_with_receipt(
+        &omitted_client,
+        "fixture-bucket",
+        "source.txt",
+        "destination.txt",
+        StorageProviderKind::Aws,
+        &cancel,
+    )
+    .await;
+    let omitted_receipt = omitted_copy
+        .as_ref()
+        .ok()
+        .map(serde_json::to_value)
+        .transpose()
+        .expect("serialize omitted-version copy receipt")
+        .map(serde_json::from_value::<s3::CopyReceipt>)
+        .transpose()
+        .expect("restore omitted-version receipt");
+    let omitted_delete = match omitted_receipt {
+        Some(receipt) => {
+            s3::e2e_delete_move_receipts_checked(
+                &omitted_client,
+                "fixture-bucket",
+                "fixture-bucket",
+                std::slice::from_ref(&receipt),
+                StorageProviderKind::Aws,
+                &cancel,
+            )
+            .await
+        }
+        None => Err("ordinary copy did not return a receipt".to_string()),
+    };
+    let omitted_source = read(&omitted_client, "fixture-bucket", "source.txt").await;
+    let omitted_destination = read(&omitted_client, "fixture-bucket", "destination.txt").await;
+    let omitted_snapshot = omitted_version.snapshot();
+    let versioning_probe_seen = omitted_snapshot["requests"]
+        .as_array()
+        .is_some_and(|requests| {
+            requests.iter().any(|request| {
+                request.as_str().is_some_and(|line| {
+                    line.starts_with("GET /fixture-bucket/?")
+                        && line.to_ascii_lowercase().contains("versioning")
+                })
+            })
+        });
+    let omitted_safe = omitted_copy.is_ok()
+        && omitted_delete
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.contains("versioned bucket"))
+        && omitted_source.as_deref() == Some("source bytes")
+        && omitted_destination.as_deref() == Some("source bytes")
+        && omitted_snapshot["source_delete_requests"] == 0
+        && versioning_probe_seen;
+    record_move_safety(
+        "missing HEAD version header triggers a live bucket-versioning check and refuses suspended-bucket deletion",
+        omitted_safe,
+        serde_json::json!({
+            "copy": format!("{:?}", omitted_copy),
+            "delete": format!("{:?}", omitted_delete),
+            "source_after": omitted_source,
+            "destination_after": omitted_destination,
+            "versioning_probe_seen": versioning_probe_seen,
+            "fixture": omitted_snapshot,
+        }),
+    );
+    omitted_version.finish().await;
+
+    let denied_versioning = MoveSafetyHttpFixture::start(
+        MoveSafetyCopyMode::Ordinary,
+        None,
+        None,
+        Some("fixture denies s3:GetBucketVersioning"),
+        b"source bytes".len() as u64,
+    )
+    .await;
+    let denied_client = denied_versioning.client();
+    let denied_copy = s3::e2e_copy_with_receipt(
+        &denied_client,
+        "fixture-bucket",
+        "source.txt",
+        "destination.txt",
+        StorageProviderKind::Aws,
+        &cancel,
+    )
+    .await;
+    let denied_receipt = denied_copy
+        .as_ref()
+        .ok()
+        .map(|receipt| serde_json::to_value(receipt).expect("serialize denied-permission receipt"))
+        .map(serde_json::from_value::<s3::CopyReceipt>)
+        .transpose()
+        .expect("restore denied-permission receipt");
+    let denied_delete = match denied_receipt {
+        Some(receipt) => {
+            s3::e2e_delete_move_receipts_checked(
+                &denied_client,
+                "fixture-bucket",
+                "fixture-bucket",
+                std::slice::from_ref(&receipt),
+                StorageProviderKind::Aws,
+                &cancel,
+            )
+            .await
+        }
+        None => Err("ordinary copy did not return a receipt".to_string()),
+    };
+    let denied_source = read(&denied_client, "fixture-bucket", "source.txt").await;
+    let denied_destination = read(&denied_client, "fixture-bucket", "destination.txt").await;
+    let denied_snapshot = denied_versioning.snapshot();
+    let denied_lookup_seen = denied_snapshot["requests"]
+        .as_array()
+        .is_some_and(|requests| {
+            requests.iter().any(|request| {
+                request.as_str().is_some_and(|line| {
+                    line.starts_with("GET /fixture-bucket/?")
+                        && line.to_ascii_lowercase().contains("versioning")
+                })
+            })
+        });
+    let denied_safe = denied_copy.is_ok()
+        && denied_delete.as_ref().err().is_some_and(|err| {
+            err.contains("s3:GetBucketVersioning")
+                && err.contains("source deletion was refused")
+                && err.contains("source was retained")
+        })
+        && denied_source.as_deref() == Some("source bytes")
+        && denied_destination.as_deref() == Some("source bytes")
+        && denied_snapshot["source_delete_requests"] == 0
+        && denied_lookup_seen;
+    record_move_safety(
+        "denied bucket-versioning lookup names the needed permission and refuses source deletion",
+        denied_safe,
+        serde_json::json!({
+            "copy": format!("{:?}", denied_copy),
+            "delete": format!("{:?}", denied_delete),
+            "source_after": denied_source,
+            "destination_after": denied_destination,
+            "versioning_lookup_seen": denied_lookup_seen,
+            "fixture": denied_snapshot,
+        }),
+    );
+    denied_versioning.finish().await;
+
+    let ordinary = MoveSafetyHttpFixture::start(
+        MoveSafetyCopyMode::Ordinary,
+        None,
+        None,
+        None,
+        b"source bytes".len() as u64,
+    )
+    .await;
+    let ordinary_client = ordinary.client();
+    let ordinary_copy = s3::e2e_copy_with_receipt(
+        &ordinary_client,
+        "fixture-bucket",
+        "source.txt",
+        "destination.txt",
+        StorageProviderKind::Aws,
+        &cancel,
+    )
+    .await;
+    let ordinary_receipt = ordinary_copy
+        .as_ref()
+        .ok()
+        .map(|receipt| serde_json::to_value(receipt).expect("serialize ordinary copy receipt"))
+        .map(serde_json::from_value::<s3::CopyReceipt>)
+        .transpose()
+        .expect("restore ordinary persisted receipt");
+    let ordinary_delete = match ordinary_receipt {
+        Some(receipt) => {
+            s3::e2e_delete_move_receipts_checked(
+                &ordinary_client,
+                "fixture-bucket",
+                "fixture-bucket",
+                std::slice::from_ref(&receipt),
+                StorageProviderKind::Aws,
+                &cancel,
+            )
+            .await
+        }
+        None => Err("ordinary copy did not return a receipt".to_string()),
+    };
+    let ordinary_source = read(&ordinary_client, "fixture-bucket", "source.txt").await;
+    let ordinary_destination = read(&ordinary_client, "fixture-bucket", "destination.txt").await;
+    let ordinary_snapshot = ordinary.snapshot();
+    let ordinary_safe = ordinary_copy.is_ok()
+        && ordinary_delete.as_ref().is_ok_and(|deleted| *deleted == 1)
+        && ordinary_source.is_none()
+        && ordinary_destination.as_deref() == Some("source bytes")
+        && ordinary_snapshot["source_delete_requests"] == 1;
+    record_move_safety(
+        "normal unversioned copy receipt still permits a matching move and retains the copied destination",
+        ordinary_safe,
+        serde_json::json!({
+            "copy": format!("{:?}", ordinary_copy),
+            "delete": format!("{:?}", ordinary_delete),
+            "source_after": ordinary_source,
+            "destination_after": ordinary_destination,
+            "fixture": ordinary_snapshot,
+        }),
+    );
+    ordinary.finish().await;
+    assert!(
+        ambiguous_safe && null_safe && omitted_safe && denied_safe && ordinary_safe,
+        "move-safety E2E failed; inspect the JSON report for each independent scenario"
+    );
+}
+
 #[tokio::test]
 #[ignore = "needs the MinIO E2E runner (npm run test:e2e:minio)"]
 async fn e2e_unversioned_move_preflights_every_source_before_first_delete() {

@@ -594,6 +594,60 @@ pub(super) async fn current_source_identity_matches(
     ))
 }
 
+/// An unversioned receipt does not bind a source version ID, so check the live
+/// bucket/object kind independently of the persisted claim. This rejects a
+/// suspended bucket's mutable null version even when JSON `null` was parsed as
+/// `None`, and fails closed if a versioning-enabled provider omits its HEAD
+/// version header.
+async fn validate_live_unversioned_source_kind(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    let head_request = client.head_object().bucket(bucket).key(key).send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = head_request => match result {
+            Ok(head) => head,
+            Err(err) if is_not_found(&err) => return Ok(()),
+            Err(err) => return Err(format!("Failed to verify live version kind for source '{}': {}. Source deletion was refused.", key, err)),
+        },
+    };
+
+    if let Some(version_id) = readable_version_id(head.version_id()) {
+        if version_id.eq_ignore_ascii_case("null") {
+            return Err(format!(
+                "Source '{}' has a mutable null version ID; source deletion was refused.",
+                key
+            ));
+        }
+        return Err(format!(
+            "Source '{}' is versioned but its receipt has no immutable version ID; source deletion was refused.",
+            key
+        ));
+    }
+
+    let versioning_request = client.get_bucket_versioning().bucket(bucket).send();
+    let versioning = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = versioning_request => result.map_err(|err| format!(
+            "Could not verify bucket versioning for source '{}': {}. Ensure this caller has s3:GetBucketVersioning so a missing HEAD version ID can be classified safely; source deletion was refused and this source was retained.",
+            key, err
+        ))?,
+    };
+    if versioning.status() == Some(&aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+        || versioning.status() == Some(&aws_sdk_s3::types::BucketVersioningStatus::Suspended)
+    {
+        return Err(format!(
+            "Source '{}' is in a versioned bucket but its receipt has no immutable version ID; source deletion was refused.",
+            key
+        ));
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SourceDeleteDecision {
     AlreadyDeleted,
@@ -813,6 +867,12 @@ pub(super) fn validate_unversioned_receipt_fingerprints(
     receipts: &[CopyReceipt],
 ) -> Result<(), String> {
     for receipt in receipts {
+        if receipt.ownership_ambiguous {
+            return Err(format!(
+                "Destination '{}' has ambiguous copy ownership; source deletion was refused and both objects were retained.",
+                receipt.destination_key
+            ));
+        }
         if readable_version_id(receipt.source_version_id.as_deref())
             .is_some_and(|version_id| version_id.eq_ignore_ascii_case("null"))
         {
@@ -895,6 +955,8 @@ pub(super) async fn delete_unversioned_receipts_checked(
     // already visible on a later receipt from leaving an avoidable partial move.
     let mut source_present = Vec::with_capacity(receipts.len());
     for receipt in receipts {
+        validate_live_unversioned_source_kind(client, src_bucket, &receipt.source_key, cancel)
+            .await?;
         match current_source_identity_matches(
             client,
             src_bucket,
@@ -929,6 +991,8 @@ pub(super) async fn delete_unversioned_receipts_checked(
         // path does. `None` means someone else already deleted it, which
         // completes the move; `Some(false)` is a concurrent change and fails
         // closed.
+        validate_live_unversioned_source_kind(client, src_bucket, &receipt.source_key, cancel)
+            .await?;
         match current_source_identity_matches(
             client,
             src_bucket,
@@ -1033,6 +1097,12 @@ pub(super) async fn delete_move_receipts_checked(
 ) -> Result<u32, String> {
     if receipts.is_empty() {
         return Ok(0);
+    }
+    if let Some(receipt) = receipts.iter().find(|receipt| receipt.ownership_ambiguous) {
+        return Err(format!(
+            "Destination '{}' has ambiguous copy ownership; source deletion was refused and both objects were retained.",
+            receipt.destination_key
+        ));
     }
     require_conditional_delete_support(provider, &receipts[0].source_key)?;
 

@@ -59,6 +59,8 @@ export interface CopyReceipt {
   destination_acl_fingerprint: string;
   destination_tag_fingerprint: string;
   destination_version_id: string | null;
+  /** True when recovery cannot prove the destination belongs to this copy. */
+  ownership_ambiguous: boolean;
 }
 
 export interface TransferItem {
@@ -955,6 +957,8 @@ function parseCopyReceipts(value: unknown): CopyReceipt[] | undefined {
       !isCanonicalFingerprint(receipt.destination_fingerprint) ||
       !isCanonicalFingerprint(receipt.destination_acl_fingerprint) ||
       !isCanonicalFingerprint(receipt.destination_tag_fingerprint) ||
+      (receipt.ownership_ambiguous !== undefined &&
+        typeof receipt.ownership_ambiguous !== "boolean") ||
       (receipt.destination_version_id !== null &&
         typeof receipt.destination_version_id !== "string") ||
       sourceKeys.has(receipt.source_key) ||
@@ -977,6 +981,10 @@ function parseCopyReceipts(value: unknown): CopyReceipt[] | undefined {
       destination_acl_fingerprint: receipt.destination_acl_fingerprint,
       destination_tag_fingerprint: receipt.destination_tag_fingerprint,
       destination_version_id: receipt.destination_version_id,
+      // Receipts written before ownership identity was recorded cannot prove
+      // that an existing destination was created by this move. Preserve a
+      // native explicit value, but treat a missing legacy field as ambiguous.
+      ownership_ambiguous: receipt.ownership_ambiguous !== false,
     });
   }
   return receipts;
@@ -1896,9 +1904,24 @@ function togglePauseTransferItem(id: number): void {
 }
 
 export function retryFailedTransfers(): void {
+  let ambiguousMovesHeld = 0;
   for (const item of queue) {
     if (item.status !== "error") continue;
+    if (
+      item.operation === "move" &&
+      item.receipts?.some((receipt) => receipt.ownership_ambiguous)
+    ) {
+      ambiguousMovesHeld += 1;
+      continue;
+    }
     resetForRetry(item, { clearPause: true });
+  }
+  if (ambiguousMovesHeld > 0) {
+    const message =
+      `${ambiguousMovesHeld} move(s) remain failed because destination ownership is ambiguous. ` +
+      "Inspect both objects and clear those rows only after reconciling them.";
+    logActivity(message, "warning");
+    showToast(message, { type: "warning", duration: 0 });
   }
   queueRender();
   writeQueueManifest();
@@ -1923,6 +1946,7 @@ export function clearNonActiveTransfers(): void {
   const removed = queue.filter(
     (item) => item.status !== "queued" && item.status !== "uploading",
   );
+  for (const item of removed) item.browserFile = undefined;
   queue = queue.filter(
     (item) => item.status === "queued" || item.status === "uploading",
   );
@@ -1985,6 +2009,7 @@ export function clearCompletedTransfers(): void {
   const removed = queue.filter(
     (item) => item.status !== "queued" && item.status !== "uploading",
   );
+  for (const item of removed) item.browserFile = undefined;
   queue = queue.filter(
     (item) => item.status === "queued" || item.status === "uploading",
   );
@@ -2080,7 +2105,7 @@ export function enqueueFiles(
       bucket,
       fileName: file.name,
       filePath,
-      browserFile: file,
+      browserFile: filePath ? undefined : file,
       key,
       size: file.size,
       status: "queued",
@@ -2915,6 +2940,11 @@ async function executeTransfer(
     if (receipts.length === 0) {
       throw new Error("Move copy receipts are unavailable.");
     }
+    if (receipts.some((receipt) => receipt.ownership_ambiguous)) {
+      throw new Error(
+        "Destination ownership is ambiguous; source was retained. Inspect both objects before clearing this transfer.",
+      );
+    }
     // Pause/cancel can arrive while the copy or manifest write is in flight.
     // Re-check after the durable marker so it cannot fall through to deletion.
     if (item.paused || item.cancelRequested) {
@@ -2983,7 +3013,6 @@ async function executeTransfer(
       overwrite,
       checksumVerification: effective.enableTransferChecksumVerification,
     });
-    item.browserFile = undefined;
   } else {
     throw new Error("No upload source available for transfer item.");
   }

@@ -29,8 +29,10 @@ const expected = [
   "publish_hard_link_path_retains_source_until_cleanup",
   "publish_copy_fallback_preserves_create_only_bytes",
   "publish_existing_destination_is_preserved_and_temp_is_retained_for_checkpoint",
-  "publish_copy_error_cleans_its_reservation",
-  "publish_sync_error_removes_destination_and_retains_checkpoint",
+  "publish_copy_error_retains_partial_reservation_for_safe_recovery",
+  "publish_sync_error_retains_destination_and_checkpoint",
+  "publish_sync_error_preserves_an_unrelated_destination_replacement",
+  "publish_final_cleanup_sync_error_keeps_durably_published_result_successful",
 ];
 const checks = [];
 const scenarios = [];
@@ -97,7 +99,7 @@ function passingOutput(overrides = {}) {
   return [
     ...names.map(([name, status]) => `test tests::${name} ... ${status}`),
     "",
-    "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 167 filtered out; finished in 0.02s",
+    `test result: ok. ${expected.length} passed; 0 failed; 0 ignored; 0 measured; 167 filtered out; finished in 0.02s`,
     "",
   ].join("\n");
 }
@@ -217,7 +219,7 @@ try {
       report.passed === true &&
       report.testMode === true &&
       report.exercisedRealMoveFileW === false &&
-      report.testCount === 6 &&
+      report.testCount === expected.length &&
       report.tests.every((test) => test.passed) &&
       calls === 1 &&
       invocation?.[0] === "test" &&
@@ -225,27 +227,12 @@ try {
       invocation?.includes("publish_") === true,
   );
 
-  const oldName =
-    "publish_copy_error_cleans_reservation_and_retains_checkpoint";
+  const oldName = "publish_copy_error_cleans_its_reservation";
   await runCase(
     "old-stale-name-stays-missing",
     passingOutput({
-      publish_copy_error_cleans_its_reservation: [oldName, "ok"],
-    }),
-    0,
-    (report, closed) =>
-      closed.code === 1 &&
-      report.passed === false &&
-      report.tests.find(
-        (test) => test.name === "publish_copy_error_cleans_its_reservation",
-      )?.passed === false,
-  );
-
-  await runCase(
-    "near-match-stays-missing",
-    passingOutput({
-      publish_copy_error_cleans_its_reservation: [
-        "publish_copy_error_cleans_its_reservation_extra",
+      publish_copy_error_retains_partial_reservation_for_safe_recovery: [
+        oldName,
         "ok",
       ],
     }),
@@ -254,15 +241,36 @@ try {
       closed.code === 1 &&
       report.passed === false &&
       report.tests.find(
-        (test) => test.name === "publish_copy_error_cleans_its_reservation",
+        (test) =>
+          test.name ===
+          "publish_copy_error_retains_partial_reservation_for_safe_recovery",
+      )?.passed === false,
+  );
+
+  await runCase(
+    "near-match-stays-missing",
+    passingOutput({
+      publish_copy_error_retains_partial_reservation_for_safe_recovery: [
+        "publish_copy_error_retains_partial_reservation_for_safe_recovery_extra",
+        "ok",
+      ],
+    }),
+    0,
+    (report, closed) =>
+      closed.code === 1 &&
+      report.passed === false &&
+      report.tests.find(
+        (test) =>
+          test.name ===
+          "publish_copy_error_retains_partial_reservation_for_safe_recovery",
       )?.passed === false,
   );
 
   await runCase(
     "failed-native-test-fails-report",
     passingOutput({
-      publish_copy_error_cleans_its_reservation: [
-        "publish_copy_error_cleans_its_reservation",
+      publish_copy_error_retains_partial_reservation_for_safe_recovery: [
+        "publish_copy_error_retains_partial_reservation_for_safe_recovery",
         "FAILED",
       ],
     }),
@@ -272,13 +280,14 @@ try {
       report.passed === false &&
       report.tests.some(
         (test) =>
-          test.name === "publish_copy_error_cleans_its_reservation" &&
+          test.name ===
+            "publish_copy_error_retains_partial_reservation_for_safe_recovery" &&
           test.passed === false,
       ),
   );
 
   const omittedOutput = passingOutput().replace(
-    "test tests::publish_copy_error_cleans_its_reservation ... ok\n",
+    "test tests::publish_copy_error_retains_partial_reservation_for_safe_recovery ... ok\n",
     "",
   );
   await runCase(
@@ -289,7 +298,9 @@ try {
       closed.code === 1 &&
       report.passed === false &&
       report.tests.find(
-        (test) => test.name === "publish_copy_error_cleans_its_reservation",
+        (test) =>
+          test.name ===
+          "publish_copy_error_retains_partial_reservation_for_safe_recovery",
       )?.passed === false,
   );
 
@@ -304,9 +315,19 @@ try {
       report.tests.every((test) => test.passed),
   );
 
+  await runCase(
+    "missing-final-cleanup-sync-regression-fails-report",
+    allPassing.replace(
+      "test tests::publish_final_cleanup_sync_error_keeps_durably_published_result_successful ... ok\n",
+      "",
+    ),
+    0,
+    (report, closed) => closed.code === 1 && report.passed === false,
+  );
+
   if (process.platform !== "win32") await runNonWindowsGateCase();
 
-  const expectedChecks = process.platform === "win32" ? 6 : 7;
+  const expectedChecks = process.platform === "win32" ? 7 : 8;
   const passed =
     checks.length === expectedChecks && checks.every((check) => check.passed);
   const report = {

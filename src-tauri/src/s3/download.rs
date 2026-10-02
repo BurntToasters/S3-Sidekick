@@ -347,6 +347,295 @@ pub(super) async fn sync_completed_download_file(temp_path: &Path) -> Result<(),
         .map_err(|e| format!("Failed to sync completed download: {}", e))
 }
 
+/// File identity for the scratch inode trusted by one parallel download.
+/// Workers reopen the pathname independently so each has its own seek cursor,
+/// but they must all resolve to this original file.
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DownloadScratchIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DownloadScratchIdentity {
+    volume: u32,
+    file_index: u64,
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DownloadScratchIdentity;
+
+fn download_scratch_identity(file: &std::fs::File) -> std::io::Result<DownloadScratchIdentity> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "download scratch is not a regular file",
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(DownloadScratchIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+
+        if metadata.file_attributes() & 0x0000_0400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "download scratch is a Windows reparse point",
+            ));
+        }
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.map_err(
+            |error| {
+                std::io::Error::other(format!(
+                    "download scratch identity lookup failed: {}",
+                    error
+                ))
+            },
+        )?;
+        if info.dwFileAttributes & 0x0000_0400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "download scratch is a Windows reparse point",
+            ));
+        }
+        let file_index = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+        if info.dwVolumeSerialNumber == 0 || file_index == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "download scratch stable file identity is unavailable",
+            ));
+        }
+        Ok(DownloadScratchIdentity {
+            volume: info.dwVolumeSerialNumber,
+            file_index,
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "download scratch identity is unsupported on this platform",
+        ))
+    }
+}
+
+fn open_download_scratch_file(
+    path: &Path,
+    create: bool,
+    expected_identity: Option<&DownloadScratchIdentity>,
+) -> std::io::Result<(std::fs::File, DownloadScratchIdentity)> {
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(create)
+        .truncate(false);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Rust's portable OpenOptionsExt API accepts raw flags. These values are
+        // O_NOFOLLOW on the supported Unix desktop targets; unknown targets fail
+        // closed below instead of opening a link.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const O_NOFOLLOW: i32 = 0x0002_0000;
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
+        const O_NOFOLLOW: i32 = 0x0000_0100;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        )))]
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no-follow download scratch opens are unsupported on this Unix platform",
+        ));
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
+        options.custom_flags(O_NOFOLLOW);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    return Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no-follow download scratch opens are unsupported on this platform",
+    ));
+
+    let file = options.open(path)?;
+    let identity = download_scratch_identity(&file)?;
+    if expected_identity.is_some_and(|expected| expected != &identity) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "download scratch file identity changed",
+        ));
+    }
+    Ok((file, identity))
+}
+
+async fn open_download_scratch_async(
+    path: &Path,
+    create: bool,
+    expected_identity: Option<DownloadScratchIdentity>,
+) -> Result<(tokio::fs::File, DownloadScratchIdentity), String> {
+    let path = path.to_path_buf();
+    let (file, identity) = tokio::task::spawn_blocking(move || {
+        open_download_scratch_file(&path, create, expected_identity.as_ref())
+    })
+    .await
+    .map_err(|error| format!("Download scratch open task failed: {}", error))?
+    .map_err(|error| {
+        format!(
+            "Failed to open download scratch without following links; scratch and checkpoint were retained: {}",
+            error
+        )
+    })?;
+    Ok((tokio::fs::File::from_std(file), identity))
+}
+
+async fn verify_download_scratch_checksum(
+    path: &Path,
+    identity: &DownloadScratchIdentity,
+    expected: &ExpectedChecksum,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    use tokio::io::AsyncReadExt;
+
+    let (mut file, _) = open_download_scratch_async(path, false, Some(identity.clone())).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 256 * 1024];
+    loop {
+        if cancel.is_cancelled() {
+            return Err(cancelled_error());
+        }
+        let count = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = file.read(&mut buffer) => {
+                result.map_err(|error| format!("Failed to read verified download scratch: {}", error))?
+            }
+        };
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let digest = hasher.finalize();
+    match expected {
+        ExpectedChecksum::Hex(hex) => {
+            let actual = digest_to_hex(&digest);
+            if actual != *hex {
+                return Err(encode_transfer_error(
+                    "checksum_mismatch",
+                    false,
+                    None,
+                    format!(
+                        "Checksum verification failed: expected {}, got {}.",
+                        hex, actual
+                    ),
+                ));
+            }
+        }
+        ExpectedChecksum::Base64(base64) => {
+            let actual = digest_to_base64(&digest);
+            if actual != *base64 {
+                return Err(encode_transfer_error(
+                    "checksum_mismatch",
+                    false,
+                    None,
+                    "Checksum verification failed.".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn sync_verified_download_scratch_file(
+    temp_path: &Path,
+    identity: &DownloadScratchIdentity,
+) -> Result<(), String> {
+    let (file, _) = open_download_scratch_async(temp_path, false, Some(identity.clone())).await?;
+    file.sync_all()
+        .await
+        .map_err(|error| format!("Failed to sync verified download scratch: {}", error))
+}
+
+async fn publish_verified_download_file(
+    temp_path: &Path,
+    identity: &DownloadScratchIdentity,
+    destination_path: &Path,
+    overwrite: bool,
+    keep_temp_on_failure: bool,
+) -> Result<(), String> {
+    let temp_path = temp_path.to_path_buf();
+    let identity = identity.clone();
+    let destination_path = destination_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let (_validated_file, _) = open_download_scratch_file(&temp_path, false, Some(&identity))
+            .map_err(|error| {
+                format!(
+                    "Download scratch identity changed before publication; scratch and checkpoint were retained: {}",
+                    error
+                )
+            })?;
+        crate::publish_temp_file(
+            &temp_path,
+            &destination_path,
+            overwrite,
+            keep_temp_on_failure,
+        )
+    })
+    .await
+    .map_err(|error| format!("Download finalize task failed: {}", error))?
+    .map_err(|error| format!("Failed to finalize download: {}", error))
+}
+
 pub(super) async fn publish_completed_download_file(
     temp_path: &Path,
     destination_path: &Path,
@@ -480,11 +769,12 @@ pub(super) fn ensure_range_honoured(
     }
 }
 
-pub(super) async fn download_parallel_part(
+async fn download_parallel_part(
     client: Client,
     bucket: String,
     key: String,
     temp_path: PathBuf,
+    temp_identity: DownloadScratchIdentity,
     start: u64,
     end: u64,
     version_id: Option<String>,
@@ -525,11 +815,7 @@ pub(super) async fn download_parallel_part(
     ensure_range_honoured(output.content_range(), output.content_length(), start, end)?;
 
     let mut reader = output.body.into_async_read();
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(&temp_path)
-        .await
-        .map_err(|e| format!("Failed to open temp file: {}", e))?;
+    let (mut file, _) = open_download_scratch_async(&temp_path, false, Some(temp_identity)).await?;
     file.seek(std::io::SeekFrom::Start(start))
         .await
         .map_err(|e| format!("Failed to seek temp file: {}", e))?;
@@ -776,20 +1062,18 @@ pub(crate) async fn download_object_parallel(
     }
 
     // Decide whether a resume is actually safe before trusting any completed
-    // parts. The scratch file must already exist at exactly the expected length:
-    // a checkpoint whose scratch file was deleted or truncated used to be
-    // honoured anyway, and because the file is reopened with `create(true)` and
-    // `set_len(total_bytes)` the missing regions were silently fabricated as
-    // zeroes. Byte accounting still added up, so the corruption was invisible
-    // unless the object happened to carry a checksum.
-    let temp_len = tokio::fs::metadata(&temp_path)
+    // parts. Read the length from the no-follow handle: a missing or truncated
+    // scratch cannot validate a checkpoint, and a same-length symlink is never
+    // accepted as the scratch file.
+    let (init_file, temp_identity) = open_download_scratch_async(&temp_path, true, None).await?;
+    let temp_len = init_file
+        .metadata()
         .await
-        .ok()
-        .map(|meta| meta.len());
-    let temp_usable = temp_len == Some(total_bytes);
+        .map_err(|error| format!("Failed to inspect opened download scratch: {}", error))
+        .map(|metadata| metadata.len())?;
+    let temp_usable = temp_len == total_bytes;
 
     let mut completed = vec![false; total_parts as usize];
-    let mut resumed = false;
 
     if checkpoint_enabled {
         if let Some(id) = checkpoint_id.as_deref() {
@@ -828,36 +1112,22 @@ pub(crate) async fn download_object_parallel(
                     for part in normalize_checkpoint_parts(&payload.completed_parts, total_parts) {
                         completed[part as usize] = true;
                     }
-                    resumed = completed.iter().any(|done| *done);
                 }
             }
         }
     }
 
-    // Anything we are not resuming into starts from a clean slate. The durable
-    // scratch lease issued above authorizes replacing a leftover file from a
-    // crashed attempt that had no valid checkpoint.
-    if !resumed && tokio::fs::try_exists(&temp_path).await.unwrap_or(false) {
-        clear_download_scratch_async(&temp_path).await?;
-    }
-
-    let init_file = tokio::fs::OpenOptions::new()
-        .create(true)
-        // Do NOT truncate: on resume we reuse the existing temp file and keep the
-        // bytes already written for completed parts.
-        .truncate(false)
-        .write(true)
-        .open(&temp_path)
-        .await
-        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+    // Keep the initial no-follow handle through sizing and sync. When resume is
+    // rejected, every part is scheduled again and overwrites its full range, so
+    // unlinking a pathname here would add a race without clearing usable bytes.
     init_file
         .set_len(total_bytes)
         .await
-        .map_err(|e| format!("Failed to set temp file length: {}", e))?;
+        .map_err(|e| format!("Failed to size opened download scratch: {}", e))?;
     init_file
         .sync_all()
         .await
-        .map_err(|e| format!("Failed to sync temp file: {}", e))?;
+        .map_err(|e| format!("Failed to sync opened download scratch: {}", e))?;
     drop(init_file);
 
     let mut completed_bytes = 0u64;
@@ -921,6 +1191,7 @@ pub(crate) async fn download_object_parallel(
             let bucket_clone = bucket.clone();
             let key_clone = key.clone();
             let path_clone = temp_path.clone();
+            let identity_clone = temp_identity.clone();
             let client_clone = client.clone();
             let version_id_clone = object_version_id.clone();
             let etag_clone = object_etag.clone();
@@ -931,6 +1202,7 @@ pub(crate) async fn download_object_parallel(
                     bucket_clone,
                     key_clone,
                     path_clone,
+                    identity_clone,
                     start,
                     end,
                     version_id_clone,
@@ -1080,10 +1352,14 @@ pub(crate) async fn download_object_parallel(
 
     let final_bytes = bytes_done.load(Ordering::Relaxed);
     let missing_parts = completed.iter().filter(|done| !**done).count();
-    let on_disk = tokio::fs::metadata(&temp_path)
+    let (scratch_file, _) =
+        open_download_scratch_async(&temp_path, false, Some(temp_identity.clone())).await?;
+    let on_disk = scratch_file
+        .metadata()
         .await
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+        .map_err(|error| format!("Failed to inspect verified download scratch: {}", error))?
+        .len();
+    drop(scratch_file);
     // Aggregate byte accounting alone cannot prove the file is intact, so check
     // the part bitmap and the actual file length too.
     if final_bytes != total_bytes || missing_parts > 0 || on_disk != total_bytes {
@@ -1098,7 +1374,9 @@ pub(crate) async fn download_object_parallel(
     }
 
     if let Some(expected) = expected_checksum.as_ref() {
-        if let Err(err) = verify_file_checksum(&temp_path, expected, &cancel).await {
+        if let Err(err) =
+            verify_download_scratch_checksum(&temp_path, &temp_identity, expected, &cancel).await
+        {
             if !checkpoint_enabled {
                 remove_download_scratch(&temp_path).await;
             }
@@ -1106,7 +1384,7 @@ pub(crate) async fn download_object_parallel(
         }
     }
 
-    if let Err(err) = sync_completed_download_file(&temp_path).await {
+    if let Err(err) = sync_verified_download_scratch_file(&temp_path, &temp_identity).await {
         if !checkpoint_enabled {
             remove_download_scratch(&temp_path).await;
         }
@@ -1171,8 +1449,14 @@ pub(crate) async fn download_object_parallel(
     // A checkpointed download keeps its finished scratch if publication fails
     // (for example the old destination is open in another app), so a retry
     // publishes it instead of downloading every byte again.
-    publish_completed_download_file(&temp_path, &destination_path, overwrite, checkpoint_enabled)
-        .await?;
+    publish_verified_download_file(
+        &temp_path,
+        &temp_identity,
+        &destination_path,
+        overwrite,
+        checkpoint_enabled,
+    )
+    .await?;
     release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;
 
     emit_transfer_progress(
@@ -1206,4 +1490,111 @@ pub(crate) async fn download_object_parallel(
     }
 
     Ok(total_bytes)
+}
+
+#[cfg(all(test, unix))]
+mod file_safety_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn scratch_test_dir() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "s3-sidekick-download-scratch-{}-{}",
+            std::process::id(),
+            nonce
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    async fn ranged_response_server() -> (Client, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                if stream.read_exact(&mut byte).await.is_err() {
+                    panic!("client closed before completing the request headers");
+                }
+                request.push(byte[0]);
+                assert!(
+                    request.len() < 16 * 1024,
+                    "request headers exceeded fixture limit"
+                );
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/4\r\nETag: \"fixture-etag\"\r\nConnection: close\r\n\r\nEVIL",
+                )
+                .await
+                .unwrap();
+        });
+
+        let credentials = aws_sdk_s3::config::Credentials::new(
+            "fixture-access",
+            "fixture-secret",
+            None,
+            None,
+            "scratch-safety-test",
+        );
+        let config = aws_sdk_s3::config::Builder::new()
+            .endpoint_url(endpoint)
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(credentials)
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
+            .force_path_style(true)
+            .behavior_version_latest()
+            .build();
+        (Client::from_conf(config), server)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ranged_worker_rejects_same_length_scratch_symlink_without_mutating_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch_test_dir();
+        let temp_path = dir.join("download.tmp");
+        let external_target = dir.join("important.bin");
+        std::fs::write(&external_target, b"SAFE").unwrap();
+        let (_, external_identity) =
+            open_download_scratch_file(&external_target, false, None).unwrap();
+        symlink(&external_target, &temp_path).unwrap();
+        assert_eq!(std::fs::metadata(&temp_path).unwrap().len(), 4);
+
+        let (client, server) = ranged_response_server().await;
+        let cancel: CancelToken = Arc::new(CancelFlag::default());
+        let result = download_parallel_part(
+            client,
+            "bucket".to_string(),
+            "object.bin".to_string(),
+            temp_path,
+            external_identity,
+            0,
+            3,
+            None,
+            "\"fixture-etag\"".to_string(),
+            cancel,
+        )
+        .await;
+        server.await.unwrap();
+
+        assert!(
+            result.is_err(),
+            "ranged worker must reject a symlink scratch entry"
+        );
+        assert_eq!(
+            std::fs::read(&external_target).unwrap(),
+            b"SAFE",
+            "the symlink target must remain unchanged"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

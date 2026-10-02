@@ -22,6 +22,9 @@ const {
   downloadReleaseAsset,
   githubApi,
 } = require("./github-cli.cjs");
+const {
+  verifyReleaseAssetIntegrity,
+} = require("./release-asset-verification.cjs");
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const version = JSON.parse(
@@ -96,6 +99,11 @@ async function main() {
     if (!names.has(name))
       throw new Error(`Published release is missing ${name}.`);
   }
+  verifyReleaseAssetIntegrity({
+    assets,
+    repository: `${owner}/${repository}`,
+    requiredNames: requiredDraftAssetNames(),
+  });
   await verifyUpdaterAssets(assets);
   const live = spawnSync(
     process.execPath,

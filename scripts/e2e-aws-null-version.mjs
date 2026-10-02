@@ -2,7 +2,7 @@
 // Local protocol E2E for the AWS SDK's handling of a suspended-bucket null
 // version. No Docker or cloud credentials are required.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,8 +19,63 @@ const appData = fs.mkdtempSync(
   path.join(os.tmpdir(), "s3sk-null-version-appdata-"),
 );
 
-function run(command, args, options = {}) {
-  return spawnSync(command, args, { encoding: "utf8", ...options });
+function run(command, args, timeoutMs, options = {}) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    const child = spawn(command, args, {
+      detached: process.platform !== "win32",
+      ...options,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const finish = (status, error = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(forceFinish);
+      resolve({ status, error, timedOut, stdout, stderr });
+    };
+    child.stdout.on("data", (chunk) => {
+      stdout = (stdout + chunk.toString()).slice(-16 * 1024 * 1024);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk.toString()).slice(-16 * 1024 * 1024);
+    });
+    let forceFinish;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (process.platform === "win32" && child.pid) {
+        spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          timeout: 5000,
+          stdio: "ignore",
+        });
+      } else if (child.pid) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          /* The process group may already have exited. */
+        }
+      }
+      child.kill("SIGKILL");
+      forceFinish = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+        finish(null, new Error(`${command} timed out after ${timeoutMs} ms`));
+      }, 1000);
+    }, timeoutMs);
+    child.once("error", (error) => finish(null, error));
+    child.once("close", (status) =>
+      finish(
+        status,
+        timedOut
+          ? new Error(`${command} timed out after ${timeoutMs} ms`)
+          : null,
+      ),
+    );
+  });
 }
 
 async function main() {
@@ -36,20 +91,43 @@ async function main() {
   const checksPath = path.join(outDir, "checks.jsonl");
   let cargoStatus = 1;
   let failure = null;
+  let timedOut = false;
+  let phase = "setup";
 
   try {
+    const timeoutMs = Number(
+      process.env.S3_SIDEKICK_AWS_NULL_TIMEOUT_MS || 15 * 60 * 1000,
+    );
+    if (
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs < 100 ||
+      timeoutMs > 60 * 60 * 1000
+    ) {
+      throw new Error(
+        "S3_SIDEKICK_AWS_NULL_TIMEOUT_MS must be an integer from 100 through 3600000.",
+      );
+    }
     if (!fs.existsSync(path.join(root, "dist", "index.html"))) {
-      const build = run("npm", ["run", "build"], { cwd: root });
+      phase = "frontend-build";
+      const build = await run(
+        process.platform === "win32" ? "npm.cmd" : "npm",
+        ["run", "build"],
+        timeoutMs,
+        { cwd: root, shell: process.platform === "win32" },
+      );
       fs.writeFileSync(
         path.join(outDir, "frontend-build.log"),
         `${build.stdout ?? ""}\n${build.stderr ?? ""}`,
       );
+      timedOut = build.timedOut;
+      if (build.error) throw build.error;
       if (build.status !== 0) {
         throw new Error(`frontend build failed with exit ${build.status}`);
       }
     }
 
-    const cargo = run(
+    phase = "cargo-test";
+    const cargo = await run(
       "cargo",
       [
         "test",
@@ -62,6 +140,7 @@ async function main() {
         "--exact",
         "--test-threads=1",
       ],
+      timeoutMs,
       {
         cwd: root,
         stdio: ["ignore", "pipe", "pipe"],
@@ -80,21 +159,34 @@ async function main() {
     process.stdout.write(cargo.stdout ?? "");
     process.stderr.write(cargo.stderr ?? "");
     cargoStatus = cargo.status ?? 1;
+    timedOut = cargo.timedOut;
+    if (cargo.error) throw cargo.error;
   } catch (err) {
     failure = err instanceof Error ? err.message : String(err);
-    fs.writeFileSync(path.join(outDir, "cargo-test.log"), `${failure}\n`);
+    fs.appendFileSync(path.join(outDir, "cargo-test.log"), `${failure}\n`);
   } finally {
-    fs.rmSync(appData, { recursive: true, force: true });
+    try {
+      fs.rmSync(appData, { recursive: true, force: true });
+    } catch (err) {
+      failure = `App-data cleanup failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
-  const checks = fs.existsSync(checksPath)
-    ? fs
+  let checks = [];
+  try {
+    if (fs.existsSync(checksPath)) {
+      checks = fs
         .readFileSync(checksPath, "utf8")
-        .split("\n")
+        .split(/\r?\n/)
         .filter(Boolean)
-        .map((line) => JSON.parse(line))
-    : [];
+        .map((line) => JSON.parse(line));
+    }
+  } catch (err) {
+    failure = `Invalid check artifact: ${err instanceof Error ? err.message : String(err)}`;
+  }
   const passed =
+    !failure &&
+    !timedOut &&
     cargoStatus === 0 &&
     checks.length > 0 &&
     checks.every((check) => check.passed);
@@ -103,6 +195,8 @@ async function main() {
     protocol: "real AWS SDK over loopback HTTP into s3::rename_object",
     ...(failure ? { error: failure } : {}),
     passed,
+    timedOut,
+    phase,
     cargoStatus,
     checkCount: checks.length,
     checks,

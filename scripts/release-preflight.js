@@ -10,6 +10,9 @@ import { isDirectExecution } from "./direct-execution.js";
 const { assertReleaseToolVersions } = createRequire(import.meta.url)(
   "./release-integrity.cjs",
 );
+const { assertStableReleaseOverridesAllowed } = createRequire(import.meta.url)(
+  "./release-policy.cjs",
+);
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -38,6 +41,32 @@ function git(args, rootDirectory = root) {
   }).trimEnd();
 }
 
+function assertReleaseOrigin(rootDirectory) {
+  const owner = process.env.GH_REPO_OWNER || "BurntToasters";
+  const repository = process.env.GH_REPO_NAME || "S3-Sidekick";
+  const expected = `${owner}/${repository}`.toLowerCase();
+  const origins = git(
+    ["remote", "get-url", "--all", "origin"],
+    rootDirectory,
+  ).split(/\r?\n/);
+  for (const origin of origins) {
+    const match = origin.match(
+      /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([^\s?#]+)$/i,
+    );
+    if (
+      !match ||
+      match[1]
+        .replace(/\.git$/i, "")
+        .replace(/\/$/, "")
+        .toLowerCase() !== expected
+    ) {
+      throw new Error(
+        `Release origin must be github.com/${owner}/${repository}; current origin is ${origin}.`,
+      );
+    }
+  }
+}
+
 function runReleasePreflight({ rootDirectory = root } = {}) {
   const packageJson = JSON.parse(
     fs.readFileSync(path.join(rootDirectory, "package.json"), "utf8"),
@@ -47,6 +76,7 @@ function runReleasePreflight({ rootDirectory = root } = {}) {
     root: rootDirectory,
   });
   const version = String(packageJson.version ?? "");
+  assertStableReleaseOverridesAllowed(process.env, version);
   const expectedBranch = expectedReleaseBranch(version);
   const branch = git(["branch", "--show-current"], rootDirectory);
   if (branch !== expectedBranch) {
@@ -65,6 +95,7 @@ function runReleasePreflight({ rootDirectory = root } = {}) {
     );
   }
 
+  assertReleaseOrigin(rootDirectory);
   git(["fetch", "--quiet", "origin"], rootDirectory);
   const upstream = git(
     ["rev-parse", "--abbrev-ref", "@{upstream}"],

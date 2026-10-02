@@ -33,8 +33,10 @@ const expected = [
   "publish_hard_link_path_retains_source_until_cleanup",
   "publish_copy_fallback_preserves_create_only_bytes",
   "publish_existing_destination_is_preserved_and_temp_is_retained_for_checkpoint",
-  "publish_copy_error_cleans_its_reservation",
-  "publish_sync_error_removes_destination_and_retains_checkpoint",
+  "publish_copy_error_retains_partial_reservation_for_safe_recovery",
+  "publish_sync_error_retains_destination_and_checkpoint",
+  "publish_sync_error_preserves_an_unrelated_destination_replacement",
+  "publish_final_cleanup_sync_error_keeps_durably_published_result_successful",
 ];
 
 fs.rmSync(outDir, { recursive: true, force: true });

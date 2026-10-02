@@ -93,7 +93,6 @@ export async function openPreview(key: string): Promise<void> {
 
     if (
       seq !== previewSeq ||
-      previewKey !== key ||
       state.currentBucket !== bucket ||
       state.connectionId !== connectionId ||
       state.connectionIdentity !== connectionIdentity
@@ -137,7 +136,6 @@ export async function openPreview(key: string): Promise<void> {
   } catch (err) {
     if (
       seq !== previewSeq ||
-      previewKey !== key ||
       state.currentBucket !== bucket ||
       state.connectionId !== connectionId ||
       state.connectionIdentity !== connectionIdentity

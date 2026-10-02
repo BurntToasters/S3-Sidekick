@@ -53,6 +53,13 @@ Windows needs Azure Artifact Signing values, including
 All signing hosts need `GPG_KEY_ID`, `GPG_PASSPHRASE`,
 `TAURI_SIGNING_PRIVATE_KEY`, and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
+Draft and published-release verification also require `GPG_KEY_ID` and the
+corresponding public key in the verifier's GPG keyring. Prefer the full primary
+fingerprint. Verification accepts that primary key's signing subkeys and does not
+need the private key or `GPG_PASSPHRASE`. Both gates verify every required installer,
+manifest, and checksum signature, recompute signed checksums against downloaded
+bytes, and require checksum coverage for every payload and updater signature.
+
 ## Run host builds
 
 Run one command per host:

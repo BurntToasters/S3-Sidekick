@@ -29,15 +29,14 @@ v0.11.1 is a hardening release for storage, transfers, and the encrypted vault. 
 - **Pause, cancel & reconnect:** Pause and cancel now reach transfers that are still waiting to start, and a quick pause/resume no longer ends in a false "Transfer cancelled" failure. Disconnecting parks the queue ("Waiting to reconnect") instead of failing every item.
 - **Offline hold:** Local and LAN endpoints (for example MinIO on this machine) keep working when the OS reports no internet.
 - **Downloads:** Resumed downloads report real speed and ETA. A finished download whose destination is briefly locked keeps its data, so a retry does not download it again. A stuck scratch file no longer blocks transfer recovery.
-- **Retries:** Uploads, copies, and folder creation that commit on the server but lose the response now recognise their own write instead of reporting a conflict.
+- **Retries:** Uploads and folder creation that commit on the server but lose the response now recognise their own write instead of reporting a conflict. Copies retain the source when the destination's ownership cannot be proved.
 - **Updates:** Installing an update warns before it interrupts running transfers.
-- **Dropped browser files:** Files dropped from outside the file system (for example from a web page) upload again. v0.11.0 sent them in a form the backend rejected.
 
 ### Data safety
 
 - **Keys with spaces and `+`:** Object listings decode spaces and plus signs correctly for AWS, MinIO, and other S3-compatible servers.
 - **Unconditional writes:** The warning has a "Don't ask again" option, with a toggle in Settings > Transfers. Local S3 emulators other than MinIO on its default port are treated as generic providers and ask first. A large object inside a folder copy or rename now asks instead of failing.
-- **Copy & move:** A single file sent to `folder/` goes inside that folder. Folder copies, moves, and renames work on MinIO (whose ACL responses have no owner). Rollback never deletes an object it cannot prove it created, and it is safer in buckets with versioning suspended.
+- **Copy & move:** A single file sent to `folder/` goes inside that folder. MinIO copies ask before unconditional writes; automatic moves and renames are refused when conditional deletion cannot be guaranteed. Rollback never deletes an object it cannot prove it created, and it is safer in buckets with versioning suspended.
 - **Bookmarks:** Corrupt or locked bookmark storage is never overwritten with an empty list. Deletes ask first and remove the exact bookmark clicked. Export uses a save dialog.
 
 ### Security
