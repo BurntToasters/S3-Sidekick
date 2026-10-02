@@ -1,7 +1,12 @@
 #!/usr/bin/env node
-// Failure-first E2E for the full-stack runner itself. Every run uses a fake
-// app marker, local HTTP servers, fake Docker/tauri-driver processes, and
-// per-case output directories. It never starts Docker or opens app data.
+// Failure-first runner E2E uses fake app, Docker/driver processes, local HTTP,
+// and isolated outputs; it never starts Docker or opens app data. Timeout
+// evidence must exist before process cleanup; native diagnostics stay bounded,
+// and missing X11/listener tools remain visible. A `/status` body can stall
+// after HTTP 200 headers but must remain inside the fetch deadline. A false
+// ready value must delay the sole POST /session until a later true value.
+// Malformed or stalled bodies must not poison later polls, and a stalled body
+// must close before session creation so no polling socket leaks.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -111,6 +116,12 @@ const mode = process.env.S3_TEST_DRIVER_MODE;
 const log = process.env.S3_TEST_DRIVER_LOG;
 const elements = new Map();
 let nextElement = 0;
+let statusChecks = 0;
+let stalledStatusClosed = false;
+if (mode === "session-stall") {
+  process.stderr.write("session-stall-driver-marker\\n");
+  process.stderr.write("x".repeat(600 * 1024));
+}
 if (mode === "ignore-term") {
   process.on("SIGTERM", () => {});
   const fakeApp = spawn(
@@ -149,8 +160,49 @@ const server = http.createServer((request, response) => {
         args: command.args,
       }),
     );
-    if (url.pathname === "/status") return reply(response, 200, { ready: true, message: "" });
+    if (url.pathname === "/status") {
+      statusChecks += 1;
+      if (
+        mode === "status-body-stall" ||
+        (mode === "status-body-stall-once" && statusChecks === 1)
+      ) {
+        response.once("close", () => {
+          stalledStatusClosed = true;
+          record("EVENT", "/status-body-closed", "");
+        });
+        response.writeHead(200, { "content-type": "application/json" });
+        response.flushHeaders();
+        return;
+      }
+      if (mode === "status-malformed-once" && statusChecks === 1) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("{malformed");
+        return;
+      }
+      const ready =
+        mode === "status-not-ready"
+          ? statusChecks >= 4
+          : mode === "status-body-stall-once"
+            ? stalledStatusClosed
+            : true;
+      return reply(response, 200, {
+        ready,
+        message: ready ? "" : "native WebDriver is starting",
+      });
+    }
     if (request.method === "POST" && url.pathname === "/session") {
+      if (mode === "status-not-ready" && statusChecks < 4) {
+        return reply(response, 500, {
+          error: "unknown error",
+          message: "fixture rejects session before status readiness",
+        });
+      }
+      if (mode === "status-body-stall-once" && !stalledStatusClosed) {
+        return reply(response, 500, {
+          error: "unknown error",
+          message: "fixture rejects session while stalled status body is open",
+        });
+      }
       if (mode === "session-stall") return;
       return reply(response, 200, { sessionId: "fixture-session", capabilities: { browserName: "wry" } });
     }
@@ -297,6 +349,12 @@ async function runCase(name, mode, options = {}) {
     S3_SIDEKICK_FULLSTACK_ENDPOINT: health.endpoint,
     S3_SIDEKICK_FULLSTACK_WEBDRIVER_URL: `http://127.0.0.1:${driverPort}`,
     S3_SIDEKICK_FULLSTACK_TEST_TIMEOUT_MS: String(options.timeoutMs ?? 240),
+    S3_SIDEKICK_FULLSTACK_SESSION_TIMEOUT_MS: String(
+      options.sessionTimeoutMs ?? 240,
+    ),
+    S3_SIDEKICK_FULLSTACK_DRIVER_READY_TIMEOUT_MS: String(
+      options.driverReadyTimeoutMs ?? 240,
+    ),
     S3_SIDEKICK_FULLSTACK_ACCEPTANCE_TIMEOUT_MS: String(
       options.acceptanceTimeoutMs ?? options.timeoutMs ?? 240,
     ),
@@ -367,6 +425,37 @@ async function runCase(name, mode, options = {}) {
   const processTreeStopped = processTreePids
     ? Object.values(processTreePids).every((pid) => !isPidAlive(pid))
     : null;
+  const driverRequests = fs
+    .readFileSync(driverLog, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const statusRequestCount = driverRequests.filter(
+    (request) => request.method === "GET" && request.url === "/status",
+  ).length;
+  const sessionRequests = driverRequests.filter(
+    (request) => request.method === "POST" && request.url === "/session",
+  );
+  const statusBodyCloseEvents = driverRequests.filter(
+    (request) =>
+      request.method === "EVENT" && request.url === "/status-body-closed",
+  );
+  const firstSessionIndex = driverRequests.indexOf(sessionRequests[0]);
+  const firstStatusBodyCloseIndex = driverRequests.indexOf(
+    statusBodyCloseEvents[0],
+  );
+  const statusBodyClosedBeforeFirstSession =
+    firstStatusBodyCloseIndex >= 0 &&
+    firstSessionIndex >= 0 &&
+    firstStatusBodyCloseIndex < firstSessionIndex;
+  const statusRequestsBeforeFirstSession =
+    sessionRequests.length === 0
+      ? statusRequestCount
+      : driverRequests
+          .slice(0, driverRequests.indexOf(sessionRequests[0]))
+          .filter(
+            (request) => request.method === "GET" && request.url === "/status",
+          ).length;
   closed.elapsedMs = Date.now() - startedAt;
   health.close();
   let report = null;
@@ -390,6 +479,11 @@ async function runCase(name, mode, options = {}) {
     pendingCleanupRequestSeen,
     processTreePids,
     processTreeStopped,
+    statusRequestCount,
+    sessionRequestCount: sessionRequests.length,
+    statusRequestsBeforeFirstSession,
+    statusBodyCloseEventCount: statusBodyCloseEvents.length,
+    statusBodyClosedBeforeFirstSession,
     watchdogFired: closed.watchdogFired,
   });
   fs.writeFileSync(
@@ -404,6 +498,11 @@ async function runCase(name, mode, options = {}) {
       pendingCleanupRequestSeen,
       processTreePids,
       processTreeStopped,
+      statusRequestCount,
+      sessionRequestCount: sessionRequests.length,
+      statusRequestsBeforeFirstSession,
+      statusBodyCloseEventCount: statusBodyCloseEvents.length,
+      statusBodyClosedBeforeFirstSession,
     });
     record(name, valid, {
       exitCode: closed.code,
@@ -415,6 +514,11 @@ async function runCase(name, mode, options = {}) {
       cleanup: report.cleanup,
       pendingCleanupPassed: pendingCleanupReport?.passed,
       processTreeStopped,
+      statusRequestCount,
+      sessionRequestCount: sessionRequests.length,
+      statusRequestsBeforeFirstSession,
+      statusBodyCloseEventCount: statusBodyCloseEvents.length,
+      statusBodyClosedBeforeFirstSession,
       watchdogFired: closed.watchdogFired,
     });
   }
@@ -455,6 +559,87 @@ try {
       report.failure?.phase === "driver-ready" &&
       report.failure?.kind === "spawn" &&
       fs.existsSync(path.join(outDir, "driver-spawn-failure", "report.json")),
+  });
+
+  await runCase("status-not-ready", "status-not-ready", {
+    timeoutMs: 2500,
+    expect: (report, closed, observation) =>
+      closed.code === 0 &&
+      report.passed === true &&
+      observation.statusRequestCount >= 4 &&
+      observation.statusRequestsBeforeFirstSession >= 4 &&
+      observation.sessionRequestCount === 1,
+  });
+
+  await runCase("status-body-stall", "status-body-stall", {
+    timeoutMs: 1200,
+    driverReadyTimeoutMs: 240,
+    expect: (report, closed, observation) =>
+      closed.code === 1 &&
+      closed.elapsedMs < 1500 &&
+      report.passed === false &&
+      report.failure?.kind === "timeout" &&
+      report.failure?.phase === "driver-ready" &&
+      report.failureDiagnostics === null &&
+      observation.statusRequestCount >= 2 &&
+      observation.sessionRequestCount === 0,
+  });
+
+  await runCase("status-malformed-once-recovers", "status-malformed-once", {
+    timeoutMs: 1200,
+    driverReadyTimeoutMs: 500,
+    expect: (report, closed, observation) =>
+      closed.code === 0 &&
+      report.passed === true &&
+      observation.statusRequestCount === 2 &&
+      observation.sessionRequestCount === 1,
+  });
+
+  await runCase("status-body-stall-once-recovers", "status-body-stall-once", {
+    timeoutMs: 1200,
+    driverReadyTimeoutMs: 500,
+    expect: (report, closed, observation) =>
+      closed.code === 0 &&
+      report.passed === true &&
+      observation.statusRequestCount >= 2 &&
+      observation.sessionRequestCount === 1 &&
+      observation.statusBodyCloseEventCount === 1 &&
+      observation.statusBodyClosedBeforeFirstSession === true,
+  });
+
+  await runCase("session-create-timeout-diagnostics", "session-stall", {
+    timeoutMs: 1200,
+    sessionTimeoutMs: 240,
+    expect: (report, closed, observation) => {
+      const caseOut = path.join(outDir, "session-create-timeout-diagnostics");
+      const driverArtifact = path.join(caseOut, "tauri-driver.log");
+      const diagnosticsArtifact = path.join(caseOut, "session-diagnostics.txt");
+      return (
+        closed.code === 1 &&
+        report.passed === false &&
+        report.failure?.kind === "timeout" &&
+        report.failure?.phase === "session-create" &&
+        report.failureDiagnostics?.captured === true &&
+        report.failureDiagnostics?.commandCount === 3 &&
+        report.failureDiagnostics?.driverLogTruncated === true &&
+        report.failureDiagnostics?.driverLogBytes === 512 * 1024 &&
+        report.artifacts?.tauriDriverLog === "tauri-driver.log" &&
+        report.artifacts?.sessionDiagnostics === "session-diagnostics.txt" &&
+        observation.sessionRequestCount === 1 &&
+        fs.existsSync(driverArtifact) &&
+        fs.statSync(driverArtifact).size === 512 * 1024 &&
+        fs
+          .readFileSync(driverArtifact, "utf8")
+          .includes("session-stall-driver-marker") &&
+        fs.existsSync(diagnosticsArtifact) &&
+        fs
+          .readFileSync(diagnosticsArtifact, "utf8")
+          .includes("tauri-driver-fixture.mjs") &&
+        fs
+          .readFileSync(path.join(caseOut, "runner.log"), "utf8")
+          .includes("session-stall-driver-marker")
+      );
+    },
   });
 
   await runCase("driver-command-stall", "driver-stall", {
@@ -522,7 +707,7 @@ try {
       report.missingChecks?.length === 0,
   });
 
-  const passed = checks.length === 10 && checks.every((check) => check.passed);
+  const passed = checks.length === 15 && checks.every((check) => check.passed);
   const report = {
     suite: "fullstack-harness-failure-artifacts",
     passed,

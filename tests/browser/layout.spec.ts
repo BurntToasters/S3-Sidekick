@@ -1,4 +1,6 @@
 import { expect, test } from "@playwright/test";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
   openMockListing,
   releaseMockListing,
@@ -180,7 +182,21 @@ test.describe("production object table geometry", () => {
       element.scrollTop = 900;
       element.dispatchEvent(new Event("scroll"));
     });
-    await page.waitForTimeout(50);
+    await page.waitForFunction(
+      () => {
+        const panel = document.querySelector<HTMLElement>("#object-panel");
+        const panelRect = panel?.getBoundingClientRect();
+        if (!panelRect) return false;
+        return Array.from(
+          document.querySelectorAll<HTMLElement>(".object-row--file"),
+        ).some((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.top >= panelRect.top && rect.bottom <= panelRect.bottom;
+        });
+      },
+      null,
+      { timeout: 5000 },
+    );
     const fileRows = page.locator(".object-row--file");
     const visibleFileIndex = await fileRows.evaluateAll((rows) => {
       const panel = document.querySelector<HTMLElement>("#object-panel");
@@ -302,6 +318,103 @@ test.describe("production object table geometry", () => {
 });
 
 test.describe("production table at compact and wide viewports", () => {
+  test("closing the compact inspector cancels a delayed selection preview", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 760, height: 520 });
+    await openMockListing(page, { objectCount: 5 });
+    await page.locator(".object-row--file").first().click();
+
+    await page.evaluate(() => {
+      const callbacks: Array<() => void> = [];
+      const originalSetTimeout = window.setTimeout.bind(window);
+      const harness = {
+        callbacks,
+        restore: () => {
+          window.setTimeout = originalSetTimeout;
+        },
+      };
+      const testWindow = window as Window & {
+        __inspectorSyncTimerHarness?: typeof harness;
+      };
+      testWindow.__inspectorSyncTimerHarness = harness;
+      window.setTimeout = ((
+        handler: TimerHandler,
+        delay?: number,
+        ...args: unknown[]
+      ) => {
+        if (delay === 180 && typeof handler === "function") {
+          callbacks.push(() => Reflect.apply(handler, window, args));
+          return 0;
+        }
+        return Reflect.apply(originalSetTimeout, window, [
+          handler,
+          delay,
+          ...args,
+        ]) as number;
+      }) as typeof window.setTimeout;
+    });
+
+    const layout = page.locator("#main-layout");
+    await page.locator("#btn-inspector").click();
+    await expect(layout).toHaveClass(/main-layout--inspector-open/);
+    const pendingSyncTimers = await page.evaluate(
+      () =>
+        (
+          window as Window & {
+            __inspectorSyncTimerHarness?: { callbacks: Array<() => void> };
+          }
+        ).__inspectorSyncTimerHarness?.callbacks.length ?? 0,
+    );
+    expect(pendingSyncTimers).toBe(1);
+
+    await page.locator("#inspector-close").click();
+    const closedBeforeTimerRelease = await layout.evaluate(
+      (element) => !element.classList.contains("main-layout--inspector-open"),
+    );
+    expect(closedBeforeTimerRelease).toBe(true);
+
+    await page.evaluate(() => {
+      const harness = (
+        window as Window & {
+          __inspectorSyncTimerHarness?: {
+            callbacks: Array<() => void>;
+            restore: () => void;
+          };
+        }
+      ).__inspectorSyncTimerHarness;
+      const release = harness?.callbacks.shift();
+      if (!harness || !release) {
+        throw new Error("the delayed inspector sync timer was not captured");
+      }
+      harness.restore();
+      release();
+    });
+
+    const openAfterTimerRelease = await layout.evaluate((element) =>
+      element.classList.contains("main-layout--inspector-open"),
+    );
+    const artifactPath = test.info().outputPath("inspector-close-race.json");
+    await mkdir(dirname(artifactPath), { recursive: true });
+    await page.screenshot({
+      path: test.info().outputPath("inspector-after-delayed-sync.png"),
+    });
+    await writeFile(
+      artifactPath,
+      JSON.stringify(
+        {
+          viewport: { width: 760, height: 520 },
+          pendingSyncTimers,
+          closedBeforeTimerRelease,
+          openAfterTimerRelease,
+        },
+        null,
+        2,
+      ),
+    );
+    expect(openAfterTimerRelease).toBe(false);
+  });
+
   test("keeps the local table within the 760px viewport and opens mobile panels as slideouts", async ({
     page,
   }) => {
@@ -335,8 +448,8 @@ test.describe("production table at compact and wide viewports", () => {
   }) => {
     await page.setViewportSize({ width: 1100, height: 720 });
     await openMockListing(page, { objectCount: 16 });
+    await expect(page.locator("#inspector-panel")).toBeVisible();
     await page.locator(".object-row--file").first().click();
-    await page.locator("#btn-inspector").click();
     await expect(page.locator("#inspector-panel")).toBeVisible();
 
     const inspectorResizer = requireBoundingBox(
@@ -468,8 +581,8 @@ test.describe("production compact selection and dialogs", () => {
   }) => {
     await page.setViewportSize({ width: 901, height: 720 });
     await openMockListing(page, { objectCount: 12 });
+    await expect(page.locator("#inspector-panel")).toBeVisible();
     await page.locator(".object-row--file").first().click();
-    await page.locator("#btn-inspector").click();
     await expect(page.locator("#inspector-panel")).toBeVisible();
     await page.locator("#sidebar-resizer").focus();
     await page.locator("#sidebar-resizer").press("End");

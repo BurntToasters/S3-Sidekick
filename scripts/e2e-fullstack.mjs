@@ -5,13 +5,14 @@
 //   xvfb-run npm run test:e2e:fullstack
 // Writes test-results/fullstack/report.json and final.png incrementally.
 
-// Failure modes checked before implementation: capabilities deny a command
-// the UI needs (only the real runtime shows it); first-run setup cannot finish;
-// the real client cannot list buckets; a folder create never reaches the
-// server; a silent step still passes (every check recorded, incomplete sets
-// fail); the run touches real app data or leaves MinIO running; a driver,
-// screenshot, quit, Docker, or fetch operation outlives its own deadline; a
-// failure/cancellation is not saved before cleanup begins.
+// Failure modes checked first: runtime capabilities deny required UI commands;
+// setup, bucket listing, or folder persistence fails; missing checks still pass;
+// real app data changes or MinIO remains; operations exceed their deadlines;
+// failure evidence is not saved before cleanup. Session timeouts must capture
+// evidence before process stop; diagnostic commands stay bounded, missing tools
+// stay visible, and retained driver logs stay capped while reaching CI output.
+// A stalled status body stays within the fetch deadline and driver-ready phase.
+// HTTP 200 with value.ready=false must poll without premature POST /session.
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -74,7 +75,9 @@ const ACCEPTANCE_TIMEOUT_MS = testValue(
 );
 const SESSION_TIMEOUT_MS = testValue(
   "S3_SIDEKICK_FULLSTACK_SESSION_TIMEOUT_MS",
-  30_000,
+  // CI debug build needs ~36s main-entry to setup on cold fontconfig
+  // (main thread blocked in pango_fc_font_map_get_config). Keep 120s.
+  120_000,
 );
 const DRIVER_READY_TIMEOUT_MS = testValue(
   "S3_SIDEKICK_FULLSTACK_DRIVER_READY_TIMEOUT_MS",
@@ -97,6 +100,7 @@ const CLEANUP_TIMEOUT_MS = testValue(
   10_000,
 );
 const POLL_INTERVAL_MS = testValue("S3_SIDEKICK_FULLSTACK_POLL_MS", 500);
+const DRIVER_LOG_MAX_BYTES = 512 * 1024;
 const checks = [];
 const cleanup = [];
 const abortController = new AbortController();
@@ -110,6 +114,11 @@ let driverProcessGroup = false;
 let dockerLaunchAttempted = false;
 let xdgHome;
 let cleanupComplete = false;
+let driverLogPath;
+let driverLogBytes = 0;
+let driverLogTruncated = false;
+let driverLogWriteError = null;
+let sessionDiagnostics = null;
 
 function normalizedError(error, phase = currentPhase) {
   if (error && typeof error === "object" && error.kind && error.phase) {
@@ -150,11 +159,31 @@ function persistReport() {
     checkCount: checks.length,
     expectedCheckCount: EXPECTED_CHECKS,
     cleanupComplete,
+    failureDiagnostics: sessionDiagnostics
+      ? {
+          captured: sessionDiagnostics.captured,
+          file: sessionDiagnostics.file ?? null,
+          triggerPhase: sessionDiagnostics.triggerPhase,
+          commandCount: sessionDiagnostics.commands?.length ?? 0,
+          driverLogBytes: sessionDiagnostics.driverLogBytes,
+          driverLogTruncated: sessionDiagnostics.driverLogTruncated,
+          error: sessionDiagnostics.error ?? null,
+        }
+      : null,
     missingChecks,
     checks,
     cleanup,
     artifacts: {
       report: "report.json",
+      tauriDriverLog:
+        driverLogPath && fs.existsSync(driverLogPath)
+          ? path.basename(driverLogPath)
+          : null,
+      sessionDiagnostics: fs.existsSync(
+        path.join(outDir, "session-diagnostics.txt"),
+      )
+        ? "session-diagnostics.txt"
+        : null,
       screenshot: fs.existsSync(path.join(outDir, "final.png"))
         ? "final.png"
         : null,
@@ -260,23 +289,39 @@ function docker(...args) {
   return result.stdout.trim();
 }
 
-async function fetchOnce(url, signal) {
+async function fetchOnce(url, signal, isReady = (response) => response?.ok) {
   const requestController = new AbortController();
   const timer = setTimeout(() => requestController.abort(), FETCH_TIMEOUT_MS);
   const stop = () => requestController.abort();
+  let response;
   signal?.addEventListener("abort", stop, { once: true });
   try {
-    return await fetch(url, { signal: requestController.signal });
+    response = await fetch(url, { signal: requestController.signal });
+    return response?.ok && (await isReady(response));
   } catch (error) {
     if (signal?.aborted) throw interruption ?? error;
-    return null;
+    return false;
   } finally {
+    if (response?.body && !response.bodyUsed) {
+      try {
+        await response.body.cancel();
+      } catch {
+        // An abort may already have closed the response body.
+      }
+    }
+    requestController.abort();
     clearTimeout(timer);
     signal?.removeEventListener("abort", stop);
   }
 }
 
-async function waitFor(url, timeoutMs, signal, childProcess = undefined) {
+async function waitFor(
+  url,
+  timeoutMs,
+  signal,
+  childProcess = undefined,
+  isReady = (response) => response?.ok,
+) {
   const poll = async () => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -289,8 +334,7 @@ async function waitFor(url, timeoutMs, signal, childProcess = undefined) {
         error.phase = currentPhase;
         throw error;
       }
-      const response = await fetchOnce(url, signal);
-      if (response?.ok) return;
+      if (await fetchOnce(url, signal, isReady)) return;
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
     const error = new Error(
@@ -306,6 +350,301 @@ async function waitFor(url, timeoutMs, signal, childProcess = undefined) {
     `waiting for ${url}`,
     signal,
   );
+}
+
+async function webDriverStatusReady(response) {
+  try {
+    const status = await response.json();
+    return status?.value?.ready === true;
+  } catch {
+    return false;
+  }
+}
+
+function runDiagnosticCommand(
+  command,
+  args,
+  filterOutput = (output) => output,
+  timeoutMs = 600,
+) {
+  try {
+    const result = spawnSync(command, args, {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    });
+    const output = filterOutput(`${result.stdout ?? ""}${result.stderr ?? ""}`);
+    return {
+      command: [command, ...args].join(" "),
+      exitCode: result.status,
+      signal: result.signal,
+      error: result.error?.message ?? null,
+      output: output.slice(0, 24_000),
+      truncated: result.error?.code === "ENOBUFS" || output.length > 24_000,
+    };
+  } catch (error) {
+    return {
+      command: [command, ...args].join(" "),
+      exitCode: null,
+      signal: null,
+      error: error instanceof Error ? error.message : String(error),
+      output: "",
+      truncated: false,
+    };
+  }
+}
+
+function applicationPidFromProcessSnapshot(output, expectedProcessGroup) {
+  const applicationName = path.basename(application);
+  for (const line of output.split("\n")) {
+    const fields = line.trim().split(/\s+/);
+    if (
+      fields.length >= 7 &&
+      fields[5] === applicationName &&
+      Number(fields[2]) === expectedProcessGroup
+    ) {
+      const pid = Number(fields[0]);
+      if (Number.isInteger(pid) && pid > 1) return pid;
+    }
+  }
+  return null;
+}
+
+function captureSessionDiagnostics(error) {
+  const capturedAt = new Date().toISOString();
+  const trackedPids = new Set(
+    [process.pid, driverProcess?.pid].filter(Number.isInteger).map(String),
+  );
+  const processPattern =
+    /s3-sidekick|tauri-driver|WebKit(?:WebDriver|NetworkProcess|WebProcess)|Xvfb|dbus-daemon/i;
+  const filterProcessOutput = (output) =>
+    output
+      .split("\n")
+      .filter(
+        (line, index) =>
+          index === 0 ||
+          trackedPids.has(line.trim().split(/\s+/, 1)[0]) ||
+          processPattern.test(line),
+      )
+      .join("\n");
+  const processSnapshot = runDiagnosticCommand(
+    "ps",
+    ["-eo", "pid,ppid,pgid,stat,etime,comm,args"],
+    filterProcessOutput,
+  );
+  const commands = [
+    processSnapshot,
+    runDiagnosticCommand("ss", ["-ltnp"]),
+    runDiagnosticCommand("xwininfo", ["-root", "-tree"]),
+  ];
+  if (!testMode && process.platform === "linux") {
+    const applicationPid = applicationPidFromProcessSnapshot(
+      processSnapshot.output,
+      driverProcess?.pid,
+    );
+    if (applicationPid) {
+      commands.push(
+        runDiagnosticCommand(
+          "sudo",
+          [
+            "--non-interactive",
+            "gdb",
+            "--batch",
+            "--nx",
+            "--quiet",
+            "-iex",
+            "set auto-load off",
+            "-iex",
+            "set debuginfod enabled off",
+            "-ex",
+            "set pagination off",
+            "-ex",
+            "set width 0",
+            "-ex",
+            "set print frame-arguments none",
+            "-ex",
+            "thread 1",
+            "-ex",
+            "bt 48",
+            "-ex",
+            "thread apply all bt 12",
+            "-p",
+            String(applicationPid),
+          ],
+          undefined,
+          8_000,
+        ),
+      );
+    } else {
+      commands.push({
+        command: "sudo --non-interactive gdb --batch --nx --quiet -p <app-pid>",
+        exitCode: null,
+        signal: null,
+        error:
+          "s3-sidekick process not found in the tauri-driver process group",
+        output: "",
+        truncated: false,
+      });
+    }
+  }
+
+  const profile = {
+    DISPLAY: process.env.DISPLAY ?? null,
+    WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY ?? null,
+    XDG_DATA_HOME: xdgHome ? path.join(xdgHome, "data") : null,
+    XDG_CONFIG_HOME: xdgHome ? path.join(xdgHome, "config") : null,
+    XDG_CACHE_HOME: xdgHome ? path.join(xdgHome, "cache") : null,
+    XDG_STATE_HOME: xdgHome ? path.join(xdgHome, "state") : null,
+  };
+  const driverLogSize =
+    driverLogPath && fs.existsSync(driverLogPath)
+      ? fs.statSync(driverLogPath).size
+      : 0;
+  const detail = {
+    capturedAt,
+    triggerPhase: currentPhase,
+    failure: normalizedError(error, currentPhase),
+    runnerPid: process.pid,
+    tauriDriverPid: driverProcess?.pid ?? null,
+    tauriDriverProcessGroup: driverProcessGroup,
+    isolatedXdgProfile: xdgHome ?? null,
+    profile,
+    driverLog: {
+      file: driverLogPath ? path.basename(driverLogPath) : null,
+      bytes: driverLogSize,
+      truncated: driverLogTruncated,
+      writeError: driverLogWriteError,
+    },
+    commands,
+  };
+  const contents = [
+    `Captured before process cleanup at ${capturedAt}`,
+    `Failure: ${detail.failure.kind} during ${detail.failure.phase}: ${detail.failure.message}`,
+    `Runner PID: ${detail.runnerPid}`,
+    `tauri-driver PID: ${detail.tauriDriverPid ?? "unavailable"}`,
+    `tauri-driver process group: ${detail.tauriDriverProcessGroup}`,
+    `Isolated XDG profile: ${detail.isolatedXdgProfile ?? "unavailable"}`,
+    `Display/profile environment: ${JSON.stringify(profile)}`,
+    `tauri-driver log: ${detail.driverLog.file ?? "unavailable"} (${driverLogSize} bytes; truncated=${driverLogTruncated}; writeError=${driverLogWriteError ?? "none"})`,
+    ...commands.flatMap((entry) => [
+      "",
+      `$ ${entry.command}`,
+      `exit=${entry.exitCode ?? "unavailable"} signal=${entry.signal ?? "none"} error=${entry.error ?? "none"} truncated=${entry.truncated}`,
+      entry.output.trimEnd() || "<no output>",
+    ]),
+  ];
+  const file = "session-diagnostics.txt";
+  let writeError = null;
+  try {
+    fs.writeFileSync(path.join(outDir, file), `${contents.join("\n")}\n`);
+  } catch (writeFailure) {
+    writeError =
+      writeFailure instanceof Error
+        ? writeFailure.message
+        : String(writeFailure);
+  }
+  sessionDiagnostics = {
+    captured: writeError === null,
+    file: writeError === null ? file : null,
+    triggerPhase: currentPhase,
+    commands: commands.map(
+      ({ command, exitCode, signal, error, truncated }) => ({
+        command,
+        exitCode,
+        signal,
+        error,
+        truncated,
+      }),
+    ),
+    driverLogBytes: driverLogSize,
+    driverLogTruncated,
+    error: writeError,
+  };
+  persistReport();
+}
+
+async function captureAcceptanceDiagnostics() {
+  // Connect submitted but main layout never visible. Record error text,
+  // button state, and layout display before cleanup. Bounded, never throws.
+  const lines = [`Captured at ${new Date().toISOString()} during acceptance`];
+  try {
+    const snapshot = await withDeadline(
+      driver.executeScript(() => {
+        const text = (id) =>
+          document.getElementById(id)?.textContent?.trim() ?? "<absent>";
+        const display = (id) =>
+          document.getElementById(id)?.style?.display ?? "<absent>";
+        return {
+          formError: text("conn-form-error"),
+          connectBtn: text("connect-btn"),
+          connectDisabled:
+            document.getElementById("connect-btn")?.disabled ?? null,
+          connectBusy:
+            document.getElementById("connect-btn")?.dataset?.busy ?? null,
+          status: text("connection-status"),
+          mainLayoutDisplay: display("main-layout"),
+          connScreenDisplay: display("connection-screen"),
+          endpoint:
+            document.getElementById("conn-endpoint")?.value ?? "<absent>",
+          url: location.href,
+          title: document.title,
+        };
+      }),
+      15_000,
+      "acceptance DOM snapshot",
+    );
+    lines.push(JSON.stringify(snapshot, null, 2));
+  } catch (error) {
+    lines.push(
+      `DOM snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    const source = await withDeadline(
+      driver.getPageSource(),
+      15_000,
+      "acceptance page source",
+    );
+    lines.push(`--- page source (${source.length} chars, first 4000) ---`);
+    lines.push(source.slice(0, 4000));
+  } catch (error) {
+    lines.push(
+      `Page source failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    fs.writeFileSync(
+      path.join(outDir, "acceptance-failure.txt"),
+      `${lines.join("\n")}\n`,
+    );
+  } catch {
+    // Artifact best effort; CI log below still carries the snapshot.
+  }
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
+function forwardDriverOutput(channel, chunk) {
+  const output = channel === "stdout" ? process.stdout : process.stderr;
+  output.write(chunk);
+  if (!driverLogPath || driverLogTruncated || driverLogWriteError) return;
+
+  const content = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+  const tagged = Buffer.concat([Buffer.from(`[${channel}] `), content]);
+  const remaining = DRIVER_LOG_MAX_BYTES - driverLogBytes;
+  if (remaining <= 0) {
+    driverLogTruncated = true;
+    return;
+  }
+  const retained = tagged.subarray(0, remaining);
+  try {
+    fs.appendFileSync(driverLogPath, retained);
+    driverLogBytes += retained.length;
+    if (retained.length < tagged.length) driverLogTruncated = true;
+  } catch (error) {
+    driverLogWriteError =
+      error instanceof Error ? error.message : String(error);
+  }
 }
 
 async function click(webDriver, id) {
@@ -343,6 +682,7 @@ async function run(webDriver) {
   check("first-run setup completes", true);
 
   await type(webDriver, "conn-endpoint", endpoint);
+  await type(webDriver, "conn-region", "us-east-1");
   await type(webDriver, "conn-access-key", accessKey);
   await type(webDriver, "conn-secret-key", secretKey);
   await click(webDriver, "connect-btn");
@@ -483,6 +823,8 @@ async function stopDriverProcessTree() {
 async function main() {
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
+  driverLogPath = path.join(outDir, "tauri-driver.log");
+  fs.writeFileSync(driverLogPath, "");
   persistReport();
 
   try {
@@ -544,7 +886,7 @@ async function main() {
     driverProcessGroup = process.platform !== "win32";
     driverProcess = spawn(driverBin, [], {
       detached: driverProcessGroup,
-      stdio: ["ignore", "inherit", "inherit"],
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       env: {
         ...process.env,
@@ -554,6 +896,12 @@ async function main() {
         XDG_STATE_HOME: path.join(xdgHome, "state"),
       },
     });
+    driverProcess.stdout.on("data", (chunk) =>
+      forwardDriverOutput("stdout", chunk),
+    );
+    driverProcess.stderr.on("data", (chunk) =>
+      forwardDriverOutput("stderr", chunk),
+    );
     const driverSpawnFailure = new Promise((_, reject) => {
       driverProcess.once("error", (error) => {
         error.kind = "spawn";
@@ -569,6 +917,7 @@ async function main() {
         DRIVER_READY_TIMEOUT_MS,
         abortController.signal,
         driverProcess,
+        webDriverStatusReady,
       ),
       driverSpawnFailure,
     ]);
@@ -597,7 +946,19 @@ async function main() {
       abortController.signal,
     );
   } catch (error) {
-    setFailure(interruption ?? error, interruption?.phase ?? currentPhase);
+    const caught = interruption ?? error;
+    const phase = interruption?.phase ?? currentPhase;
+    setFailure(caught, phase);
+    const failureDetails = normalizedError(caught, phase);
+    if (
+      failureDetails.phase === "session-create" &&
+      failureDetails.kind === "timeout"
+    ) {
+      captureSessionDiagnostics(caught);
+    }
+    if (failureDetails.phase === "acceptance" && driver) {
+      await captureAcceptanceDiagnostics();
+    }
   } finally {
     if (driver) {
       await cleanupStep("WebDriver screenshot", async () => {

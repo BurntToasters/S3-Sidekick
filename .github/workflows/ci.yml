@@ -150,13 +150,18 @@ jobs:
         run: npx playwright install --with-deps chromium webkit
 
       - name: Run browser layout harness
-        run: npm run test:ui
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_FILE: test-results/playwright-report.json
+        run: npm run test:ui -- --add-reporter=json
 
       - name: Run script E2E suites
         run: npm run test:e2e:scripts
 
       - name: Run full-stack deadline and artifact E2E
         run: npm run test:e2e:fullstack-harness
+
+      - name: Run Windows publication runner failure-first E2E
+        run: npm run test:e2e:windows-publication-harness
 
       - name: Upload full-stack harness reports
         if: always()
@@ -167,16 +172,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload browser diagnostics
-        if: failure()
+      - name: Upload Windows publication harness reports
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: browser-layout-diagnostics
-          path: |
-            test-results/
-            playwright-report/
+          name: windows-publication-harness-report
+          path: test-results/fixes-0.11.1/transfer-publication/windows-publication-harness/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
+
+      - name: Upload browser E2E evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-layout-e2e
+          path: |
+            test-results/playwright-report.json
+            test-results/playwright/**/inspector-close-race.json
+            test-results/playwright/**/inspector-after-delayed-sync.png
+            test-results/playwright/**/error-context.md
+            test-results/playwright/**/test-failed-*.png
+            test-results/playwright/**/trace.zip
+          if-no-files-found: ignore
+          retention-days: 14
 
   minio-e2e:
     name: S3 command layer E2E (MinIO)
@@ -282,7 +300,9 @@ jobs:
             libssl-dev \
             libgtk-3-dev \
             libdbus-1-dev \
+            gdb \
             webkit2gtk-driver \
+            x11-utils \
             xvfb
 
       - name: Install tauri-driver
@@ -294,7 +314,14 @@ jobs:
       - name: Build debug app
         run: npm run tauri -- build --debug --no-bundle -- --locked
 
+      - name: Warm font cache for first GTK paint
+        run: |
+          fc-cache -f >/dev/null 2>&1 || true
+          fc-list | wc -l
+
       - name: Run full-stack E2E
+        env:
+          S3_SIDEKICK_E2E_STARTUP_TRACE: "1"
         run: xvfb-run --auto-servernum npm run test:e2e:fullstack
 
       - name: Upload full-stack report

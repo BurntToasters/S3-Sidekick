@@ -2384,7 +2384,51 @@ fn is_owned_atomic_temp(path: &Path) -> bool {
         && parts[0] == "tmp"
 }
 
+fn e2e_startup_trace_enabled() -> bool {
+    std::env::var("S3_SIDEKICK_E2E_STARTUP_TRACE").as_deref() == Ok("1")
+}
+
+fn e2e_startup_trace(message: &str) {
+    if e2e_startup_trace_enabled() {
+        eprintln!("[s3-sidekick-e2e-startup] {}", message);
+    }
+}
+
+fn e2e_inspector_server_trace_value() -> String {
+    match std::env::var("WEBKIT_INSPECTOR_SERVER") {
+        Ok(value) => match value.parse::<std::net::SocketAddr>() {
+            Ok(address) if address.ip().is_loopback() && address.port() != 0 => address.to_string(),
+            _ => "<invalid-or-non-loopback>".to_string(),
+        },
+        Err(std::env::VarError::NotPresent) => "<unset>".to_string(),
+        Err(std::env::VarError::NotUnicode(_)) => "<invalid-or-non-loopback>".to_string(),
+    }
+}
+
+fn e2e_startup_entry_trace() {
+    if !e2e_startup_trace_enabled() {
+        return;
+    }
+    let value = |name| {
+        std::env::var_os(name)
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<unset>".to_string())
+    };
+    eprintln!(
+        "[s3-sidekick-e2e-startup] main-entry TAURI_WEBVIEW_AUTOMATION={} WEBKIT_INSPECTOR_SERVER={} DISPLAY={} XDG_DATA_HOME={} XDG_CONFIG_HOME={} XDG_CACHE_HOME={} XDG_STATE_HOME={}",
+        value("TAURI_WEBVIEW_AUTOMATION"),
+        e2e_inspector_server_trace_value(),
+        value("DISPLAY"),
+        value("XDG_DATA_HOME"),
+        value("XDG_CONFIG_HOME"),
+        value("XDG_CACHE_HOME"),
+        value("XDG_STATE_HOME"),
+    );
+}
+
 fn main() {
+    e2e_startup_entry_trace();
+
     #[cfg(target_os = "linux")]
     {
         // Forced X11: see run.rosie.s3-sidekick.yml finish-args. Re-evaluate
@@ -2419,6 +2463,8 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            e2e_startup_trace("setup-entered-configured-windows-constructed");
+
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(false);
@@ -2427,6 +2473,7 @@ fn main() {
             // Finish or reverse a vault migration before any protected command
             // runs. A failure is latched by the security module so protected I/O
             // fails closed, and journal-owned staging is deliberately retained.
+            e2e_startup_trace("storage-recovery-started");
             let migration_recovered = match lock_storage_ops()
                 .and_then(|_storage_guard| security::recover_interrupted_migration(app.handle()))
             {
@@ -2436,6 +2483,11 @@ fn main() {
                     false
                 }
             };
+            e2e_startup_trace(if migration_recovered {
+                "storage-recovery-finished success=true"
+            } else {
+                "storage-recovery-finished success=false"
+            });
 
             // Atomic-write leftovers are safe to sweep only when no migration
             // journal exists. Never infer ownership from the `.tmp` extension
@@ -2466,6 +2518,7 @@ fn main() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
+    e2e_startup_trace("before-builder-run");
     if let Err(err) = builder
         .manage(AppState(Mutex::new(S3State {
             client: None,
