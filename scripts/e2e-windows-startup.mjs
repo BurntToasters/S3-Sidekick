@@ -6,13 +6,10 @@
 // user's real S3 Sidekick profile; close any running copy first.
 //
 // Failure modes, written before the build.rs fix:
-// - The /STACK link arg never reaches the exe (wrong target check, applied to
-//   tests only): the PE header still reserves 1 MiB.
-// - The dispatcher frame outgrows the new reserve: the launch still exits
-//   with 0xC00000FD after the frontend's first invoke.
-// - The exe exits early for another reason (single-instance hand-off to a
-//   running copy, setup error): an early exit 0 must not count as a pass.
-// - A stale exe is tested: S3_SIDEKICK_EXE is opt-in; otherwise this builds.
+// - /STACK never reaches the exe (wrong target check): PE header still 1 MiB.
+// - Dispatcher frame outgrows the reserve: exit 0xC00000FD after first invoke.
+// - Early exit 0 from single-instance hand-off or setup error must not pass.
+// - Stale exe tested: S3_SIDEKICK_EXE is opt-in; otherwise this builds it.
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
