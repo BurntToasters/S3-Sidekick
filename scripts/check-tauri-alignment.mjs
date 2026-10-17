@@ -52,8 +52,8 @@ function npmPackages(text, file) {
   }
   const packages = new Map();
   for (const [key, entry] of Object.entries(parsed?.packages ?? {})) {
-    const name = key.replace(/^.*node_modules\//, "");
-    if (key && typeof entry?.version === "string") {
+    const name = /^node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(key)?.[1];
+    if (name && typeof entry?.version === "string") {
       packages.set(name, entry.version);
     }
   }

@@ -12,6 +12,9 @@
 // - A lockfile without tauri, or a malformed lockfile, passes or crashes
 //   with a stack trace instead of a clear error.
 // - The real repository lockfiles fail an aligned tree.
+// - A nested copy (node_modules/x/node_modules/@tauri-apps/api) on another
+//   minor fails an aligned top-level tree.
+// - A nested aligned copy hides a misaligned top-level package.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -26,7 +29,7 @@ const script = path.join(root, "scripts", "check-tauri-alignment.mjs");
 const outDir = path.join(root, "test-results", "check-tauri-alignment");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "s3sk-tauri-align-"));
 const results = [];
-const EXPECTED_CHECKS = 13;
+const EXPECTED_CHECKS = 15;
 
 function check(name, passed, observed = undefined) {
   results.push({
@@ -46,7 +49,7 @@ function cargoLock(packages) {
     .join("\n")}`;
 }
 
-function npmLock(packages) {
+function npmLock(packages, nested = []) {
   return JSON.stringify({
     name: "fixture",
     lockfileVersion: 3,
@@ -54,6 +57,10 @@ function npmLock(packages) {
       ["", { name: "fixture" }],
       ...packages.map(([name, version]) => [
         `node_modules/${name}`,
+        { version },
+      ]),
+      ...nested.map(([name, version]) => [
+        `node_modules/@wdio/tauri-plugin/node_modules/${name}`,
         { version },
       ]),
     ]),
@@ -183,6 +190,31 @@ try {
     "malformed npm lock exits 1 without a stack trace",
     malformed.status === 1 && !/\n\s+at /.test(malformed.stderr),
     malformed.stderr,
+  );
+
+  const nestedDrift = runCase(
+    "nested-copy-drift",
+    cargoLock(ALIGNED_CARGO),
+    npmLock(ALIGNED_NPM, [["@tauri-apps/api", "2.11.1"]]),
+  );
+  check(
+    "a nested copy on another minor does not fail an aligned tree",
+    nestedDrift.status === 0,
+    nestedDrift.stderr,
+  );
+
+  const nestedMask = runCase(
+    "nested-copy-mask",
+    cargoLock(ALIGNED_CARGO),
+    npmLock(replace(ALIGNED_NPM, "@tauri-apps/api", "2.11.1"), [
+      ["@tauri-apps/api", "2.12.0"],
+    ]),
+  );
+  check(
+    "an aligned nested copy does not hide top-level drift",
+    nestedMask.status === 1 &&
+      nestedMask.stderr.includes("@tauri-apps/api 2.11.1"),
+    nestedMask.stderr,
   );
 
   const repo = spawnSync(process.execPath, [script], {
