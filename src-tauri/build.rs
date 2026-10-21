@@ -78,10 +78,18 @@ const WINDOWS_MAIN_STACK_BYTES: u32 = 8 * 1024 * 1024;
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
-            Ok("msvc") => println!(
-                "cargo:rustc-link-arg-bins=/STACK:{}",
-                WINDOWS_MAIN_STACK_BYTES
-            ),
+            Ok("msvc") => {
+                println!(
+                    "cargo:rustc-link-arg-bins=/STACK:{}",
+                    WINDOWS_MAIN_STACK_BYTES
+                );
+                // The large AWS SDK graph can exceed MSVC's PDB limits
+                // (LNK1140), even with release symbol stripping enabled.
+                // Suppress PDB generation at link time for release binaries.
+                if std::env::var("PROFILE").as_deref() == Ok("release") {
+                    println!("cargo:rustc-link-arg-bins=/DEBUG:NONE");
+                }
+            }
             Ok("gnu") => println!(
                 "cargo:rustc-link-arg-bins=-Wl,--stack,{}",
                 WINDOWS_MAIN_STACK_BYTES
