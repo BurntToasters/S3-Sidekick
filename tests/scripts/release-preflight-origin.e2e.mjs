@@ -36,10 +36,23 @@ else if(args[0]==='rev-parse') console.log('a'.repeat(40));
 `,
     { mode: 0o755 },
   );
-  for (const [name, origin, pass, overrides] of [
+  for (const [name, origin, pass, overrides, omitToolchain] of [
     ["https", "https://github.com/BurntToasters/S3-Sidekick.git", true, {}],
     ["ssh", "git@github.com:BurntToasters/S3-Sidekick.git", true, {}],
     ["ssh-url", "ssh://git@github.com/BurntToasters/S3-Sidekick.git", true, {}],
+    [
+      "npm-version-change",
+      "https://github.com/BurntToasters/S3-Sidekick.git",
+      true,
+      { npm_config_user_agent: "npm/12.1.1 node/v24.19.0" },
+    ],
+    [
+      "no-toolchain-metadata",
+      "https://github.com/BurntToasters/S3-Sidekick.git",
+      true,
+      {},
+      true,
+    ],
     ["fork", "https://github.com/another-owner/S3-Sidekick.git", false, {}],
     [
       "other-host",
@@ -54,6 +67,12 @@ else if(args[0]==='rev-parse') console.log('a'.repeat(40));
       { GH_REPO_OWNER: "another-owner" },
     ],
   ]) {
+    const fixturePkg = { ...pkg };
+    if (omitToolchain) delete fixturePkg.releaseToolchain;
+    fs.writeFileSync(
+      path.join(scratch, "package.json"),
+      JSON.stringify(fixturePkg),
+    );
     fs.writeFileSync(calls, "");
     const result = spawnSync(
       process.execPath,
@@ -65,7 +84,7 @@ else if(args[0]==='rev-parse') console.log('a'.repeat(40));
         env: {
           ...process.env,
           PATH: `${bin}${path.delimiter}${process.env.PATH}`,
-          npm_config_user_agent: `npm/${pkg.releaseToolchain.npm}`,
+          npm_config_user_agent: `npm/${pkg.packageManager.split("@")[1]}`,
           FIXTURE_ORIGIN: origin,
           GH_REPO_OWNER: "BurntToasters",
           GH_REPO_NAME: "S3-Sidekick",
@@ -99,7 +118,7 @@ else if(args[0]==='rev-parse') console.log('a'.repeat(40));
   fs.rmSync(scratch, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true });
   const passed =
-    !error && checks.length === 6 && checks.every((check) => check.passed);
+    !error && checks.length === 8 && checks.every((check) => check.passed);
   fs.writeFileSync(
     path.join(out, "report.json"),
     JSON.stringify(

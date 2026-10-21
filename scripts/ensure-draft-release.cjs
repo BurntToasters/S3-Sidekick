@@ -11,7 +11,6 @@ const {
   githubStatusCode,
 } = require("./github-cli.cjs");
 const { assertStableReleaseOverridesAllowed } = require("./release-policy.cjs");
-const { assertReleaseToolVersions } = require("./release-integrity.cjs");
 const {
   assertExpectedRelease,
   assertNoMisnamedVersionDrafts,
@@ -259,10 +258,6 @@ async function waitForDraftRelease() {
 
 async function main() {
   assertStableReleaseOverridesAllowed(process.env, VERSION);
-  assertReleaseToolVersions(packageJson, {
-    environment: process.env,
-    root: ROOT,
-  });
   assertGitHubCliAuthenticated();
   verifySession();
   if (WAIT_MODE) await waitForDraftRelease();

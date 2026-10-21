@@ -19,10 +19,7 @@ const {
   uploadReleaseAssetById,
 } = githubCli;
 const require = createRequire(import.meta.url);
-const {
-  assertReleaseToolVersions,
-  signDetachedFile,
-} = require("./release-integrity.cjs");
+const { signDetachedFile } = require("./release-integrity.cjs");
 const {
   assertStableReleaseOverridesAllowed,
   isExplicitTruthy,
@@ -1058,7 +1055,6 @@ async function syncBetaManifestsAfterPublish() {
 
 async function main() {
   assertStableReleaseOverridesAllowed(process.env, VERSION);
-  assertReleaseToolVersions(pkg, { environment: process.env, root });
   assertGitHubCliAuthenticated();
   verifyReleaseSession(root);
   if (EXPECTED_TAG && EXPECTED_TAG !== TAG) {
