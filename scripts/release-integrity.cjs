@@ -101,57 +101,6 @@ function assertCleanSource(
   return after;
 }
 
-function compareVersions(left, right) {
-  const parse = (value) => {
-    const match = String(value)
-      .replace(/^v/, "")
-      .match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
-    if (!match) throw new Error(`Invalid semantic version: ${value}`);
-    return match;
-  };
-  const a = parse(left);
-  const b = parse(right);
-  for (let index = 1; index <= 3; index += 1) {
-    const result = Number(a[index]) - Number(b[index]);
-    if (result) return result;
-  }
-  if (!a[4] && !b[4]) return 0;
-  if (!a[4]) return 1;
-  if (!b[4]) return -1;
-  return a[4].localeCompare(b[4]);
-}
-
-function assertReleaseToolVersions(
-  packageJson,
-  {
-    environment = process.env,
-    root = process.cwd(),
-    nodeVersion = process.versions.node,
-  } = {},
-) {
-  const expectedNode = String(packageJson.releaseToolchain?.node || "");
-  const expectedNpm = String(packageJson.releaseToolchain?.npm || "");
-  const nodeMatch = expectedNode.match(/^(?:>=\s*|\^)?(\d+\.\d+\.\d+)$/);
-  if (!nodeMatch || !/^\d+\.\d+\.\d+$/.test(expectedNpm)) {
-    throw new Error("releaseToolchain must pin Node.js and npm versions.");
-  }
-  const actualNpm =
-    String(environment.npm_config_user_agent || "").match(
-      /(?:^|\s)npm\/(\d+\.\d+\.\d+)(?:\s|$)/,
-    )?.[1] || command(root, "npm", ["--version"], { environment });
-  const nodeMeets =
-    compareVersions(String(nodeVersion).replace(/^v/, ""), nodeMatch[1]) >= 0;
-  if (packageJson.packageManager !== `npm@${expectedNpm}`) {
-    throw new Error("packageManager and releaseToolchain.npm must match.");
-  }
-  if (!nodeMeets || actualNpm !== expectedNpm) {
-    throw new Error(
-      `Release tools do not match package.json pins (node ${nodeVersion}/${expectedNode}, npm ${actualNpm}/${expectedNpm}).`,
-    );
-  }
-  return { node: expectedNode, npm: expectedNpm };
-}
-
 function signDetachedFile(
   filePath,
   signaturePath,
@@ -198,10 +147,8 @@ function signDetachedFile(
 
 module.exports = {
   assertCleanSource,
-  assertReleaseToolVersions,
   canonicalJson,
   canonicalMacosArtifactName,
-  compareVersions,
   sha256File,
   signDetachedFile,
   sourceCommit,

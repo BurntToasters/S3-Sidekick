@@ -17,6 +17,10 @@ non-GitHub origin even when its upstream/HEAD match, and reject noncanonical sta
 release destination overrides. It must not fetch an origin that failed validation.
 Beta checkouts may use their explicitly configured GitHub release destination.
 
+Release scripts must not require releaseToolchain metadata or exact Node/npm
+versions. Preflight must accept npm patch/minor changes and missing toolchain
+metadata while continuing to reject invalid origins and stable overrides.
+
 The AWS-null-version runner must bound frontend build and Cargo execution, record
 timeout/error status, preserve readable failure logs, clean its isolated app-data
 directory, reject a missing/failed/malformed check artifact, and pass a complete

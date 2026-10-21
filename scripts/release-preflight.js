@@ -7,9 +7,6 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { isDirectExecution } from "./direct-execution.js";
 
-const { assertReleaseToolVersions } = createRequire(import.meta.url)(
-  "./release-integrity.cjs",
-);
 const { assertStableReleaseOverridesAllowed } = createRequire(import.meta.url)(
   "./release-policy.cjs",
 );
@@ -71,10 +68,6 @@ function runReleasePreflight({ rootDirectory = root } = {}) {
   const packageJson = JSON.parse(
     fs.readFileSync(path.join(rootDirectory, "package.json"), "utf8"),
   );
-  assertReleaseToolVersions(packageJson, {
-    environment: process.env,
-    root: rootDirectory,
-  });
   const version = String(packageJson.version ?? "");
   assertStableReleaseOverridesAllowed(process.env, version);
   const expectedBranch = expectedReleaseBranch(version);
