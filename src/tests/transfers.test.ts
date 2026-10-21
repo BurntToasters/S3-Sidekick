@@ -18,6 +18,8 @@ const EMPTY_HYDRATION = {
   manifest_json: "",
   legacy_import_allowed: false,
 };
+let disposeTransfers: (() => void) | undefined;
+const removeNetworkListeners: Array<() => void> = [];
 
 function renderFixture(): void {
   document.body.innerHTML = `
@@ -69,6 +71,7 @@ async function loadTransfersModule() {
   const drawer = await import("../bottom-drawer.ts");
   drawer.initDrawer();
   const transfers = await import("../transfers.ts");
+  disposeTransfers = transfers.disposeTransferQueueUI;
   const { state } = await import("../state.ts");
   state.connectionId = "test-connection";
   state.connectionIdentity = "test-identity";
@@ -84,6 +87,19 @@ async function flushMicrotasks(cycles = 2): Promise<void> {
 
 beforeEach(() => {
   vi.resetModules();
+  // resetModules does not remove listeners from the shared jsdom window.
+  // Old online handlers would restart queues against the next test's mocks.
+  const addWindowListener = window.addEventListener.bind(window);
+  vi.spyOn(window, "addEventListener").mockImplementation(
+    (type, listener, options) => {
+      if (type === "online" || type === "offline") {
+        removeNetworkListeners.push(() =>
+          window.removeEventListener(type, listener, options),
+        );
+      }
+      addWindowListener(type, listener, options);
+    },
+  );
   mockInvoke.mockReset();
   mockInvoke.mockImplementation(async (cmd, payload) => {
     if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
@@ -112,7 +128,15 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // Stop old stall tickers before replacing the fixture. Otherwise a pending
+  // transfer can repaint a later test's DOM every five seconds.
+  disposeTransfers?.();
+  disposeTransfers = undefined;
+  for (const removeListener of removeNetworkListeners.splice(0)) {
+    removeListener();
+  }
   vi.useRealTimers();
+  // Drain an already scheduled render while this test still owns the DOM.
   await new Promise<void>((resolve) =>
     window.requestAnimationFrame(() => resolve()),
   );
