@@ -91,7 +91,16 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Audit locked Cargo dependencies
-        run: cargo audit --file src-tauri/Cargo.lock
+        run: npm run test:e2e:cargo-security
+
+      - name: Upload Cargo security report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cargo-security-${{ matrix.os }}
+          path: test-results/cargo-security/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Enforce dependency license and source policy
         run: npm run licenses
