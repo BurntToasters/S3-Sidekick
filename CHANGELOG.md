@@ -6,10 +6,10 @@
 
 | <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux |
 | :--- | :--- | :--- |
-| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Linux-arm64.deb) --> |
-| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Linux-arm64.rpm) --> |
-| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.2/S3-Sidekick-Linux-arm64.flatpak) --> |
+| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Linux-arm64.AppImage) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-macOS.zip)** | **DEB:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Linux-x64.deb) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Linux-arm64.deb) --> |
+| | | **RPM:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Linux-x64.rpm) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Linux-arm64.rpm) --> |
+| | | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.11.3/S3-Sidekick-Linux-arm64.flatpak) --> |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
@@ -20,52 +20,8 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
-## Changes in `v0.11.2:`
-
-### IMPORTANT: WINDOWS USERS ON v0.11.1 MUST UPDATE MANUALLY.
-
-Hi everyone, sorry about this one! v0.11.1 crashes right after launch on Windows, before the in-app updater gets a chance to run. If you are on Windows, please download the EXE above and run it over your current install. Your saved connections, bookmarks, and settings are not affected. macOS and Linux were never affected and can update normally :)
-
-- **Windows:** Fixed an issue where S3 Sidekick `v0.11.1` would crash about half a second after opening. Windows only gives the app's main thread 1 MB of stack, and `v0.11.1` needed more than that to answer the window's first request. S3 Sidekick now reserves 8 MB, the same as macOS and Linux.
-- **Testing:** Added a Windows startup test that launches the real release build and fails if it crashes or has too little stack, so this can't slip into a release again.
-- **PKG:** Updated packages.
-
-## Changes in `v0.11.1:`
-
-v0.11.1 is a hardening release for storage, transfers, and the encrypted vault. There are no new big features, but many edge cases that could lose work, fail a transfer, or confuse the UI are now handled.
-
-### Transfers
-
-- **Pause, cancel & reconnect:** Pause and cancel now reach transfers that are still waiting to start, and a quick pause/resume no longer ends in a false "Transfer cancelled" failure. Disconnecting parks the queue ("Waiting to reconnect") instead of failing every item.
-- **Offline hold:** Local and LAN endpoints (for example MinIO on this machine) keep working when the OS reports no internet.
-- **Downloads:** Resumed downloads report real speed and ETA. A finished download whose destination is briefly locked keeps its data, so a retry does not download it again. A stuck scratch file no longer blocks transfer recovery.
-- **Retries:** Uploads and folder creation that commit on the server but lose the response now recognise their own write instead of reporting a conflict. Copies retain the source when the destination's ownership cannot be proved.
-- **Updates:** Installing an update warns before it interrupts running transfers.
-
-### Data safety
-
-- **Keys with spaces and `+`:** Object listings decode spaces and plus signs correctly for AWS, MinIO, and other S3-compatible servers.
-- **Unconditional writes:** The warning has a "Don't ask again" option, with a toggle in Settings > Transfers. Local S3 emulators other than MinIO on its default port are treated as generic providers and ask first. A large object inside a folder copy or rename now asks instead of failing.
-- **Copy & move:** A single file sent to `folder/` goes inside that folder. MinIO copies ask before unconditional writes; automatic moves and renames are refused when conditional deletion cannot be guaranteed. Rollback never deletes an object it cannot prove it created, and it is safer in buckets with versioning suspended.
-- **Bookmarks:** Corrupt or locked bookmark storage is never overwritten with an empty list. Deletes ask first and remove the exact bookmark clicked. Export uses a save dialog.
-
-### Security
-
-- **Auto-lock:** The inactivity timeout is now enforced while the app runs: it disconnects and clears decrypted credentials. Running transfers count as activity, so an unattended transfer is not interrupted.
-- **Biometrics:** Windows Hello credentials are stored local-only and no longer roam with the profile. A temporary Windows Hello error no longer unenrolls you. Biometric unlock no longer holds up other storage work while the OS prompt is open.
-- **Unlock:** A wrong password re-prompts; other failures show their real error. Changing the lock timeout no longer locks the vault immediately.
-- **Command permissions:** Every native command now needs an explicit permission, granted only to the main window.
-- **Hardening:** "Reset settings" works while the vault is locked. An unused command that could wipe encrypted data without a password was removed. On macOS, opening a local folder refuses application bundles, so it can never launch an app.
-
-### Polish
-
-- Built on Tauri 2.12, with updated dialog, notification, process, single-instance and updater plugins.
-- Storage commands run off the UI thread, so the window stays responsive during password changes.
-- Keyboard: Tab reaches every control in dialogs on macOS, and an open context menu owns the keyboard.
-- The Inspector asks before discarding unsaved property edits.
-- Breadcrumbs handle keys that contain `//`.
-- Error messages no longer misread names like `error-500-logs` as server errors.
-- Dropped folders that cannot be scanned are reported instead of being queued as broken uploads.
+## Changes in `v0.11.3:`
+* **Security:** Updated PKGs to address: https://arstechnica.com/security/2026/10/the-internet-goes-on-high-alert-after-discovery-of-8-compromised-tls-certs/
 
 ## Changes in `v0.11.0:`
 
