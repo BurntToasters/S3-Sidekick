@@ -36,7 +36,12 @@ fs2 = "=0.4.3"
 bytes = "=1.12.1"
 
 tauri-plugin-single-instance = "=2.5.0"
-tauri-plugin-updater = "=2.13.0"
+# Only v2 updater artifacts are published (createUpdaterArtifacts = true).
+# Disable legacy v1 archives to remove the vulnerable Windows zip dependency.
+tauri-plugin-updater = { version = "=2.13.0", default-features = false, features = [
+    "rustls-tls",
+    "system-proxy",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "=0.6.4"
