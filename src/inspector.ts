@@ -2,6 +2,7 @@ import { basename, escapeHtml } from "./utils.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
 import { syncPanelWidths } from "./app-layout.ts";
 import { getSelectionEntries } from "./app-selection.ts";
+import { installInspectorHost } from "./inspector-host.ts";
 import { canPreview, closePreview, openPreview } from "./preview.ts";
 import {
   closeInfoPanel,
@@ -536,6 +537,13 @@ export function wireInspectorChrome(): void {
 
   restoreInspectorOpenState();
 }
+
+installInspectorHost({
+  ensureInspectorOpenForPane,
+  focusInspectorPreviewPane,
+  focusInspectorPropertiesPane,
+  markInspectorHasContent,
+});
 
 // Re-export mount helpers for consumers that need them.
 export {

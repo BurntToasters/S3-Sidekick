@@ -12,7 +12,7 @@ import {
   ensureInspectorOpenForPane,
   focusInspectorPreviewPane,
   markInspectorHasContent,
-} from "./inspector.ts";
+} from "./inspector-host.ts";
 
 interface PreviewResponse {
   content_type: string;

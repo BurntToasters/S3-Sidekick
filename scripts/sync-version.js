@@ -7,6 +7,7 @@ import { run as updateMetainfo } from "./update-metainfo.js";
 import {
   syncChangelogForVersion,
   syncNpmLockfileVersion,
+  syncReadmeVersion,
 } from "./sync-version-helpers.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -18,13 +19,17 @@ const version = JSON.parse(
 // marker drift or a malformed lockfile aborts without a half-synced tree.
 const changelogPath = path.join(root, "CHANGELOG.md");
 const npmLockPath = path.join(root, "package-lock.json");
+const readmePath = path.join(root, "README.md");
 const changelog = fs.readFileSync(changelogPath, "utf8");
 const npmLock = fs.readFileSync(npmLockPath, "utf8");
+const readme = fs.readFileSync(readmePath, "utf8");
 let syncedChangelog;
 let syncedNpmLock;
+let syncedReadme;
 try {
   syncedChangelog = syncChangelogForVersion(changelog, version);
   syncedNpmLock = syncNpmLockfileVersion(npmLock, version);
+  syncedReadme = syncReadmeVersion(readme, version);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
@@ -92,6 +97,11 @@ try {
       : String(error);
   console.error(`Failed to update AppStream metadata: ${message}`);
   process.exit(1);
+}
+
+if (syncedReadme !== readme) {
+  fs.writeFileSync(readmePath, syncedReadme);
+  console.log(`README.md       → ${version}`);
 }
 
 if (syncedChangelog !== changelog) {

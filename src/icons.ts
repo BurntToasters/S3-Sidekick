@@ -31,6 +31,11 @@ import arrowDown from "lucide-static/icons/arrow-down.svg?raw";
 import file from "lucide-static/icons/file.svg?raw";
 import folderOpen from "lucide-static/icons/folder-open.svg?raw";
 import fileText from "lucide-static/icons/file-text.svg?raw";
+import fileImage from "lucide-static/icons/file-image.svg?raw";
+import fileCode from "lucide-static/icons/file-code.svg?raw";
+import fileArchive from "lucide-static/icons/file-archive.svg?raw";
+import fileVideo from "lucide-static/icons/file-video.svg?raw";
+import fileAudio from "lucide-static/icons/file-audio.svg?raw";
 import clock from "lucide-static/icons/clock.svg?raw";
 import skipForward from "lucide-static/icons/skip-forward.svg?raw";
 import compass from "lucide-static/icons/compass.svg?raw";
@@ -78,6 +83,11 @@ const registry: Record<string, string> = {
   file,
   "folder-open": folderOpen,
   "file-text": fileText,
+  "file-image": fileImage,
+  "file-code": fileCode,
+  "file-archive": fileArchive,
+  "file-video": fileVideo,
+  "file-audio": fileAudio,
   clock,
   "skip-forward": skipForward,
   compass,

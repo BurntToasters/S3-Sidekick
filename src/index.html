@@ -279,43 +279,45 @@
           <section class="content">
             <div class="content-toolbar">
               <div class="content-toolbar__left">
-                <button
-                  id="sidebar-toggle"
-                  class="btn btn--icon sidebar-toggle"
-                  title="Toggle buckets"
-                  aria-label="Toggle buckets"
-                  aria-controls="bucket-panel"
-                  aria-expanded="false"
-                >
-                  <span class="lucide-icon" data-icon="database"></span>
-                </button>
-                <button
-                  id="nav-back"
-                  class="btn btn--icon"
-                  title="Back (Alt+Left)"
-                  aria-label="Navigate back"
-                  disabled
-                >
-                  <span class="lucide-icon" data-icon="arrow-left"></span>
-                </button>
-                <button
-                  id="nav-forward"
-                  class="btn btn--icon"
-                  title="Forward (Alt+Right)"
-                  aria-label="Navigate forward"
-                  disabled
-                >
-                  <span class="lucide-icon" data-icon="arrow-right"></span>
-                </button>
-                <button
-                  id="nav-up"
-                  class="btn btn--icon"
-                  title="Go up (Backspace)"
-                  aria-label="Navigate up"
-                  disabled
-                >
-                  <span class="lucide-icon" data-icon="arrow-up"></span>
-                </button>
+                <div class="content-toolbar__nav">
+                  <button
+                    id="sidebar-toggle"
+                    class="btn btn--icon sidebar-toggle"
+                    title="Toggle buckets"
+                    aria-label="Toggle buckets"
+                    aria-controls="bucket-panel"
+                    aria-expanded="false"
+                  >
+                    <span class="lucide-icon" data-icon="database"></span>
+                  </button>
+                  <button
+                    id="nav-back"
+                    class="btn btn--icon"
+                    title="Back (Alt+Left)"
+                    aria-label="Navigate back"
+                    disabled
+                  >
+                    <span class="lucide-icon" data-icon="arrow-left"></span>
+                  </button>
+                  <button
+                    id="nav-forward"
+                    class="btn btn--icon"
+                    title="Forward (Alt+Right)"
+                    aria-label="Navigate forward"
+                    disabled
+                  >
+                    <span class="lucide-icon" data-icon="arrow-right"></span>
+                  </button>
+                  <button
+                    id="nav-up"
+                    class="btn btn--icon"
+                    title="Go up (Backspace)"
+                    aria-label="Navigate up"
+                    disabled
+                  >
+                    <span class="lucide-icon" data-icon="arrow-up"></span>
+                  </button>
+                </div>
                 <div
                   id="location-omnibar"
                   class="location-omnibar"
@@ -374,7 +376,6 @@
                   aria-label="Refresh"
                 >
                   <span class="lucide-icon" data-icon="refresh-cw"></span>
-                  <span class="shortcut-chip">F5</span>
                 </button>
                 <button
                   id="btn-new-folder"
@@ -383,7 +384,6 @@
                   aria-label="New folder"
                 >
                   <span class="lucide-icon" data-icon="folder-plus"></span>
-                  <span class="shortcut-chip">⌃N</span>
                 </button>
                 <button
                   id="btn-upload"
@@ -392,7 +392,6 @@
                   aria-label="Upload files"
                 >
                   <span class="lucide-icon" data-icon="upload"></span>
-                  <span class="shortcut-chip">⌃U</span>
                 </button>
                 <button
                   id="btn-upload-folder"
@@ -401,7 +400,6 @@
                   aria-label="Upload folder"
                 >
                   <span class="lucide-icon" data-icon="folder-up"></span>
-                  <span class="shortcut-chip">⌃⇧U</span>
                 </button>
                 <button
                   id="btn-download"
@@ -514,14 +512,24 @@
                   </div>
                 </div>
 
-                <div id="empty-state" class="empty-state">
+                <div id="empty-state" class="empty-state browse-empty">
                   <span
                     class="lucide-icon empty-state__icon"
                     data-icon="cloud"
                   ></span>
-                  <p class="empty-state__text">
+                  <h2 class="browse-empty__title">Choose a bucket</h2>
+                  <p class="empty-state__text browse-empty__text">
                     Select a bucket from the sidebar to browse objects.
                   </p>
+                  <div class="empty-state__actions">
+                    <button
+                      type="button"
+                      class="btn btn--sm empty-state__show-buckets"
+                      data-empty-action="show-buckets"
+                    >
+                      Show buckets
+                    </button>
+                  </div>
                 </div>
 
                 <div id="drop-zone-overlay" class="drop-zone-overlay" hidden>
@@ -1715,8 +1723,9 @@
                   id="biometric-security-note"
                   class="security-biometric-note text-secondary"
                 >
-                  Biometric prompt is defense-in-depth; stored key is not
-                  hardware-bound.
+                  Biometric prompt is a convenience gate, not hardware-bound. A
+                  process running as your operating-system user can read the
+                  stored key without completing the prompt.
                 </span>
                 <button
                   id="biometric-toggle"

@@ -40,6 +40,10 @@
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 20px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 20px;
   --focus-ring-width: 2px;
   --focus-ring-color: var(--accent);
   --text-primary: var(--text);

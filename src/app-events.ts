@@ -119,6 +119,8 @@ import {
   handleExportActivityLog,
   handleGoToKeyOrPrefix,
   handleCopyUrl,
+  handleCopyKey,
+  handleCopyArn,
 } from "./app-objects.ts";
 import {
   handleDownload,
@@ -467,6 +469,22 @@ function wireSelectionActions(): void {
       const rect = batchMore.getBoundingClientRect();
       const menuItems: MenuItem[] = [
         {
+          label: "Copy keys",
+          action: "copy-keys",
+          disabled: selectedCount === 0 || listingLoading,
+        },
+        {
+          label: "Copy ARNs",
+          action: "copy-arns",
+          disabled: selectedCount === 0 || listingLoading,
+        },
+        {
+          label: "Copy / Move to...",
+          action: "copy-move",
+          disabled: selectedCount === 0 || listingLoading,
+        },
+        { separator: true },
+        {
           label: "Delete",
           action: "delete",
           disabled: selectedCount === 0 || listingLoading || deleteInFlight,
@@ -488,7 +506,10 @@ function wireSelectionActions(): void {
         menuItems,
         (action) => {
           dismissMoreMenu();
-          if (action === "delete") void handleDelete();
+          if (action === "copy-keys") void handleCopyKey();
+          else if (action === "copy-arns") void handleCopyArn();
+          else if (action === "copy-move") openCopyMoveDialog();
+          else if (action === "delete") void handleDelete();
           else if (action === "copy-urls") void handleCopyUrl();
           else if (action === "deselect-all") clearSelection();
         },
@@ -842,6 +863,25 @@ function wireObjectTable(): void {
       void handleUploadButton();
     } else if (action === "new-folder") {
       void handleCreateFolder();
+    } else if (action === "clear-filter") {
+      clearFilterInputDebounce();
+      clearFilter();
+      renderObjectTable();
+      (
+        document.getElementById("filter-input") as HTMLInputElement | null
+      )?.focus();
+    }
+  });
+
+  dom.emptyState.addEventListener("click", (e) => {
+    const actionBtn = (e.target as HTMLElement).closest<HTMLElement>(
+      "[data-empty-action]",
+    );
+    if (!actionBtn) return;
+    if (actionBtn.dataset.emptyAction === "show-buckets") {
+      (
+        document.getElementById("sidebar-toggle") as HTMLButtonElement | null
+      )?.click();
     }
   });
 

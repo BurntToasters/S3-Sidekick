@@ -2,6 +2,89 @@
 
 use super::*;
 
+const SECRET_MARKERS: &[&str] = &[
+    "X-Amz-Security-Token",
+    "X-Amz-Credential",
+    "X-Amz-Signature",
+    "AWSAccessKeyId",
+    "secret_access_key",
+    "session_token",
+    "secret_key",
+    "access_key",
+    "Authorization",
+    "Signature",
+    "password",
+];
+
+/// Redact credentials from a diagnostic string before it reaches stderr.
+///
+/// S3 and the AWS SDK can echo presigned URLs, authorization headers, or
+/// request payloads in error text. Keep the diagnostic shape (status, error
+/// code, message) while replacing anything that looks like a credential value.
+pub(super) fn redact_sensitive(input: &str) -> String {
+    let mut redacted = input.to_string();
+    for marker in SECRET_MARKERS {
+        redacted = redact_marker(&redacted, marker);
+    }
+    redacted
+}
+
+fn redact_marker(input: &str, marker: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let needle = marker.to_ascii_lowercase();
+    let bytes = input.as_bytes();
+    let authorization = marker.eq_ignore_ascii_case("Authorization");
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while let Some(offset) = lower[cursor..].find(&needle) {
+        let marker_start = cursor + offset;
+        let marker_end = marker_start + marker.len();
+        let mut separator = marker_end;
+        while separator < bytes.len() && matches!(bytes[separator], b' ' | b'\t' | b'"' | b'\'') {
+            separator += 1;
+        }
+        if separator >= bytes.len() || !matches!(bytes[separator], b':' | b'=') {
+            output.push_str(&input[cursor..marker_end]);
+            cursor = marker_end;
+            continue;
+        }
+
+        let mut value_start = separator + 1;
+        while value_start < bytes.len() && matches!(bytes[value_start], b' ' | b'\t') {
+            value_start += 1;
+        }
+        if value_start < bytes.len() && matches!(bytes[value_start], b'"' | b'\'') {
+            value_start += 1;
+        }
+
+        let mut value_end = value_start;
+        while value_end < bytes.len() {
+            let byte = bytes[value_end];
+            if authorization {
+                if byte == b'\r' || byte == b'\n' {
+                    break;
+                }
+            } else if matches!(
+                byte,
+                b'&' | b' ' | b'\t' | b'"' | b'\'' | b',' | b'}' | b']' | b'\r' | b'\n'
+            ) {
+                break;
+            }
+            value_end += 1;
+        }
+
+        output.push_str(&input[cursor..value_start]);
+        if value_end > value_start {
+            output.push_str("[REDACTED]");
+        }
+        cursor = value_end;
+    }
+
+    output.push_str(&input[cursor..]);
+    output
+}
+
 pub(super) fn format_sdk_error<E: std::fmt::Debug>(
     prefix: &str,
     err: &aws_sdk_s3::error::SdkError<E>,
@@ -11,10 +94,11 @@ pub(super) fn format_sdk_error<E: std::fmt::Debug>(
         SdkError::ServiceError(ctx) => {
             let raw = ctx.raw();
             let status = raw.status().as_u16();
-            let body = String::from_utf8_lossy(raw.body().bytes().unwrap_or(&[]));
+            let body =
+                redact_sensitive(&String::from_utf8_lossy(raw.body().bytes().unwrap_or(&[])));
             // Service bodies can embed multi-kilobyte XML Debug payloads; keep
             // the user-facing message to status plus a short excerpt and send
-            // the full body to stderr for diagnostics.
+            // the full redacted body to stderr for diagnostics.
             let mut excerpt: String = body.chars().take(200).collect();
             if body.chars().count() > 200 {
                 excerpt.push('…');
@@ -38,20 +122,22 @@ pub(super) fn format_sdk_error<E: std::fmt::Debug>(
             message
         }
         SdkError::DispatchFailure(err) => {
-            eprintln!("S3 {} (dispatch): full error: {:?}", prefix, err);
-            let mut detail = format!("{:?}", err);
+            let detail = redact_sensitive(&format!("{:?}", err));
+            eprintln!("S3 {} (dispatch): full error: {}", prefix, detail);
+            let mut excerpt = detail.chars().take(200).collect::<String>();
             if detail.chars().count() > 200 {
-                detail = format!("{}…", detail.chars().take(200).collect::<String>());
+                excerpt.push('…');
             }
-            format!("{} (dispatch): {}", prefix, detail)
+            format!("{} (dispatch): {}", prefix, excerpt)
         }
         other => {
-            eprintln!("S3 {}: full error: {:?}", prefix, other);
-            let mut detail = format!("{:?}", other);
+            let detail = redact_sensitive(&format!("{:?}", other));
+            eprintln!("S3 {}: full error: {}", prefix, detail);
+            let mut excerpt = detail.chars().take(200).collect::<String>();
             if detail.chars().count() > 200 {
-                detail = format!("{}…", detail.chars().take(200).collect::<String>());
+                excerpt.push('…');
             }
-            format!("{}: {}", prefix, detail)
+            format!("{}: {}", prefix, excerpt)
         }
     }
 }
@@ -161,4 +247,52 @@ pub(super) fn acls_are_unavailable(message: &str) -> bool {
         || message
             .to_ascii_lowercase()
             .contains("accesscontrollistnotsupported")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_presigned_query_credentials() {
+        let input = "GET https://bucket.s3.amazonaws.com/key?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE%2F20261023&X-Amz-Signature=deadbeef&X-Amz-Security-Token=session-token";
+        let redacted = redact_sensitive(input);
+
+        assert!(
+            redacted.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"),
+            "{redacted}"
+        );
+        assert!(!redacted.contains("AKIAEXAMPLE"), "{redacted}");
+        assert!(!redacted.contains("deadbeef"), "{redacted}");
+        assert!(!redacted.contains("session-token"), "{redacted}");
+        assert!(
+            redacted.contains("X-Amz-Signature=[REDACTED]"),
+            "{redacted}"
+        );
+    }
+
+    #[test]
+    fn redacts_authorization_headers() {
+        let input =
+            "request failed\r\nAuthorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20261023/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef\r\nx-amz-request-id: request-123";
+        let redacted = redact_sensitive(input);
+
+        assert!(!redacted.contains("AKIAEXAMPLE"), "{redacted}");
+        assert!(!redacted.contains("deadbeef"), "{redacted}");
+        assert!(
+            redacted.contains("x-amz-request-id: request-123"),
+            "{redacted}"
+        );
+    }
+
+    #[test]
+    fn redacts_json_style_secret_fields() {
+        let input = r#"{"access_key":"AKIAEXAMPLE","secret_key":"super-secret-value","session_token":"session-token","message":"Access Denied"}"#;
+        let redacted = redact_sensitive(input);
+
+        assert!(!redacted.contains("AKIAEXAMPLE"), "{redacted}");
+        assert!(!redacted.contains("super-secret-value"), "{redacted}");
+        assert!(!redacted.contains("session-token"), "{redacted}");
+        assert!(redacted.contains("Access Denied"), "{redacted}");
+    }
 }

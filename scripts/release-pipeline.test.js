@@ -44,6 +44,11 @@ test("run-release accepts only canonical host commands", () => {
     () => parseReleaseArgs(["win", "--unknown"]),
     /Unknown release flag/,
   );
+  assert.throws(
+    () => parseReleaseArgs(["win", "--skip-e2e"]),
+    /Unknown release flag/,
+  );
+  assert.doesNotMatch(packageJson.scripts["release:prepare"], /--skip-e2e/);
 });
 
 test("S3 draft matrix is static and Linux x64-only", () => {

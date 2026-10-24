@@ -1,6 +1,5 @@
-<!-- > [!NOTE]
+> [!NOTE]
 > 🅱️ This is a beta build.
--->
 
 # ⬇️ Downloads
 
@@ -21,6 +20,18 @@
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
 ## Changes in `v0.12.0-beta.1:`
+
+- **Connect & browse craft:** Calmer section labels and table headers, a clearer connection title, and tabular dates in the object list.
+- **Object list:** File rows show extension-aware Lucide icons (images, text, code, archives, media) with accent folders and muted files.
+- **Toolbar:** Removed inline shortcut chips from browse actions (shortcuts remain in tooltips); navigation controls are separated from the location field.
+- **Saved connections:** Sidebar rows show a derived provider label (AWS, R2, Spaces, and so on) and a clearer empty state.
+- **Empty states:** Shared title + message pattern for no bucket, empty folder, filter miss (with Clear filter), and empty bucket sidebar; narrow layouts get a **Show buckets** action.
+- **Properties:** Grouped General tab (name/path, size/dates, HTTP headers), storage class and encryption on General, copy buttons for path/ETag/URL, clearer folder and multi-select summaries.
+- **Bulk actions:** Selection **More** menu adds Copy keys, Copy ARNs, and Copy / Move; on narrow layouts it still exposes Delete, Copy URLs, and Deselect when those toolbar buttons collapse.
+- **Security:** S3 diagnostics redact authorization headers, presigned-query credentials, and secret fields before logging. Upload sources and overwrite destinations that are symbolic links are refused.
+- **Release:** `release:prepare` now requires the full CI workflow, including the Playwright, MinIO, and full-stack jobs, to pass for the exact pushed commit. The ignored `--skip-e2e` flag was removed.
+- **Maintainability:** Transfer row and queue-chrome rendering moved out of the queue/recovery module, and the browser, inspector, preview, and properties import cycles were replaced with explicit dependency boundaries.
+- **CI:** Unsigned Windows arm64, macOS universal, and Flatpak builds now run in CI so platform toolchain breaks surface before a release host spends a session.
 
 ## Changes in `v0.11.3:`
 * **Security:** Updated PKGs to address: https://arstechnica.com/security/2026/10/the-internet-goes-on-high-alert-after-discovery-of-8-compromised-tls-certs/

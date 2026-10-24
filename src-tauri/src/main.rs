@@ -1035,6 +1035,28 @@ pub(crate) fn validate_existing_path(raw: &str, label: &str) -> Result<PathBuf, 
     Ok(path)
 }
 
+/// Validate a file the app will read and upload.
+///
+/// Uploads must name the file itself, not a symbolic link that redirects the
+/// read outside the path the user selected.
+pub(crate) fn validate_upload_source_path(raw: &str) -> Result<PathBuf, String> {
+    let path = validate_existing_path(raw, "Upload file")?;
+    if path
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Upload file is a symbolic link: {}",
+            path.display()
+        ));
+    }
+    if !path.is_file() {
+        return Err(format!("Upload path is not a file: {}", path.display()));
+    }
+    Ok(path)
+}
+
 pub(crate) fn validate_destination_path(raw: &str) -> Result<PathBuf, String> {
     let destination = parse_user_path(raw, "Destination")?;
     validate_destination_parent(&destination)?;
@@ -1082,6 +1104,16 @@ fn validate_destination_parent(destination: &Path) -> Result<(), String> {
 pub(crate) fn validate_destination_path_allow_overwrite(raw: &str) -> Result<PathBuf, String> {
     let destination = parse_user_path(raw, "Destination")?;
     validate_destination_parent(&destination)?;
+    if destination
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Destination is a symbolic link: {}",
+            destination.display()
+        ));
+    }
     if destination.exists() && !destination.is_file() {
         return Err(format!(
             "Destination is not a file: {}",
@@ -2707,6 +2739,43 @@ mod tests {
     fn validate_existing_path_rejects_nonexistent() {
         let result = validate_existing_path("/definitely/not/a/real/path/abc123", "Test");
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_destination_rejects_symlink_to_regular_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch_dir("overwrite-symlink");
+        let target = dir.join("target.bin");
+        std::fs::write(&target, b"keep").unwrap();
+        let link = dir.join("destination.bin");
+        symlink(&target, &link).unwrap();
+
+        let error = validate_destination_path_allow_overwrite(link.to_str().unwrap())
+            .expect_err("overwrite into a symlink must be refused");
+        assert!(error.contains("symbolic link"), "{error}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_source_rejects_symlink_to_regular_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch_dir("upload-symlink");
+        let target = dir.join("target.bin");
+        std::fs::write(&target, b"secret").unwrap();
+        let link = dir.join("upload.bin");
+        symlink(&target, &link).unwrap();
+
+        let error = validate_upload_source_path(link.to_str().unwrap())
+            .expect_err("upload from a symlink must be refused");
+        assert!(error.contains("symbolic link"), "{error}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn scratch_dir(label: &str) -> PathBuf {

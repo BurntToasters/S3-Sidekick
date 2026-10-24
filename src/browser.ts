@@ -1,4 +1,5 @@
 import { state, dom, type ObjectInfo } from "./state.ts";
+import { registerObjectTableRenderer } from "./layout-render-bridge.ts";
 import {
   escapeHtml,
   formatSize,
@@ -34,15 +35,133 @@ const OBJECT_VIRTUALIZE_THRESHOLD = 250;
 const OBJECT_VIRTUAL_OVERSCAN = 8;
 const OBJECT_VIRTUAL_FALLBACK_VIEWPORT = 600;
 
+type FileRowIconName =
+  | "file"
+  | "file-text"
+  | "file-image"
+  | "file-code"
+  | "file-archive"
+  | "file-video"
+  | "file-audio";
+
+const TEXT_DATA_EXTENSIONS = new Set([
+  "txt",
+  "md",
+  "csv",
+  "json",
+  "xml",
+  "html",
+  "htm",
+  "log",
+]);
+const IMAGE_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "svg",
+  "ico",
+  "bmp",
+  "avif",
+]);
+const CODE_EXTENSIONS = new Set([
+  "js",
+  "mjs",
+  "cjs",
+  "ts",
+  "tsx",
+  "jsx",
+  "py",
+  "go",
+  "rs",
+  "java",
+  "c",
+  "cpp",
+  "h",
+  "hpp",
+  "css",
+  "scss",
+  "sh",
+  "bash",
+  "yaml",
+  "yml",
+  "toml",
+  "sql",
+  "rb",
+  "php",
+  "swift",
+  "kt",
+  "lua",
+  "wasm",
+]);
+const ARCHIVE_EXTENSIONS = new Set([
+  "zip",
+  "tar",
+  "gz",
+  "tgz",
+  "bz2",
+  "xz",
+  "7z",
+  "rar",
+]);
+const VIDEO_EXTENSIONS = new Set([
+  "mp4",
+  "mov",
+  "avi",
+  "mkv",
+  "webm",
+  "m4v",
+  "wmv",
+]);
+const AUDIO_EXTENSIONS = new Set([
+  "mp3",
+  "wav",
+  "flac",
+  "ogg",
+  "m4a",
+  "aac",
+  "opus",
+]);
+
+function fileExtensionFromName(name: string): string {
+  const trimmed = name.endsWith("/") ? name.slice(0, -1) : name;
+  const dot = trimmed.lastIndexOf(".");
+  if (dot <= 0 || dot === trimmed.length - 1) return "";
+  return trimmed.slice(dot + 1).toLowerCase();
+}
+
+function resolveFileRowIconName(name: string): FileRowIconName {
+  const ext = fileExtensionFromName(name);
+  if (IMAGE_EXTENSIONS.has(ext)) return "file-image";
+  if (TEXT_DATA_EXTENSIONS.has(ext)) return "file-text";
+  if (CODE_EXTENSIONS.has(ext)) return "file-code";
+  if (ARCHIVE_EXTENSIONS.has(ext)) return "file-archive";
+  if (VIDEO_EXTENSIONS.has(ext)) return "file-video";
+  if (AUDIO_EXTENSIONS.has(ext)) return "file-audio";
+  return "file";
+}
+
+function rowIconHtml(iconName: string, fileKind: string): string {
+  const html = getIconHtml(iconName, {
+    className: "lucide-icon lucide-icon--inline",
+    decorative: true,
+  });
+  if (!html) return "";
+  return html.replace("<svg", `<svg data-file-kind="${fileKind}"`);
+}
+
 // Row icons are static markup: build once instead of per row per render.
-const FOLDER_ROW_ICON_HTML = getIconHtml("folder", {
-  className: "lucide-icon lucide-icon--inline",
-  decorative: true,
-});
-const FILE_ROW_ICON_HTML = getIconHtml("file", {
-  className: "lucide-icon lucide-icon--inline",
-  decorative: true,
-});
+const FOLDER_ROW_ICON_HTML = rowIconHtml("folder", "folder");
+const FILE_ROW_ICON_HTML_BY_KIND: Record<FileRowIconName, string> = {
+  file: rowIconHtml("file", "file"),
+  "file-text": rowIconHtml("file-text", "file-text"),
+  "file-image": rowIconHtml("file-image", "file-image"),
+  "file-code": rowIconHtml("file-code", "file-code"),
+  "file-archive": rowIconHtml("file-archive", "file-archive"),
+  "file-video": rowIconHtml("file-video", "file-video"),
+  "file-audio": rowIconHtml("file-audio", "file-audio"),
+};
 
 let lastInspectorSelectionSignature: string | null = null;
 
@@ -753,7 +872,10 @@ export function renderBucketList(): void {
   el.setAttribute("aria-label", "Buckets");
   el.setAttribute("aria-multiselectable", "false");
   if (state.buckets.length === 0) {
-    el.innerHTML = `<li class="list__empty">No buckets found</li>`;
+    el.innerHTML = bucketSidebarEmptyHtml(
+      "No buckets found",
+      "This account has no buckets you can list here.",
+    );
     return;
   }
   const filter = state.bucketFilterText.trim().toLowerCase();
@@ -763,7 +885,10 @@ export function renderBucketList(): void {
       )
     : state.buckets;
   if (visibleBuckets.length === 0) {
-    el.innerHTML = `<li class="list__empty">No buckets match filter</li>`;
+    el.innerHTML = bucketSidebarEmptyHtml(
+      "No buckets match filter",
+      "Try a different term in the bucket filter.",
+    );
     return;
   }
   const bucketIcon = getIconHtml("database", {
@@ -864,15 +989,40 @@ export function renderObjectTableSkeleton(rowCount = 8): void {
   updateSelectionUI();
 }
 
+function bucketSidebarEmptyHtml(title: string, text: string): string {
+  return (
+    `<li class="list__empty browse-sidebar-empty">` +
+    `<div class="browse-sidebar-empty__content">` +
+    `${getIconHtml("database", { className: "lucide-icon empty-state__icon", decorative: true })}` +
+    `<p class="browse-sidebar-empty__title">${escapeHtml(title)}</p>` +
+    `<p class="browse-sidebar-empty__text">${escapeHtml(text)}</p>` +
+    `</div></li>`
+  );
+}
+
 function emptyFolderRowHtml(): string {
   return (
     `<tr><td colspan="4" class="table-empty">` +
-    `<div class="table-empty__content">` +
+    `<div class="table-empty__content browse-empty">` +
     `${getIconHtml("folder", { className: "lucide-icon empty-state__icon", decorative: true })}` +
-    `<p class="table-empty__text">This folder is empty</p>` +
+    `<h3 class="browse-empty__title">Empty folder</h3>` +
+    `<p class="browse-empty__text">This folder is empty</p>` +
     `<div class="table-empty__actions">` +
     `<button type="button" class="btn btn--sm btn--primary" data-empty-action="upload">Upload files</button>` +
     `<button type="button" class="btn btn--sm" data-empty-action="new-folder">New folder</button>` +
+    `</div></div></td></tr>`
+  );
+}
+
+function filterMissRowHtml(): string {
+  return (
+    `<tr><td colspan="4" class="table-empty">` +
+    `<div class="table-empty__content browse-empty">` +
+    `${getIconHtml("search", { className: "lucide-icon empty-state__icon", decorative: true })}` +
+    `<h3 class="browse-empty__title">Nothing matched</h3>` +
+    `<p class="browse-empty__text">Try a different term in the object filter.</p>` +
+    `<div class="table-empty__actions">` +
+    `<button type="button" class="btn btn--sm btn--primary" data-empty-action="clear-filter">Clear filter</button>` +
     `</div></div></td></tr>`
   );
 }
@@ -968,8 +1118,12 @@ function updateObjectRow(
   }
   if (icon) {
     icon.className = `object-kind-icon icon-${entry.kind}`;
-    icon.innerHTML =
-      entry.kind === "folder" ? FOLDER_ROW_ICON_HTML : FILE_ROW_ICON_HTML;
+    if (entry.kind === "folder") {
+      icon.innerHTML = FOLDER_ROW_ICON_HTML;
+    } else {
+      const iconName = resolveFileRowIconName(entry.name);
+      icon.innerHTML = FILE_ROW_ICON_HTML_BY_KIND[iconName];
+    }
   }
   if (sizeCell) {
     sizeCell.className =
@@ -1222,9 +1376,7 @@ export function renderObjectTable(): void {
   table?.setAttribute("aria-rowcount", String(renderedTableEntries.length + 1));
   if (renderedTableEntries.length === 0) {
     tbody.innerHTML =
-      filter.length > 0
-        ? `<tr><td colspan="4" class="table-empty">No objects match filter</td></tr>`
-        : emptyFolderRowHtml();
+      filter.length > 0 ? filterMissRowHtml() : emptyFolderRowHtml();
   } else {
     ensureObjectPanelListeners();
     renderCurrentObjectWindow();
@@ -1758,3 +1910,5 @@ export function showEmptyState(): void {
   updateSelectionUI();
   updateNavButtons();
 }
+
+registerObjectTableRenderer(renderObjectTable);

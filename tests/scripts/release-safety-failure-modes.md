@@ -21,6 +21,12 @@ Release scripts must not require releaseToolchain metadata or exact Node/npm
 versions. Preflight must accept npm patch/minor changes and missing toolchain
 metadata while continuing to reject invalid origins and stable overrides.
 
+Release preflight must require a completed, successful `CI` workflow run for the
+exact pushed HEAD. A missing run, an in-progress run, a failed run, or a run for
+a different SHA must block the release before any build starts. Release argument
+parsing must reject `--skip-e2e`; `release:prepare` must not advertise a flag
+that the quality gate ignores.
+
 The AWS-null-version runner must bound frontend build and Cargo execution, record
 timeout/error status, preserve readable failure logs, clean its isolated app-data
 directory, reject a missing/failed/malformed check artifact, and pass a complete

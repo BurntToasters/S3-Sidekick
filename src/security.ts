@@ -412,7 +412,7 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
               : `Enable ${label} unlock`,
           );
           if (biometricNote) {
-            biometricNote.textContent = `${label} is a convenience gate and defense-in-depth; the stored key is not hardware-bound.`;
+            biometricNote.textContent = `${label} is a convenience gate, not hardware-bound. A process running as your operating-system user can read the stored key without completing the prompt.`;
           }
         } else {
           biometricSettings.style.display = "none";

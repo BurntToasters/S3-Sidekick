@@ -25,7 +25,7 @@ pub(crate) async fn upload_object(
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     validate_mutating_key(&key, "Object key")?;
-    let upload_path = validate_existing_path(&file_path, "Upload file")?;
+    let upload_path = validate_upload_source_path(&file_path)?;
     let provider = client.provider();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(

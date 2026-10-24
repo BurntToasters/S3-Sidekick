@@ -28,7 +28,7 @@ import {
   ensureInspectorOpenForPane,
   focusInspectorPropertiesPane,
   markInspectorHasContent,
-} from "./inspector.ts";
+} from "./inspector-host.ts";
 
 interface HeadObjectResponse {
   content_type: string;
@@ -198,8 +198,9 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     aclData = null;
     resetEditorState();
 
+    const folderCount = keys.length - batchKeys.length;
     if (batchKeys.length === 0) {
-      title.textContent = `${keys.length} items selected`;
+      title.textContent = `${folderCount} folder${folderCount === 1 ? "" : "s"}`;
       setInfoOverlayActive(true);
       saveBtn.style.display = "none";
       setInspectorFooterVisible(false);
@@ -207,18 +208,22 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
       const body = getInfoBodyEl();
       body.innerHTML =
         `<div class="metadata-batch-info">` +
-        `<p>Selected ${keys.length} folder(s). Properties editing applies to files only.</p>` +
+        `<p><strong>${folderCount} folder${folderCount === 1 ? "" : "s"}</strong> selected.</p>` +
+        `<p class="metadata-batch-hint">Properties editing applies to files only.</p>` +
         `</div>`;
       return;
     }
 
-    title.textContent = `${batchKeys.length} items selected`;
+    title.textContent =
+      folderCount > 0
+        ? `${batchKeys.length} file${batchKeys.length === 1 ? "" : "s"}, ${folderCount} folder${folderCount === 1 ? "" : "s"}`
+        : `${batchKeys.length} item${batchKeys.length === 1 ? "" : "s"}`;
     setInfoOverlayActive(true);
     saveBtn.style.display = "";
     setInspectorFooterVisible(true);
     saveBtn.disabled = false;
     setTabsVisible(false);
-    renderBatchView(getInfoBodyEl(), batchKeys);
+    renderBatchView(getInfoBodyEl(), batchKeys, folderCount);
     return;
   }
 
@@ -237,10 +242,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     saveBtn.style.display = "none";
     setInspectorFooterVisible(false);
     setTabsVisible(false);
-    getInfoBodyEl().innerHTML =
-      `<div class="metadata-batch-info">` +
-      `<p>Folder selected. Properties editing applies to files only.</p>` +
-      `</div>`;
+    renderFolderProperties(getInfoBodyEl(), folderPrefix);
     return;
   }
 
@@ -339,13 +341,10 @@ function renderTab(): void {
 function renderGeneral(body: HTMLElement): void {
   if (!headData) return;
 
-  body.innerHTML = [
-    infoRow("Name", basename(currentKey)),
-    infoRow("Path", currentKey),
-    infoRow("Size", formatSize(headData.content_length)),
+  const storageClass = headData.storage_class || "STANDARD";
+  const encryption = headData.server_side_encryption || "None";
+  const httpHeaderRows = [
     infoRow("Content Type", headData.content_type),
-    infoRow("Last Modified", formatDate(headData.last_modified)),
-    infoRow("ETag", headData.etag, true),
     headData.cache_control
       ? infoRow("Cache-Control", headData.cache_control)
       : "",
@@ -355,11 +354,34 @@ function renderGeneral(body: HTMLElement): void {
     headData.content_encoding
       ? infoRow("Content-Encoding", headData.content_encoding)
       : "",
-  ]
-    .filter(Boolean)
-    .join("");
+  ].filter(Boolean);
 
+  body.innerHTML =
+    infoSection("Name & path") +
+    infoRow("Name", basename(currentKey)) +
+    infoRowCopyable("Path", currentKey, true) +
+    infoSection("Size & dates") +
+    infoRow("Size", formatSize(headData.content_length)) +
+    infoRow("Last Modified", formatDate(headData.last_modified)) +
+    infoRow("Storage Class", storageClass) +
+    infoRow("Encryption", encryption) +
+    infoRowCopyable("ETag", headData.etag, true) +
+    (httpHeaderRows.length > 0
+      ? infoSection("HTTP headers") + httpHeaderRows.join("")
+      : "");
+
+  attachCopyButtons(body);
   void buildUrlAsync(body, currentKey, panelRequestToken);
+}
+
+function renderFolderProperties(body: HTMLElement, folderPrefix: string): void {
+  const displayName = basename(folderPrefix) || folderPrefix;
+  body.innerHTML =
+    infoSection("Location") +
+    infoRow("Name", displayName) +
+    infoRowCopyable("Path", folderPrefix, true) +
+    `<p class="metadata-batch-hint">Folder selected. Property editing applies to files only.</p>`;
+  attachCopyButtons(body);
 }
 
 async function buildUrlAsync(
@@ -378,12 +400,17 @@ async function buildUrlAsync(
       currentKey === expectedKey &&
       url
     ) {
-      const urlRow = document.createElement("div");
-      urlRow.className = "metadata-info-row";
-      urlRow.innerHTML =
+      const urlBlock = document.createElement("div");
+      urlBlock.className = "metadata-url-block";
+      urlBlock.innerHTML =
+        infoSection("Link") +
+        `<div class="metadata-info-row metadata-info-row--copyable">` +
         `<span class="metadata-label">URL</span>` +
-        `<span class="metadata-value-url" title="${escapeHtml(url)}">${escapeHtml(url)}</span>`;
-      body.appendChild(urlRow);
+        `<span class="metadata-info-row__value metadata-value-url" title="${escapeHtml(url)}">${escapeHtml(url)}</span>` +
+        `<button type="button" class="btn btn--ghost btn--sm metadata-copy-btn" data-copy-encoded="${encodeURIComponent(url)}" data-copy-label="URL" aria-label="Copy URL">Copy</button>` +
+        `</div>`;
+      body.appendChild(urlBlock);
+      attachCopyButtons(urlBlock);
     }
   } catch {
     return;
@@ -478,7 +505,11 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
   });
 }
 
-function renderBatchView(body: HTMLElement, keys: string[]): void {
+function renderBatchView(
+  body: HTMLElement,
+  keys: string[],
+  folderCount: number,
+): void {
   // Ctrl+A on a capped listing can select thousands of keys; rendering one
   // list item each froze the panel. It is informational, so cap the preview.
   const MAX_LISTED = 100;
@@ -490,9 +521,14 @@ function renderBatchView(body: HTMLElement, keys: string[]): void {
     keys.length > shown.length
       ? `<li class="metadata-batch-more">+${keys.length - shown.length} more…</li>`
       : "";
+  const folderNote =
+    folderCount > 0
+      ? `<p class="metadata-batch-hint">Folder selections are not edited; changes below apply to files only.</p>`
+      : "";
   body.innerHTML =
     `<div class="metadata-batch-info">` +
-    `<p>Selected ${keys.length} file(s):</p>` +
+    `<p><strong>${keys.length} file${keys.length === 1 ? "" : "s"}</strong> in this selection.</p>` +
+    folderNote +
     `<ul class="metadata-batch-list">${listItems}${more}</ul>` +
     `</div>` +
     `<div class="setting-section">Permissions</div>` +
@@ -668,9 +704,45 @@ function infoRow(label: string, value: string, mono = false): string {
   return (
     `<div class="metadata-info-row">` +
     `<span class="metadata-label">${escapeHtml(label)}</span>` +
-    `<span class="${cls}">${escapeHtml(value)}</span>` +
+    `<span class="metadata-info-row__value ${cls}">${escapeHtml(value)}</span>` +
     `</div>`
   );
+}
+
+function infoSection(title: string): string {
+  return `<div class="metadata-section-heading">${escapeHtml(title)}</div>`;
+}
+
+function infoRowCopyable(label: string, value: string, mono = false): string {
+  const cls = mono ? "metadata-value-mono" : "";
+  return (
+    `<div class="metadata-info-row metadata-info-row--copyable">` +
+    `<span class="metadata-label">${escapeHtml(label)}</span>` +
+    `<span class="metadata-info-row__value ${cls}" title="${escapeHtml(value)}">${escapeHtml(value)}</span>` +
+    `<button type="button" class="btn btn--ghost btn--sm metadata-copy-btn" data-copy-encoded="${encodeURIComponent(value)}" data-copy-label="${escapeHtml(label)}" aria-label="Copy ${escapeHtml(label)}">Copy</button>` +
+    `</div>`
+  );
+}
+
+async function copyPropertyValue(value: string, label: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(value);
+    setStatus(`${label} copied to clipboard.`, 5000);
+  } catch (err) {
+    setStatus(`Failed to copy: ${friendlyError(err)}`);
+  }
+}
+
+function attachCopyButtons(root: ParentNode): void {
+  root
+    .querySelectorAll<HTMLButtonElement>(".metadata-copy-btn")
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const encoded = btn.dataset.copyEncoded ?? "";
+        const label = btn.dataset.copyLabel ?? "Value";
+        void copyPropertyValue(decodeURIComponent(encoded), label);
+      });
+    });
 }
 
 function errorText(err: unknown): string {

@@ -53,6 +53,10 @@
     display: inline-flex;
   }
 
+  .empty-state__show-buckets {
+    display: inline-flex;
+  }
+
   .breadcrumb {
     padding-left: 8px;
   }

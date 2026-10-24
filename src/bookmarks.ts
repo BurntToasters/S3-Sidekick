@@ -323,18 +323,52 @@ export async function importBookmarksJson(
   }
 }
 
+export function deriveProviderLabelFromEndpoint(endpoint: string): string {
+  const trimmed = endpoint.trim();
+  if (!trimmed) return "Custom";
+  try {
+    const url = new URL(
+      trimmed.includes("://") ? trimmed : `https://${trimmed}`,
+    );
+    const host = url.hostname.toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1") return "Local";
+    if (host.includes("amazonaws.com")) return "AWS";
+    if (host.includes("digitaloceanspaces.com")) return "Spaces";
+    if (host.includes("backblazeb2.com")) return "B2";
+    if (host.includes("r2.cloudflarestorage.com")) return "R2";
+    if (host.includes("wasabisys.com")) return "Wasabi";
+    return host.length > 24 ? `${host.slice(0, 21)}…` : host;
+  } catch {
+    return trimmed.length > 24 ? `${trimmed.slice(0, 21)}…` : trimmed;
+  }
+}
+
 export function renderBookmarkList(
   listEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
   onDelete: (bookmark: Bookmark) => void,
-  options: { emptyMessage?: string } = {},
+  options: {
+    emptyMessage?: string;
+    emptyTitle?: string;
+    layout?: "default" | "connection";
+  } = {},
 ): void {
+  const layout = options.layout ?? "default";
   // Handlers resolve rows against this render's snapshot, so a click on a
   // list rendered before a change still names the bookmark it shows.
   const rendered = [...bookmarks];
   if (rendered.length === 0) {
     const message = options.emptyMessage ?? "No bookmarks saved";
-    listEl.innerHTML = `<li class="bookmark-empty">${escapeHtml(message)}</li>`;
+    if (layout === "connection") {
+      const title = options.emptyTitle ?? "No saved connections";
+      listEl.innerHTML =
+        `<li class="conn-saved-empty">` +
+        `<p class="conn-saved-empty__title">${escapeHtml(title)}</p>` +
+        `<p class="conn-saved-empty__text">${escapeHtml(message)}</p>` +
+        `</li>`;
+    } else {
+      listEl.innerHTML = `<li class="bookmark-empty">${escapeHtml(message)}</li>`;
+    }
     listEl.onkeydown = null;
     listEl.onclick = null;
     return;
@@ -343,6 +377,21 @@ export function renderBookmarkList(
   listEl.innerHTML = rendered
     .map((b, i) => {
       const regionPart = b.region ? ` (${escapeHtml(b.region)})` : "";
+      if (layout === "connection") {
+        const provider = escapeHtml(
+          deriveProviderLabelFromEndpoint(b.endpoint),
+        );
+        return `<li class="bookmark-item bookmark-item--connection" data-index="${i}" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
+          <div class="bookmark-item__body">
+            <div class="bookmark-item__top">
+              <div class="bookmark__name">${escapeHtml(b.name)}</div>
+              <span class="bookmark__provider">${provider}</span>
+            </div>
+            <div class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</div>
+          </div>
+          <button class="bookmark__delete" data-delete="${i}" title="Remove bookmark">${getIconHtml("x", { className: "lucide-icon bookmark__delete-icon", decorative: true })}</button>
+        </li>`;
+      }
       return `<li class="bookmark-item" data-index="${i}" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
           <div style="flex:1;min-width:0">
             <div class="bookmark__name">${escapeHtml(b.name)}</div>

@@ -67,6 +67,7 @@ function seed(version) {
     "package.json",
     "package-lock.json",
     "CHANGELOG.md",
+    "README.md",
     "run.rosie.s3-sidekick.metainfo.xml",
     "src-tauri/tauri.conf.json",
     "src-tauri/Cargo.toml",
@@ -176,6 +177,12 @@ try {
     "tauri.conf synced",
     JSON.parse(read("src-tauri/tauri.conf.json")).version === version,
   );
+  check(
+    "README version synced",
+    read("README.md").includes(
+      `> **Package version in this checkout: ${version}.**`,
+    ),
+  );
 
   seed("0.11.3");
   fs.writeFileSync(
@@ -187,6 +194,24 @@ try {
   const missingStatus = runSync("missing-marker.log");
   check("missing marker exits 1", missingStatus === 1, missingStatus);
   check("missing marker writes nothing", isClean());
+
+  seed("0.11.3");
+  fs.writeFileSync(
+    path.join(repo, "README.md"),
+    read("README.md").replace(
+      /^> \*\*Package version in this checkout:.*$/m,
+      "> Package version marker removed.",
+    ),
+  );
+  git(["add", "README.md"]);
+  git(["commit", "-qm", "missing-readme-marker"]);
+  const missingReadmeStatus = runSync("missing-readme-marker.log");
+  check(
+    "missing README marker exits 1",
+    missingReadmeStatus === 1,
+    missingReadmeStatus,
+  );
+  check("missing README marker writes nothing", isClean());
 
   seed("0.11.3");
   fs.writeFileSync(path.join(repo, "package-lock.json"), "{ broken\n");
@@ -222,7 +247,7 @@ try {
     `${JSON.stringify(
       {
         suite: "sync-version-real-script",
-        passed: passed === results.length && results.length === 18,
+        passed: passed === results.length && results.length >= 21,
         checkCount: results.length,
         passedCount: passed,
         checks: results,
@@ -235,7 +260,7 @@ try {
 }
 
 const passed =
-  results.length === 18 && results.every((result) => result.passed);
+  results.length >= 21 && results.every((result) => result.passed);
 process.stdout.write(
   `${passed ? "ALL PASS" : "FAILURES"} (${results.filter((result) => result.passed).length}/${results.length})\n`,
 );

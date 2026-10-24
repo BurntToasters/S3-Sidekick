@@ -8,6 +8,8 @@ S3 Sidekick follows semantic versioning. Stable releases use `X.Y.Z`; pre-releas
 
 The webview owns presentation state and sends named commands through Tauri. The Rust backend owns S3 clients, credentials, filesystem access, transfer checkpoints, and vault migration. Connection and listing generations prevent late async responses from changing a newer destination.
 
+Webview module boundaries avoid runtime import cycles. `app-layout.ts` renders the object table through `layout-render-bridge.ts`; preview and properties call the inspector through `inspector-host.ts`; and transfer row/chrome rendering lives in `transfer-render.ts` rather than the queue and recovery flow.
+
 ## Transfer integrity
 
 Uploads use S3 checksums when enabled. Large downloads use range requests pinned to a readable object version selector, including the literal `null`, or to an ETag when version IDs are unavailable. Resume checkpoints retain that identity and are rejected when the object generation changes. Copy receipts record source and destination ETags/version IDs plus canonical source HEAD, ACL-grant, and raw-tag fingerprints. Supported empty ACL/tag state is fingerprinted differently from a provider that explicitly reports the feature unsupported; ordinary read failures fail closed. Receipt-producing copies collect all three source fingerprints even for small objects.

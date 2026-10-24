@@ -33,12 +33,44 @@
   gap: 8px;
 }
 
+.metadata-section-heading {
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 14px 0 6px;
+}
+
+.metadata-section-heading:first-child {
+  margin-top: 0;
+}
+
 .metadata-info-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   font-size: 13px;
+  padding: 4px 0;
+}
+
+.metadata-info-row--copyable .metadata-info-row__value {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+}
+
+.metadata-copy-btn {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 2px 8px;
+  min-height: 26px;
+}
+
+.metadata-value-url {
+  word-break: break-all;
+  font-size: 12px;
 }
 
 .metadata-label {

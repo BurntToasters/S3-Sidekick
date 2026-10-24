@@ -445,7 +445,7 @@ describe("info panel", () => {
     ).toBe("none");
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
-    ).toContain("folder(s)");
+    ).toContain("folders");
 
     await info.openInfoPanel(["alpha.txt", "prefix:folder/", "beta.txt"]);
     const keyInput = document.querySelector<HTMLInputElement>(

@@ -123,8 +123,10 @@ export function refreshSavedConnectionsList(): void {
       })();
     },
     {
+      layout: "connection",
+      emptyTitle: "No saved connections yet",
       emptyMessage:
-        "No saved connections yet. Connect using the form, or save a bookmark after you connect.",
+        "Connect using the form, or save a bookmark after you connect.",
     },
   );
 }

@@ -60,6 +60,17 @@ export function syncChangelogForVersion(changelog, version) {
   return updated;
 }
 
+export function syncReadmeVersion(readme, version) {
+  const marker = /^> \*\*Package version in this checkout: [^*]+\.\*\*/m;
+  if (!marker.test(readme)) {
+    throw new Error("README.md package version marker not found");
+  }
+  return readme.replace(
+    marker,
+    `> **Package version in this checkout: ${version}.**`,
+  );
+}
+
 export function syncNpmLockfileVersion(lockText, version) {
   let parsed;
   try {

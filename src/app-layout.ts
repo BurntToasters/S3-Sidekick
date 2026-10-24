@@ -1,6 +1,6 @@
 import { state } from "./state.ts";
 import { hideContextMenu } from "./context-menu.ts";
-import { renderObjectTable } from "./browser.ts";
+import { renderObjectTableFromLayout } from "./layout-render-bridge.ts";
 
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 420;
@@ -49,7 +49,7 @@ export function wireObjectFilterInput(): void {
     // only pruned against the full listing inside updateSelectionUI.
     clearFilterInputDebounce();
     filterInputDebounce = setTimeout(() => {
-      renderObjectTable();
+      renderObjectTableFromLayout();
       filterInputDebounce = undefined;
     }, FILTER_INPUT_DEBOUNCE_MS);
   });

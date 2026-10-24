@@ -1172,7 +1172,17 @@ describe("main integration", () => {
       label: string;
       disabled?: boolean;
     }>;
-    expect(menuItems.map((item) => item.label)).toEqual([
+    expect(
+      menuItems
+        .filter(
+          (item): item is { label: string; disabled?: boolean } =>
+            !("separator" in item && item.separator),
+        )
+        .map((item) => item.label),
+    ).toEqual([
+      "Copy keys",
+      "Copy ARNs",
+      "Copy / Move to...",
       "Delete",
       "Copy URLs",
       "Deselect All",
