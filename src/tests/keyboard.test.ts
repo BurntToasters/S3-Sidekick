@@ -101,27 +101,21 @@ describe("keyboard shortcuts", () => {
     expect(inspector.isInspectorOpen()).toBe(false);
   });
 
-  it("clears docked preview on Escape before closing inspector", async () => {
+  it("closes the docked inspector on Escape, including while a preview is showing", async () => {
     document.body.innerHTML += `
       <aside id="inspector-panel"></aside>
       <button id="btn-inspector"></button>
       <div id="inspector-preview-body"></div>
     `;
-    const { state } = await import("../state.ts");
+    const selection = await import("../app-selection.ts");
     const inspector = await import("../inspector.ts");
     inspector.setInspectorOpen(true);
-    await inspector.syncInspectorFromSelection(state.selectedKeys);
+    await inspector.syncInspectorFromSelection(selection.getSelectionEntries());
     const previewBody = document.getElementById("inspector-preview-body");
     previewBody?.appendChild(document.createElement("pre"));
     inspector.markInspectorHasContent();
 
     await wireKeyboard();
-
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    expect(
-      document.getElementById("inspector-preview-body")?.childElementCount,
-    ).toBe(0);
-    expect(inspector.isInspectorOpen()).toBe(true);
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -158,5 +152,45 @@ describe("keyboard shortcuts", () => {
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "F5" }));
     expect(handlers.handleRefresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("shortcut catalog", () => {
+  it("shows Command labels on macOS and Ctrl labels elsewhere", async () => {
+    const catalog = await import("../shortcut-catalog.ts");
+
+    const mac = catalog.shortcutListText("macos");
+    expect(mac).toContain("⌘K");
+    expect(mac).toContain("⌘/");
+    expect(mac).not.toContain("Ctrl+");
+
+    for (const platform of ["windows", "linux", ""]) {
+      const other = catalog.shortcutListText(platform);
+      expect(other).toContain("Ctrl+K");
+      expect(other).toContain("Ctrl+/");
+      expect(other).not.toContain("⌘");
+    }
+  });
+
+  it("lists the shortcuts the handler supports, with F5 and Escape", async () => {
+    const catalog = await import("../shortcut-catalog.ts");
+    const lines = catalog.shortcutListText("windows").split("\n");
+
+    expect(lines.some((line) => line.includes("F5"))).toBe(true);
+    expect(lines.some((line) => line.includes("F2"))).toBe(true);
+    expect(lines.some((line) => line.includes("Alt+←"))).toBe(true);
+    expect(lines.some((line) => line.includes("Alt+→"))).toBe(true);
+    expect(lines.some((line) => line.includes("Escape"))).toBe(true);
+  });
+
+  it("has one entry per action and a key label on every platform", async () => {
+    const catalog = await import("../shortcut-catalog.ts");
+
+    const actions = catalog.SHORTCUTS.map((entry) => entry.action);
+    expect(new Set(actions).size).toBe(actions.length);
+    for (const entry of catalog.SHORTCUTS) {
+      expect(entry.macos.length).toBeGreaterThan(0);
+      expect(entry.other.length).toBeGreaterThan(0);
+    }
   });
 });

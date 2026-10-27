@@ -84,7 +84,7 @@ export async function openCopyMoveFromRow(
   await row.click({ button: "right" });
   await page
     .locator('.context-menu [role="menuitem"]', {
-      hasText: "Copy / Move to...",
+      hasText: /^Copy( \/ Move)? to\.\.\./,
     })
     .click();
   await expect(page.locator("#copy-move-overlay")).toHaveClass(/active/);

@@ -1,15 +1,34 @@
 import { state } from "./state.ts";
 
-const PREFIX_TAG = "prefix:";
-
 /**
- * Selection is stored structurally, not by string prefix.
- *
- * Files live in `selectedKeys`, folders in `selectedPrefixes`. The previous
- * encoding stored folders as `"prefix:" + prefix` in the same set as file
- * keys, so a legal object key beginning with `prefix:` was decoded as a
- * folder and destructive actions targeted the wrong path.
+ * One selected row. Kind is explicit: a folder's `key` is its prefix (ending in
+ * `/`), a file's `key` is the object key. Selection never infers kind from the
+ * text of a key, so a file named `prefix:archive` stays a file.
  */
+export interface SelectionEntry {
+  readonly kind: "file" | "folder";
+  readonly key: string;
+}
+
+export function fileEntry(key: string): SelectionEntry {
+  return { kind: "file", key };
+}
+
+export function folderEntry(prefix: string): SelectionEntry {
+  return { kind: "folder", key: prefix };
+}
+
+export function isSameEntry(a: SelectionEntry, b: SelectionEntry): boolean {
+  return a.kind === b.kind && a.key === b.key;
+}
+
+/** Read the identity of an object-table row from its dataset. */
+export function entryFromRow(row: HTMLElement): SelectionEntry | null {
+  if (row.dataset.key !== undefined) return fileEntry(row.dataset.key);
+  if (row.dataset.prefix !== undefined) return folderEntry(row.dataset.prefix);
+  return null;
+}
+
 export function getSelectedFileKeys(): string[] {
   return Array.from(state.selectedKeys);
 }
@@ -22,26 +41,25 @@ export function selectionCount(): number {
   return state.selectedKeys.size + state.selectedPrefixes.size;
 }
 
-export function isSelected(semanticKey: string): boolean {
-  if (semanticKey.startsWith(PREFIX_TAG)) {
-    return state.selectedPrefixes.has(semanticKey.slice(PREFIX_TAG.length));
-  }
-  return state.selectedKeys.has(semanticKey);
+export function isSelected(entry: SelectionEntry): boolean {
+  return entry.kind === "folder"
+    ? state.selectedPrefixes.has(entry.key)
+    : state.selectedKeys.has(entry.key);
 }
 
-export function addSelection(semanticKey: string): void {
-  if (semanticKey.startsWith(PREFIX_TAG)) {
-    state.selectedPrefixes.add(semanticKey.slice(PREFIX_TAG.length));
+export function addSelection(entry: SelectionEntry): void {
+  if (entry.kind === "folder") {
+    state.selectedPrefixes.add(entry.key);
   } else {
-    state.selectedKeys.add(semanticKey);
+    state.selectedKeys.add(entry.key);
   }
 }
 
-export function removeSelection(semanticKey: string): void {
-  if (semanticKey.startsWith(PREFIX_TAG)) {
-    state.selectedPrefixes.delete(semanticKey.slice(PREFIX_TAG.length));
+export function removeSelection(entry: SelectionEntry): void {
+  if (entry.kind === "folder") {
+    state.selectedPrefixes.delete(entry.key);
   } else {
-    state.selectedKeys.delete(semanticKey);
+    state.selectedKeys.delete(entry.key);
   }
 }
 
@@ -50,11 +68,10 @@ export function clearAllSelection(): void {
   state.selectedPrefixes.clear();
 }
 
-/** Selection as semantic keys (`prefix:x` for folders, raw keys for files). */
-export function getSelectionEntries(): Set<string> {
-  const entries = new Set<string>(state.selectedKeys);
-  for (const prefix of state.selectedPrefixes) {
-    entries.add(PREFIX_TAG + prefix);
-  }
-  return entries;
+/** Selected rows: files first, then folders. */
+export function getSelectionEntries(): SelectionEntry[] {
+  return [
+    ...getSelectedFileKeys().map(fileEntry),
+    ...getSelectedPrefixes().map(folderEntry),
+  ];
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  plural,
   $,
   $$,
   findClosest,
@@ -377,6 +378,77 @@ describe("friendlyError", () => {
   it("converts non-string errors to string", () => {
     expect(friendlyError(new Error("403 Forbidden"))).toBe(
       "Access denied. Check your credentials and permissions.",
+    );
+  });
+});
+
+describe("plural", () => {
+  it("uses the singular form for exactly one", () => {
+    expect(plural(1, "file")).toBe("1 file");
+  });
+
+  it("appends s for zero and many", () => {
+    expect(plural(0, "file")).toBe("0 files");
+    expect(plural(2, "transfer")).toBe("2 transfers");
+  });
+
+  it("accepts an irregular plural form", () => {
+    expect(plural(3, "entry", "entries")).toBe("3 entries");
+    expect(plural(1, "entry", "entries")).toBe("1 entry");
+  });
+
+  it("groups large counts with the user's locale", () => {
+    expect(plural(1000, "file")).toBe(`${(1000).toLocaleString()} files`);
+  });
+});
+
+describe("isEditableElement text-entry controls", () => {
+  it("treats checkboxes, radios and buttons as non-typing controls", () => {
+    for (const type of ["checkbox", "radio", "button", "range", "file"]) {
+      const input = document.createElement("input");
+      input.type = type;
+      expect(isEditableElement(input), type).toBe(false);
+    }
+  });
+
+  it("keeps text-entry inputs editable", () => {
+    for (const type of [
+      "text",
+      "search",
+      "email",
+      "url",
+      "password",
+      "number",
+    ]) {
+      const input = document.createElement("input");
+      input.type = type;
+      expect(isEditableElement(input), type).toBe(true);
+    }
+    expect(isEditableElement(document.createElement("input"))).toBe(true);
+  });
+});
+
+describe("friendlyError internal failures", () => {
+  const generic =
+    "Something went wrong talking to the app backend. Try again; details are in the Activity log.";
+
+  it("replaces JavaScript runtime errors with a generic sentence", () => {
+    expect(
+      friendlyError(
+        new TypeError("Cannot read properties of undefined (reading 'bucket')"),
+      ),
+    ).toBe(generic);
+    expect(friendlyError("x is not a function")).toBe(generic);
+    expect(friendlyError("ReferenceError: foo is not defined")).toBe(generic);
+  });
+
+  it("replaces unexpected response shapes with a generic sentence", () => {
+    expect(friendlyError("Unexpected response shape")).toBe(generic);
+  });
+
+  it("keeps ordinary backend messages that have no mapping", () => {
+    expect(friendlyError("Bucket policy rejected the request")).toBe(
+      "Bucket policy rejected the request",
     );
   });
 });

@@ -22,6 +22,9 @@ interface PreviewResponse {
   total_size: number;
 }
 
+/** Matches the native `MAX_PREVIEW` read limit in s3/preview.rs. */
+const PREVIEW_LIMIT_BYTES = 1_048_576;
+
 const PREVIEWABLE_IMAGE_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -32,16 +35,64 @@ const PREVIEWABLE_IMAGE_TYPES = new Set([
   "image/x-icon",
 ]);
 
+/**
+ * Extensions whose content is never rendered. They are refused before any
+ * request, so the Preview tab is disabled and no bytes are fetched. Unknown
+ * extensions still reach the native command, which decides from the HEAD
+ * content type.
+ */
+const NON_PREVIEWABLE_EXTENSIONS = new Set([
+  "zip",
+  "gz",
+  "tgz",
+  "tar",
+  "bz2",
+  "xz",
+  "7z",
+  "rar",
+  "exe",
+  "dll",
+  "so",
+  "dylib",
+  "bin",
+  "iso",
+  "dmg",
+  "msi",
+  "pdf",
+  "doc",
+  "docx",
+  "xls",
+  "xlsx",
+  "ppt",
+  "pptx",
+  "mp3",
+  "wav",
+  "flac",
+  "mp4",
+  "mov",
+  "avi",
+  "mkv",
+  "woff",
+  "woff2",
+]);
+
+const UNSUPPORTED_MESSAGE = "Preview not available for this file type.";
+
 let activePreviewObjectUrl: string | null = null;
 let previewSeq = 0;
 
-function canPreview(name: string): boolean {
-  // Always offer Preview; rendering is decided by content_type/is_text
-  // below, not by extension. Keep a non-empty guard for menu affordance.
-  return name.trim().length > 0;
+/**
+ * Whether Preview can render this file name. Decided from the extension only,
+ * so a known binary never costs a request.
+ */
+export function canPreview(name: string): boolean {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return false;
+  const dot = trimmed.lastIndexOf(".");
+  if (dot <= 0) return true;
+  const extension = trimmed.slice(dot + 1).toLowerCase();
+  return !NON_PREVIEWABLE_EXTENSIONS.has(extension);
 }
-
-export { canPreview };
 
 function clearActivePreviewObjectUrl(): void {
   if (activePreviewObjectUrl) {
@@ -64,6 +115,30 @@ function base64ToBlobUrl(base64: string, type: string): string {
   return URL.createObjectURL(blob);
 }
 
+function unsupportedMarkup(): string {
+  return `<div class="preview-unsupported" role="status">${UNSUPPORTED_MESSAGE}</div>`;
+}
+
+function tooLargeMarkup(totalSize: number): string {
+  return (
+    `<div class="preview-too-large">` +
+    `<p class="preview-unsupported" role="status">Too large to preview (${escapeHtml(formatSize(totalSize))}). ` +
+    `Download the file to open it.</p>` +
+    `<button type="button" class="btn btn--sm" data-preview-download>Download</button>` +
+    `</div>`
+  );
+}
+
+function wireDownloadAction(body: HTMLElement): void {
+  body
+    .querySelector<HTMLButtonElement>("[data-preview-download]")
+    ?.addEventListener("click", () => {
+      // The preview always belongs to the single selected file, so the toolbar
+      // download acts on the object being shown.
+      document.getElementById("btn-download")?.click();
+    });
+}
+
 export async function openPreview(key: string): Promise<void> {
   ensureInspectorOpenForPane("preview");
   if (shouldUseInspectorMount()) {
@@ -82,6 +157,13 @@ export async function openPreview(key: string): Promise<void> {
   clearActivePreviewObjectUrl();
   title.textContent = basename(key);
   showPreviewOverlay(true);
+
+  if (!canPreview(basename(key))) {
+    body.setAttribute("aria-busy", "false");
+    body.innerHTML = unsupportedMarkup();
+    return;
+  }
+
   body.setAttribute("aria-busy", "true");
   body.innerHTML = `<div class="metadata-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading preview&#8230;</div>`;
 
@@ -103,6 +185,13 @@ export async function openPreview(key: string): Promise<void> {
     const type = mediaType(resp.content_type);
 
     if (PREVIEWABLE_IMAGE_TYPES.has(type)) {
+      if (resp.total_size > PREVIEW_LIMIT_BYTES) {
+        // A partial image draws as a broken picture, so nothing is drawn.
+        body.setAttribute("aria-busy", "false");
+        body.innerHTML = tooLargeMarkup(resp.total_size);
+        wireDownloadAction(body);
+        return;
+      }
       if (type === "image/svg+xml") {
         const blob = new Blob([resp.data], { type: "image/svg+xml" });
         const url = URL.createObjectURL(blob);
@@ -124,7 +213,7 @@ export async function openPreview(key: string): Promise<void> {
     } else if (resp.is_text) {
       html += `<pre class="preview-text">${escapeHtml(resp.data)}</pre>`;
     } else {
-      html += `<div class="preview-unsupported">Preview not available for ${escapeHtml(resp.content_type)}</div>`;
+      html += unsupportedMarkup();
     }
 
     if (resp.truncated) {

@@ -8,6 +8,25 @@ pub(crate) struct ConnectResult {
     pub connection_id: String,
     pub connection_identity: String,
     pub create_only_capabilities: CreateOnlyCapabilityInfo,
+    /// Whether the provider verifies `DeleteObject If-Match`, the only basis for
+    /// automatic move source retirement. The webview treats a missing field as
+    /// unsupported.
+    pub conditional_delete_supported: bool,
+}
+
+fn build_connect_result(
+    region: String,
+    connection_id: String,
+    connection_identity: String,
+    storage_provider: StorageProviderKind,
+) -> ConnectResult {
+    ConnectResult {
+        region,
+        connection_id,
+        connection_identity,
+        create_only_capabilities: CreateOnlyCapabilityInfo::from_provider(storage_provider),
+        conditional_delete_supported: supports_conditional_delete(storage_provider),
+    }
 }
 
 pub(super) fn mint_connection_id() -> String {
@@ -314,12 +333,12 @@ pub(crate) async fn connect(
         Ok(())
     })?;
 
-    Ok(ConnectResult {
-        region: resolved_region,
+    Ok(build_connect_result(
+        resolved_region,
         connection_id,
-        connection_identity: identity,
-        create_only_capabilities: CreateOnlyCapabilityInfo::from_provider(storage_provider),
-    })
+        identity,
+        storage_provider,
+    ))
 }
 
 #[tauri::command]
@@ -411,6 +430,43 @@ pub(crate) async fn list_buckets(
                 }
             }
             Err(format_sdk_error("Failed to list buckets", &err))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_result_reports_conditional_delete_only_for_verified_providers() {
+        let providers = [
+            (StorageProviderKind::Aws, true),
+            (StorageProviderKind::Wasabi, false),
+            (StorageProviderKind::Minio, false),
+            (StorageProviderKind::CloudflareR2, false),
+            (StorageProviderKind::DigitalOcean, false),
+            (StorageProviderKind::Backblaze, false),
+            (StorageProviderKind::Generic, false),
+        ];
+        for (provider, expected) in providers {
+            let result = build_connect_result(
+                "us-east-1".to_string(),
+                "connection-id".to_string(),
+                "identity".to_string(),
+                provider,
+            );
+            let json = serde_json::to_value(&result).expect("serialize connect result");
+            assert_eq!(
+                json["conditional_delete_supported"],
+                serde_json::Value::Bool(expected),
+                "conditional DELETE flag for {:?}",
+                provider
+            );
+            assert!(
+                json["create_only_capabilities"].is_object(),
+                "create-only capabilities stay next to the delete flag"
+            );
         }
     }
 }

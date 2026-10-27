@@ -9,7 +9,7 @@
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: 260;
+  z-index: var(--z-modal);
 }
 
 .modal-overlay.active {
@@ -18,9 +18,10 @@
 
 body.titlebar-custom .modal-overlay.active,
 body.titlebar-custom .dialog-overlay.active,
+body.titlebar-custom .support-overlay:not([hidden]),
 body.titlebar-custom .setup-wizard-overlay:not([hidden]),
 body.titlebar-custom #palette-overlay:not([hidden]) {
-  top: var(--titlebar-height, 40px);
+  top: var(--titlebar-height);
   bottom: 0;
   height: auto;
 }
@@ -92,8 +93,8 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 .settings-save-error {
   margin-right: auto;
   align-self: center;
-  color: var(--danger);
-  font-size: 12px;
+  color: var(--danger-text);
+  font-size: var(--text-sm);
 }
 
 .setting-item {
@@ -125,14 +126,14 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 }
 
 .setting-item label {
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.35;
 }
 
 .security-biometric-note {
   flex: 1;
   min-width: 0;
-  font-size: 11px;
+  font-size: var(--text-xs);
   line-height: 1.35;
 }
 
@@ -152,12 +153,12 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 }
 
 .security-warning {
-  color: var(--danger);
-  font-size: 12px;
+  color: var(--danger-text);
+  font-size: var(--text-sm);
 }
 
 .setting-section {
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -169,7 +170,7 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 
 .btn--danger {
   background: transparent;
-  color: var(--danger);
+  color: var(--danger-text);
   border-color: var(--danger);
 }
 
@@ -211,13 +212,8 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   background: var(--bg-hover);
 }
 
-.bookmark-item--active {
-  border-color: var(--accent);
-  background: var(--bg-active);
-}
-
 .bookmark__name {
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 500;
   flex: 1;
   white-space: nowrap;
@@ -226,7 +222,7 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 }
 
 .bookmark__endpoint {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -234,6 +230,8 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 }
 
 .bookmark__delete {
+  min-width: 24px;
+  min-height: 24px;
   padding: 2px 6px;
   border: none;
   background: transparent;
@@ -241,7 +239,7 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
@@ -249,28 +247,74 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 }
 
 .bookmark__delete:hover {
-  color: var(--danger);
+  color: var(--danger-text);
   background: var(--bg-hover);
 }
 
-.bookmark__delete:focus-visible {
+.bookmark__delete:focus-visible,
+.bookmark-item:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring-color);
   outline-offset: 1px;
 }
 
+.bookmark__edit {
+  padding: 2px 8px;
+  min-height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.bookmark__edit:hover {
+  color: var(--accent-fg);
+  background: var(--bg-hover);
+}
+
+.bookmark__edit:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
+}
+
+.bookmark-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-hover);
+}
+
+.bookmark-edit[hidden] {
+  display: none;
+}
+
+.bookmark-edit__title {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.bookmark-edit__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--text-sm);
+}
+
+.bookmark-edit__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .bookmark-empty {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   font-style: italic;
   padding: 4px 0;
-}
-
-.bookmark-add-row {
-  display: flex;
-  gap: 6px;
-}
-
-.bookmark-add-row .field {
-  flex: 1;
-  min-width: 0;
 }

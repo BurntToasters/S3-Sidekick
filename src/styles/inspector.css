@@ -85,14 +85,20 @@
   font-family: inherit;
 }
 
-.inspector-tab:hover {
+.inspector-tab {
+  min-height: 24px;
+}
+
+/* The selected tab keeps --bg-active while hovered: the hover rule has higher
+   specificity than .inspector-tab--active, so it must exclude the selected tab. */
+.inspector-tab:not(.inspector-tab--active):hover {
   background: var(--bg-hover);
 }
 
 .inspector-tab--active {
   background: var(--bg-active);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-fg);
 }
 
 .inspector-tab--unavailable {
@@ -229,7 +235,7 @@
   inset: 0;
   border: 0;
   background: rgba(0, 0, 0, 0.35);
-  z-index: 45;
+  z-index: var(--z-inspector-overlay);
   display: none;
 }
 
@@ -237,13 +243,15 @@
   min-width: 360px;
 }
 
-.main-layout--inspector-docked .inspector-preview__title {
+/* Docked: the preview names the file being shown, so the title stays. The
+   off-canvas dialog's header already names it, so the title is dropped there. */
+.main-layout--inspector-open .inspector-preview__title {
   display: none;
 }
 
 .btn--active {
   background: var(--bg-active);
-  color: var(--accent);
+  color: var(--accent-fg);
 }
 
 .location-omnibar {
@@ -288,4 +296,32 @@
 .location-omnibar__edit:focus {
   outline: var(--focus-ring-width) solid var(--focus-ring-color);
   outline-offset: -2px;
+}
+
+.location-omnibar__edit-btn {
+  flex: none;
+  min-height: 24px;
+  min-width: 24px;
+  margin-right: 4px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.location-omnibar__edit-btn:hover {
+  color: var(--text);
+}
+
+.location-omnibar__edit-btn:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
+}
+
+.location-omnibar--edit .location-omnibar__edit-btn {
+  display: none;
 }

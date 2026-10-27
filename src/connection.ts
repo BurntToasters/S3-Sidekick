@@ -22,6 +22,7 @@ interface ConnectResult {
   connection_id: string;
   connection_identity: string;
   create_only_capabilities?: unknown;
+  conditional_delete_supported?: unknown;
 }
 
 interface ListObjectsResponse {
@@ -46,6 +47,8 @@ interface TrailingListingRefresh {
   connectionId: string;
   bucket: string;
   prefix: string;
+  /** Kept only while every coalesced request asked to keep the selection. */
+  preserveSelection: boolean;
   promise: Promise<boolean>;
   settle: (result: boolean | PromiseLike<boolean>) => void;
 }
@@ -78,6 +81,11 @@ function parseCreateOnlyCapabilities(value: unknown): CreateOnlyCapabilities {
     complete_multipart: row.complete_multipart,
     copy_object: row.copy_object,
   };
+}
+
+/** Only an explicit `true` grants move authority; anything else is unsupported. */
+function parseConditionalDeleteSupported(value: unknown): boolean {
+  return value === true;
 }
 
 export function currentConnectionId(): string {
@@ -256,6 +264,9 @@ export async function connect(
     state.createOnlyCapabilities = parseCreateOnlyCapabilities(
       result.create_only_capabilities,
     );
+    state.conditionalDeleteSupported = parseConditionalDeleteSupported(
+      result.conditional_delete_supported,
+    );
     return result.region;
   } catch (err) {
     if (generation === connectionGeneration) {
@@ -307,6 +318,7 @@ export async function disconnect(connectionId?: string): Promise<boolean> {
   state.connectionId = "";
   state.connectionIdentity = "";
   state.createOnlyCapabilities = { ...FULL_CREATE_ONLY_CAPABILITIES };
+  state.conditionalDeleteSupported = false;
   state.currentBucket = "";
   state.currentPrefix = "";
   state.buckets = [];
@@ -395,6 +407,7 @@ export interface RefreshObjectsOptions {
 function queueTrailingListingRefresh(
   bucket: string,
   prefix: string,
+  preserveSelection: boolean,
 ): Promise<boolean> {
   let connectionId: string;
   try {
@@ -409,6 +422,9 @@ function queueTrailingListingRefresh(
     trailingListingRefresh.connectionId = connectionId;
     trailingListingRefresh.bucket = bucket;
     trailingListingRefresh.prefix = prefix;
+    // One request that wants the selection cleared clears it for all of them.
+    trailingListingRefresh.preserveSelection =
+      trailingListingRefresh.preserveSelection && preserveSelection;
     return trailingListingRefresh.promise;
   }
 
@@ -420,6 +436,7 @@ function queueTrailingListingRefresh(
     connectionId,
     bucket,
     prefix,
+    preserveSelection,
     promise,
     settle,
   };
@@ -446,7 +463,13 @@ function releaseListingOwnership(request: number): void {
     return;
   }
 
-  trailing.settle(runObjectRefresh(trailing.bucket, trailing.prefix));
+  trailing.settle(
+    runObjectRefresh(
+      trailing.bucket,
+      trailing.prefix,
+      trailing.preserveSelection,
+    ),
+  );
 }
 
 async function runObjectRefresh(
@@ -516,7 +539,11 @@ export function refreshObjects(
   // instead of preserving pagination tokens, so hasMore/token stay correct
   // after the listing changes. Paginated follow-ups dedupe by key above.
   if (options.supersedePending === false && activeListingRequest !== null) {
-    return queueTrailingListingRefresh(bucket, prefix);
+    return queueTrailingListingRefresh(
+      bucket,
+      prefix,
+      options.preserveSelection ?? false,
+    );
   }
   return runObjectRefresh(bucket, prefix, options.preserveSelection ?? false);
 }

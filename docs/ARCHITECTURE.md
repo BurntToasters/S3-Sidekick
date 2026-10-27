@@ -30,15 +30,25 @@ Prefix copy and move operations first build a complete, duplicate-free, paginate
 
 `build.rs` declares an app manifest, so every app command gets an `allow-<command>` permission that only `capabilities/default.json` grants, through the permission sets in `permissions/app.toml`, and only to the `main` window. `src/ipc_acl.rs` runs Tauri's own access check against the real capabilities: every registered command is allowed for `main`; unknown commands and other windows are denied; and the build.rs list must equal the registered list.
 
+Show in folder for a completed download calls `reveal_local_path`, which takes the row's stored destination. It only shows the file: macOS runs `open -R` and Windows runs `explorer /select,`, and on Linux, where file managers cannot select a file, it opens the parent folder. Relative, missing, and symbolic-link paths are refused on every platform, and a bundle directory is refused on macOS. Nothing in this path runs the file: the selecting openers only highlight it, and the Linux opener receives only the folder.
+
 ## Cancellation and transfer state
 
 A transfer registers with the backend (`TransferGuard`) before it waits for the storage gate, so pause and cancel reach it at any point. A `cancel_transfer` that arrives before registration is kept for 30 seconds (at most 4,096 entries) and cancels the next command with that ID. The frontend treats the resulting cancellation as the pause it came from (`pauseCancelInFlight`), not as a failure.
 
 Queue rows change status only through the named transitions in `src/transfer-state.ts`, checked against a table of legal moves (`queued → uploading → done`, with side exits to `error`, `skipped`, and back to `queued`). An illegal move throws in development and tests. The queue loop and the worker claim share one `isClaimable` predicate and one `queueHeld` predicate, so the loop never spins on work that nothing may claim.
 
+## Selection identity
+
+The webview keeps files in `state.selectedKeys` and folders in `state.selectedPrefixes`. Every row, click and inspector path passes a `{ kind, key }` entry (`src/app-selection.ts`), and the row's `kind` comes from its dataset (`data-key` for files, `data-prefix` for folders), never from the text of a key. A legal object key such as `prefix:archive` is a file. Folder keys are always the trailing-slash prefix S3 returned, and native prefix delete refuses a prefix without that slash (`validate_mutating_folder_prefix`), so a bare `archive` cannot match `archive.zip` or `archived/…`.
+
 ## Create-only retries
 
 A create-only write can commit while its response is lost; the SDK retry then gets 412 against its own object. Uploads recognise their own write by size plus the SHA-256 ownership marker in metadata. Copy create-only is advertised only where the destination condition is documented and supported: the pinned MinIO server is excluded because it accepts an occupied CopyObject destination despite `If-None-Match`. Ambiguous copy completion fails without issuing a successful receipt. Persisted receipts record destination ownership ambiguity; missing legacy ownership claims are treated as ambiguous and cannot authorize source or rollback deletion. These move rows require inspection and reconciliation before removal. Providers without atomic create-only copy require explicit overwrite authorization; ordinary explicit overwrite remains supported.
+
+## Move capability exposure
+
+A move retires its source only on providers whose `DeleteObject` honours `If-Match`. The native `connect` result reports this as `conditional_delete_supported` (from `supports_conditional_delete` in `src-tauri/src/s3/create_only.rs`), and the webview stores it in `state.conditionalDeleteSupported`. The flag is false until a connect result says otherwise and is cleared on disconnect, so a missing field disables Move. It only gates the UI: the native transaction path checks the same provider rule before deleting a source, so a webview that ignores the flag still cannot retire an unverified source.
 
 ## Lock order
 

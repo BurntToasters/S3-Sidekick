@@ -372,7 +372,7 @@ describe("security flows", () => {
     await expect(security.ensureSecurityReady()).resolves.toBe(false);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Failed to read security status"),
+      expect.stringContaining("Could not read the security status"),
     );
 
     mockInvoke.mockReset();
@@ -405,15 +405,15 @@ describe("security flows", () => {
 
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Failed to lock"),
+      expect.stringContaining("Could not lock encrypted storage"),
     );
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Failed to set lock timeout"),
+      expect.stringContaining("Could not change auto-lock"),
     );
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Biometric update failed"),
+      expect.stringContaining("Could not change biometric unlock"),
     );
   });
 
@@ -431,29 +431,32 @@ describe("security flows", () => {
     const setStatus = vi.fn();
     const security = await import("../security.ts");
 
+    // Length and match rules are enforced inline by the dialog's validate
+    // hooks, so the flow never aborts with an alert on a typo.
+    type ValidateOptions = {
+      validate: (value: string) => Promise<boolean | string>;
+    };
     mockShowConfirm.mockResolvedValueOnce(true);
-    mockShowPrompt.mockResolvedValueOnce("short");
+    mockShowPrompt.mockResolvedValueOnce(null);
     await security.handleSecurityToggle(setStatus);
-    expect(mockShowAlert).toHaveBeenCalledWith(
-      "Invalid Password",
-      "Password must be at least 8 characters.",
-    );
+    const lengthRule = mockShowPrompt.mock.calls.at(-1)?.[2] as ValidateOptions;
+    expect(await lengthRule.validate("short")).toBe(false);
+    expect(await lengthRule.validate("long-pass")).toBe(true);
 
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowPrompt
       .mockResolvedValueOnce("long-pass")
-      .mockResolvedValueOnce("wrong-pass");
+      .mockResolvedValueOnce(null);
     await security.handleSecurityToggle(setStatus);
-    expect(mockShowAlert).toHaveBeenCalledWith(
-      "Password Mismatch",
-      "Passwords do not match.",
-    );
+    const matchRule = mockShowPrompt.mock.calls.at(-1)?.[2] as ValidateOptions;
+    expect(await matchRule.validate("wrong-pass")).toBe(false);
+    expect(await matchRule.validate("long-pass")).toBe(true);
 
     mockInvoke.mockRejectedValueOnce(new Error("status boom"));
     await security.handleSecurityToggle(setStatus);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Failed to read security status"),
+      expect.stringContaining("Could not read encryption status"),
     );
   });
 
@@ -534,7 +537,7 @@ describe("security flows", () => {
     await security.handleSecurityToggle(setStatus);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Security update failed"),
+      expect.stringContaining("Could not update encryption"),
     );
   });
 
@@ -631,7 +634,7 @@ describe("security flows", () => {
     await expect(security.ensureSecurityReady()).resolves.toBe(false);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Failed to initialize security"),
+      expect.stringContaining("Could not finish setup"),
     );
 
     mockInvoke.mockReset();
@@ -653,7 +656,7 @@ describe("security flows", () => {
     await expect(security.ensureSecurityReady()).resolves.toBe(false);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Failed to enable encryption"),
+      expect.stringContaining("Could not turn on encryption"),
     );
 
     mockInvoke.mockReset();
@@ -672,7 +675,7 @@ describe("security flows", () => {
     await expect(security.ensureSecurityReady()).resolves.toBe(false);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Failed to initialize security"),
+      expect.stringContaining("Could not finish setup"),
     );
   });
 
@@ -772,7 +775,7 @@ describe("security flows", () => {
     expect(
       (document.getElementById("security-status-text") as HTMLDivElement)
         .textContent,
-    ).toContain("Security status error");
+    ).toContain("Could not read encryption status");
 
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "get_security_status") {
@@ -925,7 +928,7 @@ describe("security flows", () => {
     await security.handleSecurityChangePassword(setStatus);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
-      expect.stringContaining("Failed to change password"),
+      expect.stringContaining("Could not change the password"),
     );
 
     document.getElementById("security-lock-timeout")?.remove();

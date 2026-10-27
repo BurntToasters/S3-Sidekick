@@ -11,10 +11,13 @@ export type TransferPhase = TransferItem["phase"];
 const LEGAL_TRANSITIONS: Readonly<
   Record<TransferStatus, readonly TransferStatus[]>
 > = {
-  queued: ["queued", "uploading", "error"],
-  uploading: ["queued", "error", "skipped", "done"],
+  queued: ["queued", "uploading", "error", "cancelled"],
+  uploading: ["queued", "error", "skipped", "done", "cancelled"],
   error: ["queued"],
   skipped: ["queued"],
+  // The user asked for this; it is neither a failure nor retryable. The row
+  // stays listed until removed.
+  cancelled: [],
   done: [],
 };
 
@@ -73,10 +76,12 @@ export function requeueAfterPause(item: TransferItem): void {
 }
 
 export function markCancelled(item: TransferItem, phase?: TransferPhase): void {
-  moveTo(item, "error");
+  moveTo(item, "cancelled");
   if (phase) item.phase = phase;
-  item.error = "Cancelled";
+  item.error = undefined;
+  item.cancelRequested = false;
   item.browserFile = undefined;
+  item.retryAt = undefined;
 }
 
 /**
@@ -97,6 +102,7 @@ export function holdAfterCancelFailure(
 export function markFailed(item: TransferItem, message: string): void {
   moveTo(item, "error");
   item.error = message;
+  item.retryAt = undefined;
 }
 
 export function markSkipped(item: TransferItem, message: string): void {
@@ -106,6 +112,7 @@ export function markSkipped(item: TransferItem, message: string): void {
   item.error = message;
   item.speedBps = 0;
   item.etaSeconds = null;
+  item.retryAt = undefined;
 }
 
 export function markDone(item: TransferItem): void {
@@ -115,6 +122,7 @@ export function markDone(item: TransferItem): void {
   item.speedBps = 0;
   item.etaSeconds = 0;
   item.browserFile = undefined;
+  item.retryAt = undefined;
 }
 
 /**
@@ -158,6 +166,7 @@ export function resetForRetry(
   item.progress = 0;
   item.speedBps = 0;
   item.etaSeconds = null;
+  item.retryAt = undefined;
   if (clearPause) item.paused = false;
   item.cancelRequested = false;
   item.phase = "running";

@@ -46,6 +46,7 @@ const COMMANDS: &[&str] = &[
     "preview_object",
     "rename_object",
     "rename_prefix",
+    "reveal_local_path",
     "save_bookmarks",
     "save_bookmarks_backup",
     "save_connection",

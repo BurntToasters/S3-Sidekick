@@ -13,9 +13,12 @@ import {
   basename,
   getIconHtml,
   friendlyError,
+  plural,
 } from "./utils.ts";
 import { state } from "./state.ts";
+import type { SelectionEntry } from "./app-selection.ts";
 import { showConfirm } from "./dialogs.ts";
+import { restoreTableSelectionFromInspector } from "./layout-render-bridge.ts";
 import {
   getInfoTitleEl,
   getInfoBodyEl,
@@ -58,6 +61,9 @@ type VisibilitySelection = "unchanged" | ObjectVisibility;
 
 let currentKey = "";
 let batchKeys: string[] = [];
+// The selection the pane was opened for; Keep editing selects it again.
+let shownEntries: SelectionEntry[] = [];
+let batchFolderCount = 0;
 let headData: HeadObjectResponse | null = null;
 let aclData: AclResponse | null = null;
 let metadataRows: { key: string; value: string }[] = [];
@@ -163,9 +169,27 @@ function resetEditorState(): void {
   initialSingleVisibility = null;
 }
 
-function isShowingKeys(keys: string[]): boolean {
-  if (keys.length === 1) return currentKey !== "" && currentKey === keys[0];
-  const files = keys.filter((k) => !k.startsWith("prefix:"));
+function fileKeysOf(entries: readonly SelectionEntry[]): string[] {
+  return entries
+    .filter((entry) => entry.kind === "file")
+    .map((entry) => entry.key);
+}
+
+/**
+ * Whether the Properties pane already shows these entries, so a re-selection
+ * of the same object does not ask to discard edits.
+ */
+export function infoPanelShowsEntries(
+  entries: readonly SelectionEntry[],
+): boolean {
+  if (entries.length === 1) {
+    return (
+      currentKey !== "" &&
+      entries[0].kind === "file" &&
+      currentKey === entries[0].key
+    );
+  }
+  const files = fileKeysOf(entries);
   return (
     currentKey === "" &&
     files.length === batchKeys.length &&
@@ -173,12 +197,24 @@ function isShowingKeys(keys: string[]): boolean {
   );
 }
 
-export async function openInfoPanel(keys: string[]): Promise<void> {
+/** The entries the Properties pane was last opened for. */
+export function getInfoPanelEntries(): SelectionEntry[] {
+  return shownEntries.map((entry) => ({ ...entry }));
+}
+
+export async function openInfoPanel(
+  entries: readonly SelectionEntry[],
+): Promise<void> {
   // Switching to another object would reset the editor; ask first instead of
   // silently dropping unsaved metadata or visibility edits.
-  if (!isShowingKeys(keys) && !(await confirmDiscardInfoProperties())) {
+  if (
+    !infoPanelShowsEntries(entries) &&
+    !(await confirmDiscardInfoProperties())
+  ) {
+    restoreTableSelectionFromInspector(getInfoPanelEntries());
     return;
   }
+  shownEntries = entries.map((entry) => ({ ...entry }));
   ensureInspectorOpenForPane("properties");
   if (shouldUseInspectorMount()) {
     focusInspectorPropertiesPane();
@@ -189,16 +225,17 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   const saveBtn = getInfoSaveBtn();
   saveBtn.textContent = "Save";
 
-  if (keys.length > 1) {
+  if (entries.length > 1) {
     panelRequestToken += 1;
     currentKey = "";
-    batchKeys = keys.filter((k) => !k.startsWith("prefix:"));
+    batchKeys = fileKeysOf(entries);
     metadataRows = [{ key: "", value: "" }];
     headData = null;
     aclData = null;
     resetEditorState();
 
-    const folderCount = keys.length - batchKeys.length;
+    const folderCount = entries.length - batchKeys.length;
+    batchFolderCount = folderCount;
     if (batchKeys.length === 0) {
       title.textContent = `${folderCount} folder${folderCount === 1 ? "" : "s"}`;
       setInfoOverlayActive(true);
@@ -229,14 +266,14 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
 
   batchKeys = [];
 
-  if (keys.length === 1 && keys[0].startsWith("prefix:")) {
+  if (entries.length === 1 && entries[0].kind === "folder") {
     panelRequestToken += 1;
     currentKey = "";
     headData = null;
     aclData = null;
     metadataRows = [];
     resetEditorState();
-    const folderPrefix = keys[0].slice("prefix:".length);
+    const folderPrefix = entries[0].key;
     title.textContent = basename(folderPrefix) || folderPrefix;
     setInfoOverlayActive(true);
     saveBtn.style.display = "none";
@@ -247,7 +284,7 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   }
 
   const requestToken = ++panelRequestToken;
-  currentKey = keys[0];
+  currentKey = entries[0].key;
   const selectedKey = currentKey;
   title.textContent = basename(currentKey);
   setInfoOverlayActive(true);
@@ -527,7 +564,7 @@ function renderBatchView(
       : "";
   body.innerHTML =
     `<div class="metadata-batch-info">` +
-    `<p><strong>${keys.length} file${keys.length === 1 ? "" : "s"}</strong> in this selection.</p>` +
+    `<p><strong>${escapeHtml(plural(keys.length, "file"))}</strong> in this selection.</p>` +
     folderNote +
     `<ul class="metadata-batch-list">${listItems}${more}</ul>` +
     `</div>` +
@@ -544,7 +581,7 @@ function renderBatchView(
     `<div class="setting-section">Metadata</div>` +
     `<p class="metadata-batch-hint">Headers below will be merged into each file's existing metadata.</p>` +
     `<div id="metadata-entries"></div>` +
-    `<button id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
+    `<button type="button" id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
 
   const visibilitySelect =
     body.querySelector<HTMLSelectElement>("#batch-visibility");
@@ -578,7 +615,7 @@ function renderBatchView(
 
 function renderMetadata(body: HTMLElement): void {
   let html = `<div id="metadata-entries"></div>`;
-  html += `<button id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
+  html += `<button type="button" id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
   body.innerHTML = html;
   renderEntryRows();
   const addRowBtn = body.querySelector<HTMLButtonElement>("#metadata-add-row");
@@ -663,6 +700,7 @@ function renderEntryRows(): void {
 
     if (isBatch || i > 0) {
       const delBtn = document.createElement("button");
+      delBtn.type = "button";
       delBtn.className = "btn btn--icon metadata-entry__delete";
       delBtn.innerHTML = getIconHtml("x", {
         className: "lucide-icon",
@@ -713,12 +751,20 @@ function infoSection(title: string): string {
   return `<div class="metadata-section-heading">${escapeHtml(title)}</div>`;
 }
 
+/**
+ * Escaped text with a line-break opportunity after each slash, so long paths
+ * wrap between segments. The copy button still copies the raw value.
+ */
+function wrappableText(value: string): string {
+  return escapeHtml(value).replace(/\//g, "/<wbr>");
+}
+
 function infoRowCopyable(label: string, value: string, mono = false): string {
   const cls = mono ? "metadata-value-mono" : "";
   return (
     `<div class="metadata-info-row metadata-info-row--copyable">` +
     `<span class="metadata-label">${escapeHtml(label)}</span>` +
-    `<span class="metadata-info-row__value ${cls}" title="${escapeHtml(value)}">${escapeHtml(value)}</span>` +
+    `<span class="metadata-info-row__value ${cls}" title="${escapeHtml(value)}">${wrappableText(value)}</span>` +
     `<button type="button" class="btn btn--ghost btn--sm metadata-copy-btn" data-copy-encoded="${encodeURIComponent(value)}" data-copy-label="${escapeHtml(label)}" aria-label="Copy ${escapeHtml(label)}">Copy</button>` +
     `</div>`
   );
@@ -893,7 +939,7 @@ async function saveSingleChanges(): Promise<void> {
     if (!isCurrentRequest()) return;
 
     if (!metadataError && !aclError) {
-      closeInfoPanel();
+      finishSaveSingle(selectedKey);
       if (shouldApplyMetadata && shouldApplyAcl) {
         setStatus("Properties updated.", 5000);
       } else if (shouldApplyAcl) {
@@ -1055,20 +1101,75 @@ async function saveBatchChanges(): Promise<void> {
         ? "permissions"
         : "metadata";
 
+  const capitalized = `${actionLabel[0].toUpperCase()}${actionLabel.slice(1)}`;
   if (failed === 0) {
-    closeInfoPanel();
-    setStatus(
-      `${actionLabel[0].toUpperCase()}${actionLabel.slice(1)} updated on ${succeeded} file(s).`,
-      5000,
-    );
+    finishSaveBatch();
+    setStatus(`${capitalized} updated on ${plural(succeeded, "file")}.`, 5000);
   } else {
     const partialSuffix =
       shouldApplyMetadata && shouldApplyAcl && partial > 0
         ? ` (${partial} partial)`
         : "";
     setStatus(
-      `${actionLabel[0].toUpperCase()}${actionLabel.slice(1)} updated on ${succeeded} file(s), ${failed} failed${partialSuffix}.`,
+      `${capitalized} updated on ${plural(succeeded, "file")}, ${failed} failed${partialSuffix}.`,
     );
+  }
+}
+
+/**
+ * Inspector mode keeps the Properties pane on the object after a save: the
+ * object is re-read so the saved values and new ETag show, and the active tab
+ * stays where the user left it. Legacy overlays still close after saving.
+ */
+function finishSaveSingle(savedKey: string): void {
+  if (!shouldUseInspectorMount()) {
+    closeInfoPanel();
+    return;
+  }
+  void refreshInfoAfterSave(savedKey);
+}
+
+function finishSaveBatch(): void {
+  if (!shouldUseInspectorMount()) {
+    closeInfoPanel();
+    return;
+  }
+  resetEditorState();
+  metadataRows = [{ key: "", value: "" }];
+  const body = getInfoBodyEl();
+  const saveBtn = getInfoSaveBtn();
+  saveBtn.textContent = "Save";
+  saveBtn.disabled = false;
+  renderBatchView(body, batchKeys, batchFolderCount);
+}
+
+async function refreshInfoAfterSave(savedKey: string): Promise<void> {
+  const requestToken = ++panelRequestToken;
+  resetEditorState();
+  headData = null;
+  aclData = null;
+  metadataRows = [];
+  const saveBtn = getInfoSaveBtn();
+  saveBtn.textContent = "Save";
+  saveBtn.disabled = true;
+  const body = getInfoBodyEl();
+  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
+  try {
+    const nextHeadData = await invokeS3<HeadObjectResponse>("head_object", {
+      bucket: state.currentBucket,
+      key: savedKey,
+    });
+    if (requestToken !== panelRequestToken || currentKey !== savedKey) return;
+    headData = nextHeadData;
+    metadataRows = [{ key: "Content-Type", value: headData.content_type }];
+    for (const [k, v] of Object.entries(headData.metadata)) {
+      metadataRows.push({ key: k, value: v });
+    }
+    saveBtn.disabled = false;
+    renderTab();
+  } catch (err) {
+    if (requestToken !== panelRequestToken || currentKey !== savedKey) return;
+    body.innerHTML = `<div class="metadata-loading">Saved, but failed to reload: ${escapeHtml(friendlyError(err))}</div>`;
   }
 }
 

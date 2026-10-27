@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionSnapshot } from "../connection.ts";
+import { fileEntry, folderEntry } from "../app-selection.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
@@ -68,6 +69,9 @@ const mockCheckUpdates = vi.fn<() => Promise<void>>();
 const mockSetUpdateChannel = vi.fn();
 
 const mockAddBookmark = vi.fn<(...args: unknown[]) => Promise<boolean>>();
+const mockGetBookmarks = vi.fn<() => unknown[]>(() => []);
+const mockUpdateBookmark = vi.fn<(...args: unknown[]) => Promise<boolean>>();
+const mockSuggestBookmarkName = vi.fn<() => string>(() => "suggested");
 const mockRenderBookmarkBar = vi.fn();
 const mockLoadBookmarks = vi.fn<() => Promise<void>>();
 const mockSetBookmarkChangeHandler = vi.fn();
@@ -100,6 +104,14 @@ const mockDisposeTransferQueueUI = vi.fn<() => Promise<void>>();
 const mockEnqueueDownloads = vi.fn();
 const mockEnqueueFolderEntries = vi.fn();
 const mockEnqueueCopyMoveEntries = vi.fn();
+
+/** Mirrors the transfers.ts EnqueueResult for an accepted batch of `items`. */
+function acceptedEnqueue(items: unknown[]): {
+  accepted: boolean;
+  count: number;
+} {
+  return { accepted: true, count: items.length };
+}
 
 const mockWireKeyboardShortcuts = vi.fn();
 const mockCanPreview = vi.fn();
@@ -237,6 +249,18 @@ vi.mock("../browser.ts", () => ({
   renderBreadcrumb: mockRenderBreadcrumb,
   navigateToFolder: mockNavigateToFolder,
   selectBucket: mockSelectBucket,
+  // Mirrors the real reportNavFailure's status line (toast omitted).
+  reportNavFailure: vi.fn((message: string) => {
+    const status = document.getElementById("status");
+    if (status) status.textContent = message;
+  }),
+  selectOnlyEntry: vi.fn(),
+  focusObjectTableRow: vi.fn(() => false),
+  renderedIndexOfSelection: vi.fn(() => -1),
+  revealRow: vi.fn(() => false),
+  isLocationEditMode: vi.fn(() => false),
+  enterLocationEditMode: vi.fn(),
+  exitLocationEditMode: vi.fn(),
   showEmptyState: mockShowEmptyState,
   handleRowClick: mockHandleRowClick,
   handleBucketListKeydown: mockHandleBucketListKeydown,
@@ -244,10 +268,10 @@ vi.mock("../browser.ts", () => ({
   clearSelection: mockClearSelection,
   clearFilter: mockClearFilter,
   updateFilterClearButton: mockUpdateFilterClearButton,
-  setLastClickedKey: vi.fn(),
+  setLastClickedEntry: vi.fn(),
   updateSelectionUI: mockUpdateSelectionUI,
   invalidateInspectorSelectionSync: vi.fn(),
-  getSelectableKeys: mockGetSelectableKeys,
+  getSelectableEntries: mockGetSelectableKeys,
   toggleSort: mockToggleSort,
   navigateUp: mockNavigateUp,
   navigateBack: mockNavigateBack,
@@ -275,6 +299,9 @@ vi.mock("../bookmarks.ts", () => ({
   clearBookmarks: vi.fn(),
   renderBookmarkList: vi.fn(),
   removeBookmark: vi.fn(),
+  getBookmarks: mockGetBookmarks,
+  updateBookmark: mockUpdateBookmark,
+  suggestBookmarkName: mockSuggestBookmarkName,
 }));
 
 vi.mock("../licenses.ts", () => ({
@@ -293,6 +320,10 @@ vi.mock("../info-panel.ts", () => ({
   requestCloseInfoPanel: mockRequestCloseInfoPanel,
   saveInfoPanel: mockSaveInfoPanel,
   switchTab: mockSwitchTab,
+  infoPanelShowsEntries: vi.fn(() => true),
+  hasUnsavedInfoChanges: vi.fn(() => false),
+  confirmDiscardInfoProperties: vi.fn(async () => true),
+  getInfoPanelEntries: vi.fn(() => []),
 }));
 
 vi.mock("../transfers.ts", () => ({
@@ -340,6 +371,7 @@ vi.mock("../security.ts", () => ({
   handleLockNow: mockHandleLockNow,
   handleLockTimeoutChange: mockHandleLockTimeoutChange,
   handleBiometricToggle: mockHandleBiometricToggle,
+  setForgotPasswordHandler: vi.fn(),
   startAutoLockWatcher: vi.fn(),
 }));
 
@@ -488,6 +520,9 @@ describe("main integration", () => {
     mockCheckUpdates.mockReset();
     mockSetUpdateChannel.mockReset();
     mockAddBookmark.mockReset();
+    mockGetBookmarks.mockReset().mockReturnValue([]);
+    mockUpdateBookmark.mockReset().mockResolvedValue(true);
+    mockSuggestBookmarkName.mockReset().mockReturnValue("suggested");
     mockRenderBookmarkBar.mockReset();
     mockLoadBookmarks.mockReset();
     mockSetBookmarkChangeHandler.mockReset();
@@ -506,17 +541,17 @@ describe("main integration", () => {
     mockSwitchTab.mockReset();
     mockToggleTransferQueue.mockReset();
     mockClearCompletedTransfers.mockReset();
-    mockEnqueuePaths.mockReset();
+    mockEnqueuePaths.mockReset().mockImplementation(acceptedEnqueue);
     mockSetTransferCompleteHandler.mockReset();
     mockInitTransferQueueUI.mockReset();
     mockPrepareTransferRecovery.mockReset();
     mockRecoverPendingTransfers.mockReset();
     mockResumeRecoveredTransfersAfterConnect.mockReset();
-    mockEnqueueFiles.mockReset();
+    mockEnqueueFiles.mockReset().mockImplementation(acceptedEnqueue);
     mockDisposeTransferQueueUI.mockReset();
-    mockEnqueueDownloads.mockReset();
-    mockEnqueueFolderEntries.mockReset();
-    mockEnqueueCopyMoveEntries.mockReset();
+    mockEnqueueDownloads.mockReset().mockImplementation(acceptedEnqueue);
+    mockEnqueueFolderEntries.mockReset().mockImplementation(acceptedEnqueue);
+    mockEnqueueCopyMoveEntries.mockReset().mockImplementation(acceptedEnqueue);
     mockWireKeyboardShortcuts.mockReset();
     mockCanPreview.mockReset();
     mockOpenPreview.mockReset();
@@ -732,7 +767,8 @@ describe("main integration", () => {
     preset.dispatchEvent(new Event("change", { bubbles: true }));
     expect(endpoint.value).toContain("digitaloceanspaces.com");
     expect(region.value).toBe("nyc3");
-    expect(preset.value).toBe("");
+    // The chosen provider stays selected so the user can see what was applied.
+    expect(preset.value).toBe("do");
 
     const presets: Array<{ value: string; endpoint: string; region: string }> =
       [
@@ -767,7 +803,7 @@ describe("main integration", () => {
       preset.dispatchEvent(new Event("change", { bubbles: true }));
       expect(endpoint.value).toBe(item.endpoint);
       expect(region.value).toBe(item.region);
-      expect(preset.value).toBe("");
+      expect(preset.value).toBe(item.value);
     }
     endpoint.value = "https://custom.example.com";
     region.value = "custom-region";
@@ -832,6 +868,7 @@ describe("main integration", () => {
     await flushMicrotasks();
     expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
       preserveSelection: true,
+      supersedePending: false,
     });
 
     mockShowPrompt.mockResolvedValueOnce("new-folder");
@@ -966,6 +1003,8 @@ describe("main integration", () => {
     const { state } = await import("../state.ts");
     await import("../main.ts");
     await flushMicrotasks();
+    // ARN actions are AWS-only, so this flow runs against an AWS endpoint.
+    state.endpoint = "https://s3.us-east-1.amazonaws.com";
 
     state.connected = true;
     state.connectionId = "test-connection";
@@ -1003,16 +1042,19 @@ describe("main integration", () => {
     folderRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     // Single click selects (file-manager behavior); open on dblclick/Enter.
     expect(mockHandleRowClick).toHaveBeenCalledWith(
-      "prefix:docs/folder/",
+      folderEntry("docs/folder/"),
       expect.any(MouseEvent),
     );
+    // Clicking the checkbox cell (outside the 13px box) toggles the checkbox
+    // itself; selection follows from its change event, not a row click.
+    const rowClicksBeforeCell = mockHandleRowClick.mock.calls.length;
+    const folderCheckBox =
+      folderCheckRow.querySelector<HTMLInputElement>(".row-check");
     folderCheckRow
       .querySelector(".col-check")
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(mockHandleRowClick).toHaveBeenCalledWith(
-      "prefix:docs/folder-check/",
-      expect.any(MouseEvent),
-    );
+    expect(folderCheckBox?.checked).toBe(true);
+    expect(mockHandleRowClick.mock.calls.length).toBe(rowClicksBeforeCell);
 
     fileRow.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
@@ -1037,10 +1079,14 @@ describe("main integration", () => {
       new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
     );
     await flushMicrotasks();
-    expect(mockOpenInfoPanel).toHaveBeenCalledWith(["docs/file.txt"]);
+    expect(mockOpenInfoPanel).toHaveBeenCalledWith([
+      fileEntry("docs/file.txt"),
+    ]);
     fileRow.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await flushMicrotasks();
-    expect(mockOpenInfoPanel).toHaveBeenCalledWith(["docs/file.txt"]);
+    expect(mockOpenInfoPanel).toHaveBeenCalledWith([
+      fileEntry("docs/file.txt"),
+    ]);
 
     rowCheck.checked = true;
     rowCheck.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1130,13 +1176,17 @@ describe("main integration", () => {
       keys: ["docs/file.txt"],
       connectionId: "test-connection",
     });
-    expect(mockOpenInfoPanel).toHaveBeenCalledWith(["docs/file.txt"]);
+    expect(mockOpenInfoPanel).toHaveBeenCalledWith([
+      fileEntry("docs/file.txt"),
+    ]);
     expect(mockEnqueueDownloads).toHaveBeenCalledWith(
       [
         {
           bucket: "bucket-a",
           key: "docs/file.txt",
           destination: "C:\\tmp\\download.txt",
+          // The save dialog already confirmed replacing an existing file.
+          conflictResolution: "replace",
         },
       ],
       expect.objectContaining({
@@ -1218,6 +1268,8 @@ describe("main integration", () => {
       </tr>
     `;
     const row = tbody.querySelector(".object-row") as HTMLElement;
+    // Copy ARNs is AWS-only; model an AWS endpoint for the multi-select menu.
+    state.endpoint = "https://s3.us-east-1.amazonaws.com";
 
     state.selectedKeys.clear();
     state.selectedKeys.add("docs/file-a.txt");
@@ -1254,12 +1306,12 @@ describe("main integration", () => {
     expect(
       multiItems.some((item) => item.label === "Properties (2 items)"),
     ).toBe(true);
-    expect(multiItems.some((item) => item.label === "Download 2 items")).toBe(
+    expect(multiItems.some((item) => item.label === "Download 2 files")).toBe(
       true,
     );
-    expect(multiItems.some((item) => item.label === "Copy Keys")).toBe(true);
-    expect(multiItems.some((item) => item.label === "Copy URLs")).toBe(true);
-    expect(multiItems.some((item) => item.label === "Copy ARNs")).toBe(true);
+    expect(multiItems.some((item) => item.label === "Copy 2 keys")).toBe(true);
+    expect(multiItems.some((item) => item.label === "Copy 2 URLs")).toBe(true);
+    expect(multiItems.some((item) => item.label === "Copy 2 ARNs")).toBe(true);
   });
 
   it("opens copy/move dialog and performs copy and move operations", async () => {
@@ -1272,6 +1324,9 @@ describe("main integration", () => {
     state.connectionIdentity = "test-identity";
     state.currentBucket = "bucket-a";
     state.currentPrefix = "docs/";
+    // Move is gated on the connect result; the mocked connect does not
+    // report it, so model a provider that supports conditional delete.
+    state.conditionalDeleteSupported = true;
     state.buckets = [
       { name: "bucket-a", creation_date: "" },
       { name: "bucket-b", creation_date: "" },
@@ -1309,11 +1364,12 @@ describe("main integration", () => {
     ) as HTMLDivElement;
     expect(overlay.classList.contains("active")).toBe(true);
 
-    // Verify path input pre-filled with the file key
+    // The destination no longer pre-fills the source key (it would conflict
+    // with itself); the default is a non-conflicting copy name.
     const pathInput = document.getElementById(
       "copy-move-path",
     ) as HTMLInputElement;
-    expect(pathInput.value).toBe("docs/file.txt");
+    expect(pathInput.value).toBe("docs/file copy.txt");
 
     // Test Copy button
     pathInput.value = "archive/file.txt";
@@ -1617,7 +1673,9 @@ describe("main integration", () => {
     });
     expect(mockEnqueuePaths).toHaveBeenCalled();
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
-    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
+    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
+      supersedePending: false,
+    });
 
     const tbody = document.getElementById(
       "object-tbody",
@@ -1633,6 +1691,9 @@ describe("main integration", () => {
         clientY: 16,
       }),
     );
+    // ARN actions are AWS-only; this folder flow runs against an AWS endpoint.
+    (await import("../state.ts")).state.endpoint =
+      "https://s3.us-east-1.amazonaws.com";
     ctx = mockShowContextMenu.mock.calls.at(-1);
     const onFolderAction = ctx?.[3] as ((action: string) => void) | undefined;
     if (onFolderAction) {
@@ -1671,7 +1732,7 @@ describe("main integration", () => {
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Dropped 1 item(s). Queued 1 file(s) for upload.");
+    ).toContain("Dropped 1 item. Queued 1 file for upload.");
     expect(overlay.hidden).toBe(true);
 
     capturedDragDropHandler!({
@@ -1712,7 +1773,7 @@ describe("main integration", () => {
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Dropped 1 item(s). Queued 1 file(s) for upload.");
+    ).toContain("Dropped 1 item. Queued 1 file for upload.");
 
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "list_local_files_recursive") {
@@ -1895,7 +1956,7 @@ describe("main integration", () => {
     expect(mockEnqueueFolderEntries).toHaveBeenCalled();
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Dropped 1 item(s). Queued 1 file(s) for upload.");
+    ).toContain("Dropped 1 item. Queued 1 file for upload.");
 
     const transferHandler = mockSetTransferCompleteHandler.mock
       .calls[0]?.[0] as
@@ -1908,6 +1969,7 @@ describe("main integration", () => {
     await transferHandler?.({ hadUpload: true });
     expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
       supersedePending: false,
+      preserveSelection: true,
     });
     expect(mockPruneStaleSelection).toHaveBeenCalled();
     expect(mockRenderObjectTable).toHaveBeenCalled();
@@ -2065,6 +2127,12 @@ describe("main integration", () => {
 
     mockGetActiveTab.mockReturnValueOnce("activity");
     (document.getElementById("drawer-clear") as HTMLButtonElement).click();
+    await flushMicrotasks();
+    expect(mockShowConfirm).toHaveBeenCalledWith(
+      "Clear activity log?",
+      expect.any(String),
+      expect.objectContaining({ okLabel: "Clear", cancelLabel: "Keep" }),
+    );
     expect(mockClearActivityLog).toHaveBeenCalled();
     mockGetActiveTab.mockReturnValueOnce("transfers");
     (document.getElementById("drawer-clear") as HTMLButtonElement).click();
@@ -2105,6 +2173,14 @@ describe("main integration", () => {
       writable: true,
       configurable: true,
     });
+    const winControls = document.getElementById(
+      "titlebar-win-controls",
+    ) as HTMLElement & { inert?: boolean };
+    Object.defineProperty(winControls, "inert", {
+      value: false,
+      writable: true,
+      configurable: true,
+    });
     (document.getElementById("settings-btn") as HTMLButtonElement).focus();
     const settingsOverlay = document.getElementById(
       "settings-overlay",
@@ -2113,7 +2189,9 @@ describe("main integration", () => {
     await flushMicrotasks(4);
     expect(document.body.classList.contains("modal-open")).toBe(true);
     expect(mockHideContextMenu).toHaveBeenCalled();
-    expect(app.getAttribute("aria-hidden")).toBe("true");
+    expect(app.getAttribute("aria-hidden")).toBeNull();
+    expect(winControls.inert).toBe(false);
+    expect(winControls.closest("[inert]")).toBeNull();
 
     document.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -2226,7 +2304,9 @@ describe("main integration", () => {
       overwrite: false,
       connectionId: "test-connection",
     });
-    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/");
+    expect(mockRefreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
+      supersedePending: false,
+    });
     expect(mockInvoke).toHaveBeenCalledWith(
       "delete_objects",
       expect.objectContaining({ bucket: "bucket-a" }),
@@ -2324,28 +2404,35 @@ describe("main integration", () => {
       "https://alpha.example.com/path";
     (document.getElementById("conn-access-key") as HTMLInputElement).value =
       "ak";
+    // Saving prompts for a name first; the prompt answer is the saved name.
+    mockShowPrompt.mockResolvedValueOnce("alpha");
     mockAddBookmark.mockResolvedValueOnce(true);
     (document.getElementById("bookmark-save-btn") as HTMLButtonElement).click();
-    await flushMicrotasks();
+    await flushMicrotasks(6);
     expect(mockAddBookmark).toHaveBeenLastCalledWith(
       expect.objectContaining({ name: "alpha" }),
     );
 
     (document.getElementById("conn-endpoint") as HTMLInputElement).value =
       "not-a-url:9000/path";
+    mockShowPrompt.mockResolvedValueOnce("beta");
     mockAddBookmark.mockResolvedValueOnce(false);
     (document.getElementById("bookmark-save-btn") as HTMLButtonElement).click();
-    await flushMicrotasks();
-    expect(
-      (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("already exists");
+    await flushMicrotasks(6);
+    // An already-saved endpoint is reported as a toast, not the status line.
+    expect(document.getElementById("toast-region")?.textContent).toContain(
+      '"beta" is already saved.',
+    );
 
+    // A failed save is reported on the connection form, not the status line.
+    mockShowPrompt.mockResolvedValueOnce("gamma");
     mockAddBookmark.mockRejectedValueOnce(new Error("bookmark failed"));
     (document.getElementById("bookmark-save-btn") as HTMLButtonElement).click();
-    await flushMicrotasks();
+    await flushMicrotasks(6);
     expect(
-      (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Failed to save bookmark");
+      (document.getElementById("conn-form-error") as HTMLParagraphElement)
+        .textContent,
+    ).toContain("Could not save the connection");
 
     state.selectedKeys.clear();
     const saveBeforeNoSelection = mockSave.mock.calls.length;
@@ -3154,6 +3241,10 @@ describe("main integration", () => {
   });
 
   it("covers additional modal focus trap, tab keyboard, and disconnected/drop guard branches", async () => {
+    // Earlier tests re-import main.ts into fresh module instances, and each
+    // instance's document focus trap stays registered until unload disposes it.
+    // Unload here so this test sees a single trap.
+    window.dispatchEvent(new Event("beforeunload"));
     const { state } = await import("../state.ts");
     await import("../main.ts");
     await flushMicrotasks();

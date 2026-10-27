@@ -2,7 +2,11 @@ import { invoke } from "./ipc.ts";
 import { applyTheme, saveSettings } from "./settings.ts";
 import { state } from "./state.ts";
 import type { ThemePreference } from "./settings-model.ts";
-import type { SecurityStatus } from "./security.ts";
+import {
+  biometricCaveat,
+  securityErrorMessage,
+  type SecurityStatus,
+} from "./security.ts";
 import { focusConnectionScreen } from "./app-connection.ts";
 
 const LAST_STEP = 4;
@@ -79,7 +83,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
           securityStatusError = null;
         })
         .catch((err: unknown) => {
-          securityStatusError = String(err);
+          securityStatusError = securityErrorMessage(err);
         });
     let securityCheckDone = checkSecurityStatus();
 
@@ -97,6 +101,12 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       } catch {
         // Best-effort: inputs may already be detached.
       }
+      encPassword.disabled = false;
+      encConfirm.disabled = false;
+      encPasswordReveal.disabled = false;
+      encConfirmReveal.disabled = false;
+      encStatus.hidden = true;
+      encBack.disabled = false;
       overlay.hidden = true;
       welcomeNext.removeEventListener("click", onWelcomeNext);
       themeBack.removeEventListener("click", onThemeBack);
@@ -126,9 +136,11 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     const encConfirm = $("setup-enc-confirm") as HTMLInputElement;
     const encConfirmReveal = $("setup-enc-confirm-reveal") as HTMLButtonElement;
     const encError = $("setup-enc-error") as HTMLElement;
+    const encStatus = $("setup-enc-status") as HTMLElement;
     const encBiometric = $("setup-enc-biometric") as HTMLInputElement;
     const biometricLabel = $("setup-biometric-label") as HTMLElement;
     const biometricText = $("setup-biometric-text") as HTMLElement;
+    const biometricCaveatEl = $("setup-biometric-caveat") as HTMLElement;
     const updatesBack = $("setup-updates-back") as HTMLButtonElement;
     const updatesNext = $("setup-updates-next") as HTMLButtonElement;
     const autoUpdates = $("setup-auto-updates") as HTMLInputElement;
@@ -143,13 +155,13 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       input: HTMLInputElement,
       btn: HTMLButtonElement,
     ): void {
+      // Visible text carries the state; aria-pressed tells assistive tech it
+      // is a toggle. The accessible name stays "Show password".
       btn.addEventListener("click", () => {
         const showing = input.type === "text";
         input.type = showing ? "password" : "text";
-        btn.setAttribute(
-          "aria-label",
-          showing ? "Show password" : "Hide password",
-        );
+        btn.textContent = showing ? "Show" : "Hide";
+        btn.setAttribute("aria-pressed", String(!showing));
         input.focus();
       });
     }
@@ -163,7 +175,27 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
     function restoreEncActionLabels(): void {
       encSkip.textContent = encSkipDefaultLabel;
-      encNext.textContent = encNextDefaultLabel;
+      encNext.textContent = encryptionCommitted
+        ? "Continue"
+        : encNextDefaultLabel;
+      // Skipping means "no encryption"; once it is on, the only way forward
+      // is Continue, so the skip action goes away.
+      encSkip.hidden = encryptionCommitted;
+    }
+
+    /**
+     * Encryption is on: lock the password fields so the password cannot be
+     * changed (a second initialize would fail anyway) and say so.
+     */
+    function commitEncryptionUI(): void {
+      encryptionCommitted = true;
+      encPassword.disabled = true;
+      encConfirm.disabled = true;
+      encPasswordReveal.disabled = true;
+      encConfirmReveal.disabled = true;
+      encStatus.hidden = false;
+      hideEncError();
+      restoreEncActionLabels();
     }
 
     void initBiometricUI();
@@ -181,6 +213,8 @@ export function showSetupWizard(): Promise<SetupResult | null> {
           } else {
             biometricText.textContent = "Enable biometric unlock";
           }
+          biometricCaveatEl.textContent = biometricCaveat(platform);
+          biometricCaveatEl.hidden = false;
         }
       } catch {
         // biometric not available
@@ -266,7 +300,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
         // Not knowing is not the same as "not set up". The backend refuses
         // to re-initialize an existing vault, so say why a step may fail.
         showEncError(
-          `Could not read the current security setup (${securityStatusError}). If encryption is already configured, skip this step and manage it in Settings.`,
+          `Could not read the current security setup. ${securityStatusError} If encryption is already configured, skip this step and manage it in Settings.`,
         );
       }
     }
@@ -291,7 +325,9 @@ export function showSetupWizard(): Promise<SetupResult | null> {
           password: null,
         });
       } catch (err) {
-        showEncError(`Failed to disable encryption: ${String(err)}`);
+        showEncError(
+          `Could not turn off encryption. ${securityErrorMessage(err)}`,
+        );
         return;
       }
       goTo(3);
@@ -315,13 +351,14 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
       encNext.disabled = true;
       encSkip.disabled = true;
+      encBack.disabled = true;
       try {
         if (!encryptionCommitted) {
           await invoke<SecurityStatus>("initialize_security", {
             enableEncryption: true,
             password: pw,
           });
-          encryptionCommitted = true;
+          commitEncryptionUI();
         }
 
         if (encBiometric.checked && !biometricEnrolled) {
@@ -329,8 +366,12 @@ export function showSetupWizard(): Promise<SetupResult | null> {
             await invoke<SecurityStatus>("enable_biometric");
             biometricEnrolled = true;
           } catch (err) {
-            showEncError(`Failed to enable biometric: ${String(err)}`);
+            // Encryption is already on, so only biometric is offered again.
+            showEncError(
+              `Encryption is on, but biometric unlock was not enabled. ${securityErrorMessage(err)}`,
+            );
             encNext.textContent = "Retry biometric";
+            encSkip.hidden = false;
             encSkip.textContent = "Continue without biometric";
             return;
           }
@@ -339,10 +380,13 @@ export function showSetupWizard(): Promise<SetupResult | null> {
         restoreEncActionLabels();
         goTo(3);
       } catch (err) {
-        showEncError(`Failed to enable encryption: ${String(err)}`);
+        showEncError(
+          `Could not turn on encryption. ${securityErrorMessage(err)}`,
+        );
       } finally {
         encNext.disabled = false;
         encSkip.disabled = false;
+        encBack.disabled = false;
       }
     }
 

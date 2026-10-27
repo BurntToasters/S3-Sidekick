@@ -60,15 +60,13 @@
   width: 32px;
   height: 3px;
   border-radius: 2px;
-  background: var(--border);
-  opacity: 0.6;
+  background: var(--border-strong);
   transition:
     opacity var(--transition-smooth),
     background var(--transition-smooth);
 }
 
 .bottom-drawer__resize-handle:hover::after {
-  opacity: 1;
   background: var(--accent);
 }
 
@@ -95,11 +93,12 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-height: 32px;
   padding: 10px 16px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
@@ -116,7 +115,7 @@
 }
 
 .bottom-drawer__tab--active {
-  color: var(--accent);
+  color: var(--accent-fg);
   border-bottom-color: var(--accent);
 }
 
@@ -135,7 +134,7 @@
   border-radius: 8px;
   background: var(--accent);
   color: var(--accent-text);
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-weight: 700;
   line-height: 1;
 }
@@ -144,6 +143,15 @@
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* Icon-only header controls meet the 32px pointer target floor. */
+.bottom-drawer__actions .btn--icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
 }
 
 .bottom-drawer__body {

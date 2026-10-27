@@ -10,7 +10,7 @@
   align-items: center;
   justify-content: center;
   padding: 16px;
-  z-index: 320;
+  z-index: var(--z-dialog);
 }
 
 body.modal-open {
@@ -44,7 +44,7 @@ body.modal-open .dialog-overlay.active {
   padding: 24px;
   width: min(360px, 92vw);
   max-width: calc(100vw - 32px);
-  max-height: calc(100vh - var(--titlebar-height, 0px) - 32px);
+  max-height: calc(100vh - var(--titlebar-height) - 32px);
   overflow: hidden;
   box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
   animation: modal-in 0.15s ease;
@@ -62,7 +62,7 @@ body.modal-open .dialog-overlay.active {
   max-height: min(42vh, 300px);
   overflow-x: hidden;
   overflow-y: auto;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
   margin-bottom: 20px;
   line-height: 1.5;
@@ -113,15 +113,19 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-input-reveal {
   position: absolute;
-  right: 10px;
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
   background: none;
   border: none;
-  padding: 2px 4px;
+  /* 24px minimum target; text-secondary replaces the muted tone, which was
+     too faint on the dialog surface. */
+  min-width: 24px;
+  min-height: 24px;
+  padding: 2px 6px;
   cursor: pointer;
-  font-size: 0.75rem;
-  color: var(--text-muted);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
   border-radius: var(--radius-sm);
   line-height: 1;
 }
@@ -129,6 +133,32 @@ body.modal-open .dialog-overlay.active {
 .dialog-input-reveal:hover {
   color: var(--text-primary);
   background: var(--glass-bg);
+}
+
+.dialog-input-reveal:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
+}
+
+.dialog-input-reveal[aria-pressed="true"] {
+  color: var(--text-primary);
+  background: var(--glass-bg);
+}
+
+.dialog-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.dialog-choices[hidden] {
+  display: none;
+}
+
+.dialog-choices .btn {
+  width: 100%;
+  justify-content: center;
 }
 
 .dialog-input-wrapper--icon .dialog-box__input {
@@ -141,7 +171,7 @@ body.modal-open .dialog-overlay.active {
   background: rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  z-index: 259;
+  z-index: var(--z-biometric);
 }
 
 .biometric-overlay[hidden] {
@@ -161,11 +191,15 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-validation-error {
   margin: -12px 0 20px;
-  color: var(--danger);
-  font-size: 12px;
+  color: var(--danger-text);
+  font-size: var(--text-sm);
   line-height: 1.4;
 }
 
 .dialog-box__input[aria-invalid="true"] {
   border-color: var(--danger);
+}
+
+.dialog-extra-action {
+  margin-right: auto;
 }

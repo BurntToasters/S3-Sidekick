@@ -1,15 +1,31 @@
 /* Toast notifications */
 
+/*
+ * The stack sits above the status bar and above an open bottom drawer, so it
+ * never hides the Activity and Transfers buttons it points to. The drawer
+ * publishes its height as --bottom-drawer-offset; it is 0 when closed.
+ */
 .toast-region {
   position: fixed;
   right: 16px;
-  bottom: 16px;
-  z-index: 600;
+  bottom: calc(
+    var(--statusbar-height) + var(--bottom-drawer-offset, 0px) + var(--space-3)
+  );
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   width: min(360px, calc(100vw - 32px));
   pointer-events: none;
+}
+
+/*
+ * While a dialog is open its action row sits at the bottom of the window, so
+ * the stack moves to the top instead of covering Save, Next or Finish.
+ */
+body.modal-open .toast-region {
+  top: calc(var(--titlebar-height) + var(--space-3));
+  bottom: auto;
 }
 
 .toast {
@@ -25,7 +41,7 @@
   -webkit-backdrop-filter: blur(var(--glass-blur));
   box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.4;
   pointer-events: auto;
   animation: toast-in 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94);
@@ -69,17 +85,25 @@
   margin-left: 6px;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--text-xs);
+}
+
+.toast__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
 .toast__action {
-  flex-shrink: 0;
+  min-height: 28px;
   border: none;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-fg);
   font: inherit;
   font-weight: 600;
-  font-size: 12px;
+  font-size: var(--text-sm);
   padding: 2px 6px;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -96,8 +120,8 @@
 
 .toast__close {
   flex-shrink: 0;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: none;
   background: transparent;

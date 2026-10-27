@@ -127,6 +127,8 @@ vi.mock("../app-connection.ts", () => ({
   setConnectionInputs: mockSetConnectionInputs,
   refreshBookmarkBar: mockRefreshBookmarkBar,
   setConnectionUI: mockSetConnectionUI,
+  setSavedConnectionsLocked: vi.fn(),
+  setUnlockSavedConnectionsHandler: vi.fn(),
 }));
 
 vi.mock("../app-events.ts", () => ({
@@ -335,7 +337,7 @@ describe("app-init startup waterfall", () => {
 
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Settings Corrupted",
-      expect.stringContaining("bookmarks"),
+      expect.stringContaining("saved connections"),
     );
     expect(mockInvoke).toHaveBeenCalledWith("save_settings", {
       json: "{}",

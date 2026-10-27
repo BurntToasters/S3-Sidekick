@@ -3,6 +3,10 @@ export interface MenuAction {
   action: string;
   separator?: false;
   disabled?: boolean;
+  /** Shown under a disabled item so the user learns why it is unavailable. */
+  disabledReason?: string;
+  /** Display-only keyboard hint; kept out of the accessible name. */
+  shortcut?: string;
 }
 
 export interface MenuSeparator {
@@ -16,6 +20,7 @@ let dismissHandler: ((e: MouseEvent) => void) | null = null;
 let keyHandler: ((e: KeyboardEvent) => void) | null = null;
 let restoreFocusTarget: HTMLElement | null = null;
 let dismissCallback: (() => void) | null = null;
+let reasonSequence = 0;
 
 export function showContextMenu(
   x: number,
@@ -44,9 +49,20 @@ export function showContextMenu(
       continue;
     }
     const btn = document.createElement("button");
+    btn.type = "button";
     btn.className = "context-menu__item";
     btn.setAttribute("role", "menuitem");
-    btn.textContent = item.label;
+    const label = document.createElement("span");
+    label.className = "context-menu__label";
+    label.textContent = item.label;
+    btn.appendChild(label);
+    if (item.shortcut) {
+      const hint = document.createElement("span");
+      hint.className = "context-menu__shortcut";
+      hint.setAttribute("aria-hidden", "true");
+      hint.textContent = item.shortcut;
+      btn.appendChild(hint);
+    }
     btn.disabled = !!item.disabled;
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -54,6 +70,17 @@ export function showContextMenu(
       onAction(item.action);
     });
     menu.appendChild(btn);
+    if (item.disabled && item.disabledReason) {
+      // A disabled button takes no focus, so the reason sits in the menu as
+      // visible text and is linked to the item for assistive technology.
+      const reason = document.createElement("div");
+      reason.className = "context-menu__reason";
+      reason.id = `context-menu-reason-${++reasonSequence}`;
+      reason.setAttribute("role", "presentation");
+      reason.textContent = item.disabledReason;
+      btn.setAttribute("aria-describedby", reason.id);
+      menu.appendChild(reason);
+    }
   }
 
   document.body.appendChild(menu);

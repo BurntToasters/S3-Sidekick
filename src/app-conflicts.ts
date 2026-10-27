@@ -82,29 +82,67 @@ async function confirmUnguardedWrite(
   return true;
 }
 
+export interface ConflictChoiceOptions {
+  /// Conflicts still waiting after this one. The apply-to-all question names
+  /// this count so the user knows how far the choice reaches.
+  remainingCount?: number;
+}
+
+/**
+ * Ask about a destination known to exist. The batch question (when any
+ * conflicts remain) lets one answer cover the rest of the batch.
+ */
 export async function resolveConflictChoice(
   label: string,
   session: ConflictPromptSession,
   hasBatchRemainder: boolean,
+  options: ConflictChoiceOptions = {},
 ): Promise<Exclude<ConflictPolicy, "ask">> {
   if (session.applyAll) return session.applyAll;
   const replace = await showConfirm(
-    "Conflict",
+    "Replace existing file?",
     `${label} already exists. Replace it?`,
     { okLabel: "Replace", cancelLabel: "Skip", okDanger: true },
   );
   const decision: Exclude<ConflictPolicy, "ask"> = replace ? "replace" : "skip";
-  if (hasBatchRemainder) {
+  const remainingCount = options.remainingCount;
+  const showApplyAll =
+    hasBatchRemainder && (remainingCount === undefined || remainingCount > 0);
+  if (showApplyAll) {
+    const verb = decision === "replace" ? "Replace" : "Skip";
+    const scope =
+      remainingCount === undefined
+        ? "remaining conflicts"
+        : `up to ${remainingCount} remaining conflicts`;
     const applyAll = await showConfirm(
-      "Apply Choice",
-      `Apply "${decision}" to remaining conflicts?`,
-      { okLabel: "Apply to all", cancelLabel: "Only this one" },
+      "Apply to remaining conflicts?",
+      `Apply "${verb}" to ${scope}?`,
+      {
+        okLabel: "Apply to all remaining conflicts",
+        cancelLabel: "This one only",
+      },
     );
     if (applyAll) {
       session.applyAll = decision;
     }
   }
   return decision;
+}
+
+/**
+ * Ask about a destination whose existence could not be checked. The user
+ * decides for this item only: an unknown state never becomes a batch rule.
+ */
+async function resolveUnknownDestination(
+  label: string,
+  reason: string,
+): Promise<Exclude<ConflictPolicy, "ask">> {
+  const replace = await showConfirm(
+    "Destination not checked",
+    `Couldn't check whether ${label} exists (${reason}). Replace if present?`,
+    { okLabel: "Replace", cancelLabel: "Skip", okDanger: true },
+  );
+  return replace ? "replace" : "skip";
 }
 
 export async function resolveDownloadEntriesWithConflicts(
@@ -163,6 +201,7 @@ export async function resolveDownloadEntriesWithConflicts(
       entry.destination,
       session,
       remainingConflicts > 1,
+      { remainingCount: remainingConflicts - 1 },
     );
     remainingConflicts -= 1;
     if (decision === "replace") {
@@ -183,6 +222,8 @@ export type ObjectWriteIntent = "skip" | "cancel" | { overwrite: boolean };
 export interface ObjectConflictOptions {
   operation: "upload" | "copy";
   byteLength?: number;
+  /// Conflicts still waiting after this item, for the apply-to-all question.
+  remainingCount?: number;
 }
 
 export async function resolveAbsentObjectWriteIntent(
@@ -224,12 +265,21 @@ export async function resolveObjectConflict(
   } catch (err) {
     // Fail closed. A transient error or a denied HeadObject must not be read as
     // "the object is absent", which would silently authorise an overwrite.
+    const reason = friendlyError(err).replace(/\.$/, "");
     logActivity(
-      `Could not check whether ${bucket}/${key} exists (${friendlyError(err)}). ` +
+      `Could not check whether ${bucket}/${key} exists (${reason}). ` +
         "Treating it as a conflict.",
       "warning",
     );
-    exists = true;
+    if (conflictPolicy === "replace" || session.applyAll === "replace") {
+      return { overwrite: true };
+    }
+    if (conflictPolicy === "skip" || session.applyAll === "skip") return "skip";
+    const unknownDecision = await resolveUnknownDestination(
+      `${bucket}/${key}`,
+      reason,
+    );
+    return unknownDecision === "replace" ? { overwrite: true } : "skip";
   }
   if (!exists) {
     if (conflictPolicy === "replace" || session.applyAll === "replace") {
@@ -243,6 +293,7 @@ export async function resolveObjectConflict(
     `${bucket}/${key}`,
     session,
     hasBatchRemainder,
+    { remainingCount: options.remainingCount },
   );
   return decision === "replace" ? { overwrite: true } : "skip";
 }

@@ -22,15 +22,57 @@ describe("preview module", () => {
     state.connectionIdentity = "test-identity";
   });
 
-  it("canPreview always offers preview; render decides by content type", async () => {
+  it("canPreview rejects known binary extensions before any request", async () => {
     const preview = await import("../preview.ts");
     expect(preview.canPreview("readme.md")).toBe(true);
     expect(preview.canPreview("photo.jpeg")).toBe(true);
-    // Extension-gating removed: unsupported types still offer Preview and
-    // render an unavailable message from content_type/is_text.
-    expect(preview.canPreview("archive.zip")).toBe(true);
     expect(preview.canPreview("README")).toBe(true);
     expect(preview.canPreview("")).toBe(false);
+    // Known archives, executables and media never fetch content.
+    expect(preview.canPreview("archive.zip")).toBe(false);
+    expect(preview.canPreview("ARCHIVE.TAR.GZ")).toBe(false);
+    expect(preview.canPreview("setup.exe")).toBe(false);
+    expect(preview.canPreview("movie.MP4")).toBe(false);
+  });
+
+  it("shows a friendly unsupported message without the raw content type", async () => {
+    mockInvoke.mockResolvedValueOnce({
+      content_type: "application/zip",
+      data: "",
+      is_text: false,
+      truncated: false,
+      total_size: 2048,
+    });
+    const preview = await import("../preview.ts");
+    await preview.openPreview("bundles/archive.dat");
+
+    const body = document.getElementById("preview-body") as HTMLDivElement;
+    expect(body.textContent).toContain(
+      "Preview not available for this file type.",
+    );
+    expect(body.textContent).not.toContain("application/zip");
+    expect(body.querySelector("img")).toBeNull();
+  });
+
+  it("renders an image over the preview limit as Too large with a Download action", async () => {
+    mockInvoke.mockResolvedValueOnce({
+      content_type: "image/png",
+      data: "",
+      is_text: false,
+      truncated: false,
+      total_size: 5_000_000,
+    });
+    const preview = await import("../preview.ts");
+    await preview.openPreview("images/huge.png");
+
+    const body = document.getElementById("preview-body") as HTMLDivElement;
+    expect(body.textContent).toContain("Too large to preview");
+    expect(body.querySelector("img")).toBeNull();
+    const download = body.querySelector<HTMLButtonElement>(
+      "[data-preview-download]",
+    );
+    expect(download?.type).toBe("button");
+    expect(download?.textContent).toBe("Download");
   });
 
   it("renders text preview and truncated size hint", async () => {
@@ -106,20 +148,16 @@ describe("preview module", () => {
     const { state } = await import("../state.ts");
     state.currentBucket = "bucket-a";
 
-    mockInvoke.mockResolvedValueOnce({
-      content_type: "application/octet-stream",
-      data: "AAAA",
-      is_text: false,
-      truncated: false,
-      total_size: 4,
-    });
     await preview.openPreview("bin/blob.bin");
     expect(
       (document.getElementById("preview-body") as HTMLDivElement).textContent,
     ).toContain("Preview not available");
+    expect(mockInvoke).not.toHaveBeenCalled();
 
     mockInvoke.mockRejectedValueOnce(new Error("network error"));
-    await preview.openPreview("bin/error.bin");
+    // .bin is refused before any request now, so the network error needs a
+    // previewable name to reach the fetch.
+    await preview.openPreview("bin/error.json");
     const body = document.getElementById("preview-body") as HTMLDivElement;
     expect(body.textContent).toContain("Failed to load preview");
     expect(body.querySelector("[role='alert']")).not.toBeNull();

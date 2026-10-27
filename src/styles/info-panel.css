@@ -31,8 +31,22 @@
 }
 
 .info-tab--active {
-  color: var(--accent);
+  color: var(--accent-fg);
   border-bottom-color: var(--accent);
+}
+
+/* Paths and ETags wrap at slashes and long tokens instead of breaking mid-word.
+   Overrides the broad mono rule in feedback.css, which loads later. */
+.metadata-info-row__value.metadata-value-mono {
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.metadata-entry .metadata-entry__delete {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
 }
 
 .acl-table {
@@ -62,7 +76,7 @@
   font-family: var(--mono);
   font-size: 11px;
   word-break: break-all;
-  color: var(--accent);
+  color: var(--accent-fg);
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;

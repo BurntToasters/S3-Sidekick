@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SETTING_DEFAULTS } from "../settings-model.ts";
+import { SETTING_DEFAULTS, parseSettingsRaw } from "../settings-model.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+const mockUpdateBookmark = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
 const mockRelaunch = vi.fn<() => Promise<void>>();
 const mockLoadBookmarks = vi.fn<() => Promise<void>>();
@@ -15,6 +16,11 @@ const mockSetUpdateChannel = vi.fn();
 const mockRefreshSecuritySettingsUI = vi.fn<() => Promise<void>>();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockShowAlert = vi.fn<(...args: unknown[]) => Promise<void>>();
+const mockShowChoiceDialog = vi.fn<(...args: unknown[]) => Promise<string>>();
+const mockShowConfirmWithCheckbox =
+  vi.fn<
+    (...args: unknown[]) => Promise<{ confirmed: boolean; checked: boolean }>
+  >();
 const mockSave = vi.fn<(...args: unknown[]) => Promise<string | null>>();
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -40,6 +46,7 @@ vi.mock("../bookmarks.ts", () => ({
   getBookmarks: mockGetBookmarks,
   exportBookmarksJson: mockExportBookmarksJson,
   importBookmarksJson: mockImportBookmarksJson,
+  updateBookmark: mockUpdateBookmark,
   MAX_IMPORT_BYTES: 1_048_576,
 }));
 
@@ -55,6 +62,8 @@ vi.mock("../security.ts", () => ({
 vi.mock("../dialogs.ts", () => ({
   showConfirm: mockShowConfirm,
   showAlert: mockShowAlert,
+  showChoiceDialog: mockShowChoiceDialog,
+  showConfirmWithCheckbox: mockShowConfirmWithCheckbox,
 }));
 
 describe("settings module", () => {
@@ -82,6 +91,13 @@ describe("settings module", () => {
     mockRefreshSecuritySettingsUI.mockReset();
     mockShowConfirm.mockReset();
     mockShowAlert.mockReset();
+    mockShowChoiceDialog.mockReset();
+    mockShowConfirmWithCheckbox.mockReset();
+    mockShowChoiceDialog.mockResolvedValue("cancel");
+    mockShowConfirmWithCheckbox.mockResolvedValue({
+      confirmed: false,
+      checked: false,
+    });
     mockGetVersion.mockResolvedValue("0.6.0");
     mockIsUpdaterEnabled.mockReturnValue(true);
     mockLoadBookmarks.mockResolvedValue(undefined);
@@ -91,6 +107,8 @@ describe("settings module", () => {
     mockGetBookmarks.mockReturnValue([]);
     mockExportBookmarksJson.mockReturnValue("[]");
     mockImportBookmarksJson.mockResolvedValue({ imported: 0, skipped: 0 });
+    mockUpdateBookmark.mockReset();
+    mockUpdateBookmark.mockResolvedValue(true);
 
     const { state } = await import("../state.ts");
     state.platformName = "windows";
@@ -228,7 +246,8 @@ describe("settings module", () => {
     expect(state.currentSettings.updateChannel).toBe("beta");
     expect(state.currentSettings.presignedUrlExpiration).toBe(120);
     expect(state.currentSettings.maxConcurrentTransfers).toBe(6);
-    expect(mockSetUpdateChannel).toHaveBeenCalledWith("beta");
+    // Reading the draft must not change the live update channel; that waits for Save.
+    expect(mockSetUpdateChannel).not.toHaveBeenCalled();
   });
 
   it("normalizes invalid modal values and defaults update channel", async () => {
@@ -254,7 +273,7 @@ describe("settings module", () => {
     expect(state.currentSettings.updateChannel).toBe("release");
     expect(state.currentSettings.presignedUrlExpiration).toBe(3600);
     expect(state.currentSettings.maxConcurrentTransfers).toBe(3);
-    expect(mockSetUpdateChannel).toHaveBeenCalledWith("release");
+    expect(mockSetUpdateChannel).not.toHaveBeenCalled();
   });
 
   it("open/close modal handles save success and save failure", async () => {
@@ -337,7 +356,7 @@ describe("settings module", () => {
     expect(state.currentSettings).toEqual(state.lastPersistedSettings);
     expect(
       (document.getElementById("status") as HTMLDivElement).textContent,
-    ).toContain("Failed to save settings");
+    ).toContain("Settings were not saved");
     expect(overlay.classList.contains("active")).toBe(true);
   });
 
@@ -454,10 +473,12 @@ describe("settings module", () => {
     settings.populateSettingsModal();
     await flushMicrotasks();
 
+    // Auto-update toggle and Check now stay available; only the in-app
+    // install is replaced by the package-manager note.
     expect(
       (document.getElementById("updater-section") as HTMLDivElement).style
         .display,
-    ).toBe("none");
+    ).toBe("");
     expect(
       (document.getElementById("updater-unsupported") as HTMLDivElement).style
         .display,
@@ -476,6 +497,7 @@ describe("settings module", () => {
     expect(mockInvoke).not.toHaveBeenCalled();
 
     mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
     mockInvoke.mockResolvedValue(undefined);
     mockRelaunch.mockResolvedValueOnce(undefined);
     await settings.resetSettings();
@@ -495,6 +517,7 @@ describe("settings module", () => {
       configurable: true,
     });
     mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
     mockInvoke.mockResolvedValue(undefined);
     mockRelaunch.mockRejectedValueOnce(new Error("relaunch failed"));
     await settings.resetSettings();
@@ -509,20 +532,16 @@ describe("settings module", () => {
     const settings = await import("../settings.ts");
     localStorage.setItem("s3-sidekick.transfer-manifest.v1", "plaintext");
 
-    mockShowConfirm
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
+    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    mockShowChoiceDialog.mockResolvedValueOnce("factory");
     await settings.resetSettings();
     expect(mockInvoke).not.toHaveBeenCalled();
     expect(localStorage.getItem("s3-sidekick.transfer-manifest.v1")).toBe(
       "plaintext",
     );
 
-    mockShowConfirm
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true);
+    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("factory");
     mockInvoke.mockResolvedValue(undefined);
     mockRelaunch.mockResolvedValue(undefined);
     await settings.resetSettings();
@@ -553,6 +572,7 @@ describe("settings module", () => {
       maxConcurrentTransfers: 2,
     };
 
+    mockShowChoiceDialog.mockResolvedValueOnce("discard");
     await settings.closeSettingsModal(false);
 
     expect(state.currentSettings).toEqual(state.lastPersistedSettings);
@@ -637,8 +657,8 @@ describe("settings module", () => {
     await onDelete(saved);
     expect(mockRemoveBookmark).not.toHaveBeenCalled();
     expect(mockShowConfirm).toHaveBeenLastCalledWith(
-      "Delete Bookmark",
-      'Delete bookmark "Saved One"?',
+      "Delete saved connection",
+      'Delete saved connection "Saved One"?',
       expect.objectContaining({ okLabel: "Delete", okDanger: true }),
     );
 
@@ -745,6 +765,7 @@ describe("settings module", () => {
       secret_key: "secret",
     });
 
+    await flushMicrotasks();
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(
       (
@@ -787,8 +808,11 @@ describe("settings module", () => {
 
     const settings = await import("../settings.ts");
     mockExportBookmarksJson.mockReturnValue('[{"name":"x"}]');
-    // Two-step export: confirm export, then secrets choice.
-    mockShowConfirm.mockResolvedValue(true);
+    // One export dialog: confirm, with a checkbox for secret keys.
+    mockShowConfirmWithCheckbox.mockResolvedValue({
+      confirmed: true,
+      checked: false,
+    });
     mockImportBookmarksJson
       .mockResolvedValueOnce({ imported: 0, skipped: 0, error: "bad file" })
       .mockResolvedValueOnce({ imported: 2, skipped: 1 })
@@ -863,11 +887,11 @@ describe("settings module", () => {
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Import Complete",
-      expect.stringContaining("Imported 2 bookmark(s)"),
+      expect.stringContaining("Imported 2 saved connections"),
     );
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Import Complete",
-      expect.stringContaining("skipped 1 duplicate(s)"),
+      expect.stringContaining("skipped 1 duplicate"),
     );
 
     Object.defineProperty(importInput, "files", {
@@ -880,7 +904,46 @@ describe("settings module", () => {
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Import Complete",
-      "Imported 1 bookmark(s).",
+      "Imported 1 saved connection.",
+    );
+
+    // Duplicates and invalid entries are reported separately.
+    mockImportBookmarksJson.mockResolvedValueOnce({
+      imported: 3,
+      skipped: 3,
+      duplicates: 1,
+      invalid: 2,
+    });
+    Object.defineProperty(importInput, "files", {
+      value: [
+        new File(['{"x":4}'], "bookmarks4.json", { type: "application/json" }),
+      ],
+      configurable: true,
+    });
+    importInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushMicrotasks(5);
+    expect(mockShowAlert).toHaveBeenCalledWith(
+      "Import Complete",
+      "Imported 3 saved connections, skipped 1 duplicate and 2 invalid entries.",
+    );
+
+    mockImportBookmarksJson.mockResolvedValueOnce({
+      imported: 0,
+      skipped: 1,
+      duplicates: 0,
+      invalid: 1,
+    });
+    Object.defineProperty(importInput, "files", {
+      value: [
+        new File(['{"x":5}'], "bookmarks5.json", { type: "application/json" }),
+      ],
+      configurable: true,
+    });
+    importInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushMicrotasks(5);
+    expect(mockShowAlert).toHaveBeenCalledWith(
+      "Import Complete",
+      "Imported 0 saved connections, skipped 1 invalid entry.",
     );
 
     const oversized = new File(["tiny"], "huge.json", {
@@ -896,7 +959,7 @@ describe("settings module", () => {
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Import Failed",
-      "Bookmark import is too large",
+      "The saved connections file is too large.",
     );
     expect(mockImportBookmarksJson.mock.calls.length).toBe(importCalls);
   });
@@ -915,6 +978,7 @@ describe("settings module", () => {
     settings.populateSettingsModal();
     settings.readSettingsModal();
     settings.openSettingsModal();
+    mockShowChoiceDialog.mockResolvedValueOnce("discard");
     await settings.closeSettingsModal(false);
 
     expect(state.currentSettings).toEqual(state.lastPersistedSettings);
@@ -1046,7 +1110,8 @@ describe("settings module", () => {
       transfersHintDismissed: true,
       _setupComplete: false,
     };
-    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
     mockInvoke.mockResolvedValue(undefined);
     mockRelaunch.mockResolvedValue(undefined);
 
@@ -1082,7 +1147,8 @@ describe("settings module", () => {
       supportPromptDismissed: "yes",
       transfersHintDismissed: 123,
     };
-    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
     mockInvoke.mockResolvedValue(undefined);
     mockRelaunch.mockResolvedValue(undefined);
 
@@ -1105,7 +1171,8 @@ describe("settings module", () => {
     const settings = await import("../settings.ts");
     const { state } = await import("../state.ts");
     state.settingsExtras = { launchCount: 3 };
-    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
     mockInvoke.mockRejectedValueOnce(new Error("disk full"));
 
     await settings.resetSettings();
@@ -1120,10 +1187,8 @@ describe("settings module", () => {
   it("alerts when factory reset fails before destructive cleanup", async () => {
     const settings = await import("../settings.ts");
     localStorage.setItem("s3-sidekick.keep", "1");
-    mockShowConfirm
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true);
+    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("factory");
     mockInvoke.mockRejectedValueOnce(new Error("factory boom"));
 
     await settings.resetSettings();
@@ -1139,10 +1204,8 @@ describe("settings module", () => {
 
   it("still relaunches when browser storage cleanup is unavailable", async () => {
     const settings = await import("../settings.ts");
-    mockShowConfirm
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true);
+    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("factory");
     mockInvoke.mockResolvedValue(undefined);
     mockRelaunch.mockResolvedValue(undefined);
     const clearSpy = vi
@@ -1163,7 +1226,7 @@ describe("settings module", () => {
     clearSpy.mockRestore();
   });
 
-  it("exports bookmarks with secrets, redacted, or abort", async () => {
+  it("exports bookmarks with or without secrets, and abort writes nothing", async () => {
     document.body.innerHTML = `
       <div id="settings-overlay" class="modal-overlay"></div>
       <select id="setting-theme"><option value="system" selected>system</option></select>
@@ -1188,28 +1251,40 @@ describe("settings module", () => {
       "bookmarks-export-btn",
     ) as HTMLButtonElement;
 
-    // Abort: first confirm false writes nothing.
-    mockShowConfirm.mockResolvedValueOnce(false);
+    // Abort: cancelling the export dialog writes nothing.
+    mockShowConfirmWithCheckbox.mockResolvedValueOnce({
+      confirmed: false,
+      checked: false,
+    });
     mockExportBookmarksJson.mockClear();
     exportBtn.click();
     await flushMicrotasks(4);
-    expect(mockShowConfirm).toHaveBeenCalledWith(
-      "Export bookmarks?",
+    expect(mockShowConfirmWithCheckbox).toHaveBeenCalledWith(
+      "Export saved connections",
       expect.any(String),
-      expect.objectContaining({ okLabel: "Export" }),
+      expect.objectContaining({
+        okLabel: "Export",
+        checkboxLabel: expect.stringContaining("secret keys"),
+      }),
     );
     expect(mockExportBookmarksJson).not.toHaveBeenCalled();
     expect(writes()).toHaveLength(0);
 
-    // Include secrets.
-    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+    // Include secrets: ticking the checkbox is the only secrets choice.
+    mockShowConfirmWithCheckbox.mockResolvedValueOnce({
+      confirmed: true,
+      checked: true,
+    });
     exportBtn.click();
     await flushMicrotasks(4);
     expect(mockExportBookmarksJson).toHaveBeenLastCalledWith(true);
     expect(writes()).toHaveLength(1);
 
-    // Redacted: second confirm false still exports with false.
-    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    // Redacted by default: an unticked checkbox exports without secrets.
+    mockShowConfirmWithCheckbox.mockResolvedValueOnce({
+      confirmed: true,
+      checked: false,
+    });
     exportBtn.click();
     await flushMicrotasks(4);
     expect(mockExportBookmarksJson).toHaveBeenLastCalledWith(false);
@@ -1217,7 +1292,10 @@ describe("settings module", () => {
 
     // Cancelling the save dialog writes nothing.
     mockSave.mockResolvedValueOnce(null);
-    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    mockShowConfirmWithCheckbox.mockResolvedValueOnce({
+      confirmed: true,
+      checked: false,
+    });
     exportBtn.click();
     await flushMicrotasks(4);
     expect(writes()).toHaveLength(2);
@@ -1410,7 +1488,7 @@ describe("settings module", () => {
         <button class="settings-tab" data-settings-tab="transfers">Transfers</button>
       </div>
       <div class="settings-panel" data-settings-panel="appearance">
-        <div class="setting-item">Theme <button data-tooltip="change theme tooltip">?</button></div>
+        <div class="setting-item">Theme <span class="setting-help-wrap"><button class="setting-help" aria-label="Help: Theme">?</button><span class="setting-help__tip">change theme tooltip</span></span></div>
         <div class="setting-item">Language</div>
       </div>
       <div class="settings-panel" data-settings-panel="transfers" hidden>
@@ -1672,5 +1750,252 @@ describe("settings module", () => {
     expect(
       (document.getElementById("settings-version") as HTMLElement).textContent,
     ).toBe("v0.6.0");
+  });
+});
+
+describe("desktop notifications setting", () => {
+  it("defaults to on when the saved value is absent or not a boolean", () => {
+    expect(parseSettingsRaw("{}").settings.desktopNotifications).toBe(true);
+    expect(
+      parseSettingsRaw(JSON.stringify({ desktopNotifications: "no" })).settings
+        .desktopNotifications,
+    ).toBe(true);
+    expect(
+      parseSettingsRaw(JSON.stringify({ desktopNotifications: false })).settings
+        .desktopNotifications,
+    ).toBe(false);
+  });
+
+  it("shows the saved value in the Transfers switch", async () => {
+    document.body.innerHTML = `<input id="setting-desktop-notifications" type="checkbox" checked />`;
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.currentSettings = {
+      ...SETTING_DEFAULTS,
+      desktopNotifications: false,
+    };
+
+    settings.populateSettingsModal();
+
+    expect(
+      (
+        document.getElementById(
+          "setting-desktop-notifications",
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(false);
+  });
+
+  it("saves an unchecked switch as desktopNotifications false", async () => {
+    document.body.innerHTML = `<input id="setting-desktop-notifications" type="checkbox" checked />`;
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.currentSettings = { ...SETTING_DEFAULTS, desktopNotifications: true };
+    (
+      document.getElementById(
+        "setting-desktop-notifications",
+      ) as HTMLInputElement
+    ).checked = false;
+    mockInvoke.mockResolvedValueOnce(undefined);
+
+    settings.readSettingsModal();
+    expect(state.currentSettings.desktopNotifications).toBe(false);
+    await settings.saveSettings();
+
+    expect(mockInvoke).toHaveBeenLastCalledWith("save_settings", {
+      json: expect.stringContaining('"desktopNotifications": false'),
+    });
+  });
+});
+
+describe("saved connection edit form", () => {
+  const alpha = {
+    name: "alpha",
+    endpoint: "https://alpha.example.com",
+    region: "us-east-1",
+    access_key: "AKIAALPHA",
+    secret_key: "secret-alpha",
+  };
+
+  const EDIT_FORM_DOM = `
+    <div id="settings-overlay" class="modal-overlay active">
+      <div class="settings-tabs">
+        <button class="settings-tab" data-settings-tab="appearance">A</button>
+        <button class="settings-tab" data-settings-tab="bookmarks">B</button>
+      </div>
+      <div class="settings-panel" data-settings-panel="appearance"></div>
+      <div class="settings-panel" data-settings-panel="bookmarks">
+        <ul id="bookmark-list"></ul>
+        <p id="bookmarks-status"></p>
+        <div id="bookmark-edit" hidden>
+          <input id="bookmark-edit-name" />
+          <input id="bookmark-edit-endpoint" />
+          <input id="bookmark-edit-region" />
+          <input id="bookmark-edit-access-key" />
+          <input id="bookmark-edit-secret-key" type="password" placeholder="Leave blank to keep the current secret" />
+          <input id="bookmark-edit-session-token" type="password" />
+          <p id="bookmark-edit-error" hidden></p>
+          <button type="button" id="bookmark-edit-save">Save</button>
+          <button type="button" id="bookmark-edit-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+
+  function mountEditForm(): void {
+    document.body.innerHTML = EDIT_FORM_DOM;
+  }
+
+  function field(id: string): HTMLInputElement {
+    return document.getElementById(id) as HTMLInputElement;
+  }
+
+  function editFormHidden(): boolean {
+    return (
+      (document.getElementById("bookmark-edit") as HTMLElement).hidden === true
+    );
+  }
+
+  function errorText(): string {
+    const el = document.getElementById("bookmark-edit-error") as HTMLElement;
+    return el.hidden ? "" : el.textContent;
+  }
+
+  async function openEdit(): Promise<void> {
+    const settings = await import("../settings.ts");
+    settings.editSavedConnection(alpha);
+  }
+
+  function savedPatch(): [Record<string, unknown>, Record<string, unknown>] {
+    const [target, patch] = mockUpdateBookmark.mock.calls[0] as [
+      Record<string, unknown>,
+      Record<string, unknown>,
+    ];
+    return [target, patch];
+  }
+
+  it("blank secret key leaves the stored secret alone", async () => {
+    mountEditForm();
+    await openEdit();
+    expect(field("bookmark-edit-secret-key").value).toBe("");
+    expect(field("bookmark-edit-secret-key").placeholder).toBe(
+      "Leave blank to keep the current secret",
+    );
+
+    (
+      document.getElementById("bookmark-edit-save") as HTMLButtonElement
+    ).click();
+
+    await vi.waitFor(() => expect(mockUpdateBookmark).toHaveBeenCalledTimes(1));
+    const [target, patch] = savedPatch();
+    expect(target).toEqual({
+      endpoint: alpha.endpoint,
+      access_key: alpha.access_key,
+    });
+    expect(patch).toMatchObject({
+      name: "alpha",
+      endpoint: alpha.endpoint,
+      access_key: alpha.access_key,
+    });
+    expect(patch).not.toHaveProperty("secret_key");
+  });
+
+  it("changing the endpoint updates the row matched by its old endpoint and key", async () => {
+    mountEditForm();
+    await openEdit();
+    field("bookmark-edit-endpoint").value = "https://alpha-new.example.com";
+
+    (
+      document.getElementById("bookmark-edit-save") as HTMLButtonElement
+    ).click();
+
+    await vi.waitFor(() => expect(mockUpdateBookmark).toHaveBeenCalledTimes(1));
+    const [target, patch] = savedPatch();
+    expect(target).toEqual({
+      endpoint: alpha.endpoint,
+      access_key: alpha.access_key,
+    });
+    expect(patch).toMatchObject({
+      endpoint: "https://alpha-new.example.com",
+      access_key: alpha.access_key,
+    });
+  });
+
+  it("refuses a changed access key that has no new secret key", async () => {
+    mountEditForm();
+    await openEdit();
+    field("bookmark-edit-access-key").value = "AKIANEWKEY";
+
+    (
+      document.getElementById("bookmark-edit-save") as HTMLButtonElement
+    ).click();
+
+    await vi.waitFor(() => expect(errorText()).toMatch(/secret key/i));
+    expect(mockUpdateBookmark).not.toHaveBeenCalled();
+    expect(editFormHidden()).toBe(false);
+  });
+
+  it("saves a changed access key together with its new secret key", async () => {
+    mountEditForm();
+    await openEdit();
+    field("bookmark-edit-access-key").value = "AKIANEWKEY";
+    field("bookmark-edit-secret-key").value = "new-secret";
+
+    (
+      document.getElementById("bookmark-edit-save") as HTMLButtonElement
+    ).click();
+
+    await vi.waitFor(() => expect(mockUpdateBookmark).toHaveBeenCalledTimes(1));
+    const [, patch] = savedPatch();
+    expect(patch).toMatchObject({
+      access_key: "AKIANEWKEY",
+      secret_key: "new-secret",
+    });
+  });
+
+  it("refuses an empty endpoint in the form without saving", async () => {
+    mountEditForm();
+    await openEdit();
+    field("bookmark-edit-endpoint").value = "   ";
+
+    (
+      document.getElementById("bookmark-edit-save") as HTMLButtonElement
+    ).click();
+
+    await vi.waitFor(() => expect(errorText()).toMatch(/endpoint/i));
+    expect(mockUpdateBookmark).not.toHaveBeenCalled();
+  });
+
+  it("Escape discards the edit form without saving", async () => {
+    mountEditForm();
+    await openEdit();
+    field("bookmark-edit-endpoint").value = "https://changed.example.com";
+
+    field("bookmark-edit-name").dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(editFormHidden()).toBe(true);
+    expect(mockUpdateBookmark).not.toHaveBeenCalled();
+    expect(
+      document.getElementById("settings-overlay")?.classList.contains("active"),
+    ).toBe(true);
+  });
+
+  it("keeps the form open and shows the reason when the save is refused", async () => {
+    mountEditForm();
+    await openEdit();
+    mockUpdateBookmark.mockRejectedValueOnce(
+      new Error(
+        "Another saved connection already uses this endpoint and access key.",
+      ),
+    );
+    field("bookmark-edit-endpoint").value = "https://beta.example.com";
+
+    (
+      document.getElementById("bookmark-edit-save") as HTMLButtonElement
+    ).click();
+
+    await vi.waitFor(() => expect(errorText()).toMatch(/already uses/));
+    expect(editFormHidden()).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fileEntry, folderEntry } from "../app-selection.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const { showConfirmMock } = vi.hoisted(() => ({
@@ -111,7 +112,7 @@ describe("info panel", () => {
     });
 
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["docs/notes.txt"]);
+    await info.openInfoPanel([fileEntry("docs/notes.txt")]);
     await flushMicrotasks();
 
     expect(
@@ -156,7 +157,7 @@ describe("info panel", () => {
   it("handles single-file load errors and single-file save failures", async () => {
     mockInvoke.mockRejectedValueOnce(new Error("head failed"));
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["broken/file.txt"]);
+    await info.openInfoPanel([fileEntry("broken/file.txt")]);
 
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
@@ -183,7 +184,7 @@ describe("info panel", () => {
       return "";
     });
 
-    await info.openInfoPanel(["broken-save.txt"]);
+    await info.openInfoPanel([fileEntry("broken-save.txt")]);
     info.switchTab("metadata");
     (document.getElementById("metadata-add-row") as HTMLButtonElement).click();
     const keyInputs = Array.from(
@@ -230,7 +231,7 @@ describe("info panel", () => {
     });
 
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["single-success.txt"]);
+    await info.openInfoPanel([fileEntry("single-success.txt")]);
     info.switchTab("metadata");
     (document.getElementById("metadata-add-row") as HTMLButtonElement).click();
 
@@ -282,7 +283,7 @@ describe("info panel", () => {
     });
 
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["single-acl.txt"]);
+    await info.openInfoPanel([fileEntry("single-acl.txt")]);
     info.switchTab("permissions");
     await flushMicrotasks();
 
@@ -319,7 +320,7 @@ describe("info panel", () => {
     });
 
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["no-change.txt"]);
+    await info.openInfoPanel([fileEntry("no-change.txt")]);
     await info.saveInfoPanel();
 
     expect(mockInvoke).not.toHaveBeenCalledWith(
@@ -342,7 +343,7 @@ describe("info panel", () => {
     });
 
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["alpha.txt", "beta.txt"]);
+    await info.openInfoPanel([fileEntry("alpha.txt"), fileEntry("beta.txt")]);
 
     const visibility = document.getElementById(
       "batch-visibility",
@@ -366,7 +367,7 @@ describe("info panel", () => {
     });
     expect(
       (document.getElementById("status") as HTMLDivElement).textContent,
-    ).toContain("Permissions updated on 2 file(s).");
+    ).toContain("Permissions updated on 2 files.");
   });
 
   it("reports partial failures when one of metadata/permissions fails in batch properties", async () => {
@@ -384,7 +385,7 @@ describe("info panel", () => {
     });
 
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["alpha.txt", "beta.txt"]);
+    await info.openInfoPanel([fileEntry("alpha.txt"), fileEntry("beta.txt")]);
 
     const visibility = document.getElementById(
       "batch-visibility",
@@ -436,7 +437,7 @@ describe("info panel", () => {
 
     const info = await import("../info-panel.ts");
 
-    await info.openInfoPanel(["prefix:one/", "prefix:two/"]);
+    await info.openInfoPanel([folderEntry("one/"), folderEntry("two/")]);
     expect(
       (document.getElementById("info-save") as HTMLButtonElement).style.display,
     ).toBe("none");
@@ -447,7 +448,11 @@ describe("info panel", () => {
       (document.getElementById("info-body") as HTMLDivElement).textContent,
     ).toContain("folders");
 
-    await info.openInfoPanel(["alpha.txt", "prefix:folder/", "beta.txt"]);
+    await info.openInfoPanel([
+      fileEntry("alpha.txt"),
+      folderEntry("folder/"),
+      fileEntry("beta.txt"),
+    ]);
     const keyInput = document.querySelector<HTMLInputElement>(
       ".metadata-entry__key",
     );
@@ -493,7 +498,7 @@ describe("info panel", () => {
       metadata: {},
     });
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["close-me.txt"]);
+    await info.openInfoPanel([fileEntry("close-me.txt")]);
     expect(
       (
         document.getElementById("info-overlay") as HTMLDivElement
@@ -529,7 +534,7 @@ describe("info panel", () => {
       return undefined;
     });
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["optional.bin"]);
+    await info.openInfoPanel([fileEntry("optional.bin")]);
     await flushMicrotasks();
 
     const body = document.getElementById("info-body") as HTMLDivElement;
@@ -567,7 +572,7 @@ describe("info panel", () => {
       return undefined;
     });
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["acl-fail.txt"]);
+    await info.openInfoPanel([fileEntry("acl-fail.txt")]);
     info.switchTab("permissions");
     await flushMicrotasks();
 
@@ -602,7 +607,7 @@ describe("info panel", () => {
     });
     const info = await import("../info-panel.ts");
 
-    await info.openInfoPanel(["alpha.txt", "beta.txt"]);
+    await info.openInfoPanel([fileEntry("alpha.txt"), fileEntry("beta.txt")]);
     await info.saveInfoPanel();
     expect(
       (document.getElementById("status") as HTMLDivElement).textContent,
@@ -658,7 +663,7 @@ describe("info panel", () => {
     ).toBe(false);
     expect(
       (document.getElementById("status") as HTMLDivElement).textContent,
-    ).toContain("Metadata updated on 2 file(s).");
+    ).toContain("Metadata updated on 2 files.");
 
     await info.saveInfoPanel();
     await vi.advanceTimersByTimeAsync(5000);
@@ -693,9 +698,9 @@ describe("info panel", () => {
 
     const info = await import("../info-panel.ts");
 
-    const firstOpen = info.openInfoPanel(["slow-success.txt"]);
+    const firstOpen = info.openInfoPanel([fileEntry("slow-success.txt")]);
     await flushMicrotasks();
-    await info.openInfoPanel(["fast.txt"]);
+    await info.openInfoPanel([fileEntry("fast.txt")]);
     resolveSlowHead(headPayload({ etag: '"slow-success"' }));
     await firstOpen;
     await flushMicrotasks();
@@ -707,9 +712,9 @@ describe("info panel", () => {
       (document.getElementById("info-body") as HTMLDivElement).textContent,
     ).toContain("Content Type");
 
-    const secondOpen = info.openInfoPanel(["slow-fail.txt"]);
+    const secondOpen = info.openInfoPanel([fileEntry("slow-fail.txt")]);
     await flushMicrotasks();
-    await info.openInfoPanel(["new-fast.txt"]);
+    await info.openInfoPanel([fileEntry("new-fast.txt")]);
     rejectSlowHead(new Error("late failure"));
     await expect(secondOpen).resolves.toBeUndefined();
     await flushMicrotasks();
@@ -754,7 +759,7 @@ describe("info panel", () => {
 
     const info = await import("../info-panel.ts");
 
-    await info.openInfoPanel(["perm-success.txt"]);
+    await info.openInfoPanel([fileEntry("perm-success.txt")]);
     info.switchTab("permissions");
     await flushMicrotasks();
     info.switchTab("general");
@@ -767,7 +772,7 @@ describe("info panel", () => {
       (document.getElementById("info-body") as HTMLDivElement).textContent,
     ).not.toContain("stale-owner");
 
-    await info.openInfoPanel(["perm-error.txt"]);
+    await info.openInfoPanel([fileEntry("perm-error.txt")]);
     info.switchTab("permissions");
     await flushMicrotasks();
     info.switchTab("general");
@@ -817,7 +822,7 @@ describe("info panel", () => {
 
     state.statusTimeout = setTimeout(() => undefined, 10000);
     document.getElementById("status")?.remove();
-    await info.openInfoPanel(["status-safe.txt"]);
+    await info.openInfoPanel([fileEntry("status-safe.txt")]);
     await info.saveInfoPanel();
     await vi.advanceTimersByTimeAsync(5000);
 
@@ -829,7 +834,7 @@ describe("info panel", () => {
     renderFixture();
     const info = await import("../info-panel.ts");
 
-    await info.openInfoPanel(["prefix:docs/"]);
+    await info.openInfoPanel([folderEntry("docs/")]);
 
     expect(mockInvoke).not.toHaveBeenCalled();
     expect(document.getElementById("info-body")?.textContent).toMatch(
@@ -846,7 +851,7 @@ describe("info panel", () => {
     const confirmSpy = vi.spyOn(dialogs, "showConfirm");
     const info = await import("../info-panel.ts");
 
-    await info.openInfoPanel(["prefix:docs/"]);
+    await info.openInfoPanel([folderEntry("docs/")]);
     const closed = await info.requestCloseInfoPanel();
 
     expect(closed).toBe(true);
@@ -875,7 +880,7 @@ describe("info panel", () => {
     });
 
     const info = await import("../info-panel.ts");
-    await info.openInfoPanel(["dirty.txt"]);
+    await info.openInfoPanel([fileEntry("dirty.txt")]);
     info.switchTab("metadata");
     const valueInput = document.querySelector<HTMLInputElement>(
       ".metadata-entry__value",

@@ -126,6 +126,50 @@ describe("connection module", () => {
     });
   });
 
+  it("connect exposes conditional DELETE support and fails closed when it is absent or malformed", async () => {
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+
+    mockInvoke.mockResolvedValueOnce({
+      ...CONNECT_RESULT,
+      connection_id: "conn-delete-yes",
+      conditional_delete_supported: true,
+    });
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    expect(state.conditionalDeleteSupported).toBe(true);
+
+    mockInvoke.mockResolvedValueOnce({
+      ...CONNECT_RESULT,
+      connection_id: "conn-delete-missing",
+    });
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    expect(state.conditionalDeleteSupported).toBe(false);
+
+    mockInvoke.mockResolvedValueOnce({
+      ...CONNECT_RESULT,
+      connection_id: "conn-delete-malformed",
+      conditional_delete_supported: "yes",
+    });
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    expect(state.conditionalDeleteSupported).toBe(false);
+  });
+
+  it("disconnect clears conditional DELETE support", async () => {
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    resetState(state);
+    state.conditionalDeleteSupported = true;
+    mockInvoke.mockResolvedValueOnce({
+      ...CONNECT_RESULT,
+      conditional_delete_supported: true,
+    });
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await connection.disconnect();
+    expect(state.conditionalDeleteSupported).toBe(false);
+  });
+
   it("connect clears connecting flag on failure", async () => {
     mockInvoke.mockRejectedValueOnce(new Error("boom"));
 

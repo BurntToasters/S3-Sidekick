@@ -25,6 +25,7 @@ export interface UserSettings {
   bandwidthLimitMbps: number;
   openTransferDrawerOnStart: boolean;
   confirmUnguardedWrites: boolean;
+  desktopNotifications: boolean;
   windowWidth: number;
   windowHeight: number;
 }
@@ -51,6 +52,7 @@ export const SETTING_DEFAULTS: UserSettings = {
   bandwidthLimitMbps: 0,
   openTransferDrawerOnStart: true,
   confirmUnguardedWrites: true,
+  desktopNotifications: true,
   windowWidth: 1100,
   windowHeight: 720,
 };
@@ -211,6 +213,12 @@ export function normalizeUserSettings(
       ? raw.confirmUnguardedWrites
       : SETTING_DEFAULTS.confirmUnguardedWrites;
 
+  // Missing or non-boolean values keep today's behavior: notifications stay on.
+  const desktopNotifications =
+    typeof raw.desktopNotifications === "boolean"
+      ? raw.desktopNotifications
+      : SETTING_DEFAULTS.desktopNotifications;
+
   const rawWidth = raw.windowWidth;
   const windowWidth =
     typeof rawWidth === "number" &&
@@ -251,6 +259,7 @@ export function normalizeUserSettings(
     bandwidthLimitMbps,
     openTransferDrawerOnStart,
     confirmUnguardedWrites,
+    desktopNotifications,
     windowWidth,
     windowHeight,
   };

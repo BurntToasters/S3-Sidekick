@@ -35,11 +35,11 @@
 .settings-search {
   width: 100%;
   box-sizing: border-box;
-  font-size: 12px;
+  font-size: var(--text-sm);
   padding: 6px 10px;
   border-radius: var(--radius-sm, 6px);
   border: 1px solid var(--border);
-  background: var(--bg-elevated, var(--glass-bg-heavy));
+  background: var(--bg-elevated);
   color: var(--text);
 }
 
@@ -74,7 +74,7 @@
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-family: inherit;
   font-weight: 500;
   cursor: pointer;
@@ -108,7 +108,7 @@
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-family: inherit;
   font-weight: 500;
   cursor: pointer;
@@ -124,7 +124,7 @@
 }
 
 .settings-tab--active {
-  color: var(--accent);
+  color: var(--accent-fg);
   background: var(--bg-active);
   font-weight: 600;
 }
@@ -134,64 +134,107 @@
   outline-offset: -2px;
 }
 
+/* Help: a 24px target with the standard focus ring. The tip is real text
+   (role="tooltip", referenced by aria-describedby), shown on hover, focus
+   or click, and flipped below the control when it sits near the top. */
+.setting-help-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
 .setting-help {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
-  margin-left: 6px;
+  width: 24px;
+  height: 24px;
+  margin-left: 2px;
   padding: 0;
   border-radius: 50%;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-family: inherit;
+  font-size: var(--text-xs);
   font-weight: 600;
   line-height: 1;
   cursor: help;
-  vertical-align: middle;
-  position: relative;
 }
 
 .setting-help:hover,
 .setting-help:focus-visible {
   color: var(--text);
   border-color: var(--accent);
-  outline: none;
 }
 
-.setting-help[data-tooltip]::after {
-  content: attr(data-tooltip);
+.setting-help:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+.setting-help__tip {
+  display: none;
   position: absolute;
   bottom: calc(100% + 6px);
   left: 50%;
   transform: translateX(-50%);
-  background: var(--bg-elevated, #1f2230);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 6px);
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 1.4;
-  white-space: normal;
+  box-sizing: border-box;
   width: max-content;
   max-width: 240px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--tooltip-bg, var(--bg-elevated));
+  color: var(--tooltip-text, var(--text));
   box-shadow: var(--glass-shadow-elevated, 0 6px 16px rgba(0, 0, 0, 0.35));
+  font-size: var(--text-sm);
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
   pointer-events: none;
-  opacity: 0;
-  visibility: hidden;
-  transition:
-    opacity 0.12s ease,
-    visibility 0.12s ease;
   z-index: 10;
 }
 
-.setting-help:hover::after,
-.setting-help:focus-visible::after {
-  opacity: 1;
-  visibility: visible;
+.setting-help__tip--below {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+
+.setting-help-wrap:hover .setting-help__tip,
+.setting-help:focus-visible + .setting-help__tip,
+.setting-help-wrap--open .setting-help__tip {
+  display: block;
+}
+
+/* Short explanatory text under a control (not a tooltip). */
+.setting-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+/* The footer is hidden on tabs that apply changes immediately. */
+#settings-overlay .modal__footer[hidden] {
+  display: none;
+}
+
+.settings-instant-note {
+  margin: 0 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-hover);
+}
+
+/* Select boxes keep room for their longest option so labels are not cut. */
+.settings-content .field--sm {
+  width: auto;
+  min-width: max-content;
 }
 
 .advanced-toggle {
@@ -201,7 +244,7 @@
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-family: inherit;
   font-weight: 600;
   text-transform: uppercase;
@@ -252,7 +295,7 @@
 }
 
 .settings-panel--search .settings-search-group-title {
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -262,7 +305,7 @@
 
 .settings-search-empty {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-md);
   padding: 12px 4px;
 }
 
@@ -281,7 +324,7 @@
   gap: 8px;
   padding: 8px;
   border: 2px solid var(--border);
-  border-radius: var(--radius-md, 8px);
+  border-radius: var(--radius-md);
   background: transparent;
   cursor: pointer;
   transition:
@@ -335,66 +378,88 @@
   width: 55%;
 }
 
+/* Preview swatches hold the real token values from tokens.css, so each card
+   shows its own theme whichever theme is active: --bg is the frame, --bg-surface
+   is the inset panel, --accent-fg is the accent line and --text is the text
+   line (drawn at reduced opacity). The values are literals on purpose. */
 .theme-card-preview--light {
-  background: #f4f5f8;
-  border-color: #d8dadf;
+  --preview-bg: #f4f4f5;
+  --preview-surface: #ffffff;
+  --preview-accent: #4f46e5;
+  --preview-text: #09090b;
+  --preview-edge: #e4e4e7;
+  background:
+    linear-gradient(var(--preview-surface), var(--preview-surface)) content-box,
+    var(--preview-bg);
+  border-color: var(--preview-edge);
 }
 
 .theme-card-preview--light .theme-card-preview__row {
-  background: #d1d4db;
+  background: var(--preview-text);
+  opacity: 0.22;
 }
 
 .theme-card-preview--light .theme-card-preview__row--short {
-  background: #3a7bd5;
+  background: var(--preview-accent);
+  opacity: 1;
 }
 
 .theme-card-preview--dark {
-  background: #1b1d23;
-  border-color: #2c2f37;
+  --preview-bg: #09090b;
+  --preview-surface: #18181b;
+  --preview-accent: #818cf8;
+  --preview-text: #fafafa;
+  --preview-edge: #27272a;
+  background:
+    linear-gradient(var(--preview-surface), var(--preview-surface)) content-box,
+    var(--preview-bg);
+  border-color: var(--preview-edge);
 }
 
 .theme-card-preview--dark .theme-card-preview__row {
-  background: #3a3d47;
+  background: var(--preview-text);
+  opacity: 0.22;
 }
 
 .theme-card-preview--dark .theme-card-preview__row--short {
-  background: #5aa9ff;
+  background: var(--preview-accent);
+  opacity: 1;
 }
 
 .theme-card-preview--system {
   background: linear-gradient(
     135deg,
-    #f4f5f8 0%,
-    #f4f5f8 49.5%,
-    #2c2f37 50.5%,
-    #1b1d23 100%
+    #f4f4f5 0%,
+    #f4f4f5 49.5%,
+    #09090b 50.5%,
+    #09090b 100%
   );
-  border-color: #6d7079;
+  border-color: #71717a;
 }
 
 .theme-card-preview--system .theme-card-preview__row {
   background: linear-gradient(
     135deg,
-    #d1d4db 0%,
-    #d1d4db 49.5%,
-    #3a3d47 50.5%,
-    #3a3d47 100%
+    #d4d4d8 0%,
+    #d4d4d8 49.5%,
+    #3f3f46 50.5%,
+    #3f3f46 100%
   );
 }
 
 .theme-card-preview--system .theme-card-preview__row--short {
   background: linear-gradient(
     135deg,
-    #3a7bd5 0%,
-    #3a7bd5 49.5%,
-    #5aa9ff 50.5%,
-    #5aa9ff 100%
+    #4f46e5 0%,
+    #4f46e5 49.5%,
+    #818cf8 50.5%,
+    #818cf8 100%
   );
 }
 
 .theme-card-label {
   text-align: center;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text);
   font-weight: 500;
 }

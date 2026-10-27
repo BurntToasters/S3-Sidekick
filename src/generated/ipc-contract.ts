@@ -189,6 +189,9 @@ export interface IpcCommandArgs {
     overwrite: boolean;
     transferId?: number | null;
   };
+  reveal_local_path: {
+    path: string;
+  };
   save_bookmarks: {
     json: string;
   };

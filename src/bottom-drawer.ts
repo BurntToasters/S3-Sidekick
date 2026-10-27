@@ -1,25 +1,64 @@
 import { $ } from "./utils.ts";
 import { markActivitySeen } from "./activity-log.ts";
 import { handleTabListArrowKey } from "./app-layout.ts";
+import { TRANSFER_TEXT } from "./transfer-render.ts";
 
 export type DrawerTab = "activity" | "transfers";
+export type TransferFilter = "all" | "active" | "failed" | "completed";
+
+const DRAWER_OPEN_KEY = "drawer-open";
+const DRAWER_TAB_KEY = "drawer-tab";
+const DRAWER_MINIMIZED_KEY = "drawer-minimized";
+const STORAGE_KEY = "drawer-height";
+const MIN_HEIGHT = 120;
+const MAX_RATIO = 0.5;
 
 let currentTab: DrawerTab = "activity";
 let minimized = false;
 let focusBeforeDrawer: HTMLElement | null = null;
+let transferFilter: TransferFilter = "all";
+
+const FILTER_STATUSES: Record<TransferFilter, readonly string[] | null> = {
+  all: null,
+  active: ["queued", "uploading"],
+  failed: ["error"],
+  completed: ["done"],
+};
+
+const FILTER_EMPTY_TEXT: Record<Exclude<TransferFilter, "all">, string> = {
+  active: "No active transfers",
+  failed: "No failed transfers",
+  completed: "No completed transfers",
+};
+
 function readStoredDrawerHeight(): number {
   try {
-    const parsed = parseInt(localStorage.getItem("drawer-height") ?? "240", 10);
-    return Number.isFinite(parsed) && parsed >= 120 ? parsed : 240;
+    const parsed = parseInt(localStorage.getItem(STORAGE_KEY) ?? "240", 10);
+    return Number.isFinite(parsed) && parsed >= MIN_HEIGHT ? parsed : 240;
   } catch {
     return 240;
   }
 }
 let drawerHeight = readStoredDrawerHeight();
 
-const STORAGE_KEY = "drawer-height";
-const MIN_HEIGHT = 120;
-const MAX_RATIO = 0.5;
+function readStored(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** Remember open/closed, tab and minimized state across reloads. */
+function persistDrawerState(): void {
+  try {
+    localStorage.setItem(DRAWER_OPEN_KEY, String(isDrawerOpen()));
+    localStorage.setItem(DRAWER_TAB_KEY, currentTab);
+    localStorage.setItem(DRAWER_MINIMIZED_KEY, String(minimized));
+  } catch {
+    // Storage unavailable (private mode); drawer state is best-effort.
+  }
+}
 
 function maxDrawerHeight(): number {
   return Math.round(window.innerHeight * MAX_RATIO);
@@ -39,18 +78,31 @@ function syncMinimizeButton(): void {
   const button = document.getElementById(
     "drawer-minimize",
   ) as HTMLButtonElement | null;
-  if (!button) return;
-  const expanded = !minimized;
-  button.setAttribute("aria-expanded", String(expanded));
-  button.setAttribute(
-    "aria-label",
-    expanded ? "Minimize panel" : "Restore panel",
-  );
-  button.title = expanded ? "Minimize" : "Restore";
+  if (button) {
+    const expanded = !minimized;
+    button.setAttribute("aria-expanded", String(expanded));
+    button.setAttribute(
+      "aria-label",
+      expanded ? "Minimize panel" : "Restore panel",
+    );
+    button.title = expanded ? "Minimize" : "Restore";
+  }
+  publishDrawerOffset();
 }
 
 function applyExpandedHeight(drawer: HTMLDivElement): void {
   drawer.style.height = `${effectiveDrawerHeight()}px`;
+  publishDrawerOffset();
+}
+
+/** Lift the toast stack above the drawer by publishing the drawer's height. */
+function publishDrawerOffset(): void {
+  const drawer = document.getElementById("bottom-drawer");
+  const offset = drawer && !drawer.hidden ? drawer.offsetHeight : 0;
+  document.documentElement.style.setProperty(
+    "--bottom-drawer-offset",
+    `${offset}px`,
+  );
 }
 
 export function initDrawer(): void {
@@ -83,6 +135,23 @@ export function initDrawer(): void {
     handle.title = "Drag to resize";
     initResize(handle, drawer);
   }
+
+  initTransferFilter();
+  restoreDrawerState();
+}
+
+function restoreDrawerState(): void {
+  // Read every flag before opening: openDrawer rewrites them as it runs.
+  const tab = readStored(DRAWER_TAB_KEY);
+  const wasOpen = readStored(DRAWER_OPEN_KEY) === "true";
+  const wasMinimized = readStored(DRAWER_MINIMIZED_KEY) === "true";
+  if (tab === "activity" || tab === "transfers") {
+    currentTab = tab;
+  }
+  if (wasOpen) {
+    openDrawer(currentTab);
+    if (wasMinimized) setMinimized(true);
+  }
 }
 
 export function openDrawer(tab: DrawerTab): void {
@@ -111,6 +180,7 @@ export function openDrawer(tab: DrawerTab): void {
   syncMinimizeButton();
   switchDrawerTab(tab);
   syncToggleButtons(true);
+  persistDrawerState();
 }
 
 export function closeDrawer(): void {
@@ -130,6 +200,7 @@ export function closeDrawer(): void {
     ?.removeAttribute("hidden");
   syncMinimizeButton();
   syncToggleButtons(false);
+  persistDrawerState();
 
   const restore = focusBeforeDrawer;
   focusBeforeDrawer = null;
@@ -148,6 +219,11 @@ export function isDrawerOpen(): boolean {
   return drawer ? !drawer.hidden : false;
 }
 
+/** True only when the Activity panel's entries are on screen. */
+export function isActivityPanelVisible(): boolean {
+  return isDrawerOpen() && !minimized && currentTab === "activity";
+}
+
 export function getActiveTab(): DrawerTab {
   return currentTab;
 }
@@ -161,6 +237,10 @@ export function toggleDrawer(tab: DrawerTab): void {
 }
 
 function toggleMinimized(): void {
+  setMinimized(!minimized);
+}
+
+function setMinimized(next: boolean): void {
   const drawer = document.getElementById(
     "bottom-drawer",
   ) as HTMLDivElement | null;
@@ -172,7 +252,7 @@ function toggleMinimized(): void {
     ".bottom-drawer__resize-handle",
   );
 
-  minimized = !minimized;
+  minimized = next;
   drawer.classList.toggle("bottom-drawer--minimized", minimized);
   if (minimized) {
     // The inline expanded height would beat the CSS `height: auto` rule and
@@ -197,6 +277,7 @@ function toggleMinimized(): void {
     applyExpandedHeight(drawer);
   }
   syncMinimizeButton();
+  persistDrawerState();
 }
 
 export function switchDrawerTab(tab: DrawerTab): void {
@@ -225,6 +306,7 @@ export function switchDrawerTab(tab: DrawerTab): void {
 
   updateClearButton();
   syncToggleButtons(isDrawerOpen());
+  persistDrawerState();
 }
 
 export function updateClearButton(): void {
@@ -236,7 +318,7 @@ export function updateClearButton(): void {
     btn.textContent = "Clear";
     btn.style.display = "";
   } else {
-    btn.textContent = "Clear done";
+    btn.textContent = TRANSFER_TEXT.clearCompleted;
     btn.style.display = "";
   }
   // Export only exports the activity log; hide it while transfers are shown
@@ -266,6 +348,88 @@ function syncToggleButtons(open: boolean): void {
       "aria-expanded",
       String(open && currentTab === "transfers"),
     );
+}
+
+/**
+ * Filter the transfer rows. The filter lives on the list element as a data
+ * attribute so that re-rendering rows never resets it.
+ */
+export function setTransferFilter(filter: TransferFilter): void {
+  transferFilter = filter;
+  const list = document.getElementById("transfer-list");
+  if (list) list.dataset.filter = filter;
+  for (const button of document.querySelectorAll<HTMLButtonElement>(
+    "[data-transfer-filter]",
+  )) {
+    button.setAttribute(
+      "aria-pressed",
+      String(button.dataset.transferFilter === filter),
+    );
+  }
+  updateFilterEmpty();
+}
+
+function rowMatchesFilter(row: HTMLElement, filter: TransferFilter): boolean {
+  const statuses = FILTER_STATUSES[filter];
+  return statuses === null || statuses.includes(row.dataset.status ?? "");
+}
+
+function updateFilterEmpty(): void {
+  const empty = document.getElementById("transfer-filter-empty");
+  const list = document.getElementById("transfer-list");
+  if (!empty || !list) return;
+  if (transferFilter === "all") {
+    empty.hidden = true;
+    return;
+  }
+  const rows = Array.from(list.querySelectorAll<HTMLElement>(".transfer-item"));
+  const anyVisible = rows.some((row) => rowMatchesFilter(row, transferFilter));
+  empty.hidden = anyVisible || rows.length === 0;
+  if (!empty.hidden) {
+    empty.textContent = FILTER_EMPTY_TEXT[transferFilter];
+  }
+}
+
+function initTransferFilter(): void {
+  for (const button of document.querySelectorAll<HTMLButtonElement>(
+    "[data-transfer-filter]",
+  )) {
+    button.addEventListener("click", () => {
+      setTransferFilter(button.dataset.transferFilter as TransferFilter);
+    });
+  }
+  const list = document.getElementById("transfer-list");
+  if (list) {
+    // Rows arrive through the queue's render path; keep the empty message in
+    // step with whatever rows are present.
+    new MutationObserver(updateFilterEmpty).observe(list, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-status"],
+    });
+    list.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      const current = (event.target as HTMLElement).closest<HTMLElement>(
+        ".transfer-item",
+      );
+      if (!current) return;
+      const rows = Array.from(
+        list.querySelectorAll<HTMLElement>(".transfer-item"),
+      ).filter((row) => !row.hidden && rowIsVisible(row));
+      const index = rows.indexOf(current);
+      const next = rows[index + (event.key === "ArrowDown" ? 1 : -1)];
+      if (!next) return;
+      event.preventDefault();
+      next.focus();
+    });
+  }
+  setTransferFilter(transferFilter);
+}
+
+/** A row hidden by the active filter is skipped by arrow-key movement. */
+function rowIsVisible(row: HTMLElement): boolean {
+  return rowMatchesFilter(row, transferFilter);
 }
 
 function initResize(handle: HTMLElement, drawer: HTMLDivElement): void {

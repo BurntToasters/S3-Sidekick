@@ -2635,6 +2635,7 @@ fn main() {
             platform::updater_support_info,
             platform::open_external_url,
             platform::open_local_path,
+            platform::reveal_local_path,
         ])
         .run(tauri::generate_context!())
     {

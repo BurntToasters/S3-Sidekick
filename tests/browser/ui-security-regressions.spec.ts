@@ -282,9 +282,16 @@ test("retries a pathless browser File after upload and verification failures", a
     const file = new File([new Uint8Array(1024)], "browser-only.txt", {
       type: "text/plain",
     });
-    const transfers = (await import(
-      /* @vite-ignore */ new URL("/transfers.ts", window.location.href).href
-    )) as {
+    // Import the transfers module instance the app itself loaded. The dev
+    // server can append an HMR `?t=` to the app's URL, so a plain
+    // "/transfers.ts" import would create a second, unrelated queue.
+    const appTransfersUrl =
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .find((name) => /\/transfers\.ts(\?|$)/.test(name)) ??
+      new URL("/transfers.ts", window.location.href).href;
+    const transfers = (await import(/* @vite-ignore */ appTransfersUrl)) as {
       enqueueFiles(files: File[], targetPrefix: string): void;
     };
     transfers.enqueueFiles([file], "browser-upload/");
@@ -302,7 +309,11 @@ test("retries a pathless browser File after upload and verification failures", a
   });
 
   const row = page.locator("#transfer-list .transfer-item").first();
-  await expect(row.locator(".transfer-error")).toContainText(byteUploadError);
+  // The row shows a friendly message; the raw error is kept on its title.
+  await expect(row.locator(".transfer-error")).toHaveAttribute(
+    "title",
+    byteUploadError,
+  );
   await showTransferList(page);
   await setMockCommandError(page, "upload_object_bytes", null);
   await setMockCommandError(page, "head_object", verificationError);
@@ -310,7 +321,10 @@ test("retries a pathless browser File after upload and verification failures", a
   await page
     .locator('.context-menu [role="menuitem"]', { hasText: "Retry failed" })
     .click();
-  await expect(row.locator(".transfer-error")).toContainText(verificationError);
+  await expect(row.locator(".transfer-error")).toHaveAttribute(
+    "title",
+    verificationError,
+  );
 
   const afterVerificationFailure = await readMockCallLog(page);
   expect(
@@ -323,6 +337,15 @@ test("retries a pathless browser File after upload and verification failures", a
   await page.locator("#transfer-more").click();
   await page
     .locator('.context-menu [role="menuitem"]', { hasText: "Retry failed" })
+    .click();
+  // A completed row stays listed until "Clear completed" removes it.
+  await expect(page.locator("#transfer-list .transfer-item")).toHaveCount(1);
+  await expect(page.locator("#transfer-list .transfer-item")).toContainText(
+    "Completed",
+  );
+  await page.locator("#transfer-more").click();
+  await page
+    .locator('.context-menu [role="menuitem"]', { hasText: "Clear completed" })
     .click();
   await expect(page.locator("#transfer-list .transfer-item")).toHaveCount(0);
 

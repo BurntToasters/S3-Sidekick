@@ -11,6 +11,31 @@ import {
 
 const ARTIFACT_SUITE = "fixes-0.11.1/lock-security";
 
+/**
+ * Module URLs the app actually loaded, keyed by file name. Vite appends `?t=`
+ * to modules it has hot-updated, so a literal "/connection.ts" can be a second
+ * module instance. Playwright's fake clock empties the page's resource
+ * timeline, so the URLs are recorded from network requests instead.
+ */
+const moduleUrlsByPage = new WeakMap<Page, Map<string, string>>();
+
+function trackModuleUrls(page: Page): void {
+  const urls = new Map<string, string>();
+  moduleUrlsByPage.set(page, urls);
+  page.on("request", (request) => {
+    const match = /\/([\w-]+\.ts)(?:\?|$)/.exec(request.url());
+    if (match && !urls.has(match[1])) urls.set(match[1], request.url());
+  });
+}
+
+function moduleUrls(page: Page): Record<string, string> {
+  return Object.fromEntries(moduleUrlsByPage.get(page) ?? []);
+}
+
+test.beforeEach(({ page }) => {
+  trackModuleUrls(page);
+});
+
 async function recordStage(
   page: Page,
   testInfo: TestInfo,
@@ -18,11 +43,9 @@ async function recordStage(
   details: Record<string, unknown>,
 ): Promise<void> {
   const calls = await readMockCallLog(page);
-  const observed = await page.evaluate(async () => {
-    const stateModule = "/state.ts";
-    const ipcModule = "/ipc.ts";
-    const { state } = await import(stateModule);
-    const { invoke } = await import(ipcModule);
+  const observed = await page.evaluate(async (urls) => {
+    const { state } = await import(urls["state.ts"] ?? "/state.ts");
+    const { invoke } = await import(urls["ipc.ts"] ?? "/ipc.ts");
     return {
       connected: state.connected,
       connectionId: state.connectionId ?? null,
@@ -41,7 +64,7 @@ async function recordStage(
           .getElementById("dialog-overlay")
           ?.classList.contains("active") ?? false,
     };
-  });
+  }, moduleUrls(page));
   const directory = path.join(
     "test-results",
     ARTIFACT_SUITE,
@@ -89,9 +112,8 @@ test("auto-lock retries failed retirement, blocks S3 access, then stays closed a
     .evaluate((element) => element.classList.contains("active"));
   if (firstPromptVisible) await page.locator("#dialog-cancel").click();
 
-  const previewAttempt = await page.evaluate(async () => {
-    const connectionModule = "/connection.ts";
-    const connection = await import(connectionModule);
+  const previewAttempt = await page.evaluate(async (urls) => {
+    const connection = await import(urls["connection.ts"] ?? "/connection.ts");
     try {
       await connection.invokeS3For(
         "browser-layout-connection-1",
@@ -105,7 +127,7 @@ test("auto-lock retries failed retirement, blocks S3 access, then stays closed a
     } catch (error) {
       return { rejected: true, error: String(error) };
     }
-  });
+  }, moduleUrls(page));
   const previewCallsAfterFirstAttempt = await commandCount(
     page,
     "preview_object",
@@ -126,11 +148,9 @@ test("auto-lock retries failed retirement, blocks S3 access, then stays closed a
   if (retryPromptVisible) await page.locator("#dialog-cancel").click();
 
   await page.clock.runFor(180_000);
-  const afterDismissal = await page.evaluate(async () => {
-    const stateModule = "/state.ts";
-    const connectionModule = "/connection.ts";
-    const { state } = await import(stateModule);
-    const connection = await import(connectionModule);
+  const afterDismissal = await page.evaluate(async (urls) => {
+    const { state } = await import(urls["state.ts"] ?? "/state.ts");
+    const connection = await import(urls["connection.ts"] ?? "/connection.ts");
     let previewRejected = false;
     try {
       await connection.invokeS3For(
@@ -161,7 +181,7 @@ test("auto-lock retries failed retirement, blocks S3 access, then stays closed a
           .getElementById("dialog-overlay")
           ?.classList.contains("active") ?? false,
     };
-  });
+  }, moduleUrls(page));
   await recordStage(page, testInfo, "retry-cleanup-dismissed", {
     disconnectAttempts: disconnectAttemptsAfterRetry,
     retryPromptVisible,
@@ -203,7 +223,11 @@ test("a stale disconnect result cannot clear a newer connection generation", asy
     holdDisconnect: true,
   });
   const original = await page.evaluate(async () => {
-    const stateModule = "/state.ts";
+    const stateModule =
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .find((name) => /\/state\.ts(\?|$)/.test(name)) ?? "/state.ts";
     const { state } = await import(stateModule);
     return state.connectionId;
   });
@@ -212,7 +236,12 @@ test("a stale disconnect result cannot clear a newer connection generation", asy
     const app = window as typeof window & {
       __oldDisconnect?: Promise<boolean>;
     };
-    const appConnectionModule = "/app-connection.ts";
+    const appConnectionModule =
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .find((name) => /\/app-connection\.ts(\?|$)/.test(name)) ??
+      "/app-connection.ts";
     app.__oldDisconnect = import(appConnectionModule).then(
       ({ handleDisconnect }) => handleDisconnect(),
     );
@@ -220,7 +249,12 @@ test("a stale disconnect result cannot clear a newer connection generation", asy
   await expect.poll(() => commandCount(page, "disconnect")).toBe(1);
 
   await page.evaluate(async () => {
-    const appConnectionModule = "/app-connection.ts";
+    const appConnectionModule =
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .find((name) => /\/app-connection\.ts(\?|$)/.test(name)) ??
+      "/app-connection.ts";
     const { handleConnect, setConnectionInputs } = await import(
       appConnectionModule
     );
@@ -234,7 +268,11 @@ test("a stale disconnect result cannot clear a newer connection generation", asy
     await handleConnect();
   });
   const newer = await page.evaluate(async () => {
-    const stateModule = "/state.ts";
+    const stateModule =
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .find((name) => /\/state\.ts(\?|$)/.test(name)) ?? "/state.ts";
     const { state } = await import(stateModule);
     return state.connectionId;
   });
@@ -247,7 +285,11 @@ test("a stale disconnect result cannot clear a newer connection generation", asy
   });
 
   const stateAfterStaleResult = await page.evaluate(async () => {
-    const stateModule = "/state.ts";
+    const stateModule =
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .find((name) => /\/state\.ts(\?|$)/.test(name)) ?? "/state.ts";
     const { state } = await import(stateModule);
     return {
       connected: state.connected,
@@ -282,7 +324,11 @@ test("manual disconnect rejection keeps the current session visible and retryabl
     },
   });
   const original = await page.evaluate(async () => {
-    const stateModule = "/state.ts";
+    const stateModule =
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .find((name) => /\/state\.ts(\?|$)/.test(name)) ?? "/state.ts";
     const { state } = await import(stateModule);
     return state.connectionId;
   });
@@ -290,7 +336,11 @@ test("manual disconnect rejection keeps the current session visible and retryabl
   await page.locator("#disconnect-btn").click();
   await expect.poll(() => commandCount(page, "disconnect")).toBe(1);
   const observed = await page.evaluate(async () => {
-    const stateModule = "/state.ts";
+    const stateModule =
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .find((name) => /\/state\.ts(\?|$)/.test(name)) ?? "/state.ts";
     const { state } = await import(stateModule);
     return {
       connected: state.connected,

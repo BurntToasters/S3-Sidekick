@@ -31,6 +31,7 @@
             >Disconnected</span
           >
           <button
+            type="button"
             id="disconnect-btn"
             class="btn btn--disconnect btn--sm"
             style="display: none"
@@ -38,6 +39,7 @@
             Disconnect
           </button>
           <button
+            type="button"
             id="settings-btn"
             class="btn btn--icon"
             title="Settings"
@@ -81,11 +83,12 @@
         <div id="connection-screen" class="connection-screen">
           <div class="connection-screen__sidebar">
             <div class="connection-screen__sidebar-header">
-              <span>Saved Connections</span>
+              <span>Saved connections</span>
               <button
+                type="button"
                 id="conn-new-btn"
                 class="btn btn--icon"
-                title="Create new connection"
+                title="New connection"
                 aria-label="New connection"
               >
                 <span class="lucide-icon" data-icon="plus"></span>
@@ -98,8 +101,8 @@
               <h1 class="connection-screen__title">Connect to S3 Storage</h1>
               <p class="connection-screen__subtitle">
                 Enter credentials, or choose a saved connection to connect
-                instantly. After you connect, the same entries appear as
-                bookmark chips in the title bar.
+                instantly. Choose Save connection to keep these credentials;
+                saved connections also appear as chips in the title bar.
               </p>
 
               <div class="connection-form">
@@ -111,7 +114,6 @@
                     <select
                       id="conn-provider-preset"
                       class="field field--full"
-                      aria-label="Provider preset"
                       title="Choose a storage provider to prefill endpoint"
                     >
                       <option value="">Choose provider (optional)...</option>
@@ -134,6 +136,10 @@
                       type="text"
                       placeholder="https://nyc3.digitaloceanspaces.com"
                       aria-label="Endpoint URL"
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
                     />
                   </div>
                   <div class="form-group form-group--narrow">
@@ -144,6 +150,10 @@
                       type="text"
                       placeholder="us-east-1"
                       aria-label="Region"
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
                     />
                   </div>
                 </div>
@@ -157,6 +167,10 @@
                       type="text"
                       placeholder="Access Key"
                       aria-label="Access key"
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
                     />
                   </div>
                 </div>
@@ -171,6 +185,10 @@
                         type="password"
                         placeholder="Secret Key"
                         aria-label="Secret key"
+                        spellcheck="false"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        autocomplete="off"
                       />
                       <button
                         id="secret-key-toggle"
@@ -192,32 +210,50 @@
                       >Session Token
                       <span class="field-optional">(optional)</span></label
                     >
-                    <input
-                      id="conn-session-token"
-                      class="field field--full"
-                      type="password"
-                      placeholder="Session Token"
-                      aria-label="Session token"
-                      autocomplete="off"
-                    />
+                    <div class="field-with-toggle field-with-toggle--full">
+                      <input
+                        id="conn-session-token"
+                        class="field field--full"
+                        type="password"
+                        placeholder="Session Token"
+                        spellcheck="false"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        autocomplete="off"
+                      />
+                      <button
+                        id="session-token-toggle"
+                        type="button"
+                        class="field-toggle-btn field-toggle-btn--text"
+                        title="Show/hide session token"
+                        aria-label="Show session token"
+                        aria-pressed="false"
+                      >
+                        Show
+                      </button>
+                    </div>
                   </div>
                 </div>
 
                 <div class="form-actions">
                   <button
+                    type="button"
                     id="bookmark-save-btn"
                     class="btn"
-                    title="Bookmark this connection"
-                    aria-label="Bookmark this connection"
+                    title="Save this connection to the saved connections list"
                   >
                     <span
                       id="bookmark-save-icon"
                       class="lucide-icon"
                       data-icon="bookmark"
                     ></span>
-                    Save Bookmark
+                    Save connection
                   </button>
-                  <button id="connect-btn" class="btn btn--primary">
+                  <button
+                    type="button"
+                    id="connect-btn"
+                    class="btn btn--primary"
+                  >
                     Connect
                   </button>
                 </div>
@@ -338,6 +374,15 @@
                     autocomplete="off"
                     hidden
                   />
+                  <button
+                    id="location-edit"
+                    class="location-omnibar__edit-btn"
+                    type="button"
+                    aria-label="Edit location"
+                    title="Edit location"
+                  >
+                    Edit
+                  </button>
                 </div>
               </div>
               <div class="filter-control">
@@ -426,13 +471,13 @@
 
             <div class="content-body">
               <div class="content-main">
-                <div
-                  id="batch-toolbar"
-                  class="batch-toolbar"
-                  aria-live="polite"
-                  aria-busy="false"
-                >
-                  <span id="batch-count" class="batch-toolbar__count"></span>
+                <div id="batch-toolbar" class="batch-toolbar" aria-busy="false">
+                  <span
+                    id="batch-count"
+                    class="batch-toolbar__count"
+                    aria-live="polite"
+                    aria-atomic="true"
+                  ></span>
                   <div
                     id="batch-toolbar-actions"
                     class="batch-toolbar__actions"
@@ -538,7 +583,7 @@
                       class="lucide-icon drop-zone-overlay__icon"
                       data-icon="upload"
                     ></span>
-                    <p class="drop-zone-overlay__text">Drop files to upload</p>
+                    <p class="drop-zone-overlay__text">Drop to upload to</p>
                     <p id="drop-zone-path" class="drop-zone-overlay__path"></p>
                   </div>
                 </div>
@@ -550,6 +595,8 @@
                 >
                   <table
                     class="object-table"
+                    role="grid"
+                    aria-multiselectable="true"
                     aria-label="Objects"
                     aria-rowcount="0"
                   >
@@ -560,8 +607,8 @@
                       <col class="col-object-modified" />
                     </colgroup>
                     <thead>
-                      <tr>
-                        <th scope="col" class="col-check">
+                      <tr role="row">
+                        <th scope="col" role="columnheader" class="col-check">
                           <input
                             id="select-all"
                             type="checkbox"
@@ -571,6 +618,7 @@
                         </th>
                         <th
                           scope="col"
+                          role="columnheader"
                           class="col-name col-sortable"
                           data-sort="name"
                           aria-sort="ascending"
@@ -591,6 +639,7 @@
                         </th>
                         <th
                           scope="col"
+                          role="columnheader"
                           class="col-size col-sortable"
                           data-sort="size"
                           aria-sort="none"
@@ -606,6 +655,7 @@
                         </th>
                         <th
                           scope="col"
+                          role="columnheader"
                           class="col-modified col-sortable"
                           data-sort="modified"
                           aria-sort="none"
@@ -631,7 +681,11 @@
                     class="load-more-row"
                     style="display: none"
                   >
-                    <button id="btn-load-more" class="btn btn--ghost">
+                    <button
+                      id="btn-load-more"
+                      type="button"
+                      class="btn btn--ghost"
+                    >
                       Load more...
                     </button>
                     <span
@@ -667,22 +721,32 @@
                     class="inspector-panel__title"
                     >Inspector</span
                   >
-                  <div class="inspector-tabs" role="tablist">
+                  <div
+                    class="inspector-tabs"
+                    role="tablist"
+                    aria-label="Inspector views"
+                  >
                     <button
+                      id="inspector-tab-preview"
                       type="button"
                       class="inspector-tab inspector-tab--active"
                       data-inspector-tab="preview"
                       role="tab"
                       aria-selected="true"
+                      aria-controls="inspector-pane-preview"
+                      tabindex="0"
                     >
                       Preview
                     </button>
                     <button
+                      id="inspector-tab-properties"
                       type="button"
                       class="inspector-tab"
                       data-inspector-tab="properties"
                       role="tab"
                       aria-selected="false"
+                      aria-controls="inspector-pane-info"
+                      tabindex="-1"
                     >
                       Properties
                     </button>
@@ -699,7 +763,14 @@
                 <div id="inspector-empty" class="inspector-empty" hidden>
                   Select an object to inspect.
                 </div>
-                <div id="inspector-pane-preview" class="inspector-pane" hidden>
+                <div
+                  id="inspector-pane-preview"
+                  class="inspector-pane"
+                  role="tabpanel"
+                  aria-labelledby="inspector-tab-preview"
+                  tabindex="0"
+                  hidden
+                >
                   <div
                     id="inspector-preview-title"
                     class="inspector-preview__title"
@@ -709,7 +780,14 @@
                     class="inspector-preview__body preview-body"
                   ></div>
                 </div>
-                <div id="inspector-pane-info" class="inspector-pane" hidden>
+                <div
+                  id="inspector-pane-info"
+                  class="inspector-pane"
+                  role="tabpanel"
+                  aria-labelledby="inspector-tab-properties"
+                  tabindex="0"
+                  hidden
+                >
                   <div class="inspector-info__header">
                     <h3 id="inspector-info-title" class="inspector-info__title">
                       File Info
@@ -719,11 +797,13 @@
                     class="info-tabs"
                     id="inspector-info-tabs"
                     role="tablist"
+                    aria-label="Property sections"
                   >
                     <button
                       class="info-tab info-tab--active"
                       data-tab="general"
                       role="tab"
+                      aria-controls="inspector-info-body"
                       aria-selected="true"
                       tabindex="0"
                     >
@@ -733,6 +813,7 @@
                       class="info-tab"
                       data-tab="permissions"
                       role="tab"
+                      aria-controls="inspector-info-body"
                       aria-selected="false"
                       tabindex="-1"
                     >
@@ -742,6 +823,7 @@
                       class="info-tab"
                       data-tab="metadata"
                       role="tab"
+                      aria-controls="inspector-info-body"
                       aria-selected="false"
                       tabindex="-1"
                     >
@@ -751,6 +833,7 @@
                       class="info-tab"
                       data-tab="s3"
                       role="tab"
+                      aria-controls="inspector-info-body"
                       aria-selected="false"
                       tabindex="-1"
                     >
@@ -760,6 +843,8 @@
                   <div
                     id="inspector-info-body"
                     class="inspector-info__body modal__body"
+                    role="tabpanel"
+                    aria-label="Property details"
                   ></div>
                   <div class="inspector-panel__footer">
                     <button
@@ -786,7 +871,7 @@
         <div id="bottom-drawer" class="bottom-drawer" hidden>
           <div
             class="bottom-drawer__resize-handle"
-            role="slider"
+            role="separator"
             aria-label="Resize bottom panel"
             aria-orientation="horizontal"
             tabindex="0"
@@ -794,6 +879,7 @@
           <div class="bottom-drawer__header">
             <div class="bottom-drawer__tabs" role="tablist">
               <button
+                type="button"
                 class="bottom-drawer__tab bottom-drawer__tab--active"
                 id="drawer-tab-activity"
                 role="tab"
@@ -810,6 +896,7 @@
                 ></span>
               </button>
               <button
+                type="button"
                 class="bottom-drawer__tab"
                 id="drawer-tab-transfers"
                 role="tab"
@@ -827,13 +914,22 @@
               </button>
             </div>
             <div class="bottom-drawer__actions">
-              <button id="drawer-export" class="btn btn--ghost btn--sm">
+              <button
+                type="button"
+                id="drawer-export"
+                class="btn btn--ghost btn--sm"
+              >
                 Export
               </button>
-              <button id="drawer-clear" class="btn btn--ghost btn--sm">
+              <button
+                type="button"
+                id="drawer-clear"
+                class="btn btn--ghost btn--sm"
+              >
                 Clear
               </button>
               <button
+                type="button"
                 id="drawer-minimize"
                 class="btn btn--icon"
                 title="Minimize"
@@ -842,6 +938,7 @@
                 <span class="lucide-icon" data-icon="chevron-down"></span>
               </button>
               <button
+                type="button"
                 id="drawer-close"
                 class="btn btn--icon"
                 aria-label="Close panel"
@@ -886,10 +983,18 @@
                   class="transfer-queue-summary"
                   aria-live="polite"
                 ></div>
-                <button id="transfer-pause-all" class="btn btn--ghost btn--sm">
+                <button
+                  type="button"
+                  id="transfer-pause-all"
+                  class="btn btn--ghost btn--sm"
+                >
                   Pause all
                 </button>
-                <button id="transfer-resume-all" class="btn btn--ghost btn--sm">
+                <button
+                  type="button"
+                  id="transfer-resume-all"
+                  class="btn btn--ghost btn--sm"
+                >
                   Resume all
                 </button>
                 <button
@@ -907,18 +1012,63 @@
                 ></span>
               </div>
               <div
+                class="transfer-filter"
+                role="group"
+                aria-label="Filter transfers"
+              >
+                <button
+                  type="button"
+                  class="btn btn--ghost btn--sm transfer-filter__btn"
+                  data-transfer-filter="all"
+                  aria-pressed="true"
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  class="btn btn--ghost btn--sm transfer-filter__btn"
+                  data-transfer-filter="active"
+                  aria-pressed="false"
+                >
+                  Active
+                </button>
+                <button
+                  type="button"
+                  class="btn btn--ghost btn--sm transfer-filter__btn"
+                  data-transfer-filter="failed"
+                  aria-pressed="false"
+                >
+                  Failed
+                </button>
+                <button
+                  type="button"
+                  class="btn btn--ghost btn--sm transfer-filter__btn"
+                  data-transfer-filter="completed"
+                  aria-pressed="false"
+                >
+                  Completed
+                </button>
+              </div>
+              <div
+                id="transfer-filter-empty"
+                class="transfer-filter-empty"
+                role="status"
+                hidden
+              ></div>
+              <div id="transfer-queue-empty" class="transfer-empty">
+                <span
+                  class="lucide-icon empty-state__icon"
+                  data-icon="download"
+                ></span>
+                <span>No transfers</span>
+              </div>
+              <div
                 id="transfer-list"
                 class="transfer-list"
+                role="list"
                 aria-label="Transfers"
-              >
-                <div class="transfer-empty">
-                  <span
-                    class="lucide-icon empty-state__icon"
-                    data-icon="download"
-                  ></span>
-                  <span>No transfers</span>
-                </div>
-              </div>
+                data-filter="all"
+              ></div>
             </div>
           </div>
         </div>
@@ -929,6 +1079,7 @@
             <span id="statusbar-count" class="statusbar__count"></span>
             <span id="statusbar-throughput" class="statusbar__count"></span>
             <button
+              type="button"
               id="activity-toggle"
               class="btn btn--icon statusbar__transfer"
               title="Activity log"
@@ -944,6 +1095,7 @@
               ></span>
             </button>
             <button
+              type="button"
               id="transfer-toggle"
               class="btn btn--icon statusbar__transfer"
               title="Transfers"
@@ -960,6 +1112,7 @@
             </button>
             <span id="version-label"></span>
             <button
+              type="button"
               id="palette-hint"
               class="btn btn--ghost btn--sm statusbar__palette"
               title="Commands (Ctrl+K)"
@@ -984,12 +1137,17 @@
       <div class="modal modal--settings">
         <div class="modal__header">
           <h2 id="settings-heading">Settings</h2>
-          <button id="settings-close" class="btn btn--icon" aria-label="Close">
+          <button
+            type="button"
+            id="settings-close"
+            class="btn btn--icon"
+            aria-label="Close"
+          >
             <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
         <div class="modal__body settings-layout">
-          <aside class="settings-sidebar">
+          <aside class="settings-sidebar" aria-label="Settings sections">
             <div class="settings-search-wrap">
               <input
                 id="settings-search"
@@ -1006,6 +1164,7 @@
               aria-orientation="vertical"
             >
               <button
+                type="button"
                 class="settings-tab settings-tab--active"
                 id="settings-tab-appearance"
                 data-settings-tab="appearance"
@@ -1017,6 +1176,7 @@
                 Appearance
               </button>
               <button
+                type="button"
                 class="settings-tab"
                 id="settings-tab-updates"
                 data-settings-tab="updates"
@@ -1028,6 +1188,7 @@
                 Updates
               </button>
               <button
+                type="button"
                 class="settings-tab"
                 id="settings-tab-transfers"
                 data-settings-tab="transfers"
@@ -1039,6 +1200,7 @@
                 Transfers
               </button>
               <button
+                type="button"
                 class="settings-tab"
                 id="settings-tab-sharing"
                 data-settings-tab="sharing"
@@ -1050,6 +1212,7 @@
                 Sharing
               </button>
               <button
+                type="button"
                 class="settings-tab"
                 id="settings-tab-bookmarks"
                 data-settings-tab="bookmarks"
@@ -1058,9 +1221,10 @@
                 aria-controls="settings-panel-bookmarks"
                 tabindex="-1"
               >
-                Bookmarks
+                Saved connections
               </button>
               <button
+                type="button"
                 class="settings-tab"
                 id="settings-tab-security"
                 data-settings-tab="security"
@@ -1072,6 +1236,7 @@
                 Security
               </button>
               <button
+                type="button"
                 class="settings-tab"
                 id="settings-tab-about"
                 data-settings-tab="about"
@@ -1101,8 +1266,14 @@
               aria-labelledby="settings-tab-appearance"
             >
               <div class="setting-item setting-item--stacked">
-                <label>Theme</label>
-                <div class="theme-picker" role="radiogroup" aria-label="Theme">
+                <span id="settings-theme-label" class="setting-label"
+                  >Theme</span
+                >
+                <div
+                  class="theme-picker"
+                  role="radiogroup"
+                  aria-labelledby="settings-theme-label"
+                >
                   <label class="theme-card" data-theme-card="system">
                     <input
                       type="radio"
@@ -1179,39 +1350,62 @@
                 <div class="setting-item">
                   <label class="toggle-row">
                     <input id="setting-updates" type="checkbox" />
-                    <span>Download updates automatically</span>
+                    <span>Automatically check for and download updates</span>
                   </label>
                 </div>
                 <div class="setting-item">
                   <span class="setting-label">
                     <label for="setting-update-channel">Update channel</label>
-                    <button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help"
-                      data-tooltip="Release: stable builds. Beta: pre-release builds with newer features and possible bugs."
+                    <span class="setting-help-wrap"
+                      ><button
+                        type="button"
+                        class="setting-help"
+                        aria-label="Help: Update channel"
+                        aria-describedby="help-update-channel"
+                      >
+                        ?</button
+                      ><span
+                        id="help-update-channel"
+                        role="tooltip"
+                        class="setting-help__tip"
+                        >Stable follows published releases. Beta follows
+                        pre-release builds and also includes newer stable
+                        releases.</span
+                      ></span
                     >
-                      ?
-                    </button>
                   </span>
                   <select id="setting-update-channel" class="field field--sm">
-                    <option value="release">Release</option>
+                    <option value="release">Stable</option>
                     <option value="beta">Beta</option>
                   </select>
                 </div>
                 <div class="setting-item">
-                  <label>Check for updates now</label>
-                  <button id="settings-check-updates" class="btn">
+                  <span class="setting-label">Check for updates now</span>
+                  <button id="settings-check-updates" type="button" class="btn">
                     Check now
                   </button>
+                  <div
+                    id="settings-update-status"
+                    class="setting-note"
+                    role="status"
+                    aria-live="polite"
+                  ></div>
                 </div>
               </div>
               <div id="updater-unsupported" style="display: none">
                 <div class="setting-item">
-                  <span class="text-secondary" style="font-size: 12px"
+                  <span class="setting-note"
                     >Auto-updates are not available for this package format.
-                    Update through your package manager.</span
+                    Update through your package manager, or open the release
+                    page to download the latest build.</span
                   >
+                  <button
+                    id="settings-open-release-page"
+                    type="button"
+                    class="btn"
+                  >
+                    Open release page
+                  </button>
                 </div>
               </div>
             </div>
@@ -1229,14 +1423,22 @@
                   <label for="setting-transfer-performance-preset"
                     >Performance preset</label
                   >
-                  <button
-                    type="button"
-                    class="setting-help"
-                    aria-label="Help"
-                    data-tooltip="Safe: low memory, slower. Balanced: default. Max: highest throughput, more memory and CPU."
+                  <span class="setting-help-wrap"
+                    ><button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help: Performance preset"
+                      aria-describedby="help-transfer-performance"
+                    >
+                      ?</button
+                    ><span
+                      id="help-transfer-performance"
+                      role="tooltip"
+                      class="setting-help__tip"
+                      >Safe: low memory, slower. Balanced: default. Max: highest
+                      throughput, more memory and CPU.</span
+                    ></span
                   >
-                    ?
-                  </button>
                 </span>
                 <select
                   id="setting-transfer-performance-preset"
@@ -1275,29 +1477,62 @@
                     />
                     <span>Warn before unconditional writes</span>
                   </label>
-                  <button
-                    type="button"
-                    class="setting-help"
-                    aria-label="Help"
-                    data-tooltip="Some providers cannot enforce create-only writes, so another client could create the same key before a transfer finishes. When on, S3 Sidekick asks before writing to those providers."
+                  <span class="setting-help-wrap"
+                    ><button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help: Warn before unconditional writes"
+                      aria-describedby="help-unguarded-writes"
+                    >
+                      ?</button
+                    ><span
+                      id="help-unguarded-writes"
+                      role="tooltip"
+                      class="setting-help__tip"
+                      >Some providers cannot enforce create-only writes, so
+                      another client could create the same key before a transfer
+                      finishes. When on, S3 Sidekick asks before writing to
+                      those providers.</span
+                    ></span
                   >
-                    ?
-                  </button>
                 </span>
+              </div>
+              <div class="setting-item">
+                <label class="toggle-row">
+                  <input
+                    id="setting-desktop-notifications"
+                    type="checkbox"
+                    aria-describedby="help-desktop-notifications"
+                  />
+                  <span>Desktop notifications</span>
+                </label>
+                <p id="help-desktop-notifications" class="setting-note">
+                  OS notifications for finished transfers and updates stop when
+                  this is off; in-app toasts still appear; the operating system
+                  can also block them.
+                </p>
               </div>
               <div class="setting-item">
                 <span class="setting-label">
                   <label for="setting-bandwidth-limit-mbps"
                     >Bandwidth cap</label
                   >
-                  <button
-                    type="button"
-                    class="setting-help"
-                    aria-label="Help"
-                    data-tooltip="Maximum total network speed used for transfers. Unlimited uses all available bandwidth."
+                  <span class="setting-help-wrap"
+                    ><button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help: Bandwidth cap"
+                      aria-describedby="help-bandwidth-cap"
+                    >
+                      ?</button
+                    ><span
+                      id="help-bandwidth-cap"
+                      role="tooltip"
+                      class="setting-help__tip"
+                      >Maximum total network speed used for transfers. Unlimited
+                      uses all available bandwidth.</span
+                    ></span
                   >
-                    ?
-                  </button>
                 </span>
                 <select
                   id="setting-bandwidth-limit-mbps"
@@ -1330,14 +1565,22 @@
                   <label for="setting-transfer-retry-base-ms"
                     >Retry base delay</label
                   >
-                  <button
-                    type="button"
-                    class="setting-help"
-                    aria-label="Help"
-                    data-tooltip="Initial wait before the first retry. Each subsequent retry waits longer using exponential backoff."
+                  <span class="setting-help-wrap"
+                    ><button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help: Retry delay"
+                      aria-describedby="help-retry-delay"
+                    >
+                      ?</button
+                    ><span
+                      id="help-retry-delay"
+                      role="tooltip"
+                      class="setting-help__tip"
+                      >Initial wait before the first retry. Each subsequent
+                      retry waits longer using exponential backoff.</span
+                    ></span
                   >
-                    ?
-                  </button>
                 </span>
                 <select
                   id="setting-transfer-retry-base-ms"
@@ -1375,7 +1618,7 @@
                   </label>
                 </div>
                 <div class="setting-item">
-                  <label class="setting-checkbox">
+                  <label class="toggle-row">
                     <input id="setting-open-transfer-drawer" type="checkbox" />
                     <span>Open transfer drawer when a transfer starts</span>
                   </label>
@@ -1385,14 +1628,22 @@
                     <label for="setting-download-parallel-threshold-mb"
                       >Parallel download threshold</label
                     >
-                    <button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help"
-                      data-tooltip="Files larger than this use parallel range-GET downloads. Smaller files use a single request."
+                    <span class="setting-help-wrap"
+                      ><button
+                        type="button"
+                        class="setting-help"
+                        aria-label="Help: Parallel download threshold"
+                        aria-describedby="help-parallel-threshold"
+                      >
+                        ?</button
+                      ><span
+                        id="help-parallel-threshold"
+                        role="tooltip"
+                        class="setting-help__tip"
+                        >Files larger than this use parallel range-GET
+                        downloads. Smaller files use a single request.</span
+                      ></span
                     >
-                      ?
-                    </button>
                   </span>
                   <select
                     id="setting-download-parallel-threshold-mb"
@@ -1411,14 +1662,22 @@
                     <label for="setting-download-part-size-mb"
                       >Download part size</label
                     >
-                    <button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help"
-                      data-tooltip="Size of each range-GET chunk for parallel downloads. Larger = fewer requests, more memory per part."
+                    <span class="setting-help-wrap"
+                      ><button
+                        type="button"
+                        class="setting-help"
+                        aria-label="Help: Download part size"
+                        aria-describedby="help-download-part-size"
+                      >
+                        ?</button
+                      ><span
+                        id="help-download-part-size"
+                        role="tooltip"
+                        class="setting-help__tip"
+                        >Size of each range-GET chunk for parallel downloads.
+                        Larger = fewer requests, more memory per part.</span
+                      ></span
                     >
-                      ?
-                    </button>
                   </span>
                   <select
                     id="setting-download-part-size-mb"
@@ -1438,14 +1697,22 @@
                     <label for="setting-download-part-concurrency"
                       >Download part concurrency</label
                     >
-                    <button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help"
-                      data-tooltip="How many parts of a single file are downloaded in parallel."
+                    <span class="setting-help-wrap"
+                      ><button
+                        type="button"
+                        class="setting-help"
+                        aria-label="Help: Download part concurrency"
+                        aria-describedby="help-download-part-concurrency"
+                      >
+                        ?</button
+                      ><span
+                        id="help-download-part-concurrency"
+                        role="tooltip"
+                        class="setting-help__tip"
+                        >How many parts of a single file are downloaded in
+                        parallel.</span
+                      ></span
                     >
-                      ?
-                    </button>
                   </span>
                   <select
                     id="setting-download-part-concurrency"
@@ -1466,14 +1733,22 @@
                     <label for="setting-upload-part-size-mb"
                       >Upload part size</label
                     >
-                    <button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help"
-                      data-tooltip="Size of each multipart upload chunk. Larger = fewer requests, more memory per part."
+                    <span class="setting-help-wrap"
+                      ><button
+                        type="button"
+                        class="setting-help"
+                        aria-label="Help: Upload part size"
+                        aria-describedby="help-upload-part-size"
+                      >
+                        ?</button
+                      ><span
+                        id="help-upload-part-size"
+                        role="tooltip"
+                        class="setting-help__tip"
+                        >Size of each multipart upload chunk. Larger = fewer
+                        requests, more memory per part.</span
+                      ></span
                     >
-                      ?
-                    </button>
                   </span>
                   <select
                     id="setting-upload-part-size-mb"
@@ -1493,14 +1768,22 @@
                     <label for="setting-upload-part-concurrency"
                       >Upload part concurrency</label
                     >
-                    <button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help"
-                      data-tooltip="How many parts of a single file are uploaded in parallel."
+                    <span class="setting-help-wrap"
+                      ><button
+                        type="button"
+                        class="setting-help"
+                        aria-label="Help: Upload part concurrency"
+                        aria-describedby="help-upload-part-concurrency"
+                      >
+                        ?</button
+                      ><span
+                        id="help-upload-part-concurrency"
+                        role="tooltip"
+                        class="setting-help__tip"
+                        >How many parts of a single file are uploaded in
+                        parallel.</span
+                      ></span
                     >
-                      ?
-                    </button>
                   </span>
                   <select
                     id="setting-upload-part-concurrency"
@@ -1525,14 +1808,23 @@
                       />
                       <span>Enable resumable large downloads</span>
                     </label>
-                    <button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help"
-                      data-tooltip="Save progress for large multipart downloads so an interrupted transfer can resume from where it stopped."
+                    <span class="setting-help-wrap"
+                      ><button
+                        type="button"
+                        class="setting-help"
+                        aria-label="Help: Resume interrupted downloads"
+                        aria-describedby="help-resume-downloads"
+                      >
+                        ?</button
+                      ><span
+                        id="help-resume-downloads"
+                        role="tooltip"
+                        class="setting-help__tip"
+                        >Save progress for large multipart downloads so an
+                        interrupted transfer can resume from where it
+                        stopped.</span
+                      ></span
                     >
-                      ?
-                    </button>
                   </span>
                 </div>
                 <div class="setting-item">
@@ -1544,14 +1836,22 @@
                       />
                       <span>Verify transfer checksums when available</span>
                     </label>
-                    <button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help"
-                      data-tooltip="Compare an integrity checksum after each transfer when the server provides one. Adds slight CPU cost."
+                    <span class="setting-help-wrap"
+                      ><button
+                        type="button"
+                        class="setting-help"
+                        aria-label="Help: Verify checksums"
+                        aria-describedby="help-verify-checksums"
+                      >
+                        ?</button
+                      ><span
+                        id="help-verify-checksums"
+                        role="tooltip"
+                        class="setting-help__tip"
+                        >Compare an integrity checksum after each transfer when
+                        the server provides one. Adds slight CPU cost.</span
+                      ></span
                     >
-                      ?
-                    </button>
                   </span>
                 </div>
                 <div class="setting-item">
@@ -1559,14 +1859,22 @@
                     <label for="setting-transfer-checkpoint-ttl-hours"
                       >Checkpoint retention</label
                     >
-                    <button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help"
-                      data-tooltip="How long to keep resume checkpoints on disk before discarding them."
+                    <span class="setting-help-wrap"
+                      ><button
+                        type="button"
+                        class="setting-help"
+                        aria-label="Help: Checkpoint retention"
+                        aria-describedby="help-checkpoint-retention"
+                      >
+                        ?</button
+                      ><span
+                        id="help-checkpoint-retention"
+                        role="tooltip"
+                        class="setting-help__tip"
+                        >How long to keep resume checkpoints on disk before
+                        discarding them.</span
+                      ></span
                     >
-                      ?
-                    </button>
                   </span>
                   <select
                     id="setting-transfer-checkpoint-ttl-hours"
@@ -1595,14 +1903,22 @@
                   <label for="setting-presigned-expiration"
                     >Pre-signed URL expiration</label
                   >
-                  <button
-                    type="button"
-                    class="setting-help"
-                    aria-label="Help"
-                    data-tooltip="How long generated share links stay valid before expiring."
+                  <span class="setting-help-wrap"
+                    ><button
+                      type="button"
+                      class="setting-help"
+                      aria-label="Help: Share link expiration"
+                      aria-describedby="help-link-expiration"
+                    >
+                      ?</button
+                    ><span
+                      id="help-link-expiration"
+                      role="tooltip"
+                      class="setting-help__tip"
+                      >How long generated share links stay valid before
+                      expiring.</span
+                    ></span
                   >
-                    ?
-                  </button>
                 </span>
                 <select
                   id="setting-presigned-expiration"
@@ -1629,12 +1945,14 @@
             >
               <div class="bookmark-list-toolbar">
                 <button
+                  type="button"
                   id="bookmarks-export-btn"
                   class="btn btn--ghost btn--sm"
                 >
                   Export
                 </button>
                 <button
+                  type="button"
                   id="bookmarks-import-btn"
                   class="btn btn--ghost btn--sm"
                 >
@@ -1648,6 +1966,106 @@
                   aria-hidden="true"
                 />
               </div>
+              <p
+                id="bookmarks-status"
+                class="setting-note"
+                role="status"
+                aria-live="polite"
+              ></p>
+              <div id="bookmark-edit" class="bookmark-edit" hidden>
+                <h3 class="bookmark-edit__title">Edit saved connection</h3>
+                <p class="setting-note">
+                  Changes apply the next time you connect. The current session
+                  keeps the credentials it already has.
+                </p>
+                <div class="bookmark-edit__field">
+                  <label for="bookmark-edit-name">Name</label>
+                  <input
+                    id="bookmark-edit-name"
+                    class="field"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    maxlength="256"
+                  />
+                </div>
+                <div class="bookmark-edit__field">
+                  <label for="bookmark-edit-endpoint">Endpoint</label>
+                  <input
+                    id="bookmark-edit-endpoint"
+                    class="field"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    maxlength="2048"
+                  />
+                </div>
+                <div class="bookmark-edit__field">
+                  <label for="bookmark-edit-region">Region</label>
+                  <input
+                    id="bookmark-edit-region"
+                    class="field"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    maxlength="128"
+                  />
+                </div>
+                <div class="bookmark-edit__field">
+                  <label for="bookmark-edit-access-key">Access key</label>
+                  <input
+                    id="bookmark-edit-access-key"
+                    class="field"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    maxlength="256"
+                  />
+                </div>
+                <div class="bookmark-edit__field">
+                  <label for="bookmark-edit-secret-key">Secret key</label>
+                  <input
+                    id="bookmark-edit-secret-key"
+                    class="field"
+                    type="password"
+                    autocomplete="new-password"
+                    maxlength="4096"
+                    placeholder="Leave blank to keep the current secret"
+                  />
+                </div>
+                <div class="bookmark-edit__field">
+                  <label for="bookmark-edit-session-token">Session token</label>
+                  <input
+                    id="bookmark-edit-session-token"
+                    class="field"
+                    type="password"
+                    autocomplete="new-password"
+                    maxlength="16384"
+                  />
+                </div>
+                <p
+                  id="bookmark-edit-error"
+                  class="form-error"
+                  role="alert"
+                  hidden
+                ></p>
+                <div class="bookmark-edit__actions">
+                  <button
+                    type="button"
+                    id="bookmark-edit-cancel"
+                    class="btn btn--ghost"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    id="bookmark-edit-save"
+                    class="btn btn--primary"
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
               <ul id="bookmark-list" class="bookmark-list"></ul>
             </div>
 
@@ -1659,17 +2077,23 @@
               aria-labelledby="settings-tab-security"
               hidden
             >
+              <p class="setting-note settings-instant-note">
+                Changes apply immediately. Save and Cancel do not apply them.
+              </p>
               <div class="setting-item setting-item--stacked">
-                <label>Credential Encryption</label>
+                <span id="settings-encryption-label" class="setting-label"
+                  >Credential Encryption</span
+                >
                 <div class="security-controls">
                   <span id="security-status-text" class="text-secondary"
                     ><span class="spinner"></span> Loading...</span
                   >
                   <div class="security-controls__actions">
-                    <button id="security-toggle" class="btn">
+                    <button type="button" id="security-toggle" class="btn">
                       Enable Encryption
                     </button>
                     <button
+                      type="button"
                       id="security-change-password"
                       class="btn btn--ghost"
                       style="display: none"
@@ -1702,14 +2126,31 @@
                   <option value="30">30 minutes</option>
                   <option value="60">1 hour</option>
                 </select>
+                <p id="security-lock-note" class="setting-note">
+                  Running transfers keep the vault unlocked until they finish;
+                  the timer starts only when the queue is idle. Locking
+                  disconnects the current session.
+                </p>
+                <span
+                  id="security-lock-status"
+                  class="setting-note"
+                  role="status"
+                  aria-live="polite"
+                ></span>
               </div>
               <div
                 id="security-lock-action"
                 class="setting-item"
                 style="display: none"
               >
-                <label>Lock encrypted storage now</label>
-                <button id="security-lock-btn" class="btn btn--ghost">
+                <span id="settings-lock-now-label" class="setting-label"
+                  >Lock encrypted storage now</span
+                >
+                <button
+                  type="button"
+                  id="security-lock-btn"
+                  class="btn btn--ghost"
+                >
                   Lock Now
                 </button>
               </div>
@@ -1718,7 +2159,9 @@
                 class="setting-item"
                 style="display: none"
               >
-                <label for="biometric-toggle">Biometric Unlock</label>
+                <span id="biometric-label" class="setting-label"
+                  >Biometric Unlock</span
+                >
                 <span
                   id="biometric-security-note"
                   class="security-biometric-note text-secondary"
@@ -1728,9 +2171,10 @@
                   stored key without completing the prompt.
                 </span>
                 <button
+                  type="button"
                   id="biometric-toggle"
                   class="btn"
-                  aria-label="Toggle biometric unlock"
+                  aria-labelledby="biometric-label"
                 >
                   Enable
                 </button>
@@ -1746,21 +2190,29 @@
               hidden
             >
               <div class="setting-item">
-                <label>Version</label>
+                <span class="setting-label">Version</span>
                 <span id="settings-version" class="text-secondary"></span>
               </div>
               <div class="setting-item">
-                <label>Platform</label>
+                <span class="setting-label">Platform</span>
                 <span id="settings-platform" class="text-secondary"></span>
               </div>
               <div class="setting-item">
-                <label>Open-source licenses</label>
-                <button id="show-licenses" class="btn">View</button>
+                <span class="setting-label">Open-source licenses</span>
+                <button type="button" id="show-licenses" class="btn">
+                  View
+                </button>
               </div>
               <div class="setting-section">Danger Zone</div>
               <div class="setting-item">
-                <label>Reset all settings to defaults</label>
-                <button id="settings-reset" class="btn btn--danger">
+                <span class="setting-label"
+                  >Reset all settings to defaults</span
+                >
+                <button
+                  type="button"
+                  id="settings-reset"
+                  class="btn btn--danger"
+                >
                   Reset
                 </button>
               </div>
@@ -1787,8 +2239,12 @@
             role="alert"
             hidden
           ></div>
-          <button id="settings-cancel" class="btn btn--ghost">Cancel</button>
-          <button id="settings-save" class="btn btn--primary">Save</button>
+          <button type="button" id="settings-cancel" class="btn btn--ghost">
+            Cancel
+          </button>
+          <button type="button" id="settings-save" class="btn btn--primary">
+            Save
+          </button>
         </div>
       </div>
     </div>
@@ -1824,6 +2280,7 @@
             type="button"
             tabindex="0"
             aria-label="Show password"
+            aria-pressed="false"
             hidden
           >
             Show
@@ -1844,9 +2301,14 @@
           <input id="dialog-checkbox" type="checkbox" />
           <span id="dialog-checkbox-label"></span>
         </label>
+        <div id="dialog-choices" class="dialog-choices" hidden></div>
         <div class="dialog-box__actions">
-          <button id="dialog-cancel" class="btn btn--ghost">Cancel</button>
-          <button id="dialog-ok" class="btn btn--primary">OK</button>
+          <button type="button" id="dialog-cancel" class="btn btn--ghost">
+            Cancel
+          </button>
+          <button type="button" id="dialog-ok" class="btn btn--primary">
+            OK
+          </button>
         </div>
       </div>
     </div>
@@ -1861,7 +2323,12 @@
       <div class="modal">
         <div class="modal__header">
           <h2 id="copy-move-heading">Copy / Move</h2>
-          <button id="copy-move-close" class="btn btn--icon" aria-label="Close">
+          <button
+            type="button"
+            id="copy-move-close"
+            class="btn btn--icon"
+            aria-label="Close"
+          >
             <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
@@ -1882,7 +2349,14 @@
               type="text"
               autocomplete="off"
               spellcheck="false"
+              aria-describedby="copy-move-error"
             />
+            <p
+              id="copy-move-error"
+              class="copy-move-error"
+              role="alert"
+              hidden
+            ></p>
           </div>
           <div
             id="copy-move-recent-wrap"
@@ -1912,10 +2386,21 @@
             </div>
           </div>
         </div>
+        <p id="copy-move-move-reason" class="copy-move-reason" hidden></p>
         <div class="modal__footer">
-          <button id="copy-move-cancel" class="btn btn--ghost">Cancel</button>
-          <button id="copy-move-copy-btn" class="btn btn--primary">Copy</button>
-          <button id="copy-move-move-btn" class="btn btn--danger">Move</button>
+          <button type="button" id="copy-move-cancel" class="btn btn--ghost">
+            Cancel
+          </button>
+          <button
+            type="button"
+            id="copy-move-copy-btn"
+            class="btn btn--primary"
+          >
+            Copy
+          </button>
+          <button type="button" id="copy-move-move-btn" class="btn btn--danger">
+            Move
+          </button>
         </div>
       </div>
     </div>
@@ -1932,7 +2417,12 @@
       <div class="modal modal--wide">
         <div class="modal__header">
           <h2 id="licenses-heading">Open-Source Licenses</h2>
-          <button id="close-licenses" class="btn btn--icon" aria-label="Close">
+          <button
+            type="button"
+            id="close-licenses"
+            class="btn btn--icon"
+            aria-label="Close"
+          >
             <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
@@ -1941,14 +2431,14 @@
             Icons by
             <a
               href="https://github.com/lucide-icons/lucide"
-              target="_blank"
+              data-external-url
               rel="noopener"
               >Lucide</a
             >
             are licensed under the
             <a
               href="https://github.com/lucide-icons/lucide/blob/main/LICENSE"
-              target="_blank"
+              data-external-url
               rel="noopener"
               >MIT License</a
             >.
@@ -1972,12 +2462,18 @@
       <div class="modal modal--wide">
         <div class="modal__header">
           <h2 id="info-title">File Info</h2>
-          <button id="info-close" class="btn btn--icon" aria-label="Close">
+          <button
+            type="button"
+            id="info-close"
+            class="btn btn--icon"
+            aria-label="Close"
+          >
             <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
         <div class="info-tabs" role="tablist">
           <button
+            type="button"
             class="info-tab info-tab--active"
             id="info-tab-general"
             data-tab="general"
@@ -1989,6 +2485,7 @@
             General
           </button>
           <button
+            type="button"
             class="info-tab"
             id="info-tab-permissions"
             data-tab="permissions"
@@ -2000,6 +2497,7 @@
             Permissions
           </button>
           <button
+            type="button"
             class="info-tab"
             id="info-tab-metadata"
             data-tab="metadata"
@@ -2011,6 +2509,7 @@
             Metadata
           </button>
           <button
+            type="button"
             class="info-tab"
             id="info-tab-s3"
             data-tab="s3"
@@ -2028,8 +2527,12 @@
           </div>
         </div>
         <div class="modal__footer">
-          <button id="info-cancel" class="btn btn--ghost">Cancel</button>
-          <button id="info-save" class="btn btn--primary">Save</button>
+          <button type="button" id="info-cancel" class="btn btn--ghost">
+            Cancel
+          </button>
+          <button type="button" id="info-save" class="btn btn--primary">
+            Save
+          </button>
         </div>
       </div>
     </div>
@@ -2044,7 +2547,12 @@
       <div class="modal modal--wide preview-modal">
         <div class="modal__header">
           <h2 id="preview-title">Preview</h2>
-          <button id="preview-close" class="btn btn--icon" aria-label="Close">
+          <button
+            type="button"
+            id="preview-close"
+            class="btn btn--icon"
+            aria-label="Close"
+          >
             <span class="lucide-icon" data-icon="x"></span>
           </button>
         </div>
@@ -2079,6 +2587,7 @@
             aria-controls="palette-results"
             aria-autocomplete="list"
             aria-activedescendant=""
+            aria-describedby="palette-shortcut-help"
           />
         </div>
         <div
@@ -2087,6 +2596,9 @@
           role="listbox"
           aria-label="Commands"
         ></div>
+        <div id="palette-shortcut-help" class="palette__hint">
+          ↑↓ navigate · Enter to run · Esc to close
+        </div>
       </div>
     </div>
 
@@ -2114,8 +2626,10 @@
           please consider supporting its development :D
         </p>
         <div class="support-card__actions">
-          <button id="support-no" class="btn btn--ghost">No Thanks</button>
-          <button id="support-yes" class="btn btn--primary">
+          <button type="button" id="support-no" class="btn btn--ghost">
+            No Thanks
+          </button>
+          <button type="button" id="support-yes" class="btn btn--primary">
             <span class="lucide-icon" data-icon="heart"></span>
             Yes, I'd love to!
           </button>
@@ -2161,6 +2675,7 @@
           </p>
           <div class="setup-wizard-step__actions">
             <button
+              type="button"
               id="setup-welcome-next"
               class="btn btn--primary setup-wizard-btn-wide"
             >
@@ -2192,6 +2707,20 @@
             aria-label="Theme"
           >
             <button
+              type="button"
+              class="setup-wizard-theme-btn setup-wizard-theme-btn--active"
+              data-theme-value="system"
+              role="radio"
+              aria-checked="true"
+              tabindex="0"
+            >
+              <span
+                class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--system"
+              ></span>
+              <span>System</span>
+            </button>
+            <button
+              type="button"
               class="setup-wizard-theme-btn"
               data-theme-value="light"
               role="radio"
@@ -2204,6 +2733,7 @@
               <span>Light</span>
             </button>
             <button
+              type="button"
               class="setup-wizard-theme-btn"
               data-theme-value="dark"
               role="radio"
@@ -2215,22 +2745,18 @@
               ></span>
               <span>Dark</span>
             </button>
-            <button
-              class="setup-wizard-theme-btn setup-wizard-theme-btn--active"
-              data-theme-value="system"
-              role="radio"
-              aria-checked="true"
-              tabindex="0"
-            >
-              <span
-                class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--system"
-              ></span>
-              <span>System</span>
-            </button>
           </div>
           <div class="setup-wizard-step__actions">
-            <button id="setup-theme-back" class="btn btn--ghost">Back</button>
-            <button id="setup-theme-next" class="btn btn--primary">Next</button>
+            <button type="button" id="setup-theme-back" class="btn btn--ghost">
+              Back
+            </button>
+            <button
+              type="button"
+              id="setup-theme-next"
+              class="btn btn--primary"
+            >
+              Next
+            </button>
           </div>
         </div>
 
@@ -2253,7 +2779,9 @@
             Encrypt Your Credentials On-Disk
           </h2>
           <p class="setup-wizard-step__desc">
-            Protect saved credentials and bookmarks with AES-256 encryption.
+            Encrypt saved connections and your last-used connection with
+            AES-256. The password can't be recovered: if you forget it, the only
+            way back is a factory reset, which deletes saved connections.
           </p>
           <div class="setup-wizard-encryption-form" id="setup-encryption-form">
             <div class="field-with-toggle setup-wizard-field">
@@ -2266,13 +2794,13 @@
                 autocomplete="new-password"
               />
               <button
-                id="setup-enc-password-reveal"
                 type="button"
-                class="btn btn--icon field-toggle-btn"
+                id="setup-enc-password-reveal"
+                class="btn btn--ghost field-toggle-btn"
                 aria-label="Show password"
-                title="Show/hide password"
+                aria-pressed="false"
               >
-                <span class="lucide-icon" data-icon="eye"></span>
+                Show
               </button>
             </div>
             <div class="field-with-toggle setup-wizard-field">
@@ -2287,13 +2815,13 @@
                 autocomplete="new-password"
               />
               <button
-                id="setup-enc-confirm-reveal"
                 type="button"
-                class="btn btn--icon field-toggle-btn"
+                id="setup-enc-confirm-reveal"
+                class="btn btn--ghost field-toggle-btn"
                 aria-label="Show password"
-                title="Show/hide password"
+                aria-pressed="false"
               >
-                <span class="lucide-icon" data-icon="eye"></span>
+                Show
               </button>
             </div>
             <p
@@ -2303,6 +2831,15 @@
               aria-live="assertive"
               hidden
             ></p>
+            <p
+              id="setup-enc-status"
+              class="setup-wizard-enc-status"
+              role="status"
+              aria-live="polite"
+              hidden
+            >
+              Encryption enabled.
+            </p>
             <label
               id="setup-biometric-label"
               class="setup-wizard-checkbox-row"
@@ -2311,16 +2848,24 @@
               <input id="setup-enc-biometric" type="checkbox" />
               <span id="setup-biometric-text">Enable biometric unlock</span>
             </label>
+            <p
+              id="setup-biometric-caveat"
+              class="setup-wizard-caveat"
+              hidden
+            ></p>
           </div>
           <div class="setup-wizard-step__actions">
-            <button id="setup-enc-back" class="btn btn--ghost">Back</button>
+            <button type="button" id="setup-enc-back" class="btn btn--ghost">
+              Back
+            </button>
             <button
+              type="button"
               id="setup-enc-skip"
               class="btn btn--ghost setup-wizard-skip-btn"
             >
               Skip (not recommended)
             </button>
-            <button id="setup-enc-next" class="btn btn--primary">
+            <button type="button" id="setup-enc-next" class="btn btn--primary">
               Enable Encryption
             </button>
           </div>
@@ -2347,7 +2892,7 @@
           <div class="setup-wizard-updates-form">
             <label class="setup-wizard-checkbox-row">
               <input id="setup-auto-updates" type="checkbox" checked />
-              <span>Automatically check for updates</span>
+              <span>Automatically check for and download updates</span>
             </label>
             <div class="setup-wizard-channel-row">
               <label
@@ -2359,14 +2904,24 @@
                 id="setup-update-channel"
                 class="field setup-wizard-channel-select"
               >
-                <option value="release">Stable (Recommended)</option>
+                <option value="release">Stable</option>
                 <option value="beta">Beta</option>
               </select>
             </div>
           </div>
           <div class="setup-wizard-step__actions">
-            <button id="setup-updates-back" class="btn btn--ghost">Back</button>
-            <button id="setup-updates-next" class="btn btn--primary">
+            <button
+              type="button"
+              id="setup-updates-back"
+              class="btn btn--ghost"
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              id="setup-updates-next"
+              class="btn btn--primary"
+            >
               Finish Setup
             </button>
           </div>
@@ -2394,6 +2949,7 @@
           </p>
           <div class="setup-wizard-step__actions">
             <button
+              type="button"
               id="setup-done-btn"
               class="btn btn--primary setup-wizard-btn-wide"
             >

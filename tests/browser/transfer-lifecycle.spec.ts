@@ -73,7 +73,8 @@ test.describe("transfer lifecycle", () => {
     await showTransferList(page);
 
     const row = page.locator("#transfer-list .transfer-item").first();
-    await expect(row).toContainText("Retry wait");
+    // Intentional: the backoff reads as a countdown, "Retrying in N s".
+    await expect(row).toContainText(/Retrying in \d+ s/);
 
     // Pause while the backoff runs: nothing is registered natively, so the
     // cancel is recorded as pending. Resume well inside its 30s lifetime.
@@ -83,13 +84,17 @@ test.describe("transfer lifecycle", () => {
         countOf(await readMockCallLog(page), "mock:pending-cancel-recorded"),
       )
       .toBe(1);
+    // Intentional: the control is labelled with the file name, e.g. "Resume <file>".
     await expect(row.locator(".transfer-pause")).toHaveAttribute(
       "title",
-      "Resume",
+      /^Resume /,
     );
     await row.locator(".transfer-pause").click();
 
-    await expect(page.locator("#transfer-list .transfer-item")).toHaveCount(0);
+    // Intentional: a completed row stays listed until "Clear completed".
+    await expect(page.locator("#transfer-list .transfer-item")).toContainText(
+      "Completed",
+    );
     const calls = await readMockCallLog(page);
     expect(countOf(calls, "mock:pending-cancel-consumed")).toBe(1);
     // Attempt 1 failed (503), the resumed attempt absorbed the pending
@@ -135,7 +140,10 @@ test.describe("transfer lifecycle", () => {
 
     await releaseMockCopies(page);
     await showTransferList(page);
-    await expect(page.locator("#transfer-list .transfer-item")).toHaveCount(0);
+    // Intentional: the completed row stays until "Clear completed".
+    await expect(page.locator("#transfer-list .transfer-item")).toContainText(
+      "Completed",
+    );
 
     // Idle queue: the inactivity timeout applies again.
     await page.clock.runFor(3 * 60_000);
@@ -167,8 +175,12 @@ test.describe("transfer lifecycle", () => {
     const row = page.locator("#transfer-list .transfer-item").first();
     await row.locator(".transfer-cancel").click();
     await expect(row).toContainText("Cancelled");
+    // Intentional: a cancel is its own count, not a failure.
     await expect(page.locator("#transfer-queue-summary")).toContainText(
-      "1 failed",
+      "1 cancelled",
+    );
+    await expect(page.locator("#transfer-queue-summary")).not.toContainText(
+      /failed/,
     );
     await saveSuiteArtifact(
       page,
@@ -209,8 +221,10 @@ test.describe("transfer lifecycle", () => {
     await queued.locator(".transfer-cancel").click();
     await expect(rows.filter({ hasText: "Cancelled" })).toHaveCount(1);
     await releaseMockCopies(page);
-    await expect(rows).toHaveCount(1);
-    await expect(rows.first()).toContainText("Cancelled");
+    // Intentional: the completed row and the cancelled row both remain listed.
+    await expect(rows).toHaveCount(2);
+    await expect(rows.filter({ hasText: "Cancelled" })).toHaveCount(1);
+    await expect(rows.filter({ hasText: "Completed" })).toHaveCount(1);
     const calls = await readMockCallLog(page);
     expect(countOf(calls, "copy_object_to")).toBe(1);
     await saveSuiteArtifact(
@@ -239,7 +253,9 @@ test.describe("transfer lifecycle", () => {
     await page
       .locator('.context-menu [role="menuitem"]', { hasText: "Retry failed" })
       .click();
-    await expect(rows).toHaveCount(0);
+    // Intentional: the retried row completes and stays until cleared.
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText("Completed");
     const calls = await readMockCallLog(page);
     expect(countOf(calls, "copy_object_to")).toBe(2);
     await saveSuiteArtifact(
@@ -263,6 +279,16 @@ test.describe("transfer lifecycle", () => {
       .poll(async () => countOf(await readMockCallLog(page), "copy_object_to"))
       .toBe(1);
     await page.locator("#disconnect-btn").click();
+    // Disconnect asks first while transfers run; accept the action, not Cancel.
+    await expect(page.locator("#dialog-title")).toHaveText(
+      "Transfers in progress",
+    );
+    await page
+      .locator("#dialog-overlay")
+      .getByRole("button")
+      .filter({ hasNotText: "Cancel" })
+      .first()
+      .click();
     await expect(page.locator("#connection-screen")).toBeVisible();
     await showTransferList(page);
     const row = page.locator("#transfer-list .transfer-item").first();
@@ -277,7 +303,10 @@ test.describe("transfer lifecycle", () => {
       .toBe(2);
     await releaseMockCopies(page);
     await showTransferList(page);
-    await expect(page.locator("#transfer-list .transfer-item")).toHaveCount(0);
+    // Intentional: the completed row stays until "Clear completed".
+    await expect(page.locator("#transfer-list .transfer-item")).toContainText(
+      "Completed",
+    );
     await saveSuiteArtifact(
       page,
       testInfo,
@@ -300,7 +329,10 @@ test.describe("transfer lifecycle", () => {
     );
     expect(countOf(await readMockCallLog(page), "copy_object_to")).toBe(0);
     await context.setOffline(false);
-    await expect(page.locator("#transfer-list .transfer-item")).toHaveCount(0);
+    // Intentional: the completed row stays until "Clear completed".
+    await expect(page.locator("#transfer-list .transfer-item")).toContainText(
+      "Completed",
+    );
     const calls = await readMockCallLog(page);
     expect(countOf(calls, "copy_object_to")).toBe(1);
     await saveSuiteArtifact(

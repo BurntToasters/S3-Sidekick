@@ -22,6 +22,20 @@
   padding: 12px;
 }
 
+.preview-unsupported,
+.preview-too-large {
+  padding: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.preview-too-large {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
 .preview-image {
   display: flex;
   justify-content: center;

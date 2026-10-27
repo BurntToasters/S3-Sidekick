@@ -9,9 +9,16 @@ const mockRenderBreadcrumb = vi.fn();
 const mockNavigateToFolder = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockClearSelection = vi.fn();
 const mockClipboardWrite = vi.fn<(data: string) => Promise<void>>();
+const mockShowToast = vi.fn<(message: string, options?: unknown) => void>();
+const mockRevealRow = vi.fn<(key: string, kind: string) => boolean>();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
+}));
+
+vi.mock("../toast.ts", () => ({
+  showToast: (...args: unknown[]) =>
+    mockShowToast(...(args as [string, unknown])),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -38,6 +45,10 @@ vi.mock("../browser.ts", () => ({
   clearSelection: (...args: unknown[]) => mockClearSelection(...args),
   updateSelectionUI: vi.fn(),
   invalidateInspectorSelectionSync: vi.fn(),
+  revealRow: (...args: unknown[]) =>
+    mockRevealRow(...(args as [string, string])),
+  renderedIndexOfSelection: vi.fn(() => -1),
+  focusObjectTableRow: vi.fn(() => false),
 }));
 
 function renderFixture(): void {
@@ -92,6 +103,7 @@ async function setupConnected(): Promise<
   state.objects = [];
   state.prefixes = [];
   state.selectedKeys.clear();
+  state.selectedPrefixes.clear();
   state.currentSettings.conflictPolicy = "ask";
   state.createOnlyCapabilities = {
     put_object: true,
@@ -115,6 +127,8 @@ beforeEach(async () => {
   mockClearSelection.mockReset();
   mockClipboardWrite.mockReset();
   mockClipboardWrite.mockResolvedValue(undefined);
+  mockShowToast.mockReset();
+  mockRevealRow.mockReset();
   mockInvoke.mockImplementation(async (cmd, payload) =>
     defaultInvoke(cmd, payload as Record<string, unknown>),
   );
@@ -279,6 +293,46 @@ describe("file rename validation", () => {
     expect(document.getElementById("status")?.textContent).toContain(
       "Access denied",
     );
+  });
+
+  it("validates the rename prompt with the same rules as the handler", async () => {
+    const state = await setupConnected();
+    state.selectedKeys.add("docs/file.txt");
+    mockShowPrompt.mockResolvedValueOnce(null);
+    const { handleRename } = await import("../app-objects.ts");
+    await handleRename();
+    const options = mockShowPrompt.mock.calls[0][2] as {
+      validate: (value: string) => Promise<boolean | string>;
+    };
+    expect(await options.validate("   ")).toBe("Name cannot be empty.");
+    expect(await options.validate("a/b")).toBe('Name cannot contain "/".');
+    expect(await options.validate("file.txt")).toBe(
+      "That is already the name.",
+    );
+    expect(await options.validate("  fresh.txt ")).toBe(true);
+  });
+
+  it("trims whitespace from the new file name before renaming", async () => {
+    const state = await setupConnected();
+    state.selectedKeys.add("docs/file.txt");
+    mockShowPrompt.mockResolvedValueOnce("  spaced.txt  ");
+    const { handleRename } = await import("../app-objects.ts");
+    await handleRename();
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "rename_object",
+      expect.objectContaining({ newKey: "docs/spaced.txt" }),
+    );
+  });
+
+  it("selects and reveals the renamed file after the rename", async () => {
+    const state = await setupConnected();
+    state.selectedKeys.add("docs/file.txt");
+    mockShowPrompt.mockResolvedValueOnce("renamed.txt");
+    const { handleRename } = await import("../app-objects.ts");
+    await handleRename();
+    expect(state.selectedKeys.has("docs/renamed.txt")).toBe(true);
+    expect(state.selectedKeys.has("docs/file.txt")).toBe(false);
+    expect(mockRevealRow).toHaveBeenCalledWith("docs/renamed.txt", "file");
   });
 
   it("cancels rename when not connected", async () => {
@@ -671,7 +725,7 @@ describe("delete confirmations", () => {
     expect(document.getElementById("status")?.textContent).toContain("Deleted");
   });
 
-  it("reports partial delete failures with counts", async () => {
+  it("reports partial delete failures in a sticky error toast", async () => {
     const state = await setupConnected();
     state.selectedKeys.add("docs/file.txt");
     mockShowConfirm.mockResolvedValueOnce(true);
@@ -683,9 +737,59 @@ describe("delete confirmations", () => {
     });
     const { handleDelete } = await import("../app-objects.ts");
     await handleDelete();
-    expect(document.getElementById("status")?.textContent).toContain(
-      "Delete failed",
+    expect(mockShowToast).toHaveBeenCalledWith(
+      `Couldn't delete "file.txt"`,
+      expect.objectContaining({
+        type: "error",
+        duration: 0,
+        actionLabel: "Details",
+      }),
     );
+  });
+
+  it("keeps the items that remain selected after a partial delete", async () => {
+    const state = await setupConnected();
+    state.selectedKeys.add("docs/a.txt");
+    state.selectedKeys.add("docs/b.txt");
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockInvoke.mockImplementation(async (cmd, payload) => {
+      if (cmd === "delete_objects") {
+        return { deleted: 1, failed: 1, incomplete: false, errors: ["denied"] };
+      }
+      if (cmd === "list_objects") {
+        return {
+          objects: [{ key: "docs/b.txt", size: 1, last_modified: "" }],
+          prefixes: [],
+          truncated: false,
+          next_continuation_token: "",
+        };
+      }
+      return defaultInvoke(cmd, payload as Record<string, unknown>);
+    });
+    const { handleDelete } = await import("../app-objects.ts");
+    await handleDelete();
+    expect(mockShowToast).toHaveBeenCalledWith(
+      "Couldn't delete 1 of 2 items",
+      expect.objectContaining({ type: "error", duration: 0 }),
+    );
+    expect(state.selectedKeys.has("docs/b.txt")).toBe(true);
+    expect(state.selectedKeys.has("docs/a.txt")).toBe(false);
+  });
+
+  it("builds the delete confirmation with plain plurals and names", async () => {
+    const state = await setupConnected();
+    state.selectedKeys.add("docs/a.txt");
+    state.selectedKeys.add("docs/b.txt");
+    state.selectedPrefixes.add("docs/folder/");
+    mockShowConfirm.mockResolvedValueOnce(false);
+    const { handleDelete } = await import("../app-objects.ts");
+    await handleDelete();
+    const [, message] = mockShowConfirm.mock.calls[0] as [string, string];
+    expect(message).toContain(
+      "Delete 2 files and 1 folder? The folder's contents are deleted too.",
+    );
+    expect(message).not.toContain("all their contents");
+    expect(message).not.toContain("(s)");
   });
 
   it("maps invalid delete receipts to failures", async () => {
@@ -698,8 +802,9 @@ describe("delete confirmations", () => {
     });
     const { handleDelete } = await import("../app-objects.ts");
     await handleDelete();
-    expect(document.getElementById("status")?.textContent).toContain(
-      "Delete failed",
+    expect(mockShowToast).toHaveBeenCalledWith(
+      `Couldn't delete "file.txt"`,
+      expect.objectContaining({ type: "error", duration: 0 }),
     );
   });
 
@@ -769,6 +874,7 @@ describe("object copy helpers and presigned expiry", () => {
 
   it("copies keys and ARNs for multi-select", async () => {
     const state = await setupConnected();
+    state.endpoint = "https://s3.us-east-1.amazonaws.com";
     state.selectedKeys.add("docs/a.txt");
     state.selectedPrefixes.add("docs/folder/");
     const { handleCopyKey, handleCopyArn } = await import("../app-objects.ts");
@@ -817,30 +923,21 @@ describe("export and go-to guards", () => {
     );
   });
 
-  it("exports the activity log and honors overwrite decline", async () => {
+  it("exports through the save dialog without a second overwrite prompt", async () => {
     const { logActivity } = await import("../activity-log.ts");
     logActivity("hello", "info");
     await setupConnected();
-    const { state } = await import("../state.ts");
-    state.connected = true;
     mockSave.mockResolvedValueOnce("/tmp/log.txt");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "path_exists") return true;
       return defaultInvoke(cmd);
     });
-    mockShowConfirm.mockResolvedValueOnce(false);
     const { handleExportActivityLog } = await import("../app-objects.ts");
     await handleExportActivityLog();
-    expect(mockInvoke).not.toHaveBeenCalledWith(
-      "write_text_file",
-      expect.anything(),
-    );
-    mockSave.mockResolvedValueOnce("/tmp/log.txt");
-    mockShowConfirm.mockResolvedValueOnce(true);
-    await handleExportActivityLog();
+    expect(mockShowConfirm).not.toHaveBeenCalled();
     expect(mockInvoke).toHaveBeenCalledWith(
       "write_text_file",
-      expect.objectContaining({ overwrite: true }),
+      expect.objectContaining({ path: "/tmp/log.txt", overwrite: true }),
     );
   });
 
@@ -856,6 +953,66 @@ describe("export and go-to guards", () => {
     mockShowPrompt.mockResolvedValueOnce("docs/target.txt");
     await handleGoToKeyOrPrefix();
     expect(state.selectedKeys.has("docs/target.txt")).toBe(true);
+    expect(mockRevealRow).toHaveBeenCalledWith("docs/target.txt", "file");
+  });
+
+  it("refuses to copy ARNs for a non-AWS endpoint", async () => {
+    const state = await setupConnected();
+    state.selectedKeys.add("docs/file.txt");
+    state.endpoint = "https://minio.internal.example";
+    const { handleCopyArn } = await import("../app-objects.ts");
+    await handleCopyArn();
+    expect(mockClipboardWrite).not.toHaveBeenCalled();
+    expect(document.getElementById("status")?.textContent).toContain(
+      "only available for AWS",
+    );
+  });
+
+  it("classifies AWS endpoints for ARN actions", async () => {
+    const { isAwsEndpoint } = await import("../app-objects.ts");
+    expect(isAwsEndpoint("https://s3.us-east-1.amazonaws.com")).toBe(true);
+    expect(isAwsEndpoint("s3.amazonaws.com")).toBe(true);
+    expect(isAwsEndpoint("https://minio.amazonaws.com.evil.example")).toBe(
+      false,
+    );
+    expect(isAwsEndpoint("https://layout-test.invalid")).toBe(false);
+    expect(isAwsEndpoint("not a url")).toBe(false);
+    expect(isAwsEndpoint("")).toBe(false);
+  });
+
+  it("builds plural-aware delete wording", async () => {
+    const { deleteConfirmationMessage } = await import("../app-objects.ts");
+    expect(deleteConfirmationMessage(["a.txt"], [])).toBe("Delete 1 file?");
+    expect(deleteConfirmationMessage(["a", "b"], [])).toBe("Delete 2 files?");
+    expect(deleteConfirmationMessage([], ["x/"])).toBe(
+      "Delete 1 folder? Its contents are deleted too.",
+    );
+    expect(deleteConfirmationMessage([], ["x/", "y/"])).toBe(
+      "Delete 2 folders? Their contents are deleted too.",
+    );
+    expect(deleteConfirmationMessage(["a", "b"], ["x/"])).toBe(
+      "Delete 2 files and 1 folder? The folder's contents are deleted too.",
+    );
+    expect(deleteConfirmationMessage(["a"], ["x/", "y/"])).toBe(
+      "Delete 1 file and 2 folders? The folders' contents are deleted too.",
+    );
+  });
+
+  it("classifies rename names with one shared rule set", async () => {
+    const { objectNameProblem } = await import("../app-objects.ts");
+    expect(objectNameProblem("   ", "a.txt", "file")).toBe(
+      "Name cannot be empty.",
+    );
+    expect(objectNameProblem("x/y", "a.txt", "file")).toBe(
+      'Name cannot contain "/".',
+    );
+    expect(objectNameProblem("x/y", "a", "folder")).toBe(
+      "Folder name cannot contain slashes.",
+    );
+    expect(objectNameProblem(" a.txt ", "a.txt", "file")).toBe(
+      "That is already the name.",
+    );
+    expect(objectNameProblem(" b.txt ", "a.txt", "file")).toBeNull();
   });
 
   it("go-to ignores empty input and connection changes", async () => {

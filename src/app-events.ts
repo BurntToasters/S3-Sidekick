@@ -22,7 +22,7 @@ import {
   handleBucketListKeydown,
   handleSelectAll,
   clearSelection,
-  setLastClickedKey,
+  setLastClickedEntry,
   updateSelectionUI,
   toggleSort,
   navigateBack,
@@ -34,10 +34,17 @@ import {
   pruneStaleSelection,
   clearFilter,
   updateFilterClearButton,
+  reportNavFailure,
+  selectOnlyEntry,
+  isLocationEditMode,
 } from "./browser.ts";
 import { wireInspectorChrome, toggleInspector } from "./inspector.ts";
 import { wireWindowSizePersistence } from "./window-size.ts";
-import { checkUpdates, setUpdateChannel } from "./updater.ts";
+import {
+  checkUpdates,
+  getReleasePageUrl,
+  setUpdateChannel,
+} from "./updater.ts";
 import { loadBookmarks, clearBookmarks } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
@@ -53,28 +60,36 @@ import {
   initTransferQueueUI,
   recoverPendingTransfers,
   disposeTransferQueueUI,
+  retryFailedTransfers,
 } from "./transfers.ts";
-import { wireKeyboardShortcuts } from "./keyboard.ts";
+import { openKeyboardShortcuts, wireKeyboardShortcuts } from "./keyboard.ts";
 import { canPreview, openPreview, closePreview } from "./preview.ts";
 import {
   logActivity,
   toggleActivityLog,
   clearActivityLog,
 } from "./activity-log.ts";
-import { initDrawer, getActiveTab } from "./bottom-drawer.ts";
+import {
+  initDrawer,
+  getActiveTab,
+  openDrawer,
+  setTransferFilter,
+} from "./bottom-drawer.ts";
+import { showConfirm } from "./dialogs.ts";
 import {
   handleSecurityChangePassword,
   handleSecurityToggle,
   handleLockNow,
   handleLockTimeoutChange,
   handleBiometricToggle,
+  setForgotPasswordHandler,
 } from "./security.ts";
 import {
   initPalette,
   registerCommands,
   openPalette,
 } from "./command-palette.ts";
-import { basename, friendlyError } from "./utils.ts";
+import { basename, friendlyError, plural } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { showToast } from "./toast.ts";
 import {
@@ -101,10 +116,16 @@ import {
   handleNewConnection,
   awsRegionalEndpoint,
   setConnectionUI,
+  confirmSessionTeardown,
+  handleConnectButton,
+  handleDisconnectRequest,
+  setSavedConnectionsLocked,
 } from "./app-connection.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
 import {
   addSelection,
+  entryFromRow,
+  fileEntry,
   getSelectedFileKeys,
   getSelectionEntries,
   isSelected,
@@ -116,6 +137,7 @@ import {
   handleRename,
   handleCreateFolder,
   handleRefresh,
+  handleRefreshBuckets,
   handleExportActivityLog,
   handleGoToKeyOrPrefix,
   handleCopyUrl,
@@ -148,6 +170,7 @@ let dragDropUnlisten: (() => void) | null = null;
 export async function clearSessionAfterAutoLock(): Promise<boolean> {
   const hadSession = state.connected || Boolean(state.connectionId);
   setConnectionAccessLocked(true);
+  setSavedConnectionsLocked(true);
   setConnectionUI(false);
   closePreview();
   setConnectionInputs("", "", "", "");
@@ -164,8 +187,10 @@ export async function clearSessionAfterAutoLock(): Promise<boolean> {
 
 /** Connection form: connect, credentials, provider presets, saved list. */
 function wireConnectionForm(): void {
-  dom.connectBtn.addEventListener("click", handleConnect);
-  dom.disconnectBtn.addEventListener("click", handleDisconnect);
+  dom.connectBtn.addEventListener("click", handleConnectButton);
+  dom.disconnectBtn.addEventListener("click", () => {
+    void handleDisconnectRequest();
+  });
 
   const connectionFieldIds = [
     "conn-endpoint",
@@ -184,22 +209,26 @@ function wireConnectionForm(): void {
     });
   }
 
-  const secretToggle = document.getElementById(
-    "secret-key-toggle",
-  ) as HTMLButtonElement | null;
-  const secretInput = document.getElementById(
-    "conn-secret-key",
-  ) as HTMLInputElement | null;
-  if (secretToggle && secretInput) {
-    secretToggle.addEventListener("click", () => {
-      const showing = secretInput.type === "text";
-      secretInput.type = showing ? "password" : "text";
-      secretToggle.textContent = showing ? "Show" : "Hide";
-      secretToggle.setAttribute("aria-pressed", String(!showing));
-      secretToggle.setAttribute(
-        "aria-label",
-        showing ? "Show secret key" : "Hide secret key",
-      );
+  // Reveal toggles keep a fixed accessible name and expose state via aria-pressed.
+  const revealToggles: Array<
+    [toggleId: string, inputId: string, label: string]
+  > = [
+    ["secret-key-toggle", "conn-secret-key", "secret key"],
+    ["session-token-toggle", "conn-session-token", "session token"],
+  ];
+  for (const [toggleId, inputId, label] of revealToggles) {
+    const toggle = document.getElementById(
+      toggleId,
+    ) as HTMLButtonElement | null;
+    const input = document.getElementById(inputId) as HTMLInputElement | null;
+    if (!toggle || !input) continue;
+    toggle.setAttribute("aria-label", `Show ${label}`);
+    toggle.setAttribute("aria-pressed", "false");
+    toggle.addEventListener("click", () => {
+      const revealed = input.type === "text";
+      input.type = revealed ? "password" : "text";
+      toggle.textContent = revealed ? "Show" : "Hide";
+      toggle.setAttribute("aria-pressed", String(!revealed));
     });
   }
 
@@ -228,8 +257,14 @@ function wireConnectionForm(): void {
           endpointInput.value = "https://s3.us-west-004.backblazeb2.com";
         if (regionInput) regionInput.value = "us-west-004";
       } else if (preset === "cloudflare") {
-        if (endpointInput)
-          endpointInput.value = "https://<account-id>.r2.cloudflarestorage.com";
+        // The account ID is a placeholder: select it so typing replaces it.
+        const placeholder = "<account-id>";
+        if (endpointInput) {
+          endpointInput.value = `https://${placeholder}.r2.cloudflarestorage.com`;
+          endpointInput.focus();
+          const start = endpointInput.value.indexOf(placeholder);
+          endpointInput.setSelectionRange(start, start + placeholder.length);
+        }
         if (regionInput) regionInput.value = "auto";
       } else if (preset === "minio") {
         if (endpointInput) endpointInput.value = "http://localhost:9000";
@@ -238,7 +273,8 @@ function wireConnectionForm(): void {
         if (endpointInput) endpointInput.value = "https://s3.wasabisys.com";
         if (regionInput) regionInput.value = "us-east-1";
       }
-      providerPreset.value = "";
+      // Keep the chosen preset visible so the user can see which one was applied.
+      updateBookmarkBtn();
     });
   }
 
@@ -291,18 +327,35 @@ function wireSettingsModal(): void {
   document
     .getElementById("settings-reset")!
     .addEventListener("click", resetSettings);
+  const checkNowButton = document.getElementById(
+    "settings-check-updates",
+  ) as HTMLButtonElement;
+  checkNowButton.addEventListener("click", () => {
+    // Runs inside Settings: the button shows progress and the result is
+    // reported in the panel. Settings stays open with unsaved edits intact.
+    const persistedChannel = state.lastPersistedSettings.updateChannel;
+    const channelSelect = document.getElementById(
+      "setting-update-channel",
+    ) as HTMLSelectElement | null;
+    setUpdateChannel(channelSelect?.value === "beta" ? "beta" : "release");
+    const idleLabel = checkNowButton.textContent;
+    checkNowButton.disabled = true;
+    checkNowButton.setAttribute("aria-busy", "true");
+    checkNowButton.textContent = "Checking\u2026";
+    void checkUpdates().finally(() => {
+      setUpdateChannel(persistedChannel);
+      checkNowButton.disabled = false;
+      checkNowButton.removeAttribute("aria-busy");
+      checkNowButton.textContent = idleLabel;
+    });
+  });
   document
-    .getElementById("settings-check-updates")!
+    .getElementById("settings-open-release-page")!
     .addEventListener("click", () => {
-      const persistedChannel = state.lastPersistedSettings.updateChannel;
-      const channelSelect = document.getElementById(
-        "setting-update-channel",
-      ) as HTMLSelectElement | null;
-      setUpdateChannel(channelSelect?.value === "beta" ? "beta" : "release");
-      void closeSettingsModal(false);
-      void checkUpdates().finally(() => {
-        setUpdateChannel(persistedChannel);
-      });
+      void invoke("open_external_url", { url: getReleasePageUrl() }).catch(
+        (err) =>
+          logActivity(`Failed to open release page: ${String(err)}`, "warning"),
+      );
     });
 
   document
@@ -380,7 +433,13 @@ function wireOverlaysAndDrawer(): void {
   document.getElementById("drawer-clear")!.addEventListener("click", () => {
     const tab = getActiveTab();
     if (tab === "activity") {
-      clearActivityLog();
+      void showConfirm(
+        "Clear activity log?",
+        "This removes every entry from the activity log. Files and transfers are not changed.",
+        { okLabel: "Clear", cancelLabel: "Keep", okDanger: true },
+      ).then((confirmed) => {
+        if (confirmed) clearActivityLog();
+      });
     } else {
       clearCompletedTransfers();
     }
@@ -419,6 +478,38 @@ function wireAppLifecycle(): void {
 }
 
 /** Preview overlay and batch selection actions. */
+/** More-menu actions that have a batch toolbar button of the same name. */
+const TOOLBAR_TWIN_BY_ACTION: Readonly<Record<string, string>> = {
+  "copy-urls": "batch-copy-urls",
+  delete: "batch-delete",
+  "deselect-all": "batch-deselect",
+};
+
+function isToolbarButtonShowing(id: string): boolean {
+  const button = document.getElementById(id);
+  return button !== null && button.getClientRects().length > 0;
+}
+
+function withoutVisibleToolbarTwins(items: MenuItem[]): MenuItem[] {
+  const kept = items.filter((item) => {
+    if ("separator" in item) return true;
+    const twin = TOOLBAR_TWIN_BY_ACTION[item.action];
+    return !twin || !isToolbarButtonShowing(twin);
+  });
+  // Separators survive only between two real actions.
+  return kept.filter((item, index) => {
+    if (!("separator" in item)) return true;
+    const prev = kept[index - 1];
+    const next = kept[index + 1];
+    return (
+      prev !== undefined &&
+      next !== undefined &&
+      !("separator" in prev) &&
+      !("separator" in next)
+    );
+  });
+}
+
 function wireSelectionActions(): void {
   document.getElementById("preview-overlay")!.addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closePreview();
@@ -467,7 +558,7 @@ function wireSelectionActions(): void {
       ) as HTMLButtonElement | null;
       const deleteInFlight = deleteButton?.dataset.operationInFlight === "true";
       const rect = batchMore.getBoundingClientRect();
-      const menuItems: MenuItem[] = [
+      const allMenuItems: MenuItem[] = [
         {
           label: "Copy keys",
           action: "copy-keys",
@@ -500,6 +591,9 @@ function wireSelectionActions(): void {
           disabled: selectedCount === 0,
         },
       ];
+      // Only list what the toolbar cannot show right now. A visible toolbar
+      // button already answers the same action, so it is not repeated here.
+      const menuItems = withoutVisibleToolbarTwins(allMenuItems);
       showContextMenu(
         rect.left,
         rect.bottom,
@@ -522,6 +616,8 @@ function wireSelectionActions(): void {
 
 /** Vault, biometric and lock controls in Settings. */
 function wireSecuritySettings(): void {
+  // "Forgot password?" on the Unlock prompt runs the existing reset flow.
+  setForgotPasswordHandler(() => void resetSettings());
   document.getElementById("security-toggle")!.addEventListener("click", () => {
     void (async () => {
       const changed = await handleSecurityToggle(setStatus);
@@ -557,12 +653,16 @@ function wireSecuritySettings(): void {
     .getElementById("security-lock-btn")!
     .addEventListener("click", () => {
       void (async () => {
+        // Ask before anything is torn down: running transfers stop on lock.
+        if (!(await confirmSessionTeardown("Lock now"))) return;
         // Disconnect first so the backend cancels and drains operations that
         // already cloned the S3 client before encrypted credentials are locked.
         if (state.connected && !(await handleDisconnect())) return;
         const locked = await handleLockNow(setStatus);
         if (locked) {
           setConnectionInputs("", "", "", "");
+          // Mirror clearSessionAfterAutoLock: show the locked saved list, not an empty one.
+          setSavedConnectionsLocked(true);
           clearBookmarks();
           refreshBookmarkBar();
           await closeSettingsModal(false);
@@ -606,15 +706,30 @@ function wireLocationAndFilters(): void {
     }
   });
 
+  // Leaving the editor by any route (Tab, a click elsewhere) closes it and
+  // restores the path, so it cannot linger as an unlabeled, stale input.
+  pathInput?.addEventListener("blur", () => {
+    if (isLocationEditMode()) exitLocationEditMode(true);
+  });
+
+  // One click anywhere on the bar outside a breadcrumb segment opens the
+  // editor. Segments keep their own click (navigate to that folder).
   const locationOmnibar = document.getElementById("location-omnibar");
-  locationOmnibar?.addEventListener("dblclick", (e) => {
-    if ((e.target as HTMLElement).closest(".breadcrumb__segment")) return;
+  locationOmnibar?.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    // The Edit button enters edit mode itself, so the bar ignores its clicks.
+    if (
+      target.closest(
+        ".breadcrumb__segment, .location-omnibar__edit, .location-omnibar__edit-btn",
+      )
+    )
+      return;
+    if (isLocationEditMode()) return;
     enterLocationEditMode();
   });
-  locationOmnibar?.addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).closest(".breadcrumb__segment")) return;
-    if (e.target === locationOmnibar) enterLocationEditMode();
-  });
+  document
+    .getElementById("location-edit")
+    ?.addEventListener("click", () => enterLocationEditMode());
 
   document
     .getElementById("btn-refresh")!
@@ -710,13 +825,7 @@ function wireBucketList(): void {
     if (bucket) {
       void selectBucket(bucket)
         .then(() => closeSidebarOnMobile())
-        .catch((err) => {
-          setStatus(`Failed to open bucket "${bucket}": ${err}`);
-          logActivity(
-            `Failed to open bucket "${bucket}": ${String(err)}`,
-            "error",
-          );
-        });
+        .catch((err) => reportBucketOpenFailure(bucket, err));
     }
   });
   dom.bucketList.addEventListener("keydown", (e) => {
@@ -736,15 +845,16 @@ function wireBucketList(): void {
     (e as KeyboardEvent).preventDefault();
     void selectBucket(bucket)
       .then(() => closeSidebarOnMobile())
-      .catch((err) => {
-        setStatus(`Failed to open bucket "${bucket}": ${err}`);
-        logActivity(
-          `Failed to open bucket "${bucket}": ${String(err)}`,
-          "error",
-        );
-      });
+      .catch((err) => reportBucketOpenFailure(bucket, err));
   });
   dom.bucketPanel.addEventListener("contextmenu", handleBucketContextMenu);
+}
+
+/** A bucket that fails to open must not look like an empty bucket. */
+function reportBucketOpenFailure(bucket: string, err: unknown): void {
+  const message = `Failed to open bucket "${bucket}": ${friendlyError(err)}`;
+  reportNavFailure(message, () => void selectBucket(bucket));
+  logActivity(message, "error");
 }
 
 /** Object table clicks, keys, selection and breadcrumb. */
@@ -753,14 +863,19 @@ function wireObjectTable(): void {
     const target = e.target as HTMLElement;
     const row = target.closest<HTMLElement>(".object-row");
     if (!row) return;
+    // The whole checkbox cell is the target, not only the 13px box. Clicking
+    // the cell forwards to the input, whose change handler does the selection.
+    const checkCell = target.closest<HTMLElement>(".col-check");
+    if (checkCell && !target.closest(".row-check")) {
+      checkCell.querySelector<HTMLInputElement>(".row-check")?.click();
+      return;
+    }
     if (target.closest(".row-check")) return;
 
     // Standard file-manager behavior: single click selects (with
     // ctrl/shift support via handleRowClick); open on double-click/Enter.
-    const key =
-      row.dataset.key ??
-      (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
-    if (key) handleRowClick(key, e);
+    const entry = entryFromRow(row);
+    if (entry) handleRowClick(entry, e);
   });
 
   dom.objectTbody.addEventListener("change", (e) => {
@@ -770,16 +885,14 @@ function wireObjectTable(): void {
     if (!input) return;
     const row = input.closest<HTMLElement>(".object-row");
     if (!row) return;
-    const key =
-      row.dataset.key ??
-      (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
-    if (!key) return;
+    const entry = entryFromRow(row);
+    if (!entry) return;
     if (input.checked) {
-      addSelection(key);
+      addSelection(entry);
     } else {
-      removeSelection(key);
+      removeSelection(entry);
     }
-    setLastClickedKey(key);
+    setLastClickedEntry(entry);
     updateSelectionUI();
   });
 
@@ -790,16 +903,14 @@ function wireObjectTable(): void {
 
     if (e.key === " ") {
       e.preventDefault();
-      const key =
-        row.dataset.key ??
-        (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
-      if (!key) return;
-      if (isSelected(key)) {
-        removeSelection(key);
+      const entry = entryFromRow(row);
+      if (!entry) return;
+      if (isSelected(entry)) {
+        removeSelection(entry);
       } else {
-        addSelection(key);
+        addSelection(entry);
       }
-      setLastClickedKey(key);
+      setLastClickedEntry(entry);
       updateSelectionUI();
       return;
     }
@@ -809,11 +920,18 @@ function wireObjectTable(): void {
     // tables share one owner; Space/Enter are handled here.
     if (e.key === "Enter") {
       e.preventDefault();
+      // Enter acts on the focused row, so it becomes the selection first; the
+      // open/preview below then refers to what the user sees highlighted.
+      const focusedEntry = entryFromRow(row);
+      if (focusedEntry) selectOnlyEntry(focusedEntry);
       if (row.classList.contains("object-row--folder")) {
         const prefix = row.dataset.prefix;
         if (prefix !== undefined) {
           void navigateToFolder(prefix).catch((err) => {
-            setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+            reportNavFailure(
+              `Failed to open folder: ${friendlyError(err)}`,
+              () => void navigateToFolder(prefix),
+            );
           });
         }
         return;
@@ -824,7 +942,7 @@ function wireObjectTable(): void {
       if (canPreview(basename(key))) {
         void openPreview(key);
       } else {
-        void openInfoPanel([key]);
+        void openInfoPanel([fileEntry(key)]);
       }
     }
   });
@@ -838,7 +956,10 @@ function wireObjectTable(): void {
       const prefix = row.dataset.prefix;
       if (prefix !== undefined) {
         void navigateToFolder(prefix).catch((err) => {
-          setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+          reportNavFailure(
+            `Failed to open folder: ${friendlyError(err)}`,
+            () => void navigateToFolder(prefix),
+          );
           logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
         });
       }
@@ -849,7 +970,7 @@ function wireObjectTable(): void {
     if (canPreview(basename(key))) {
       void openPreview(key);
     } else {
-      void openInfoPanel([key]);
+      void openInfoPanel([fileEntry(key)]);
     }
   });
 
@@ -904,10 +1025,26 @@ function wireObjectTable(): void {
     const prefix = seg.dataset.prefix;
     if (prefix !== undefined) {
       void navigateToFolder(prefix).catch((err) => {
-        setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+        reportNavFailure(
+          `Failed to open folder: ${friendlyError(err)}`,
+          () => void navigateToFolder(prefix),
+        );
       });
     }
   });
+
+  // Clicking the header's checkbox cell (not the box itself) toggles select-all.
+  document
+    .getElementById("select-all")
+    ?.closest("th")
+    ?.addEventListener("click", (e) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("input, .sort-trigger")) return;
+      const selectAll = document.getElementById(
+        "select-all",
+      ) as HTMLInputElement | null;
+      selectAll?.click();
+    });
 }
 
 /** Drag-and-drop uploads onto the object panel. */
@@ -929,14 +1066,28 @@ function wireDropUpload(): void {
   objectPanel.addEventListener("drop", suppressDrag);
   dropOverlay.addEventListener("drop", suppressDrag);
 
+  // Escape dismisses the target without dropping; the next drag re-shows it.
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || dropOverlay.hidden) return;
+    dropOverlay.hidden = true;
+    objectPanel.classList.remove("object-panel--dragover");
+  });
+
   void getCurrentWebview()
     .onDragDropEvent((event) => {
       if (event.payload.type === "enter") {
-        if (state.connected && state.currentBucket) {
-          dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
+        // Only offer a target when a drop would actually upload: connected to
+        // a bucket, carrying files, and no dialog waiting for an answer.
+        const canUpload =
+          state.connected &&
+          Boolean(state.currentBucket) &&
+          event.payload.paths.length > 0 &&
+          !document.body.classList.contains("modal-open");
+        if (canUpload) {
+          dropPath.textContent = `${state.currentBucket}/${state.currentPrefix}`;
           dropOverlay.hidden = false;
+          objectPanel.classList.add("object-panel--dragover");
         }
-        objectPanel.classList.add("object-panel--dragover");
       } else if (event.payload.type === "leave") {
         objectPanel.classList.remove("object-panel--dragover");
         dropOverlay.hidden = true;
@@ -944,8 +1095,15 @@ function wireDropUpload(): void {
         objectPanel.classList.remove("object-panel--dragover");
         dropOverlay.hidden = true;
 
+        if (document.body.classList.contains("modal-open")) {
+          setStatus(
+            "Finish or close the open dialog before dropping files.",
+            5000,
+          );
+          return;
+        }
         if (!state.connected || !state.currentBucket) {
-          setStatus("Connect to a bucket first.");
+          setStatus("Connect to a bucket first.", 5000);
           return;
         }
 
@@ -985,8 +1143,10 @@ function wireTransferCompletion(): void {
       const bucket = state.currentBucket;
       const prefix = state.currentPrefix;
       try {
+        // A background refresh must not wipe what the user has selected.
         const committed = await refreshObjects(bucket, prefix, {
           supersedePending: false,
+          preserveSelection: true,
         });
         if (
           committed &&
@@ -1035,13 +1195,22 @@ function wireTransferCompletion(): void {
       showToast("Transfer complete", { type: "success" });
     }
     if (summary.errorCount > 0) {
-      const n = summary.errorCount;
-      showToast(
-        `${n} transfer${n === 1 ? "" : "s"} failed \u2014 see Activity log`,
-        {
-          type: "error",
-        },
-      );
+      // Sticky, with the two things the user needs next: look at the rows, or
+      // retry them. Both open the Transfers tab rather than the log.
+      showToast(`${plural(summary.errorCount, "transfer")} failed`, {
+        type: "error",
+        duration: 0,
+        actions: [
+          {
+            label: "Show failed",
+            onClick: () => {
+              openDrawer("transfers");
+              setTransferFilter("failed");
+            },
+          },
+          { label: "Retry failed", onClick: () => retryFailedTransfers() },
+        ],
+      });
     }
     if (summary.skippedCount > 0) {
       showToast(
@@ -1079,6 +1248,7 @@ function wireCommandPalette(): void {
       label: "Create Folder",
       icon: "folder-plus",
       shortcut: `${accelLabel}N`,
+      keywords: ["mkdir", "new folder"],
       action: () => void handleCreateFolder(),
       available: () => state.connected,
     },
@@ -1087,7 +1257,16 @@ function wireCommandPalette(): void {
       label: "Refresh",
       icon: "refresh-cw",
       shortcut: "F5",
+      keywords: ["reload"],
       action: () => void handleRefresh(),
+      available: () => state.connected,
+    },
+    {
+      id: "refresh-buckets",
+      label: "Refresh Buckets",
+      icon: "refresh-cw",
+      keywords: ["bucket list", "reload buckets"],
+      action: () => void handleRefreshBuckets(),
       available: () => state.connected,
     },
     {
@@ -1101,6 +1280,7 @@ function wireCommandPalette(): void {
       id: "delete",
       label: "Delete Selected",
       icon: "trash-2",
+      keywords: ["trash", "remove"],
       action: () => void handleDelete(),
       available: () => state.connected && selectionCount() > 0,
     },
@@ -1145,6 +1325,7 @@ function wireCommandPalette(): void {
       id: "go-to-key-prefix",
       label: "Go to Key/Prefix",
       icon: "compass",
+      keywords: ["jump", "path", "prefix"],
       action: () => void handleGoToKeyOrPrefix(),
       available: () => state.connected,
     },
@@ -1224,6 +1405,85 @@ function wireCommandPalette(): void {
         void navigateUp();
       },
       available: () => state.connected && state.currentPrefix.length > 0,
+    },
+    {
+      id: "rename-selected",
+      label: "Rename Selected",
+      icon: "file-text",
+      keywords: ["move", "name"],
+      action: () => void handleRename(),
+      available: () => state.connected && selectionCount() === 1,
+    },
+    {
+      id: "copy-urls",
+      label: "Copy Object URLs",
+      icon: "clipboard-list",
+      keywords: ["link", "url"],
+      action: () => void handleCopyUrl(),
+      available: () => state.connected && getSelectedFileKeys().length > 0,
+    },
+    {
+      id: "copy-keys",
+      label: "Copy Keys",
+      icon: "clipboard-list",
+      keywords: ["path", "name"],
+      action: () => void handleCopyKey(),
+      available: () => state.connected && selectionCount() > 0,
+    },
+    {
+      // Non-AWS endpoints get an explanation from handleCopyArn rather than a
+      // hidden command, so the reason is visible.
+      id: "copy-arns",
+      label: "Copy ARNs",
+      icon: "clipboard-list",
+      keywords: ["amazon resource name"],
+      action: () => void handleCopyArn(),
+      available: () => state.connected && selectionCount() > 0,
+    },
+    {
+      id: "back",
+      label: "Back",
+      icon: "arrow-left",
+      keywords: ["previous", "history"],
+      action: () => void navigateBack(),
+      available: () => state.connected,
+    },
+    {
+      id: "forward",
+      label: "Forward",
+      icon: "arrow-right",
+      keywords: ["next", "history"],
+      action: () => void navigateForward(),
+      available: () => state.connected,
+    },
+    {
+      id: "clear-filter",
+      label: "Clear Filter",
+      icon: "x-square",
+      keywords: ["reset filter"],
+      action: () => clearFilter(),
+      available: () => {
+        const filter = document.getElementById(
+          "filter-input",
+        ) as HTMLInputElement | null;
+        return state.connected && (filter?.value.length ?? 0) > 0;
+      },
+    },
+    {
+      id: "edit-location",
+      label: "Edit Location",
+      icon: "compass",
+      keywords: ["address bar", "path", "url"],
+      action: () => enterLocationEditMode(),
+      available: () => state.connected,
+    },
+    {
+      id: "keyboard-shortcuts",
+      label: "Keyboard Shortcuts",
+      icon: "info",
+      shortcut: `${accelLabel}/`,
+      keywords: ["keys", "hotkeys", "bindings"],
+      action: () => void openKeyboardShortcuts(),
     },
   ]);
 }

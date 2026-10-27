@@ -11,7 +11,7 @@ import {
   type CopyMoveQueueEntry,
   type TransferEnqueueTarget,
 } from "./transfers.ts";
-import { basename, friendlyError } from "./utils.ts";
+import { basename, friendlyError, getIconHtml, plural } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
 import { getSelectedFileKeys, getSelectedPrefixes } from "./app-selection.ts";
@@ -39,6 +39,29 @@ function destinationLocation(path: string): string {
   const trimmed = path.trim().replace(/^\/+/, "");
   if (trimmed === "" || trimmed.endsWith("/")) return trimmed;
   return trimmed.slice(0, trimmed.lastIndexOf("/") + 1);
+}
+
+const MOVE_UNSUPPORTED_REASON =
+  "This provider can't safely delete the source. Use Copy, then Delete.";
+const SELF_COPY_MESSAGE =
+  "Can't copy onto itself: the source and destination are the same. Choose a different destination.";
+const INTO_ITSELF_MESSAGE =
+  "Can't copy a folder into itself. Choose a destination outside it.";
+
+/// Closes the open Copy/Move dialog through its own close path, so an
+/// in-flight destination check is cancelled with it.
+let activeCloseCopyMove: (() => void) | null = null;
+
+export function closeCopyMoveDialog(): void {
+  activeCloseCopyMove?.();
+}
+
+/// Default name for a copy: "report.txt" becomes "report copy.txt".
+function suffixedName(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > 0
+    ? `${name.slice(0, dot)} copy${name.slice(dot)}`
+    : `${name} copy`;
 }
 
 const RECENT_COPY_MOVE_DESTS_STORAGE_KEY =
@@ -153,6 +176,12 @@ export function openCopyMoveDialog(): void {
   const closeBtn = document.getElementById(
     "copy-move-close",
   ) as HTMLButtonElement;
+  const errorEl = document.getElementById(
+    "copy-move-error",
+  ) as HTMLElement | null;
+  const moveReasonEl = document.getElementById(
+    "copy-move-move-reason",
+  ) as HTMLElement | null;
   const recentWrap = document.getElementById(
     "copy-move-recent-wrap",
   ) as HTMLElement | null;
@@ -189,13 +218,35 @@ export function openCopyMoveDialog(): void {
     return location;
   }
 
+  /// Returns the inline error when the destination would copy an item onto
+  /// itself (or a folder into its own subtree), or null when it is allowed.
+  function findSelfDestinationError(dstPath: string): string | null {
+    if (isSingleFile) {
+      return dstPath === fileKeys[0] ? SELF_COPY_MESSAGE : null;
+    }
+    const folder = dstPath.endsWith("/") ? dstPath : `${dstPath}/`;
+    if (fileKeys.some((key) => folder + basename(key) === key)) {
+      return SELF_COPY_MESSAGE;
+    }
+    for (const srcPrefix of prefixes) {
+      const target = isSingleFolder
+        ? folder
+        : folder + basename(srcPrefix.replace(/\/$/, "")) + "/";
+      if (target === srcPrefix) return SELF_COPY_MESSAGE;
+      if (target.startsWith(srcPrefix)) return INTO_ITSELF_MESSAGE;
+    }
+    return null;
+  }
+
+  // Prefill a copy destination that differs from the source. Prefilling the
+  // source itself would make the default action a self-copy.
   if (isSingleFile) {
     descEl.textContent = `File: ${fileKeys[0]}`;
-    pathInput.value = fileKeys[0];
+    pathInput.value = state.currentPrefix + suffixedName(basename(fileKeys[0]));
     pathLabel.textContent = "Destination key";
   } else if (isSingleFolder) {
     descEl.textContent = `Folder: ${prefixes[0]}`;
-    pathInput.value = prefixes[0];
+    pathInput.value = `${state.currentPrefix}${singleFolderName} copy/`;
     pathLabel.textContent = "Destination prefix";
   } else {
     const parts: string[] = [];
@@ -206,8 +257,40 @@ export function openCopyMoveDialog(): void {
         `${prefixes.length} folder${prefixes.length !== 1 ? "s" : ""}`,
       );
     descEl.textContent = `${parts.join(" + ")} — items placed under destination prefix`;
-    pathInput.value = state.currentPrefix;
+    // Multi-item destinations are chosen by the user: the current folder
+    // would place each item on top of its own source.
+    pathInput.value = "";
     pathLabel.textContent = "Destination prefix";
+  }
+
+  function showDestinationError(message: string | null): void {
+    if (errorEl) {
+      errorEl.textContent = message ?? "";
+      errorEl.hidden = message === null;
+    }
+    if (message === null) {
+      pathInput.removeAttribute("aria-invalid");
+    } else {
+      pathInput.setAttribute("aria-invalid", "true");
+    }
+  }
+  /// A queue refusal is about the whole batch, not the destination path, so it
+  /// shares the error line without marking the path field invalid.
+  function showRefusal(message: string): void {
+    if (errorEl) {
+      errorEl.textContent = message;
+      errorEl.hidden = false;
+    }
+  }
+  pathInput.oninput = () => showDestinationError(null);
+  showDestinationError(null);
+
+  // Move needs a provider that verifies DeleteObject If-Match. Without it the
+  // button stays visible with the reason, so the limit is explained.
+  const moveSupported = state.conditionalDeleteSupported;
+  if (moveReasonEl) {
+    moveReasonEl.hidden = moveSupported;
+    moveReasonEl.textContent = moveSupported ? "" : MOVE_UNSUPPORTED_REASON;
   }
 
   const browserPanel = document.getElementById(
@@ -263,6 +346,105 @@ export function openCopyMoveDialog(): void {
   renderRecentDestinations();
 
   let loadFolderSeq = 0;
+  const isBrowseStale = (seq: number): boolean =>
+    seq !== loadFolderSeq || dialogGeneration !== copyMoveDialogGeneration;
+
+  interface FolderPage {
+    prefixes: string[];
+    truncated: boolean;
+    nextToken: string;
+  }
+
+  async function fetchFolderPage(
+    prefix: string,
+    token: string,
+  ): Promise<FolderPage> {
+    const resp = await invokeS3For<{
+      prefixes: string[];
+      truncated: boolean;
+      next_continuation_token: string;
+    }>(sourceSnap.connectionId, "list_objects", {
+      bucket: bucketSelect.value,
+      prefix,
+      delimiter: "/",
+      continuationToken: token,
+    });
+    return {
+      prefixes: resp.prefixes,
+      truncated: resp.truncated === true,
+      nextToken: resp.next_continuation_token ?? "",
+    };
+  }
+
+  function renderFolderRows(prefix: string, folders: string[]): void {
+    for (const p of folders) {
+      const name = p.slice(prefix.length).replace(/\/$/, "");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "copy-move-folder-item";
+      btn.setAttribute("aria-pressed", "false");
+      const icon = document.createElement("span");
+      icon.className = "copy-move-folder-item__icon";
+      icon.innerHTML = getIconHtml("folder", { decorative: true });
+      const label = document.createElement("span");
+      label.textContent = name;
+      btn.append(icon, label);
+      btn.addEventListener("dblclick", () => void loadFolders(p));
+      btn.addEventListener("click", () => {
+        pathInput.value = pathForLocation(p);
+        showDestinationError(null);
+        for (const item of browserList.querySelectorAll<HTMLElement>(
+          ".copy-move-folder-item",
+        )) {
+          item.setAttribute("aria-pressed", String(item === btn));
+        }
+      });
+      btn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") void loadFolders(p);
+      });
+      browserList.appendChild(btn);
+    }
+  }
+
+  function renderLoadMore(prefix: string, token: string, seq: number): void {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "btn btn--ghost copy-move-browser-more";
+    more.textContent = "Load more folders";
+    more.addEventListener("click", () => {
+      more.disabled = true;
+      void (async () => {
+        try {
+          const page = await fetchFolderPage(prefix, token);
+          if (isBrowseStale(seq)) return;
+          more.remove();
+          renderFolderRows(prefix, page.prefixes);
+          if (page.truncated) renderLoadMore(prefix, page.nextToken, seq);
+        } catch (err) {
+          if (isBrowseStale(seq)) return;
+          // The button stays, so clicking it again is the retry.
+          more.disabled = false;
+          setStatus(`Could not load more folders: ${friendlyError(err)}`, 5000);
+        }
+      })();
+    });
+    browserList.appendChild(more);
+  }
+
+  function renderFolderError(message: string, retry: () => void): void {
+    const wrap = document.createElement("div");
+    wrap.className = "copy-move-browser-empty";
+    wrap.setAttribute("role", "alert");
+    const text = document.createElement("span");
+    text.textContent = message;
+    const retryBtn = document.createElement("button");
+    retryBtn.type = "button";
+    retryBtn.className = "btn btn--ghost";
+    retryBtn.textContent = "Retry";
+    retryBtn.addEventListener("click", retry);
+    wrap.append(text, " ", retryBtn);
+    browserList.appendChild(wrap);
+  }
 
   async function loadFolders(prefix: string): Promise<void> {
     const seq = ++loadFolderSeq;
@@ -274,57 +456,24 @@ export function openCopyMoveDialog(): void {
     renderBrowserCrumbs(prefix);
 
     try {
-      const bucket = bucketSelect.value;
-      const resp = await invokeS3For<{ prefixes: string[] }>(
-        sourceSnap.connectionId,
-        "list_objects",
-        {
-          bucket,
-          prefix,
-          delimiter: "/",
-          continuationToken: "",
-        },
-      );
-
-      if (
-        dialogGeneration !== copyMoveDialogGeneration ||
-        seq !== loadFolderSeq
-      )
-        return;
-
+      const page = await fetchFolderPage(prefix, "");
+      if (isBrowseStale(seq)) return;
       browserList.innerHTML = "";
-
-      if (resp.prefixes.length === 0) {
+      if (page.prefixes.length === 0 && !page.truncated) {
         browserList.insertAdjacentHTML(
           "beforeend",
           '<div class="copy-move-browser-empty">No subfolders</div>',
         );
         return;
       }
-
-      for (const p of resp.prefixes) {
-        const name = p.slice(prefix.length).replace(/\/$/, "");
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "copy-move-folder-item";
-        btn.textContent = "\uD83D\uDCC1 " + name;
-        btn.addEventListener("dblclick", () => void loadFolders(p));
-        btn.addEventListener("click", () => {
-          pathInput.value = pathForLocation(p);
-        });
-        btn.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") void loadFolders(p);
-        });
-        browserList.appendChild(btn);
-      }
-    } catch {
-      if (
-        dialogGeneration !== copyMoveDialogGeneration ||
-        seq !== loadFolderSeq
-      )
-        return;
-      browserList.innerHTML =
-        '<div class="copy-move-browser-empty">Failed to load folders</div>';
+      renderFolderRows(prefix, page.prefixes);
+      if (page.truncated) renderLoadMore(prefix, page.nextToken, seq);
+    } catch (err) {
+      if (isBrowseStale(seq)) return;
+      browserList.innerHTML = "";
+      renderFolderError(`Failed to load folders: ${friendlyError(err)}`, () => {
+        void loadFolders(prefix);
+      });
     }
   }
 
@@ -382,12 +531,18 @@ export function openCopyMoveDialog(): void {
     dialogGeneration === copyMoveDialogGeneration &&
     runGeneration === operationGeneration;
 
+  // Move stays disabled on providers without verified conditional delete,
+  // even while a copy runs or after the dialog resets.
+  const setOperationBusy = (busy: boolean): void => {
+    copyBtn.disabled = busy;
+    moveBtn.disabled = busy || !state.conditionalDeleteSupported;
+  };
+
   const closeFn = () => {
     // A stale async run from an earlier dialog must not close a dialog that was
     // opened later against the same shared DOM nodes.
     if (dialogGeneration !== copyMoveDialogGeneration) return;
-    copyBtn.disabled = false;
-    moveBtn.disabled = false;
+    setOperationBusy(false);
     copyMoveDialogGeneration += 1;
     operationGeneration += 1;
     overlay.classList.remove("active");
@@ -400,6 +555,7 @@ export function openCopyMoveDialog(): void {
 
   const runCopy = async (move: boolean) => {
     if (operationInFlight) return;
+    if (move && !state.conditionalDeleteSupported) return;
     const runGeneration = ++operationGeneration;
     if (sourceChanged()) {
       setStatus(
@@ -425,13 +581,18 @@ export function openCopyMoveDialog(): void {
       pathInput.focus();
       return;
     }
+    const selfError = findSelfDestinationError(dstPath);
+    if (selfError !== null) {
+      showDestinationError(selfError);
+      pathInput.focus();
+      return;
+    }
     const action = move ? "move" : "copy";
     operationInFlight = true;
-    copyBtn.disabled = true;
-    moveBtn.disabled = true;
+    setOperationBusy(true);
 
     try {
-      setStatus(`Preparing ${action} transfer(s)...`);
+      setStatus(`Preparing ${action} transfers…`);
       const queuedEntries: CopyMoveQueueEntry[] = [];
       let skippedFiles = 0;
       let skippedFolders = 0;
@@ -477,7 +638,7 @@ export function openCopyMoveDialog(): void {
         });
       } else {
         const prefix = dstPath.endsWith("/") ? dstPath : dstPath + "/";
-        for (const key of fileKeys) {
+        for (const [fileIndex, key] of fileKeys.entries()) {
           const dstKey = prefix + basename(key);
           const sourceSize =
             state.objects.find((object) => object.key === key)?.size ??
@@ -488,7 +649,11 @@ export function openCopyMoveDialog(): void {
             dstKey,
             conflictSession,
             true,
-            { operation: "copy", byteLength: sourceSize },
+            {
+              operation: "copy",
+              byteLength: sourceSize,
+              remainingCount: fileKeys.length - fileIndex - 1 + prefixes.length,
+            },
           );
           if (!runIsCurrent(runGeneration)) return;
           if (intent === "skip") {
@@ -511,7 +676,7 @@ export function openCopyMoveDialog(): void {
             ...(sourceSize === undefined ? {} : { size: sourceSize }),
           });
         }
-        for (const srcPrefix of prefixes) {
+        for (const [prefixIndex, srcPrefix] of prefixes.entries()) {
           const folderName = basename(srcPrefix.replace(/\/$/, ""));
           const dstPrefix = isSingleFolder ? prefix : prefix + folderName + "/";
           let folderHasConflict = false;
@@ -550,6 +715,7 @@ export function openCopyMoveDialog(): void {
                 `${dstBucket}/${dstPrefix}`,
                 conflictSession,
                 true,
+                { remainingCount: prefixes.length - prefixIndex - 1 },
               );
               if (!runIsCurrent(runGeneration)) return;
             }
@@ -615,7 +781,15 @@ export function openCopyMoveDialog(): void {
         return;
       }
 
-      enqueueCopyMoveEntries(queuedEntries, sourceTarget);
+      const queueResult = enqueueCopyMoveEntries(queuedEntries, sourceTarget);
+      if (!queueResult.accepted) {
+        // The queue has already logged and toasted the reason. Keep the dialog
+        // and selection so the user can resolve recovery and submit again.
+        showRefusal(
+          queueResult.reason ?? "The transfer queue did not accept this.",
+        );
+        return;
+      }
       const destinationPrefix = dstPath.endsWith("/") ? dstPath : `${dstPath}/`;
       rememberCopyMoveDestination(
         dstBucket,
@@ -635,11 +809,11 @@ export function openCopyMoveDialog(): void {
           ? ` Cancelled ${cancelledWrites} unconditional write${cancelledWrites === 1 ? "" : "s"}.`
           : "";
       setStatus(
-        `Queued ${queuedEntries.length} ${action} transfer(s).${skippedLabel}${cancelledLabel}`,
+        `Queued ${plural(queueResult.count, "item")}….${skippedLabel}${cancelledLabel}`,
         5000,
       );
       logActivity(
-        `Queued ${queuedEntries.length} ${action} transfer(s) to "${dstBucket}/${dstPath}".${skippedLabel}${cancelledLabel}`,
+        `Queued ${plural(queueResult.count, `${action} transfer`)} to "${dstBucket}/${dstPath}".${skippedLabel}${cancelledLabel}`,
         "success",
       );
       closeFn();
@@ -654,8 +828,7 @@ export function openCopyMoveDialog(): void {
     } finally {
       operationInFlight = false;
       if (dialogGeneration === copyMoveDialogGeneration) {
-        copyBtn.disabled = false;
-        moveBtn.disabled = false;
+        setOperationBusy(false);
       }
     }
   };
@@ -665,6 +838,8 @@ export function openCopyMoveDialog(): void {
   cancelBtn.onclick = closeFn;
   closeBtn.onclick = closeFn;
 
+  setOperationBusy(false);
+  activeCloseCopyMove = closeFn;
   overlay.classList.add("active");
   pathInput.focus();
   pathInput.select();

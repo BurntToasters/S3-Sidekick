@@ -1,32 +1,54 @@
-/* Design tokens, theme variables, reset and base elements */
+/* Design tokens, theme variables, reset and base elements.
+
+   Light values live on :root. Dark values are repeated in exactly two blocks,
+   the OS-dark media query (app theme "system") and [data-theme="dark"]. Keep the
+   two copies identical; tests/browser/ux-theme-tokens.spec.ts fails on drift. */
 
 :root {
+  color-scheme: light;
+
   --bg: #f4f4f5;
   --bg-surface: #ffffff;
-  --bg-hover: #e4e4e7;
+  --bg-elevated: #ffffff;
+  --bg-hover: #eeeef1;
   --bg-active: #dbeafe;
   --border: #e4e4e7;
+  --border-strong: #8e8e96;
   --border-focus: #4f46e5;
+  --focus-ring-width: 2px;
+  --focus-ring-color: var(--border-focus);
   --text: #09090b;
+  --text-primary: var(--text);
   --text-secondary: #5c5c64;
-  --text-muted: #6e6e77;
+  --text-muted: #66666f;
 
   --accent: #4f46e5;
   --accent-hover: #4338ca;
   --accent-text: #ffffff;
+  --accent-fg: #4f46e5;
 
   --danger: #ef4444;
+  --danger-text: #b91c1c;
+  --danger-strong: #b91c1c;
+  --warning: #f59e0b;
+  /* Amber-700 (#b45309) only reaches 4.12:1 on --bg-active; amber-800 clears 4.5:1. */
+  --warning-text: #92400e;
+
   --disconnect-bg: rgba(239, 68, 68, 0.08);
   --disconnect-border: rgba(239, 68, 68, 0.25);
-  --disconnect-text: #dc2626;
+  /* Red-700 keeps the error text at 4.5:1 on the --disconnect-bg tint. */
+  --disconnect-text: #b91c1c;
   --disconnect-bg-hover: rgba(239, 68, 68, 0.15);
   --disconnect-border-hover: rgba(239, 68, 68, 0.45);
-  --disconnect-text-hover: #b91c1c;
+  --disconnect-text-hover: #991b1b;
 
   --badge-off-bg: #e4e4e7;
   --badge-off-text: #5c5c64;
   --badge-on-bg: #dcfce7;
   --badge-on-text: #15803d;
+
+  --tooltip-bg: #18181b;
+  --tooltip-text: #fafafa;
 
   --font:
     "Segoe UI Variable", "Segoe UI", "Ubuntu", "Noto Sans", system-ui,
@@ -34,6 +56,7 @@
   --mono: "Cascadia Code", "Consolas", "SF Mono", monospace;
   --radius: 8px;
   --radius-sm: 6px;
+  --radius-md: 10px;
   --radius-lg: 12px;
   --space-1: 4px;
   --space-2: 8px;
@@ -44,19 +67,22 @@
   --text-sm: 12px;
   --text-md: 13px;
   --text-lg: 20px;
-  --focus-ring-width: 2px;
-  --focus-ring-color: var(--accent);
-  --text-primary: var(--text);
+  --line-height-body: 1.4;
+
+  --titlebar-height: 40px;
+  --titlebar-traffic-spacer: 78px;
+  --statusbar-height: 32px;
+
   --sidebar-width: 240px;
   --sidebar-min: 200px;
   --sidebar-max: 420px;
   --inspector-width: 360px;
   --inspector-min: 280px;
   --inspector-max: 560px;
-  --warning: #f59e0b;
 
   --glass-bg: rgba(255, 255, 255, 0.7);
   --glass-bg-heavy: rgba(255, 255, 255, 0.88);
+  --glass-bg-subtle: rgba(0, 0, 0, 0.03);
   --glass-border: rgba(0, 0, 0, 0.06);
   --glass-blur: 16px;
   --glass-blur-light: 10px;
@@ -65,29 +91,63 @@
   --glass-shadow-elevated:
     0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
   --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.28);
   --glow-accent: rgba(79, 70, 229, 0.12);
   --transition-smooth: 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
   --transition-bounce: 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Overlay stacking order. The app picks the topmost overlay by computed z-index,
+     so these values must keep this order. */
+  --z-biometric: 259;
+  --z-modal: 260;
+  --z-context-menu: 300;
+  --z-dialog: 320;
+  --z-palette: 400;
+  --z-support: 450;
+  --z-wizard: 500;
+  --z-toast: 600;
+  --z-skip-link: 10000;
+
+  /* Panel overlays inside .main-layout, used only at narrow widths. They sit
+     under the app-level scale above and are ordered backdrop < drop zone < inspector < sidebar. */
+  --z-panel-backdrop: 40;
+  --z-drop-zone: 50;
+  --z-inspector-overlay: 55;
+  --z-sidebar-overlay: 60;
 }
 
 /* Dark theme: activated by OS preference (when user hasn't forced light)
-   or by explicit data-theme="dark" attribute. Single source of truth. */
+   or by explicit data-theme="dark" attribute. Keep in sync with the
+   [data-theme="dark"] block below. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
     --bg: #09090b;
     --bg-surface: #18181b;
-    --bg-hover: #27272a;
+    --bg-elevated: #27272a;
+    --bg-hover: #32323a;
     --bg-active: #1e1b4b;
     --border: #27272a;
+    --border-strong: #71717a;
     --border-focus: #6366f1;
     --text: #fafafa;
     --text-secondary: #b4b4bd;
     --text-muted: #a1a1aa;
 
-    --accent: #6366f1;
-    --accent-hover: #818cf8;
-    /* White on indigo-500 keeps accent-button text above 4.5:1 in dark. */
+    /* Buttons fill with indigo-600 so white text clears 4.5:1 in dark. */
+    --accent: #4f46e5;
+    --accent-hover: #4338ca;
     --accent-text: #ffffff;
+    --accent-fg: #818cf8;
+
+    --danger-text: #f87171;
+    --danger-strong: #b91c1c;
+    --warning: #fbbf24;
+    --warning-text: #fbbf24;
+
+    --tooltip-bg: #3f3f46;
+    --tooltip-text: #fafafa;
 
     --disconnect-bg: rgba(248, 113, 113, 0.12);
     --disconnect-border: rgba(248, 113, 113, 0.3);
@@ -101,36 +161,49 @@
     --badge-on-bg: #064e3b;
     --badge-on-text: #a7f3d0;
 
-    --warning: #fbbf24;
-    --text-primary: var(--text);
-
     --glass-bg: rgba(24, 24, 27, 0.72);
     --glass-bg-heavy: rgba(24, 24, 27, 0.88);
+    --glass-bg-subtle: rgba(255, 255, 255, 0.04);
     --glass-border: rgba(255, 255, 255, 0.08);
     --glass-shadow:
       0 4px 20px -2px rgba(0, 0, 0, 0.35), 0 2px 8px -1px rgba(0, 0, 0, 0.25);
     --glass-shadow-elevated:
       0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4);
     --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.5);
     --glow-accent: rgba(99, 102, 241, 0.1);
   }
 }
 
-/* Explicit dark override (user forced via settings toggle) */
+/* Explicit dark override (user forced via settings toggle). Identical to the
+   media-query block above. */
 [data-theme="dark"] {
+  color-scheme: dark;
+
   --bg: #09090b;
   --bg-surface: #18181b;
-  --bg-hover: #27272a;
+  --bg-elevated: #27272a;
+  --bg-hover: #32323a;
   --bg-active: #1e1b4b;
   --border: #27272a;
+  --border-strong: #71717a;
   --border-focus: #6366f1;
   --text: #fafafa;
   --text-secondary: #b4b4bd;
   --text-muted: #a1a1aa;
 
-  --accent: #6366f1;
-  --accent-hover: #818cf8;
-  --accent-text: #09090b;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-text: #ffffff;
+  --accent-fg: #818cf8;
+
+  --danger-text: #f87171;
+  --danger-strong: #b91c1c;
+  --warning: #fbbf24;
+  --warning-text: #fbbf24;
+
+  --tooltip-bg: #3f3f46;
+  --tooltip-text: #fafafa;
 
   --disconnect-bg: rgba(248, 113, 113, 0.12);
   --disconnect-border: rgba(248, 113, 113, 0.3);
@@ -144,17 +217,16 @@
   --badge-on-bg: #064e3b;
   --badge-on-text: #a7f3d0;
 
-  --warning: #fbbf24;
-  --text-primary: var(--text);
-
   --glass-bg: rgba(24, 24, 27, 0.72);
   --glass-bg-heavy: rgba(24, 24, 27, 0.88);
+  --glass-bg-subtle: rgba(255, 255, 255, 0.04);
   --glass-border: rgba(255, 255, 255, 0.08);
   --glass-shadow:
     0 4px 20px -2px rgba(0, 0, 0, 0.35), 0 2px 8px -1px rgba(0, 0, 0, 0.25);
   --glass-shadow-elevated:
     0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4);
   --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.5);
   --glow-accent: rgba(99, 102, 241, 0.1);
 }
 
@@ -184,6 +256,7 @@ body {
   overflow: hidden;
   font-family: var(--font);
   font-size: 14px;
+  line-height: var(--line-height-body);
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -200,4 +273,9 @@ body.platform-macos {
 
 body.platform-linux {
   --font: "Noto Sans", "Ubuntu", "Cantarell", sans-serif;
+}
+
+/* Linux uses native window chrome, so no custom title bar offset applies. */
+body:not(.titlebar-custom) {
+  --titlebar-height: 0px;
 }

@@ -32,6 +32,11 @@
   letter-spacing: inherit;
   display: inline-flex;
   align-items: center;
+  /* 24px minimum target (matching the breadcrumb segments). The negative
+     block margin keeps the header row at its original height: the target
+     overhangs the header padding instead of growing the sticky thead. */
+  min-height: 24px;
+  margin-block: -4.25px;
   cursor: pointer;
 }
 
@@ -41,9 +46,9 @@
 }
 
 .sort-indicator {
-  font-size: 9px;
+  font-size: var(--text-xs);
   margin-left: 2px;
-  color: var(--accent);
+  color: var(--accent-fg);
   display: inline-flex;
   align-items: center;
 }

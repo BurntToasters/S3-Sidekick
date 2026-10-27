@@ -87,10 +87,6 @@
   display: none;
 }
 
-#batch-more {
-  display: none;
-}
-
 /* The content-main container narrows when the inspector is docked. Keep the
    permanent row on one line and move the less common actions into the shared
    keyboard-aware context-menu surface. */

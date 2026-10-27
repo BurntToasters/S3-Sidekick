@@ -1,7 +1,7 @@
 /* Copy/Move dialog and folder browser */
 
 .copy-move-desc {
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
   word-break: break-all;
 }
@@ -11,7 +11,7 @@
 }
 
 .copy-move-browse-toggle {
-  font-size: 13px;
+  font-size: var(--text-md);
   padding: 4px 0;
   text-align: left;
 }
@@ -20,8 +20,40 @@
   gap: 6px;
 }
 
+/* .setting-item sets display: flex, which would otherwise override the hidden
+   attribute and show an empty "Recent destinations" heading. */
+.copy-move-recents[hidden] {
+  display: none;
+}
+
+.copy-move-error,
+.copy-move-reason {
+  margin: 4px 0 0;
+  font-size: var(--text-sm);
+  color: var(--danger-text);
+}
+
+.copy-move-error[hidden],
+.copy-move-reason[hidden] {
+  display: none;
+}
+
+.copy-move-folder-item[aria-pressed="true"] {
+  background: var(--bg-hover);
+  font-weight: 600;
+}
+
+.copy-move-folder-item__icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.copy-move-browser-more {
+  margin: 6px 10px;
+}
+
 .copy-move-recents__label {
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   letter-spacing: 0.01em;
   color: var(--text-secondary);
@@ -38,7 +70,7 @@
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 3px 9px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   background: var(--bg-surface);
   cursor: pointer;
@@ -73,14 +105,14 @@
   align-items: center;
   gap: 2px;
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   border-bottom: 1px solid var(--border);
 }
 
 .copy-move-browser-crumbs button {
   background: none;
   border: none;
-  color: var(--accent);
+  color: var(--accent-fg);
   cursor: pointer;
   font: inherit;
   min-height: 24px;
@@ -112,7 +144,7 @@
   align-items: center;
   gap: 6px;
   padding: 5px 10px;
-  font-size: 13px;
+  font-size: var(--text-md);
   cursor: pointer;
   border: none;
   background: none;
@@ -133,14 +165,14 @@
 
 .copy-move-browser-empty {
   padding: 12px 10px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   text-align: center;
 }
 
 .copy-move-browser-loading {
   padding: 12px 10px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   text-align: center;
 }

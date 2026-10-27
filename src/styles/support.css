@@ -3,7 +3,7 @@
 .support-overlay {
   position: fixed;
   inset: 0;
-  z-index: 450;
+  z-index: var(--z-support);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -14,6 +14,13 @@
 }
 .support-overlay[hidden] {
   display: none;
+}
+
+/* Same title-bar offset as the modal and dialog overlays. */
+body.titlebar-custom .support-overlay {
+  top: var(--titlebar-height);
+  bottom: 0;
+  height: auto;
 }
 
 @keyframes support-overlay-in {
@@ -31,13 +38,13 @@
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--glass-border);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
   padding: 32px 28px 24px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   text-align: center;
   animation: support-card-in 0.25s var(--transition-bounce);
 }
@@ -59,7 +66,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-1);
 }
 
 .support-card__icon-svg {
@@ -75,7 +82,7 @@
 }
 
 .support-card__body {
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
   line-height: 1.6;
   margin: 0;
@@ -85,7 +92,7 @@
 .support-card__actions {
   display: flex;
   gap: 10px;
-  margin-top: 8px;
+  margin-top: var(--space-2);
   width: 100%;
   justify-content: center;
 }

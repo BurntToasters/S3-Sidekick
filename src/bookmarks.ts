@@ -10,6 +10,10 @@ export interface Bookmark {
   session_token?: string;
 }
 
+// The icon registry has no pencil; this is Lucide's `pencil` path.
+const PENCIL_ICON_SVG =
+  '<svg class="lucide-icon bookmark__rename-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>';
+
 let bookmarks: Bookmark[] = [];
 /**
  * Why the last load could not read the stored bookmarks, or null when it
@@ -213,11 +217,83 @@ export async function removeBookmark(
   });
 }
 
+/**
+ * Name suggested when saving a connection. Endpoint, region, and a masked
+ * access key tell apart connections that share a host or a generic name.
+ * Keys of eight characters or fewer are omitted rather than partly shown.
+ */
+export function suggestBookmarkName(
+  endpoint: string,
+  region: string,
+  accessKey: string,
+): string {
+  const parts = [deriveProviderLabelFromEndpoint(endpoint)];
+  const trimmedRegion = region.trim();
+  if (trimmedRegion) parts.push(trimmedRegion);
+  const key = accessKey.trim();
+  if (key.length > 8) parts.push(`${key.slice(0, 4)}…${key.slice(-4)}`);
+  return parts.join(" · ");
+}
+
+export type BookmarkPatch = Partial<
+  Pick<
+    Bookmark,
+    | "name"
+    | "endpoint"
+    | "region"
+    | "access_key"
+    | "secret_key"
+    | "session_token"
+  >
+>;
+
+/**
+ * Edit a saved connection in place, matched by identity like removeBookmark.
+ * Resolves false when it is no longer saved, so a stale edit cannot re-add it.
+ * Rejects, and saves nothing, when the edited row would not load again or
+ * would duplicate another saved endpoint and access key.
+ */
+export async function updateBookmark(
+  target: Pick<Bookmark, "endpoint" | "access_key">,
+  patch: BookmarkPatch,
+): Promise<boolean> {
+  return enqueueBookmarkMutation(async () => {
+    requireBookmarksLoaded();
+    if (!bookmarks.some((b) => sameBookmark(b, target))) return false;
+    const edited = bookmarks
+      .filter((b) => sameBookmark(b, target))
+      .map((b) => ({ ...b, ...patch }));
+    if (!edited.every(isBookmark)) {
+      throw new Error(
+        "Those details are not valid for a saved connection. Check the name, endpoint, and access key.",
+      );
+    }
+    for (const row of edited) {
+      const clash = bookmarks.some(
+        (b) => !sameBookmark(b, target) && sameBookmark(b, row),
+      );
+      if (clash) {
+        throw new Error(
+          "Another saved connection already uses this endpoint and access key.",
+        );
+      }
+    }
+    const next = bookmarks.map((b) =>
+      sameBookmark(b, target) ? { ...b, ...patch } : b,
+    );
+    await persistBookmarksSnapshot(next);
+    bookmarks = next;
+    onChangeCallback?.();
+    return true;
+  });
+}
+
 export function renderBookmarkBar(
   barEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
   activeEndpoint?: string,
   onNewTab?: () => void,
+  activeAccessKey?: string,
 ): void {
   barEl.innerHTML = "";
   if (bookmarks.length === 0 && !onNewTab) return;
@@ -225,13 +301,23 @@ export function renderBookmarkBar(
   for (let i = 0; i < bookmarks.length; i++) {
     const b = bookmarks[i];
     const chip = document.createElement("button");
+    // The endpoint alone is shared by every key saved for one host.
     const isActive =
-      activeEndpoint !== undefined && b.endpoint === activeEndpoint;
+      activeEndpoint !== undefined &&
+      b.endpoint === activeEndpoint &&
+      (activeAccessKey === undefined || b.access_key === activeAccessKey);
     chip.className = isActive
       ? "bookmark-chip bookmark-chip--active"
       : "bookmark-chip";
-    chip.textContent = b.name;
-    chip.title = b.region ? `${b.endpoint} (${b.region})` : b.endpoint;
+    chip.type = "button";
+    const label = document.createElement("span");
+    label.className = "bookmark-chip__label";
+    label.textContent = b.name;
+    chip.appendChild(label);
+    // The title carries the full name (the label may be truncated) and the endpoint.
+    const where = b.region ? `${b.endpoint} (${b.region})` : b.endpoint;
+    chip.title = `${b.name} · ${where}`;
+    chip.setAttribute("aria-label", b.name);
     chip.addEventListener("click", () => onSelect(b));
     barEl.appendChild(chip);
   }
@@ -239,6 +325,7 @@ export function renderBookmarkBar(
   if (onNewTab) {
     const plusBtn = document.createElement("button");
     plusBtn.className = "bookmark-chip bookmark-chip--new";
+    plusBtn.type = "button";
     plusBtn.title = "New connection";
     plusBtn.textContent = "+";
     plusBtn.addEventListener("click", onNewTab);
@@ -256,9 +343,18 @@ export function exportBookmarksJson(includeSecrets = false): string {
   return JSON.stringify(exported, null, 2);
 }
 
+export interface BookmarkImportResult {
+  imported: number;
+  /** Entries not imported: `duplicates` plus `invalid`. */
+  skipped: number;
+  duplicates?: number;
+  invalid?: number;
+  error?: string;
+}
+
 export async function importBookmarksJson(
   json: string,
-): Promise<{ imported: number; skipped: number; error?: string }> {
+): Promise<BookmarkImportResult> {
   if (typeof json !== "string" || json.length > MAX_IMPORT_BYTES) {
     return { imported: 0, skipped: 0, error: "Bookmark import is too large" };
   }
@@ -282,15 +378,16 @@ export async function importBookmarksJson(
   }
 
   const valid = parsed.filter(isBookmark);
+  const invalid = parsed.length - valid.length;
   if (valid.length === 0) {
-    return { imported: 0, skipped: parsed.length };
+    return { imported: 0, skipped: parsed.length, duplicates: 0, invalid };
   }
 
   try {
     return await enqueueBookmarkMutation(async () => {
       requireBookmarksLoaded();
       let imported = 0;
-      let skipped = 0;
+      let duplicates = 0;
       const nextBookmarks = [...bookmarks];
       for (const b of valid) {
         const exists = nextBookmarks.some(
@@ -299,7 +396,7 @@ export async function importBookmarksJson(
             existing.access_key === b.access_key,
         );
         if (exists) {
-          skipped++;
+          duplicates++;
         } else {
           nextBookmarks.push(b);
           imported++;
@@ -312,7 +409,12 @@ export async function importBookmarksJson(
         onChangeCallback?.();
       }
 
-      return { imported, skipped };
+      return {
+        imported,
+        skipped: duplicates + invalid,
+        duplicates,
+        invalid,
+      };
     });
   } catch (err) {
     return {
@@ -351,6 +453,8 @@ export function renderBookmarkList(
     emptyMessage?: string;
     emptyTitle?: string;
     layout?: "default" | "connection";
+    onRename?: (bookmark: Bookmark) => void;
+    onEdit?: (bookmark: Bookmark) => void;
   } = {},
 ): void {
   const layout = options.layout ?? "default";
@@ -374,6 +478,13 @@ export function renderBookmarkList(
     return;
   }
 
+  const deleteButton = (b: Bookmark, i: number) =>
+    `<button type="button" class="bookmark__delete" data-delete="${i}" aria-label="Delete ${escapeHtml(b.name)}" title="Delete ${escapeHtml(b.name)}">${getIconHtml("x", { className: "lucide-icon bookmark__delete-icon", decorative: true })}</button>`;
+  const renameButton = (b: Bookmark, i: number) =>
+    `<button type="button" class="bookmark__rename" data-rename="${i}" aria-label="Rename ${escapeHtml(b.name)}" title="Rename ${escapeHtml(b.name)}">${PENCIL_ICON_SVG}</button>`;
+  const editButton = (b: Bookmark, i: number) =>
+    `<button type="button" class="bookmark__edit" data-edit="${i}" aria-label="Edit ${escapeHtml(b.name)}" title="Edit ${escapeHtml(b.name)}">Edit</button>`;
+
   listEl.innerHTML = rendered
     .map((b, i) => {
       const regionPart = b.region ? ` (${escapeHtml(b.region)})` : "";
@@ -381,7 +492,7 @@ export function renderBookmarkList(
         const provider = escapeHtml(
           deriveProviderLabelFromEndpoint(b.endpoint),
         );
-        return `<li class="bookmark-item bookmark-item--connection" data-index="${i}" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
+        return `<li class="bookmark-item bookmark-item--connection" data-index="${i}" role="button" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
           <div class="bookmark-item__body">
             <div class="bookmark-item__top">
               <div class="bookmark__name">${escapeHtml(b.name)}</div>
@@ -389,23 +500,25 @@ export function renderBookmarkList(
             </div>
             <div class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</div>
           </div>
-          <button class="bookmark__delete" data-delete="${i}" title="Remove bookmark">${getIconHtml("x", { className: "lucide-icon bookmark__delete-icon", decorative: true })}</button>
+          ${options.onRename ? renameButton(b, i) : ""}
+          ${options.onEdit ? editButton(b, i) : ""}
+          ${deleteButton(b, i)}
         </li>`;
       }
-      return `<li class="bookmark-item" data-index="${i}" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
+      return `<li class="bookmark-item" data-index="${i}" role="button" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
           <div style="flex:1;min-width:0">
             <div class="bookmark__name">${escapeHtml(b.name)}</div>
             <div class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</div>
           </div>
-          <button class="bookmark__delete" data-delete="${i}" title="Remove bookmark">${getIconHtml("x", { className: "lucide-icon bookmark__delete-icon", decorative: true })}</button>
+          ${options.onEdit ? editButton(b, i) : ""}
+          ${deleteButton(b, i)}
         </li>`;
     })
     .join("");
 
   listEl.onclick = (e) => {
-    const deleteBtn = (e.target as HTMLElement).closest<HTMLElement>(
-      "[data-delete]",
-    );
+    const target = e.target as HTMLElement;
+    const deleteBtn = target.closest<HTMLElement>("[data-delete]");
     if (deleteBtn) {
       e.stopPropagation();
       const idx = parseInt(deleteBtn.dataset.delete!, 10);
@@ -414,9 +527,35 @@ export function renderBookmarkList(
       }
       return;
     }
-    const item = (e.target as HTMLElement).closest<HTMLElement>(
-      ".bookmark-item",
-    );
+    const renameBtn = target.closest<HTMLElement>("[data-rename]");
+    if (renameBtn) {
+      e.stopPropagation();
+      const idx = parseInt(renameBtn.dataset.rename!, 10);
+      if (
+        options.onRename &&
+        Number.isInteger(idx) &&
+        idx >= 0 &&
+        idx < rendered.length
+      ) {
+        options.onRename(rendered[idx]);
+      }
+      return;
+    }
+    const editBtn = target.closest<HTMLElement>("[data-edit]");
+    if (editBtn) {
+      e.stopPropagation();
+      const idx = parseInt(editBtn.dataset.edit!, 10);
+      if (
+        options.onEdit &&
+        Number.isInteger(idx) &&
+        idx >= 0 &&
+        idx < rendered.length
+      ) {
+        options.onEdit(rendered[idx]);
+      }
+      return;
+    }
+    const item = target.closest<HTMLElement>(".bookmark-item");
     if (item) {
       highlightBookmarkListItem(listEl, item);
       const idx = parseInt(item.dataset.index!, 10);
@@ -427,10 +566,12 @@ export function renderBookmarkList(
   };
 
   listEl.onkeydown = (e) => {
-    if (e.key !== "Enter") return;
-    const item = (e.target as HTMLElement).closest<HTMLElement>(
-      ".bookmark-item",
-    );
+    // Controls inside a row keep their own keys: Enter on Delete must ask
+    // to delete, not connect through the row.
+    const target = e.target as HTMLElement;
+    if (target.closest("[data-delete], [data-rename], [data-edit]")) return;
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const item = target.closest<HTMLElement>(".bookmark-item");
     if (!item) return;
     e.preventDefault();
     highlightBookmarkListItem(listEl, item);

@@ -2,6 +2,55 @@
 
 use super::*;
 
+/// Largest body the preview reads. Text keeps this prefix with a size hint;
+/// images above it are not drawn from a partial body.
+const MAX_PREVIEW: i64 = 1_048_576;
+
+/// What the preview does once HEAD has named the content type and size.
+/// Only `Read` fetches the body; the other plans answer from HEAD alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewPlan {
+    Read,
+    TooLarge,
+    Unsupported,
+}
+
+fn preview_media_type(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn is_previewable_image_type(content_type: &str) -> bool {
+    matches!(
+        preview_media_type(content_type).as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/svg+xml"
+            | "image/bmp"
+            | "image/x-icon"
+    )
+}
+
+fn plan_preview(content_type: &str, total_size: i64) -> PreviewPlan {
+    if is_previewable_image_type(content_type) {
+        if total_size > MAX_PREVIEW {
+            PreviewPlan::TooLarge
+        } else {
+            PreviewPlan::Read
+        }
+    } else if is_text_content_type(content_type) {
+        PreviewPlan::Read
+    } else {
+        PreviewPlan::Unsupported
+    }
+}
+
 // Keep the future held by Tauri's IPC responder small. The implementation
 // owns AWS SDK request state and the bounded preview body, so returning it
 // boxed prevents that state from being copied onto the responder's stack.
@@ -39,7 +88,16 @@ pub(super) async fn preview_object_inner(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    const MAX_PREVIEW: i64 = 1_048_576;
+    if plan_preview(&content_type, total_size) != PreviewPlan::Read {
+        return Ok(PreviewResponse {
+            content_type,
+            data: String::new(),
+            is_text: false,
+            truncated: false,
+            total_size,
+        });
+    }
+
     let head_truncated = total_size > MAX_PREVIEW;
     let version_id = head
         .version_id()
@@ -129,4 +187,62 @@ pub(super) async fn preview_object_inner(
         truncated: head_truncated || observed_truncation,
         total_size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: i64 = 1_048_576;
+
+    #[test]
+    fn small_images_are_read() {
+        assert_eq!(plan_preview("image/png", 4096), PreviewPlan::Read);
+        assert_eq!(plan_preview("image/jpeg", MIB), PreviewPlan::Read);
+        assert_eq!(
+            plan_preview("image/png; charset=binary", 10),
+            PreviewPlan::Read
+        );
+    }
+
+    #[test]
+    fn images_over_the_limit_are_too_large_without_a_read() {
+        assert_eq!(plan_preview("image/png", MIB + 1), PreviewPlan::TooLarge);
+        assert_eq!(plan_preview("image/webp", 50 * MIB), PreviewPlan::TooLarge);
+    }
+
+    #[test]
+    fn svg_follows_the_image_size_rule() {
+        assert_eq!(plan_preview("image/svg+xml", 2048), PreviewPlan::Read);
+        assert_eq!(
+            plan_preview("image/svg+xml", 2 * MIB),
+            PreviewPlan::TooLarge
+        );
+    }
+
+    #[test]
+    fn text_is_read_even_when_larger_than_the_limit() {
+        // Text keeps its first megabyte; the size hint explains the cut.
+        assert_eq!(plan_preview("text/plain", 5 * MIB), PreviewPlan::Read);
+        assert_eq!(plan_preview("application/json", 5 * MIB), PreviewPlan::Read);
+    }
+
+    #[test]
+    fn archives_binaries_and_media_are_unsupported_without_a_read() {
+        assert_eq!(
+            plan_preview("application/zip", 2048),
+            PreviewPlan::Unsupported
+        );
+        assert_eq!(
+            plan_preview("application/octet-stream", 2048),
+            PreviewPlan::Unsupported
+        );
+        assert_eq!(plan_preview("video/mp4", 2048), PreviewPlan::Unsupported);
+        assert_eq!(plan_preview("", 2048), PreviewPlan::Unsupported);
+    }
+
+    #[test]
+    fn unknown_image_subtypes_are_not_previewed() {
+        assert_eq!(plan_preview("image/heic", 2048), PreviewPlan::Unsupported);
+    }
 }

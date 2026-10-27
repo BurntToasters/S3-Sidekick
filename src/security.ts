@@ -1,7 +1,34 @@
 import { invoke } from "./ipc.ts";
-import { showConfirm, showPrompt, showAlert } from "./dialogs.ts";
+import {
+  showConfirm,
+  showPrompt,
+  showAlert,
+  type DialogExtraAction,
+} from "./dialogs.ts";
 import { state } from "./state.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
+import { friendlyError, plural } from "./utils.ts";
+
+const NEW_PASSWORD_WARNING =
+  "Set a password to encrypt saved connections and your last-used connection with AES-256.\n\nThis password can't be recovered. If you forget it, the only way back is a factory reset, which deletes saved connections.";
+
+const FORGOT_PASSWORD_HINT =
+  "\n\nA forgotten password can't be recovered. Forgot password? starts a factory reset, which deletes saved connections.";
+
+/** Runs the reset flow for "Forgot password?"; registered by the app wiring. */
+let forgotPasswordHandler: (() => void) | null = null;
+
+export function setForgotPasswordHandler(handler: () => void): void {
+  forgotPasswordHandler = handler;
+}
+
+function forgotPasswordAction(): DialogExtraAction | undefined {
+  if (!forgotPasswordHandler) return undefined;
+  return {
+    label: "Forgot password?",
+    onSelect: () => forgotPasswordHandler?.(),
+  };
+}
 
 export interface SecurityStatus {
   initialized: boolean;
@@ -114,6 +141,31 @@ function errorText(err: unknown): string {
   return String(err);
 }
 
+/**
+ * User-facing text for a failed vault operation. Backend strings are kept as
+ * detail only when nothing more specific applies, and each common cause says
+ * what the user can do next.
+ */
+export function securityErrorMessage(err: unknown): string {
+  const text = errorText(err);
+  if (/invalid password|incorrect password/i.test(text)) {
+    return "That password is incorrect. Check caps lock and try again.";
+  }
+  if (/keychain/i.test(text) && /denied|refus|access/i.test(text)) {
+    return "The system keychain denied access. Allow S3 Sidekick to use the keychain (or unlock it), then try again.";
+  }
+  if (/locked/i.test(text) && /unlock/i.test(text)) {
+    return "Encrypted storage is locked. Unlock it with your password first.";
+  }
+  return friendlyError(text);
+}
+
+/** Convenience-gate caveat shown wherever biometric unlock is offered. */
+export function biometricCaveat(platform: string): string {
+  const label = biometricLabel(platform);
+  return `${label} is a convenience gate, not hardware-bound. A process running as your operating-system user can read the stored key without completing the prompt.`;
+}
+
 export function isCancellationError(err: unknown): boolean {
   const text = errorText(err).toLowerCase();
   return text.includes("canceled") || text.includes("cancelled");
@@ -140,7 +192,7 @@ export function isSecurityUpgradeRequiredError(err: unknown): boolean {
 function unlockFailureMessage(err: unknown): false | string {
   const text = errorText(err);
   if (/invalid password/i.test(text)) return false;
-  return `Unlock failed: ${text}`;
+  return `Unlock failed: ${securityErrorMessage(err)}`;
 }
 
 function extractErrorCode(err: unknown): string | null {
@@ -182,35 +234,45 @@ async function waitForWindowFocus(timeoutMs: number): Promise<void> {
   });
 }
 
+/**
+ * Ask for a new password twice. Length and match problems are reported
+ * inline by the dialog, so the user corrects the field instead of restarting.
+ */
 async function promptForNewPassword(): Promise<string | null> {
-  const first = await showPrompt(
-    "Set Password",
-    "Set a password to encrypt saved credentials (AES-256):",
-    { inputType: "password", inputPlaceholder: "Password (8+ characters)" },
-  );
+  const first = await showPrompt("Set Password", NEW_PASSWORD_WARNING, {
+    inputType: "password",
+    inputPlaceholder: "Password (8+ characters)",
+    validationMessage: "Password must be at least 8 characters.",
+    validate: async (value) => value.length >= 8,
+  });
   if (first === null) return null;
-  if (first.length < 8) {
-    await showAlert(
-      "Invalid Password",
-      "Password must be at least 8 characters.",
-    );
-    return null;
-  }
 
   const confirmed = await showPrompt(
     "Confirm Password",
-    "Confirm your password:",
+    "Type the same password again.",
     {
       inputType: "password",
       inputPlaceholder: "Confirm password",
+      validationMessage: "Passwords do not match.",
+      validate: async (value) => value === first,
     },
   );
   if (confirmed === null) return null;
-  if (first !== confirmed) {
-    await showAlert("Password Mismatch", "Passwords do not match.");
-    return null;
-  }
   return first;
+}
+
+/**
+ * Check the current password before the flow asks for anything else. Uses
+ * the backend unlock verifier, which is idempotent for an unlocked vault.
+ */
+async function verifyCurrentPassword(value: string): Promise<boolean | string> {
+  if (!value) return "Enter your current password.";
+  try {
+    await unlockSecurity(value, false);
+    return true;
+  } catch (err) {
+    return unlockFailureMessage(err);
+  }
 }
 
 export async function ensureSecurityReady(): Promise<boolean> {
@@ -218,14 +280,17 @@ export async function ensureSecurityReady(): Promise<boolean> {
   try {
     status = await getSecurityStatus();
   } catch (err) {
-    await showAlert("Error", `Failed to read security status: ${err}`);
+    await showAlert(
+      "Error",
+      `Could not read the security status. ${securityErrorMessage(err)}`,
+    );
     return false;
   }
 
   if (!status.initialized) {
     const enableEncryption = await showConfirm(
       "Credential Encryption",
-      "Enable credential encryption?\n\nRecommended: Yes.\nCredentials and bookmarks will be encrypted with AES-256 and protected by your password.",
+      "Enable credential encryption?\n\nRecommended: Yes.\nSaved connections and your last-used connection will be encrypted with AES-256 and protected by your password.",
       { okLabel: "Enable", cancelLabel: "Skip" },
     );
 
@@ -240,14 +305,20 @@ export async function ensureSecurityReady(): Promise<boolean> {
         try {
           status = await initializeSecurity(false, null);
         } catch (err) {
-          await showAlert("Error", `Failed to initialize security: ${err}`);
+          await showAlert(
+            "Error",
+            `Could not finish setup. ${securityErrorMessage(err)}`,
+          );
           return false;
         }
       } else {
         try {
           status = await initializeSecurity(true, password);
         } catch (err) {
-          await showAlert("Error", `Failed to enable encryption: ${err}`);
+          await showAlert(
+            "Error",
+            `Could not turn on encryption. ${securityErrorMessage(err)}`,
+          );
           return false;
         }
       }
@@ -255,7 +326,10 @@ export async function ensureSecurityReady(): Promise<boolean> {
       try {
         status = await initializeSecurity(false, null);
       } catch (err) {
-        await showAlert("Error", `Failed to initialize security: ${err}`);
+        await showAlert(
+          "Error",
+          `Could not finish setup. ${securityErrorMessage(err)}`,
+        );
         return false;
       }
     }
@@ -305,17 +379,19 @@ export async function ensureSecurityReady(): Promise<boolean> {
   }
 
   const label = biometricLabel(platform);
-  const unlockMessage = biometricAttempted
-    ? biometricUpgradeRequired
-      ? "A one-time password unlock is required to upgrade encrypted credentials after updating S3 Sidekick."
-      : biometricCredentialRemoved
-        ? `${label} credential was removed from the system.\nPlease unlock with your password, then re-enable ${label} in Settings.`
-        : biometricCanceled
-          ? "Biometric authentication was canceled.\nEnter your password to unlock encrypted credentials:"
-          : biometricErrorCode
-            ? `Biometric authentication was not completed (${biometricErrorCode}).\nEnter your password to unlock encrypted credentials:`
-            : "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
-    : "Enter your password to unlock encrypted credentials:";
+  const unlockMessage =
+    (biometricAttempted
+      ? biometricUpgradeRequired
+        ? "A one-time password unlock is required to upgrade encrypted credentials after updating S3 Sidekick."
+        : biometricCredentialRemoved
+          ? `${label} credential was removed from the system.\nPlease unlock with your password, then re-enable ${label} in Settings.`
+          : biometricCanceled
+            ? "Biometric authentication was canceled.\nEnter your password to unlock encrypted credentials:"
+            : biometricErrorCode
+              ? `Biometric authentication was not completed (${biometricErrorCode}).\nEnter your password to unlock encrypted credentials:`
+              : "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
+      : "Enter your password to unlock encrypted credentials:") +
+    FORGOT_PASSWORD_HINT;
   // An unlock can still be running when the user presses Cancel. The backend
   // may then finish unlocking; report that state rather than claiming the
   // vault is locked while it is not.
@@ -324,6 +400,7 @@ export async function ensureSecurityReady(): Promise<boolean> {
     inputType: "password",
     inputPlaceholder: "Password",
     validationMessage: "Incorrect password. Try again.",
+    extraAction: forgotPasswordAction(),
     validate: async (value) => {
       if (!value) return false;
       const attempt = unlockSecurity(value);
@@ -399,20 +476,16 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
       if (biometricSettings && biometricToggle) {
         if (status.biometric_available && status.unlocked) {
           biometricSettings.style.display = "";
-          const biometricLabelEl = biometricSettings.querySelector("label");
+          const biometricLabelEl =
+            biometricSettings.querySelector(".setting-label");
           if (biometricLabelEl)
             biometricLabelEl.textContent = `${label} Unlock`;
+          // The visible text is the accessible name, so it starts the name.
           biometricToggle.textContent = status.biometric_enrolled
             ? `Disable ${label}`
             : `Enable ${label}`;
-          biometricToggle.setAttribute(
-            "aria-label",
-            status.biometric_enrolled
-              ? `Disable ${label} unlock`
-              : `Enable ${label} unlock`,
-          );
           if (biometricNote) {
-            biometricNote.textContent = `${label} is a convenience gate, not hardware-bound. A process running as your operating-system user can read the stored key without completing the prompt.`;
+            biometricNote.textContent = biometricCaveat(platform);
           }
         } else {
           biometricSettings.style.display = "none";
@@ -428,7 +501,7 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
       if (biometricSettings) biometricSettings.style.display = "none";
     }
   } catch (err) {
-    statusText.textContent = `Security status error: ${err}`;
+    statusText.textContent = `Could not read encryption status. ${securityErrorMessage(err)}`;
   }
 }
 
@@ -445,7 +518,10 @@ export async function handleSecurityToggle(
     status = await getSecurityStatus();
   } catch (err) {
     if (toggleBtn) toggleBtn.disabled = false;
-    await showAlert("Error", `Failed to read security status: ${err}`);
+    await showAlert(
+      "Error",
+      `Could not read encryption status. ${securityErrorMessage(err)}`,
+    );
     return false;
   }
 
@@ -485,11 +561,12 @@ export async function handleSecurityToggle(
       let unlockResult: SecurityStatus | null = null;
       const password = await showPrompt(
         "Unlock",
-        "Enter your password to unlock encrypted credentials:",
+        `Enter your password to unlock encrypted credentials:${FORGOT_PASSWORD_HINT}`,
         {
           inputType: "password",
           inputPlaceholder: "Password",
           validationMessage: "Incorrect password. Try again.",
+          extraAction: forgotPasswordAction(),
           validate: async (value) => {
             if (!value) return false;
             try {
@@ -515,7 +592,7 @@ export async function handleSecurityToggle(
     } else if (status.encryption_enabled) {
       const shouldDisable = await showConfirm(
         "Disable Encryption",
-        "Disable encryption?\n\nSaved credentials and bookmarks will be stored unencrypted.",
+        "Disable encryption?\n\nSaved connections and your last-used connection will be stored unencrypted.",
         { okLabel: "Disable", okDanger: true },
       );
       if (!shouldDisable) return false;
@@ -523,7 +600,12 @@ export async function handleSecurityToggle(
       const currentPassword = await showPrompt(
         "Current Password",
         "Enter your current password to decrypt stored credentials:",
-        { inputType: "password", inputPlaceholder: "Current password" },
+        {
+          inputType: "password",
+          inputPlaceholder: "Current password",
+          validationMessage: "That password is incorrect. Try again.",
+          validate: verifyCurrentPassword,
+        },
       );
       if (currentPassword === null) return false;
       if (!currentPassword) {
@@ -546,7 +628,10 @@ export async function handleSecurityToggle(
     await refreshSecuritySettingsUI();
     return true;
   } catch (err) {
-    await showAlert("Error", `Security update failed: ${err}`);
+    await showAlert(
+      "Error",
+      `Could not update encryption. ${securityErrorMessage(err)}`,
+    );
     return false;
   } finally {
     if (toggleBtn) toggleBtn.disabled = false;
@@ -556,27 +641,49 @@ export async function handleSecurityToggle(
 export async function handleSecurityChangePassword(
   setStatus: StatusSetter,
 ): Promise<void> {
-  const currentPassword = await showPrompt(
-    "Current Password",
-    "Enter your current password:",
-    { inputType: "password", inputPlaceholder: "Current password" },
-  );
-  if (currentPassword === null) return;
-  if (!currentPassword) {
-    await showAlert("Error", "Current password is required.");
-    return;
-  }
-
-  const newPassword = await promptForNewPassword();
-  if (!newPassword) return;
-
+  const changeBtn = document.getElementById(
+    "security-change-password",
+  ) as HTMLButtonElement | null;
+  if (changeBtn) changeBtn.disabled = true;
   try {
+    // The current password is verified inline, before the new one is typed.
+    const currentPassword = await showPrompt(
+      "Current Password",
+      "Enter your current password:",
+      {
+        inputType: "password",
+        inputPlaceholder: "Current password",
+        validationMessage: "That password is incorrect. Try again.",
+        validate: verifyCurrentPassword,
+      },
+    );
+    if (currentPassword === null) return;
+    if (!currentPassword) {
+      await showAlert("Error", "Current password is required.");
+      return;
+    }
+
+    const newPassword = await promptForNewPassword();
+    if (!newPassword) return;
+
     await changeSecurityPassword(currentPassword, newPassword);
     setStatus("Credential encryption password updated.");
     await refreshSecuritySettingsUI();
   } catch (err) {
-    await showAlert("Error", `Failed to change password: ${err}`);
+    await showAlert(
+      "Error",
+      `Could not change the password. ${securityErrorMessage(err)}`,
+    );
+  } finally {
+    if (changeBtn) changeBtn.disabled = false;
   }
+}
+
+/** Visible confirmation for an immediately applied auto-lock change. */
+export function autoLockLabel(minutes: number): string {
+  if (minutes <= 0) return "Auto-lock turned off";
+  if (minutes >= 60) return "Auto-lock set to 1 hour";
+  return `Auto-lock set to ${plural(minutes, "minute")}`;
 }
 
 export async function handleLockNow(setStatus: StatusSetter): Promise<boolean> {
@@ -587,7 +694,10 @@ export async function handleLockNow(setStatus: StatusSetter): Promise<boolean> {
     await refreshSecuritySettingsUI();
     return true;
   } catch (err) {
-    await showAlert("Error", `Failed to lock: ${err}`);
+    await showAlert(
+      "Error",
+      `Could not lock encrypted storage. ${securityErrorMessage(err)}`,
+    );
     return false;
   }
 }
@@ -596,12 +706,19 @@ export async function handleLockTimeoutChange(): Promise<void> {
   const select = document.getElementById(
     "security-lock-timeout",
   ) as HTMLSelectElement | null;
+  const statusEl = document.getElementById("security-lock-status");
   if (!select) return;
 
+  const minutes = Number(select.value);
   try {
-    await setLockTimeoutMinutes(Number(select.value));
+    await setLockTimeoutMinutes(minutes);
+    if (statusEl) statusEl.textContent = autoLockLabel(minutes);
   } catch (err) {
-    await showAlert("Error", `Failed to set lock timeout: ${err}`);
+    if (statusEl) statusEl.textContent = "";
+    await showAlert(
+      "Error",
+      `Could not change auto-lock. ${securityErrorMessage(err)}`,
+    );
   }
 }
 
@@ -627,7 +744,10 @@ export async function handleBiometricToggle(
     }
     await refreshSecuritySettingsUI();
   } catch (err) {
-    await showAlert("Error", `Biometric update failed: ${err}`);
+    await showAlert(
+      "Error",
+      `Could not change biometric unlock. ${securityErrorMessage(err)}`,
+    );
   } finally {
     if (btn) btn.disabled = false;
   }

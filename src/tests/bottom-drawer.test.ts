@@ -29,6 +29,9 @@ describe("bottom drawer", () => {
   beforeEach(() => {
     vi.resetModules();
     localStorage.removeItem("drawer-height");
+    localStorage.removeItem("drawer-open");
+    localStorage.removeItem("drawer-tab");
+    localStorage.removeItem("drawer-minimized");
     renderFixture();
     vi.spyOn(window, "innerHeight", "get").mockReturnValue(900);
   });
@@ -55,7 +58,7 @@ describe("bottom drawer", () => {
     expect(
       (document.getElementById("drawer-clear") as HTMLButtonElement)
         .textContent,
-    ).toBe("Clear done");
+    ).toBe("Clear completed");
 
     (document.getElementById("drawer-minimize") as HTMLButtonElement).click();
     expect(

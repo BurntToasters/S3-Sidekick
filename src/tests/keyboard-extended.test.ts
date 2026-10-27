@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockHideContextMenu = vi.fn();
 const mockIsDialogActive = vi.fn();
@@ -27,8 +27,13 @@ vi.mock("../context-menu.ts", () => ({
   isContextMenuOpen: () => false,
 }));
 
+const mockShowAlert = vi.fn<(title: string, message: string) => Promise<void>>(
+  async () => {},
+);
+
 vi.mock("../dialogs.ts", () => ({
   isDialogActive: mockIsDialogActive,
+  showAlert: mockShowAlert,
 }));
 
 vi.mock("../preview.ts", () => ({
@@ -38,6 +43,12 @@ vi.mock("../preview.ts", () => ({
 vi.mock("../info-panel.ts", () => ({
   closeInfoPanel: mockCloseInfoPanel,
   requestCloseInfoPanel: mockRequestCloseInfoPanel,
+  // Reporting the panel as already showing the selection skips the
+  // discard guard, so these keyboard tests see no unsaved-edit prompt.
+  infoPanelShowsEntries: vi.fn(() => true),
+  hasUnsavedInfoChanges: vi.fn(() => false),
+  confirmDiscardInfoProperties: vi.fn(async () => true),
+  getInfoPanelEntries: vi.fn(() => []),
 }));
 
 vi.mock("../licenses.ts", () => ({
@@ -59,11 +70,17 @@ vi.mock("../command-palette.ts", () => ({
   isPaletteOpen: mockIsPaletteOpen,
 }));
 
+const mockCloseCopyMoveDialog = vi.fn();
+
+vi.mock("../app-copy-move.ts", () => ({
+  closeCopyMoveDialog: mockCloseCopyMoveDialog,
+}));
+
 vi.mock("../browser.ts", () => ({
   navigateUp: mockNavigateUp,
   navigateBack: mockNavigateBack,
   navigateForward: mockNavigateForward,
-  getSelectableKeys: mockGetSelectableKeys,
+  getSelectableEntries: mockGetSelectableKeys,
   handleSelectAll: mockHandleSelectAll,
   updateSelectionUI: mockUpdateSelectionUI,
 }));
@@ -94,6 +111,227 @@ function createHandlers() {
     handleCreateFolder: vi.fn(async () => {}),
   };
 }
+
+describe("macOS delete keys and modal Escape routing", () => {
+  // Detach every listener this block registers, so earlier suites in this file
+  // (which keep theirs attached) cannot inflate shared mock counts.
+  const unwires: Array<() => void> = [];
+  afterEach(() => {
+    for (const unwire of unwires.splice(0)) unwire();
+  });
+
+  beforeEach(async () => {
+    vi.resetModules();
+    mockHideContextMenu.mockReset();
+    mockIsDialogActive.mockReset();
+    mockIsDialogActive.mockReturnValue(false);
+    mockIsDrawerOpen.mockReset();
+    mockIsDrawerOpen.mockReturnValue(false);
+    mockIsPaletteOpen.mockReset();
+    mockIsPaletteOpen.mockReturnValue(false);
+    mockNavigateUp.mockReset();
+    mockNavigateUp.mockResolvedValue(undefined);
+    mockCloseCopyMoveDialog.mockReset();
+    renderFixture();
+    const { state } = await import("../state.ts");
+    state.platformName = "windows";
+    state.selectedKeys.clear();
+  });
+
+  it("routes Escape on the copy/move dialog through its cancel path", async () => {
+    document.body.innerHTML += `<div id="copy-move-overlay" class="modal-overlay active"></div>`;
+    const keyboard = await import("../keyboard.ts");
+    unwires.push(keyboard.wireKeyboardShortcuts(createHandlers()));
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(mockCloseCopyMoveDialog).toHaveBeenCalledTimes(1);
+    expect(
+      document
+        .getElementById("copy-move-overlay")
+        ?.classList.contains("active"),
+    ).toBe(true);
+  });
+
+  it("on macOS, plain Backspace goes up a folder even with a selection", async () => {
+    const { state } = await import("../state.ts");
+    const keyboard = await import("../keyboard.ts");
+    const handlers = createHandlers();
+    state.platformName = "macos";
+    state.selectedKeys.add("one.txt");
+    unwires.push(keyboard.wireKeyboardShortcuts(handlers));
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Backspace", cancelable: true }),
+    );
+    expect(handlers.handleDelete).not.toHaveBeenCalled();
+    expect(mockNavigateUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("on macOS, Command+Backspace deletes the selection", async () => {
+    const { state } = await import("../state.ts");
+    const keyboard = await import("../keyboard.ts");
+    const handlers = createHandlers();
+    state.platformName = "macos";
+    state.selectedKeys.add("one.txt");
+    unwires.push(keyboard.wireKeyboardShortcuts(handlers));
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Backspace", metaKey: true }),
+    );
+    expect(handlers.handleDelete).toHaveBeenCalledTimes(1);
+    expect(mockNavigateUp).not.toHaveBeenCalled();
+  });
+
+  it("on macOS, Backspace with no selection still goes up a folder", async () => {
+    const { state } = await import("../state.ts");
+    const keyboard = await import("../keyboard.ts");
+    const handlers = createHandlers();
+    state.platformName = "macos";
+    unwires.push(keyboard.wireKeyboardShortcuts(handlers));
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace" }));
+    expect(handlers.handleDelete).not.toHaveBeenCalled();
+    expect(mockNavigateUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores Delete and Backspace-delete while the listing is loading", async () => {
+    const { state } = await import("../state.ts");
+    const keyboard = await import("../keyboard.ts");
+    const handlers = createHandlers();
+    state.platformName = "macos";
+    state.selectedKeys.add("one.txt");
+    document.body.innerHTML += `<div id="object-panel" aria-busy="true"></div>`;
+    unwires.push(keyboard.wireKeyboardShortcuts(handlers));
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Backspace", metaKey: true }),
+    );
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
+    expect(handlers.handleDelete).not.toHaveBeenCalled();
+    expect(mockNavigateUp).not.toHaveBeenCalled();
+  });
+
+  it("a focused row checkbox does not block Delete", async () => {
+    const { state } = await import("../state.ts");
+    const keyboard = await import("../keyboard.ts");
+    const handlers = createHandlers();
+    state.selectedKeys.add("one.txt");
+    document.body.innerHTML += `<input id="row-checkbox" type="checkbox" />`;
+    unwires.push(keyboard.wireKeyboardShortcuts(handlers));
+
+    const checkbox = document.getElementById(
+      "row-checkbox",
+    ) as HTMLInputElement;
+    checkbox.focus();
+    checkbox.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Delete",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(handlers.handleDelete).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Runs before the "extended" suite below: that suite keeps its document
+// listeners attached, and they would also fire on these chord presses.
+describe("keyboard shortcuts dialog chord", () => {
+  const unwires: Array<() => void> = [];
+  afterEach(() => {
+    for (const unwire of unwires.splice(0)) unwire();
+  });
+
+  beforeEach(async () => {
+    vi.resetModules();
+    mockIsDialogActive.mockReset();
+    mockIsDialogActive.mockReturnValue(false);
+    mockIsPaletteOpen.mockReset();
+    mockIsPaletteOpen.mockReturnValue(false);
+    mockShowAlert.mockClear();
+    renderFixture();
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      `<input id="inline-editor" />`,
+    );
+    const { state } = await import("../state.ts");
+    state.platformName = "windows";
+    state.selectedKeys.clear();
+  });
+
+  it("Ctrl+/ opens the shortcut list as an alert", async () => {
+    const keyboard = await import("../keyboard.ts");
+    unwires.push(keyboard.wireKeyboardShortcuts(createHandlers()));
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "/",
+        ctrlKey: true,
+        cancelable: true,
+      }),
+    );
+
+    expect(mockShowAlert).toHaveBeenCalledTimes(1);
+    const [title, message] = mockShowAlert.mock.calls[0];
+    expect(title).toBe("Keyboard Shortcuts");
+    expect(message).toContain("Ctrl+K");
+    expect(message).toContain("F5");
+  });
+
+  it("Cmd+/ opens the list on macOS, labelled with Command", async () => {
+    const { state } = await import("../state.ts");
+    state.platformName = "macos";
+    const keyboard = await import("../keyboard.ts");
+    unwires.push(keyboard.wireKeyboardShortcuts(createHandlers()));
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "/", metaKey: true }),
+    );
+
+    expect(mockShowAlert).toHaveBeenCalledTimes(1);
+    expect(mockShowAlert.mock.calls[0][1]).toContain("⌘K");
+  });
+
+  it("is ignored while an editable field has focus", async () => {
+    const keyboard = await import("../keyboard.ts");
+    unwires.push(keyboard.wireKeyboardShortcuts(createHandlers()));
+    const input = document.getElementById("inline-editor") as HTMLInputElement;
+    input.focus();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "/", ctrlKey: true }),
+    );
+
+    expect(mockShowAlert).not.toHaveBeenCalled();
+  });
+
+  it("is ignored while a modal layer is open", async () => {
+    const keyboard = await import("../keyboard.ts");
+    unwires.push(keyboard.wireKeyboardShortcuts(createHandlers()));
+    // Real modal overlays carry the modal-overlay class; see index.html.
+    document
+      .getElementById("settings-overlay")
+      ?.classList.add("modal-overlay", "active");
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "/", ctrlKey: true }),
+    );
+
+    expect(mockShowAlert).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op while the command palette owns the keyboard", async () => {
+    mockIsPaletteOpen.mockReturnValue(true);
+    const keyboard = await import("../keyboard.ts");
+    unwires.push(keyboard.wireKeyboardShortcuts(createHandlers()));
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "/", ctrlKey: true }),
+    );
+
+    expect(mockShowAlert).not.toHaveBeenCalled();
+  });
+});
 
 describe("keyboard shortcuts extended", () => {
   beforeEach(async () => {

@@ -646,14 +646,16 @@ test.describe("production compact selection and dialogs", () => {
     for (let index = 0; index < 5; index += 1) {
       await longRows.nth(index).locator(".row-check").check();
     }
-    const more = page.locator("#batch-more");
-    if (await more.isVisible()) {
-      await more.click();
+    // The More menu omits Delete while the toolbar Delete button is showing,
+    // so prefer the toolbar button and fall back to the menu when it is hidden.
+    const toolbarDelete = page.locator("#batch-delete");
+    if (await toolbarDelete.isVisible()) {
+      await toolbarDelete.click();
+    } else {
+      await page.locator("#batch-more").click();
       await page
         .locator('.context-menu [role="menuitem"]', { hasText: "Delete" })
         .click();
-    } else {
-      await page.locator("#batch-delete").click();
     }
 
     await expect(page.locator("#dialog-overlay")).toHaveClass(/active/);
@@ -697,7 +699,8 @@ test.describe("production listing states", () => {
   test.use({ viewport: { width: 1100, height: 720 } });
 
   const stateCases: Array<[LayoutMockOptions["scenario"], string]> = [
-    ["empty", "This folder is empty"],
+    // The listing is the bucket root, so the empty copy names the bucket.
+    ["empty", "This bucket is empty"],
     ["error", "Failed to open bucket"],
   ];
 

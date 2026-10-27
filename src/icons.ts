@@ -48,6 +48,10 @@ import moreHorizontal from "lucide-static/icons/more-horizontal.svg?raw";
 import minus from "lucide-static/icons/minus.svg?raw";
 import square from "lucide-static/icons/square.svg?raw";
 import plus from "lucide-static/icons/plus.svg?raw";
+import pause from "lucide-static/icons/pause.svg?raw";
+import play from "lucide-static/icons/play.svg?raw";
+import copy from "lucide-static/icons/copy.svg?raw";
+import rotateCcw from "lucide-static/icons/rotate-ccw.svg?raw";
 
 const registry: Record<string, string> = {
   settings,
@@ -101,6 +105,10 @@ const registry: Record<string, string> = {
   minus,
   square,
   plus,
+  pause,
+  play,
+  copy,
+  "rotate-ccw": rotateCcw,
 };
 
 export function getIconHtml(

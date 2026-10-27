@@ -48,7 +48,25 @@ pub(crate) async fn upload_object(
     // what detects same-size rewrites before CompleteMultipartUpload publishes.
     // Create-only writes also carry the digest as an ownership marker so a
     // retried request that hits 412 can recognise its own committed object.
-    let expected_checksum = if checksum_enabled || file_size >= MULTIPART_THRESHOLD || !overwrite {
+    let needs_digest = checksum_enabled || file_size >= MULTIPART_THRESHOLD || !overwrite;
+    if needs_digest && file_size >= MULTIPART_THRESHOLD {
+        // Hashing a large file takes a while; the row says so instead of sitting at 0%.
+        emit_transfer_progress(
+            &app,
+            "upload-progress",
+            transfer_id,
+            0,
+            file_size,
+            attempt,
+            "preparing",
+            started_at,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+    let expected_checksum = if needs_digest {
         let digest = sha256_file(&upload_path, &cancel).await?;
         Some(sha256_checksum_from_digest(&digest))
     } else {

@@ -7,7 +7,11 @@ import {
 } from "./connection.ts";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { state } from "./state.ts";
-import { enqueueDownloads, type TransferEnqueueTarget } from "./transfers.ts";
+import {
+  enqueueDownloads,
+  type EnqueueResult,
+  type TransferEnqueueTarget,
+} from "./transfers.ts";
 import { showConfirm } from "./dialogs.ts";
 import { logActivity } from "./activity-log.ts";
 import {
@@ -15,6 +19,7 @@ import {
   splitNameExt,
   joinPath,
   friendlyError,
+  plural,
   safeFileName,
 } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
@@ -261,8 +266,8 @@ function enqueueTargetFromSnapshot(
 function enqueueDownloadTransfers(
   entries: DownloadQueueEntry[],
   target: TransferEnqueueTarget,
-): void {
-  enqueueDownloads(entries, target);
+): EnqueueResult {
+  return enqueueDownloads(entries, target);
 }
 
 export async function handleDownload(): Promise<void> {
@@ -302,10 +307,13 @@ export async function handleDownload(): Promise<void> {
       return;
     }
     saveRememberedDownloadDir(destination);
+    // The save dialog already asked the user about replacing an existing file,
+    // so that answer is the confirmed replace; no second prompt follows.
     entries.push({
       bucket: snap.bucket,
       key: capturedKeys[0],
       destination,
+      conflictResolution: "replace",
     });
   } else {
     let selected: string | string[] | null;
@@ -342,7 +350,10 @@ export async function handleDownload(): Promise<void> {
     );
     return;
   }
-  const resolvedEntries = await resolveDownloadEntriesWithConflicts(entries);
+  const resolvedEntries =
+    capturedKeys.length === 1
+      ? entries
+      : await resolveDownloadEntriesWithConflicts(entries);
   if (connectionSnapshotChanged(snap)) {
     setStatus(
       "Download cancelled because connection or location changed.",
@@ -369,9 +380,16 @@ export async function handleDownload(): Promise<void> {
   // progress, cancellation and resume. The direct `download_object` loop that
   // used to follow this was unreachable (its guard could not be false) and had
   // drifted out of sync with the command, omitting the required transfer id.
-  enqueueDownloadTransfers(resolvedEntries, enqueueTargetFromSnapshot(snap));
-  setStatus(`Queued ${resolvedEntries.length} download(s).`, 5000);
-  logActivity(`Queued ${resolvedEntries.length} download(s).`, "info");
+  // enqueueDownloads logs the accepted count itself.
+  const result = enqueueDownloadTransfers(
+    resolvedEntries,
+    enqueueTargetFromSnapshot(snap),
+  );
+  if (!result.accepted) {
+    setStatus(result.reason ?? "Download not queued.", 8000);
+    return;
+  }
+  setStatus(`Queued ${plural(result.count, "download")}.`, 5000);
 }
 
 export async function handleOpenLastDownloadFolder(): Promise<void> {

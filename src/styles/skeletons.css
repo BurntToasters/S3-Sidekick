@@ -72,10 +72,6 @@
   gap: 10px;
 }
 
-.table-empty__text {
-  color: var(--text-secondary);
-}
-
 .table-empty__actions {
   display: flex;
   gap: var(--space-2);

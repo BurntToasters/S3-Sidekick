@@ -76,20 +76,9 @@
   height: 14px;
 }
 
-.path-input {
-  width: min(280px, 32vw);
-  min-width: 120px;
-  max-width: 360px;
-  padding: 4px 8px;
-  font-size: 12px;
-  font-family: var(--mono);
-  flex-shrink: 1;
-  margin-right: 8px;
-}
-
 .object-size--folder {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .object-modified--muted {
@@ -104,7 +93,7 @@
 
 .shortcut-chip {
   display: inline-block;
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-family: var(--mono);
   padding: 1px 4px;
   border: 1px solid var(--border);
@@ -167,8 +156,13 @@
   background: transparent;
   padding: 0;
   font: inherit;
+  /* Keeps the touch and pointer target at least 24px tall. Flex, so the
+     current-location span (a span, not a button) gets the same box. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   cursor: pointer;
-  color: var(--accent);
+  color: var(--accent-fg);
 }
 
 .breadcrumb__segment:hover {
@@ -181,13 +175,10 @@
   border-radius: var(--radius-sm);
 }
 
-.breadcrumb__segment:last-child {
+/* The current location is plain text (aria-current="page"), not a control. */
+.breadcrumb__segment--current {
   color: var(--text);
   cursor: default;
-}
-
-.breadcrumb__segment:last-child:hover {
-  text-decoration: none;
 }
 
 .breadcrumb__sep {
@@ -315,7 +306,7 @@
   padding: 10px 14px;
   color: var(--disconnect-text);
   background: var(--disconnect-bg);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .table-error .btn {
@@ -329,7 +320,7 @@
 }
 
 .object-kind-icon.icon-folder {
-  color: var(--accent);
+  color: var(--accent-fg);
 }
 
 .object-kind-icon.icon-file {
@@ -383,7 +374,7 @@
 
 .list__item--active .list__item-btn {
   background: var(--bg-active);
-  color: var(--accent);
+  color: var(--accent-fg);
   font-weight: 600;
 }
 
@@ -439,12 +430,24 @@
   height: 13px;
 }
 
-.object-row {
+.object-table tbody .object-row > td {
   height: 36px;
 }
 
-.object-table tbody .object-row > td {
-  height: 36px;
+/* A focused row scrolled out of the virtual window stays mounted at zero
+   height so focus is not lost to <body>. It takes no space and shows nothing. */
+.object-row--parked,
+.object-row--parked > td {
+  height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border: 0;
+  line-height: 0;
+  overflow: hidden;
+}
+
+.object-row--parked * {
+  visibility: hidden;
 }
 
 .object-virtual-spacer td {
@@ -454,8 +457,8 @@
 }
 
 .listing-cap-notice {
-  color: var(--warning);
-  font-size: 12px;
+  color: var(--warning-text);
+  font-size: var(--text-sm);
   margin-left: 8px;
 }
 

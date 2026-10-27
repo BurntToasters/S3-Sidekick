@@ -32,7 +32,7 @@
 .sidebar__header--stacked {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .sidebar__header--stacked > span {
@@ -108,7 +108,7 @@
   inset: 0;
   border: 0;
   background: rgba(0, 0, 0, 0.35);
-  z-index: 40;
+  z-index: var(--z-panel-backdrop);
   display: none;
 }
 
@@ -133,7 +133,7 @@
 }
 
 .connection-screen__sidebar-header {
-  padding: 14px 16px;
+  padding: 14px var(--space-4);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -190,18 +190,18 @@
 
 .connection-form__error {
   margin: 0;
-  padding: 8px 10px;
+  padding: var(--space-2) 10px;
   border-radius: var(--radius-sm);
   border: 1px solid rgba(239, 68, 68, 0.35);
   background: rgba(239, 68, 68, 0.12);
-  color: var(--danger);
-  font-size: 12px;
+  color: var(--danger-text);
+  font-size: var(--text-sm);
   line-height: 1.4;
 }
 
 .form-row {
   display: flex;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .form-group {
@@ -221,7 +221,7 @@
 }
 
 .form-group label {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   color: var(--text-secondary);
 }
@@ -240,7 +240,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 8px;
+  margin-top: var(--space-2);
 }
 
 .conn-saved-list {
@@ -248,7 +248,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 12px;
+  padding: var(--space-3);
 }
 
 .conn-saved-list--disabled {

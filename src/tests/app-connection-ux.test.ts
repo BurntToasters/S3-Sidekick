@@ -19,6 +19,7 @@ const logActivityMock = vi.fn();
 const setStatusMock = vi.fn();
 const clearFilterInputDebounceMock = vi.fn();
 const showConfirmMock = vi.fn<(...args: unknown[]) => Promise<boolean>>();
+const readLastBucketMock = vi.fn((): string | null => null);
 
 vi.mock("../connection.ts", () => ({
   connect: connectMock,
@@ -36,7 +37,7 @@ vi.mock("../browser.ts", () => ({
   showEmptyState: showEmptyStateMock,
   clearSelection: clearSelectionMock,
   clearNavHistory: clearNavHistoryMock,
-  readLastBucket: vi.fn(() => null),
+  readLastBucket: readLastBucketMock,
 }));
 
 vi.mock("../bookmarks.ts", () => ({
@@ -101,6 +102,7 @@ describe("connection UX polish", () => {
     setStatusMock.mockReset();
     clearFilterInputDebounceMock.mockReset();
     showConfirmMock.mockReset().mockResolvedValue(true);
+    readLastBucketMock.mockReset().mockReturnValue(null);
     renderFixture();
 
     const { state } = await import("../state.ts");
@@ -185,9 +187,10 @@ describe("connection UX polish", () => {
     const pending = app.handleConnect();
     await Promise.resolve();
 
+    // While connecting, the same button cancels the attempt.
     const btn = document.getElementById("connect-btn") as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
-    expect(btn.textContent).toContain("Connecting");
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toContain("Cancel");
     expect(btn.querySelector(".spinner")).not.toBeNull();
 
     resolveConnect!("us-east-1");
@@ -215,5 +218,164 @@ describe("connection UX polish", () => {
       expect.objectContaining({ okDanger: true }),
     );
     expect(connectMock).not.toHaveBeenCalled();
+  });
+
+  it("confirmSessionTeardown resolves true without asking when nothing is active", async () => {
+    const app = await import("../app-connection.ts");
+    const { state } = await import("../state.ts");
+    state.activeTransferCount = 0;
+
+    await expect(app.confirmSessionTeardown("Disconnect")).resolves.toBe(true);
+    expect(showConfirmMock).not.toHaveBeenCalled();
+  });
+
+  it("confirmSessionTeardown asks with the transfer count and returns the answer", async () => {
+    const app = await import("../app-connection.ts");
+    const { state } = await import("../state.ts");
+    state.activeTransferCount = 2;
+
+    showConfirmMock.mockResolvedValueOnce(false);
+    await expect(app.confirmSessionTeardown("Disconnect")).resolves.toBe(false);
+    expect(showConfirmMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("2 transfers are still running or queued"),
+      expect.objectContaining({ okLabel: "Continue" }),
+    );
+    expect(showConfirmMock.mock.calls[0][1]).toContain(
+      "Disconnect will pause them until you reconnect",
+    );
+
+    showConfirmMock.mockResolvedValueOnce(true);
+    await expect(app.confirmSessionTeardown("Disconnect")).resolves.toBe(true);
+  });
+
+  it("switching connections asks before pausing active transfers and keeps the session when declined", async () => {
+    const app = await import("../app-connection.ts");
+    const { state } = await import("../state.ts");
+    state.connected = true;
+    state.connectionId = "conn-live";
+    state.activeTransferCount = 1;
+    showConfirmMock.mockResolvedValueOnce(false);
+
+    await app.switchToBookmark(
+      "beta",
+      "https://beta.example.com",
+      "us-east-1",
+      "AKIA",
+      "secret",
+    );
+
+    expect(showConfirmMock).toHaveBeenCalledTimes(1);
+    expect(disconnectMock).not.toHaveBeenCalled();
+    expect(connectMock).not.toHaveBeenCalled();
+    state.connected = false;
+    state.connectionId = "";
+  });
+
+  it("empty submit marks the first missing field invalid and focuses it", async () => {
+    const app = await import("../app-connection.ts");
+    const endpoint = document.getElementById(
+      "conn-endpoint",
+    ) as HTMLInputElement;
+    (document.getElementById("conn-access-key") as HTMLInputElement).value =
+      "AKIA";
+
+    await app.handleConnect();
+
+    expect(document.activeElement).toBe(endpoint);
+    expect(endpoint.getAttribute("aria-invalid")).toBe("true");
+    expect(endpoint.getAttribute("aria-describedby")).toBe("conn-form-error");
+    expect(
+      (
+        document.getElementById("conn-access-key") as HTMLInputElement
+      ).hasAttribute("aria-invalid"),
+    ).toBe(false);
+  });
+
+  it("the Connect button cancels a pending connect and tears down its late session", async () => {
+    let resolveConnect: ((value: string) => void) | null = null;
+    connectMock.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveConnect = resolve;
+        }),
+    );
+    const app = await import("../app-connection.ts");
+    const { state } = await import("../state.ts");
+    (document.getElementById("conn-endpoint") as HTMLInputElement).value =
+      "https://alpha.example.com";
+    (document.getElementById("conn-access-key") as HTMLInputElement).value =
+      "AKIA";
+    (document.getElementById("conn-secret-key") as HTMLInputElement).value =
+      "secret";
+
+    const pending = app.handleConnect();
+    await Promise.resolve();
+    const btn = document.getElementById("connect-btn") as HTMLButtonElement;
+    expect(btn.textContent).toContain("Cancel");
+
+    app.handleConnectButton();
+    expect(btn.textContent).toBe("Connect");
+    expect(btn.disabled).toBe(false);
+    expect(
+      (document.getElementById("conn-endpoint") as HTMLInputElement).disabled,
+    ).toBe(false);
+
+    // The backend finishes the cancelled connect after the user gave up.
+    state.connectionId = "conn-late";
+    resolveConnect!("us-east-1");
+    await pending;
+
+    expect(disconnectMock).toHaveBeenCalledWith("conn-late");
+    expect(saveConnectionMock).not.toHaveBeenCalled();
+    expect(document.getElementById("connection-screen")!.style.display).toBe(
+      "flex",
+    );
+    state.connectionId = "";
+  });
+});
+
+describe("connect shows the layout before restoring the last bucket", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    connectMock.mockReset().mockResolvedValue("us-east-1");
+    disconnectMock.mockReset().mockResolvedValue(true);
+    saveConnectionMock.mockReset().mockResolvedValue(undefined);
+    refreshBucketsMock.mockReset().mockResolvedValue(undefined);
+    showConfirmMock.mockReset().mockResolvedValue(true);
+    readLastBucketMock.mockReset().mockReturnValue("bucket-a");
+    selectBucketMock
+      .mockReset()
+      .mockImplementation(() => new Promise<undefined>(() => undefined));
+    const { state } = await import("../state.ts");
+    state.connected = false;
+    state.connecting = false;
+    state.connectionId = "";
+    renderFixture();
+    (document.getElementById("conn-endpoint") as HTMLInputElement).value =
+      "https://alpha.example.com";
+    (document.getElementById("conn-access-key") as HTMLInputElement).value =
+      "AKIA";
+    (document.getElementById("conn-secret-key") as HTMLInputElement).value =
+      "secret";
+  });
+
+  it("reveals the main layout while the restored listing is still pending", async () => {
+    const app = await import("../app-connection.ts");
+    const { state } = await import("../state.ts");
+    state.buckets = [{ name: "bucket-a", creation_date: "2024-01-01" }];
+
+    void app.handleConnect();
+
+    await vi.waitFor(() => {
+      expect(document.getElementById("main-layout")!.style.display).toBe(
+        "flex",
+      );
+    });
+    expect(selectBucketMock).toHaveBeenCalledWith("bucket-a");
+    expect(document.getElementById("connection-screen")!.style.display).toBe(
+      "none",
+    );
+    expect(showEmptyStateMock).not.toHaveBeenCalled();
   });
 });

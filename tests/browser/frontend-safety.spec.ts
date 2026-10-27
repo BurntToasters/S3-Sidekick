@@ -33,6 +33,40 @@ import {
   releaseMockUnlock,
 } from "./tauri-layout";
 
+/**
+ * Move is offered only when connect reports a provider that verifies
+ * conditional DELETE. The shared layout mock predates that field, so Move
+ * tests opt in here, before the app reads the connect result.
+ */
+async function openMoveReadyListing(
+  page: Page,
+  options: Parameters<typeof openMockListing>[1] = {},
+): Promise<void> {
+  await installLayoutTauriMock(page, options);
+  await page.addInitScript(() => {
+    const internals = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string,
+            args?: unknown,
+            opts?: unknown,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const inner = internals.invoke;
+    internals.invoke = async (cmd, args, opts) => {
+      if (cmd !== "connect") return inner(cmd, args, opts);
+      const result = (await inner(cmd, args, opts)) as Record<string, unknown>;
+      return { ...result, conditional_delete_supported: true };
+    };
+  });
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+  await connectMockListing(page, options.endpoint);
+}
+
 const BOOKMARK_A = {
   name: "Alpha",
   endpoint: "https://alpha.example.invalid",
@@ -148,7 +182,7 @@ test.describe("frontend mutation and recovery safety", () => {
   test("moves a file into a folder by appending its basename, then deletes exact receipts", async ({
     page,
   }, testInfo) => {
-    await openMockListing(page, {
+    await openMoveReadyListing(page, {
       objectCount: 1,
       prefixes: [],
       createOnlyCapabilities: FULL_CREATE_ONLY,
@@ -215,7 +249,7 @@ test.describe("frontend mutation and recovery safety", () => {
   test("keeps ambiguous fresh receipts ambiguous through persistence and delete admission", async ({
     page,
   }, testInfo) => {
-    await openMockListing(page, {
+    await openMoveReadyListing(page, {
       objectCount: 1,
       prefixes: [],
       createOnlyCapabilities: FULL_CREATE_ONLY,
@@ -276,8 +310,14 @@ test.describe("frontend mutation and recovery safety", () => {
       transferManifestJson: LEGACY_COPIED_MOVE_WITHOUT_OWNERSHIP_PROOF,
     });
     await page.goto("/");
-    await expect(page.locator("#dialog-title")).toHaveText("Resume Transfers");
-    await page.locator("#dialog-ok").click();
+    // Intentional: the recovery prompt is a choice (Resume / Discard / Decide later).
+    await expect(page.locator("#dialog-title")).toHaveText(
+      "Resume transfers from last session?",
+    );
+    await page
+      .locator("#dialog-overlay")
+      .getByRole("button", { name: "Resume", exact: true })
+      .click();
     await expect(page.locator("#connection-screen")).toBeVisible();
     await connectMockListing(page);
     await expect
@@ -451,14 +491,18 @@ test.describe("frontend mutation and recovery safety", () => {
     await expect(page.locator("#bookmark-list")).toContainText("Beta");
 
     await page.locator("#bookmark-list .bookmark__delete").first().click();
-    await expect(page.locator("#dialog-title")).toHaveText("Delete Bookmark");
+    await expect(page.locator("#dialog-title")).toHaveText(
+      "Delete saved connection",
+    );
     await page.locator("#dialog-ok").click();
     await expect(page.locator("#bookmark-list .bookmark-item")).toHaveCount(1);
     await expect(page.locator("#bookmark-list")).toContainText("Beta");
     await expect(page.locator("#bookmark-list")).not.toContainText("Alpha");
 
     await page.locator("#bookmark-list .bookmark__delete").click();
-    await expect(page.locator("#dialog-title")).toHaveText("Delete Bookmark");
+    await expect(page.locator("#dialog-title")).toHaveText(
+      "Delete saved connection",
+    );
     await page.locator("#dialog-ok").click();
     await expect(page.locator("#bookmark-list .bookmark-empty")).toHaveText(
       "No bookmarks saved",

@@ -36,6 +36,11 @@ export const state = {
   createOnlyCapabilities: {
     ...FULL_CREATE_ONLY_CAPABILITIES,
   } as CreateOnlyCapabilities,
+  /**
+   * Provider verifies DeleteObject If-Match, so a move may retire its source.
+   * Fails closed: false until a connect result says otherwise.
+   */
+  conditionalDeleteSupported: false,
   currentBucket: "",
   currentPrefix: "",
   buckets: [] as BucketInfo[],

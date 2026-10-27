@@ -46,6 +46,8 @@ function renderFixture(): void {
         <button id="setup-enc-password-reveal"></button>
         <input id="setup-enc-confirm" type="password" />
         <button id="setup-enc-confirm-reveal"></button>
+        <p id="setup-enc-status" hidden></p>
+        <p id="setup-biometric-caveat" hidden></p>
         <p id="setup-enc-error" role="alert" aria-live="assertive" hidden></p>
         <label id="setup-biometric-label" hidden>
           <input id="setup-enc-biometric" type="checkbox" />
@@ -124,7 +126,7 @@ describe("setup wizard", () => {
       false,
     );
     expect(document.getElementById("setup-enc-error")?.textContent).toContain(
-      "Failed to enable encryption",
+      "Could not turn on encryption",
     );
     expect(
       document.getElementById("setup-enc-error")?.getAttribute("role"),
@@ -173,7 +175,7 @@ describe("setup wizard", () => {
       false,
     );
     expect(document.getElementById("setup-enc-error")?.textContent).toContain(
-      "Failed to enable biometric",
+      "biometric unlock was not enabled",
     );
     expect(
       (document.getElementById("setup-enc-next") as HTMLButtonElement)
@@ -449,7 +451,7 @@ describe("setup wizard", () => {
       false,
     );
     expect(document.getElementById("setup-enc-error")?.textContent).toContain(
-      "Failed to disable encryption",
+      "Could not turn off encryption",
     );
   });
 
@@ -495,7 +497,7 @@ describe("setup wizard", () => {
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(document.getElementById("setup-enc-error")?.textContent).toContain(
-      "Failed to enable biometric",
+      "biometric unlock was not enabled",
     );
 
     // Retry with biometric unchecked and cleared passwords: committed path
@@ -691,11 +693,12 @@ describe("setup wizard", () => {
 
     reveal.click();
     expect(password.type).toBe("text");
-    expect(reveal.getAttribute("aria-label")).toBe("Hide password");
-
+    expect(reveal.textContent).toBe("Hide");
+    expect(reveal.getAttribute("aria-pressed")).toBe("true");
     reveal.click();
     expect(password.type).toBe("password");
-    expect(reveal.getAttribute("aria-label")).toBe("Show password");
+    expect(reveal.textContent).toBe("Show");
+    expect(reveal.getAttribute("aria-pressed")).toBe("false");
 
     const confirm = document.getElementById(
       "setup-enc-confirm",
@@ -728,6 +731,8 @@ describe("setup wizard", () => {
           <button id="setup-enc-back"></button><button id="setup-enc-skip">Skip</button><button id="setup-enc-next">Continue</button>
           <input id="setup-enc-password" type="password" /><button id="setup-enc-password-reveal"></button>
           <input id="setup-enc-confirm" type="password" /><button id="setup-enc-confirm-reveal"></button>
+          <p id="setup-enc-status" hidden></p>
+          <p id="setup-biometric-caveat" hidden></p>
           <p id="setup-enc-error" hidden></p>
           <label id="setup-biometric-label" hidden><input id="setup-enc-biometric" type="checkbox" /><span id="setup-biometric-text"></span></label>
         </div>
@@ -789,6 +794,8 @@ describe("setup wizard", () => {
           <button id="setup-enc-back"></button><button id="setup-enc-skip">Skip</button><button id="setup-enc-next">Continue</button>
           <input id="setup-enc-password" type="password" /><button id="setup-enc-password-reveal"></button>
           <input id="setup-enc-confirm" type="password" /><button id="setup-enc-confirm-reveal"></button>
+          <p id="setup-enc-status" hidden></p>
+          <p id="setup-biometric-caveat" hidden></p>
           <p id="setup-enc-error" hidden></p>
           <label id="setup-biometric-label" hidden><input id="setup-enc-biometric" type="checkbox" /><span id="setup-biometric-text"></span></label>
         </div>

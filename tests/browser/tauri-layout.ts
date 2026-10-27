@@ -440,6 +440,9 @@ export async function installLayoutTauriMock(
               connection_id: `browser-layout-connection-${connectSequence}`,
               connection_identity: "browser-layout-identity",
               create_only_capabilities: createOnlyCapabilities,
+              // Models AWS, the only provider that verifies conditional DELETE,
+              // so Move flows stay available.
+              conditional_delete_supported: true,
             };
           case "list_buckets":
             return [

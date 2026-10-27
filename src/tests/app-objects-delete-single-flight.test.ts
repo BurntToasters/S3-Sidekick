@@ -39,7 +39,12 @@ vi.mock("../browser.ts", () => ({
   }),
   updateSelectionUI: mocks.updateSelectionUI,
   invalidateInspectorSelectionSync: mocks.invalidateInspectorSelectionSync,
+  revealRow: vi.fn(() => true),
+  renderedIndexOfSelection: vi.fn(() => -1),
+  focusObjectTableRow: vi.fn(() => false),
 }));
+vi.mock("../bottom-drawer.ts", () => ({ openDrawer: vi.fn() }));
+vi.mock("../toast.ts", () => ({ showToast: vi.fn() }));
 vi.mock("../dialogs.ts", () => ({
   showConfirm: mocks.showConfirm,
   showPrompt: vi.fn(),
@@ -141,7 +146,23 @@ describe("destructive delete single-flight", () => {
 
     expect(mocks.refreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
       preserveSelection: true,
+      supersedePending: false,
     });
     expect(mocks.invalidateInspectorSelectionSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("queues mutation refreshes behind an in-flight navigation", async () => {
+    const { state } = await import("../state.ts");
+    state.connected = true;
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    const objects = await import("../app-objects.ts");
+    mocks.showConfirm.mockResolvedValueOnce(true);
+
+    await objects.handleDelete();
+
+    expect(mocks.refreshObjects).toHaveBeenCalledWith("bucket-a", "docs/", {
+      supersedePending: false,
+    });
   });
 });

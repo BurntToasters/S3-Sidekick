@@ -47,6 +47,14 @@ export function formatSize(bytes: number): string {
   return `${i === 0 ? value : value.toFixed(1)} ${units[i]}`;
 }
 
+export function plural(
+  count: number,
+  singular: string,
+  pluralForm = `${singular}s`,
+): string {
+  return `${count.toLocaleString()} ${count === 1 ? singular : pluralForm}`;
+}
+
 export function formatDate(iso: string): string {
   if (!iso) return "—";
   const cached = formatDateCache.get(iso);
@@ -121,15 +129,25 @@ export function safeFileName(key: string, platform: string): string {
   return name.length > 0 ? name : "unnamed";
 }
 
+/** Input types that accept typed text. Checkboxes, radios, buttons and
+ * ranges take Space/arrow keys for their own behavior, not text entry. */
+const TEXT_ENTRY_INPUT_TYPES = new Set([
+  "text",
+  "search",
+  "email",
+  "url",
+  "password",
+  "number",
+  "tel",
+]);
+
 export function isEditableElement(el: Element | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
   const tag = el.tagName;
-  return (
-    el.isContentEditable ||
-    tag === "INPUT" ||
-    tag === "TEXTAREA" ||
-    tag === "SELECT"
-  );
+  if (tag === "INPUT") {
+    return TEXT_ENTRY_INPUT_TYPES.has((el as HTMLInputElement).type);
+  }
+  return el.isContentEditable || tag === "TEXTAREA" || tag === "SELECT";
 }
 
 export { getIconHtml } from "./icons.ts";
@@ -175,6 +193,9 @@ function statusToken(code: number): RegExp {
   return new RegExp(`(?<![\\w\\-./%])${code}(?![\\w\\-./%])`);
 }
 
+const INTERNAL_FAILURE_MESSAGE =
+  "Something went wrong talking to the app backend. Try again; details are in the Activity log.";
+
 export function friendlyError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
   const msg = unwrapTransferErrorEnvelope(raw.replace(/^Error:\s*/u, ""));
@@ -208,6 +229,16 @@ export function friendlyError(err: unknown): string {
     statusToken(429).test(text)
   )
     return "Rate limited. Too many requests \u2014 wait a moment and try again.";
+  // Runtime and shape errors come from the app itself. Their raw text is
+  // developer-facing and can leak internal identifiers, so show a generic
+  // sentence and let the Activity log hold the detail.
+  if (
+    /^(TypeError|ReferenceError|RangeError|SyntaxError)\b/.test(text) ||
+    /Cannot read propert|is not a function|is not defined|is not iterable|Unexpected response shape/i.test(
+      text,
+    )
+  )
+    return INTERNAL_FAILURE_MESSAGE;
   return msg;
 }
 

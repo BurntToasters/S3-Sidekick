@@ -276,9 +276,96 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
   );
 }
 
+const MODAL_OVERLAY_SELECTOR =
+  ".modal-overlay, .dialog-overlay, .support-overlay, .setup-wizard-overlay, #palette-overlay";
+/// Titlebar controls that must stay usable while a modal is open. The drag
+/// handle keeps the window movable; the window buttons stay operable under
+/// the overlay, and everything else in the header is inert like the page.
+const MODAL_BACKDROP_EXEMPT_SELECTOR =
+  "#titlebar-win-controls, .titlebar-drag-handle";
+/// Most recent focusable control outside the modal layer. WebKit does not
+/// focus buttons on click, so a mouse-opened dialog would otherwise lose its
+/// opener.
+let lastOutsideFocus: HTMLElement | null = null;
+let modalInertTargets: HTMLElement[] = [];
+
+function isInsideModalOverlay(node: Element): boolean {
+  return node.closest(MODAL_OVERLAY_SELECTOR) !== null;
+}
+
+function rememberOutsideFocus(target: EventTarget | null): void {
+  if (!(target instanceof Element)) return;
+  const control = target.closest<HTMLElement>(FOCUSABLE_SELECTOR);
+  if (control && !isInsideModalOverlay(control)) lastOutsideFocus = control;
+}
+
+function onModalPointerDown(event: PointerEvent): void {
+  rememberOutsideFocus(event.target);
+}
+
+function onModalFocusIn(event: FocusEvent): void {
+  rememberOutsideFocus(event.target);
+}
+
+function resolveModalOpener(): HTMLElement | null {
+  const active = document.activeElement;
+  if (
+    active instanceof HTMLElement &&
+    active !== document.body &&
+    !isInsideModalOverlay(active)
+  ) {
+    return active;
+  }
+  return lastOutsideFocus?.isConnected ? lastOutsideFocus : null;
+}
+
+function collectBackgroundRoots(
+  container: HTMLElement,
+  roots: HTMLElement[],
+): void {
+  for (const child of Array.from(container.children)) {
+    if (!(child instanceof HTMLElement)) continue;
+    if (child.matches(MODAL_BACKDROP_EXEMPT_SELECTOR)) continue;
+    if (child.querySelector(MODAL_BACKDROP_EXEMPT_SELECTOR)) {
+      collectBackgroundRoots(child, roots);
+    } else {
+      roots.push(child);
+    }
+  }
+}
+
+/// Inerts the page behind a modal, leaving the titlebar window controls and
+/// drag handle reachable. Only elements this module inerts are released, so
+/// inert state owned by sidebar or inspector logic survives a modal.
+function setModalBackgroundInert(inert: boolean): void {
+  if (!inert) {
+    for (const element of modalInertTargets.splice(0)) {
+      setElementInert(element, false);
+    }
+    return;
+  }
+  const app = document.getElementById("app");
+  if (!app) return;
+  const roots: HTMLElement[] = [];
+  collectBackgroundRoots(app, roots);
+  for (const root of roots) {
+    if ((root as HTMLElement & { inert?: boolean }).inert) continue;
+    setElementInert(root, true);
+    modalInertTargets.push(root);
+  }
+}
+
 function focusFirstInOverlay(overlay: HTMLElement): void {
+  // Settings opens on the active tab (or search), not the close button, so
+  // keyboard users start where the settings content begins.
+  const preferred =
+    overlay.id === "settings-overlay"
+      ? overlay.querySelector<HTMLElement>(
+          ".settings-tab--active, #settings-search",
+        )
+      : null;
   const focusable = getFocusableElements(overlay);
-  const target = focusable[0] ?? overlay;
+  const target = preferred ?? focusable[0] ?? overlay;
   if (target === overlay && target.tabIndex < 0) {
     target.tabIndex = -1;
   }
@@ -295,30 +382,24 @@ function syncModalLayerState(): void {
   }
 
   if (hasActiveOverlay && !modalLayerActive) {
-    focusBeforeModal =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
+    focusBeforeModal = resolveModalOpener();
+    setModalBackgroundInert(true);
   } else if (!hasActiveOverlay && modalLayerActive) {
+    // Release inert before restoring focus: focusing a control inside an inert
+    // subtree silently does nothing, so the restore would otherwise be lost.
+    setModalBackgroundInert(false);
     const restore = focusBeforeModal;
     focusBeforeModal = null;
-    if (restore && document.contains(restore)) {
+    const active = document.activeElement;
+    const focusLost =
+      !(active instanceof HTMLElement) ||
+      active === document.body ||
+      isInsideModalOverlay(active);
+    if (restore?.isConnected && focusLost) {
       restore.focus();
     }
   }
   modalLayerActive = hasActiveOverlay;
-
-  const appRoot = document.getElementById("app") as HTMLElement | null;
-  if (appRoot) {
-    if (hasActiveOverlay) {
-      appRoot.setAttribute("aria-hidden", "true");
-    } else {
-      appRoot.removeAttribute("aria-hidden");
-    }
-    if ("inert" in appRoot) {
-      (appRoot as HTMLElement & { inert: boolean }).inert = hasActiveOverlay;
-    }
-  }
 
   if (overlay) {
     const active = document.activeElement;
@@ -331,36 +412,29 @@ function syncModalLayerState(): void {
 function trapFocusInModalLayer(e: KeyboardEvent): void {
   if (e.key !== "Tab") return;
   const overlay = getActiveModalOverlay();
-  if (!overlay) return;
+  // Dialogs run their own trap, which also covers the dialog's buttons.
+  if (!overlay || overlay.id === "dialog-overlay") return;
 
   const focusable = getFocusableElements(overlay);
+  e.preventDefault();
   if (focusable.length === 0) {
-    e.preventDefault();
     if (overlay.tabIndex < 0) overlay.tabIndex = -1;
     overlay.focus();
     return;
   }
 
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  const active =
-    document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-
-  if (!active || !overlay.contains(active)) {
-    e.preventDefault();
-    first.focus();
-    return;
+  // Cycle explicitly rather than relying on native Tab order: WebKit (the
+  // macOS webview) skips checkboxes and some buttons, which let focus leak
+  // out of the modal.
+  const index = focusable.indexOf(document.activeElement as HTMLElement);
+  let nextIndex: number;
+  if (index === -1) {
+    nextIndex = e.shiftKey ? focusable.length - 1 : 0;
+  } else {
+    nextIndex =
+      (index + (e.shiftKey ? -1 : 1) + focusable.length) % focusable.length;
   }
-
-  if (e.shiftKey && active === first) {
-    e.preventDefault();
-    last.focus();
-  } else if (!e.shiftKey && active === last) {
-    e.preventDefault();
-    first.focus();
-  }
+  focusable[nextIndex].focus();
 }
 
 export function handleTabListArrowKey(
@@ -772,10 +846,10 @@ export function initModalLayerObserver(): void {
   modalLayerObserver = new MutationObserver(() => {
     syncModalLayerState();
   });
+  document.addEventListener("pointerdown", onModalPointerDown, true);
+  document.addEventListener("focusin", onModalFocusIn, true);
   document
-    .querySelectorAll<HTMLElement>(
-      ".modal-overlay, .dialog-overlay, .support-overlay, .setup-wizard-overlay, #palette-overlay",
-    )
+    .querySelectorAll<HTMLElement>(MODAL_OVERLAY_SELECTOR)
     .forEach((overlay) => {
       modalLayerObserver!.observe(overlay, {
         attributes: true,
@@ -792,4 +866,7 @@ export function disposeModalLayerObserver(): void {
     modalLayerObserver = null;
   }
   document.removeEventListener("keydown", trapFocusInModalLayer, true);
+  document.removeEventListener("pointerdown", onModalPointerDown, true);
+  document.removeEventListener("focusin", onModalFocusIn, true);
+  lastOutsideFocus = null;
 }

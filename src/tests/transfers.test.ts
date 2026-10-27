@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
+const mockShowChoiceDialog = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockListen =
   vi.fn<
     (event: string, callback: (event: unknown) => void) => Promise<() => void>
@@ -62,6 +63,7 @@ async function loadTransfersModule() {
   }));
   vi.doMock("../dialogs.ts", () => ({
     showConfirm: mockShowConfirm,
+    showChoiceDialog: mockShowChoiceDialog,
     showConfirmWithCheckbox: (...args: unknown[]) =>
       mockShowConfirm(...args).then((confirmed) => ({
         confirmed,
@@ -123,6 +125,9 @@ beforeEach(() => {
   mockListen.mockResolvedValue(() => {});
   mockShowConfirm.mockReset();
   mockShowConfirm.mockResolvedValue(false);
+  mockShowChoiceDialog.mockReset();
+  // Default: "Decide later" on the recovery prompt, which keeps the manifest.
+  mockShowChoiceDialog.mockResolvedValue("later");
   localStorage.clear();
   renderFixture();
 });
@@ -187,9 +192,12 @@ describe("transfers queue UI", () => {
     expect(uploadCall).toBeTruthy();
     const uploadPayload = uploadCall?.[1] as Record<string, unknown>;
     expect(uploadPayload).not.toHaveProperty("checkpointId");
+    // Completed rows stay until the user clears them.
     await vi.waitFor(() => {
-      expect(list.textContent).not.toContain("photo.png");
+      expect(list.textContent).toContain("Completed");
     });
+    transfers.clearCompletedTransfers();
+    expect(list.textContent).not.toContain("photo.png");
   });
 
   it("serializes unconditional-write consent and applies one batch choice", async () => {
@@ -218,7 +226,9 @@ describe("transfers queue UI", () => {
     await vi.waitFor(() => expect(mockShowConfirm).toHaveBeenCalledTimes(1));
     promptResolvers.shift()?.(true);
     await vi.waitFor(() => expect(mockShowConfirm).toHaveBeenCalledTimes(2));
-    expect(mockShowConfirm.mock.calls[1]?.[0]).toBe("Apply Choice");
+    expect(mockShowConfirm.mock.calls[1]?.[0]).toBe(
+      "Apply to all remaining conflicts",
+    );
     promptResolvers.shift()?.(true);
 
     await vi.waitFor(() => {
@@ -370,7 +380,7 @@ describe("transfers queue UI", () => {
       expect(
         (document.getElementById("activity-list") as HTMLDivElement)
           .textContent,
-      ).toContain("Downloaded readme.txt");
+      ).toContain("Downloaded bucket-a/docs/readme.txt");
     });
     await flushMicrotasks(4);
     transfers.clearCompletedTransfers();
@@ -741,7 +751,15 @@ describe("transfers queue UI", () => {
           .textContent,
       ).toContain("Cancelled");
     });
+    const summary = document.getElementById("transfer-queue-summary");
+    expect(summary?.textContent ?? "").not.toMatch(/failed/i);
+    // Cancelled is neutral: it is not a completed row, so clearing completed keeps it.
     transfers.clearCompletedTransfers();
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("slow.txt");
+    const cancelledRow = document.querySelector<HTMLElement>(".transfer-item");
+    await transfers.removeTransfer(Number(cancelledRow?.dataset.id));
     expect(
       (document.getElementById("transfer-list") as HTMLDivElement).textContent,
     ).not.toContain("slow.txt");
@@ -1889,7 +1907,7 @@ describe("transfer recovery ownership", () => {
       "beforeend",
       '<div id="dialog-overlay"></div>',
     );
-    mockShowConfirm.mockResolvedValue(true);
+    mockShowChoiceDialog.mockResolvedValue("resume");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "load_transfer_manifest") {
         return {
@@ -1938,7 +1956,7 @@ describe("transfer recovery ownership", () => {
         "beforeend",
         '<div id="dialog-overlay"></div>',
       );
-      mockShowConfirm.mockResolvedValue(true);
+      mockShowChoiceDialog.mockResolvedValue("resume");
       const freshReceipt = {
         ...recoveredReceipt,
         source_etag: '"source-fresh"',
@@ -1994,7 +2012,7 @@ describe("transfer recovery ownership", () => {
       "beforeend",
       '<div id="dialog-overlay"></div>',
     );
-    mockShowConfirm.mockResolvedValue(true);
+    mockShowChoiceDialog.mockResolvedValue("resume");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "load_transfer_manifest") {
         return {
@@ -2039,7 +2057,7 @@ describe("transfer recovery ownership", () => {
         "beforeend",
         '<div id="dialog-overlay"></div>',
       );
-      mockShowConfirm.mockResolvedValue(true);
+      mockShowChoiceDialog.mockResolvedValue("resume");
       const freshReceipt = {
         ...recoveredReceipt,
         source_etag: '"source-fresh"',
@@ -2089,6 +2107,7 @@ describe("transfer recovery ownership", () => {
       "beforeend",
       '<div id="dialog-overlay"></div>',
     );
+    mockShowChoiceDialog.mockResolvedValue("resume");
     mockShowConfirm.mockResolvedValue(true);
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "load_transfer_manifest") {
@@ -2111,7 +2130,9 @@ describe("transfer recovery ownership", () => {
         mockInvoke.mock.calls.some(([cmd]) => cmd === "download_object"),
       ).toBe(true);
     });
-    expect(mockShowConfirm).toHaveBeenCalledTimes(2);
+    expect(mockShowChoiceDialog).toHaveBeenCalledTimes(1);
+    expect(mockShowConfirm).toHaveBeenCalledTimes(1);
+    expect(mockShowConfirm.mock.calls[0]?.[0]).toBe("Bind Recovered Transfers");
     const bindingSaveIndex = mockInvoke.mock.calls.findIndex(
       ([cmd, payload]) =>
         cmd === "save_transfer_manifest" &&
@@ -2177,6 +2198,7 @@ describe("transfer recovery ownership", () => {
 
   it("retains malformed native recovery data instead of clearing it", async () => {
     const transfers = await loadTransfersModule();
+    mockShowChoiceDialog.mockResolvedValue("keep");
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "load_transfer_manifest") {
         return { ...EMPTY_HYDRATION, manifest_json: "{malformed" };
@@ -2184,8 +2206,13 @@ describe("transfer recovery ownership", () => {
       return undefined;
     });
 
-    await expect(transfers.recoverPendingTransfers()).rejects.toThrow(
-      /malformed or from an unsupported future version/i,
+    // The user is asked, and "Keep for repair" leaves the data untouched.
+    await transfers.recoverPendingTransfers();
+    expect(mockShowChoiceDialog).toHaveBeenCalledWith(
+      "Transfer recovery data is damaged",
+      expect.stringMatching(/malformed or from an unsupported version/i),
+      expect.any(Array),
+      expect.objectContaining({ cancelValue: "keep" }),
     );
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "clear_transfer_manifest",
@@ -2389,7 +2416,7 @@ describe("transfer coverage lift", () => {
     expect(decoded[1234]).toBe(1234 % 251);
   });
 
-  it("discards recovery state on clearCompletedTransfers", async () => {
+  it("discards recovery state on clearFailedTransfers after confirmation", async () => {
     const transfers = await loadTransfersModule();
     const { state } = await import("../state.ts");
     state.currentSettings.maxConcurrentTransfers = 1;
@@ -2415,12 +2442,27 @@ describe("transfer coverage lift", () => {
       expect(
         (document.getElementById("transfer-list") as HTMLDivElement)
           .textContent,
-      ).toContain("forbidden");
+      ).toContain("Failed");
     });
+    // Clearing completed rows must not touch a failed row or its recovery state.
+    transfers.clearCompletedTransfers();
+    expect(
+      (document.getElementById("transfer-list") as HTMLDivElement).textContent,
+    ).toContain("clear-me.txt");
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "discard_download_scratch",
+      expect.anything(),
+    );
     mockInvoke.mockClear();
     mockInvoke.mockImplementation(async () => undefined);
-    transfers.clearCompletedTransfers();
+    mockShowConfirm.mockResolvedValue(true);
+    await transfers.clearFailedTransfers();
     await flushMicrotasks(4);
+    expect(mockShowConfirm).toHaveBeenCalledWith(
+      "Clear failed transfers?",
+      expect.any(String),
+      expect.objectContaining({ okLabel: "Remove", okDanger: true }),
+    );
     expect(mockInvoke).toHaveBeenCalledWith("discard_download_scratch", {
       destination: "C:\\tmp\\clear-me.txt",
     });
@@ -2433,7 +2475,7 @@ describe("transfer coverage lift", () => {
     );
   });
 
-  it("discards recovery state on clearNonActiveTransfers", async () => {
+  it("discards recovery state on removeTransfer after confirmation", async () => {
     const transfers = await loadTransfersModule();
     const { state } = await import("../state.ts");
     state.currentSettings.maxConcurrentTransfers = 1;
@@ -2459,11 +2501,13 @@ describe("transfer coverage lift", () => {
       expect(
         (document.getElementById("transfer-list") as HTMLDivElement)
           .textContent,
-      ).toContain("forbidden");
+      ).toContain("Failed");
     });
     mockInvoke.mockClear();
     mockInvoke.mockImplementation(async () => undefined);
-    transfers.clearNonActiveTransfers();
+    mockShowConfirm.mockResolvedValue(true);
+    const failedRow = document.querySelector<HTMLElement>(".transfer-item");
+    await transfers.removeTransfer(Number(failedRow?.dataset.id));
     await flushMicrotasks(4);
     expect(mockInvoke).toHaveBeenCalledWith("discard_download_scratch", {
       destination: "C:\\tmp\\clear-nonactive.txt",

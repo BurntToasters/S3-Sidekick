@@ -109,6 +109,22 @@ pub(super) fn validate_mutating_prefix(prefix: &str, label: &str) -> Result<(), 
     validate_key(prefix, label)
 }
 
+/// Validate a folder prefix that is about to be deleted, moved, or copied.
+///
+/// A folder is always named with its trailing `/`. Without it, `archive` also
+/// matches `archive.zip` and `archived-logs/...`, so a mistaken folder operation
+/// would reach sibling objects.
+pub(super) fn validate_mutating_folder_prefix(prefix: &str, label: &str) -> Result<(), String> {
+    validate_mutating_prefix(prefix, label)?;
+    if !prefix.ends_with('/') {
+        return Err(format!(
+            "{} must end with '/' to name a folder. A prefix without it also matches sibling objects.",
+            label
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn prefixes_overlap(first: &str, second: &str) -> bool {
     // Compare at `/` boundaries so `photos` and `photos2` are siblings, not
     // an overlap. A trailing slash normalizes `photos` and `photos/` alike.
@@ -211,4 +227,31 @@ pub(super) fn validate_bucket_name(bucket: &str) -> Result<(), String> {
         return Err("Bucket name must not contain adjacent dots".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_prefix_mutation_requires_trailing_slash() {
+        // A folder is always named with its trailing `/`. Without it, `archive`
+        // also matches `archive.zip` and `archived-logs/...` on a prefix delete.
+        for prefix in ["archive", "archive.zip", "archived-logs", "a/b"] {
+            assert!(
+                validate_mutating_folder_prefix(prefix, "Prefix").is_err(),
+                "{prefix} must be refused without a trailing slash"
+            );
+        }
+        assert!(validate_mutating_folder_prefix("archive/", "Prefix").is_ok());
+        assert!(validate_mutating_folder_prefix("a/b/", "Prefix").is_ok());
+    }
+
+    #[test]
+    fn folder_prefix_mutation_keeps_existing_refusals() {
+        let empty = validate_mutating_folder_prefix("", "Prefix").unwrap_err();
+        assert!(empty.contains("must not be empty"), "{empty}");
+        assert!(validate_mutating_folder_prefix("../etc/", "Prefix").is_err());
+        assert!(validate_mutating_folder_prefix(".s3-sidekick-rollback/", "Prefix").is_err());
+    }
 }

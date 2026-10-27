@@ -570,4 +570,94 @@ describe("app-conflicts object and download routing", () => {
     expect(out).toHaveLength(2);
     expect(mockShowConfirm).toHaveBeenCalledTimes(2);
   });
+
+  it("says the destination could not be checked when the existence probe fails", async () => {
+    mockInvoke.mockRejectedValueOnce(new Error("AccessDenied"));
+    mockShowConfirm.mockResolvedValueOnce(false);
+    const { state } = await import("../state.ts");
+    state.currentSettings.conflictPolicy = "ask";
+    const { resolveObjectConflict } = await import("../app-conflicts.ts");
+
+    const intent = await resolveObjectConflict(
+      "frozen-connection",
+      "bucket-a",
+      "docs/unknown.txt",
+      { applyAll: null },
+      false,
+      { operation: "copy" },
+    );
+
+    expect(intent).toBe("skip");
+    expect(mockShowConfirm).toHaveBeenCalledTimes(1);
+    const [title, message] = mockShowConfirm.mock.calls[0] as [string, string];
+    expect(title).toBe("Destination not checked");
+    expect(message).toContain(
+      "Couldn't check whether bucket-a/docs/unknown.txt exists",
+    );
+    expect(message).toContain("Replace if present?");
+    expect(message).not.toContain("already exists");
+  });
+
+  it("still fails closed on an unknown destination under replace policy", async () => {
+    mockInvoke.mockRejectedValueOnce(new Error("timeout"));
+    const { state } = await import("../state.ts");
+    state.currentSettings.conflictPolicy = "replace";
+    const { resolveObjectConflict } = await import("../app-conflicts.ts");
+
+    const intent = await resolveObjectConflict(
+      "frozen-connection",
+      "bucket-a",
+      "docs/unknown.txt",
+      { applyAll: null },
+      false,
+      { operation: "copy" },
+    );
+    expect(intent).toEqual({ overwrite: true });
+  });
+
+  it("uses consistent conflict wording and counts the remaining conflicts", async () => {
+    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const { resolveConflictChoice } = await import("../app-conflicts.ts");
+    const session: ConflictPromptSession = { applyAll: null };
+
+    const decision = await resolveConflictChoice(
+      "bucket-a/docs/a.txt",
+      session,
+      true,
+      {
+        remainingCount: 3,
+      },
+    );
+
+    expect(decision).toBe("replace");
+    const [first, second] = mockShowConfirm.mock.calls as unknown as [
+      [string, string, { okLabel: string; cancelLabel: string }],
+      [string, string, { okLabel: string; cancelLabel: string }],
+    ];
+    expect(first[0]).toBe("Replace existing file?");
+    expect(first[1]).toBe("bucket-a/docs/a.txt already exists. Replace it?");
+    expect(first[2]).toEqual(
+      expect.objectContaining({ okLabel: "Replace", cancelLabel: "Skip" }),
+    );
+    expect(second[0]).toBe("Apply to remaining conflicts?");
+    expect(second[1]).toContain(
+      'Apply "Replace" to up to 3 remaining conflicts?',
+    );
+    expect(second[2]).toEqual(
+      expect.objectContaining({
+        okLabel: "Apply to all remaining conflicts",
+        cancelLabel: "This one only",
+      }),
+    );
+    expect(session.applyAll).toBeNull();
+  });
+
+  it("skips the apply-to-all question when nothing remains", async () => {
+    mockShowConfirm.mockResolvedValueOnce(true);
+    const { resolveConflictChoice } = await import("../app-conflicts.ts");
+    const session: ConflictPromptSession = { applyAll: null };
+
+    await resolveConflictChoice("bucket-a/docs/last.txt", session, false);
+    expect(mockShowConfirm).toHaveBeenCalledTimes(1);
+  });
 });

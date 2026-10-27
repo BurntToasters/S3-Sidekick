@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fileEntry, type SelectionEntry } from "../app-selection.ts";
 
 const { syncInspectorMock, markInspectorHasContentMock } = vi.hoisted(() => ({
-  syncInspectorMock: vi.fn<(selectedKeys?: Set<string>) => Promise<void>>(
-    async () => {},
-  ),
+  syncInspectorMock: vi.fn<
+    (selectedEntries?: readonly SelectionEntry[]) => Promise<void>
+  >(async () => {}),
   markInspectorHasContentMock: vi.fn(),
 }));
 
@@ -78,6 +79,9 @@ function renderFixture(): void {
 describe("browser core rendering and selection", () => {
   beforeEach(async () => {
     vi.resetModules();
+    // The sort preference is read when browser.ts loads; a stored sort from an
+    // earlier test would otherwise leak into this one.
+    window.localStorage.clear();
     refreshObjectsMock.mockClear();
     syncInspectorMock.mockClear();
     markInspectorHasContentMock.mockClear();
@@ -245,10 +249,20 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("btn-download") as HTMLButtonElement).disabled,
     ).toBe(true);
 
-    browser.renderObjectTableSkeleton(1);
-    expect(
-      document.querySelector(".object-row--skeleton .object-name__inner"),
-    ).toBeTruthy();
+    // The skeleton waits 150 ms so warm navigations never flash it.
+    vi.useFakeTimers();
+    try {
+      browser.renderObjectTableSkeleton(1);
+      expect(
+        document.querySelector(".object-row--skeleton .object-name__inner"),
+      ).toBeNull();
+      vi.advanceTimersByTime(150);
+      expect(
+        document.querySelector(".object-row--skeleton .object-name__inner"),
+      ).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("supports row click multi-selection and select-all", async () => {
@@ -279,20 +293,20 @@ describe("browser core rendering and selection", () => {
     browser.renderObjectTable();
 
     browser.handleRowClick(
-      "file-a.txt",
+      fileEntry("file-a.txt"),
       new MouseEvent("click", { bubbles: true }),
     );
     expect(state.selectedKeys.has("file-a.txt")).toBe(true);
 
     browser.handleRowClick(
-      "file-b.txt",
+      fileEntry("file-b.txt"),
       new MouseEvent("click", { bubbles: true, ctrlKey: true }),
     );
     expect(state.selectedKeys.has("file-a.txt")).toBe(true);
     expect(state.selectedKeys.has("file-b.txt")).toBe(true);
 
     browser.handleRowClick(
-      "file-c.txt",
+      fileEntry("file-c.txt"),
       new MouseEvent("click", { bubbles: true, shiftKey: true }),
     );
     expect(state.selectedKeys.has("file-c.txt")).toBe(true);
@@ -340,11 +354,11 @@ describe("browser core rendering and selection", () => {
     browser.renderObjectTable();
 
     browser.handleRowClick(
-      "file-c.txt",
+      fileEntry("file-c.txt"),
       new MouseEvent("click", { bubbles: true }),
     );
     browser.handleRowClick(
-      "file-a.txt",
+      fileEntry("file-a.txt"),
       new MouseEvent("click", { bubbles: true, shiftKey: true }),
     );
     expect(state.selectedKeys.has("file-a.txt")).toBe(true);
@@ -352,7 +366,7 @@ describe("browser core rendering and selection", () => {
     expect(state.selectedKeys.has("file-c.txt")).toBe(true);
 
     browser.handleRowClick(
-      "file-a.txt",
+      fileEntry("file-a.txt"),
       new MouseEvent("click", { bubbles: true, metaKey: true }),
     );
     expect(state.selectedKeys.has("file-a.txt")).toBe(false);
@@ -360,7 +374,11 @@ describe("browser core rendering and selection", () => {
     state.selectedKeys.add("ghost-file");
     browser.updateSelectionUI();
     expect(state.selectedKeys.has("ghost-file")).toBe(false);
-    expect(browser.getSelectableKeys()).not.toContain("ignored-folder-marker");
+    expect(
+      browser
+        .getSelectableEntries()
+        .some((entry) => entry.key === "ignored-folder-marker"),
+    ).toBe(false);
   });
 
   it("filters rows, updates modified sort, and handles hasMore toggle", async () => {
@@ -405,11 +423,12 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("load-more-row") as HTMLDivElement).style
         .display,
     ).toBe("");
+    // Size cells carry no data-bar gradient: the bar read as a rendering fault.
     expect(
       (rows[1].querySelector(".object-size") as HTMLElement).getAttribute(
         "style",
       ),
-    ).toContain("linear-gradient");
+    ).toBe(null);
     expect(
       (rows[2].querySelector(".object-size") as HTMLElement).getAttribute(
         "style",
@@ -444,10 +463,10 @@ describe("browser core rendering and selection", () => {
     });
 
     browser.renderObjectTable();
-    const visible = browser.getVisibleSelectableKeys();
+    const visible = browser.getVisibleSelectableEntries();
     expect(visible).toHaveLength(260);
-    expect(visible[0]).toBe("match-001.txt");
-    expect(visible.at(-1)).toBe("match-260.txt");
+    expect(visible[0]).toEqual(fileEntry("match-001.txt"));
+    expect(visible.at(-1)).toEqual(fileEntry("match-260.txt"));
 
     browser.handleRowClick(
       visible[0],
@@ -488,13 +507,13 @@ describe("browser core rendering and selection", () => {
     ];
     browser.renderObjectTable();
     browser.handleRowClick(
-      "anchor.txt",
+      fileEntry("anchor.txt"),
       new MouseEvent("click", { bubbles: true }),
     );
     state.filterText = "clicked";
     browser.renderObjectTable();
     browser.handleRowClick(
-      "clicked.txt",
+      fileEntry("clicked.txt"),
       new MouseEvent("click", { bubbles: true, shiftKey: true }),
     );
 
@@ -562,11 +581,11 @@ describe("browser core rendering and selection", () => {
       state.filterText = "";
       state.objects = objects.map((object) => ({ ...object }));
       state.selectedKeys.clear();
-      browser.setLastClickedKey(null);
+      browser.setLastClickedEntry(null);
       browser.renderObjectTable();
 
-      const ordered = browser.getVisibleSelectableKeys();
-      expect(ordered).toEqual(scenario.expected);
+      const ordered = browser.getVisibleSelectableEntries();
+      expect(ordered.map((entry) => entry.key)).toEqual(scenario.expected);
       browser.handleRowClick(
         ordered[0],
         new MouseEvent("click", { bubbles: true }),
@@ -626,11 +645,11 @@ describe("browser core rendering and selection", () => {
     );
     browser.handleSelectAll(true);
     expect(
-      [
-        ...state.selectedKeys,
-        ...[...state.selectedPrefixes].map((prefix) => "prefix:" + prefix),
-      ].sort(),
-    ).toEqual(["hidden.json", "prefix:txt-folder/", "visible.txt"]);
+      (await import("../app-selection.ts"))
+        .getSelectionEntries()
+        .map((entry) => `${entry.kind}:${entry.key}`)
+        .sort(),
+    ).toEqual(["file:hidden.json", "file:visible.txt", "folder:txt-folder/"]);
 
     // Select-all only changes matching loaded entries; hidden selection stays
     // selected when the matching rows are cleared.
@@ -659,23 +678,30 @@ describe("browser core rendering and selection", () => {
     ];
     browser.renderObjectTable();
 
+    // Size starts largest-first; a second click flips it to ascending.
     browser.toggleSort("size");
     expect(
       (document.getElementById("sort-size") as HTMLElement).innerHTML,
     ).not.toBe("");
-    browser.toggleSort("size");
     expect(
       (
         document.querySelector('th[data-sort="size"]') as HTMLElement
       ).getAttribute("aria-sort"),
     ).toBe("descending");
+    browser.toggleSort("size");
+    expect(
+      (
+        document.querySelector('th[data-sort="size"]') as HTMLElement
+      ).getAttribute("aria-sort"),
+    ).toBe("ascending");
 
     state.objects = [];
     state.prefixes = [];
     browser.renderObjectTable();
+    // The listing is the bucket root here, so the copy names the bucket.
     expect(
       (document.getElementById("object-tbody") as HTMLElement).textContent,
-    ).toContain("This folder is empty");
+    ).toContain("This bucket is empty");
 
     browser.showEmptyState();
     expect(
@@ -761,8 +787,8 @@ describe("browser core rendering and selection", () => {
     browser.renderObjectTable();
     expect(syncInspectorMock).toHaveBeenCalledTimes(1);
     const selectionSnapshot = syncInspectorMock.mock
-      .calls[0]?.[0] as Set<string>;
-    expect([...selectionSnapshot]).toEqual(["selected.txt"]);
+      .calls[0]?.[0] as readonly SelectionEntry[];
+    expect(selectionSnapshot).toEqual([fileEntry("selected.txt")]);
 
     browser.updateSelectionUI();
     browser.renderObjectTable();
@@ -784,7 +810,7 @@ describe("browser core rendering and selection", () => {
     expect(state.selectedKeys.has("selected.txt")).toBe(true);
     // Retained selection keeps the inspector signature stable: no resync.
     expect(syncInspectorMock).toHaveBeenCalledTimes(3);
-    expect([...selectionSnapshot]).toEqual(["selected.txt"]);
+    expect(selectionSnapshot).toEqual([fileEntry("selected.txt")]);
   });
 
   it("benchmarks a 50k-object virtual window with bounded keyed DOM work", async () => {
