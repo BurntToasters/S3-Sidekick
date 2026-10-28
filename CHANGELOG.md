@@ -39,7 +39,7 @@
 - **Visual refresh:** New design tokens for spacing, type, motion, elevation, overlay scrim, success colors, and row density, one focus ring across controls, shared badge and switch styles, and a connected-status dot that pulses three times instead of forever.
 - **Security:** S3 diagnostics redact authorization headers, presigned-query credentials, and secret fields before logging. Upload sources and overwrite destinations that are symbolic links are refused.
 - **Release:** `release:prepare` now requires the full CI workflow, including the Playwright, MinIO, and full-stack jobs, to pass for the exact pushed commit. The ignored `--skip-e2e` flag was removed.
-- **Maintainability:** Transfer row and queue-chrome rendering moved out of the queue/recovery module, and the browser, inspector, preview, and properties import cycles were replaced with explicit dependency boundaries.
+- **Maintainability:** Transfer row and queue-chrome rendering moved out of the queue/recovery module, and the browser, inspector, preview, and properties import cycles were replaced with explicit dependency boundaries. Stylesheets take every color from design tokens and use the spacing, type, and radius tokens wherever a value is on the scale, with no visual change.
 - **CI:** Unsigned Windows arm64, macOS universal, and Flatpak builds now run in CI so platform toolchain breaks surface before a release host spends a session.
 
 ## Changes in `v0.11.3:`
