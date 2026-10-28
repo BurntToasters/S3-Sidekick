@@ -421,7 +421,9 @@ test.describe("theme previews, help tips, header and selects", () => {
     await openSettingsTab(page, "appearance");
 
     for (const theme of ["light", "dark"] as const) {
-      const preview = page.locator(`.theme-card-preview--${theme}`);
+      const preview = page.locator(
+        `#settings-panel-appearance .theme-card-preview--${theme}`,
+      );
       await expect(preview).toBeVisible();
       const values = await preview.evaluate((el) => {
         const style = getComputedStyle(el);
@@ -458,15 +460,18 @@ test.describe("theme previews, help tips, header and selects", () => {
 
     const backgrounds = async (name: string) =>
       page
-        .locator(`.setup-wizard-theme-btn__swatch--${name}`)
-        .evaluate((el) => getComputedStyle(el).backgroundImage);
+        .locator(`#setup-wizard-overlay .theme-card-preview--${name}`)
+        .evaluate((el) => {
+          const style = getComputedStyle(el);
+          return `${style.backgroundColor} ${style.backgroundImage}`;
+        });
     expect(await backgrounds("light")).toContain("rgb(244, 244, 245)");
     expect(await backgrounds("light")).toContain("rgb(255, 255, 255)");
     expect(await backgrounds("dark")).toContain("rgb(9, 9, 11)");
     expect(await backgrounds("dark")).toContain("rgb(24, 24, 27)");
-    // The system swatch splits light background and dark surface on the diagonal.
+    // The system card reuses the settings preview: light and dark frame split on the diagonal.
     expect(await backgrounds("system")).toContain("rgb(244, 244, 245)");
-    expect(await backgrounds("system")).toContain("rgb(24, 24, 27)");
+    expect(await backgrounds("system")).toContain("rgb(9, 9, 11)");
   });
 
   test("settings help is an inline description inside the settings pane", async ({

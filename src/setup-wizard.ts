@@ -238,6 +238,17 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       syncThemeCards();
     }
 
+    /** Arrow keys move through the radio group natively; Home and End do not. */
+    function onThemeKeydown(event: KeyboardEvent): void {
+      if (event.key !== "Home" && event.key !== "End") return;
+      const list = Array.from(themeInputs);
+      const target = event.key === "Home" ? list[0] : list[list.length - 1];
+      if (!target) return;
+      event.preventDefault();
+      target.focus();
+      target.click();
+    }
+
     function showEncError(msg: string): void {
       encError.textContent = msg;
       encError.hidden = false;
@@ -416,6 +427,9 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     listen(doneBtn, "click", onDone);
     for (const input of themeInputs) {
       listen(input, "change", () => onThemeChange(input));
+      listen(input, "keydown", (event) =>
+        onThemeKeydown(event as KeyboardEvent),
+      );
     }
     syncThemeCards();
 

@@ -51,8 +51,7 @@
   .inspector-tab--active,
   .bottom-drawer__tab--active,
   .list__item--active,
-  .theme-card--active,
-  .setup-wizard-theme-btn--active {
+  .theme-card--active {
     outline: 2px solid Highlight;
     outline-offset: -2px;
   }

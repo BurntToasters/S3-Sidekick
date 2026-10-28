@@ -91,3 +91,16 @@ test("the theme choices form one radio group that arrow keys move through", asyn
   await page.keyboard.press("ArrowLeft");
   await expect(page.locator("#setup-theme-system")).toBeChecked();
 });
+
+test("Home and End move between theme cards", async ({ page }) => {
+  await installLayoutTauriMock(page, FIRST_RUN);
+  await page.goto("/");
+  await page.locator("#setup-welcome-next").click();
+  await page.locator("#setup-theme-light").focus();
+  await page.keyboard.press("End");
+  await expect(page.locator("#setup-theme-dark")).toBeChecked();
+  await expect(page.locator("#setup-theme-dark")).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(page.locator("#setup-theme-system")).toBeChecked();
+  await expect(page.locator("#setup-theme-system")).toBeFocused();
+});

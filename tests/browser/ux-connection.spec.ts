@@ -334,17 +334,19 @@ test.describe("connection screen UX", () => {
       unlockPasswords: ["correct horse"],
     });
     await page.goto("/");
-    await expect.poll(() => dialogVisible(page)).toBe(true);
-    await page.locator("#dialog-cancel").click();
+    await expect(page.locator("#lock-view")).toBeVisible();
+    await page.locator("#lock-view-continue").click();
+    await expect(page.locator("#lock-view")).toBeHidden();
 
     const list = page.locator("#conn-saved-list");
     await expect(list).not.toContainText("No saved connections yet");
     const unlock = list.getByRole("button", { name: "Unlock" });
     await expect(unlock).toBeVisible();
     await unlock.click();
-    await expect.poll(() => dialogVisible(page)).toBe(true);
-    await page.locator("#dialog-input").fill("correct horse");
-    await page.locator("#dialog-ok").click();
+    await expect(page.locator("#lock-view")).toBeVisible();
+    await page.locator("#lock-view-password").fill("correct horse");
+    await page.locator("#lock-view-unlock").click();
+    await expect(page.locator("#lock-view")).toBeHidden();
 
     await expect(list).toContainText("Production");
     await saveArtifact(

@@ -771,8 +771,9 @@ describe("setup wizard", () => {
       document.getElementById("setup-welcome-next") as HTMLButtonElement
     ).click();
 
-    // Arrow, Home and End move focus and the checked choice natively within
-    // a radio group; E2E checks the browser keys (ux-setup-wizard.spec.ts).
+    // Arrow keys move focus and the checked choice natively within a radio
+    // group. The wizard handles Home and End itself. E2E checks all the keys
+    // (ux-setup-wizard.spec.ts).
     const radios = Array.from(
       document.querySelectorAll<HTMLInputElement>('input[name="setup-theme"]'),
     );
