@@ -362,12 +362,11 @@ function restoreSearchItems(): void {
 }
 
 /**
- * What a row is searched by: its label, its help and description text, and its
- * section heading. Option text is left out, so "default" finds no row by itself.
+ * What a row is searched by: its label, its description text, and its section
+ * heading. Option text is left out, so "default" finds no row by itself.
  */
-const SEARCH_DESCRIPTION_SELECTOR =
-  ".setting-description, .setting-note, .setting-help__tip";
-const SEARCH_SKIP_SELECTOR = `select, option, button, input, textarea, .setting-section, .setting-help-wrap, ${SEARCH_DESCRIPTION_SELECTOR}`;
+const SEARCH_DESCRIPTION_SELECTOR = ".setting-description, .setting-note";
+const SEARCH_SKIP_SELECTOR = `select, option, button, input, textarea, .setting-section, ${SEARCH_DESCRIPTION_SELECTOR}`;
 
 function searchableText(item: HTMLElement): {
   label: string;
@@ -757,7 +756,6 @@ export function populateSettingsModal(): void {
     updaterUnsupported.style.display = supported ? "none" : "";
   const updateStatus = document.getElementById("settings-update-status");
   if (updateStatus) updateStatus.textContent = "";
-  initHelpTooltips();
 
   void refreshBookmarkListUI();
   void refreshSecuritySettingsUI();
@@ -1654,44 +1652,4 @@ export function editSavedConnection(bookmark: Bookmark): void {
   if (!settingsIsOpen()) openSettingsModal();
   switchSettingsTab("bookmarks");
   showBookmarkEdit(bookmark);
-}
-
-/** Help tooltips: open on hover, focus or click, flipped below near the top. */
-function placeHelpTip(wrap: HTMLElement): void {
-  const pane = wrap.closest<HTMLElement>(".settings-content");
-  const tip = wrap.querySelector<HTMLElement>(".setting-help__tip");
-  if (!pane || !tip) return;
-  const room =
-    wrap.getBoundingClientRect().top - pane.getBoundingClientRect().top;
-  tip.classList.toggle("setting-help__tip--below", room < 96);
-}
-
-function initHelpTooltips(): void {
-  const pane = document.querySelector<HTMLElement>(".settings-content");
-  if (!pane || pane.dataset.helpWired === "true") return;
-  pane.dataset.helpWired = "true";
-  const wrapOf = (target: EventTarget | null): HTMLElement | null =>
-    (target as HTMLElement | null)?.closest<HTMLElement>(
-      ".setting-help-wrap",
-    ) ?? null;
-  pane.addEventListener("pointerover", (e) => {
-    const wrap = wrapOf(e.target);
-    if (wrap) placeHelpTip(wrap);
-  });
-  pane.addEventListener("focusin", (e) => {
-    const wrap = wrapOf(e.target);
-    if (wrap) placeHelpTip(wrap);
-  });
-  pane.addEventListener("click", (e) => {
-    const button = (e.target as HTMLElement).closest<HTMLElement>(
-      ".setting-help",
-    );
-    const wrap = wrapOf(button);
-    if (!wrap) return;
-    placeHelpTip(wrap);
-    wrap.classList.toggle("setting-help-wrap--open");
-  });
-  pane.addEventListener("focusout", (e) => {
-    wrapOf(e.target)?.classList.remove("setting-help-wrap--open");
-  });
 }

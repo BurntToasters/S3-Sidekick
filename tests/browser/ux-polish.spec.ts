@@ -469,7 +469,7 @@ test.describe("theme previews, help tips, header and selects", () => {
     expect(await backgrounds("system")).toContain("rgb(24, 24, 27)");
   });
 
-  test("help buttons are 24px and their tooltip stays inside the settings pane", async ({
+  test("settings help is an inline description inside the settings pane", async ({
     page,
   }) => {
     await installLayoutTauriMock(page, { objectCount: 0, prefixes: [] });
@@ -481,40 +481,35 @@ test.describe("theme previews, help tips, header and selects", () => {
     await pane.evaluate((el) => {
       el.scrollTop = 0;
     });
-    const help = page.locator(".setting-help:visible").first();
-    await expect(help).toBeVisible();
-    const box = await help.boundingBox();
-    expect(box?.width ?? 0).toBeGreaterThanOrEqual(24);
-    expect(box?.height ?? 0).toBeGreaterThanOrEqual(24);
+    const describedBy = await page
+      .locator("#setting-update-channel")
+      .getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const description = page.locator(`#${describedBy}`);
+    await expect(description).toBeVisible();
+    await expect(description).toHaveClass(/setting-description/);
 
-    await help.hover();
-    const tip = page
-      .locator(".setting-help-wrap:visible .setting-help__tip")
-      .first();
-    await expect(tip).toBeVisible();
-    const [paneBox, tipBox] = await Promise.all([
+    const [paneBox, descBox] = await Promise.all([
       pane.boundingBox(),
-      tip.boundingBox(),
+      description.boundingBox(),
     ]);
     expect(paneBox).not.toBeNull();
-    expect(tipBox).not.toBeNull();
-    expect(tipBox?.y ?? -1, "tooltip top").toBeGreaterThanOrEqual(
-      paneBox?.y ?? 0,
-    );
+    expect(descBox).not.toBeNull();
+    expect(descBox!.x, "description left").toBeGreaterThanOrEqual(paneBox!.x);
     expect(
-      (tipBox?.y ?? 0) + (tipBox?.height ?? 0),
-      "tooltip bottom",
-    ).toBeLessThanOrEqual((paneBox?.y ?? 0) + (paneBox?.height ?? 0));
+      descBox!.x + descBox!.width,
+      "description right",
+    ).toBeLessThanOrEqual(paneBox!.x + paneBox!.width);
+    expect(descBox!.y, "description top").toBeGreaterThanOrEqual(paneBox!.y);
+    expect(
+      descBox!.y + descBox!.height,
+      "description bottom",
+    ).toBeLessThanOrEqual(paneBox!.y + paneBox!.height);
 
-    const background = await tip.evaluate((el) => {
-      const probe = document.createElement("span");
-      probe.style.color = "var(--tooltip-bg)";
-      document.body.appendChild(probe);
-      const resolved = getComputedStyle(probe).color;
-      probe.remove();
-      return { actual: getComputedStyle(el).backgroundColor, resolved };
-    });
-    expect(background.actual).toBe(background.resolved);
+    const fontSize = await description.evaluate((el) =>
+      parseFloat(getComputedStyle(el).fontSize),
+    );
+    expect(fontSize).toBeGreaterThanOrEqual(12);
   });
 
   test("settings select values fit their boxes at 1280px and 820px", async ({

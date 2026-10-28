@@ -16,6 +16,7 @@
 // - Size units and date format do not re-render the object table.
 // - Transfers has no Performance, Behavior, Network or Advanced headings.
 // - A performance preset keeps its name after an Advanced value changes.
+// - Custom can be picked from the Performance preset list as if it were an action.
 // - Reset is still inside About and not its own last section.
 // - Help is a hover "?" button instead of an inline, linked description.
 
@@ -338,6 +339,90 @@ test("A performance preset shows Custom after an Advanced value changes", async 
     page.locator("#setting-download-parallel-threshold-mb"),
   ).toHaveValue("256");
   await expect(preset).toHaveValue("safe");
+});
+
+test("Custom cannot be chosen from the Performance preset list", async ({
+  page,
+}, testInfo) => {
+  await installLayoutTauriMock(page, { objectCount: 0, prefixes: [] });
+  await page.goto("/");
+  await openSettings(page);
+  await page.locator("#settings-tab-transfers").click();
+
+  const preset = page.locator("#setting-transfer-performance-preset");
+  const customDisabled = await preset.evaluate(
+    (el) =>
+      (el as HTMLSelectElement).querySelector<HTMLOptionElement>(
+        'option[value="custom"]',
+      )?.disabled ?? false,
+  );
+  expect(customDisabled).toBe(true);
+  await saveArtifact(page, testInfo, SUITE, "custom-not-selectable", []);
+});
+
+test("Custom is the shown label once an Advanced value diverges", async ({
+  page,
+}, testInfo) => {
+  await installLayoutTauriMock(page, { objectCount: 0, prefixes: [] });
+  await page.goto("/");
+  await openSettings(page);
+  await page.locator("#settings-tab-transfers").click();
+  await page.locator('[aria-controls="transfers-advanced"]').click();
+
+  const preset = page.locator("#setting-transfer-performance-preset");
+  const shownLabel = () =>
+    preset.evaluate((el) =>
+      (el as HTMLSelectElement).selectedOptions[0]?.textContent?.trim(),
+    );
+  await expect(preset).toHaveValue("balanced");
+  expect(await shownLabel()).toBe("Balanced (default)");
+
+  await page
+    .locator("#setting-download-parallel-threshold-mb")
+    .selectOption("256");
+  await expect(preset).toHaveValue("custom");
+  expect(await shownLabel()).toBe("Custom");
+  await saveArtifact(page, testInfo, SUITE, "custom-shown-label", []);
+});
+
+test("Choosing a real preset after Custom applies its values and clears Custom", async ({
+  page,
+}, testInfo) => {
+  await installLayoutTauriMock(page, { objectCount: 0, prefixes: [] });
+  await page.goto("/");
+  await openSettings(page);
+  await page.locator("#settings-tab-transfers").click();
+  await page.locator('[aria-controls="transfers-advanced"]').click();
+
+  const preset = page.locator("#setting-transfer-performance-preset");
+  await page
+    .locator("#setting-download-parallel-threshold-mb")
+    .selectOption("256");
+  await expect(preset).toHaveValue("custom");
+
+  await preset.selectOption("max");
+  await expect(preset).toHaveValue("max");
+  await expect(
+    page.locator("#setting-download-parallel-threshold-mb"),
+  ).toHaveValue("64");
+  await expect(page.locator("#setting-download-part-size-mb")).toHaveValue(
+    "64",
+  );
+  await expect(page.locator("#setting-download-part-concurrency")).toHaveValue(
+    "10",
+  );
+  await expect(page.locator("#setting-upload-part-size-mb")).toHaveValue("64");
+  await expect(page.locator("#setting-upload-part-concurrency")).toHaveValue(
+    "10",
+  );
+
+  await page.locator("#settings-save").click();
+  await expect(page.locator("#settings-overlay")).not.toHaveClass(/active/);
+  const calls = await readMockCallLog(page);
+  expect(lastCallJson(calls, "save_settings")).toMatchObject({
+    transferPerformancePreset: "max",
+  });
+  await saveArtifact(page, testInfo, SUITE, "preset-clears-custom", calls);
 });
 
 test("Reset is its own last section, not part of About", async ({ page }) => {

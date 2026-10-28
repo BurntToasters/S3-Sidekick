@@ -1480,7 +1480,7 @@ describe("settings module", () => {
         <button class="settings-tab" data-settings-tab="transfers">Transfers</button>
       </div>
       <div class="settings-panel" data-settings-panel="appearance">
-        <div class="setting-item">Theme <span class="setting-help-wrap"><button class="setting-help" aria-label="Help: Theme">?</button><span class="setting-help__tip">change theme tooltip</span></span></div>
+        <div class="setting-item">Theme <p class="setting-description">change theme tooltip</p></div>
         <div class="setting-item">Language</div>
       </div>
       <div class="settings-panel" data-settings-panel="transfers" hidden>
@@ -1507,7 +1507,7 @@ describe("settings module", () => {
       document.querySelector(".settings-search-empty") as HTMLElement,
     ).not.toBeNull();
 
-    // Tooltip-only match via data-tooltip text.
+    // Description-only match.
     settings.updateSettingsSearch("change theme tooltip");
     expect(
       document.querySelectorAll(".settings-search-group").length,
