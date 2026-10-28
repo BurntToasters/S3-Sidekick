@@ -173,12 +173,51 @@ pub(super) async fn preview_object_inner(
         )?;
     }
 
-    use tokio::io::AsyncReadExt;
     let mut reader = output.body.into_async_read();
-    let max_bytes = MAX_PREVIEW as usize;
-    let mut raw_bytes = Vec::with_capacity(max_bytes + 1);
+    let body = read_preview_body(&mut reader, &content_type, &cancel).await?;
+
+    let is_text = is_text_content_type(&content_type);
+
+    let data = if is_text {
+        String::from_utf8_lossy(&body.bytes).to_string()
+    } else {
+        B64.encode(&body.bytes)
+    };
+
+    Ok(PreviewResponse {
+        content_type,
+        data,
+        is_text,
+        truncated: head_truncated || body.truncated,
+        total_size,
+    })
+}
+
+/// A preview body after the per-type read policy has been applied.
+#[derive(Debug, PartialEq, Eq)]
+struct PreviewBody {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+/// Streams a preview body from `reader` up to the type's read cap, reading one
+/// byte past it so an exact fit is distinguishable from an overflow. Text
+/// overflow is cut to its prefix; an image overflow is refused, never cut.
+async fn read_preview_body<R>(
+    reader: &mut R,
+    content_type: &str,
+    cancel: &CancelFlag,
+) -> Result<PreviewBody, String>
+where
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
+    use tokio::io::AsyncReadExt;
+    let cap = preview_read_cap(content_type)
+        .ok_or_else(|| "Preview is unavailable for this content type.".to_string())?
+        as usize;
+    let mut raw_bytes = Vec::new();
     let mut buffer = vec![0u8; 64 * 1024];
-    while raw_bytes.len() <= max_bytes {
+    while raw_bytes.len() <= cap {
         let read = reader.read(&mut buffer);
         let count = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
@@ -188,35 +227,31 @@ pub(super) async fn preview_object_inner(
         if count == 0 {
             break;
         }
-        let remaining = max_bytes + 1 - raw_bytes.len();
+        let remaining = cap + 1 - raw_bytes.len();
         raw_bytes.extend_from_slice(&buffer[..count.min(remaining)]);
-        if raw_bytes.len() > max_bytes {
-            break;
-        }
     }
 
-    let observed_truncation = raw_bytes.len() > max_bytes;
-    let bytes: &[u8] = if observed_truncation {
-        &raw_bytes[..max_bytes]
-    } else {
-        raw_bytes.as_slice()
-    };
-
-    let is_text = is_text_content_type(&content_type);
-
-    let data = if is_text {
-        String::from_utf8_lossy(bytes).to_string()
-    } else {
-        B64.encode(bytes)
-    };
-
-    Ok(PreviewResponse {
-        content_type,
-        data,
-        is_text,
-        truncated: head_truncated || observed_truncation,
-        total_size,
-    })
+    if raw_bytes.len() <= cap {
+        return Ok(PreviewBody {
+            bytes: raw_bytes,
+            truncated: false,
+        });
+    }
+    match preview_truncation_cap(content_type) {
+        Some(cut) => {
+            raw_bytes.truncate(cut as usize);
+            Ok(PreviewBody {
+                bytes: raw_bytes,
+                truncated: true,
+            })
+        }
+        // HEAD named a size inside the cap but the stream ran past it. A prefix
+        // of an image cannot be drawn, so refuse rather than return it.
+        None => Err(format!(
+            "Preview is unavailable because the image grew past the {} MiB preview limit while downloading.",
+            MAX_IMAGE_PREVIEW / 1_048_576
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -330,5 +365,109 @@ mod tests {
             plan_preview("image/avif", 16 * MIB + 1),
             PreviewPlan::TooLarge
         );
+    }
+
+    // Failure modes of the body read, enumerated before the per-type cap:
+    // - an image between 1 MiB and 16 MiB is cut at the text cap (red first)
+    // - an image exactly at 16 MiB is cut one byte short (red first)
+    // - an image stream past 16 MiB is cut and returned as a partial picture
+    //   instead of refused (red first)
+    // - text over 1 MiB is not cut to its prefix with a truncation flag
+    // - text exactly at 1 MiB is flagged as truncated when it is not
+    // - cancellation before or during the body read does not return bytes
+    // - a reader error does not return partial bytes
+    struct PendingReader;
+
+    impl tokio::io::AsyncRead for PendingReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    struct FailingReader;
+
+    impl tokio::io::AsyncRead for FailingReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("connection reset")))
+        }
+    }
+
+    fn body_of(len: i64) -> std::io::Cursor<Vec<u8>> {
+        std::io::Cursor::new(vec![7u8; len as usize])
+    }
+
+    #[tokio::test]
+    async fn image_of_3_mib_is_read_whole() {
+        let mut reader = body_of(3 * MIB);
+        let body = read_preview_body(&mut reader, "image/png", &CancelFlag::default())
+            .await
+            .expect("read a 3 MiB image");
+        assert_eq!(body.bytes.len(), (3 * MIB) as usize);
+        assert!(!body.truncated);
+    }
+
+    #[tokio::test]
+    async fn image_at_exactly_16_mib_is_read_whole() {
+        let mut reader = body_of(16 * MIB);
+        let body = read_preview_body(&mut reader, "image/jpeg", &CancelFlag::default())
+            .await
+            .expect("read a 16 MiB image");
+        assert_eq!(body.bytes.len(), (16 * MIB) as usize);
+        assert!(!body.truncated);
+    }
+
+    #[tokio::test]
+    async fn image_stream_past_16_mib_is_refused_not_cut() {
+        let mut reader = body_of(16 * MIB + 1);
+        let err = read_preview_body(&mut reader, "image/png", &CancelFlag::default())
+            .await
+            .expect_err("an oversized image stream must be refused");
+        assert!(err.contains("16 MiB"), "unexpected refusal: {err}");
+    }
+
+    #[tokio::test]
+    async fn text_over_1_mib_is_cut_to_1_mib_and_flagged() {
+        let mut reader = body_of(2 * MIB);
+        let body = read_preview_body(&mut reader, "text/plain", &CancelFlag::default())
+            .await
+            .expect("read a 2 MiB text body");
+        assert_eq!(body.bytes.len(), MIB as usize);
+        assert!(body.truncated);
+    }
+
+    #[tokio::test]
+    async fn text_exactly_1_mib_is_not_flagged() {
+        let mut reader = body_of(MIB);
+        let body = read_preview_body(&mut reader, "text/csv", &CancelFlag::default())
+            .await
+            .expect("read a 1 MiB text body");
+        assert_eq!(body.bytes.len(), MIB as usize);
+        assert!(!body.truncated);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_a_pending_body_read_returns_no_bytes() {
+        let cancel = CancelFlag::default();
+        cancel.cancel();
+        let err = read_preview_body(&mut PendingReader, "image/png", &cancel)
+            .await
+            .expect_err("a cancelled preview must not return bytes");
+        assert_eq!(err, cancelled_error());
+    }
+
+    #[tokio::test]
+    async fn reader_errors_surface_without_partial_bytes() {
+        let err = read_preview_body(&mut FailingReader, "text/plain", &CancelFlag::default())
+            .await
+            .expect_err("a failed body read must not return bytes");
+        assert!(err.contains("Failed to read preview body"), "{err}");
     }
 }

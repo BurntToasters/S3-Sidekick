@@ -2032,3 +2032,92 @@ async fn e2e_versioned_prefix_overwrite_rolls_back_with_exact_version_authority(
         serde_json::json!({"result": format!("{:?}", result), "destination_a": destination_a, "destination_b": destination_b, "backup_keys": backups}),
     );
 }
+
+#[tokio::test]
+#[ignore = "needs the MinIO E2E runner (npm run test:e2e:minio)"]
+async fn e2e_preview_bodies_follow_their_per_type_caps() {
+    use base64::Engine as _;
+    let test = "preview_body_caps";
+    let env = env();
+    let raw = raw_client(&env.endpoint_minio, &env);
+    let bucket = fresh_bucket(&raw, "preview-caps").await;
+    let image_size: usize = 3 * 1024 * 1024;
+    let text_size: usize = 2 * 1024 * 1024;
+    let image_body: Vec<u8> = (0..image_size).map(|i| (i % 251) as u8).collect();
+    let text_body: Vec<u8> = (0..text_size).map(|i| b'a' + (i % 26) as u8).collect();
+    raw.put_object()
+        .bucket(&bucket)
+        .key("photo.png")
+        .content_type("image/png")
+        .body(ByteStream::from(image_body.clone()))
+        .send()
+        .await
+        .expect("seed 3 MiB image");
+    raw.put_object()
+        .bucket(&bucket)
+        .key("log.txt")
+        .content_type("text/plain")
+        .body(ByteStream::from(text_body.clone()))
+        .send()
+        .await
+        .expect("seed 2 MiB text");
+
+    let app = make_app();
+    let session = connect(&app, &env.endpoint_minio, &env).await;
+    let image = s3::preview_object(
+        app.state::<AppState>(),
+        session.connection_id.clone(),
+        bucket.clone(),
+        "photo.png".to_string(),
+    )
+    .await;
+    let image_json = image
+        .as_ref()
+        .map(|response| serde_json::to_value(response).expect("serialize preview"))
+        .unwrap_or(serde_json::Value::Null);
+    let decoded_image = image_json["data"]
+        .as_str()
+        .map(|data| base64::engine::general_purpose::STANDARD.decode(data))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    record(
+        test,
+        "a 3 MiB image is returned whole, byte-for-byte, with truncated false",
+        decoded_image == image_body
+            && image_json["truncated"] == serde_json::json!(false)
+            && image_json["total_size"] == serde_json::json!(image_size),
+        serde_json::json!({
+            "error": image.as_ref().err(),
+            "decoded_len": decoded_image.len(),
+            "truncated": image_json["truncated"],
+            "total_size": image_json["total_size"],
+        }),
+    );
+
+    let text = s3::preview_object(
+        app.state::<AppState>(),
+        session.connection_id,
+        bucket.clone(),
+        "log.txt".to_string(),
+    )
+    .await;
+    let text_json = text
+        .as_ref()
+        .map(|response| serde_json::to_value(response).expect("serialize preview"))
+        .unwrap_or(serde_json::Value::Null);
+    let text_len = text_json["data"].as_str().map(str::len).unwrap_or(0);
+    let one_mib = 1024 * 1024;
+    record(
+        test,
+        "a 2 MiB text/plain object is cut to its first 1 MiB and flagged truncated",
+        text_len == one_mib
+            && text_json["truncated"] == serde_json::json!(true)
+            && text_json["total_size"] == serde_json::json!(text_size),
+        serde_json::json!({
+            "error": text.as_ref().err(),
+            "data_len": text_len,
+            "truncated": text_json["truncated"],
+            "total_size": text_json["total_size"],
+        }),
+    );
+}

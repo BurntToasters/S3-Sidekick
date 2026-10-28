@@ -461,8 +461,9 @@ export async function openPreview(key: string): Promise<void> {
     const type = mediaType(resp.content_type);
 
     if (PREVIEWABLE_IMAGE_TYPES.has(type)) {
-      if (resp.total_size > PREVIEW_IMAGE_LIMIT_BYTES) {
-        // A partial image draws as a broken picture, so nothing is drawn.
+      if (resp.total_size > PREVIEW_IMAGE_LIMIT_BYTES || resp.truncated) {
+        // A partial image draws as a broken picture, so nothing is drawn. A
+        // truncated image body is refused here too, even under the size cap.
         body.setAttribute("aria-busy", "false");
         body.innerHTML = tooLargeMarkup(resp.total_size);
         wireDownloadAction(body);

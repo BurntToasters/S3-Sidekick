@@ -258,6 +258,33 @@ describe("preview module", () => {
     expect(createObjectURL).toHaveBeenCalledTimes(1);
   });
 
+  it("never draws a truncated image response, even under the image size limit", async () => {
+    const preview = await import("../preview.ts");
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValue("blob:preview-cut");
+    createObjectURL.mockClear();
+
+    // A cut image body is a broken picture. The native layer should refuse
+    // such a body, but the webview must fail closed if one ever arrives.
+    mockInvoke.mockResolvedValueOnce({
+      content_type: "image/png",
+      data: "iVBORw0KGgo=",
+      is_text: false,
+      truncated: true,
+      total_size: 3_145_728,
+    });
+    await preview.openPreview("images/cut.png");
+
+    const body = document.getElementById("preview-body") as HTMLDivElement;
+    expect(body.querySelector("img")).toBeNull();
+    expect(body.textContent).toContain("Too large to preview");
+    expect(
+      body.querySelector<HTMLButtonElement>("[data-preview-download]"),
+    ).not.toBeNull();
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
   it("pretty-prints JSON with escaped token classes, not raw markup", async () => {
     const preview = await import("../preview.ts");
     const html = preview.formatJsonHtml(
