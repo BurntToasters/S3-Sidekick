@@ -40,7 +40,7 @@ body.titlebar-custom .support-overlay {
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
-  padding: 32px 28px 24px;
+  padding: var(--space-7) 28px var(--space-6);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -75,7 +75,7 @@ body.titlebar-custom .support-overlay {
 }
 
 .support-card__title {
-  font-size: 18px;
+  font-size: var(--text-xl);
   font-weight: 600;
   color: var(--text);
   margin: 0;

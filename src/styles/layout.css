@@ -151,7 +151,7 @@
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 28px 32px;
+  padding: 28px var(--space-7);
   overflow-y: auto;
   min-height: 0;
 }
@@ -159,11 +159,11 @@
 .connection-screen__form-card {
   width: 100%;
   max-width: 460px;
-  margin-top: 24px;
+  margin-top: var(--space-6);
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 24px;
+  padding: var(--space-6);
   box-shadow: var(--glass-shadow);
   box-sizing: border-box;
 }
@@ -474,7 +474,7 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
   align-items: flex-start;
   gap: 1px;
   min-height: 28px;
-  padding: 6px 8px;
+  padding: 6px var(--space-2);
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -537,7 +537,7 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
 
 .conn-switcher__action {
   min-height: 28px;
-  padding: 4px 8px;
+  padding: var(--space-1) var(--space-2);
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -563,7 +563,7 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
 .reconnect-card {
   width: 100%;
   max-width: 460px;
-  margin-top: 24px;
+  margin-top: var(--space-6);
   margin-bottom: var(--space-4);
   display: flex;
   align-items: center;
@@ -619,7 +619,7 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
   flex: 1;
   min-width: 0;
   min-height: 32px;
-  padding: 6px 8px;
+  padding: 6px var(--space-2);
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -691,7 +691,7 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
 
 .bookmark-row-menu__item {
   min-height: 28px;
-  padding: 4px 10px;
+  padding: var(--space-1) 10px;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;

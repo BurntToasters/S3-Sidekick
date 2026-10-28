@@ -21,8 +21,8 @@
 .settings-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px 10px 14px 16px;
+  gap: var(--space-2);
+  padding: 14px 10px 14px var(--space-4);
   border-right: 1px solid var(--border);
   overflow-y: auto;
   min-height: 0;
@@ -37,7 +37,7 @@
   box-sizing: border-box;
   font-size: var(--text-sm);
   padding: 6px 10px;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--bg-elevated);
   color: var(--text);
@@ -49,13 +49,13 @@
 }
 
 .settings-content {
-  padding: 16px 20px 20px;
+  padding: var(--space-4) var(--space-5) var(--space-5);
   overflow-y: auto;
   min-height: 0;
 }
 
 .settings-content .settings-panel {
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .settings-tabs {
@@ -70,7 +70,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -104,7 +104,7 @@
   display: block;
   width: 100%;
   text-align: left;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -125,7 +125,7 @@
 
 /* Reset is separated from the settings tabs above it. */
 .settings-tab--reset {
-  margin-top: 8px;
+  margin-top: var(--space-2);
   border-top: 1px solid var(--border);
   border-radius: 0 0 var(--radius-sm) var(--radius-sm);
 }
@@ -144,7 +144,7 @@
 /* Short explanatory text under a control (not a tooltip). */
 .setting-note {
   display: block;
-  margin-top: 4px;
+  margin-top: var(--space-1);
   color: var(--text-secondary);
   font-size: var(--text-sm);
   line-height: 1.45;
@@ -162,7 +162,7 @@
 
 .settings-panel .setting-item {
   flex-wrap: wrap;
-  row-gap: 4px;
+  row-gap: var(--space-1);
 }
 
 .settings-panel .setting-item > .setting-description:last-child {
@@ -185,7 +185,7 @@
 
 .settings-group .setting-section {
   margin: 0;
-  padding-top: 12px;
+  padding-top: var(--space-3);
 }
 
 .settings-group--advanced .advanced-toggle {
@@ -193,7 +193,7 @@
 }
 
 .settings-group--advanced .setting-section {
-  padding-top: 12px;
+  padding-top: var(--space-3);
 }
 
 /* The footer is hidden when no explicit-save setting is on screen. */
@@ -202,10 +202,10 @@
 }
 
 .settings-instant-note {
-  margin: 0 0 4px;
-  padding: 8px 10px;
+  margin: 0 0 var(--space-1);
+  padding: var(--space-2) 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   background: var(--bg-hover);
 }
 
@@ -228,10 +228,10 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   cursor: pointer;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .advanced-toggle:hover {
@@ -256,9 +256,9 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding-top: 8px;
+  padding-top: var(--space-2);
   border-top: 1px dashed var(--border);
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 
 .advanced-group[hidden] {
@@ -278,19 +278,19 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-1);
 }
 
 .settings-search-empty {
   color: var(--text-secondary);
   font-size: var(--text-md);
-  padding: 12px 4px;
+  padding: var(--space-3) var(--space-1);
 }
 
 .theme-picker {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--space-3);
   width: 100%;
   max-width: 480px;
   margin-top: 6px;
@@ -299,8 +299,8 @@
 .theme-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 8px;
+  gap: var(--space-2);
+  padding: var(--space-2);
   border: 2px solid var(--border);
   border-radius: var(--radius-md);
   background: transparent;
@@ -340,7 +340,7 @@
   gap: 6px;
   aspect-ratio: 16 / 10;
   padding: 10px;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   overflow: hidden;
 }
@@ -451,7 +451,7 @@
     border-right: none;
     border-bottom: 1px solid var(--border);
     flex-direction: column;
-    padding: 12px;
+    padding: var(--space-3);
   }
   .settings-tabs {
     flex-direction: row;
@@ -461,6 +461,6 @@
     width: auto;
   }
   .settings-support-btn {
-    margin-top: 4px;
+    margin-top: var(--space-1);
   }
 }
