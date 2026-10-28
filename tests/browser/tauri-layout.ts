@@ -80,6 +80,10 @@ export interface LayoutMockOptions {
    * ms pass without `touch_security_activity` or an unlock.
    */
   autoLockAfterMs?: number;
+  /** Platform reported by `get_platform_info`. Default: "linux". */
+  platform?: "linux" | "macos" | "windows";
+  /** Hold a biometric unlock until `releaseMockBiometric` is called. */
+  holdBiometric?: boolean;
 }
 
 export interface MockCall {
@@ -108,6 +112,8 @@ interface LayoutMockInit {
   copyFailures: number;
   holdCopies: boolean;
   autoLockAfterMs: number;
+  platform: string;
+  holdBiometric: boolean;
 }
 
 /**
@@ -158,6 +164,8 @@ export async function installLayoutTauriMock(
     copyFailures: options.transferBackend?.copyFailures ?? 0,
     holdCopies: options.transferBackend?.holdCopies ?? false,
     autoLockAfterMs: options.autoLockAfterMs ?? 0,
+    platform: options.platform ?? "linux",
+    holdBiometric: options.holdBiometric ?? false,
   };
 
   await page.addInitScript(
@@ -182,6 +190,8 @@ export async function installLayoutTauriMock(
       copyFailures,
       holdCopies,
       autoLockAfterMs,
+      platform,
+      holdBiometric,
     }: LayoutMockInit) => {
       const callbacks = new Map<number, (value: unknown) => void>();
       const listeners = new Map<string, Set<number>>();
@@ -220,6 +230,7 @@ export async function installLayoutTauriMock(
         releaseListing: undefined as (() => void) | undefined,
         releaseUnlock: undefined as (() => void) | undefined,
         releaseDisconnect: undefined as (() => void) | undefined,
+        releaseBiometric: undefined as (() => void) | undefined,
         releaseCopies: [] as (() => void)[],
         setCommandError: undefined as
           ((command: string, error: string | null) => void) | undefined,
@@ -330,7 +341,7 @@ export async function installLayoutTauriMock(
 
         switch (command) {
           case "get_platform_info":
-            return "linux";
+            return platform;
           case "plugin:app|version":
             return "0.11.0-beta.7";
           case "load_settings":
@@ -424,6 +435,29 @@ export async function installLayoutTauriMock(
           }
           case "lock_security":
             securityState.unlocked = false;
+            return { ...securityState };
+          case "unlock_biometric":
+            if (holdBiometric) {
+              await new Promise<void>((resolve) => {
+                testState.releaseBiometric = resolve;
+              });
+            }
+            securityState.unlocked = true;
+            lastVaultActivity = Date.now();
+            return { ...securityState };
+          case "enable_biometric":
+            securityState.biometric_enrolled = true;
+            return { ...securityState };
+          case "disable_biometric":
+            securityState.biometric_enrolled = false;
+            return { ...securityState };
+          case "set_security_encryption":
+            securityState.initialized = true;
+            securityState.encryption_enabled = args.enableEncryption === true;
+            securityState.unlocked = true;
+            return { ...securityState };
+          case "change_security_password":
+            securityState.unlocked = true;
             return { ...securityState };
           case "load_transfer_manifest":
             return {
@@ -693,6 +727,17 @@ export async function releaseMockCopies(page: Page): Promise<void> {
       }
     ).__S3_LAYOUT_TEST__;
     for (const release of state?.releaseCopies.splice(0) ?? []) release();
+  });
+}
+
+export async function releaseMockBiometric(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const state = (
+      window as typeof window & {
+        __S3_LAYOUT_TEST__?: { releaseBiometric?: () => void };
+      }
+    ).__S3_LAYOUT_TEST__;
+    state?.releaseBiometric?.();
   });
 }
 

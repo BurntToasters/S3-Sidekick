@@ -59,10 +59,9 @@ async function recordStage(
       connectionScreenVisible:
         getComputedStyle(document.getElementById("connection-screen")!)
           .display !== "none",
-      unlockPromptVisible:
-        document
-          .getElementById("dialog-overlay")
-          ?.classList.contains("active") ?? false,
+      unlockPromptVisible: !(
+        document.getElementById("lock-view")?.hidden ?? true
+      ),
     };
   }, moduleUrls(page));
   const directory = path.join(
@@ -108,9 +107,9 @@ test("auto-lock retries failed retirement, blocks S3 access, then stays closed a
   await expect.poll(() => commandCount(page, "disconnect")).toBeGreaterThan(0);
   expect(await commandCount(page, "disconnect")).toBe(1);
   const firstPromptVisible = await page
-    .locator("#dialog-overlay")
-    .evaluate((element) => element.classList.contains("active"));
-  if (firstPromptVisible) await page.locator("#dialog-cancel").click();
+    .locator("#lock-view")
+    .evaluate((element) => !(element as HTMLElement).hidden);
+  if (firstPromptVisible) await page.locator("#lock-view-continue").click();
 
   const previewAttempt = await page.evaluate(async (urls) => {
     const connection = await import(urls["connection.ts"] ?? "/connection.ts");
@@ -143,9 +142,9 @@ test("auto-lock retries failed retirement, blocks S3 access, then stays closed a
   await page.clock.runFor(15_000);
   const disconnectAttemptsAfterRetry = await commandCount(page, "disconnect");
   const retryPromptVisible = await page
-    .locator("#dialog-overlay")
-    .evaluate((element) => element.classList.contains("active"));
-  if (retryPromptVisible) await page.locator("#dialog-cancel").click();
+    .locator("#lock-view")
+    .evaluate((element) => !(element as HTMLElement).hidden);
+  if (retryPromptVisible) await page.locator("#lock-view-continue").click();
 
   await page.clock.runFor(180_000);
   const afterDismissal = await page.evaluate(async (urls) => {
@@ -176,10 +175,9 @@ test("auto-lock retries failed retirement, blocks S3 access, then stays closed a
       mainLayoutVisible:
         getComputedStyle(document.getElementById("main-layout")!).display !==
         "none",
-      unlockPromptVisible:
-        document
-          .getElementById("dialog-overlay")
-          ?.classList.contains("active") ?? false,
+      unlockPromptVisible: !(
+        document.getElementById("lock-view")?.hidden ?? true
+      ),
     };
   }, moduleUrls(page));
   await recordStage(page, testInfo, "retry-cleanup-dismissed", {

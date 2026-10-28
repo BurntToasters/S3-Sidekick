@@ -17,23 +17,69 @@ vi.mock("../dialogs.ts", () => ({
 
 function renderFixture(): void {
   document.body.innerHTML = `
-    <div id="security-status-text"></div>
-    <button id="security-toggle">Enable Encryption</button>
-    <button id="security-change-password" style="display:none"></button>
-    <div id="security-warning" style="display:none"></div>
-    <div id="security-lock-settings" style="display:none"></div>
-    <div id="security-lock-action" style="display:none"></div>
+    <div id="security-status-card">
+      <span id="security-status-icon"></span>
+      <p id="security-status-text"></p>
+      <p id="security-status-detail"></p>
+    </div>
+    <button id="security-setup-btn" hidden></button>
+    <button id="security-unlock-btn" hidden></button>
+    <button id="security-lock-btn" hidden></button>
+    <button id="security-change-password" hidden></button>
+    <button id="security-disable-btn" hidden></button>
+    <div id="security-warning" hidden></div>
+    <div id="security-lock-settings" hidden></div>
     <select id="security-lock-timeout">
       <option value="5">5</option>
       <option value="15" selected>15</option>
       <option value="30">30</option>
     </select>
-    <div id="security-biometric-settings" style="display:none">
+    <div id="security-biometric-settings" hidden>
+      <span class="setting-label"></span>
+      <span id="biometric-security-note"></span>
       <label for="biometric-toggle"></label>
     </div>
     <button id="biometric-toggle"></button>
-    <button id="security-lock-btn"></button>
+    <div id="lock-view" hidden>
+      <p id="lock-view-notice" hidden></p>
+      <form id="lock-view-form">
+        <input id="lock-view-password" type="password" />
+        <button type="button" id="lock-view-reveal"></button>
+        <p id="lock-view-error" hidden></p>
+        <button type="submit" id="lock-view-unlock"></button>
+        <button type="button" id="lock-view-biometric" hidden></button>
+      </form>
+      <button type="button" id="lock-view-forgot"></button>
+      <button type="button" id="lock-view-continue"></button>
+      <div id="biometric-overlay" hidden>
+        <h3 id="biometric-overlay-title"></h3>
+        <p id="biometric-overlay-desc"></p>
+        <button type="button" id="biometric-overlay-cancel"></button>
+      </div>
+    </div>
   `;
+}
+
+/**
+ * The lock view replaces the old Unlock prompt. Waits until it is on screen
+ * and no biometric wait is open, then types the password and submits, or
+ * picks "Continue locked" when `password` is null.
+ */
+async function answerLockView(password: string | null): Promise<void> {
+  await vi.waitFor(() => {
+    const view = document.getElementById("lock-view");
+    const overlay = document.getElementById("biometric-overlay");
+    expect(!!view && !view.hidden && (!overlay || overlay.hidden)).toBe(true);
+  });
+  if (password === null) {
+    document.getElementById("lock-view-continue")!.click();
+    return;
+  }
+  (document.getElementById("lock-view-password") as HTMLInputElement).value =
+    password;
+  document
+    .getElementById("lock-view-form")!
+    .dispatchEvent(new Event("submit", { cancelable: true }));
 }
 
 function makeStatus(overrides: Record<string, unknown> = {}) {

@@ -618,9 +618,9 @@ function wireSelectionActions(): void {
 function wireSecuritySettings(): void {
   // "Forgot password?" on the Unlock prompt runs the existing reset flow.
   setForgotPasswordHandler(() => void resetSettings());
-  document.getElementById("security-toggle")!.addEventListener("click", () => {
+  const runSecurityAction = (action: "setup" | "unlock" | "disable"): void => {
     void (async () => {
-      const changed = await handleSecurityToggle(setStatus);
+      const changed = await handleSecurityToggle(setStatus, action);
       if (!changed) return;
       try {
         await loadBookmarks();
@@ -643,7 +643,16 @@ function wireSecuritySettings(): void {
         /* connection unavailable */
       }
     })();
-  });
+  };
+  document
+    .getElementById("security-setup-btn")!
+    .addEventListener("click", () => runSecurityAction("setup"));
+  document
+    .getElementById("security-unlock-btn")!
+    .addEventListener("click", () => runSecurityAction("unlock"));
+  document
+    .getElementById("security-disable-btn")!
+    .addEventListener("click", () => runSecurityAction("disable"));
   document
     .getElementById("security-change-password")!
     .addEventListener("click", () => {

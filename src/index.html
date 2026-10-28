@@ -2006,38 +2006,78 @@
                 <span id="settings-encryption-label" class="setting-label"
                   >Credential Encryption</span
                 >
-                <div class="security-controls">
-                  <span id="security-status-text" class="text-secondary"
-                    ><span class="spinner"></span> Loading...</span
-                  >
-                  <div class="security-controls__actions">
-                    <button type="button" id="security-toggle" class="btn">
-                      Enable Encryption
-                    </button>
-                    <button
-                      type="button"
-                      id="security-change-password"
-                      class="btn btn--ghost"
-                      style="display: none"
+                <div
+                  id="security-status-card"
+                  class="security-status-card"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span
+                    id="security-status-icon"
+                    class="security-status-card__icon"
+                    aria-hidden="true"
+                  ></span>
+                  <div class="security-status-card__body">
+                    <p
+                      id="security-status-text"
+                      class="security-status-card__title"
                     >
-                      Change Password
-                    </button>
+                      <span class="spinner"></span> Loading...
+                    </p>
+                    <p
+                      id="security-status-detail"
+                      class="setting-description"
+                    ></p>
                   </div>
                 </div>
-                <div
-                  id="security-warning"
-                  class="security-warning"
-                  style="display: none"
-                >
+                <div id="security-warning" class="security-warning" hidden>
                   Warning: saved credentials are stored unencrypted on this
                   device.
                 </div>
+                <div class="security-controls__actions">
+                  <button
+                    type="button"
+                    id="security-setup-btn"
+                    class="btn btn--primary"
+                    hidden
+                  >
+                    Set up encryption
+                  </button>
+                  <button
+                    type="button"
+                    id="security-unlock-btn"
+                    class="btn btn--primary"
+                    hidden
+                  >
+                    Unlock
+                  </button>
+                  <button
+                    type="button"
+                    id="security-lock-btn"
+                    class="btn btn--ghost"
+                    hidden
+                  >
+                    Lock now
+                  </button>
+                  <button
+                    type="button"
+                    id="security-change-password"
+                    class="btn btn--ghost"
+                    hidden
+                  >
+                    Change password
+                  </button>
+                  <button
+                    type="button"
+                    id="security-disable-btn"
+                    class="btn btn--danger"
+                    hidden
+                  >
+                    Turn off encryption
+                  </button>
+                </div>
               </div>
-              <div
-                id="security-lock-settings"
-                class="setting-item"
-                style="display: none"
-              >
+              <div id="security-lock-settings" class="setting-item" hidden>
                 <label for="security-lock-timeout"
                   >Auto-lock after inactivity</label
                 >
@@ -2048,7 +2088,7 @@
                   <option value="30">30 minutes</option>
                   <option value="60">1 hour</option>
                 </select>
-                <p id="security-lock-note" class="setting-note">
+                <p id="security-lock-note" class="setting-description">
                   Running transfers keep the vault unlocked until they finish;
                   the timer starts only when the queue is idle. Locking
                   disconnects the current session.
@@ -2060,34 +2100,11 @@
                   aria-live="polite"
                 ></span>
               </div>
-              <div
-                id="security-lock-action"
-                class="setting-item"
-                style="display: none"
-              >
-                <span id="settings-lock-now-label" class="setting-label"
-                  >Lock encrypted storage now</span
-                >
-                <button
-                  type="button"
-                  id="security-lock-btn"
-                  class="btn btn--ghost"
-                >
-                  Lock Now
-                </button>
-              </div>
-              <div
-                id="security-biometric-settings"
-                class="setting-item"
-                style="display: none"
-              >
+              <div id="security-biometric-settings" class="setting-item" hidden>
                 <span id="biometric-label" class="setting-label"
                   >Biometric Unlock</span
                 >
-                <span
-                  id="biometric-security-note"
-                  class="security-biometric-note text-secondary"
-                >
+                <span id="biometric-security-note" class="setting-description">
                   Biometric prompt is a convenience gate, not hardware-bound. A
                   process running as your operating-system user can read the
                   stored key without completing the prompt.
@@ -2096,7 +2113,7 @@
                   type="button"
                   id="biometric-toggle"
                   class="btn"
-                  aria-labelledby="biometric-label"
+                  aria-describedby="biometric-security-note"
                 >
                   Enable
                 </button>
@@ -2344,7 +2361,110 @@
       </div>
     </div>
 
-    <div id="biometric-overlay" class="biometric-overlay" hidden></div>
+    <div
+      id="lock-view"
+      class="lock-view"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="lock-view-title"
+      aria-describedby="lock-view-desc"
+      hidden
+    >
+      <div class="lock-view__card">
+        <span
+          class="lock-view__icon"
+          data-icon="lock"
+          aria-hidden="true"
+        ></span>
+        <p class="lock-view__app">S3 Sidekick</p>
+        <h2 id="lock-view-title" class="lock-view__title">
+          S3 Sidekick is locked
+        </h2>
+        <p id="lock-view-desc" class="lock-view__desc">
+          Enter your password to load saved connections.
+        </p>
+        <p
+          id="lock-view-notice"
+          class="lock-view__notice"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></p>
+        <form id="lock-view-form" class="lock-view__form" novalidate>
+          <label class="lock-view__label" for="lock-view-password"
+            >Password</label
+          >
+          <div class="field-with-toggle lock-view__field">
+            <input
+              id="lock-view-password"
+              class="field"
+              type="password"
+              autocomplete="current-password"
+              aria-describedby="lock-view-error"
+            />
+            <button
+              type="button"
+              id="lock-view-reveal"
+              class="btn btn--ghost field-toggle-btn"
+              aria-label="Show password"
+              aria-pressed="false"
+            >
+              Show
+            </button>
+          </div>
+          <p
+            id="lock-view-error"
+            class="lock-view__error"
+            role="alert"
+            aria-live="assertive"
+            hidden
+          ></p>
+          <div class="lock-view__actions">
+            <button
+              type="submit"
+              id="lock-view-unlock"
+              class="btn btn--primary"
+            >
+              Unlock
+            </button>
+            <button type="button" id="lock-view-biometric" class="btn" hidden>
+              Use Touch ID
+            </button>
+          </div>
+        </form>
+        <div class="lock-view__links">
+          <button type="button" id="lock-view-forgot" class="lock-view__link">
+            Forgot password?
+          </button>
+          <button type="button" id="lock-view-continue" class="lock-view__link">
+            Continue locked
+          </button>
+        </div>
+        <div
+          id="biometric-overlay"
+          class="biometric-overlay"
+          role="status"
+          aria-live="polite"
+          hidden
+        >
+          <div class="biometric-overlay__card">
+            <h3 id="biometric-overlay-title" class="biometric-overlay__title">
+              Waiting for Touch ID
+            </h3>
+            <p id="biometric-overlay-desc" class="setting-description">
+              Approve the prompt to unlock, or cancel and type your password.
+            </p>
+            <button
+              type="button"
+              id="biometric-overlay-cancel"
+              class="btn btn--ghost"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div
       id="licenses-overlay"
@@ -2598,111 +2718,138 @@
             id="setup-wizard-progress-bar"
           ></div>
         </div>
+        <p id="setup-step-count" class="setup-wizard-step-count">Step 1 of 3</p>
 
         <div class="setup-wizard-step" id="setup-step-welcome" data-step="0">
-          <div class="setup-wizard-step__icon">
-            <span
-              class="lucide-icon setup-wizard-step__icon-svg"
-              data-icon="hand"
-            ></span>
-          </div>
-          <h2 id="setup-wizard-title-welcome" class="setup-wizard-step__title">
-            Welcome to S3 Sidekick
-          </h2>
-          <p class="setup-wizard-step__desc">
-            Let's get you set up. This will only take a moment.
-          </p>
-          <div class="setup-wizard-step__actions">
-            <button
-              type="button"
-              id="setup-welcome-next"
-              class="btn btn--primary setup-wizard-btn-wide"
+          <div class="setup-wizard-substep" id="setup-substep-welcome">
+            <div class="setup-wizard-step__icon">
+              <span
+                class="lucide-icon setup-wizard-step__icon-svg"
+                data-icon="hand"
+              ></span>
+            </div>
+            <h2
+              id="setup-wizard-title-welcome"
+              class="setup-wizard-step__title"
+              tabindex="-1"
             >
-              Get Started
-            </button>
+              Welcome to S3 Sidekick
+            </h2>
+            <p class="setup-wizard-step__desc">
+              Let's get you set up. This will only take a moment.
+            </p>
+            <div class="setup-wizard-step__actions">
+              <button
+                type="button"
+                id="setup-welcome-next"
+                class="btn btn--primary setup-wizard-btn-wide"
+              >
+                Get Started
+              </button>
+            </div>
           </div>
-        </div>
 
-        <div
-          class="setup-wizard-step"
-          id="setup-step-theme"
-          data-step="1"
-          hidden
-        >
-          <div class="setup-wizard-step__icon">
-            <span
-              class="lucide-icon setup-wizard-step__icon-svg"
-              data-icon="palette"
-            ></span>
-          </div>
-          <h2 id="setup-wizard-title-theme" class="setup-wizard-step__title">
-            Choose Your Theme
-          </h2>
-          <p class="setup-wizard-step__desc">Pick how S3 Sidekick looks.</p>
-          <div
-            class="setup-wizard-theme-options"
-            id="setup-theme-options"
-            role="radiogroup"
-            aria-label="Theme"
-          >
-            <button
-              type="button"
-              class="setup-wizard-theme-btn setup-wizard-theme-btn--active"
-              data-theme-value="system"
-              role="radio"
-              aria-checked="true"
-              tabindex="0"
-            >
+          <div class="setup-wizard-substep" id="setup-substep-theme" hidden>
+            <div class="setup-wizard-step__icon">
               <span
-                class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--system"
+                class="lucide-icon setup-wizard-step__icon-svg"
+                data-icon="palette"
               ></span>
-              <span>System</span>
-            </button>
-            <button
-              type="button"
-              class="setup-wizard-theme-btn"
-              data-theme-value="light"
-              role="radio"
-              aria-checked="false"
+            </div>
+            <h2
+              id="setup-wizard-title-theme"
+              class="setup-wizard-step__title"
               tabindex="-1"
             >
-              <span
-                class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--light"
-              ></span>
-              <span>Light</span>
-            </button>
-            <button
-              type="button"
-              class="setup-wizard-theme-btn"
-              data-theme-value="dark"
-              role="radio"
-              aria-checked="false"
-              tabindex="-1"
+              Choose Your Theme
+            </h2>
+            <p class="setup-wizard-step__desc">
+              Pick how S3 Sidekick looks. You can change this later in Settings.
+            </p>
+            <div
+              class="theme-picker setup-wizard-theme-picker"
+              role="radiogroup"
+              aria-labelledby="setup-wizard-title-theme"
             >
-              <span
-                class="setup-wizard-theme-btn__swatch setup-wizard-theme-btn__swatch--dark"
-              ></span>
-              <span>Dark</span>
-            </button>
-          </div>
-          <div class="setup-wizard-step__actions">
-            <button type="button" id="setup-theme-back" class="btn btn--ghost">
-              Back
-            </button>
-            <button
-              type="button"
-              id="setup-theme-next"
-              class="btn btn--primary"
-            >
-              Next
-            </button>
+              <label class="theme-card" data-theme-card="system">
+                <input
+                  type="radio"
+                  name="setup-theme"
+                  value="system"
+                  id="setup-theme-system"
+                  checked
+                />
+                <span
+                  class="theme-card-preview theme-card-preview--system"
+                  aria-hidden="true"
+                >
+                  <span class="theme-card-preview__row"></span>
+                  <span
+                    class="theme-card-preview__row theme-card-preview__row--short"
+                  ></span>
+                </span>
+                <span class="theme-card-label">System</span>
+              </label>
+              <label class="theme-card" data-theme-card="light">
+                <input
+                  type="radio"
+                  name="setup-theme"
+                  value="light"
+                  id="setup-theme-light"
+                />
+                <span
+                  class="theme-card-preview theme-card-preview--light"
+                  aria-hidden="true"
+                >
+                  <span class="theme-card-preview__row"></span>
+                  <span
+                    class="theme-card-preview__row theme-card-preview__row--short"
+                  ></span>
+                </span>
+                <span class="theme-card-label">Light</span>
+              </label>
+              <label class="theme-card" data-theme-card="dark">
+                <input
+                  type="radio"
+                  name="setup-theme"
+                  value="dark"
+                  id="setup-theme-dark"
+                />
+                <span
+                  class="theme-card-preview theme-card-preview--dark"
+                  aria-hidden="true"
+                >
+                  <span class="theme-card-preview__row"></span>
+                  <span
+                    class="theme-card-preview__row theme-card-preview__row--short"
+                  ></span>
+                </span>
+                <span class="theme-card-label">Dark</span>
+              </label>
+            </div>
+            <div class="setup-wizard-step__actions">
+              <button
+                type="button"
+                id="setup-theme-back"
+                class="btn btn--ghost"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                id="setup-theme-next"
+                class="btn btn--primary"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </div>
 
         <div
           class="setup-wizard-step"
           id="setup-step-encryption"
-          data-step="2"
+          data-step="1"
           hidden
         >
           <div class="setup-wizard-step__icon">
@@ -2714,6 +2861,7 @@
           <h2
             id="setup-wizard-title-encryption"
             class="setup-wizard-step__title"
+            tabindex="-1"
           >
             Encrypt Your Credentials On-Disk
           </h2>
@@ -2793,6 +2941,10 @@
               hidden
             ></p>
           </div>
+          <p id="setup-enc-skip-note" class="setting-description">
+            Skipping stores saved connections unencrypted (not recommended). You
+            can turn on encryption later in Settings.
+          </p>
           <div class="setup-wizard-step__actions">
             <button type="button" id="setup-enc-back" class="btn btn--ghost">
               Back
@@ -2802,7 +2954,7 @@
               id="setup-enc-skip"
               class="btn btn--ghost setup-wizard-skip-btn"
             >
-              Skip (not recommended)
+              Skip setup
             </button>
             <button type="button" id="setup-enc-next" class="btn btn--primary">
               Enable Encryption
@@ -2813,87 +2965,92 @@
         <div
           class="setup-wizard-step"
           id="setup-step-updates"
-          data-step="3"
+          data-step="2"
           hidden
         >
-          <div class="setup-wizard-step__icon">
-            <span
-              class="lucide-icon setup-wizard-step__icon-svg"
-              data-icon="refresh-cw"
-            ></span>
-          </div>
-          <h2 id="setup-wizard-title-updates" class="setup-wizard-step__title">
-            Updates
-          </h2>
-          <p class="setup-wizard-step__desc">
-            Stay up to date with the latest features and fixes.
-          </p>
-          <div class="setup-wizard-updates-form">
-            <label class="setup-wizard-checkbox-row">
-              <input id="setup-auto-updates" type="checkbox" checked />
-              <span>Automatically check for and download updates</span>
-            </label>
-            <div class="setup-wizard-channel-row">
-              <label
-                class="setup-wizard-channel-label"
-                for="setup-update-channel"
-                >Update channel</label
+          <div class="setup-wizard-substep" id="setup-substep-updates">
+            <div class="setup-wizard-step__icon">
+              <span
+                class="lucide-icon setup-wizard-step__icon-svg"
+                data-icon="refresh-cw"
+              ></span>
+            </div>
+            <h2
+              id="setup-wizard-title-updates"
+              class="setup-wizard-step__title"
+              tabindex="-1"
+            >
+              Updates
+            </h2>
+            <p class="setup-wizard-step__desc">
+              Stay up to date with the latest features and fixes.
+            </p>
+            <div class="setup-wizard-updates-form">
+              <label class="setup-wizard-checkbox-row">
+                <input id="setup-auto-updates" type="checkbox" checked />
+                <span>Automatically check for and download updates</span>
+              </label>
+              <div class="setup-wizard-channel-row">
+                <label
+                  class="setup-wizard-channel-label"
+                  for="setup-update-channel"
+                  >Update channel</label
+                >
+                <select
+                  id="setup-update-channel"
+                  class="field setup-wizard-channel-select"
+                >
+                  <option value="release">Stable</option>
+                  <option value="beta">Beta</option>
+                </select>
+              </div>
+            </div>
+            <div class="setup-wizard-step__actions">
+              <button
+                type="button"
+                id="setup-updates-back"
+                class="btn btn--ghost"
               >
-              <select
-                id="setup-update-channel"
-                class="field setup-wizard-channel-select"
+                Back
+              </button>
+              <button
+                type="button"
+                id="setup-updates-next"
+                class="btn btn--primary"
               >
-                <option value="release">Stable</option>
-                <option value="beta">Beta</option>
-              </select>
+                Finish Setup
+              </button>
             </div>
           </div>
-          <div class="setup-wizard-step__actions">
-            <button
-              type="button"
-              id="setup-updates-back"
-              class="btn btn--ghost"
-            >
-              Back
-            </button>
-            <button
-              type="button"
-              id="setup-updates-next"
-              class="btn btn--primary"
-            >
-              Finish Setup
-            </button>
-          </div>
-        </div>
 
-        <div
-          class="setup-wizard-step"
-          id="setup-step-done"
-          data-step="4"
-          hidden
-        >
-          <div class="setup-wizard-step__icon">
-            <span
-              class="lucide-icon setup-wizard-step__icon-svg"
-              data-icon="rocket"
-            ></span>
-          </div>
-          <h2 id="setup-wizard-title-done" class="setup-wizard-step__title">
-            You're All Set!
-          </h2>
-          <p class="setup-wizard-step__desc">
-            Connect to your first S3-compatible storage. Saved connections
-            become bookmark chips in the title bar for one-click access later.
-            You can change any setup choices in Settings.
-          </p>
-          <div class="setup-wizard-step__actions">
-            <button
-              type="button"
-              id="setup-done-btn"
-              class="btn btn--primary setup-wizard-btn-wide"
+          <div class="setup-wizard-substep" id="setup-substep-done" hidden>
+            <div class="setup-wizard-step__icon">
+              <span
+                class="lucide-icon setup-wizard-step__icon-svg"
+                data-icon="rocket"
+              ></span>
+            </div>
+            <h2
+              id="setup-wizard-title-done"
+              class="setup-wizard-step__title"
+              tabindex="-1"
             >
-              Connect to storage
-            </button>
+              You're All Set!
+            </h2>
+            <p class="setup-wizard-step__desc">
+              Connect to your first S3-compatible storage. Saved connections
+              become bookmark chips in the title bar for one-click access later.
+              You can change any setup choices in Settings.
+            </p>
+            <div class="setup-wizard-step__actions">
+              <button
+                type="button"
+                id="setup-done-btn"
+                class="btn btn--primary setup-wizard-btn-wide"
+              >
+                Connect to storage
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -123,70 +123,21 @@
   min-width: 180px;
 }
 
-.setup-wizard-theme-options {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-  margin-bottom: 4px;
+.setup-wizard-step-count {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
 }
 
-.setup-wizard-theme-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 14px 20px;
-  border: 2px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-surface);
-  color: var(--text);
-  font-size: var(--text-md);
-  font-family: inherit;
-  cursor: pointer;
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease,
-    background 0.15s ease;
-  min-width: 100px;
-  flex: 1 1 100px;
+.setup-wizard-substep[hidden] {
+  display: none;
 }
 
-.setup-wizard-theme-btn:hover {
-  border-color: var(--accent);
-}
-
-.setup-wizard-theme-btn:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring-color);
-  outline-offset: 2px;
-}
-
-.setup-wizard-theme-btn--active {
-  border-color: var(--accent);
-  box-shadow:
-    0 0 0 1px var(--accent),
-    0 2px 8px var(--glow-accent);
-}
-
-.setup-wizard-theme-btn__swatch {
-  width: 40px;
-  height: 28px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-}
-
-/* Swatches mirror the light (--bg / --bg-surface) and dark (--bg / --bg-surface)
-   token pairs so each option previews its real theme. */
-.setup-wizard-theme-btn__swatch--light {
-  background: linear-gradient(135deg, #f4f4f5 50%, #ffffff 50%);
-}
-
-.setup-wizard-theme-btn__swatch--dark {
-  background: linear-gradient(135deg, #09090b 50%, #18181b 50%);
-}
-
-.setup-wizard-theme-btn__swatch--system {
-  background: linear-gradient(135deg, #f4f4f5 50%, #18181b 50%);
+.setup-wizard-theme-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
 }
 
 .setup-wizard-encryption-form {

@@ -192,7 +192,7 @@ test("Settings description text meets 4.5:1 contrast in the light theme", async 
   expect(ratio).toBeGreaterThanOrEqual(4.5);
 });
 
-test("the Unlock prompt offers a Forgot password? action", async ({ page }) => {
+test("the lock view offers a Forgot password? action", async ({ page }) => {
   await installLayoutTauriMock(page, {
     objectCount: 0,
     prefixes: [],
@@ -204,14 +204,13 @@ test("the Unlock prompt offers a Forgot password? action", async ({ page }) => {
     unlockPasswords: ["correct-horse-battery"],
   });
   await page.goto("/");
-  await expect(dialog(page)).toHaveClass(/active/);
-  await expect(page.locator("#dialog-title")).toHaveText("Unlock");
-  await expect(page.locator("#dialog-message")).toContainText(
-    /can.t be recovered/i,
+  await expect(page.locator("#lock-view")).toBeVisible();
+  await expect(page.locator("#lock-view-title")).toHaveText(
+    "S3 Sidekick is locked",
   );
-  await expect(
-    dialog(page).getByRole("button", { name: "Forgot password?" }),
-  ).toBeVisible();
+  await expect(page.locator("#lock-view-forgot")).toHaveText(
+    "Forgot password?",
+  );
 });
 
 test("Forgot password? opens the reset flow, and Escape on Reset Scope cancels it", async ({
@@ -228,10 +227,10 @@ test("Forgot password? opens the reset flow, and Escape on Reset Scope cancels i
     unlockPasswords: ["correct-horse-battery"],
   });
   await page.goto("/");
-  await expect(page.locator("#dialog-title")).toHaveText("Unlock");
-  await dialog(page).getByRole("button", { name: "Forgot password?" }).click();
+  await expect(page.locator("#lock-view")).toBeVisible();
+  await page.locator("#lock-view-forgot").click();
 
-  // The Unlock prompt resolves as cancelled and the existing reset flow opens.
+  // The lock view stays up underneath while the existing reset flow opens.
   await expect(page.locator("#dialog-title")).toHaveText("Reset Settings");
   await page.locator("#dialog-ok").click(); // "Continue"
   await expect(page.locator("#dialog-title")).toHaveText("Reset Scope");
@@ -249,7 +248,7 @@ test("Forgot password? opens the reset flow, and Escape on Reset Scope cancels i
   expect(await callNames(page)).not.toContain("unlock_security");
 });
 
-test("Escape on the Unlock prompt cancels and never starts the reset flow", async ({
+test("Escape on the lock view does not dismiss it or start the reset flow", async ({
   page,
 }) => {
   await installLayoutTauriMock(page, {
@@ -263,12 +262,11 @@ test("Escape on the Unlock prompt cancels and never starts the reset flow", asyn
     unlockPasswords: ["correct-horse-battery"],
   });
   await page.goto("/");
-  await expect(page.locator("#dialog-title")).toHaveText("Unlock");
+  await expect(page.locator("#lock-view")).toBeVisible();
   await page.keyboard.press("Escape");
+  await expect(page.locator("#lock-view")).toBeVisible();
   await expect(dialog(page)).not.toHaveClass(/active/);
   expect(await callNames(page)).not.toContain("factory_reset");
-  await expect(page.locator("#dialog-title")).not.toHaveText("Reset Settings");
-  await expect(page.locator("#dialog-title")).not.toHaveText("Reset Scope");
 });
 
 test("Lock Now asks before interrupting running transfers", async ({
@@ -386,7 +384,7 @@ test("Settings bookmark, theme and update labels match across surfaces", async (
   await openSettings(page);
   await page.locator("#settings-tab-appearance").click();
   const settingsThemes = await page
-    .locator(".theme-card-label")
+    .locator("#settings-panel-appearance .theme-card-label")
     .allTextContents();
   expect(settingsThemes).toEqual(["System", "Light", "Dark"]);
 
