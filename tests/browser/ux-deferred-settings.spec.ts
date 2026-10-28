@@ -53,11 +53,15 @@ function countCalls(calls: MockCall[], command: string): number {
   return calls.filter((call) => call.command === command).length;
 }
 
-async function editAlphaFromConnectionScreen(page: Page): Promise<void> {
-  await page
-    .locator('#conn-saved-list button[aria-label="Edit alpha"]')
-    .click();
-  await expect(page.locator("#settings-overlay")).toHaveClass(/active/);
+/**
+ * Opens the Settings edit form for "alpha". The connection screen's Edit now
+ * opens an inline form instead (see the connection-screen test), so these
+ * tests reach the Settings edit form through the Bookmarks tab.
+ */
+async function editAlphaFromSettings(page: Page): Promise<void> {
+  await openSettings(page);
+  await page.locator("#settings-tab-bookmarks").click();
+  await page.locator('#bookmark-list button[aria-label="Edit alpha"]').click();
   await expect(page.locator("#bookmark-edit")).toBeVisible();
 }
 
@@ -95,7 +99,7 @@ test("Transfers has a Desktop notifications switch that is saved when unchecked"
   );
 });
 
-test("Edit on the connection screen opens Settings on the edit form", async ({
+test("Edit on the connection screen opens the connect form prefilled for editing", async ({
   page,
 }) => {
   await installLayoutTauriMock(page, {
@@ -104,32 +108,23 @@ test("Edit on the connection screen opens Settings on the edit form", async ({
     bookmarks: [ALPHA, BETA],
   });
   await page.goto("/");
-  await editAlphaFromConnectionScreen(page);
+  await page
+    .locator(
+      '#conn-saved-list .bookmark__menu[aria-label="More actions for alpha"]',
+    )
+    .click();
+  await page
+    .locator('.bookmark-row-menu__item[aria-label="Edit alpha"]')
+    .click();
 
-  await expect(page.locator("#settings-tab-bookmarks")).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
-  await expect(page.locator("#bookmark-edit-name")).toHaveValue(ALPHA.name);
-  await expect(page.locator("#bookmark-edit-endpoint")).toHaveValue(
-    ALPHA.endpoint,
-  );
-  await expect(page.locator("#bookmark-edit-region")).toHaveValue(ALPHA.region);
-  await expect(page.locator("#bookmark-edit-access-key")).toHaveValue(
-    ALPHA.access_key,
-  );
-  await expect(page.locator("#bookmark-edit-secret-key")).toHaveValue("");
-  await expect(page.locator("#bookmark-edit-secret-key")).toHaveAttribute(
-    "placeholder",
-    "Leave blank to keep the current secret",
-  );
-  await expect(page.locator("#bookmark-edit-save")).toHaveAttribute(
-    "type",
-    "button",
-  );
-  await expect(page.locator("#bookmark-edit-cancel")).toHaveAttribute(
-    "type",
-    "button",
+  await expect(page.locator("#settings-overlay")).not.toHaveClass(/active/);
+  await expect(page.locator("#conn-name")).toHaveValue(ALPHA.name);
+  await expect(page.locator("#conn-endpoint")).toHaveValue(ALPHA.endpoint);
+  await expect(page.locator("#conn-region")).toHaveValue(ALPHA.region);
+  await expect(page.locator("#conn-access-key")).toHaveValue(ALPHA.access_key);
+  await expect(page.locator("#conn-secret-key")).toHaveValue(ALPHA.secret_key);
+  await expect(page.locator("#bookmark-save-btn")).toHaveText(
+    "Update connection",
   );
 });
 
@@ -142,7 +137,7 @@ test("Changing only the endpoint updates the saved row and keeps the stored secr
     bookmarks: [ALPHA, BETA],
   });
   await page.goto("/");
-  await editAlphaFromConnectionScreen(page);
+  await editAlphaFromSettings(page);
 
   await page
     .locator("#bookmark-edit-endpoint")
@@ -193,7 +188,7 @@ test("A new secret key typed into the edit form replaces the stored one", async 
     bookmarks: [ALPHA],
   });
   await page.goto("/");
-  await editAlphaFromConnectionScreen(page);
+  await editAlphaFromSettings(page);
 
   await page.locator("#bookmark-edit-secret-key").fill("rotated-secret-value");
   await page.locator("#bookmark-edit-save").click();
@@ -219,7 +214,7 @@ test("Escape on the edit form discards the changes and keeps Settings open", asy
     bookmarks: [ALPHA, BETA],
   });
   await page.goto("/");
-  await editAlphaFromConnectionScreen(page);
+  await editAlphaFromSettings(page);
 
   await page
     .locator("#bookmark-edit-endpoint")
@@ -242,7 +237,7 @@ test("Cancel on the edit form discards the changes without saving", async ({
     bookmarks: [ALPHA],
   });
   await page.goto("/");
-  await editAlphaFromConnectionScreen(page);
+  await editAlphaFromSettings(page);
 
   await page.locator("#bookmark-edit-region").fill("eu-central-1");
   await page.locator("#bookmark-edit-cancel").click();
@@ -261,7 +256,7 @@ test("An edit that duplicates another saved endpoint and key is refused", async 
     bookmarks: [ALPHA, BETA],
   });
   await page.goto("/");
-  await editAlphaFromConnectionScreen(page);
+  await editAlphaFromSettings(page);
 
   await page.locator("#bookmark-edit-endpoint").fill(BETA.endpoint);
   await page.locator("#bookmark-edit-access-key").fill(BETA.access_key);

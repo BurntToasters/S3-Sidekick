@@ -331,7 +331,8 @@ test("manual disconnect rejection keeps the current session visible and retryabl
     return state.connectionId;
   });
 
-  await page.locator("#disconnect-btn").click();
+  await page.locator("#conn-switcher-btn").click();
+  await page.locator("#conn-switcher-disconnect").click();
   await expect.poll(() => commandCount(page, "disconnect")).toBe(1);
   const observed = await page.evaluate(async () => {
     const stateModule =

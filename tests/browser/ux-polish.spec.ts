@@ -298,26 +298,23 @@ test.describe("text tokens and target sizes", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("bookmark chips are 28px tall and the bookmark delete control is 24px", async ({
+  test("the header switcher is 28px tall and the bookmark delete control is 24px", async ({
     page,
   }) => {
     await page.goto("/");
     const sizes = await page.evaluate(() => {
-      const bar = document.getElementById("bookmark-bar") as HTMLElement;
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "bookmark-chip";
-      chip.textContent = "Production";
-      bar.appendChild(chip);
+      const switcher = document.getElementById(
+        "conn-switcher-btn",
+      ) as HTMLElement;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "bookmark__delete";
       remove.textContent = "×";
       document.body.appendChild(remove);
-      const chipBox = chip.getBoundingClientRect();
+      const switcherBox = switcher.getBoundingClientRect();
       const removeBox = remove.getBoundingClientRect();
       return {
-        chipHeight: chipBox.height,
+        chipHeight: switcherBox.height,
         removeWidth: removeBox.width,
         removeHeight: removeBox.height,
       };
@@ -584,7 +581,7 @@ test.describe("theme previews, help tips, header and selects", () => {
     }
   });
 
-  test("at 820px with the sidebar open, header parts never overlap and Disconnect is readable", async ({
+  test("at 820px with the sidebar open, header parts never overlap and the switcher is readable", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 820, height: 640 });
@@ -595,14 +592,12 @@ test.describe("theme previews, help tips, header and selects", () => {
         { ...savedConnections[0], name: "Gamma", access_key: "third-key" },
       ],
     });
-    await expect(page.locator("#disconnect-btn")).toBeVisible();
+    await expect(page.locator("#conn-switcher-btn")).toBeVisible();
 
     const overlaps = await page.evaluate(() => {
       const parts: Record<string, Element | null> = {
         title: document.querySelector(".header__brand"),
-        chips: document.getElementById("bookmark-bar"),
-        badge: document.getElementById("connection-status"),
-        disconnect: document.getElementById("disconnect-btn"),
+        switcher: document.getElementById("conn-switcher-btn"),
         settings: document.getElementById("settings-btn"),
       };
       const boxes = Object.entries(parts).map(([name, el]) => {
@@ -637,8 +632,8 @@ test.describe("theme previews, help tips, header and selects", () => {
     });
     expect(overlaps).toEqual([]);
 
-    const disconnect = await page.locator("#disconnect-btn").boundingBox();
-    expect(disconnect?.height ?? 0).toBeGreaterThanOrEqual(24);
+    const switcher = await page.locator("#conn-switcher-btn").boundingBox();
+    expect(switcher?.height ?? 0).toBeGreaterThanOrEqual(24);
 
     for (const theme of ["light", "dark"] as const) {
       const ratio = await page.evaluate((mode) => {
@@ -663,7 +658,7 @@ test.describe("theme previews, help tips, header and selects", () => {
           };
           return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
         };
-        const btn = document.getElementById("disconnect-btn");
+        const btn = document.getElementById("conn-switcher-btn");
         const header = document.querySelector(".header");
         if (!btn || !header) return 0;
         const page = over(
@@ -683,7 +678,7 @@ test.describe("theme previews, help tips, header and selects", () => {
         const b = luminance(buttonBg);
         return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
       }, theme);
-      expect(ratio, `Disconnect text on fill, ${theme}`).toBeGreaterThanOrEqual(
+      expect(ratio, `Switcher text on fill, ${theme}`).toBeGreaterThanOrEqual(
         4.5,
       );
     }

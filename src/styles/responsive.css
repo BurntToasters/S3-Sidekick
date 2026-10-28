@@ -131,6 +131,15 @@
     padding: var(--space-5);
   }
 
+  .reconnect-card {
+    margin-top: var(--space-4);
+    flex-wrap: wrap;
+  }
+
+  .conn-switcher__host {
+    display: none;
+  }
+
   #conn-endpoint,
   #conn-access-key,
   #conn-secret-key {

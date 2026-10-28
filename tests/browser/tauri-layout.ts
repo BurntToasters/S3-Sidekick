@@ -45,6 +45,8 @@ export interface LayoutMockOptions {
   bookmarks?: unknown[];
   /** Optional independent backup rows. Defaults to `bookmarks`. */
   bookmarkBackup?: unknown[];
+  /** Buckets returned by `list_buckets`. Defaults to one layout-test bucket. */
+  buckets?: Array<{ name: string; creation_date?: string }>;
   /** Security state returned by the mock backend. */
   security?: Partial<MockSecurityStatus>;
   /** Passwords accepted by `unlock_security`; an empty list accepts any. */
@@ -101,6 +103,7 @@ interface LayoutMockInit {
   listObjectsByPrefix: Record<string, MockListOverride>;
   bookmarks: unknown[];
   bookmarkBackup: unknown[];
+  buckets: Array<{ name: string; creation_date?: string }>;
   security: MockSecurityStatus;
   unlockPasswords: string[];
   deferUnlock: boolean;
@@ -144,6 +147,7 @@ export async function installLayoutTauriMock(
     listObjectsByPrefix: options.listObjectsByPrefix ?? {},
     bookmarks: options.bookmarks ?? [],
     bookmarkBackup: options.bookmarkBackup ?? options.bookmarks ?? [],
+    buckets: options.buckets ?? [],
     security: {
       initialized: true,
       encryption_enabled: false,
@@ -179,6 +183,7 @@ export async function installLayoutTauriMock(
       listObjectsByPrefix,
       bookmarks,
       bookmarkBackup,
+      buckets,
       security,
       unlockPasswords,
       deferUnlock,
@@ -221,6 +226,15 @@ export async function installLayoutTauriMock(
       };
       let storedBookmarks = [...bookmarks];
       let storedBookmarkBackup = [...bookmarkBackup];
+      const storedBuckets =
+        buckets.length > 0
+          ? buckets
+          : [
+              {
+                name: "layout-test-bucket",
+                creation_date: "2025-01-01T00:00:00.000Z",
+              },
+            ];
       const securityState = { ...security };
       const testState = {
         scenario,
@@ -480,12 +494,10 @@ export async function installLayoutTauriMock(
               conditional_delete_supported: true,
             };
           case "list_buckets":
-            return [
-              {
-                name: "layout-test-bucket",
-                creation_date: "2025-01-01T00:00:00.000Z",
-              },
-            ];
+            return storedBuckets.map((bucket) => ({
+              name: bucket.name,
+              creation_date: bucket.creation_date ?? "2025-01-01T00:00:00.000Z",
+            }));
           case "list_objects":
             if (scenario === "error") {
               throw new Error("Mock listing failed");

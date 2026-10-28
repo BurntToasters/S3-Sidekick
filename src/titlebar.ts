@@ -16,13 +16,12 @@ const DRAG_REGION_SELECTOR =
 function isInteractiveTitlebarTarget(target: HTMLElement): boolean {
   return Boolean(
     target.closest(
-      "button, a, input, select, textarea, .bookmark-chip, .titlebar-win-controls",
+      "button, a, input, select, textarea, .titlebar-win-controls",
     ),
   );
 }
 
 export function wireTitlebar(): void {
-  wireBookmarkBarWheel();
   if (!usesCustomTitlebar()) return;
 
   document.body.classList.add("titlebar-custom");
@@ -66,31 +65,12 @@ function onTitlebarDoubleClick(event: MouseEvent): void {
   const target = event.target as HTMLElement;
   if (
     target.closest(
-      ".header__actions, .bookmark-bar, .titlebar-win-controls, button, a, input, select, textarea",
+      ".header__actions, .titlebar-win-controls, button, a, input, select, textarea",
     )
   ) {
     return;
   }
   void getCurrentWindow().toggleMaximize();
-}
-
-/**
- * The bar is a horizontal list that hides its scrollbar, so a mouse wheel
- * would otherwise do nothing. Vertical wheel motion scrolls it sideways.
- */
-function wireBookmarkBarWheel(): void {
-  const bar = document.getElementById("bookmark-bar");
-  if (!bar) return;
-  bar.addEventListener(
-    "wheel",
-    (event) => {
-      if (bar.scrollWidth <= bar.clientWidth) return;
-      if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
-      event.preventDefault();
-      bar.scrollLeft += event.deltaY;
-    },
-    { passive: false },
-  );
 }
 
 function applyMaximizeState(maximize: HTMLElement, maximized: boolean): void {

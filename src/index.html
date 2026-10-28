@@ -22,22 +22,82 @@
             data-tauri-drag-region
             aria-hidden="true"
           ></div>
-          <div id="bookmark-bar" class="bookmark-bar"></div>
+          <div class="conn-switcher-wrap">
+            <button
+              type="button"
+              id="conn-switcher-btn"
+              class="conn-switcher"
+              aria-haspopup="true"
+              aria-expanded="false"
+              title="Connections"
+            >
+              <span
+                id="conn-switcher-dot"
+                class="conn-switcher__dot"
+                data-state="off"
+                aria-hidden="true"
+              ></span>
+              <span id="conn-switcher-name" class="conn-switcher__name"
+                >No connection</span
+              >
+              <span id="conn-switcher-host" class="conn-switcher__host"></span>
+              <span
+                class="lucide-icon conn-switcher__chevron"
+                data-icon="chevron-down"
+                aria-hidden="true"
+              ></span>
+            </button>
+            <div
+              id="conn-switcher-menu"
+              class="conn-switcher__menu"
+              aria-label="Connections"
+              hidden
+            >
+              <div
+                id="conn-switcher-saved"
+                class="conn-switcher__saved"
+                role="group"
+                aria-label="Saved connections"
+              ></div>
+              <div
+                class="conn-switcher__actions"
+                role="group"
+                aria-label="Connection actions"
+              >
+                <button
+                  type="button"
+                  id="conn-switcher-new"
+                  class="conn-switcher__action"
+                >
+                  New…
+                </button>
+                <button
+                  type="button"
+                  id="conn-switcher-manage"
+                  class="conn-switcher__action"
+                >
+                  Manage…
+                </button>
+                <button
+                  type="button"
+                  id="conn-switcher-disconnect"
+                  class="conn-switcher__action"
+                >
+                  Disconnect
+                </button>
+                <button
+                  type="button"
+                  id="conn-switcher-lock"
+                  class="conn-switcher__action"
+                  hidden
+                >
+                  Lock now
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="header__actions">
-          <span
-            id="connection-status"
-            class="connection-badge connection-badge--off"
-            >Disconnected</span
-          >
-          <button
-            type="button"
-            id="disconnect-btn"
-            class="btn btn--disconnect btn--sm"
-            style="display: none"
-          >
-            Disconnect
-          </button>
           <button
             type="button"
             id="settings-btn"
@@ -94,18 +154,66 @@
                 <span class="lucide-icon" data-icon="plus"></span>
               </button>
             </div>
+            <input
+              id="conn-saved-filter"
+              class="field conn-saved-filter"
+              type="text"
+              placeholder="Filter saved connections"
+              aria-label="Filter saved connections"
+              spellcheck="false"
+              autocomplete="off"
+              hidden
+            />
             <ul id="conn-saved-list" class="conn-saved-list"></ul>
           </div>
           <div class="connection-screen__main">
+            <div id="reconnect-card" class="reconnect-card" hidden>
+              <div class="reconnect-card__body">
+                <span class="reconnect-card__title"
+                  >Reconnect to
+                  <span
+                    id="reconnect-card-name"
+                    class="reconnect-card__name"
+                  ></span
+                ></span>
+                <span
+                  id="reconnect-card-endpoint"
+                  class="reconnect-card__endpoint"
+                ></span>
+              </div>
+              <button
+                type="button"
+                id="reconnect-card-btn"
+                class="btn btn--primary btn--sm"
+              >
+                Reconnect
+              </button>
+            </div>
             <div class="connection-screen__form-card">
               <h1 class="connection-screen__title">Connect to S3 Storage</h1>
               <p class="connection-screen__subtitle">
-                Enter credentials, or choose a saved connection to connect
-                instantly. Choose Save connection to keep these credentials;
-                saved connections also appear as chips in the title bar.
+                Enter credentials, or pick a saved connection to connect
+                instantly.
               </p>
 
               <div class="connection-form">
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="conn-name">Name</label>
+                    <input
+                      id="conn-name"
+                      class="field field--full"
+                      type="text"
+                      placeholder="Production"
+                      aria-label="Connection name"
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                    />
+                  </div>
+                </div>
+
                 <div class="form-row">
                   <div class="form-group">
                     <label for="conn-provider-preset"
@@ -123,7 +231,25 @@
                       <option value="cloudflare">Cloudflare R2</option>
                       <option value="minio">MinIO (local)</option>
                       <option value="wasabi">Wasabi</option>
+                      <option value="custom">Custom</option>
                     </select>
+                  </div>
+                </div>
+
+                <div class="form-row" id="conn-r2-account-row" hidden>
+                  <div class="form-group">
+                    <label for="conn-r2-account">Account ID</label>
+                    <input
+                      id="conn-r2-account"
+                      class="field field--full"
+                      type="text"
+                      placeholder="Your Cloudflare account ID"
+                      aria-label="Cloudflare account ID"
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                    />
                   </div>
                 </div>
 
@@ -249,13 +375,23 @@
                     ></span>
                     Save connection
                   </button>
-                  <button
-                    type="button"
-                    id="connect-btn"
-                    class="btn btn--primary"
-                  >
-                    Connect
-                  </button>
+                  <div class="form-actions__end">
+                    <button
+                      type="button"
+                      id="conn-test-btn"
+                      class="btn"
+                      title="Verify these credentials without connecting"
+                    >
+                      Test connection
+                    </button>
+                    <button
+                      type="button"
+                      id="connect-btn"
+                      class="btn btn--primary"
+                    >
+                      Connect
+                    </button>
+                  </div>
                 </div>
                 <p
                   id="conn-form-error"

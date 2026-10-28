@@ -38,10 +38,13 @@ vi.mock("../browser.ts", () => ({
   clearSelection: clearSelectionMock,
   clearNavHistory: clearNavHistoryMock,
   readLastBucket: readLastBucketMock,
+  navigateToFolder: vi.fn(async () => undefined),
 }));
 
 vi.mock("../bookmarks.ts", () => ({
   addBookmark: addBookmarkMock,
+  clearBookmarks: vi.fn(),
+  getBookmarks: vi.fn(() => []),
   renderBookmarkBar: renderBookmarkBarMock,
   isEndpointBookmarked: isEndpointBookmarkedMock,
   renderBookmarkList: renderBookmarkListMock,
@@ -377,5 +380,193 @@ describe("connect shows the layout before restoring the last bucket", () => {
       "none",
     );
     expect(showEmptyStateMock).not.toHaveBeenCalled();
+  });
+});
+
+const MEMORY_STORAGE_KEY = "s3-sidekick.connection-memory";
+
+/**
+ * Failure-mode inventory for the per-connection location memory: the key
+ * must be name+endpoint only, records must never carry secrets, and every
+ * malformed storage state must read as "nothing remembered" instead of
+ * throwing or leaking.
+ */
+describe("connection location memory (pure logic)", () => {
+  let app: typeof import("../app-connection.ts");
+
+  beforeEach(async () => {
+    vi.resetModules();
+    window.localStorage.clear();
+    app = await import("../app-connection.ts");
+  });
+
+  it("keys memory on the connection name and endpoint only", () => {
+    expect(app.connectionMemoryKey("Production", "https://x.example.com")).toBe(
+      "Production\nhttps://x.example.com",
+    );
+    // Same name, different endpoint: a distinct connection.
+    expect(app.connectionMemoryKey("a", "https://x")).not.toBe(
+      app.connectionMemoryKey("a", "https://y"),
+    );
+    // Same endpoint, different name: also distinct.
+    expect(app.connectionMemoryKey("a", "https://x")).not.toBe(
+      app.connectionMemoryKey("b", "https://x"),
+    );
+  });
+
+  it("round-trips bucket and prefix and never stores credentials", () => {
+    app.rememberConnectionLocation(
+      "Production",
+      "https://x.example.com",
+      "bucket-a",
+      "docs/",
+      1_000,
+    );
+
+    const stored = JSON.parse(
+      window.localStorage.getItem(MEMORY_STORAGE_KEY) ?? "{}",
+    ) as Record<string, unknown>;
+    const record = stored["Production\nhttps://x.example.com"] as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(record).sort()).toEqual([
+      "bucket",
+      "lastUsedAt",
+      "prefix",
+    ]);
+    expect(record.bucket).toBe("bucket-a");
+    expect(record.prefix).toBe("docs/");
+
+    expect(
+      app.readConnectionLocation("Production", "https://x.example.com"),
+    ).toEqual({
+      bucket: "bucket-a",
+      prefix: "docs/",
+      lastUsedAt: 1_000,
+    });
+  });
+
+  it("returns null for connections that were never remembered", () => {
+    expect(app.readConnectionLocation("Ghost", "https://x.example.com")).toBe(
+      null,
+    );
+    expect(app.readConnectionLocation("", "")).toBe(null);
+  });
+
+  it("overwrites the previous location for the same connection", () => {
+    app.rememberConnectionLocation("a", "https://x", "bucket-1", "", 100);
+    app.rememberConnectionLocation("a", "https://x", "bucket-2", "new/", 200);
+
+    expect(app.readConnectionLocation("a", "https://x")).toEqual({
+      bucket: "bucket-2",
+      prefix: "new/",
+      lastUsedAt: 200,
+    });
+  });
+
+  it("reads nothing when the stored memory is corrupt JSON", () => {
+    window.localStorage.setItem(MEMORY_STORAGE_KEY, "not-json{");
+    expect(app.readConnectionLocation("a", "https://x")).toBe(null);
+  });
+
+  it("rejects memory that is not a key-to-record map", () => {
+    window.localStorage.setItem(MEMORY_STORAGE_KEY, "42");
+    expect(app.readConnectionLocation("a", "https://x")).toBe(null);
+  });
+
+  it("rejects individual records with malformed fields", () => {
+    window.localStorage.setItem(
+      MEMORY_STORAGE_KEY,
+      JSON.stringify({
+        "a\nhttps://x": { bucket: 7, prefix: "", lastUsedAt: 5 },
+        "b\nhttps://x": { bucket: "ok", prefix: "", lastUsedAt: "soon" },
+        "c\nhttps://x": { bucket: "ok", prefix: "", lastUsedAt: NaN },
+      }),
+    );
+    expect(app.readConnectionLocation("a", "https://x")).toBe(null);
+    expect(app.readConnectionLocation("b", "https://x")).toBe(null);
+    expect(app.readConnectionLocation("c", "https://x")).toBe(null);
+  });
+
+  it("survives storage that refuses writes", () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("quota");
+    });
+    expect(() =>
+      app.rememberConnectionLocation("a", "https://x", "bucket-a", "", 5),
+    ).not.toThrow();
+    vi.restoreAllMocks();
+  });
+
+  it("survives storage that refuses reads", () => {
+    window.localStorage.setItem(
+      MEMORY_STORAGE_KEY,
+      JSON.stringify({
+        "a\nhttps://x": { bucket: "b", prefix: "", lastUsedAt: 1 },
+      }),
+    );
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    expect(app.readConnectionLocation("a", "https://x")).toBe(null);
+    vi.restoreAllMocks();
+  });
+
+  it("forgets a removed connection", () => {
+    app.rememberConnectionLocation("a", "https://x", "bucket-a", "", 5);
+    app.forgetConnectionLocation("a", "https://x");
+    expect(app.readConnectionLocation("a", "https://x")).toBe(null);
+  });
+
+  it("picks the most recent remembered connection that still exists", () => {
+    app.rememberConnectionLocation("gone", "https://gone", "b", "", 300);
+    app.rememberConnectionLocation("kept", "https://kept", "b", "", 100);
+    app.rememberConnectionLocation("kept2", "https://kept2", "b", "", 200);
+
+    // "gone" was removed from the saved list, so it is not a candidate.
+    expect(
+      app.mostRecentRememberedConnection([
+        { name: "kept", endpoint: "https://kept" },
+        { name: "kept2", endpoint: "https://kept2" },
+      ]),
+    ).toEqual({ name: "kept2", endpoint: "https://kept2", lastUsedAt: 200 });
+  });
+
+  it("returns null when no remembered connection matches a saved one", () => {
+    app.rememberConnectionLocation("gone", "https://gone", "b", "", 300);
+    expect(app.mostRecentRememberedConnection([])).toBe(null);
+    expect(
+      app.mostRecentRememberedConnection([
+        { name: "x", endpoint: "https://x" },
+      ]),
+    ).toBe(null);
+  });
+});
+
+describe("last-used marker label (pure logic)", () => {
+  let app: typeof import("../app-connection.ts");
+
+  beforeEach(async () => {
+    vi.resetModules();
+    app = await import("../app-connection.ts");
+  });
+
+  it("labels fresh, recent, and older uses", () => {
+    const now = 1_000_000_000;
+    expect(app.lastUsedLabel(now - 10_000, now)).toBe("just now");
+    expect(app.lastUsedLabel(now - 5 * 60_000, now)).toBe("5 min ago");
+    expect(app.lastUsedLabel(now - 90 * 60_000, now)).toBe("1 hr ago");
+    expect(app.lastUsedLabel(now - 3 * 3_600_000, now)).toBe("3 hr ago");
+    expect(app.lastUsedLabel(now - 86_400_000, now)).toBe("1 day ago");
+    expect(app.lastUsedLabel(now - 2 * 86_400_000, now)).toBe("2 days ago");
+  });
+
+  it("hides the marker for invalid or stale timestamps", () => {
+    const now = 1_000_000_000;
+    expect(app.lastUsedLabel(0, now)).toBe(null);
+    expect(app.lastUsedLabel(Number.NaN, now)).toBe(null);
+    expect(app.lastUsedLabel(now + 120_000, now)).toBe(null);
+    expect(app.lastUsedLabel(now - 40 * 86_400_000, now)).toBe(null);
   });
 });

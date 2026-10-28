@@ -654,11 +654,24 @@ describe("saved connection naming, identity, and editing", () => {
     });
 
     const row = list.querySelector(".bookmark-item") as HTMLLIElement;
-    expect(row.getAttribute("role")).toBe("button");
-    const deleteBtn = list.querySelector("[data-delete]") as HTMLButtonElement;
+    // The row is a Connect button plus a ⋯ menu with per-row labels.
+    const connectBtn = row.querySelector(
+      ".bookmark-item__connect",
+    ) as HTMLButtonElement;
+    expect(connectBtn).not.toBeNull();
+    expect(connectBtn.textContent).toContain("alpha");
+    const menuButton = row.querySelector(
+      ".bookmark__menu",
+    ) as HTMLButtonElement;
+    expect(menuButton.getAttribute("aria-label")).toBe(
+      "More actions for alpha",
+    );
+    const deleteBtn = row.querySelector(
+      '[role="menuitem"][data-delete]',
+    ) as HTMLButtonElement;
     expect(deleteBtn.getAttribute("aria-label")).toBe("Delete alpha");
     expect(
-      list.querySelector('button[aria-label="Rename alpha"]'),
+      row.querySelector('button[aria-label="Rename alpha"]'),
     ).not.toBeNull();
 
     deleteBtn.dispatchEvent(
@@ -666,7 +679,7 @@ describe("saved connection naming, identity, and editing", () => {
     );
     expect(onSelect).not.toHaveBeenCalled();
 
-    row.dispatchEvent(
+    connectBtn.dispatchEvent(
       new KeyboardEvent("keydown", { key: " ", bubbles: true }),
     );
     expect(onSelect).toHaveBeenCalledWith(alphaBookmark);

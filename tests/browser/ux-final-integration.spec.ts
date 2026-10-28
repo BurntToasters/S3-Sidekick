@@ -780,7 +780,9 @@ test.describe("0.12.0 residue: contrast, targets, palette, resizers", () => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
     const error = await measureTextPaint(errorText);
-    const disconnect = await measureTextPaint(page.locator("#disconnect-btn"));
+    const disconnect = await measureTextPaint(
+      page.locator("#conn-switcher-btn"),
+    );
     const errorRatio = contrastRatio(error.color, error.background);
     const disconnectRatio = contrastRatio(
       disconnect.color,

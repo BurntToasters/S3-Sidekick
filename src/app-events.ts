@@ -115,11 +115,11 @@ import {
   refreshBookmarkBar,
   updateBookmarkBtn,
   handleNewConnection,
-  awsRegionalEndpoint,
+  applyProviderPreset,
+  wireConnectionScreenExtras,
   setConnectionUI,
   confirmSessionTeardown,
   handleConnectButton,
-  handleDisconnectRequest,
   setSavedConnectionsLocked,
 } from "./app-connection.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
@@ -189,9 +189,6 @@ export async function clearSessionAfterAutoLock(): Promise<boolean> {
 /** Connection form: connect, credentials, provider presets, saved list. */
 function wireConnectionForm(): void {
   dom.connectBtn.addEventListener("click", handleConnectButton);
-  dom.disconnectBtn.addEventListener("click", () => {
-    void handleDisconnectRequest();
-  });
 
   const connectionFieldIds = [
     "conn-endpoint",
@@ -237,47 +234,15 @@ function wireConnectionForm(): void {
     "conn-provider-preset",
   ) as HTMLSelectElement | null;
   if (providerPreset) {
+    // Preset prefill (endpoint/region/Account ID) lives in app-connection.ts
+    // next to the rest of the connection-form behavior.
     providerPreset.addEventListener("change", () => {
-      const endpointInput = document.getElementById(
-        "conn-endpoint",
-      ) as HTMLInputElement | null;
-      const regionInput = document.getElementById(
-        "conn-region",
-      ) as HTMLInputElement | null;
-      const preset = providerPreset.value;
-      if (preset === "aws") {
-        const region = "us-east-1";
-        if (endpointInput) endpointInput.value = awsRegionalEndpoint(region);
-        if (regionInput) regionInput.value = region;
-      } else if (preset === "do") {
-        if (endpointInput)
-          endpointInput.value = "https://nyc3.digitaloceanspaces.com";
-        if (regionInput) regionInput.value = "nyc3";
-      } else if (preset === "backblaze") {
-        if (endpointInput)
-          endpointInput.value = "https://s3.us-west-004.backblazeb2.com";
-        if (regionInput) regionInput.value = "us-west-004";
-      } else if (preset === "cloudflare") {
-        // The account ID is a placeholder: select it so typing replaces it.
-        const placeholder = "<account-id>";
-        if (endpointInput) {
-          endpointInput.value = `https://${placeholder}.r2.cloudflarestorage.com`;
-          endpointInput.focus();
-          const start = endpointInput.value.indexOf(placeholder);
-          endpointInput.setSelectionRange(start, start + placeholder.length);
-        }
-        if (regionInput) regionInput.value = "auto";
-      } else if (preset === "minio") {
-        if (endpointInput) endpointInput.value = "http://localhost:9000";
-        if (regionInput) regionInput.value = "us-east-1";
-      } else if (preset === "wasabi") {
-        if (endpointInput) endpointInput.value = "https://s3.wasabisys.com";
-        if (regionInput) regionInput.value = "us-east-1";
-      }
-      // Keep the chosen preset visible so the user can see which one was applied.
-      updateBookmarkBtn();
+      applyProviderPreset(providerPreset.value);
     });
   }
+
+  // Switcher, test connection, saved filter, reconnect card, blur validation.
+  wireConnectionScreenExtras();
 
   document
     .getElementById("bookmark-save-btn")!

@@ -78,6 +78,12 @@ const savedConnections = [
   },
 ];
 
+/** Open the header connection switcher menu and wait for it to show. */
+async function openSwitcherMenu(page: Page): Promise<void> {
+  await page.locator("#conn-switcher-btn").click();
+  await expect(page.locator("#conn-switcher-menu")).toBeVisible();
+}
+
 test.describe("connection screen UX", () => {
   test("reconnect shows the main layout and skeleton while the last bucket loads", async ({
     page,
@@ -114,7 +120,14 @@ test.describe("connection screen UX", () => {
   }) => {
     await installLayoutTauriMock(page, { bookmarks: savedConnections });
     await page.goto("/");
-    const deleteButton = page.locator('#conn-saved-list [data-delete="0"]');
+    await page
+      .locator(
+        '#conn-saved-list .bookmark__menu[aria-label="More actions for Production"]',
+      )
+      .click();
+    const deleteButton = page.locator(
+      '#conn-saved-list [role="menuitem"][data-delete="0"]',
+    );
     await expect(deleteButton).toHaveAttribute(
       "aria-label",
       "Delete Production",
@@ -136,9 +149,10 @@ test.describe("connection screen UX", () => {
   }) => {
     await installLayoutTauriMock(page, { bookmarks: savedConnections });
     await page.goto("/");
-    const row = page.locator("#conn-saved-list .bookmark-item").first();
-    await expect(row).toHaveAttribute("role", "button");
-    await row.focus();
+    const connectBtn = page
+      .locator("#conn-saved-list .bookmark-item__connect")
+      .first();
+    await connectBtn.focus();
     await page.keyboard.press("Space");
 
     await expect(page.locator("#main-layout")).toBeVisible();
@@ -166,13 +180,15 @@ test.describe("connection screen UX", () => {
       .poll(async () => countOf(await readMockCallLog(page), "copy_object_to"))
       .toBe(1);
 
-    await page.locator("#disconnect-btn").click();
+    await openSwitcherMenu(page);
+    await page.locator("#conn-switcher-disconnect").click();
     await expect.poll(() => dialogVisible(page)).toBe(true);
     await page.locator("#dialog-cancel").click();
     await expect(page.locator("#main-layout")).toBeVisible();
     expect(countOf(await readMockCallLog(page), "disconnect")).toBe(0);
 
-    await page.locator("#disconnect-btn").click();
+    await openSwitcherMenu(page);
+    await page.locator("#conn-switcher-disconnect").click();
     await expect.poll(() => dialogVisible(page)).toBe(true);
     await page.locator("#dialog-ok").click();
     await expect(page.locator("#connection-screen")).toBeVisible();
@@ -241,7 +257,7 @@ test.describe("connection screen UX", () => {
     }
   });
 
-  test("at 820px with the sidebar open, the title does not overlap chips or the badge", async ({
+  test("at 820px with the sidebar open, the title does not overlap the switcher or the settings button", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 820, height: 640 });
@@ -273,55 +289,51 @@ test.describe("connection screen UX", () => {
           b.t < a.b,
         );
       const title = rect(document.querySelector(".header__brand"));
-      const badge = rect(document.getElementById("connection-status"));
-      const chips = Array.from(document.querySelectorAll(".bookmark-chip")).map(
-        (chip) => rect(chip),
-      );
+      const switcher = rect(document.getElementById("conn-switcher-btn"));
+      const settings = rect(document.getElementById("settings-btn"));
       return {
-        titleHitsBadge: hit(title, badge),
-        titleHitsChip: chips.some((chip) => hit(title, chip)),
-        chipUnderBadge: chips.some((chip) => hit(chip, badge)),
+        titleHitsSwitcher: hit(title, switcher),
+        switcherHitsSettings: hit(switcher, settings),
+        switcherVisible: Boolean(switcher && switcher.w > 0),
       };
     });
     expect(overlap).toEqual({
-      titleHitsBadge: false,
-      titleHitsChip: false,
-      chipUnderBadge: false,
+      titleHitsSwitcher: false,
+      switcherHitsSettings: false,
+      switcherVisible: true,
     });
   });
 
-  test("bookmark chips are at least 24px tall and bounded in width", async ({
+  test("the switcher button is at least 24px tall and bounded in width", async ({
     page,
   }) => {
     const longName = "x".repeat(200);
     await installLayoutTauriMock(page, {
       bookmarks: [{ ...savedConnections[0], name: longName }],
     });
-    await page.goto("/");
-    const chip = page.locator("#bookmark-bar .bookmark-chip").first();
-    const box = await chip.boundingBox();
+    await openMockListing(page);
+    const switcher = page.locator("#conn-switcher-btn");
+    const box = await switcher.boundingBox();
     expect(box?.height ?? 0).toBeGreaterThanOrEqual(24);
-    expect(box?.width ?? 0).toBeLessThanOrEqual(200);
-    await expect(chip).toHaveAttribute("title", /stored|layout-test/);
+    expect(box?.width ?? 0).toBeLessThanOrEqual(340);
   });
 
-  test("wheel over the bookmark bar scrolls it horizontally", async ({
-    page,
-  }) => {
+  test("the switcher menu saved list scrolls when long", async ({ page }) => {
     const bookmarks = Array.from({ length: 16 }, (_, i) => ({
       ...savedConnections[0],
       name: `Connection ${i + 1}`,
       access_key: `key-${i}`,
     }));
-    await installLayoutTauriMock(page, { bookmarks });
-    await page.goto("/");
-    const bar = page.locator("#bookmark-bar");
-    const box = await bar.boundingBox();
-    expect(box).not.toBeNull();
-    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await openMockListing(page, { bookmarks });
+    await openSwitcherMenu(page);
+    const saved = page.locator("#conn-switcher-saved");
+    await page.mouse.move(
+      (await saved.boundingBox())!.x + 20,
+      (await saved.boundingBox())!.y + 20,
+    );
     await page.mouse.wheel(0, 240);
     await expect
-      .poll(() => bar.evaluate((el) => el.scrollLeft))
+      .poll(() => saved.evaluate((el) => el.scrollTop))
       .toBeGreaterThan(0);
   });
 
@@ -376,25 +388,19 @@ test.describe("connection screen UX", () => {
     await expect(page.locator("#conn-form-error")).toBeHidden();
   });
 
-  test("R2 preset selects the <account-id> placeholder and keeps the preset", async ({
+  test("R2 preset builds the endpoint from the Account ID and keeps the preset", async ({
     page,
   }) => {
     await installLayoutTauriMock(page, {});
     await page.goto("/");
     await page.locator("#conn-provider-preset").selectOption("cloudflare");
-    const endpoint = page.locator("#conn-endpoint");
-    await expect(endpoint).toHaveValue(
-      "https://<account-id>.r2.cloudflarestorage.com",
+    const account = page.locator("#conn-r2-account");
+    await expect(account).toBeVisible();
+    await expect(account).toBeFocused();
+    await account.fill("abc123");
+    await expect(page.locator("#conn-endpoint")).toHaveValue(
+      "https://abc123.r2.cloudflarestorage.com",
     );
-    await expect(endpoint).toBeFocused();
-    const selected = await endpoint.evaluate((el) => {
-      const input = el as HTMLInputElement;
-      return input.value.slice(
-        input.selectionStart ?? 0,
-        input.selectionEnd ?? 0,
-      );
-    });
-    expect(selected).toBe("<account-id>");
     await expect(page.locator("#conn-provider-preset")).toHaveValue(
       "cloudflare",
     );
@@ -430,8 +436,11 @@ test.describe("connection screen UX", () => {
       bookmarks: [{ ...savedConnections[0], secret_key: "" }],
     });
     await page.goto("/");
+    await openSwitcherMenu(page);
     await page
-      .locator("#bookmark-bar .bookmark-chip", { hasText: "Production" })
+      .locator("#conn-switcher-menu .conn-switcher__connection", {
+        hasText: "Production",
+      })
       .click();
 
     await expect.poll(() => dialogVisible(page)).toBe(true);
@@ -456,7 +465,14 @@ test.describe("connection screen UX", () => {
     await installLayoutTauriMock(page, { bookmarks: savedConnections });
     await page.goto("/");
     await page
-      .locator('#conn-saved-list button[aria-label="Rename Production"]')
+      .locator(
+        '#conn-saved-list .bookmark__menu[aria-label="More actions for Production"]',
+      )
+      .click();
+    await page
+      .locator(
+        '.bookmark-row-menu__item[role="menuitem"][aria-label="Rename Production"]',
+      )
       .click();
     await expect.poll(() => dialogVisible(page)).toBe(true);
     await page.locator("#dialog-input").fill("Renamed production");
@@ -469,7 +485,7 @@ test.describe("connection screen UX", () => {
     expect(JSON.stringify(saves.at(-1)?.args)).toContain("Renamed production");
   });
 
-  test("only the chip whose access key matches the connection looks active", async ({
+  test("only the saved connection matching endpoint and access key shows as current", async ({
     page,
   }) => {
     await openMockListing(page, {
@@ -482,9 +498,18 @@ test.describe("connection screen UX", () => {
         },
       ],
     });
-    const active = page.locator(".bookmark-chip--active");
-    await expect(active).toHaveCount(1);
-    await expect(active).toHaveText("Same endpoint A");
+    await openSwitcherMenu(page);
+    const rows = page.locator(
+      "#conn-switcher-saved .conn-switcher__connection",
+    );
+    await expect(rows).toHaveCount(2);
+    await expect(rows.filter({ hasText: "Same endpoint A" })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    await expect(
+      rows.filter({ hasText: "Same endpoint B" }),
+    ).not.toHaveAttribute("aria-current", "true");
   });
 
   test("validation errors for a bookmark appear in the connection form, not only the status bar", async ({
@@ -618,5 +643,399 @@ test.describe("connection screen UX", () => {
     );
     await page.getByRole("button", { name: "Retry" }).click();
     await expect(page.locator("#licenses-list")).toContainText("only@1.0.0");
+  });
+});
+
+test.describe("P6 connection switcher and remembered locations", () => {
+  test("the header shows a connection switcher instead of the chip strip", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await page.goto("/");
+    const switcher = page.locator("#conn-switcher-btn");
+    await expect(switcher).toBeVisible();
+    await expect(switcher).toContainText("No connection");
+    await expect(page.locator("#bookmark-bar")).toHaveCount(0);
+    await expect(page.locator("#connection-status")).toHaveCount(0);
+    await expect(page.locator("#disconnect-btn")).toHaveCount(0);
+    await expect(page.locator("#conn-switcher-dot")).toHaveAttribute(
+      "data-state",
+      "off",
+    );
+  });
+
+  test("the switcher shows the active connection name and endpoint host", async ({
+    page,
+  }) => {
+    await openMockListing(page, { bookmarks: savedConnections });
+    const switcher = page.locator("#conn-switcher-btn");
+    await expect(switcher).toContainText("Production");
+    await expect(switcher).toContainText("layout-test.invalid");
+    await expect(page.locator("#conn-switcher-dot")).toHaveAttribute(
+      "data-state",
+      "on",
+    );
+  });
+
+  test("the switcher menu lists saved connections and the actions group", async ({
+    page,
+  }) => {
+    await openMockListing(page, {
+      bookmarks: [
+        ...savedConnections,
+        { ...savedConnections[0], name: "Other", access_key: "other-key" },
+      ],
+    });
+    await openSwitcherMenu(page);
+    const menu = page.locator("#conn-switcher-menu");
+    await expect(menu).toBeVisible();
+    const production = menu
+      .locator(".conn-switcher__connection", { hasText: "Production" })
+      .first();
+    await expect(production).toHaveAttribute("aria-current", "true");
+    await expect(
+      menu.locator(".conn-switcher__connection", { hasText: "Other" }).first(),
+    ).not.toHaveAttribute("aria-current", "true");
+    await expect(menu.locator("#conn-switcher-new")).toBeVisible();
+    await expect(menu.locator("#conn-switcher-manage")).toBeVisible();
+    await expect(menu.locator("#conn-switcher-disconnect")).toBeVisible();
+    await expect(menu.locator("#conn-switcher-lock")).toBeHidden();
+  });
+
+  test("Disconnect from the switcher menu returns to the connection screen", async ({
+    page,
+  }) => {
+    await openMockListing(page, { bookmarks: savedConnections });
+    await openSwitcherMenu(page);
+    await page.locator("#conn-switcher-disconnect").click();
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    await expect(page.locator("#main-layout")).toBeHidden();
+  });
+
+  test("Lock now appears in the switcher when the vault is on", async ({
+    page,
+  }) => {
+    await openMockListing(page, {
+      bookmarks: savedConnections,
+      security: { encryption_enabled: true, unlocked: true },
+    });
+    await openSwitcherMenu(page);
+    await expect(page.locator("#conn-switcher-lock")).toBeVisible();
+  });
+
+  test("Test connection verifies credentials without keeping a session", async ({
+    page,
+  }, testInfo) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    await fillCredentials(page);
+    await page.locator("#conn-test-btn").click();
+
+    await expect
+      .poll(async () => {
+        const calls = await readMockCallLog(page);
+        return {
+          connect: countOf(calls, "connect"),
+          listBuckets: countOf(calls, "list_buckets"),
+          disconnect: countOf(calls, "disconnect"),
+        };
+      })
+      .toEqual({ connect: 1, listBuckets: 1, disconnect: 1 });
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    await expect(page.locator("#main-layout")).toBeHidden();
+    await expect(page.locator("#conn-test-btn")).toBeEnabled();
+    await saveArtifact(
+      page,
+      testInfo,
+      ARTIFACT_SUITE,
+      "test-connection-clean",
+      await readMockCallLog(page),
+    );
+  });
+
+  test("a failed test connection leaves no session behind", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {
+      errors: { list_buckets: "Mock listing failed" },
+    });
+    await page.goto("/");
+    await fillCredentials(page);
+    await page.locator("#conn-test-btn").click();
+
+    await expect
+      .poll(async () => countOf(await readMockCallLog(page), "disconnect"))
+      .toBe(1);
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    await expect(page.locator("#main-layout")).toBeHidden();
+  });
+
+  test("Test connection is disabled while a connection is active", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await installUxHooks(page, { holdConnect: true });
+    await page.goto("/");
+    await fillCredentials(page);
+    await page.locator("#connect-btn").click();
+    await expect(page.locator("#connect-btn")).toHaveText("Cancel");
+    await expect(page.locator("#conn-test-btn")).toBeDisabled();
+
+    await page.locator("#connect-btn").click(); // cancel
+    await expect(page.locator("#conn-test-btn")).toBeEnabled();
+  });
+
+  test("saved rows are a Connect button plus a row menu", async ({ page }) => {
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await page.goto("/");
+    const row = page.locator("#conn-saved-list .bookmark-item").first();
+    await expect(row.locator(".bookmark-item__connect")).toContainText(
+      "Production",
+    );
+    const more = row.locator(".bookmark__menu");
+    await expect(more).toHaveAttribute(
+      "aria-label",
+      "More actions for Production",
+    );
+    await more.click();
+    const menu = row.locator(".bookmark-row-menu");
+    await expect(menu).toBeVisible();
+    for (const label of ["Edit", "Rename", "Duplicate", "Delete"]) {
+      await expect(
+        menu.locator(".bookmark-row-menu__item", { hasText: label }),
+      ).toBeVisible();
+    }
+  });
+
+  test("Duplicate opens the connect form prefilled as a copy", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await page.goto("/");
+    await page
+      .locator(
+        '#conn-saved-list .bookmark__menu[aria-label="More actions for Production"]',
+      )
+      .click();
+    await page
+      .locator('.bookmark-row-menu__item[aria-label="Duplicate Production"]')
+      .click();
+
+    await expect(page.locator("#conn-name")).toHaveValue("Production (copy)");
+    await expect(page.locator("#conn-endpoint")).toHaveValue(ENDPOINT);
+    await expect(page.locator("#conn-access-key")).toHaveValue(
+      "layout-access-key",
+    );
+    await expect(page.locator("#conn-secret-key")).toHaveValue("stored-secret");
+  });
+
+  test("switching connections restores the remembered bucket and prefix", async ({
+    page,
+  }) => {
+    await openMockListing(page, {
+      buckets: [
+        { name: "layout-test-bucket" },
+        { name: "layout-test-bucket-2" },
+      ],
+      prefixes: ["docs/"],
+      bookmarks: savedConnections,
+    });
+    // Move to the second bucket and into a folder.
+    await page
+      .locator('#bucket-list [data-bucket="layout-test-bucket-2"]')
+      .click();
+    await expect(page.locator("#object-panel")).toBeVisible();
+    await page.locator('.object-row--folder[data-prefix="docs/"]').focus();
+    await page.keyboard.press("Enter");
+    await expect(
+      page.locator('.breadcrumb__segment[aria-current="page"]'),
+    ).toHaveText("docs");
+
+    // Disconnect, then switch back to the same saved connection.
+    await openSwitcherMenu(page);
+    await page.locator("#conn-switcher-disconnect").click();
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    await openSwitcherMenu(page);
+    await page
+      .locator("#conn-switcher-menu .conn-switcher__connection", {
+        hasText: "Production",
+      })
+      .click();
+
+    await expect(page.locator("#main-layout")).toBeVisible();
+    await expect(
+      page.locator('.breadcrumb__segment[aria-current="page"]'),
+    ).toHaveText("docs");
+    await expect(
+      page.locator(
+        '#bucket-list .list__item--active [data-bucket="layout-test-bucket-2"]',
+      ),
+    ).toHaveCount(1);
+  });
+
+  test("the connection screen offers a Reconnect to the last used connection card", async ({
+    page,
+  }) => {
+    await openMockListing(page, { bookmarks: savedConnections });
+    await openSwitcherMenu(page);
+    await page.locator("#conn-switcher-disconnect").click();
+    await expect(page.locator("#connection-screen")).toBeVisible();
+
+    const card = page.locator("#reconnect-card");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Reconnect to");
+    await expect(card).toContainText("Production");
+    await page.locator("#reconnect-card-btn").click();
+    await expect(page.locator("#main-layout")).toBeVisible();
+    expect(countOf(await readMockCallLog(page), "connect")).toBe(2);
+  });
+
+  test("the saved list shows a filter input only with more than 8 connections", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {
+      bookmarks: Array.from({ length: 10 }, (_, i) => ({
+        ...savedConnections[0],
+        name: i === 9 ? "Staging" : `Conn ${i}`,
+        access_key: `key-${i}`,
+      })),
+    });
+    await page.goto("/");
+    const filter = page.locator("#conn-saved-filter");
+    await expect(filter).toBeVisible();
+    await filter.fill("stag");
+    const rows = page.locator("#conn-saved-list .bookmark-item");
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText("Staging");
+
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await page.goto("/");
+    await expect(page.locator("#conn-saved-filter")).toBeHidden();
+  });
+
+  test("editing the endpoint switches the preset to Custom", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    const preset = page.locator("#conn-provider-preset");
+    const endpoint = page.locator("#conn-endpoint");
+    await preset.selectOption("aws");
+    await expect(endpoint).toHaveValue("https://s3.us-east-1.amazonaws.com");
+    await endpoint.fill("https://custom.example.com");
+    await expect(preset).toHaveValue("custom");
+  });
+
+  test("changing the AWS region rewrites the endpoint", async ({ page }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    await page.locator("#conn-provider-preset").selectOption("aws");
+    await page.locator("#conn-region").fill("eu-west-1");
+    await expect(page.locator("#conn-endpoint")).toHaveValue(
+      "https://s3.eu-west-1.amazonaws.com",
+    );
+  });
+
+  test("the R2 preset asks for the Account ID and builds the endpoint", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    await page.locator("#conn-provider-preset").selectOption("cloudflare");
+    const account = page.locator("#conn-r2-account");
+    await expect(account).toBeVisible();
+    await expect(account).toBeFocused();
+    await account.fill("abc123");
+    await expect(page.locator("#conn-endpoint")).toHaveValue(
+      "https://abc123.r2.cloudflarestorage.com",
+    );
+  });
+
+  test("blur shows a per-field endpoint error that clears on correction", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    const endpoint = page.locator("#conn-endpoint");
+    await endpoint.fill("not-a-url");
+    await page.locator("#conn-region").click(); // blur the endpoint
+    await expect(page.locator("#conn-form-error")).toBeVisible();
+    await expect(page.locator("#conn-form-error")).toContainText("http");
+    await expect(endpoint).toHaveAttribute("aria-invalid", "true");
+
+    await endpoint.fill("https://ok.example.com");
+    await page.locator("#conn-region").click();
+    await expect(page.locator("#conn-form-error")).toBeHidden();
+    await expect(endpoint).not.toHaveAttribute("aria-invalid", "true");
+  });
+});
+
+test.describe("P6 saved rows, duplicates, and test connection guards", () => {
+  test("clicking a saved connection's Connect button connects with it", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await page.goto("/");
+    await page
+      .locator("#conn-saved-list .bookmark-item__connect")
+      .first()
+      .click();
+    await expect(page.locator("#main-layout")).toBeVisible();
+    expect(countOf(await readMockCallLog(page), "connect")).toBe(1);
+  });
+
+  test("choosing a row menu item closes the row menu", async ({ page }) => {
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await page.goto("/");
+    const row = page.locator("#conn-saved-list .bookmark-item").first();
+    await row.locator(".bookmark__menu").click();
+    await expect(row.locator(".bookmark-row-menu")).toBeVisible();
+    await row.locator('.bookmark-row-menu__item[data-rename="0"]').click();
+    await expect.poll(() => dialogVisible(page)).toBe(true);
+    await expect(row.locator(".bookmark-row-menu")).toBeHidden();
+    await page.locator("#dialog-cancel").click();
+  });
+
+  test("saving a duplicate with the same endpoint and access key asks for a different key", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await page.goto("/");
+    await page
+      .locator(
+        '#conn-saved-list .bookmark__menu[aria-label="More actions for Production"]',
+      )
+      .click();
+    await page
+      .locator('.bookmark-row-menu__item[aria-label="Duplicate Production"]')
+      .click();
+    const before = countOf(await readMockCallLog(page), "save_bookmarks");
+    await page.locator("#bookmark-save-btn").click();
+    await expect(page.locator("#conn-form-error")).toContainText(
+      "already uses this endpoint and access key",
+    );
+    await expect(page.locator("#conn-access-key")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(countOf(await readMockCallLog(page), "save_bookmarks")).toBe(before);
+  });
+
+  test("Test connection over plain HTTP to a remote host asks before sending credentials", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    await page.locator("#conn-endpoint").fill("http://remote.example.com");
+    await page.locator("#conn-access-key").fill("layout-access-key");
+    await page.locator("#conn-secret-key").fill("layout-secret-key");
+    await page.locator("#conn-test-btn").click();
+    await expect.poll(() => dialogVisible(page)).toBe(true);
+    await expect(page.locator("#dialog-title")).toHaveText(
+      "Insecure connection",
+    );
+    await page.locator("#dialog-cancel").click();
+    await expect(page.locator("#conn-test-btn")).toBeEnabled();
+    expect(countOf(await readMockCallLog(page), "connect")).toBe(0);
   });
 });

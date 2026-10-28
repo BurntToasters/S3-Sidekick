@@ -784,7 +784,8 @@ describe("main integration", () => {
         },
         {
           value: "cloudflare",
-          endpoint: "https://<account-id>.r2.cloudflarestorage.com",
+          // R2 builds its endpoint from the Account ID field as it is typed.
+          endpoint: "",
           region: "auto",
         },
         {
@@ -926,7 +927,9 @@ describe("main integration", () => {
 
     const emptyStateCallsBefore = mockShowEmptyState.mock.calls.length;
     mockDisconnect.mockResolvedValueOnce(false);
-    (document.getElementById("disconnect-btn") as HTMLButtonElement).click();
+    (
+      document.getElementById("conn-switcher-disconnect") as HTMLButtonElement
+    ).click();
     await flushMicrotasks();
     expect(mockDisconnect).toHaveBeenCalledTimes(1);
     expect(mockShowEmptyState).toHaveBeenCalledTimes(emptyStateCallsBefore);
@@ -936,7 +939,9 @@ describe("main integration", () => {
       state.connected = false;
       return true;
     });
-    (document.getElementById("disconnect-btn") as HTMLButtonElement).click();
+    (
+      document.getElementById("conn-switcher-disconnect") as HTMLButtonElement
+    ).click();
     await flushMicrotasks();
     expect(mockDisconnect).toHaveBeenCalledTimes(2);
     expect(mockShowEmptyState).toHaveBeenCalledTimes(emptyStateCallsBefore + 1);
@@ -3387,7 +3392,9 @@ describe("main integration", () => {
     ) as HTMLInputElement;
     filterInput.value = "pending";
     filterInput.dispatchEvent(new Event("input", { bubbles: true }));
-    (document.getElementById("disconnect-btn") as HTMLButtonElement).click();
+    (
+      document.getElementById("conn-switcher-disconnect") as HTMLButtonElement
+    ).click();
     await flushMicrotasks();
     expect(filterInput.value).toBe("");
 

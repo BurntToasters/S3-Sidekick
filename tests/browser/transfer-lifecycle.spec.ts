@@ -278,7 +278,8 @@ test.describe("transfer lifecycle", () => {
     await expect
       .poll(async () => countOf(await readMockCallLog(page), "copy_object_to"))
       .toBe(1);
-    await page.locator("#disconnect-btn").click();
+    await page.locator("#conn-switcher-btn").click();
+    await page.locator("#conn-switcher-disconnect").click();
     // Disconnect asks first while transfers run; accept the action, not Cancel.
     await expect(page.locator("#dialog-title")).toHaveText(
       "Transfers in progress",

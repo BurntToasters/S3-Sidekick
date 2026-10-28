@@ -34,6 +34,8 @@ vi.mock("../connection.ts", () => ({
 
 vi.mock("../bookmarks.ts", () => ({
   addBookmark: saveBookmarkMock,
+  clearBookmarks: vi.fn(),
+  getBookmarks: vi.fn(() => []),
   renderBookmarkBar: renderBookmarkBarMock,
   isEndpointBookmarked: isEndpointBookmarkedMock,
   renderBookmarkList: renderBookmarkListMock,

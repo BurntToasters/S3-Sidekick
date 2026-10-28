@@ -582,7 +582,7 @@ async function captureAcceptanceDiagnostics() {
             document.getElementById("connect-btn")?.disabled ?? null,
           connectBusy:
             document.getElementById("connect-btn")?.dataset?.busy ?? null,
-          status: text("connection-status"),
+          status: text("conn-switcher-name"),
           mainLayoutDisplay: display("main-layout"),
           connScreenDisplay: display("connection-screen"),
           endpoint:
