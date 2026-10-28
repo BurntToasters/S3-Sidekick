@@ -231,6 +231,7 @@ export async function installLayoutTauriMock(
         releaseUnlock: undefined as (() => void) | undefined,
         releaseDisconnect: undefined as (() => void) | undefined,
         releaseBiometric: undefined as (() => void) | undefined,
+        biometricReleased: false,
         releaseCopies: [] as (() => void)[],
         setCommandError: undefined as
           ((command: string, error: string | null) => void) | undefined,
@@ -437,7 +438,7 @@ export async function installLayoutTauriMock(
             securityState.unlocked = false;
             return { ...securityState };
           case "unlock_biometric":
-            if (holdBiometric) {
+            if (holdBiometric && !testState.biometricReleased) {
               await new Promise<void>((resolve) => {
                 testState.releaseBiometric = resolve;
               });
@@ -734,9 +735,13 @@ export async function releaseMockBiometric(page: Page): Promise<void> {
   await page.evaluate(() => {
     const state = (
       window as typeof window & {
-        __S3_LAYOUT_TEST__?: { releaseBiometric?: () => void };
+        __S3_LAYOUT_TEST__?: {
+          releaseBiometric?: () => void;
+          biometricReleased?: boolean;
+        };
       }
     ).__S3_LAYOUT_TEST__;
+    if (state) state.biometricReleased = true;
     state?.releaseBiometric?.();
   });
 }

@@ -485,17 +485,18 @@ function promptLockView(
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       if (!first || !last) return;
-      const active = document.activeElement;
-      const inside = active instanceof Node && lockView.contains(active);
-      if (event.shiftKey) {
-        if (!inside || active === first) {
-          event.preventDefault();
-          last.focus();
-        }
-      } else if (!inside || active === last) {
-        event.preventDefault();
-        first.focus();
+      // Step through the list here rather than letting the browser Tab, since
+      // WebKit skips buttons and would otherwise leave the view.
+      event.preventDefault();
+      const current = focusable.indexOf(document.activeElement as HTMLElement);
+      if (current === -1) {
+        (event.shiftKey ? last : first).focus();
+        return;
       }
+      const step = event.shiftKey ? -1 : 1;
+      const next =
+        focusable[(current + step + focusable.length) % focusable.length];
+      next?.focus();
     };
 
     const finish = (unlocked: boolean): void => {
@@ -672,6 +673,14 @@ function describeVault(status: SecurityStatus): {
   detail: string;
   icon: string;
 } {
+  if (!status.initialized) {
+    return {
+      title: "Not initialized",
+      detail:
+        "The vault has not been set up yet. Set up encryption to protect saved credentials with AES-256 and your password.",
+      icon: "alert-triangle",
+    };
+  }
   if (!status.encryption_enabled) {
     return {
       title: "Not encrypted",
@@ -682,14 +691,14 @@ function describeVault(status: SecurityStatus): {
   }
   if (status.unlocked) {
     return {
-      title: "Encrypted and unlocked",
+      title: "Encrypted (AES-256) and unlocked",
       detail:
         "Saved connections are encrypted with AES-256. Lock now clears the keys from memory and disconnects the current session.",
       icon: "check-circle",
     };
   }
   return {
-    title: "Encrypted and locked",
+    title: "Encrypted (AES-256) and locked",
     detail:
       "Saved connections stay unavailable until you unlock them with your password.",
     icon: "lock",

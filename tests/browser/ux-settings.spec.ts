@@ -213,7 +213,7 @@ test("the lock view offers a Forgot password? action", async ({ page }) => {
   );
 });
 
-test("Forgot password? opens the reset flow, and Escape on Reset Scope cancels it", async ({
+test("Forgot password? opens the erase explanation, and Escape on the final confirmation cancels it", async ({
   page,
 }) => {
   await installLayoutTauriMock(page, {
@@ -230,13 +230,14 @@ test("Forgot password? opens the reset flow, and Escape on Reset Scope cancels i
   await expect(page.locator("#lock-view")).toBeVisible();
   await page.locator("#lock-view-forgot").click();
 
-  // The lock view stays up underneath while the existing reset flow opens.
-  await expect(page.locator("#dialog-title")).toHaveText("Reset Settings");
+  // The lock view stays up underneath while the erase explanation opens.
+  await expect(page.locator("#dialog-title")).toHaveText(
+    "Erase the Encrypted Vault?",
+  );
   await page.locator("#dialog-ok").click(); // "Continue"
-  await expect(page.locator("#dialog-title")).toHaveText("Reset Scope");
-  await expect(
-    dialog(page).getByRole("button", { name: "Cancel", exact: true }),
-  ).toBeFocused();
+  await expect(page.locator("#dialog-title")).toHaveText(
+    "Permanently Delete All App Data?",
+  );
 
   const before = (await callNames(page)).length;
   await page.keyboard.press("Escape");

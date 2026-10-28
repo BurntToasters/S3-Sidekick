@@ -26,45 +26,28 @@ vi.mock("../app-connection.ts", () => ({
   focusConnectionScreen: mockFocusConnectionScreen,
 }));
 
+/**
+ * The real wizard markup from index.html, so the fixture cannot drift from the
+ * page. Takes the overlay's outer div through its matching close tag.
+ */
+function wizardMarkup(): string {
+  const html = readFileSync("src/index.html", "utf8");
+  const start = html.lastIndexOf(
+    "<div",
+    html.indexOf('id="setup-wizard-overlay"'),
+  );
+  const divTag = /<(\/?)div\b/g;
+  divTag.lastIndex = start;
+  let depth = 0;
+  for (let m = divTag.exec(html); m !== null; m = divTag.exec(html)) {
+    depth += m[1] ? -1 : 1;
+    if (depth === 0) return html.slice(start, html.indexOf(">", m.index) + 1);
+  }
+  throw new Error("setup wizard markup not found in index.html");
+}
+
 function renderFixture(): void {
-  document.body.innerHTML = `
-    <div id="setup-wizard-overlay" role="dialog" hidden>
-      <div class="setup-wizard-progress">
-        <div id="setup-wizard-progress-bar"></div>
-      </div>
-      <div id="setup-step-welcome" class="setup-wizard-step" data-step="0"><button id="setup-welcome-next"></button></div>
-      <div id="setup-step-theme" class="setup-wizard-step" data-step="1" hidden>
-        <button id="setup-theme-back"></button>
-        <button id="setup-theme-next"></button>
-        <div class="setup-wizard-theme-btn" data-theme-value="system"></div>
-      </div>
-      <div id="setup-step-encryption" class="setup-wizard-step" data-step="2" hidden>
-        <button id="setup-enc-back"></button>
-        <button id="setup-enc-skip"></button>
-        <button id="setup-enc-next"></button>
-        <input id="setup-enc-password" type="password" />
-        <button id="setup-enc-password-reveal"></button>
-        <input id="setup-enc-confirm" type="password" />
-        <button id="setup-enc-confirm-reveal"></button>
-        <p id="setup-enc-status" hidden></p>
-        <p id="setup-biometric-caveat" hidden></p>
-        <p id="setup-enc-error" role="alert" aria-live="assertive" hidden></p>
-        <label id="setup-biometric-label" hidden>
-          <input id="setup-enc-biometric" type="checkbox" />
-          <span id="setup-biometric-text"></span>
-        </label>
-      </div>
-      <div id="setup-step-updates" class="setup-wizard-step" data-step="3" hidden>
-        <button id="setup-updates-back"></button>
-        <button id="setup-updates-next"></button>
-        <input id="setup-auto-updates" type="checkbox" checked />
-        <select id="setup-update-channel"><option value="release"></option></select>
-      </div>
-      <div id="setup-step-done" class="setup-wizard-step" data-step="4" hidden>
-        <button id="setup-done-btn"></button>
-      </div>
-    </div>
-  `;
+  document.body.innerHTML = wizardMarkup();
 }
 
 const initializedStatus = {
@@ -351,7 +334,7 @@ describe("setup wizard", () => {
     (
       document.getElementById("setup-updates-next") as HTMLButtonElement
     ).click();
-    expect(document.getElementById("setup-step-done")?.hidden).toBe(false);
+    expect(document.getElementById("setup-substep-done")?.hidden).toBe(false);
 
     (document.getElementById("setup-done-btn") as HTMLButtonElement).click();
     const result = await donePromise;
@@ -562,7 +545,7 @@ describe("setup wizard", () => {
     expect(result?.encryptionEnabled).toBe(true);
   });
 
-  it("skips encryption step when security is already initialized", async () => {
+  it("offers Enable on an already-initialized vault and enables it without re-initializing", async () => {
     const already = { ...initializedStatus, initialized: true };
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_security_status") return already;
@@ -578,14 +561,34 @@ describe("setup wizard", () => {
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks(6);
 
+    expect(document.getElementById("setup-step-encryption")?.hidden).toBe(
+      false,
+    );
+    (document.getElementById("setup-enc-password") as HTMLInputElement).value =
+      "password123";
+    (document.getElementById("setup-enc-confirm") as HTMLInputElement).value =
+      "password123";
+    (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
+    await flushMicrotasks(6);
+
+    expect(mockInvoke).toHaveBeenCalledWith("set_security_encryption", {
+      enableEncryption: true,
+      currentPassword: null,
+      newPassword: "password123",
+    });
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "initialize_security")
+        .length,
+    ).toBe(0);
     expect(document.getElementById("setup-step-updates")?.hidden).toBe(false);
 
-    // Back from updates returns to theme when already initialized.
     (
       document.getElementById("setup-updates-back") as HTMLButtonElement
     ).click();
     await flushMicrotasks(6);
-    expect(document.getElementById("setup-step-theme")?.hidden).toBe(false);
+    expect(document.getElementById("setup-step-encryption")?.hidden).toBe(
+      false,
+    );
   });
 
   it("returns to encryption from updates when setup is fresh", async () => {
@@ -625,10 +628,12 @@ describe("setup wizard", () => {
     (
       document.getElementById("setup-welcome-next") as HTMLButtonElement
     ).click();
-    expect(document.getElementById("setup-step-theme")?.hidden).toBe(false);
+    expect(document.getElementById("setup-substep-theme")?.hidden).toBe(false);
 
     (document.getElementById("setup-theme-back") as HTMLButtonElement).click();
-    expect(document.getElementById("setup-step-welcome")?.hidden).toBe(false);
+    expect(document.getElementById("setup-substep-welcome")?.hidden).toBe(
+      false,
+    );
 
     (
       document.getElementById("setup-welcome-next") as HTMLButtonElement
@@ -640,7 +645,7 @@ describe("setup wizard", () => {
     );
 
     (document.getElementById("setup-enc-back") as HTMLButtonElement).click();
-    expect(document.getElementById("setup-step-theme")?.hidden).toBe(false);
+    expect(document.getElementById("setup-substep-theme")?.hidden).toBe(false);
     expect(
       (document.getElementById("setup-enc-error") as HTMLElement).hidden,
     ).toBe(true);
@@ -654,7 +659,7 @@ describe("setup wizard", () => {
     (
       document.getElementById("setup-updates-next") as HTMLButtonElement
     ).click();
-    expect(document.getElementById("setup-step-done")?.hidden).toBe(false);
+    expect(document.getElementById("setup-substep-done")?.hidden).toBe(false);
   });
 
   it("proceeds to encryption when the initial security check fails", async () => {
@@ -712,58 +717,39 @@ describe("setup wizard", () => {
     expect(confirm.type).toBe("password");
   });
 
-  it("selects themes and keeps roving tabindex in sync", async () => {
-    document.body.innerHTML = `
-      <div id="setup-wizard-overlay" role="dialog" hidden>
-        <div class="setup-wizard-progress"><div id="setup-wizard-progress-bar"></div></div>
-        <div class="setup-wizard-step" data-step="0"><h2 id="setup-wizard-title-welcome">W</h2><button id="setup-welcome-next"></button></div>
-        <div class="setup-wizard-step" data-step="1" hidden>
-          <h2 id="setup-wizard-title-theme">T</h2>
-          <button id="setup-theme-back"></button><button id="setup-theme-next"></button>
-          <div id="setup-theme-options" role="radiogroup">
-            <button class="setup-wizard-theme-btn" data-theme-value="system" aria-checked="true">System</button>
-            <button class="setup-wizard-theme-btn" data-theme-value="light" aria-checked="false">Light</button>
-            <button class="setup-wizard-theme-btn" data-theme-value="dark" aria-checked="false">Dark</button>
-          </div>
-        </div>
-        <div class="setup-wizard-step" data-step="2" hidden>
-          <h2 id="setup-wizard-title-encryption">E</h2>
-          <button id="setup-enc-back"></button><button id="setup-enc-skip">Skip</button><button id="setup-enc-next">Continue</button>
-          <input id="setup-enc-password" type="password" /><button id="setup-enc-password-reveal"></button>
-          <input id="setup-enc-confirm" type="password" /><button id="setup-enc-confirm-reveal"></button>
-          <p id="setup-enc-status" hidden></p>
-          <p id="setup-biometric-caveat" hidden></p>
-          <p id="setup-enc-error" hidden></p>
-          <label id="setup-biometric-label" hidden><input id="setup-enc-biometric" type="checkbox" /><span id="setup-biometric-text"></span></label>
-        </div>
-        <div class="setup-wizard-step" data-step="3" hidden>
-          <h2 id="setup-wizard-title-updates">U</h2>
-          <button id="setup-updates-back"></button><button id="setup-updates-next"></button>
-          <input id="setup-auto-updates" type="checkbox" checked />
-          <select id="setup-update-channel"><option value="release">r</option><option value="beta">b</option></select>
-        </div>
-        <div class="setup-wizard-step" data-step="4" hidden>
-          <h2 id="setup-wizard-title-done">D</h2><button id="setup-done-btn"></button>
-        </div>
-      </div>
-    `;
+  it("selects themes through one native radio group", async () => {
+    renderFixture();
     const wizard = await import("../setup-wizard.ts");
     const donePromise = wizard.showSetupWizard();
     (
       document.getElementById("setup-welcome-next") as HTMLButtonElement
     ).click();
 
-    const btns = Array.from(
-      document.querySelectorAll<HTMLButtonElement>(".setup-wizard-theme-btn"),
+    const radios = Array.from(
+      document.querySelectorAll<HTMLInputElement>('input[name="setup-theme"]'),
     );
-    expect(btns[0].tabIndex).toBe(0);
-    expect(btns[1].tabIndex).toBe(-1);
+    expect(radios.map((radio) => radio.value)).toEqual([
+      "system",
+      "light",
+      "dark",
+    ]);
+    expect(radios.every((radio) => radio.type === "radio")).toBe(true);
+    expect(radios.filter((radio) => radio.checked).map((r) => r.value)).toEqual(
+      ["system"],
+    );
 
-    btns[2].click();
+    radios[2].click();
     expect(mockApplyTheme).toHaveBeenCalledWith("dark");
-    expect(btns[2].getAttribute("aria-checked")).toBe("true");
-    expect(btns[2].tabIndex).toBe(0);
-    expect(btns[0].tabIndex).toBe(-1);
+    expect(
+      radios[2]
+        .closest(".theme-card")
+        ?.classList.contains("theme-card--active"),
+    ).toBe(true);
+    expect(
+      radios[0]
+        .closest(".theme-card")
+        ?.classList.contains("theme-card--active"),
+    ).toBe(false);
 
     (document.getElementById("setup-theme-next") as HTMLButtonElement).click();
     await flushMicrotasks();
@@ -777,83 +763,27 @@ describe("setup wizard", () => {
     expect(result?.theme).toBe("dark");
   });
 
-  it("moves theme focus with arrow keys, Home, and End", async () => {
-    document.body.innerHTML = `
-      <div id="setup-wizard-overlay" role="dialog" hidden>
-        <div class="setup-wizard-progress"><div id="setup-wizard-progress-bar"></div></div>
-        <div class="setup-wizard-step" data-step="0"><button id="setup-welcome-next"></button></div>
-        <div class="setup-wizard-step" data-step="1" hidden>
-          <button id="setup-theme-back"></button><button id="setup-theme-next"></button>
-          <div id="setup-theme-options" role="radiogroup">
-            <button class="setup-wizard-theme-btn" data-theme-value="system" aria-checked="true">System</button>
-            <button class="setup-wizard-theme-btn" data-theme-value="light" aria-checked="false">Light</button>
-            <button class="setup-wizard-theme-btn" data-theme-value="dark" aria-checked="false">Dark</button>
-          </div>
-        </div>
-        <div class="setup-wizard-step" data-step="2" hidden>
-          <button id="setup-enc-back"></button><button id="setup-enc-skip">Skip</button><button id="setup-enc-next">Continue</button>
-          <input id="setup-enc-password" type="password" /><button id="setup-enc-password-reveal"></button>
-          <input id="setup-enc-confirm" type="password" /><button id="setup-enc-confirm-reveal"></button>
-          <p id="setup-enc-status" hidden></p>
-          <p id="setup-biometric-caveat" hidden></p>
-          <p id="setup-enc-error" hidden></p>
-          <label id="setup-biometric-label" hidden><input id="setup-enc-biometric" type="checkbox" /><span id="setup-biometric-text"></span></label>
-        </div>
-        <div class="setup-wizard-step" data-step="3" hidden>
-          <button id="setup-updates-back"></button><button id="setup-updates-next"></button>
-          <input id="setup-auto-updates" type="checkbox" checked />
-          <select id="setup-update-channel"><option value="release">r</option></select>
-        </div>
-        <div class="setup-wizard-step" data-step="4" hidden><button id="setup-done-btn"></button></div>
-      </div>
-    `;
+  it("moves theme focus and choice across one radio group", async () => {
+    renderFixture();
     const wizard = await import("../setup-wizard.ts");
     void wizard.showSetupWizard();
     (
       document.getElementById("setup-welcome-next") as HTMLButtonElement
     ).click();
 
-    const options = document.getElementById(
-      "setup-theme-options",
-    ) as HTMLElement;
-    const btns = Array.from(
-      document.querySelectorAll<HTMLButtonElement>(".setup-wizard-theme-btn"),
+    // Arrow, Home and End move focus and the checked choice natively within
+    // a radio group; E2E checks the browser keys (ux-setup-wizard.spec.ts).
+    const radios = Array.from(
+      document.querySelectorAll<HTMLInputElement>('input[name="setup-theme"]'),
     );
-
-    options.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-    );
-    expect(btns[0].getAttribute("aria-checked")).toBe("true");
-
-    options.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
-    );
-    expect(btns[1].getAttribute("aria-checked")).toBe("true");
-
-    options.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }),
-    );
-    expect(btns[0].getAttribute("aria-checked")).toBe("true");
-
-    options.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "End", bubbles: true }),
-    );
-    expect(btns[2].getAttribute("aria-checked")).toBe("true");
-
-    options.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Home", bubbles: true }),
-    );
-    expect(btns[0].getAttribute("aria-checked")).toBe("true");
-
-    options.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
-    );
-    expect(btns[1].getAttribute("aria-checked")).toBe("true");
-
-    options.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
-    );
-    expect(btns[0].getAttribute("aria-checked")).toBe("true");
+    for (const radio of radios) radio.focus();
+    expect(document.activeElement).toBe(radios[2]);
+    radios[1].click();
+    expect(radios[1].checked).toBe(true);
+    expect(radios[0].checked).toBe(false);
+    radios[0].click();
+    expect(radios[0].checked).toBe(true);
+    expect(mockApplyTheme).toHaveBeenLastCalledWith("system");
   });
 
   it("labels biometric opt-in per platform and hides it when unavailable", async () => {

@@ -78,3 +78,16 @@ test("skipping says that saved connections are stored unencrypted", async ({
   );
   await expect(page.locator("#setup-enc-skip")).toHaveText("Skip setup");
 });
+
+test("the theme choices form one radio group that arrow keys move through", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, FIRST_RUN);
+  await page.goto("/");
+  await page.locator("#setup-welcome-next").click();
+  await page.locator("#setup-theme-system").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#setup-theme-light")).toBeChecked();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.locator("#setup-theme-system")).toBeChecked();
+});

@@ -5,6 +5,7 @@ import {
   openSettingsModal,
   closeSettingsModal,
   resetSettings,
+  resetAfterForgottenPassword,
   setBookmarkSelectHandler,
   switchSettingsTab,
 } from "./settings.ts";
@@ -616,8 +617,8 @@ function wireSelectionActions(): void {
 
 /** Vault, biometric and lock controls in Settings. */
 function wireSecuritySettings(): void {
-  // "Forgot password?" on the Unlock prompt runs the existing reset flow.
-  setForgotPasswordHandler(() => void resetSettings());
+  // "Forgot password?" on the lock view goes straight to the erase explanation.
+  setForgotPasswordHandler(() => void resetAfterForgottenPassword());
   const runSecurityAction = (action: "setup" | "unlock" | "disable"): void => {
     void (async () => {
       const changed = await handleSecurityToggle(setStatus, action);

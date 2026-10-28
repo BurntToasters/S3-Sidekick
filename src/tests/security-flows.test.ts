@@ -61,15 +61,24 @@ function renderFixture(): void {
 }
 
 /**
- * The lock view replaces the old Unlock prompt. Waits until it is on screen
- * and no biometric wait is open, then types the password and submits, or
- * picks "Continue locked" when `password` is null.
+ * The lock view replaces the old Unlock prompt. Waits until it is on screen,
+ * no biometric wait is open, and no password check is in flight, then types
+ * the password and submits, or picks "Continue locked" when `password` is null.
  */
 async function answerLockView(password: string | null): Promise<void> {
   await vi.waitFor(() => {
     const view = document.getElementById("lock-view");
     const overlay = document.getElementById("biometric-overlay");
-    expect(!!view && !view.hidden && (!overlay || overlay.hidden)).toBe(true);
+    const input = document.getElementById(
+      "lock-view-password",
+    ) as HTMLInputElement | null;
+    expect(
+      !!view &&
+        !view.hidden &&
+        (!overlay || overlay.hidden) &&
+        !!input &&
+        !input.disabled,
+    ).toBe(true);
   });
   if (password === null) {
     document.getElementById("lock-view-continue")!.click();
@@ -122,9 +131,13 @@ describe("security flows", () => {
         .textContent,
     ).toBe("Not initialized");
     expect(
-      (document.getElementById("security-toggle") as HTMLButtonElement)
-        .textContent,
-    ).toBe("Initialize Security");
+      (document.getElementById("security-setup-btn") as HTMLButtonElement)
+        .hidden,
+    ).toBe(false);
+    expect(
+      (document.getElementById("security-disable-btn") as HTMLButtonElement)
+        .hidden,
+    ).toBe(true);
 
     status = makeStatus({
       initialized: true,
@@ -141,13 +154,17 @@ describe("security flows", () => {
         .textContent,
     ).toContain("unlocked");
     expect(
-      (document.getElementById("security-toggle") as HTMLButtonElement)
-        .textContent,
-    ).toBe("Disable Encryption");
+      (document.getElementById("security-setup-btn") as HTMLButtonElement)
+        .hidden,
+    ).toBe(true);
+    expect(
+      (document.getElementById("security-disable-btn") as HTMLButtonElement)
+        .hidden,
+    ).toBe(false);
     expect(
       (document.getElementById("security-change-password") as HTMLButtonElement)
-        .style.display,
-    ).toBe("");
+        .hidden,
+    ).toBe(false);
     expect(
       (document.getElementById("security-lock-timeout") as HTMLSelectElement)
         .value,
@@ -181,7 +198,7 @@ describe("security flows", () => {
 
     const setStatus = vi.fn();
     const security = await import("../security.ts");
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "setup");
 
     expect(mockInvoke).toHaveBeenCalledWith("initialize_security", {
       enableEncryption: false,
@@ -191,7 +208,7 @@ describe("security flows", () => {
       "Security initialized without encryption.",
     );
     expect(
-      (document.getElementById("security-toggle") as HTMLButtonElement)
+      (document.getElementById("security-setup-btn") as HTMLButtonElement)
         .disabled,
     ).toBe(false);
   });
@@ -203,17 +220,6 @@ describe("security flows", () => {
       unlocked: false,
       biometric_available: true,
       biometric_enrolled: true,
-    });
-
-    mockShowPrompt.mockImplementation(async (_title, _msg, options) => {
-      const validate = (
-        options as { validate?: (value: string) => Promise<boolean> }
-      )?.validate;
-      if (validate) {
-        const ok = await validate("supersecret");
-        if (!ok) return null;
-      }
-      return "supersecret";
     });
 
     mockInvoke.mockImplementation(async (cmd) => {
@@ -237,7 +243,9 @@ describe("security flows", () => {
 
     const setStatus = vi.fn();
     const security = await import("../security.ts");
-    await security.handleSecurityToggle(setStatus);
+    const unlocking = security.handleSecurityToggle(setStatus, "unlock");
+    await answerLockView("supersecret");
+    await expect(unlocking).resolves.toBe(true);
 
     expect(mockInvoke).toHaveBeenCalledWith("unlock_biometric");
     expect(mockInvoke).toHaveBeenCalledWith("unlock_security", {
@@ -397,19 +405,10 @@ describe("security flows", () => {
       return undefined;
     });
 
-    mockShowPrompt.mockImplementationOnce(async (_t, _m, options) => {
-      const validate = (
-        options as { validate?: (value: string) => Promise<boolean> }
-      )?.validate;
-      if (validate) {
-        const ok = await validate("strong-pass");
-        if (!ok) return null;
-      }
-      return "strong-pass";
-    });
-
     const security = await import("../security.ts");
-    await expect(security.ensureSecurityReady()).resolves.toBe(true);
+    const ready = security.ensureSecurityReady();
+    await answerLockView("strong-pass");
+    await expect(ready).resolves.toBe(true);
   });
 
   it("returns false when status cannot be read or setup is canceled", async () => {
@@ -484,7 +483,7 @@ describe("security flows", () => {
     };
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowPrompt.mockResolvedValueOnce(null);
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "setup");
     const lengthRule = mockShowPrompt.mock.calls.at(-1)?.[2] as ValidateOptions;
     expect(await lengthRule.validate("short")).toBe(false);
     expect(await lengthRule.validate("long-pass")).toBe(true);
@@ -493,13 +492,13 @@ describe("security flows", () => {
     mockShowPrompt
       .mockResolvedValueOnce("long-pass")
       .mockResolvedValueOnce(null);
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "setup");
     const matchRule = mockShowPrompt.mock.calls.at(-1)?.[2] as ValidateOptions;
     expect(await matchRule.validate("wrong-pass")).toBe(false);
     expect(await matchRule.validate("long-pass")).toBe(true);
 
     mockInvoke.mockRejectedValueOnce(new Error("status boom"));
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "setup");
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
       expect.stringContaining("Could not read encryption status"),
@@ -534,7 +533,7 @@ describe("security flows", () => {
 
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowPrompt.mockResolvedValueOnce("");
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "disable");
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
       "Current password is required.",
@@ -542,7 +541,7 @@ describe("security flows", () => {
 
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowPrompt.mockResolvedValueOnce("current-pass");
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "disable");
     expect(mockInvoke).toHaveBeenCalledWith("set_security_encryption", {
       enableEncryption: false,
       currentPassword: "current-pass",
@@ -562,7 +561,7 @@ describe("security flows", () => {
     mockShowPrompt
       .mockResolvedValueOnce("new-pass-123")
       .mockResolvedValueOnce("new-pass-123");
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "setup");
     expect(mockInvoke).toHaveBeenCalledWith("set_security_encryption", {
       enableEncryption: true,
       currentPassword: null,
@@ -580,7 +579,7 @@ describe("security flows", () => {
     mockShowPrompt
       .mockResolvedValueOnce("newer-pass-123")
       .mockResolvedValueOnce("newer-pass-123");
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "setup");
     expect(mockShowAlert).toHaveBeenCalledWith(
       "Error",
       expect.stringContaining("Could not update encryption"),
@@ -634,6 +633,7 @@ describe("security flows", () => {
     const security = await import("../security.ts");
     const promise = security.ensureSecurityReady();
     await vi.advanceTimersByTimeAsync(4000);
+    await answerLockView("win-pass-123");
     await expect(promise).resolves.toBe(true);
     vi.useRealTimers();
   });
@@ -788,22 +788,27 @@ describe("security flows", () => {
       biometric_available: false,
       biometric_enrolled: false,
     });
-    mockShowPrompt.mockImplementationOnce(async (_title, _msg, options) => {
-      const validate = (
-        options as { validate?: (value: string) => Promise<boolean> }
-      )?.validate;
-      if (!validate) return null;
-      expect(await validate("")).toBe(false);
-      expect(await validate("wrong-pass")).toBe(false);
-      return null;
-    });
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "get_security_status") return status;
       if (cmd === "get_platform_info") return "linux";
       if (cmd === "unlock_security") throw new Error("Invalid password");
       return status;
     });
-    await expect(security.ensureSecurityReady()).resolves.toBe(false);
+    const pending = security.ensureSecurityReady();
+    await answerLockView("");
+    await vi.waitFor(() => {
+      expect(document.getElementById("lock-view-error")?.textContent).toContain(
+        "Enter your password",
+      );
+    });
+    await answerLockView("wrong-pass");
+    await vi.waitFor(() => {
+      expect(document.getElementById("lock-view-error")?.textContent).toContain(
+        "incorrect",
+      );
+    });
+    await answerLockView(null);
+    await expect(pending).resolves.toBe(false);
   });
 
   it("handles refreshSecuritySettingsUI guards and errors, including macOS biometric label", async () => {
@@ -869,7 +874,7 @@ describe("security flows", () => {
     mockShowPrompt
       .mockResolvedValueOnce("valid-pass-1")
       .mockResolvedValueOnce("valid-pass-1");
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "setup");
     expect(setStatus).toHaveBeenCalledWith("Credential encryption enabled.");
 
     status = makeStatus({
@@ -894,7 +899,7 @@ describe("security flows", () => {
       if (cmd === "get_platform_info") return "linux";
       return status;
     });
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "unlock");
     expect(setStatus).toHaveBeenCalledWith("Credentials unlocked.");
 
     status = makeStatus({
@@ -904,22 +909,19 @@ describe("security flows", () => {
       biometric_available: false,
       biometric_enrolled: false,
     });
-    mockShowPrompt.mockImplementationOnce(async (_title, _msg, options) => {
-      const validate = (
-        options as { validate?: (value: string) => Promise<boolean> }
-      )?.validate;
-      if (!validate) return null;
-      expect(await validate("")).toBe(false);
-      expect(await validate("wrong")).toBe(false);
-      return null;
-    });
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "get_security_status") return status;
       if (cmd === "unlock_security") throw new Error("bad");
       if (cmd === "get_platform_info") return "linux";
       return status;
     });
-    await security.handleSecurityToggle(setStatus);
+    const unlocking = security.handleSecurityToggle(setStatus, "unlock");
+    await answerLockView("wrong");
+    await vi.waitFor(() => {
+      expect(document.getElementById("lock-view-error")?.hidden).toBe(false);
+    });
+    await answerLockView(null);
+    await expect(unlocking).resolves.toBe(false);
 
     status = makeStatus({
       initialized: true,
@@ -933,11 +935,11 @@ describe("security flows", () => {
       if (cmd === "get_security_status") return status;
       return status;
     });
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "disable");
 
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowPrompt.mockResolvedValueOnce(null);
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "disable");
 
     status = makeStatus({
       initialized: true,
@@ -951,7 +953,7 @@ describe("security flows", () => {
       return status;
     });
     mockShowPrompt.mockResolvedValueOnce(null);
-    await security.handleSecurityToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "setup");
 
     mockShowPrompt.mockResolvedValueOnce(null);
     await security.handleSecurityChangePassword(setStatus);
@@ -1051,7 +1053,7 @@ describe("security flows", () => {
   it("covers security UI/handler paths when optional controls are missing", async () => {
     document.body.innerHTML = `
       <div id="security-status-text"></div>
-      <button id="security-toggle">Enable Encryption</button>
+      <button id="security-setup-btn" hidden>Set up encryption</button>
       <button id="security-change-password" style="display:none"></button>
       <div id="security-warning" style="display:none"></div>
     `;
@@ -1094,9 +1096,9 @@ describe("security flows", () => {
     });
     await security.refreshSecuritySettingsUI();
 
-    document.getElementById("security-toggle")?.remove();
+    document.getElementById("security-setup-btn")?.remove();
     mockInvoke.mockRejectedValueOnce(new Error("status boom"));
-    await security.handleSecurityToggle(vi.fn());
+    await security.handleSecurityToggle(vi.fn(), "setup");
 
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "get_security_status") {
@@ -1110,7 +1112,7 @@ describe("security flows", () => {
       return status;
     });
     mockShowPrompt.mockResolvedValueOnce(null);
-    await security.handleSecurityToggle(vi.fn());
+    await security.handleSecurityToggle(vi.fn(), "setup");
 
     document.getElementById("biometric-toggle")?.remove();
     await security.handleBiometricToggle(vi.fn());
@@ -1126,11 +1128,9 @@ describe("security flows", () => {
       biometric_enrolled: true,
     });
 
-    let promptMessage = "";
-    mockShowPrompt.mockImplementation(async (_title, message) => {
-      promptMessage = String(message);
-      return null;
-    });
+    const noticeText = () =>
+      document.getElementById("lock-view-notice")?.textContent ?? "";
+
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "get_security_status") return status;
       if (cmd === "get_platform_info") return "linux";
@@ -1139,10 +1139,13 @@ describe("security flows", () => {
       }
       return status;
     });
-    await expect(security.ensureSecurityReady()).resolves.toBe(false);
-    expect(promptMessage).toContain("credential was removed");
+    const removed = security.ensureSecurityReady();
+    await vi.waitFor(() => {
+      expect(noticeText()).toContain("credential was removed");
+    });
+    await answerLockView(null);
+    await expect(removed).resolves.toBe(false);
 
-    promptMessage = "";
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "get_security_status") return status;
       if (cmd === "get_platform_info") return "linux";
@@ -1151,10 +1154,13 @@ describe("security flows", () => {
       }
       return status;
     });
-    await expect(security.ensureSecurityReady()).resolves.toBe(false);
-    expect(promptMessage).toContain("0x8010000A");
+    const code = security.ensureSecurityReady();
+    await vi.waitFor(() => {
+      expect(noticeText()).toContain("0x8010000A");
+    });
+    await answerLockView(null);
+    await expect(code).resolves.toBe(false);
 
-    promptMessage = "";
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "get_security_status") return status;
       if (cmd === "get_platform_info") return "linux";
@@ -1165,7 +1171,11 @@ describe("security flows", () => {
       }
       return status;
     });
-    await expect(security.ensureSecurityReady()).resolves.toBe(false);
-    expect(promptMessage).toContain("one-time password unlock");
+    const upgrade = security.ensureSecurityReady();
+    await vi.waitFor(() => {
+      expect(noticeText()).toContain("one-time password unlock");
+    });
+    await answerLockView(null);
+    await expect(upgrade).resolves.toBe(false);
   });
 });

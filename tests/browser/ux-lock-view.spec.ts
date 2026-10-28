@@ -193,7 +193,7 @@ test("the biometric wait shows a message and Cancel falls back to the password",
   await expect(page.locator("#lock-view")).toBeHidden();
 });
 
-test("Forgot password? starts the existing reset flow from the lock view", async ({
+test("Forgot password? explains the erase, and Cancel leaves the vault untouched", async ({
   page,
 }) => {
   await installLayoutTauriMock(page, {
@@ -205,8 +205,54 @@ test("Forgot password? starts the existing reset flow from the lock view", async
   await page.goto("/");
   await page.locator("#lock-view-forgot").click();
   await expect(page.locator("#dialog-overlay")).toHaveClass(/active/);
+  await expect(page.locator("#dialog-title")).toHaveText(
+    "Erase the Encrypted Vault?",
+  );
+  await expect(page.locator("#dialog-message")).toContainText(
+    /can.t be recovered/i,
+  );
+  await page.locator("#dialog-cancel").click();
+  await expect(page.locator("#dialog-overlay")).not.toHaveClass(/active/);
+  await expect(page.locator("#lock-view")).toBeVisible();
+
   const calls = await readMockCallLog(page);
-  expect(calls.some((call) => call.command === "factory_reset")).toBe(false);
+  for (const command of [
+    "factory_reset",
+    "unlock_security",
+    "initialize_security",
+    "set_security_encryption",
+  ]) {
+    expect(calls.some((call) => call.command === command)).toBe(false);
+  }
+});
+
+test("confirming the erase runs the factory reset after a final confirmation", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, {
+    objectCount: 0,
+    prefixes: [],
+    security: ENCRYPTED_LOCKED,
+    unlockPasswords: ["correct-horse-1"],
+  });
+  await page.goto("/");
+  await page.locator("#lock-view-forgot").click();
+  await expect(page.locator("#dialog-title")).toHaveText(
+    "Erase the Encrypted Vault?",
+  );
+  await page.locator("#dialog-ok").click();
+  await expect(page.locator("#dialog-title")).toHaveText(
+    "Permanently Delete All App Data?",
+  );
+  await page.locator("#dialog-ok").click();
+
+  await expect
+    .poll(async () =>
+      (await readMockCallLog(page)).some(
+        (call) => call.command === "factory_reset",
+      ),
+    )
+    .toBe(true);
 });
 
 test("Continue locked leaves saved connections locked and closes the lock view", async ({

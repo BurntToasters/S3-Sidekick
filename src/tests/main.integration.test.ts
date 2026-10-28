@@ -2139,7 +2139,9 @@ describe("main integration", () => {
     expect(mockClearCompletedTransfers).toHaveBeenCalled();
 
     state.connected = false;
-    (document.getElementById("security-toggle") as HTMLButtonElement).click();
+    (
+      document.getElementById("security-disable-btn") as HTMLButtonElement
+    ).click();
     (
       document.getElementById("security-change-password") as HTMLButtonElement
     ).click();

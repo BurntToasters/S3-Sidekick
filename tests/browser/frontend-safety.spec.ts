@@ -409,18 +409,18 @@ test.describe("frontend mutation and recovery safety", () => {
 
     await page.locator("#settings-btn").click();
     await page.locator("#settings-tab-security").click();
-    await expect(page.locator("#security-toggle")).toHaveText("Unlock");
-    await page.locator("#security-toggle").click();
-    await expect(page.locator("#dialog-title")).toHaveText("Unlock");
-    await page.locator("#dialog-input").fill("wrong-password");
-    await page.locator("#dialog-ok").click();
-    await expect(page.locator("#dialog-overlay")).toHaveClass(/active/);
-    await expect(page.locator("#dialog-validation-error")).toHaveText(
-      "Incorrect password. Try again.",
+    await expect(page.locator("#security-unlock-btn")).toBeVisible();
+    await page.locator("#security-unlock-btn").click();
+    await expect(page.locator("#lock-view")).toBeVisible();
+    await page.locator("#lock-view-password").fill("wrong-password");
+    await page.locator("#lock-view-unlock").click();
+    await expect(page.locator("#lock-view")).toBeVisible();
+    await expect(page.locator("#lock-view-error")).toHaveText(
+      "That password is incorrect. Check caps lock and try again.",
     );
-    await page.locator("#dialog-input").fill("correct-password");
-    await page.locator("#dialog-ok").click();
-    await expect(page.locator("#dialog-overlay")).not.toHaveClass(/active/);
+    await page.locator("#lock-view-password").fill("correct-password");
+    await page.locator("#lock-view-unlock").click();
+    await expect(page.locator("#lock-view")).toBeHidden();
     await expect(page.locator("#security-status-text")).toHaveText(
       "Encrypted (AES-256) and unlocked",
     );
@@ -582,7 +582,7 @@ test.describe("frontend mutation and recovery safety", () => {
     );
   });
 
-  test("canceling an in-flight unlock leaves the vault locked and does not reload secrets", async ({
+  test("an in-flight unlock cannot be canceled from the lock view, and a successful one does not relock", async ({
     page,
   }, testInfo) => {
     await openMockListing(page, {
@@ -597,45 +597,36 @@ test.describe("frontend mutation and recovery safety", () => {
     await page.locator("#settings-btn").click();
     await page.locator("#settings-tab-security").click();
 
-    const before = await readMockCallLog(page);
-    const bookmarkLoadsBefore = commandCalls(before, "load_bookmarks").length;
-    const connectionLoadsBefore = commandCalls(
-      before,
-      "load_connection",
+    const locksBefore = commandCalls(
+      await readMockCallLog(page),
+      "lock_security",
     ).length;
-    const locksBefore = commandCalls(before, "lock_security").length;
 
-    await page.locator("#security-toggle").click();
-    await page.locator("#dialog-input").fill("correct-password");
-    await page.locator("#dialog-ok").click();
+    await page.locator("#security-unlock-btn").click();
+    await expect(page.locator("#lock-view")).toBeVisible();
+    await page.locator("#lock-view-password").fill("correct-password");
+    await page.locator("#lock-view-unlock").click();
     await expect
       .poll(
         async () =>
           commandCalls(await readMockCallLog(page), "unlock_security").length,
       )
       .toBe(1);
-    await page.locator("#dialog-cancel").click();
-    await expect(page.locator("#dialog-overlay")).not.toHaveClass(/active/);
+    await expect(page.locator("#lock-view-continue")).toBeDisabled();
+    await expect(page.locator("#lock-view-unlock")).toBeDisabled();
     await releaseMockUnlock(page);
 
-    await expect
-      .poll(
-        async () =>
-          commandCalls(await readMockCallLog(page), "lock_security").length,
-      )
-      .toBe(locksBefore + 1);
+    await expect(page.locator("#lock-view")).toBeHidden();
+    await expect(page.locator("#security-status-text")).toHaveText(
+      "Encrypted (AES-256) and unlocked",
+    );
     const calls = await readMockCallLog(page);
-    expect(commandCalls(calls, "load_bookmarks")).toHaveLength(
-      bookmarkLoadsBefore,
-    );
-    expect(commandCalls(calls, "load_connection")).toHaveLength(
-      connectionLoadsBefore,
-    );
+    expect(commandCalls(calls, "lock_security")).toHaveLength(locksBefore);
     await saveSuiteArtifact(
       page,
       testInfo,
       "frontend-safety",
-      "cancel-unlock",
+      "in-flight-unlock",
       calls,
     );
   });

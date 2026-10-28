@@ -28,7 +28,7 @@ test("an unlocked vault shows a status card and separate action buttons", async 
 
   await expect(page.locator("#security-status-card")).toBeVisible();
   await expect(page.locator("#security-status-text")).toHaveText(
-    "Encrypted and unlocked",
+    "Encrypted (AES-256) and unlocked",
   );
   await expect(page.locator("#security-status-card .lucide-icon")).toHaveCount(
     1,
@@ -84,7 +84,7 @@ test("a locked vault offers Unlock and hides Lock now and Change password", asyn
   await openSecurityTab(page);
 
   await expect(page.locator("#security-status-text")).toHaveText(
-    "Encrypted and locked",
+    "Encrypted (AES-256) and locked",
   );
   await expect(page.locator("#security-unlock-btn")).toBeVisible();
   await expect(page.locator("#security-lock-btn")).toBeHidden();
@@ -165,6 +165,6 @@ test("Set up encryption on an unencrypted vault calls the existing enable path",
     calls.find((call) => call.command === "set_security_encryption")?.args,
   ).toMatchObject({ enableEncryption: true });
   await expect(page.locator("#security-status-text")).toHaveText(
-    "Encrypted and unlocked",
+    "Encrypted (AES-256) and unlocked",
   );
 });
