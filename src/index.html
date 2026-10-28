@@ -743,16 +743,40 @@
                       Preview
                     </button>
                     <button
-                      id="inspector-tab-properties"
+                      id="inspector-tab-details"
                       type="button"
                       class="inspector-tab"
-                      data-inspector-tab="properties"
+                      data-inspector-tab="details"
                       role="tab"
                       aria-selected="false"
                       aria-controls="inspector-pane-info"
                       tabindex="-1"
                     >
-                      Properties
+                      Details
+                    </button>
+                    <button
+                      id="inspector-tab-permissions"
+                      type="button"
+                      class="inspector-tab"
+                      data-inspector-tab="permissions"
+                      role="tab"
+                      aria-selected="false"
+                      aria-controls="inspector-pane-info"
+                      tabindex="-1"
+                    >
+                      Permissions
+                    </button>
+                    <button
+                      id="inspector-tab-metadata"
+                      type="button"
+                      class="inspector-tab"
+                      data-inspector-tab="metadata"
+                      role="tab"
+                      aria-selected="false"
+                      aria-controls="inspector-pane-info"
+                      tabindex="-1"
+                    >
+                      Metadata
                     </button>
                   </div>
                   <button
@@ -764,9 +788,7 @@
                     <span class="lucide-icon" data-icon="x"></span>
                   </button>
                 </div>
-                <div id="inspector-empty" class="inspector-empty" hidden>
-                  Select an object to inspect.
-                </div>
+                <div id="inspector-empty" class="inspector-empty" hidden></div>
                 <div
                   id="inspector-pane-preview"
                   class="inspector-pane"
@@ -778,6 +800,7 @@
                   <div
                     id="inspector-preview-title"
                     class="inspector-preview__title"
+                    hidden
                   ></div>
                   <div
                     id="inspector-preview-body"
@@ -788,69 +811,24 @@
                   id="inspector-pane-info"
                   class="inspector-pane"
                   role="tabpanel"
-                  aria-labelledby="inspector-tab-properties"
+                  aria-labelledby="inspector-tab-details"
                   tabindex="0"
                   hidden
                 >
-                  <div class="inspector-info__header">
-                    <h3 id="inspector-info-title" class="inspector-info__title">
-                      File Info
-                    </h3>
-                  </div>
-                  <div
-                    class="info-tabs"
-                    id="inspector-info-tabs"
-                    role="tablist"
-                    aria-label="Property sections"
+                  <h3
+                    id="inspector-info-title"
+                    class="inspector-info__title"
+                    hidden
                   >
-                    <button
-                      class="info-tab info-tab--active"
-                      data-tab="general"
-                      role="tab"
-                      aria-controls="inspector-info-body"
-                      aria-selected="true"
-                      tabindex="0"
-                    >
-                      General
-                    </button>
-                    <button
-                      class="info-tab"
-                      data-tab="permissions"
-                      role="tab"
-                      aria-controls="inspector-info-body"
-                      aria-selected="false"
-                      tabindex="-1"
-                    >
-                      Permissions
-                    </button>
-                    <button
-                      class="info-tab"
-                      data-tab="metadata"
-                      role="tab"
-                      aria-controls="inspector-info-body"
-                      aria-selected="false"
-                      tabindex="-1"
-                    >
-                      Metadata
-                    </button>
-                    <button
-                      class="info-tab"
-                      data-tab="s3"
-                      role="tab"
-                      aria-controls="inspector-info-body"
-                      aria-selected="false"
-                      tabindex="-1"
-                    >
-                      S3
-                    </button>
-                  </div>
+                    File Info
+                  </h3>
                   <div
                     id="inspector-info-body"
                     class="inspector-info__body modal__body"
                     role="tabpanel"
                     aria-label="Property details"
                   ></div>
-                  <div class="inspector-panel__footer">
+                  <div class="inspector-panel__footer" hidden>
                     <button
                       id="inspector-info-cancel"
                       type="button"

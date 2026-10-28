@@ -19,6 +19,7 @@ import { state } from "./state.ts";
 import type { SelectionEntry } from "./app-selection.ts";
 import { showConfirm } from "./dialogs.ts";
 import { restoreTableSelectionFromInspector } from "./layout-render-bridge.ts";
+import type { InspectorInfoTab } from "./inspector.ts";
 import {
   getInfoTitleEl,
   getInfoBodyEl,
@@ -29,8 +30,9 @@ import {
 } from "./inspector-mount.ts";
 import {
   ensureInspectorOpenForPane,
-  focusInspectorPropertiesPane,
+  focusInspectorInfoPane,
   markInspectorHasContent,
+  setInspectorTitle,
 } from "./inspector-host.ts";
 
 interface HeadObjectResponse {
@@ -67,7 +69,9 @@ let batchFolderCount = 0;
 let headData: HeadObjectResponse | null = null;
 let aclData: AclResponse | null = null;
 let metadataRows: { key: string; value: string }[] = [];
-let activeTab = "general";
+// `general` and `s3` exist only for the legacy overlay tabs; the inspector
+// shows the merged `details` view instead.
+let activeTab: InspectorInfoTab | "general" | "s3" = "details";
 let panelRequestToken = 0;
 let metadataDirty = false;
 let aclDirty = false;
@@ -162,11 +166,27 @@ function setInspectorFooterVisible(visible: boolean): void {
   }
 }
 
+/**
+ * Inspector footer rule: the footer appears only on the Metadata or
+ * Permissions view, and only while an edit is unsaved. A batch has no
+ * sub-tabs and edits both sections on one screen, so it counts as editable.
+ * The legacy overlay footer always shows and is unaffected.
+ */
+function updateInspectorFooter(): void {
+  if (!shouldUseInspectorMount()) return;
+  const onEditableTab =
+    batchKeys.length > 0 ||
+    activeTab === "metadata" ||
+    activeTab === "permissions";
+  setInspectorFooterVisible(onEditableTab && (metadataDirty || aclDirty));
+}
+
 function resetEditorState(): void {
   metadataDirty = false;
   aclDirty = false;
   selectedVisibility = "unchanged";
   initialSingleVisibility = null;
+  updateInspectorFooter();
 }
 
 function fileKeysOf(entries: readonly SelectionEntry[]): string[] {
@@ -204,6 +224,7 @@ export function getInfoPanelEntries(): SelectionEntry[] {
 
 export async function openInfoPanel(
   entries: readonly SelectionEntry[],
+  tab: InspectorInfoTab = "details",
 ): Promise<void> {
   // Switching to another object would reset the editor; ask first instead of
   // silently dropping unsaved metadata or visibility edits.
@@ -215,10 +236,11 @@ export async function openInfoPanel(
     return;
   }
   shownEntries = entries.map((entry) => ({ ...entry }));
-  ensureInspectorOpenForPane("properties");
+  ensureInspectorOpenForPane(tab);
   if (shouldUseInspectorMount()) {
-    focusInspectorPropertiesPane();
+    focusInspectorInfoPane(tab);
     markInspectorHasContent();
+    showHeaderFor(entries);
   }
 
   const title = getInfoTitleEl();
@@ -240,8 +262,8 @@ export async function openInfoPanel(
       title.textContent = `${folderCount} folder${folderCount === 1 ? "" : "s"}`;
       setInfoOverlayActive(true);
       saveBtn.style.display = "none";
-      setInspectorFooterVisible(false);
       setTabsVisible(false);
+      updateInspectorFooter();
       const body = getInfoBodyEl();
       body.innerHTML =
         `<div class="metadata-batch-info">` +
@@ -257,7 +279,7 @@ export async function openInfoPanel(
         : `${batchKeys.length} item${batchKeys.length === 1 ? "" : "s"}`;
     setInfoOverlayActive(true);
     saveBtn.style.display = "";
-    setInspectorFooterVisible(true);
+    setInspectorFooterVisible(false);
     saveBtn.disabled = false;
     setTabsVisible(false);
     renderBatchView(getInfoBodyEl(), batchKeys, folderCount);
@@ -277,8 +299,8 @@ export async function openInfoPanel(
     title.textContent = basename(folderPrefix) || folderPrefix;
     setInfoOverlayActive(true);
     saveBtn.style.display = "none";
-    setInspectorFooterVisible(false);
     setTabsVisible(false);
+    updateInspectorFooter();
     renderFolderProperties(getInfoBodyEl(), folderPrefix);
     return;
   }
@@ -289,10 +311,10 @@ export async function openInfoPanel(
   title.textContent = basename(currentKey);
   setInfoOverlayActive(true);
   saveBtn.style.display = "";
-  setInspectorFooterVisible(true);
+  setInspectorFooterVisible(false);
   saveBtn.disabled = true;
   setTabsVisible(true);
-  activeTab = "general";
+  activeTab = tab;
   updateTabUI();
 
   headData = null;
@@ -324,8 +346,82 @@ export async function openInfoPanel(
     if (requestToken !== panelRequestToken || currentKey !== selectedKey) {
       return;
     }
-    body.innerHTML = `<div class="metadata-loading">Failed to load: ${escapeHtml(friendlyError(err))}</div>`;
+    renderLoadError(body, `Failed to load: ${escapeHtml(friendlyError(err))}`);
   }
+}
+
+/**
+ * Names the opened selection in the inspector header, the one place the
+ * inspector shows a file name. Matches what a selection sync shows, so a
+ * direct Properties open does not leave the header on a stale title.
+ */
+function showHeaderFor(entries: readonly SelectionEntry[]): void {
+  if (entries.length === 1) {
+    setInspectorTitle(basename(entries[0].key), entries[0]);
+  } else {
+    setInspectorTitle(`${entries.length} selected`, null);
+  }
+}
+
+/**
+ * Load-error state: an alert with a Retry that re-issues the same request.
+ * Shown for HEAD and ACL failures alike.
+ */
+function renderLoadError(body: HTMLElement, message: string): void {
+  body.innerHTML =
+    `<div class="metadata-loading" role="alert">` +
+    `${message} ` +
+    `<button type="button" class="btn btn--sm" data-info-retry>Retry</button>` +
+    `</div>`;
+  body
+    .querySelector<HTMLButtonElement>("[data-info-retry]")
+    ?.addEventListener("click", () => {
+      void retryInfoLoad();
+    });
+}
+
+/** Re-runs the load that failed, for the entries the pane was opened for. */
+function retryInfoLoad(): void {
+  const tab: InspectorInfoTab =
+    activeTab === "permissions"
+      ? "permissions"
+      : activeTab === "metadata"
+        ? "metadata"
+        : "details";
+  if (batchKeys.length > 0) {
+    void openInfoPanel(
+      shownEntries.map((entry) => ({ ...entry })),
+      tab,
+    );
+    return;
+  }
+  if (currentKey) {
+    void openInfoPanel([{ kind: "file", key: currentKey }], tab);
+    return;
+  }
+  if (shownEntries.length === 1 && shownEntries[0].kind === "folder") {
+    void openInfoPanel([{ ...shownEntries[0] }], tab);
+  }
+}
+
+/**
+ * Explicit inspector tab switch (Details/Permissions/Metadata). Renders from
+ * the already loaded object when possible instead of refetching.
+ */
+export function showInfoPanelTab(tab: InspectorInfoTab): void {
+  activeTab = tab;
+  updateTabUI();
+  updateInspectorFooter();
+  if (!headData && currentKey) {
+    const entry: SelectionEntry = { kind: "file", key: currentKey };
+    void openInfoPanel([entry], tab);
+    return;
+  }
+  if (batchKeys.length > 0) {
+    renderBatchView(getInfoBodyEl(), batchKeys, batchFolderCount);
+    return;
+  }
+  renderTab();
 }
 
 function infoTabRoot(): ParentNode | null {
@@ -354,9 +450,25 @@ function updateTabUI(): void {
   }
 }
 
+const INFO_TAB_KEYS: readonly string[] = [
+  "details",
+  "permissions",
+  "metadata",
+  "general",
+  "s3",
+];
+
+function isInfoTabKey(
+  value: string,
+): value is InspectorInfoTab | "general" | "s3" {
+  return INFO_TAB_KEYS.includes(value);
+}
+
 export function switchTab(tab: string): void {
+  if (!isInfoTabKey(tab)) return;
   activeTab = tab;
   updateTabUI();
+  updateInspectorFooter();
   renderTab();
 }
 
@@ -364,7 +476,9 @@ function renderTab(): void {
   if (!headData) return;
   const body = getInfoBodyEl();
 
-  if (activeTab === "general") {
+  if (activeTab === "details") {
+    renderDetails(body);
+  } else if (activeTab === "general") {
     renderGeneral(body);
   } else if (activeTab === "permissions") {
     void renderPermissions(body);
@@ -373,6 +487,44 @@ function renderTab(): void {
   } else if (activeTab === "s3") {
     renderS3(body);
   }
+}
+
+/**
+ * The merged Details view: the old General and S3 tabs combined, with the
+ * rows that appeared in both (Storage Class, Encryption, ETag) shown once.
+ * The file name lives in the inspector header, so only the path repeats here.
+ */
+function renderDetails(body: HTMLElement): void {
+  if (!headData) return;
+
+  const httpHeaderRows = [
+    infoRow("Content Type", headData.content_type),
+    headData.cache_control
+      ? infoRow("Cache-Control", headData.cache_control)
+      : "",
+    headData.content_disposition
+      ? infoRow("Content-Disposition", headData.content_disposition)
+      : "",
+    headData.content_encoding
+      ? infoRow("Content-Encoding", headData.content_encoding)
+      : "",
+  ].filter(Boolean);
+
+  body.innerHTML =
+    infoSection("Name & path") +
+    infoRowCopyable("Path", currentKey, true) +
+    infoSection("Size & dates") +
+    infoRow("Size", formatSize(headData.content_length)) +
+    infoRow("Last Modified", formatDate(headData.last_modified)) +
+    infoRow("Storage Class", headData.storage_class || "STANDARD") +
+    infoRow("Encryption", headData.server_side_encryption || "None") +
+    infoRowCopyable("ETag", headData.etag, true) +
+    (httpHeaderRows.length > 0
+      ? infoSection("HTTP headers") + httpHeaderRows.join("")
+      : "");
+
+  attachCopyButtons(body);
+  void buildUrlAsync(body, currentKey, panelRequestToken);
 }
 
 function renderGeneral(body: HTMLElement): void {
@@ -433,7 +585,7 @@ async function buildUrlAsync(
     });
     if (
       requestToken === panelRequestToken &&
-      activeTab === "general" &&
+      (activeTab === "details" || activeTab === "general") &&
       currentKey === expectedKey &&
       url
     ) {
@@ -481,7 +633,10 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
       ) {
         return;
       }
-      body.innerHTML = `<div class="metadata-loading">Failed to load permissions: ${escapeHtml(friendlyError(err))}</div>`;
+      renderLoadError(
+        body,
+        `Failed to load permissions: ${escapeHtml(friendlyError(err))}`,
+      );
       return;
     }
   }
@@ -515,7 +670,7 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
     }
     html += `</tbody></table>`;
   } else {
-    html += `<div class="metadata-loading">No ACL grants found.</div>`;
+    html += `<div class="acl-empty" role="status">No ACL grants found.</div>`;
   }
 
   body.innerHTML = html;
@@ -533,12 +688,14 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
       : selectedVisibility;
   visibilitySelect.value = effectiveSelection;
   aclDirty = effectiveSelection !== initialSingleVisibility;
+  updateInspectorFooter();
 
   visibilitySelect.addEventListener("change", () => {
     const next = normalizeVisibility(visibilitySelect.value);
     if (!next || !initialSingleVisibility) return;
     selectedVisibility = next;
     aclDirty = next !== initialSingleVisibility;
+    updateInspectorFooter();
   });
 }
 
@@ -599,6 +756,7 @@ function renderBatchView(
         selectedVisibility = "unchanged";
       }
       aclDirty = selectedVisibility !== "unchanged";
+      updateInspectorFooter();
     });
   }
 
@@ -614,7 +772,14 @@ function renderBatchView(
 }
 
 function renderMetadata(body: HTMLElement): void {
-  let html = `<div id="metadata-entries"></div>`;
+  let html = "";
+  if (batchKeys.length === 0) {
+    // Row 0 is the system Content-Type header; the rest are user metadata.
+    html += `<div class="metadata-section-heading">System metadata</div>`;
+    html += `<div data-metadata-section="system" id="metadata-system-entries"></div>`;
+    html += `<div class="metadata-section-heading">User metadata</div>`;
+  }
+  html += `<div data-metadata-section="${batchKeys.length === 0 ? "user" : "all"}" id="metadata-entries"></div>`;
   html += `<button type="button" id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
   body.innerHTML = html;
   renderEntryRows();
@@ -623,6 +788,7 @@ function renderMetadata(body: HTMLElement): void {
     addRowBtn.addEventListener("click", () => {
       metadataRows.push({ key: "", value: "" });
       metadataDirty = true;
+      updateInspectorFooter();
       renderEntryRows();
     });
   }
@@ -647,6 +813,8 @@ function renderEntryRows(): void {
   const container = $("metadata-entries");
   container.innerHTML = "";
   const isBatch = batchKeys.length > 0;
+  const systemContainer = document.getElementById("metadata-system-entries");
+  if (systemContainer) systemContainer.innerHTML = "";
 
   const keyDatalist = document.createElement("datalist");
   keyDatalist.id = "metadata-header-names";
@@ -660,6 +828,9 @@ function renderEntryRows(): void {
   for (let i = 0; i < metadataRows.length; i++) {
     const row = document.createElement("div");
     row.className = "metadata-entry";
+    // Single-file row 0 is the system Content-Type header; it renders in the
+    // system section instead of the user metadata list.
+    const isSystemRow = !isBatch && i === 0 && systemContainer !== null;
 
     const keyInput = document.createElement("input");
     keyInput.type = "text";
@@ -673,7 +844,7 @@ function renderEntryRows(): void {
 
     const valDatalistId = `metadata-val-${i}`;
     const valDatalist = buildValueDatalist(valDatalistId, metadataRows[i].key);
-    container.appendChild(valDatalist);
+    (isSystemRow ? systemContainer : container).appendChild(valDatalist);
 
     const valInput = document.createElement("input");
     valInput.type = "text";
@@ -685,6 +856,7 @@ function renderEntryRows(): void {
     keyInput.addEventListener("input", () => {
       metadataRows[i].key = keyInput.value;
       metadataDirty = true;
+      updateInspectorFooter();
       const newDatalist = buildValueDatalist(valDatalistId, keyInput.value);
       const old = document.getElementById(valDatalistId);
       if (old) old.replaceWith(newDatalist);
@@ -693,6 +865,7 @@ function renderEntryRows(): void {
     valInput.addEventListener("input", () => {
       metadataRows[i].value = valInput.value;
       metadataDirty = true;
+      updateInspectorFooter();
     });
 
     row.appendChild(keyInput);
@@ -711,18 +884,27 @@ function renderEntryRows(): void {
       delBtn.addEventListener("click", () => {
         metadataRows.splice(i, 1);
         metadataDirty = true;
+        updateInspectorFooter();
         renderEntryRows();
       });
       row.appendChild(delBtn);
     } else {
+      // Matches the 32px delete button so single-file rows align with
+      // multi-row entries (the old 30px spacer left a 2px misalignment).
       const spacer = document.createElement("span");
-      spacer.style.width = "30px";
-      spacer.style.flexShrink = "0";
+      spacer.className = "metadata-entry__spacer";
       row.appendChild(spacer);
     }
 
-    container.appendChild(row);
+    (isSystemRow ? systemContainer : container).appendChild(row);
   }
+  if (!isBatch && !container.querySelector(".metadata-entry")) {
+    const hint = document.createElement("p");
+    hint.className = "metadata-empty";
+    hint.textContent = "No user metadata yet.";
+    container.appendChild(hint);
+  }
+  updateInspectorFooter();
 }
 
 function renderS3(body: HTMLElement): void {
@@ -1152,6 +1334,7 @@ async function refreshInfoAfterSave(savedKey: string): Promise<void> {
   const saveBtn = getInfoSaveBtn();
   saveBtn.textContent = "Save";
   saveBtn.disabled = true;
+  updateInspectorFooter();
   const body = getInfoBodyEl();
   body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
   try {
@@ -1169,7 +1352,10 @@ async function refreshInfoAfterSave(savedKey: string): Promise<void> {
     renderTab();
   } catch (err) {
     if (requestToken !== panelRequestToken || currentKey !== savedKey) return;
-    body.innerHTML = `<div class="metadata-loading">Saved, but failed to reload: ${escapeHtml(friendlyError(err))}</div>`;
+    renderLoadError(
+      body,
+      `Saved, but failed to reload: ${escapeHtml(friendlyError(err))}`,
+    );
   }
 }
 

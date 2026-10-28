@@ -60,7 +60,8 @@ describe("preview module", () => {
       data: "",
       is_text: false,
       truncated: false,
-      total_size: 5_000_000,
+      // Over the 16 MB image cap (s3/preview.rs MAX_IMAGE_PREVIEW).
+      total_size: 16_777_217,
     });
     const preview = await import("../preview.ts");
     await preview.openPreview("images/huge.png");
@@ -100,7 +101,11 @@ describe("preview module", () => {
 
     expect(overlay.classList.contains("active")).toBe(true);
     expect(title.textContent).toBe("readme.txt");
-    expect(body.querySelector(".preview-text")?.textContent).toBe("<hello>");
+    // The text listing shows one gutter-numbered line with the escaped body.
+    const textLines = body.querySelectorAll(".preview-code__text");
+    expect(textLines).toHaveLength(1);
+    expect(textLines[0].textContent).toBe("<hello>");
+    expect(body.querySelector(".preview-code__num")).not.toBeNull();
     expect(body.textContent).toContain("Showing first 1 MB");
     expect(mockInvoke).toHaveBeenCalledWith("preview_object", {
       bucket: "bucket-a",
@@ -190,5 +195,112 @@ describe("preview module", () => {
 
     preview.closePreview();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview-png");
+  });
+
+  // Failure-mode inventory for the new preview formats, written before the
+  // formatters exist: the ways JSON, CSV and text rendering can fail.
+  it("routes AVIF images through the image preview path", async () => {
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview-avif");
+    const revokeObjectURL = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => undefined);
+
+    mockInvoke.mockResolvedValueOnce({
+      content_type: "image/avif",
+      data: "AAAA",
+      is_text: false,
+      truncated: false,
+      total_size: 4,
+    });
+    const preview = await import("../preview.ts");
+    await preview.openPreview("images/photo.avif");
+
+    const img = document.querySelector("#preview-body img") as HTMLImageElement;
+    expect(img).not.toBeNull();
+    expect(img.getAttribute("src")).toBe("blob:preview-avif");
+    expect(
+      (document.getElementById("preview-body") as HTMLDivElement).textContent,
+    ).not.toContain("Too large");
+    preview.closePreview();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview-avif");
+  });
+
+  it("keeps images up to 16 MB previewable and refuses larger ones", async () => {
+    const preview = await import("../preview.ts");
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValue("blob:preview-big");
+
+    mockInvoke.mockResolvedValueOnce({
+      content_type: "image/png",
+      data: "AAAA",
+      is_text: false,
+      truncated: false,
+      total_size: 15_000_000,
+    });
+    await preview.openPreview("images/big.png");
+    expect(document.querySelector("#preview-body img")).not.toBeNull();
+    expect(
+      (document.getElementById("preview-body") as HTMLDivElement).textContent,
+    ).not.toContain("Too large");
+
+    mockInvoke.mockResolvedValueOnce({
+      content_type: "image/png",
+      data: "",
+      is_text: false,
+      truncated: false,
+      total_size: 16_777_217,
+    });
+    await preview.openPreview("images/huge.png");
+    expect(
+      (document.getElementById("preview-body") as HTMLDivElement).textContent,
+    ).toContain("Too large to preview");
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+  });
+
+  it("pretty-prints JSON with escaped token classes, not raw markup", async () => {
+    const preview = await import("../preview.ts");
+    const html = preview.formatJsonHtml(
+      '{"name":"a","n":1.5,"ok":true,"no":null,"list":[1,"x"]}',
+    );
+    expect(html).not.toBeNull();
+    expect(html).toContain('class="tok-key"');
+    expect(html).toContain('class="tok-str"');
+    expect(html).toContain('class="tok-num"');
+    expect(html).toContain('class="tok-bool"');
+    expect(html).toContain('class="tok-null"');
+    // Values must be HTML-escaped: no raw angle brackets or unescaped quotes.
+    expect(preview.formatJsonHtml('{"x":"<script>"}')).not.toContain(
+      "<script>",
+    );
+    // Invalid JSON falls back to plain text instead of throwing.
+    expect(preview.formatJsonHtml("{not json")).toBeNull();
+  });
+
+  it("parses delimited text with quoted fields and a row cap", async () => {
+    const preview = await import("../preview.ts");
+    const parsed = preview.parseDelimited(
+      'a,b\n"x,y",2\n"say ""hi""",3\n',
+      ",",
+      200,
+    );
+    expect(parsed.header).toEqual(["a", "b"]);
+    expect(parsed.rows).toEqual([
+      ["x,y", "2"],
+      ['say "hi"', "3"],
+    ]);
+    expect(parsed.totalRows).toBe(2);
+
+    const tabs = preview.parseDelimited("a\tb\n1\t2\n", "\t", 200);
+    expect(tabs.header).toEqual(["a", "b"]);
+
+    // A ragged trailing line does not crash; the cap is respected.
+    const many = preview.parseDelimited(
+      "n\n" + Array.from({ length: 205 }, (_, i) => `${i + 1}`).join("\n"),
+      ",",
+      200,
+    );
+    expect(many.rows).toHaveLength(200);
+    expect(many.totalRows).toBe(205);
   });
 });

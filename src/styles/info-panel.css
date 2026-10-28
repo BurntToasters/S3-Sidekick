@@ -49,6 +49,27 @@
   min-height: 32px;
 }
 
+/* Invisible stand-in for rows without a delete button, so every metadata row
+   lines up with the 32px controls column. */
+.metadata-entry__spacer {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  flex-shrink: 0;
+}
+
+/* Empty state for a permission set without grants. */
+.acl-empty {
+  padding: 14px 12px;
+  margin-top: 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  background: var(--bg);
+}
+
 .acl-table {
   width: 100%;
   border-collapse: collapse;
@@ -86,4 +107,10 @@
 
 .text-secondary {
   color: var(--text-secondary);
+}
+
+.metadata-empty {
+  margin: 4px 0 8px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
 }

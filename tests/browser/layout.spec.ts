@@ -440,6 +440,11 @@ test.describe("production table at compact and wide viewports", () => {
   }) => {
     await page.setViewportSize({ width: 1100, height: 720 });
     await openMockListing(page, { objectCount: 16 });
+    // The default-open rule needs a 1280px content container, so open the
+    // docked inspector explicitly for the compression checks.
+    if (await page.locator("#inspector-panel").isHidden()) {
+      await page.locator("#btn-inspector").click();
+    }
     await expect(page.locator("#inspector-panel")).toBeVisible();
     await page.locator(".object-row--file").first().click();
     await expect(page.locator("#inspector-panel")).toBeVisible();
@@ -573,6 +578,9 @@ test.describe("production compact selection and dialogs", () => {
   }) => {
     await page.setViewportSize({ width: 901, height: 720 });
     await openMockListing(page, { objectCount: 12 });
+    if (await page.locator("#inspector-panel").isHidden()) {
+      await page.locator("#btn-inspector").click();
+    }
     await expect(page.locator("#inspector-panel")).toBeVisible();
     await page.locator(".object-row--file").first().click();
     await expect(page.locator("#inspector-panel")).toBeVisible();

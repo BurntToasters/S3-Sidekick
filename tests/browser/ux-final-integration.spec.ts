@@ -332,10 +332,12 @@ test.describe("inspector keep editing", () => {
     await openMockListing(page, { objectCount: 0, prefixes: [] });
 
     await rowByKey(page, "notes.txt").locator(".object-name").click();
+    if (!(await page.locator("#inspector-panel").isVisible())) {
+      await page.locator("#btn-inspector").click();
+    }
     await page
-      .locator('#inspector-panel [data-inspector-tab="properties"]')
+      .locator('#inspector-panel [data-inspector-tab="metadata"]')
       .click();
-    await page.locator('#inspector-pane-info [data-tab="metadata"]').click();
     await page.locator("#metadata-add-row").click();
     await page.locator(".metadata-entry__key").last().fill("x-final");
     await page.locator(".metadata-entry__value").last().fill("pending");
@@ -434,7 +436,7 @@ test.describe("properties wrapping", () => {
         await page.locator("#btn-inspector").click();
       }
       await page
-        .locator('#inspector-panel [data-inspector-tab="properties"]')
+        .locator('#inspector-panel [data-inspector-tab="details"]')
         .click();
       const values = page.locator(
         "#inspector-info-body .metadata-info-row__value",
@@ -709,7 +711,7 @@ function contrastRatio(foreground: string, background: string): number {
 }
 
 test.describe("0.12.0 residue: contrast, targets, palette, resizers", () => {
-  test("dark theme: the active Properties tab keeps 4.5:1 while hovered", async ({
+  test("dark theme: the active Details tab keeps 4.5:1 while hovered", async ({
     page,
   }, testInfo) => {
     await page.emulateMedia({ colorScheme: "dark" });
@@ -726,14 +728,15 @@ test.describe("0.12.0 residue: contrast, targets, palette, resizers", () => {
     if (!(await page.locator("#inspector-panel").isVisible())) {
       await page.locator("#btn-inspector").click();
     }
-    const properties = page.locator("#inspector-tab-properties");
-    await properties.click();
-    await expect(properties).toHaveClass(/inspector-tab--active/);
+    // The Properties tab is now Details; this is still the active-tab contrast.
+    const details = page.locator("#inspector-tab-details");
+    await details.click();
+    await expect(details).toHaveClass(/inspector-tab--active/);
 
-    await properties.hover();
-    const hovered = await measureTextPaint(properties);
+    await details.hover();
+    const hovered = await measureTextPaint(details);
     await page.mouse.move(0, 0);
-    const rested = await measureTextPaint(properties);
+    const rested = await measureTextPaint(details);
 
     const hoveredRatio = contrastRatio(hovered.color, hovered.background);
     const restedRatio = contrastRatio(rested.color, rested.background);

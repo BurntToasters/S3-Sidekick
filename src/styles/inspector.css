@@ -101,12 +101,67 @@
   color: var(--accent-fg);
 }
 
-.inspector-tab--unavailable {
+/* An unavailable Preview tab is truly inert: dimmed, unfocusable and closed
+   to pointer events, so it can neither be clicked nor trap roving focus. */
+.inspector-tab[disabled] {
   opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
 }
 
-.inspector-tab--unavailable.inspector-tab--active {
-  opacity: 0.85;
+.inspector-title-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 4px;
+  color: var(--text-secondary);
+  vertical-align: -2px;
+}
+
+.inspector-empty__summary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 280px;
+}
+
+.inspector-empty__heading {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.inspector-empty__location {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+  word-break: break-all;
+  text-align: center;
+}
+
+.inspector-empty__stats {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.inspector-empty__stat {
+  display: contents;
+}
+
+.inspector-empty__stat dt {
+  color: var(--text-secondary);
+}
+
+.inspector-empty__stat dd {
+  margin: 0;
+  color: var(--text);
+  text-align: right;
 }
 
 .inspector-preview-unavailable {
@@ -157,21 +212,8 @@
   padding: 8px 12px 12px;
 }
 
-.inspector-info__header {
-  display: none; /* filename already in inspector-panel__title */
-}
-
-.inspector-pane-info .info-tabs {
-  flex-shrink: 0;
-  padding: 0 8px;
-  overflow-x: auto;
-  scrollbar-width: thin;
-}
-
-.inspector-pane-info .info-tab {
-  padding: 8px 10px;
-  font-size: 12px;
-  white-space: nowrap;
+.inspector-info__title[hidden] {
+  display: none;
 }
 
 .inspector-info__body {

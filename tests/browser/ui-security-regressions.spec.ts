@@ -106,12 +106,12 @@ async function switchInspectorSelection(
 
   if (scenario !== "empty selection") {
     await expect(
-      page.locator('[data-inspector-tab="properties"]'),
+      page.locator('[data-inspector-tab="details"]'),
     ).toHaveAttribute("aria-selected", "true");
   }
 
-  // Unavailable tabs carry aria-disabled for accessibility, while the
-  // production click handler still renders the selection explanation.
+  // The Preview tab is truly inert while the selection cannot preview: even a
+  // forced click reaches nothing, and no unavailable copy is rendered.
   await page.locator('[data-inspector-tab="preview"]').click({ force: true });
 }
 
@@ -178,17 +178,15 @@ for (const scenario of [
 
     await switchInspectorSelection(page, scenario);
     if (scenario === "folder") {
-      await expect(
-        page.locator("#inspector-preview-body .inspector-preview-unavailable"),
-      ).toHaveText("Preview is available for files only.");
+      // The Preview tab is disabled for a folder; the pane stays hidden and
+      // no explanation card is rendered into it.
+      await expect(page.locator("#inspector-pane-preview")).toBeHidden();
     } else if (scenario === "multiple files") {
-      await expect(
-        page.locator("#inspector-preview-body .inspector-preview-unavailable"),
-      ).toHaveText("Preview is available for a single previewable file.");
+      await expect(page.locator("#inspector-pane-preview")).toBeHidden();
     } else {
-      await expect(page.locator("#inspector-empty")).toHaveText(
-        "Select an object to inspect.",
-      );
+      await expect(
+        page.locator("#inspector-empty .inspector-empty__summary"),
+      ).toBeVisible();
     }
 
     const beforeRelease = await inspectorSnapshot(page);
@@ -249,18 +247,19 @@ for (const scenario of [
     ).toHaveLength(1);
     if (scenario === "folder") {
       expect(afterRelease.selectedKeys).toEqual(["prefix:archive/"]);
-      expect(afterRelease.previewBody).toBe(
-        "Preview is available for files only.",
-      );
+      // The preview pane never opens for a folder, so the released body
+      // cannot leak into it.
+      expect(afterRelease.previewBody).toBe("");
+      expect(afterRelease.previewPaneVisible).toBe(false);
     } else if (scenario === "multiple files") {
       expect(afterRelease.selectedKeys).toHaveLength(2);
-      expect(afterRelease.previewBody).toBe(
-        "Preview is available for a single previewable file.",
-      );
+      expect(afterRelease.previewBody).toBe("");
+      expect(afterRelease.previewPaneVisible).toBe(false);
     } else {
       expect(afterRelease.selectedKeys).toHaveLength(0);
       expect(afterRelease.emptyVisible).toBe(true);
-      expect(afterRelease.emptyMessage).toBe("Select an object to inspect.");
+      // The empty state now summarises the loaded folder.
+      expect(afterRelease.emptyMessage).toContain("layout-test-bucket");
     }
   });
 }

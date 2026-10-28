@@ -1,4 +1,5 @@
-import type { InspectorPaneTab } from "./inspector.ts";
+import type { InspectorInfoTab, InspectorPaneTab } from "./inspector.ts";
+import type { SelectionEntry } from "./app-selection.ts";
 
 // Preview and properties render inside the inspector, but the inspector also
 // owns their lifecycle. Keeping this small callback boundary here means preview
@@ -7,8 +8,9 @@ import type { InspectorPaneTab } from "./inspector.ts";
 type InspectorHost = {
   ensureInspectorOpenForPane(tab: InspectorPaneTab): void;
   focusInspectorPreviewPane(): void;
-  focusInspectorPropertiesPane(): void;
+  focusInspectorInfoPane(tab: InspectorInfoTab): void;
   markInspectorHasContent(): void;
+  setInspectorTitle(label: string, entry: SelectionEntry | null): void;
 };
 
 let host: InspectorHost | null = null;
@@ -25,10 +27,18 @@ export function focusInspectorPreviewPane(): void {
   host?.focusInspectorPreviewPane();
 }
 
-export function focusInspectorPropertiesPane(): void {
-  host?.focusInspectorPropertiesPane();
+export function focusInspectorInfoPane(tab: InspectorInfoTab): void {
+  host?.focusInspectorInfoPane(tab);
 }
 
 export function markInspectorHasContent(): void {
   host?.markInspectorHasContent();
+}
+
+/** Names the shown object once in the inspector header, with its type icon. */
+export function setInspectorTitle(
+  label: string,
+  entry: SelectionEntry | null,
+): void {
+  host?.setInspectorTitle(label, entry);
 }

@@ -2,9 +2,13 @@
 
 use super::*;
 
-/// Largest body the preview reads. Text keeps this prefix with a size hint;
-/// images above it are not drawn from a partial body.
+/// Largest text body the preview reads. Text keeps this prefix with a size
+/// hint; the rest of the object is never pulled for a preview.
 const MAX_PREVIEW: i64 = 1_048_576;
+
+/// Largest image body the preview reads. A partial image cannot be drawn, so
+/// images above this are refused instead of truncated.
+const MAX_IMAGE_PREVIEW: i64 = 16_777_216;
 
 /// What the preview does once HEAD has named the content type and size.
 /// Only `Read` fetches the body; the other plans answer from HEAD alone.
@@ -31,23 +35,46 @@ fn is_previewable_image_type(content_type: &str) -> bool {
             | "image/jpeg"
             | "image/gif"
             | "image/webp"
+            | "image/avif"
             | "image/svg+xml"
             | "image/bmp"
             | "image/x-icon"
     )
 }
 
-fn plan_preview(content_type: &str, total_size: i64) -> PreviewPlan {
+/// The read cap for a previewable type: the image cap for images, the text
+/// cap for text, and `None` when the type is not previewable at all.
+fn preview_read_cap(content_type: &str) -> Option<i64> {
     if is_previewable_image_type(content_type) {
-        if total_size > MAX_PREVIEW {
-            PreviewPlan::TooLarge
-        } else {
-            PreviewPlan::Read
-        }
+        Some(MAX_IMAGE_PREVIEW)
     } else if is_text_content_type(content_type) {
-        PreviewPlan::Read
+        Some(MAX_PREVIEW)
     } else {
-        PreviewPlan::Unsupported
+        None
+    }
+}
+
+/// How a readable body is cut to its cap. Text is truncated to its prefix;
+/// images are never truncated, so they have no truncation cap.
+fn preview_truncation_cap(content_type: &str) -> Option<i64> {
+    if is_previewable_image_type(content_type) {
+        None
+    } else if is_text_content_type(content_type) {
+        Some(MAX_PREVIEW)
+    } else {
+        None
+    }
+}
+
+fn plan_preview(content_type: &str, total_size: i64) -> PreviewPlan {
+    match preview_read_cap(content_type) {
+        None => PreviewPlan::Unsupported,
+        // Images must arrive whole: anything above the image cap is refused
+        // rather than read partially.
+        Some(cap) if preview_truncation_cap(content_type).is_none() && total_size > cap => {
+            PreviewPlan::TooLarge
+        }
+        Some(_) => PreviewPlan::Read,
     }
 }
 
@@ -98,7 +125,10 @@ pub(super) async fn preview_object_inner(
         });
     }
 
-    let head_truncated = total_size > MAX_PREVIEW;
+    // Only text truncates to the 1 MiB prefix. A Read-planned image is within
+    // the image cap and must arrive whole.
+    let is_image = is_previewable_image_type(&content_type);
+    let head_truncated = !is_image && total_size > MAX_PREVIEW;
     let version_id = head
         .version_id()
         .map(str::trim)
@@ -207,7 +237,10 @@ mod tests {
 
     #[test]
     fn images_over_the_limit_are_too_large_without_a_read() {
-        assert_eq!(plan_preview("image/png", MIB + 1), PreviewPlan::TooLarge);
+        assert_eq!(
+            plan_preview("image/png", 16 * MIB + 1),
+            PreviewPlan::TooLarge
+        );
         assert_eq!(plan_preview("image/webp", 50 * MIB), PreviewPlan::TooLarge);
     }
 
@@ -215,7 +248,7 @@ mod tests {
     fn svg_follows_the_image_size_rule() {
         assert_eq!(plan_preview("image/svg+xml", 2048), PreviewPlan::Read);
         assert_eq!(
-            plan_preview("image/svg+xml", 2 * MIB),
+            plan_preview("image/svg+xml", 17 * MIB),
             PreviewPlan::TooLarge
         );
     }
@@ -244,5 +277,58 @@ mod tests {
     #[test]
     fn unknown_image_subtypes_are_not_previewed() {
         assert_eq!(plan_preview("image/heic", 2048), PreviewPlan::Unsupported);
+    }
+
+    // Failure-mode inventory for the separate image cap: the ways the split
+    // caps can fail are enumerated here before the caps exist.
+    #[test]
+    fn images_at_exactly_16_mib_are_read() {
+        assert_eq!(plan_preview("image/png", 16 * MIB), PreviewPlan::Read);
+        assert_eq!(plan_preview("image/jpeg", 16 * MIB), PreviewPlan::Read);
+    }
+
+    #[test]
+    fn images_over_16_mib_are_too_large_without_a_read() {
+        assert_eq!(
+            plan_preview("image/png", 16 * MIB + 1),
+            PreviewPlan::TooLarge
+        );
+        assert_eq!(plan_preview("image/webp", 64 * MIB), PreviewPlan::TooLarge);
+    }
+
+    #[test]
+    fn text_at_the_1_mib_cap_is_read() {
+        assert_eq!(plan_preview("text/plain", MIB), PreviewPlan::Read);
+        assert_eq!(plan_preview("application/json", MIB), PreviewPlan::Read);
+    }
+
+    #[test]
+    fn text_over_1_mib_is_read_and_truncated_to_the_cap() {
+        // Text never refuses a read; the 1 MiB cap applies as truncation, so
+        // the truncation cap for text is exactly 1 MiB.
+        assert_eq!(plan_preview("text/plain", MIB + 1), PreviewPlan::Read);
+        assert_eq!(plan_preview("text/csv", 5 * MIB), PreviewPlan::Read);
+        assert_eq!(preview_truncation_cap("text/plain"), Some(MIB));
+        assert_eq!(preview_truncation_cap("text/csv"), Some(MIB));
+    }
+
+    #[test]
+    fn images_are_never_truncated_to_the_text_cap() {
+        assert_eq!(preview_truncation_cap("image/png"), None);
+        assert_eq!(preview_truncation_cap("image/avif"), None);
+    }
+
+    #[test]
+    fn avif_is_routed_to_the_image_cap() {
+        assert_eq!(plan_preview("image/avif", 2048), PreviewPlan::Read);
+        assert_eq!(plan_preview("image/avif", 16 * MIB), PreviewPlan::Read);
+        assert_eq!(
+            plan_preview("image/avif; charset=binary", 16 * MIB),
+            PreviewPlan::Read
+        );
+        assert_eq!(
+            plan_preview("image/avif", 16 * MIB + 1),
+            PreviewPlan::TooLarge
+        );
     }
 }
