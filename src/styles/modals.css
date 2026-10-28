@@ -54,7 +54,7 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px 8px;
+  padding: var(--space-4) var(--space-5) var(--space-2);
 }
 
 /* Modal and dialog titles share --text-xl so every heading reads at one size. */
@@ -64,10 +64,10 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 }
 
 .modal__body {
-  padding: 12px 20px 20px;
+  padding: var(--space-3) var(--space-5) var(--space-5);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .settings-panel {
@@ -86,8 +86,8 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 .modal__footer {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 12px 20px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
   border-top: 1px solid var(--border);
 }
 
@@ -102,7 +102,7 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-4);
   padding: 2px 0;
 }
 
@@ -143,13 +143,13 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .security-controls__actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
@@ -164,30 +164,30 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
-  margin-top: 4px;
-  padding-top: 12px;
+  margin-top: var(--space-1);
+  padding-top: var(--space-3);
   border-top: 1px solid var(--border);
 }
 
 .bookmark-list-toolbar {
   display: flex;
   gap: 6px;
-  padding: 8px 0;
+  padding: var(--space-2) 0;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
 }
 
 .bookmark-list {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .bookmark-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -246,7 +246,7 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 }
 
 .bookmark__edit {
-  padding: 2px 8px;
+  padding: 2px var(--space-2);
   min-height: 24px;
   border: none;
   background: transparent;
@@ -270,9 +270,9 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 .bookmark-edit {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
-  margin-bottom: 8px;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  margin-bottom: var(--space-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-hover);
@@ -290,19 +290,19 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
 .bookmark-edit__field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   font-size: var(--text-sm);
 }
 
 .bookmark-edit__actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .bookmark-empty {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   font-style: italic;
-  padding: 4px 0;
+  padding: var(--space-1) 0;
 }

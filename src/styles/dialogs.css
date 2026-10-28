@@ -9,7 +9,7 @@
   display: none;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: var(--space-4);
   z-index: var(--z-dialog);
 }
 
@@ -41,7 +41,7 @@ body.modal-open .dialog-overlay.active {
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
-  padding: 24px;
+  padding: var(--space-6);
   width: min(360px, 92vw);
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - var(--titlebar-height) - 32px);
@@ -54,7 +54,7 @@ body.modal-open .dialog-overlay.active {
 .dialog-box__title {
   font-size: var(--text-xl);
   font-weight: 600;
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
   overflow-wrap: anywhere;
 }
 
@@ -65,7 +65,7 @@ body.modal-open .dialog-overlay.active {
   overflow-y: auto;
   font-size: var(--text-md);
   color: var(--text-secondary);
-  margin-bottom: 20px;
+  margin-bottom: var(--space-5);
   line-height: var(--line-height-relaxed);
   white-space: pre-line;
   overflow-wrap: anywhere;
@@ -73,7 +73,7 @@ body.modal-open .dialog-overlay.active {
 }
 
 .dialog-checkbox {
-  margin-bottom: 20px;
+  margin-bottom: var(--space-5);
   flex-shrink: 0;
   color: var(--text-secondary);
 }
@@ -84,7 +84,7 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-input-wrapper {
   position: relative;
-  margin-bottom: 20px;
+  margin-bottom: var(--space-5);
   flex-shrink: 0;
 }
 
@@ -149,8 +149,8 @@ body.modal-open .dialog-overlay.active {
 .dialog-choices {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 16px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
 }
 
 .dialog-choices[hidden] {
@@ -163,7 +163,7 @@ body.modal-open .dialog-overlay.active {
 }
 
 .dialog-input-wrapper--icon .dialog-box__input {
-  padding-right: 48px;
+  padding-right: var(--space-9);
 }
 
 .biometric-overlay {
@@ -182,7 +182,7 @@ body.modal-open .dialog-overlay.active {
 .dialog-box__actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-2);
   flex-shrink: 0;
 }
 
@@ -191,7 +191,7 @@ body.modal-open .dialog-overlay.active {
 }
 
 .dialog-validation-error {
-  margin: -12px 0 20px;
+  margin: -12px 0 var(--space-5);
   color: var(--danger-text);
   font-size: var(--text-sm);
   line-height: 1.4;

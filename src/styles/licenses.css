@@ -51,13 +51,13 @@
   font-size: var(--text-xs);
   background: var(--bg-active);
   color: var(--accent-fg);
-  padding: 2px 8px;
+  padding: 2px var(--space-2);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
 }
 
 .license-card__body {
-  padding: 12px 14px;
+  padding: var(--space-3) 14px;
   font-size: var(--text-sm);
   color: var(--text-secondary);
   line-height: 1.5;
@@ -92,7 +92,7 @@
   flex-shrink: 0;
   width: 6px;
   height: 6px;
-  margin-left: 4px;
+  margin-left: var(--space-1);
   border-right: 2px solid currentColor;
   border-bottom: 2px solid currentColor;
   transform: rotate(45deg);
@@ -108,7 +108,7 @@
   margin: 0 0 10px;
   max-height: 240px;
   overflow: auto;
-  padding: 10px 12px;
+  padding: 10px var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
@@ -125,8 +125,8 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
-  padding: 12px 14px;
+  gap: var(--space-2);
+  padding: var(--space-3) 14px;
   color: var(--text-secondary);
   font-size: var(--text-sm);
 }

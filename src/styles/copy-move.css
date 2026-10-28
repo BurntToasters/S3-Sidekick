@@ -12,7 +12,7 @@
 
 .copy-move-browse-toggle {
   font-size: var(--text-md);
-  padding: 4px 0;
+  padding: var(--space-1) 0;
   text-align: left;
 }
 
@@ -28,7 +28,7 @@
 
 .copy-move-error,
 .copy-move-reason {
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
   font-size: var(--text-sm);
   color: var(--danger-text);
 }
@@ -164,14 +164,14 @@
 }
 
 .copy-move-browser-empty {
-  padding: 12px 10px;
+  padding: var(--space-3) 10px;
   font-size: var(--text-sm);
   color: var(--text-secondary);
   text-align: center;
 }
 
 .copy-move-browser-loading {
-  padding: 12px 10px;
+  padding: var(--space-3) 10px;
   font-size: var(--text-sm);
   color: var(--text-secondary);
   text-align: center;
