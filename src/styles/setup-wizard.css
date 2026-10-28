@@ -7,7 +7,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--setup-scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   animation: setup-overlay-in 0.3s ease;

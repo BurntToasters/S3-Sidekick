@@ -125,8 +125,8 @@
 .transfer-badge--alert,
 .drawer-badge--alert {
   /* Darker than --danger so the white count clears 4.5:1 in both themes. */
-  background: #b91c1c !important;
-  color: #fff !important;
+  background: var(--danger-strong) !important;
+  color: var(--accent-text) !important;
 }
 
 .transfer-toolbar .statusbar__count {

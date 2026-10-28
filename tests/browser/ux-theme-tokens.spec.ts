@@ -6,6 +6,8 @@
 // - A focused field, settings search or palette input shows no focus ring.
 // - A stylesheet references a custom property that no token defines.
 // - Owned stylesheets reintroduce raw hex/rgb colours or px font sizes.
+// - Any stylesheet outside tokens.css reintroduces a raw hex/rgb/hsl colour.
+// - A component surface token drifts between the light and dark theme blocks.
 // - The .badge, .switch and select chevron primitives are missing or unthemed.
 // - The connected-dot pulse repeats forever.
 // - The dialog title and modal title sizes diverge.
@@ -18,7 +20,7 @@ import {
   type Page,
   type TestInfo,
 } from "@playwright/test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { installLayoutTauriMock, openMockListing } from "./tauri-layout.ts";
 
@@ -70,6 +72,28 @@ const PARITY_TOKENS = [
   "--shadow-1",
   "--shadow-2",
   "--shadow-3",
+  "--drawer-shadow",
+  "--resizer-grip",
+  "--panel-scrim",
+  "--support-scrim",
+  "--setup-scrim",
+  "--form-error-bg",
+  "--form-error-border",
+  "--scrollbar-thumb",
+  "--scrollbar-thumb-hover",
+  "--settings-preview-light-frame",
+  "--settings-preview-light-surface",
+  "--settings-preview-light-accent",
+  "--settings-preview-light-text",
+  "--settings-preview-light-edge",
+  "--settings-preview-dark-frame",
+  "--settings-preview-dark-surface",
+  "--settings-preview-dark-accent",
+  "--settings-preview-dark-text",
+  "--settings-preview-dark-edge",
+  "--settings-preview-system-edge",
+  "--settings-preview-system-light-row",
+  "--settings-preview-system-dark-row",
 ];
 
 /** Tokens added for the 0.12.0 design system; each must resolve in both themes. */
@@ -780,6 +804,22 @@ test("owned stylesheets use tokens instead of raw colours or px font sizes", () 
       },
       file,
     ).toEqual({ file, hex: [], rgb: [], px: [] });
+  }
+});
+
+test("every stylesheet outside tokens.css uses tokens for colour", () => {
+  const dir = path.resolve(process.cwd(), "src/styles");
+  for (const file of readdirSync(dir).filter((name) => name.endsWith(".css"))) {
+    if (file === "tokens.css") continue;
+    const css = stripCssComments(readFileSync(path.join(dir, file), "utf8"));
+    expect(
+      {
+        file,
+        hex: css.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [],
+        fn: css.match(/(?:rgba?|hsla?)\([^)]*\)/g) ?? [],
+      },
+      file,
+    ).toEqual({ file, hex: [], fn: [] });
   }
 });
 

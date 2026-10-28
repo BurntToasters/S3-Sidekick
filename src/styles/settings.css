@@ -330,7 +330,7 @@
 
 .theme-card--active {
   border-color: var(--accent);
-  background: var(--glass-bg-subtle, rgba(255, 255, 255, 0.04));
+  background: var(--glass-bg-subtle);
 }
 
 .theme-card-preview {
@@ -356,16 +356,17 @@
   width: 55%;
 }
 
-/* Preview swatches hold the real token values from tokens.css, so each card
-   shows its own theme whichever theme is active: --bg is the frame, --bg-surface
-   is the inset panel, --accent-fg is the accent line and --text is the text
-   line (drawn at reduced opacity). The values are literals on purpose. */
+/* Preview swatches read the fixed --settings-preview-* tokens from tokens.css,
+   not the live theme tokens, so each card shows its own theme whichever theme
+   is active: the frame is the card background, the surface is the inset panel,
+   the accent is the accent line and the text is the text line (drawn at reduced
+   opacity). */
 .theme-card-preview--light {
-  --preview-bg: #f4f4f5;
-  --preview-surface: #ffffff;
-  --preview-accent: #4f46e5;
-  --preview-text: #09090b;
-  --preview-edge: #e4e4e7;
+  --preview-bg: var(--settings-preview-light-frame);
+  --preview-surface: var(--settings-preview-light-surface);
+  --preview-accent: var(--settings-preview-light-accent);
+  --preview-text: var(--settings-preview-light-text);
+  --preview-edge: var(--settings-preview-light-edge);
   background:
     linear-gradient(var(--preview-surface), var(--preview-surface)) content-box,
     var(--preview-bg);
@@ -383,11 +384,11 @@
 }
 
 .theme-card-preview--dark {
-  --preview-bg: #09090b;
-  --preview-surface: #18181b;
-  --preview-accent: #818cf8;
-  --preview-text: #fafafa;
-  --preview-edge: #27272a;
+  --preview-bg: var(--settings-preview-dark-frame);
+  --preview-surface: var(--settings-preview-dark-surface);
+  --preview-accent: var(--settings-preview-dark-accent);
+  --preview-text: var(--settings-preview-dark-text);
+  --preview-edge: var(--settings-preview-dark-edge);
   background:
     linear-gradient(var(--preview-surface), var(--preview-surface)) content-box,
     var(--preview-bg);
@@ -407,31 +408,31 @@
 .theme-card-preview--system {
   background: linear-gradient(
     135deg,
-    #f4f4f5 0%,
-    #f4f4f5 49.5%,
-    #09090b 50.5%,
-    #09090b 100%
+    var(--settings-preview-light-frame) 0%,
+    var(--settings-preview-light-frame) 49.5%,
+    var(--settings-preview-dark-frame) 50.5%,
+    var(--settings-preview-dark-frame) 100%
   );
-  border-color: #71717a;
+  border-color: var(--settings-preview-system-edge);
 }
 
 .theme-card-preview--system .theme-card-preview__row {
   background: linear-gradient(
     135deg,
-    #d4d4d8 0%,
-    #d4d4d8 49.5%,
-    #3f3f46 50.5%,
-    #3f3f46 100%
+    var(--settings-preview-system-light-row) 0%,
+    var(--settings-preview-system-light-row) 49.5%,
+    var(--settings-preview-system-dark-row) 50.5%,
+    var(--settings-preview-system-dark-row) 100%
   );
 }
 
 .theme-card-preview--system .theme-card-preview__row--short {
   background: linear-gradient(
     135deg,
-    #4f46e5 0%,
-    #4f46e5 49.5%,
-    #818cf8 50.5%,
-    #818cf8 100%
+    var(--settings-preview-light-accent) 0%,
+    var(--settings-preview-light-accent) 49.5%,
+    var(--settings-preview-dark-accent) 50.5%,
+    var(--settings-preview-dark-accent) 100%
   );
 }
 

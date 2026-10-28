@@ -175,13 +175,13 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(127, 127, 127, 0.3);
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(127, 127, 127, 0.5);
+  background: var(--scrollbar-thumb-hover);
   background-clip: padding-box;
 }

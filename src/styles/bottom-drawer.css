@@ -10,7 +10,7 @@
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border-top: 1px solid var(--glass-border);
-  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--drawer-shadow);
 }
 .bottom-drawer[hidden] {
   display: none;

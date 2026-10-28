@@ -139,6 +139,30 @@
     0 20px 40px -8px rgba(0, 0, 0, 0.22), 0 4px 12px rgba(0, 0, 0, 0.06);
   --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.28);
   --glow-accent: rgba(79, 70, 229, 0.12);
+
+  /* Component surfaces. Each value is the same in light and dark; every theme block repeats it. */
+  --drawer-shadow: 0 -4px 24px rgba(0, 0, 0, 0.08);
+  --resizer-grip: rgba(127, 127, 127, 0.2);
+  --panel-scrim: rgba(0, 0, 0, 0.35);
+  --support-scrim: rgba(0, 0, 0, 0.35);
+  --setup-scrim: rgba(0, 0, 0, 0.5);
+  --form-error-bg: rgba(239, 68, 68, 0.12);
+  --form-error-border: rgba(239, 68, 68, 0.35);
+  --scrollbar-thumb: rgba(127, 127, 127, 0.3);
+  --scrollbar-thumb-hover: rgba(127, 127, 127, 0.5);
+  --settings-preview-light-frame: #f4f4f5;
+  --settings-preview-light-surface: #ffffff;
+  --settings-preview-light-accent: #4f46e5;
+  --settings-preview-light-text: #09090b;
+  --settings-preview-light-edge: #e4e4e7;
+  --settings-preview-dark-frame: #09090b;
+  --settings-preview-dark-surface: #18181b;
+  --settings-preview-dark-accent: #818cf8;
+  --settings-preview-dark-text: #fafafa;
+  --settings-preview-dark-edge: #27272a;
+  --settings-preview-system-edge: #71717a;
+  --settings-preview-system-light-row: #d4d4d8;
+  --settings-preview-system-dark-row: #3f3f46;
   --transition-smooth: var(--duration-base) var(--ease-standard);
   --transition-bounce: var(--duration-slow) cubic-bezier(0.34, 1.56, 0.64, 1);
 
@@ -235,6 +259,30 @@
       0 24px 48px -8px rgba(0, 0, 0, 0.7), 0 4px 12px rgba(0, 0, 0, 0.4);
     --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.5);
     --glow-accent: rgba(99, 102, 241, 0.1);
+
+    /* Component surfaces. Each value is the same in light and dark; every theme block repeats it. */
+    --drawer-shadow: 0 -4px 24px rgba(0, 0, 0, 0.08);
+    --resizer-grip: rgba(127, 127, 127, 0.2);
+    --panel-scrim: rgba(0, 0, 0, 0.35);
+    --support-scrim: rgba(0, 0, 0, 0.35);
+    --setup-scrim: rgba(0, 0, 0, 0.5);
+    --form-error-bg: rgba(239, 68, 68, 0.12);
+    --form-error-border: rgba(239, 68, 68, 0.35);
+    --scrollbar-thumb: rgba(127, 127, 127, 0.3);
+    --scrollbar-thumb-hover: rgba(127, 127, 127, 0.5);
+    --settings-preview-light-frame: #f4f4f5;
+    --settings-preview-light-surface: #ffffff;
+    --settings-preview-light-accent: #4f46e5;
+    --settings-preview-light-text: #09090b;
+    --settings-preview-light-edge: #e4e4e7;
+    --settings-preview-dark-frame: #09090b;
+    --settings-preview-dark-surface: #18181b;
+    --settings-preview-dark-accent: #818cf8;
+    --settings-preview-dark-text: #fafafa;
+    --settings-preview-dark-edge: #27272a;
+    --settings-preview-system-edge: #71717a;
+    --settings-preview-system-light-row: #d4d4d8;
+    --settings-preview-system-dark-row: #3f3f46;
   }
 }
 
@@ -302,6 +350,30 @@
     0 24px 48px -8px rgba(0, 0, 0, 0.7), 0 4px 12px rgba(0, 0, 0, 0.4);
   --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.5);
   --glow-accent: rgba(99, 102, 241, 0.1);
+
+  /* Component surfaces. Each value is the same in light and dark; every theme block repeats it. */
+  --drawer-shadow: 0 -4px 24px rgba(0, 0, 0, 0.08);
+  --resizer-grip: rgba(127, 127, 127, 0.2);
+  --panel-scrim: rgba(0, 0, 0, 0.35);
+  --support-scrim: rgba(0, 0, 0, 0.35);
+  --setup-scrim: rgba(0, 0, 0, 0.5);
+  --form-error-bg: rgba(239, 68, 68, 0.12);
+  --form-error-border: rgba(239, 68, 68, 0.35);
+  --scrollbar-thumb: rgba(127, 127, 127, 0.3);
+  --scrollbar-thumb-hover: rgba(127, 127, 127, 0.5);
+  --settings-preview-light-frame: #f4f4f5;
+  --settings-preview-light-surface: #ffffff;
+  --settings-preview-light-accent: #4f46e5;
+  --settings-preview-light-text: #09090b;
+  --settings-preview-light-edge: #e4e4e7;
+  --settings-preview-dark-frame: #09090b;
+  --settings-preview-dark-surface: #18181b;
+  --settings-preview-dark-accent: #818cf8;
+  --settings-preview-dark-text: #fafafa;
+  --settings-preview-dark-edge: #27272a;
+  --settings-preview-system-edge: #71717a;
+  --settings-preview-system-light-row: #d4d4d8;
+  --settings-preview-system-dark-row: #3f3f46;
 }
 
 *,

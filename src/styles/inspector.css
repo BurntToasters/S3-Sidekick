@@ -256,8 +256,8 @@
   background: linear-gradient(
     to right,
     transparent 2px,
-    rgba(127, 127, 127, 0.2) 2px,
-    rgba(127, 127, 127, 0.2) 6px,
+    var(--resizer-grip) 2px,
+    var(--resizer-grip) 6px,
     transparent 6px
   );
 }
@@ -276,7 +276,7 @@
   position: absolute;
   inset: 0;
   border: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--panel-scrim);
   z-index: var(--z-inspector-overlay);
   display: none;
 }

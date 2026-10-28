@@ -68,8 +68,8 @@
   background: linear-gradient(
     to right,
     transparent 2px,
-    rgba(127, 127, 127, 0.2) 2px,
-    rgba(127, 127, 127, 0.2) 6px,
+    var(--resizer-grip) 2px,
+    var(--resizer-grip) 6px,
     transparent 6px
   );
 }
@@ -107,7 +107,7 @@
   position: absolute;
   inset: 0;
   border: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--panel-scrim);
   z-index: var(--z-panel-backdrop);
   display: none;
 }
@@ -192,8 +192,8 @@
   margin: 0;
   padding: var(--space-2) 10px;
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(239, 68, 68, 0.35);
-  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid var(--form-error-border);
+  background: var(--form-error-bg);
   color: var(--danger-text);
   font-size: var(--text-sm);
   line-height: 1.4;
