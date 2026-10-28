@@ -3,15 +3,15 @@
 .info-tabs {
   display: flex;
   border-bottom: 1px solid var(--border);
-  padding: 0 20px;
+  padding: 0 var(--space-5);
 }
 
 .info-tab {
-  padding: 8px 14px;
+  padding: var(--space-2) 14px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-family: inherit;
   cursor: pointer;
   border-bottom: 2px solid transparent;
@@ -60,8 +60,8 @@
 
 /* Empty state for a permission set without grants. */
 .acl-empty {
-  padding: 14px 12px;
-  margin-top: 8px;
+  padding: 14px var(--space-3);
+  margin-top: var(--space-2);
   border: 1px dashed var(--border);
   border-radius: var(--radius);
   text-align: center;
@@ -73,8 +73,8 @@
 .acl-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
-  margin-top: 4px;
+  font-size: var(--text-sm);
+  margin-top: var(--space-1);
 }
 
 .acl-table th {
@@ -83,7 +83,7 @@
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -95,7 +95,7 @@
 
 .metadata-value-url {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-xs);
   word-break: break-all;
   color: var(--accent-fg);
   max-width: 100%;
@@ -110,7 +110,7 @@
 }
 
 .metadata-empty {
-  margin: 4px 0 8px;
+  margin: var(--space-1) 0 var(--space-2);
   color: var(--text-muted);
   font-size: var(--text-sm);
 }

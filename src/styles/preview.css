@@ -12,20 +12,20 @@
 
 .preview-text {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px;
+  padding: var(--space-3);
 }
 
 .preview-unsupported,
 .preview-too-large {
-  padding: 16px;
-  font-size: 13px;
+  padding: var(--space-4);
+  font-size: var(--text-md);
   color: var(--text-secondary);
 }
 
@@ -33,7 +33,7 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .preview-unsupported {
@@ -44,20 +44,20 @@
 .preview-truncated {
   color: var(--text-secondary);
   font-size: var(--text-sm);
-  margin-top: 8px;
+  margin-top: var(--space-2);
 }
 
 /* Code-style text listing: gutter numbers, wrap toggle and Copy. */
 .preview-code {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   min-width: 0;
 }
 
 .preview-code__tools {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   flex-shrink: 0;
 }
 
@@ -68,7 +68,7 @@
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 8px 0;
+  padding: var(--space-2) 0;
   overflow-x: auto;
   min-width: 0;
 }
@@ -81,7 +81,7 @@
 .preview-code__num {
   flex: none;
   min-width: 3ch;
-  padding: 0 8px;
+  padding: 0 var(--space-2);
   text-align: right;
   color: var(--text-muted);
   user-select: none;
@@ -90,7 +90,7 @@
 .preview-code__text {
   flex: 1;
   min-width: 0;
-  padding: 0 12px 0 4px;
+  padding: 0 var(--space-3) 0 var(--space-1);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -138,7 +138,7 @@
 
 .preview-table th,
 .preview-table td {
-  padding: 4px 10px;
+  padding: var(--space-1) 10px;
   border-bottom: 1px solid var(--border);
   text-align: left;
   white-space: nowrap;
@@ -159,7 +159,7 @@
 .preview-table-note {
   color: var(--text-secondary);
   font-size: var(--text-sm);
-  margin-top: 8px;
+  margin-top: var(--space-2);
 }
 
 /* Image previews: checkerboard so transparency is visible, with a fit/100%
@@ -169,7 +169,7 @@
   justify-content: center;
   align-items: center;
   min-height: 200px;
-  padding: 8px;
+  padding: var(--space-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg);

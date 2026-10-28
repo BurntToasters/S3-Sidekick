@@ -9,8 +9,8 @@
 .object-table th.col-check,
 .object-table td.col-check {
   width: 36px;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
 }
 
 .col-check input[type="checkbox"] {
@@ -47,7 +47,7 @@
   padding: 0 14px;
   background: var(--bg-active);
   border-bottom: 1px solid var(--glass-border);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   flex-shrink: 0;
 }
@@ -85,7 +85,7 @@
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 4px;
+  gap: var(--space-1);
   min-width: 0;
   justify-content: flex-end;
   flex-wrap: nowrap;
@@ -109,12 +109,12 @@
    Delete remains visible while the container is at least 760px wide. */
 @container content-main (max-width: 699px) {
   .batch-toolbar {
-    gap: 4px;
-    padding-inline: 8px;
+    gap: var(--space-1);
+    padding-inline: var(--space-2);
   }
 
   .batch-toolbar__actions .btn {
-    padding-inline: 8px;
+    padding-inline: var(--space-2);
   }
 
   .batch-toolbar__actions #batch-delete,
@@ -150,6 +150,6 @@
     overflow: hidden;
     text-overflow: clip;
     white-space: nowrap;
-    font-size: 11px;
+    font-size: var(--text-xs);
   }
 }
