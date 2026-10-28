@@ -328,6 +328,39 @@ test.describe("keyboard selection, roving focus and menus", () => {
     );
   });
 
+  test("Shift+click extends from the anchor and moves the anchor to the clicked row", async ({
+    page,
+  }, testInfo) => {
+    await openMockListing(page, { objectCount: 10, prefixes: ["archive/"] });
+
+    await rowAt(page, 2).click();
+    await expect(page.locator("#batch-count")).toHaveText("1 file selected");
+
+    await rowAt(page, 6).click({ modifiers: ["Shift"] });
+    await expect(page.locator("#batch-count")).toHaveText("5 files selected");
+    for (const index of [2, 3, 4, 5, 6]) {
+      await expect(rowAt(page, index)).toHaveAttribute("aria-selected", "true");
+    }
+
+    await rowAt(page, 4).click({ modifiers: ["Shift"] });
+    await expect(page.locator("#batch-count")).toHaveText("5 files selected");
+    for (const index of [2, 3, 4, 5, 6]) {
+      await expect(rowAt(page, index)).toHaveAttribute("aria-selected", "true");
+    }
+
+    await rowAt(page, 1).click({ modifiers: ["Shift"] });
+    await expect(page.locator("#batch-count")).toHaveText("6 files selected");
+    await expect(rowAt(page, 1)).toHaveAttribute("aria-selected", "true");
+
+    await saveArtifact(
+      page,
+      testInfo,
+      SUITE,
+      "shift-click-anchor",
+      await readMockCallLog(page),
+    );
+  });
+
   test("selected rows are stronger than hover and hover has no accent bar", async ({
     page,
   }, testInfo) => {

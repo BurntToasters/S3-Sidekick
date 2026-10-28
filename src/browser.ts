@@ -960,7 +960,7 @@ export function setLastClickedEntry(entry: SelectionEntry | null): void {
 /**
  * Select the rows between the anchor and `targetIndex` on top of the selection
  * from before the range began. Shift+click and Shift+Arrow share this, so the
- * anchor stays put and the range can grow or shrink.
+ * range can grow or shrink without dropping rows selected before it.
  */
 function selectShiftRange(
   ordered: readonly SelectionEntry[],
@@ -988,8 +988,10 @@ export function handleRowClick(entry: SelectionEntry, e: MouseEvent): void {
     const startIdx = indexOfEntry(lastClickedEntry);
     const endIdx = indexOfEntry(entry);
     if (startIdx >= 0 && endIdx >= 0) {
-      // Shift-click keeps the anchor where it is, as Shift+Arrow does.
+      // The range grows from the old anchor. The clicked row then becomes the
+      // anchor, so the next Shift+click extends from it.
       selectShiftRange(allEntries, startIdx, endIdx);
+      setAnchor(entry);
     } else {
       // A filter can hide the anchor while the clicked row remains visible.
       // Treat that range as a normal click so Shift-click always selects the
