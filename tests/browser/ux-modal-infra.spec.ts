@@ -103,23 +103,22 @@ test.describe("modal focus return", () => {
     page,
   }) => {
     await openMockListing(page);
-    await page.locator("#btn-palette").focus();
-    await page.keyboard.press("Enter");
+    await page.locator("#palette-hint").click();
     await expect(page.locator("#palette-overlay")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.locator("#palette-overlay")).toBeHidden();
-    expect(await activeId(page)).toBe("btn-palette");
+    expect(await activeId(page)).toBe("palette-hint");
   });
 
   test("command palette returns focus after a mouse-opened palette", async ({
     page,
   }) => {
     await openMockListing(page);
-    await page.locator("#btn-palette").click();
+    await page.locator("#palette-hint").click();
     await expect(page.locator("#palette-overlay")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.locator("#palette-overlay")).toBeHidden();
-    expect(await activeId(page)).toBe("btn-palette");
+    expect(await activeId(page)).toBe("palette-hint");
   });
 
   test("settings returns focus on Escape and on the X button", async ({

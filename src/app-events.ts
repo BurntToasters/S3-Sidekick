@@ -22,7 +22,6 @@ import {
   handleRowClick,
   handleBucketListKeydown,
   handleSelectAll,
-  clearSelection,
   setLastClickedEntry,
   updateSelectionUI,
   toggleSort,
@@ -89,6 +88,7 @@ import {
   initPalette,
   registerCommands,
   openPalette,
+  type PaletteCommand,
 } from "./command-palette.ts";
 import { basename, friendlyError, plural } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
@@ -127,11 +127,8 @@ import {
   addSelection,
   entryFromRow,
   fileEntry,
-  getSelectedFileKeys,
-  getSelectionEntries,
   isSelected,
   removeSelection,
-  selectionCount,
 } from "./app-selection.ts";
 import {
   handleDelete,
@@ -141,12 +138,8 @@ import {
   handleRefreshBuckets,
   handleExportActivityLog,
   handleGoToKeyOrPrefix,
-  handleCopyUrl,
-  handleCopyKey,
-  handleCopyArn,
 } from "./app-objects.ts";
 import {
-  handleDownload,
   handleOpenLastDownloadFolder,
   getRememberedDownloadDir,
 } from "./app-downloads.ts";
@@ -160,7 +153,14 @@ import {
   handleBucketContextMenu,
 } from "./app-context-menu.ts";
 import { showContextMenu, type MenuItem } from "./context-menu.ts";
-import { openCopyMoveDialog } from "./app-copy-move.ts";
+import {
+  MORE_MENU_ACTION_IDS,
+  currentActionContext,
+  getObjectAction,
+  resolveActionLabel,
+  runObjectAction,
+  syncSelectionBar,
+} from "./object-actions.ts";
 
 let dragDropUnlisten: (() => void) | null = null;
 
@@ -479,36 +479,23 @@ function wireAppLifecycle(): void {
 }
 
 /** Preview overlay and batch selection actions. */
-/** More-menu actions that have a batch toolbar button of the same name. */
-const TOOLBAR_TWIN_BY_ACTION: Readonly<Record<string, string>> = {
-  "copy-urls": "batch-copy-urls",
-  delete: "batch-delete",
-  "deselect-all": "batch-deselect",
-};
 
-function isToolbarButtonShowing(id: string): boolean {
-  const button = document.getElementById(id);
-  return button !== null && button.getClientRects().length > 0;
-}
-
-function withoutVisibleToolbarTwins(items: MenuItem[]): MenuItem[] {
-  const kept = items.filter((item) => {
-    if ("separator" in item) return true;
-    const twin = TOOLBAR_TWIN_BY_ACTION[item.action];
-    return !twin || !isToolbarButtonShowing(twin);
-  });
-  // Separators survive only between two real actions.
-  return kept.filter((item, index) => {
-    if (!("separator" in item)) return true;
-    const prev = kept[index - 1];
-    const next = kept[index + 1];
-    return (
-      prev !== undefined &&
-      next !== undefined &&
-      !("separator" in prev) &&
-      !("separator" in next)
-    );
-  });
+/** The fixed More menu, built from the object-actions registry. */
+function moreMenuItems(): MenuItem[] {
+  const context = currentActionContext();
+  const items: MenuItem[] = [];
+  for (const id of MORE_MENU_ACTION_IDS) {
+    const action = getObjectAction(id);
+    if (!action || !action.isAvailable(context)) continue;
+    items.push({
+      label: resolveActionLabel(action, context),
+      action: id,
+      icon: action.icon,
+      danger: action.danger,
+      disabled: context.listingLoading,
+    });
+  }
+  return items;
 }
 
 function wireSelectionActions(): void {
@@ -520,24 +507,27 @@ function wireSelectionActions(): void {
     .getElementById("activity-toggle")!
     .addEventListener("click", toggleActivityLog);
 
-  document.getElementById("batch-properties")!.addEventListener("click", () => {
-    const keys = Array.from(getSelectionEntries());
-    if (keys.length > 0) {
-      void openInfoPanel(keys);
-    }
-  });
-  document.getElementById("batch-download")!.addEventListener("click", () => {
-    void handleDownload();
-  });
-  document.getElementById("batch-delete")!.addEventListener("click", () => {
-    void handleDelete();
-  });
-  document.getElementById("batch-copy-urls")!.addEventListener("click", () => {
-    void handleCopyUrl();
-  });
-  document.getElementById("batch-deselect")!.addEventListener("click", () => {
-    clearSelection();
-  });
+  const runSelectionAction = (id: string): void => {
+    runObjectAction(id, currentActionContext());
+  };
+  document
+    .getElementById("batch-download")
+    ?.addEventListener("click", () => runSelectionAction("download"));
+  document
+    .getElementById("batch-copy-move")
+    ?.addEventListener("click", () => runSelectionAction("copy-move"));
+  document
+    .getElementById("batch-rename")
+    ?.addEventListener("click", () => runSelectionAction("rename"));
+  document
+    .getElementById("batch-copy-urls")
+    ?.addEventListener("click", () => runSelectionAction("copy-url"));
+  document
+    .getElementById("batch-delete")
+    ?.addEventListener("click", () => runSelectionAction("delete"));
+  document
+    .getElementById("batch-deselect")
+    ?.addEventListener("click", () => runSelectionAction("deselect-all"));
 
   const batchMore = document.getElementById(
     "batch-more",
@@ -549,70 +539,41 @@ function wireSelectionActions(): void {
     batchMore.addEventListener("click", () => {
       if (batchMore.hidden || batchMore.disabled) return;
       dismissMoreMenu();
-
-      const objectPanel = document.getElementById("object-panel");
-      const listingLoading = objectPanel?.getAttribute("aria-busy") === "true";
-      const selectedFiles = getSelectedFileKeys().length;
-      const selectedCount = selectionCount();
-      const deleteButton = document.getElementById(
-        "batch-delete",
-      ) as HTMLButtonElement | null;
-      const deleteInFlight = deleteButton?.dataset.operationInFlight === "true";
       const rect = batchMore.getBoundingClientRect();
-      const allMenuItems: MenuItem[] = [
-        {
-          label: "Copy keys",
-          action: "copy-keys",
-          disabled: selectedCount === 0 || listingLoading,
-        },
-        {
-          label: "Copy ARNs",
-          action: "copy-arns",
-          disabled: selectedCount === 0 || listingLoading,
-        },
-        {
-          label: "Copy / Move to...",
-          action: "copy-move",
-          disabled: selectedCount === 0 || listingLoading,
-        },
-        { separator: true },
-        {
-          label: "Delete",
-          action: "delete",
-          disabled: selectedCount === 0 || listingLoading || deleteInFlight,
-        },
-        {
-          label: "Copy URLs",
-          action: "copy-urls",
-          disabled: selectedFiles === 0 || listingLoading,
-        },
-        {
-          label: "Deselect All",
-          action: "deselect-all",
-          disabled: selectedCount === 0,
-        },
-      ];
-      // Only list what the toolbar cannot show right now. A visible toolbar
-      // button already answers the same action, so it is not repeated here.
-      const menuItems = withoutVisibleToolbarTwins(allMenuItems);
       showContextMenu(
         rect.left,
         rect.bottom,
-        menuItems,
+        moreMenuItems(),
         (action) => {
           dismissMoreMenu();
-          if (action === "copy-keys") void handleCopyKey();
-          else if (action === "copy-arns") void handleCopyArn();
-          else if (action === "copy-move") openCopyMoveDialog();
-          else if (action === "delete") void handleDelete();
-          else if (action === "copy-urls") void handleCopyUrl();
-          else if (action === "deselect-all") clearSelection();
+          runObjectAction(action, currentActionContext());
         },
         dismissMoreMenu,
       );
       batchMore.setAttribute("aria-expanded", "true");
     });
   }
+
+  // The bar's labels and Rename visibility follow the live selection. The
+  // count node is rewritten on every selection update, so watching it keeps
+  // the registry-derived bar in sync without touching the render path.
+  const selectionBarSync = new MutationObserver(() => syncSelectionBar());
+  const batchToolbar = document.getElementById("batch-toolbar");
+  const batchCount = document.getElementById("batch-count");
+  if (batchToolbar) {
+    selectionBarSync.observe(batchToolbar, {
+      attributes: true,
+      attributeFilter: ["data-selection-state", "aria-busy"],
+    });
+  }
+  if (batchCount) {
+    selectionBarSync.observe(batchCount, {
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }
+  syncSelectionBar();
 }
 
 /** Vault, biometric and lock controls in Settings. */
@@ -745,23 +706,39 @@ function wireLocationAndFilters(): void {
     .getElementById("btn-refresh")!
     .addEventListener("click", handleRefresh);
   document
-    .getElementById("btn-palette")!
-    .addEventListener("click", openPalette);
-  document
     .getElementById("palette-hint")!
     .addEventListener("click", openPalette);
   document
     .getElementById("btn-new-folder")!
     .addEventListener("click", handleCreateFolder);
-  document
-    .getElementById("btn-upload")!
-    .addEventListener("click", handleUploadButton);
-  document
-    .getElementById("btn-upload-folder")!
-    .addEventListener("click", handleUploadFolderButton);
-  document.getElementById("btn-download")!.addEventListener("click", () => {
-    void handleDownload();
-  });
+  const uploadButton = document.getElementById(
+    "btn-upload",
+  ) as HTMLButtonElement | null;
+  if (uploadButton) {
+    const dismissUploadMenu = (): void => {
+      uploadButton.setAttribute("aria-expanded", "false");
+    };
+    uploadButton.addEventListener("click", () => {
+      if (uploadButton.disabled) return;
+      dismissUploadMenu();
+      const rect = uploadButton.getBoundingClientRect();
+      showContextMenu(
+        rect.left,
+        rect.bottom,
+        [
+          { label: "Files\u2026", action: "upload-files" },
+          { label: "Folder\u2026", action: "upload-folder" },
+        ],
+        (action) => {
+          dismissUploadMenu();
+          if (action === "upload-files") void handleUploadButton();
+          else if (action === "upload-folder") void handleUploadFolderButton();
+        },
+        dismissUploadMenu,
+      );
+      uploadButton.setAttribute("aria-expanded", "true");
+    });
+  }
 
   wireObjectFilterInput();
 
@@ -1232,6 +1209,25 @@ function wireTransferCompletion(): void {
 }
 
 /** Command palette entries and their shortcuts. */
+
+/** One palette command rendered from the shared object-actions registry. */
+function paletteCommandForAction(id: string): PaletteCommand {
+  const entry = getObjectAction(id);
+  if (!entry) throw new Error(`Unknown object action: ${id}`);
+  return {
+    id: entry.id,
+    get label() {
+      return resolveActionLabel(entry, currentActionContext());
+    },
+    icon: entry.icon,
+    shortcut: entry.shortcut,
+    keywords: entry.keywords,
+    action: () => entry.run(currentActionContext()),
+    available: () =>
+      state.connected && entry.isAvailable(currentActionContext()),
+  };
+}
+
 function wireCommandPalette(): void {
   initPalette();
   const isMac = state.platformName === "macos";
@@ -1255,7 +1251,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "create-folder",
-      label: "Create Folder",
+      label: "New folder",
       icon: "folder-plus",
       shortcut: `${accelLabel}N`,
       keywords: ["mkdir", "new folder"],
@@ -1279,28 +1275,20 @@ function wireCommandPalette(): void {
       action: () => void handleRefreshBuckets(),
       available: () => state.connected,
     },
-    {
-      id: "download",
-      label: "Download Selected",
-      icon: "download",
-      action: () => void handleDownload(),
-      available: () => state.connected && getSelectedFileKeys().length > 0,
-    },
-    {
-      id: "delete",
-      label: "Delete Selected",
-      icon: "trash-2",
-      keywords: ["trash", "remove"],
-      action: () => void handleDelete(),
-      available: () => state.connected && selectionCount() > 0,
-    },
-    {
-      id: "copy-move",
-      label: "Copy / Move to...",
-      icon: "folder",
-      action: () => openCopyMoveDialog(),
-      available: () => state.connected && selectionCount() > 0,
-    },
+    // Selection commands come from the object-actions registry, so their
+    // labels match the context menu and the batch More menu exactly.
+    paletteCommandForAction("download"),
+    paletteCommandForAction("delete"),
+    paletteCommandForAction("copy-move"),
+    paletteCommandForAction("rename"),
+    paletteCommandForAction("copy-url"),
+    paletteCommandForAction("share-link"),
+    paletteCommandForAction("copy-keys"),
+    paletteCommandForAction("copy-arns"),
+    paletteCommandForAction("copy-s3-uri"),
+    paletteCommandForAction("properties"),
+    paletteCommandForAction("deselect-all"),
+    paletteCommandForAction("preview"),
     {
       id: "select-all",
       label: "Select All",
@@ -1310,13 +1298,6 @@ function wireCommandPalette(): void {
         handleSelectAll(true);
       },
       available: () => state.connected,
-    },
-    {
-      id: "deselect-all",
-      label: "Deselect All",
-      icon: "x-square",
-      action: () => clearSelection(),
-      available: () => selectionCount() > 0,
     },
     {
       id: "filter",
@@ -1377,37 +1358,6 @@ function wireCommandPalette(): void {
       available: () => state.connected,
     },
     {
-      id: "preview-selected",
-      label: "Preview Selected File",
-      icon: "eye",
-      action: () => {
-        const fileKeys = getSelectedFileKeys();
-        if (fileKeys.length === 1 && canPreview(basename(fileKeys[0]))) {
-          void openPreview(fileKeys[0]);
-        }
-      },
-      available: () => {
-        const fileKeys = getSelectedFileKeys();
-        return (
-          state.connected &&
-          fileKeys.length === 1 &&
-          canPreview(basename(fileKeys[0]))
-        );
-      },
-    },
-    {
-      id: "properties-selected",
-      label: "Open Properties for Selection",
-      icon: "info",
-      action: () => {
-        const keys = Array.from(getSelectionEntries());
-        if (keys.length > 0) {
-          void openInfoPanel(keys);
-        }
-      },
-      available: () => state.connected && selectionCount() > 0,
-    },
-    {
       id: "go-up",
       label: "Go Up (Parent Folder)",
       icon: "arrow-up",
@@ -1415,40 +1365,6 @@ function wireCommandPalette(): void {
         void navigateUp();
       },
       available: () => state.connected && state.currentPrefix.length > 0,
-    },
-    {
-      id: "rename-selected",
-      label: "Rename Selected",
-      icon: "file-text",
-      keywords: ["move", "name"],
-      action: () => void handleRename(),
-      available: () => state.connected && selectionCount() === 1,
-    },
-    {
-      id: "copy-urls",
-      label: "Copy Object URLs",
-      icon: "clipboard-list",
-      keywords: ["link", "url"],
-      action: () => void handleCopyUrl(),
-      available: () => state.connected && getSelectedFileKeys().length > 0,
-    },
-    {
-      id: "copy-keys",
-      label: "Copy Keys",
-      icon: "clipboard-list",
-      keywords: ["path", "name"],
-      action: () => void handleCopyKey(),
-      available: () => state.connected && selectionCount() > 0,
-    },
-    {
-      // Non-AWS endpoints get an explanation from handleCopyArn rather than a
-      // hidden command, so the reason is visible.
-      id: "copy-arns",
-      label: "Copy ARNs",
-      icon: "clipboard-list",
-      keywords: ["amazon resource name"],
-      action: () => void handleCopyArn(),
-      available: () => state.connected && selectionCount() > 0,
     },
     {
       id: "back",

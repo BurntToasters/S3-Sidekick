@@ -312,3 +312,37 @@
   color: var(--text-muted);
   letter-spacing: 0.02em;
 }
+
+/* Content toolbar actions (P4): labeled buttons that collapse to icons via
+   the toolbar container query, and never wrap. */
+.content-toolbar__actions {
+  min-width: 0;
+}
+
+.content-toolbar__actions .btn {
+  flex-shrink: 0;
+}
+
+/* JS collapse marks moved-out buttons with [hidden]; the .btn display rule
+   would otherwise override the UA stylesheet and keep them visible. */
+.content-toolbar .btn[hidden] {
+  display: none;
+}
+
+.btn__label {
+  white-space: nowrap;
+}
+
+.toolbar-upload .btn__caret {
+  width: 14px;
+  height: 14px;
+}
+
+/* Stage 1 of the collapse: drop the visible labels, keep the icons.
+   949 matches the pre-existing shortcut-chip breakpoint: at a 900px
+   viewport the container is the full 900px window width. */
+@container content-toolbar (max-width: 949px) {
+  .content-toolbar__actions .btn__label {
+    display: none;
+  }
+}

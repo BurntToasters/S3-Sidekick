@@ -84,7 +84,7 @@ test.describe("browse table sorting, filter and live announcements", () => {
     await page.locator("#filter-input").fill("bravo");
     await expect(page.locator("#object-tbody .object-row")).toHaveCount(1);
 
-    await page.locator("#btn-palette").click();
+    await page.locator("#palette-hint").click();
     await page.locator("#palette-input").fill("Clear Filter");
     await page
       .locator("#palette-results .palette__item", { hasText: "Clear Filter" })

@@ -238,15 +238,7 @@ test.describe("production object table geometry", () => {
       beforeScroll,
     );
 
-    const directDeselect = page.locator("#batch-deselect");
-    if (await directDeselect.isVisible()) {
-      await directDeselect.click();
-    } else {
-      await page.locator("#batch-more").click();
-      await page
-        .locator('.context-menu [role="menuitem"]', { hasText: "Deselect All" })
-        .click();
-    }
+    await page.locator("#batch-deselect").click();
     await expect(page.locator("#batch-toolbar-actions")).toBeHidden();
     const afterZero = requireBoundingBox(
       await row.boundingBox(),
@@ -646,13 +638,13 @@ test.describe("production compact selection and dialogs", () => {
     for (let index = 0; index < 5; index += 1) {
       await longRows.nth(index).locator(".row-check").check();
     }
-    // The More menu omits Delete while the toolbar Delete button is showing,
-    // so prefer the toolbar button and fall back to the menu when it is hidden.
+    // The More menu has no Delete; when the toolbar Delete button is hidden,
+    // delete via the row context menu instead.
     const toolbarDelete = page.locator("#batch-delete");
     if (await toolbarDelete.isVisible()) {
       await toolbarDelete.click();
     } else {
-      await page.locator("#batch-more").click();
+      await longRows.nth(0).click({ button: "right" });
       await page
         .locator('.context-menu [role="menuitem"]', { hasText: "Delete" })
         .click();

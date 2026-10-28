@@ -390,7 +390,7 @@
                   id="filter-input"
                   class="field filter-input"
                   type="text"
-                  placeholder="Filter..."
+                  placeholder="Filter…"
                   aria-label="Filter objects"
                 />
                 <button
@@ -407,53 +407,48 @@
               </div>
               <div class="content-toolbar__actions">
                 <button
-                  id="btn-palette"
-                  class="btn btn--icon"
-                  title="Commands (Ctrl+K)"
-                  aria-label="Commands"
+                  id="btn-upload"
+                  class="btn btn--sm btn--primary toolbar-upload"
+                  title="Upload (Ctrl+U)"
+                  aria-label="Upload"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
                 >
-                  <span class="lucide-icon" data-icon="search"></span>
+                  <span class="lucide-icon" data-icon="upload"></span>
+                  <span class="btn__label">Upload</span>
+                  <span
+                    class="lucide-icon btn__caret"
+                    data-icon="chevron-down"
+                  ></span>
+                </button>
+                <button
+                  id="btn-new-folder"
+                  class="btn btn--sm btn--ghost toolbar-action"
+                  title="New folder (Ctrl+N)"
+                  aria-label="New folder"
+                >
+                  <span class="lucide-icon" data-icon="folder-plus"></span>
+                  <span class="btn__label">New folder</span>
                 </button>
                 <button
                   id="btn-refresh"
-                  class="btn btn--icon"
+                  class="btn btn--sm btn--ghost toolbar-action"
                   title="Refresh (F5)"
                   aria-label="Refresh"
                 >
                   <span class="lucide-icon" data-icon="refresh-cw"></span>
+                  <span class="btn__label">Refresh</span>
                 </button>
                 <button
-                  id="btn-new-folder"
+                  id="btn-toolbar-overflow"
                   class="btn btn--icon"
-                  title="New Folder (Ctrl+N)"
-                  aria-label="New folder"
+                  title="More toolbar actions"
+                  aria-label="More toolbar actions"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  hidden
                 >
-                  <span class="lucide-icon" data-icon="folder-plus"></span>
-                </button>
-                <button
-                  id="btn-upload"
-                  class="btn btn--icon"
-                  title="Upload Files (Ctrl+U)"
-                  aria-label="Upload files"
-                >
-                  <span class="lucide-icon" data-icon="upload"></span>
-                </button>
-                <button
-                  id="btn-upload-folder"
-                  class="btn btn--icon"
-                  title="Upload Folder (Ctrl+Shift+U)"
-                  aria-label="Upload folder"
-                >
-                  <span class="lucide-icon" data-icon="folder-up"></span>
-                </button>
-                <button
-                  id="btn-download"
-                  class="btn btn--icon"
-                  title="Download"
-                  aria-label="Download selected"
-                  disabled
-                >
-                  <span class="lucide-icon" data-icon="download"></span>
+                  <span class="lucide-icon" data-icon="more-horizontal"></span>
                 </button>
                 <button
                   id="btn-inspector"
@@ -486,16 +481,6 @@
                     hidden
                   >
                     <button
-                      id="batch-properties"
-                      type="button"
-                      class="btn btn--sm btn--ghost"
-                      title="Properties"
-                      aria-label="Properties"
-                    >
-                      <span class="lucide-icon" data-icon="info"></span>
-                      <span class="batch-toolbar__label">Properties</span>
-                    </button>
-                    <button
                       id="batch-download"
                       type="button"
                       class="btn btn--sm"
@@ -504,6 +489,40 @@
                     >
                       <span class="lucide-icon" data-icon="download"></span>
                       <span class="batch-toolbar__label">Download</span>
+                    </button>
+                    <button
+                      id="batch-copy-move"
+                      type="button"
+                      class="btn btn--sm btn--ghost"
+                      title="Copy / Move…"
+                      aria-label="Copy / Move…"
+                    >
+                      <span class="lucide-icon" data-icon="folder"></span>
+                      <span class="batch-toolbar__label">Copy / Move…</span>
+                    </button>
+                    <button
+                      id="batch-rename"
+                      type="button"
+                      class="btn btn--sm btn--ghost"
+                      title="Rename"
+                      aria-label="Rename"
+                      hidden
+                    >
+                      <span class="lucide-icon" data-icon="pencil"></span>
+                      <span class="batch-toolbar__label">Rename</span>
+                    </button>
+                    <button
+                      id="batch-copy-urls"
+                      type="button"
+                      class="btn btn--sm btn--ghost"
+                      title="Copy URL"
+                      aria-label="Copy URL"
+                    >
+                      <span
+                        class="lucide-icon"
+                        data-icon="external-link"
+                      ></span>
+                      <span class="batch-toolbar__label">Copy URL</span>
                     </button>
                     <button
                       id="batch-delete"
@@ -516,29 +535,6 @@
                       <span class="batch-toolbar__label">Delete</span>
                     </button>
                     <button
-                      id="batch-copy-urls"
-                      type="button"
-                      class="btn btn--sm btn--ghost"
-                      title="Copy URLs"
-                      aria-label="Copy URLs"
-                    >
-                      <span
-                        class="lucide-icon"
-                        data-icon="clipboard-list"
-                      ></span>
-                      <span class="batch-toolbar__label">Copy URLs</span>
-                    </button>
-                    <button
-                      id="batch-deselect"
-                      type="button"
-                      class="btn btn--sm btn--ghost"
-                      title="Deselect All"
-                      aria-label="Deselect all"
-                    >
-                      <span class="lucide-icon" data-icon="x-square"></span>
-                      <span class="batch-toolbar__label">Deselect All</span>
-                    </button>
-                    <button
                       id="batch-more"
                       type="button"
                       class="btn btn--sm btn--ghost"
@@ -546,13 +542,21 @@
                       aria-label="More selection actions"
                       aria-haspopup="menu"
                       aria-expanded="false"
-                      hidden
                     >
                       <span
                         class="lucide-icon"
                         data-icon="more-horizontal"
                       ></span>
                       <span class="batch-toolbar__label">More</span>
+                    </button>
+                    <button
+                      id="batch-deselect"
+                      type="button"
+                      class="btn btn--sm btn--icon batch-toolbar__close"
+                      title="Deselect all"
+                      aria-label="Deselect all"
+                    >
+                      <span class="lucide-icon" data-icon="x"></span>
                     </button>
                   </div>
                 </div>

@@ -99,15 +99,8 @@ async function switchInspectorSelection(
       "2 selected",
     );
   } else {
-    const deselectAll = page.locator("#batch-deselect");
-    if (await deselectAll.isVisible()) {
-      await deselectAll.click();
-    } else {
-      await page.locator("#batch-more").click();
-      await page
-        .locator('.context-menu [role="menuitem"]', { hasText: "Deselect All" })
-        .click();
-    }
+    // The × deselect button is always visible while items are selected.
+    await page.locator("#batch-deselect").click();
     await expect(page.locator("#inspector-empty")).toBeVisible();
   }
 

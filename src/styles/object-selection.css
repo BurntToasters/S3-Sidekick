@@ -71,6 +71,16 @@
   width: auto;
 }
 
+/* Accent marks the bar only while a selection is active; the idle row is a
+   neutral info strip. */
+.batch-toolbar[data-selection-state="selected"] {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.batch-toolbar[data-selection-state="selected"] .batch-toolbar__count {
+  color: var(--accent-fg);
+}
+
 .batch-toolbar__actions {
   display: flex;
   align-items: center;
@@ -86,10 +96,18 @@
   display: none;
 }
 
-/* The content-main container narrows when the inspector is docked. Keep the
-   permanent row on one line and move the less common actions into the shared
-   keyboard-aware context-menu surface. */
-@container content-main (max-width: 759px) {
+.batch-toolbar__close {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+/* The content-main container is ~660px at a 1280 viewport (sidebar and
+   transfer pane take the rest). WebKit button metrics cannot fit the full
+   set there, so below 700px the bar keeps Download, More and the close
+   button, and the rest stay reachable through the object context menu.
+   Delete remains visible while the container is at least 760px wide. */
+@container content-main (max-width: 699px) {
   .batch-toolbar {
     gap: 4px;
     padding-inline: 8px;
@@ -100,16 +118,12 @@
   }
 
   .batch-toolbar__actions #batch-delete,
-  .batch-toolbar__actions #batch-copy-urls,
-  .batch-toolbar__actions #batch-deselect {
+  .batch-toolbar__actions #batch-copy-move,
+  .batch-toolbar__actions #batch-rename,
+  .batch-toolbar__actions #batch-copy-urls {
     display: none;
   }
 
-  .batch-toolbar__actions #batch-more {
-    display: inline-flex;
-  }
-
-  .batch-toolbar__actions #batch-properties .batch-toolbar__label,
   .batch-toolbar__actions #batch-download .batch-toolbar__label,
   .batch-toolbar__actions #batch-more .batch-toolbar__label {
     position: absolute;

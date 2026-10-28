@@ -1,5 +1,11 @@
 import { state } from "./state.ts";
-import { hideContextMenu } from "./context-menu.ts";
+import {
+  hideContextMenu,
+  showContextMenu,
+  type MenuItem,
+} from "./context-menu.ts";
+import { handleCreateFolder, handleRefresh } from "./app-objects.ts";
+import { handleUploadButton, handleUploadFolderButton } from "./app-upload.ts";
 import {
   registerFilterRenderCanceller,
   renderObjectTableFromLayout,
@@ -96,11 +102,8 @@ function setTitle(id: string, title: string): void {
 
 function updateToolbarShortcutTitles(isMac: boolean): void {
   const accel = isMac ? "⌘" : "Ctrl+";
-  const accelShift = isMac ? "⌘⇧" : "Ctrl+Shift+";
-  setTitle("btn-new-folder", `New Folder (${accel}N)`);
-  setTitle("btn-upload", `Upload Files (${accel}U)`);
-  setTitle("btn-upload-folder", `Upload Folder (${accelShift}U)`);
-  setTitle("btn-palette", `Commands (${accel}K)`);
+  setTitle("btn-new-folder", `New folder (${accel}N)`);
+  setTitle("btn-upload", `Upload (${accel}U)`);
   setTitle("palette-hint", `Commands (${accel}K)`);
 }
 
@@ -725,6 +728,128 @@ export function wireInspectorControls(): void {
   syncPanelWidths();
 }
 
+/* Toolbar collapse: labels first (a container query in layout.css), then
+   whole buttons into the ⋯ overflow menu, so the toolbar never wraps. */
+const TOOLBAR_BREADCRUMB_MIN = 160;
+const TOOLBAR_SLACK_PX = 24;
+const TOOLBAR_COLLAPSE_ORDER = [
+  "btn-new-folder",
+  "btn-refresh",
+  "btn-upload",
+] as const;
+
+let toolbarOverflowObserver: ResizeObserver | null = null;
+
+function fitToolbarButtons(): void {
+  const toolbar = document.querySelector<HTMLElement>(".content-toolbar");
+  const overflowButton = document.getElementById("btn-toolbar-overflow");
+  if (!toolbar || !overflowButton) return;
+  if (toolbar.offsetWidth === 0) return;
+
+  const buttons = TOOLBAR_COLLAPSE_ORDER.map((id) =>
+    document.getElementById(id),
+  ).filter((button): button is HTMLButtonElement => button !== null);
+
+  const nav = toolbar.querySelector<HTMLElement>(".content-toolbar__nav");
+  const filter = toolbar.querySelector<HTMLElement>(".filter-control");
+  const actions = toolbar.querySelector<HTMLElement>(
+    ".content-toolbar__actions",
+  );
+
+  const actionsWidth = (): number => {
+    if (!actions) return 0;
+    const style = getComputedStyle(actions);
+    const gap = Number.parseFloat(style.columnGap || style.gap) || 0;
+    let width = 0;
+    let count = 0;
+    for (const child of Array.from(actions.children)) {
+      if (!(child instanceof HTMLElement)) continue;
+      const box = child.getBoundingClientRect();
+      if (box.width > 0) {
+        width += box.width;
+        count += 1;
+      }
+    }
+    return count > 1 ? width + gap * (count - 1) : width;
+  };
+
+  const requiredWidth = (): number =>
+    TOOLBAR_SLACK_PX +
+    (nav?.getBoundingClientRect().width ?? 0) +
+    TOOLBAR_BREADCRUMB_MIN +
+    (filter?.getBoundingClientRect().width ?? 0) +
+    actionsWidth();
+
+  const available = toolbar.getBoundingClientRect().width;
+
+  // Re-measure from the fully expanded state so widening the window
+  // restores buttons in the reverse order they were collapsed.
+  for (const button of buttons) button.hidden = false;
+  let hiddenCount = 0;
+  for (const button of buttons) {
+    if (requiredWidth() > available) {
+      button.hidden = true;
+      hiddenCount += 1;
+    }
+  }
+  overflowButton.hidden = hiddenCount === 0;
+}
+
+function wireToolbarOverflow(): void {
+  const toolbar = document.querySelector<HTMLElement>(".content-toolbar");
+  const overflowButton = document.getElementById("btn-toolbar-overflow");
+  if (!toolbar || !overflowButton || toolbarOverflowObserver) return;
+
+  const dismissOverflowMenu = (): void => {
+    overflowButton.setAttribute("aria-expanded", "false");
+  };
+  overflowButton.addEventListener("click", () => {
+    if (overflowButton.hidden) return;
+    dismissOverflowMenu();
+    const items: MenuItem[] = [];
+    const collapsed = (id: string): boolean =>
+      document.getElementById(id)?.hasAttribute("hidden") ?? false;
+    if (collapsed("btn-new-folder")) {
+      items.push({ label: "New folder", action: "new-folder" });
+    }
+    if (collapsed("btn-refresh")) {
+      items.push({ label: "Refresh", action: "refresh" });
+    }
+    if (collapsed("btn-upload")) {
+      items.push({ separator: true });
+      items.push({ label: "Files\u2026", action: "upload-files" });
+      items.push({ label: "Folder\u2026", action: "upload-folder" });
+    }
+    if (items.length === 0) return;
+    const rect = overflowButton.getBoundingClientRect();
+    showContextMenu(
+      rect.left,
+      rect.bottom,
+      items,
+      (action) => {
+        dismissOverflowMenu();
+        if (action === "new-folder") void handleCreateFolder();
+        else if (action === "refresh") void handleRefresh();
+        else if (action === "upload-files") void handleUploadButton();
+        else if (action === "upload-folder") void handleUploadFolderButton();
+      },
+      dismissOverflowMenu,
+    );
+    overflowButton.setAttribute("aria-expanded", "true");
+  });
+
+  // jsdom and very old webviews lack ResizeObserver; the toolbar then keeps
+  // every button visible and the overflow menu simply stays hidden.
+  if (typeof ResizeObserver === "function") {
+    toolbarOverflowObserver = new ResizeObserver(() => fitToolbarButtons());
+    toolbarOverflowObserver.observe(toolbar);
+  }
+  fitToolbarButtons();
+  // Icon injection and font loading change button widths without changing
+  // the toolbar's own size, so re-fit once the first frames have painted.
+  window.setTimeout(fitToolbarButtons, 300);
+}
+
 export function wireLayoutControls(): void {
   const toggleBtn = document.getElementById("sidebar-toggle");
   const backdrop = document.getElementById("sidebar-backdrop");
@@ -773,6 +898,7 @@ export function wireLayoutControls(): void {
   toggleBtn?.addEventListener("click", toggleSidebar);
   backdrop?.addEventListener("click", () => setSidebarOpen(false));
   window.addEventListener("resize", syncSidebarMode);
+  wireToolbarOverflow();
 
   let dragStartX = 0;
   let dragStartWidth = 0;

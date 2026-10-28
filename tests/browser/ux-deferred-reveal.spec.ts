@@ -101,13 +101,14 @@ async function startDownloadOfFirstFile(page: Page): Promise<void> {
   const row = page.locator(".object-row--file").first();
   await row.click();
   await row.click({ button: "right" });
-  await page
-    .locator('.context-menu [role="menuitem"]', { hasText: /^Download$/ })
-    .click();
+  await page.getByRole("menuitem", { name: "Download" }).click();
 }
 
 async function startUploadFromToolbar(page: Page): Promise<void> {
   await page.locator("#btn-upload").click();
+  await page
+    .locator('.context-menu [role="menuitem"]', { hasText: "Files…" })
+    .click();
 }
 
 function revealControl(page: Page, fileName: string) {

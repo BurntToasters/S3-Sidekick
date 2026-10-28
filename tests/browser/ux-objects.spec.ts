@@ -309,7 +309,7 @@ test.describe("context menu labels and availability", () => {
 
     await expect(menuItem(page, "Download 2 files")).toBeEnabled();
     await expect(menuItem(page, "Copy 2 keys")).toBeVisible();
-    await expect(menuItem(page, "Copy 2 URLs")).toBeVisible();
+    await expect(menuItem(page, "Copy URLs")).toBeVisible();
     await expect(menuItem(page, "Delete 2 items")).toBeVisible();
 
     const calls = await readMockCallLog(page);
@@ -331,13 +331,13 @@ test.describe("context menu labels and availability", () => {
     await openMockListing(page, { objectCount: 12 });
 
     await fileRow(page, "001-sample-object.txt").click({ button: "right" });
-    const move = menuItem(page, "Move to...");
+    const move = menuItem(page, "Move to…");
     await expect(move).toBeDisabled();
     await expect(page.locator(".context-menu")).toContainText(
       "This provider can't safely delete the source. Use Copy, then Delete.",
     );
-    await expect(menuItem(page, "Copy / Move to...")).toHaveCount(0);
-    await expect(menuItem(page, "Copy to...")).toBeEnabled();
+    await expect(menuItem(page, "Copy / Move…")).toHaveCount(0);
+    await expect(menuItem(page, "Copy to…")).toBeEnabled();
 
     const calls = await readMockCallLog(page);
     await saveArtifact(page, testInfo, ARTIFACT_SUITE, "move-disabled", calls);
@@ -348,8 +348,8 @@ test.describe("context menu labels and availability", () => {
   }, testInfo) => {
     await openMockListing(page, { objectCount: 12 });
     await fileRow(page, "001-sample-object.txt").click({ button: "right" });
-    await expect(menuItem(page, "Copy Key")).toBeVisible();
-    await expect(menuItem(page, "Copy ARN")).toHaveCount(0);
+    await expect(menuItem(page, "Copy keys")).toBeVisible();
+    await expect(menuItem(page, "Copy ARNs")).toHaveCount(0);
     await page.keyboard.press("Escape");
 
     const awsPage = await page.context().newPage();
@@ -358,7 +358,7 @@ test.describe("context menu labels and availability", () => {
       endpoint: "https://s3.us-east-1.amazonaws.com",
     });
     await fileRow(awsPage, "001-sample-object.txt").click({ button: "right" });
-    await expect(menuItem(awsPage, "Copy ARN")).toBeVisible();
+    await expect(menuItem(awsPage, "Copy ARNs")).toBeVisible();
     await awsPage.close();
 
     const calls = await readMockCallLog(page);
@@ -427,7 +427,7 @@ test.describe("go to, export and bucket refresh", () => {
     await openMockListing(page, { objectCount: 12 });
 
     await fileRow(page, "001-sample-object.txt").click({ button: "right" });
-    await menuItem(page, "Copy Key").click();
+    await menuItem(page, "Copy keys").click();
 
     await page.locator("#activity-toggle").click();
     await page.locator("#drawer-export").click();

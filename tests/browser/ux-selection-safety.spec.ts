@@ -85,7 +85,7 @@ test.describe("selection identity is structural", () => {
     await expect(fileRow).toBeVisible();
     await fileRow.locator(".row-check").check();
 
-    const summary = await page.locator("#batch-count").innerText();
+    const summary = await page.locator("#batch-count").textContent();
     expect(summary).toBe("1 file selected");
 
     const dialogText = await confirmDelete(page);
@@ -117,7 +117,7 @@ test.describe("selection identity is structural", () => {
     await expect(folderRow).toBeVisible();
     await folderRow.locator(".row-check").check();
 
-    const summary = await page.locator("#batch-count").innerText();
+    const summary = await page.locator("#batch-count").textContent();
     expect(summary).toBe("1 folder selected");
 
     const dialogText = await confirmDelete(page);
@@ -178,7 +178,7 @@ test.describe("selection identity is structural", () => {
     await rowFor(page, "file", "prefix:archive").locator(".row-check").check();
     await rowFor(page, "folder", "archive/").locator(".row-check").check();
 
-    const summary = await page.locator("#batch-count").innerText();
+    const summary = await page.locator("#batch-count").textContent();
     expect(summary).toBe("1 file + 1 folder selected");
 
     const dialogText = await confirmDelete(page);

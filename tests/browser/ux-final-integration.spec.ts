@@ -575,7 +575,7 @@ test.describe("command palette", () => {
     const before = (await readMockCallLog(page)).filter(
       (call) => call.command === "list_buckets",
     ).length;
-    await page.locator("#btn-palette").click();
+    await page.locator("#palette-hint").click();
     await expect(page.locator("#palette-overlay")).toBeVisible();
     await page.locator("#palette-input").fill("Refresh Buckets");
     const item = page.locator("#palette-results .palette__item", {
@@ -902,7 +902,7 @@ test.describe("0.12.0 residue: contrast, targets, palette, resizers", () => {
     page,
   }, testInfo) => {
     await openMockListing(page, { objectCount: 1, prefixes: [] });
-    await page.locator("#btn-palette").click();
+    await page.locator("#palette-hint").click();
     const input = page.locator("#palette-input");
     await expect(input).toBeVisible();
     // offsetHeight is layout height; the palette fades in with a transform,

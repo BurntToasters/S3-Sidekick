@@ -1,3 +1,5 @@
+import { getIconHtml } from "./utils.ts";
+
 export interface MenuAction {
   label: string;
   action: string;
@@ -7,6 +9,10 @@ export interface MenuAction {
   disabledReason?: string;
   /** Display-only keyboard hint; kept out of the accessible name. */
   shortcut?: string;
+  /** Leading icon name from the icon registry; decorative only. */
+  icon?: string;
+  /** Destructive items render with the shared danger styling. */
+  danger?: boolean;
 }
 
 export interface MenuSeparator {
@@ -52,6 +58,18 @@ export function showContextMenu(
     btn.type = "button";
     btn.className = "context-menu__item";
     btn.setAttribute("role", "menuitem");
+    btn.dataset.action = item.action;
+    if (item.danger) btn.classList.add("context-menu__item--danger");
+    if (item.icon) {
+      const icon = document.createElement("span");
+      icon.className = "context-menu__icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.innerHTML = getIconHtml(item.icon, {
+        className: "lucide-icon",
+        decorative: true,
+      });
+      btn.appendChild(icon);
+    }
     const label = document.createElement("span");
     label.className = "context-menu__label";
     label.textContent = item.label;

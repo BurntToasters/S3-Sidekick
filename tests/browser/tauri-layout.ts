@@ -507,6 +507,11 @@ export async function installLayoutTauriMock(
               }
             }
             return listing;
+          case "generate_presigned_url": {
+            const key = encodeURIComponent(String(args.key ?? "object"));
+            const expires = Number(args.expiresInSecs ?? 3600);
+            return `https://layout-test.invalid/presigned/${key}?X-Amz-Expires=${expires}`;
+          }
           case "updater_support_info":
             return {
               mode: "manual",

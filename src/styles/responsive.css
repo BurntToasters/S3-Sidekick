@@ -61,31 +61,15 @@
     padding-left: var(--space-2);
   }
 
+  /* The toolbar never wraps: the container query collapses labels first and
+     app-layout.ts collapses buttons into the overflow menu. */
   .content-toolbar {
-    flex-wrap: wrap;
-    padding-bottom: var(--space-1);
-  }
-
-  .content-toolbar__actions {
-    width: 100%;
-    justify-content: flex-end;
-    padding-right: var(--space-2);
+    flex-wrap: nowrap;
   }
 
   .filter-input {
     margin-left: auto;
     margin-right: var(--space-2);
-  }
-
-  .location-omnibar {
-    width: 100%;
-    max-width: none;
-    margin: 0 var(--space-2) var(--space-1);
-    order: 2;
-  }
-
-  .content-toolbar__left {
-    flex-wrap: wrap;
   }
 
   .content-body {
@@ -120,15 +104,6 @@
 
   .inspector-resizer {
     display: none;
-  }
-
-  .batch-toolbar {
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .batch-toolbar__count {
-    width: 100%;
   }
 
   .statusbar {

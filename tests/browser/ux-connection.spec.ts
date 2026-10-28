@@ -157,7 +157,7 @@ test.describe("connection screen UX", () => {
     await page.locator(".object-row--file").first().click({ button: "right" });
     await page
       .locator('.context-menu [role="menuitem"]', {
-        hasText: "Copy / Move to...",
+        hasText: "Copy / Move…",
       })
       .click();
     await page.locator("#copy-move-path").fill("destination/");

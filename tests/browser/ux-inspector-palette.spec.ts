@@ -64,7 +64,7 @@ async function firstLabel(page: Page): Promise<string> {
 test.describe("command palette focus and ranking", () => {
   test("Escape returns focus to the status-bar opener", async ({ page }) => {
     await openRootWithObjects(page);
-    const opener = page.locator("#btn-palette");
+    const opener = page.locator("#palette-hint");
     await opener.focus();
     await page.keyboard.press("Enter");
     await expect(page.locator("#palette-overlay")).toBeVisible();
@@ -91,11 +91,11 @@ test.describe("command palette focus and ranking", () => {
     page,
   }) => {
     await openRootWithObjects(page);
-    await page.locator("#btn-palette").click();
+    await page.locator("#palette-hint").click();
     await typeQuery(page, "uf");
     expect(await firstLabel(page)).toBe("Upload Files");
     await typeQuery(page, "mkdir");
-    expect(await firstLabel(page)).toBe("Create Folder");
+    expect(await firstLabel(page)).toBe("New folder");
     await typeQuery(page, "ref");
     expect(await firstLabel(page)).toBe("Refresh");
     await page.keyboard.press("Escape");
@@ -105,7 +105,7 @@ test.describe("command palette focus and ranking", () => {
     page,
   }) => {
     await openRootWithObjects(page);
-    await page.locator("#btn-palette").click();
+    await page.locator("#palette-hint").click();
     await typeQuery(page, "o");
     const second = options(page).nth(1);
     await second.hover();
@@ -118,7 +118,7 @@ test.describe("command palette focus and ranking", () => {
 
   test("the keyboard hint sits outside the listbox", async ({ page }) => {
     await openRootWithObjects(page);
-    await page.locator("#btn-palette").click();
+    await page.locator("#palette-hint").click();
     await expect(page.locator("#palette-results .palette__hint")).toHaveCount(
       0,
     );
@@ -134,9 +134,9 @@ test.describe("command palette focus and ranking", () => {
       .locator('.object-row--file[data-key="notes.txt"]')
       .locator(".row-check")
       .check();
-    await page.locator("#btn-palette").click();
-    await typeQuery(page, "copy urls");
-    expect(await firstLabel(page)).toBe("Copy Object URLs");
+    await page.locator("#palette-hint").click();
+    await typeQuery(page, "copy url");
+    expect(await firstLabel(page)).toBe("Copy URL");
     await typeQuery(page, "location");
     expect(await firstLabel(page)).toBe("Edit Location");
     await typeQuery(page, "back");

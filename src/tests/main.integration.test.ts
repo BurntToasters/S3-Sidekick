@@ -881,7 +881,13 @@ describe("main integration", () => {
       connectionId: "test-connection",
     });
 
+    // The toolbar upload button opens the Upload menu; the file and folder
+    // pickers launch from the menu actions.
     (document.getElementById("btn-upload") as HTMLButtonElement).click();
+    const uploadMenuAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
+      ((action: string) => void) | undefined;
+    expect(uploadMenuAction).toBeTruthy();
+    uploadMenuAction?.("upload-files");
     await flushMicrotasks();
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
       ["C:\\tmp\\upload-a.txt", "C:\\tmp\\upload-b.txt"],
@@ -893,7 +899,7 @@ describe("main integration", () => {
       }),
     );
 
-    (document.getElementById("btn-upload-folder") as HTMLButtonElement).click();
+    uploadMenuAction?.("upload-folder");
     await flushMicrotasks();
     expect(mockEnqueueFolderEntries).toHaveBeenCalledWith(
       expect.any(Array),
@@ -1138,14 +1144,15 @@ describe("main integration", () => {
 
     if (onAction) {
       onAction("copy-url");
-      onAction("copy-presigned-url");
-      onAction("copy-key");
-      onAction("copy-arn");
+      onAction("share-link");
+      (document.getElementById("share-link-copy") as HTMLButtonElement).click();
+      onAction("copy-keys");
+      onAction("copy-arns");
       onAction("copy-move");
       onAction("rename");
       onAction("download");
       onAction("delete");
-      onAction("info");
+      onAction("properties");
       await flushMicrotasks(10);
     }
 
@@ -1205,6 +1212,8 @@ describe("main integration", () => {
     state.connected = true;
     state.currentBucket = "bucket-a";
     state.selectedKeys.add("docs/file.txt");
+    // Copy ARNs is AWS-only; the More menu runs against an AWS endpoint here.
+    state.endpoint = "https://s3.us-east-1.amazonaws.com";
 
     const batchMore = document.getElementById(
       "batch-more",
@@ -1232,10 +1241,9 @@ describe("main integration", () => {
     ).toEqual([
       "Copy keys",
       "Copy ARNs",
-      "Copy / Move to...",
-      "Delete",
-      "Copy URLs",
-      "Deselect All",
+      "Share link\u2026",
+      "Copy S3 URI",
+      "Properties",
     ]);
     expect(menuItems.some((item) => item.disabled)).toBe(false);
     expect(batchMore.getAttribute("aria-expanded")).toBe("true");
@@ -1310,7 +1318,7 @@ describe("main integration", () => {
       true,
     );
     expect(multiItems.some((item) => item.label === "Copy 2 keys")).toBe(true);
-    expect(multiItems.some((item) => item.label === "Copy 2 URLs")).toBe(true);
+    expect(multiItems.some((item) => item.label === "Copy URLs")).toBe(true);
     expect(multiItems.some((item) => item.label === "Copy 2 ARNs")).toBe(true);
   });
 
@@ -1527,11 +1535,17 @@ describe("main integration", () => {
 
     state.connected = false;
     state.currentBucket = "";
+    // The upload button opens its menu even while disconnected; the guard
+    // lives on the menu actions.
     (document.getElementById("btn-upload") as HTMLButtonElement).click();
+    const disconnectedUploadAction = mockShowContextMenu.mock.calls.at(
+      -1,
+    )?.[3] as ((action: string) => void) | undefined;
+    disconnectedUploadAction?.("upload-files");
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Connect to a bucket first.");
-    (document.getElementById("btn-upload-folder") as HTMLButtonElement).click();
+    disconnectedUploadAction?.("upload-folder");
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("Connect to a bucket first.");
@@ -1698,8 +1712,8 @@ describe("main integration", () => {
     const onFolderAction = ctx?.[3] as ((action: string) => void) | undefined;
     if (onFolderAction) {
       onFolderAction("open-folder");
-      onFolderAction("copy-key");
-      onFolderAction("copy-arn");
+      onFolderAction("copy-keys");
+      onFolderAction("copy-arns");
       await flushMicrotasks();
     }
     expect(mockNavigateToFolder).toHaveBeenCalledWith("docs/ctx/");
@@ -2490,8 +2504,11 @@ describe("main integration", () => {
     );
     let onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
       ((action: string) => void) | undefined;
-    onAction?.("copy-presigned-url");
+    // Share link only applies to a single file; nothing opens for a
+    // multi-selection.
+    onAction?.("share-link");
     await flushMicrotasks(3);
+    expect(document.getElementById("share-link-overlay")).toBeNull();
 
     clipboardWriteText.mockRejectedValueOnce(new Error("clipboard blocked"));
     (document.getElementById("batch-copy-urls") as HTMLButtonElement).click();
@@ -2502,7 +2519,7 @@ describe("main integration", () => {
 
     state.selectedKeys.clear();
     state.selectedKeys.add("docs/file.txt");
-    state.currentSettings.presignedUrlExpiration = 120;
+    state.currentSettings.presignedUrlExpiration = 300;
     row.dispatchEvent(
       new MouseEvent("contextmenu", {
         bubbles: true,
@@ -2513,13 +2530,17 @@ describe("main integration", () => {
     );
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
       ((action: string) => void) | undefined;
-    onAction?.("copy-presigned-url");
+    onAction?.("share-link");
+    (document.getElementById("share-link-expiry") as HTMLSelectElement).value =
+      "300";
+    (document.getElementById("share-link-copy") as HTMLButtonElement).click();
     await flushMicrotasks(4);
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("2 minutes");
+    ).toContain("5 minutes");
+    expect(document.getElementById("share-link-overlay")).toBeNull();
 
-    state.currentSettings.presignedUrlExpiration = 172800;
+    state.currentSettings.presignedUrlExpiration = 604800;
     row.dispatchEvent(
       new MouseEvent("contextmenu", {
         bubbles: true,
@@ -2530,11 +2551,14 @@ describe("main integration", () => {
     );
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
       ((action: string) => void) | undefined;
-    onAction?.("copy-presigned-url");
+    onAction?.("share-link");
+    (document.getElementById("share-link-expiry") as HTMLSelectElement).value =
+      "604800";
+    (document.getElementById("share-link-copy") as HTMLButtonElement).click();
     await flushMicrotasks(4);
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("2 days");
+    ).toContain("7 days");
 
     failPresigned = true;
     row.dispatchEvent(
@@ -2547,11 +2571,12 @@ describe("main integration", () => {
     );
     onAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
       ((action: string) => void) | undefined;
-    onAction?.("copy-presigned-url");
+    onAction?.("share-link");
+    (document.getElementById("share-link-copy") as HTMLButtonElement).click();
     await flushMicrotasks(4);
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
-    ).toContain("Failed to create pre-signed URL");
+    ).toContain("Failed to create share link");
     failPresigned = false;
 
     const renameInvokeCount = mockInvoke.mock.calls.filter(
@@ -2642,23 +2667,26 @@ describe("main integration", () => {
 
     mockOpen.mockResolvedValueOnce(null);
     (document.getElementById("btn-upload") as HTMLButtonElement).click();
+    const uploadMenuErrorAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
+      ((action: string) => void) | undefined;
+    uploadMenuErrorAction?.("upload-files");
     await flushMicrotasks();
     mockOpen.mockResolvedValueOnce(null);
-    (document.getElementById("btn-upload-folder") as HTMLButtonElement).click();
+    uploadMenuErrorAction?.("upload-folder");
     await flushMicrotasks();
     mockOpen.mockResolvedValueOnce([42] as unknown as string[]);
-    (document.getElementById("btn-upload-folder") as HTMLButtonElement).click();
+    uploadMenuErrorAction?.("upload-folder");
     await flushMicrotasks();
     listMode = "empty";
     mockOpen.mockResolvedValueOnce(["C:\\tmp\\folder"]);
-    (document.getElementById("btn-upload-folder") as HTMLButtonElement).click();
+    uploadMenuErrorAction?.("upload-folder");
     await flushMicrotasks(6);
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
     ).toContain("contain no files");
     listMode = "throw";
     mockOpen.mockResolvedValueOnce(["C:\\tmp\\folder"]);
-    (document.getElementById("btn-upload-folder") as HTMLButtonElement).click();
+    uploadMenuErrorAction?.("upload-folder");
     await flushMicrotasks(6);
     expect(
       (document.getElementById("status") as HTMLSpanElement).textContent,
@@ -3345,8 +3373,12 @@ describe("main integration", () => {
     expect(mockRefreshObjects.mock.calls.length).toBe(refreshObjectsBefore);
 
     const openDialogBefore = mockOpen.mock.calls.length;
+    // The upload menu's actions carry the disconnected guard.
     (document.getElementById("btn-upload") as HTMLButtonElement).click();
-    (document.getElementById("btn-upload-folder") as HTMLButtonElement).click();
+    const guardMenuAction = mockShowContextMenu.mock.calls.at(-1)?.[3] as
+      ((action: string) => void) | undefined;
+    guardMenuAction?.("upload-files");
+    guardMenuAction?.("upload-folder");
     await flushMicrotasks();
     expect(mockOpen.mock.calls.length).toBe(openDialogBefore);
 
