@@ -4,9 +4,15 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { save } from "@tauri-apps/plugin-dialog";
 import { state } from "./state.ts";
 import {
+  type DateFormat,
+  type Density,
+  type SizeUnits,
   type TransferPerformancePreset,
   type UserSettings,
+  DATE_FORMAT_VALUES,
+  DENSITY_VALUES,
   SETTING_DEFAULTS,
+  SIZE_UNIT_VALUES,
   parseSettingsRaw,
   mergeSettingsPayload,
 } from "./settings-model.ts";
@@ -30,14 +36,77 @@ import {
   showAlert,
   showChoiceDialog,
 } from "./dialogs.ts";
-import { friendlyError, plural } from "./utils.ts";
+import {
+  friendlyError,
+  getFormatPreferences,
+  plural,
+  setFormatPreferences,
+} from "./utils.ts";
+import { renderObjectTableFromLayout } from "./layout-render-bridge.ts";
 
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
 let settingsSaveTail: Promise<void> = Promise.resolve();
 let settingsModalSaveOperation: Promise<void> | null = null;
 
-/** Tabs whose controls apply immediately, so Save and Cancel do not apply. */
-const INSTANT_APPLY_TABS = new Set(["security", "bookmarks"]);
+/**
+ * Tabs with no explicit-save settings: their controls apply at once or carry
+ * their own buttons. Save is shown only for other tabs or dirty drafts.
+ */
+const NO_SAVE_TABS = new Set(["security", "bookmarks", "about", "reset"]);
+
+/** Set by the last search: whether a result row needs the explicit Save. */
+let searchShowsExplicitSave = false;
+
+function isExplicitSaveTab(tab: string): boolean {
+  return !NO_SAVE_TABS.has(tab);
+}
+
+const PRESET_CONTROL_IDS = {
+  threshold: "setting-download-parallel-threshold-mb",
+  downloadPartSize: "setting-download-part-size-mb",
+  downloadConcurrency: "setting-download-part-concurrency",
+  uploadPartSize: "setting-upload-part-size-mb",
+  uploadConcurrency: "setting-upload-part-concurrency",
+} as const;
+
+type PresetControl = keyof typeof PRESET_CONTROL_IDS;
+
+const PRESET_VALUES: Record<
+  TransferPerformancePreset,
+  Record<PresetControl, string>
+> = {
+  safe: {
+    threshold: "256",
+    downloadPartSize: "16",
+    downloadConcurrency: "2",
+    uploadPartSize: "16",
+    uploadConcurrency: "2",
+  },
+  max: {
+    threshold: "64",
+    downloadPartSize: "64",
+    downloadConcurrency: "10",
+    uploadPartSize: "64",
+    uploadConcurrency: "10",
+  },
+  balanced: {
+    threshold: "128",
+    downloadPartSize: "32",
+    downloadConcurrency: "6",
+    uploadPartSize: "32",
+    uploadConcurrency: "6",
+  },
+};
+
+function isTransferPreset(value: string): value is TransferPerformancePreset {
+  return value === "safe" || value === "balanced" || value === "max";
+}
+
+function presetControl(key: PresetControl): HTMLSelectElement | null {
+  return document.getElementById(
+    PRESET_CONTROL_IDS[key],
+  ) as HTMLSelectElement | null;
+}
 
 export function setBookmarkSelectHandler(handler: (b: Bookmark) => void): void {
   onBookmarkSelect = handler;
@@ -46,56 +115,36 @@ export function setBookmarkSelectHandler(handler: (b: Bookmark) => void): void {
 function applyPresetToTransferControls(
   preset: TransferPerformancePreset,
 ): void {
-  const values =
-    preset === "safe"
-      ? {
-          threshold: "256",
-          downloadPartSize: "16",
-          downloadConcurrency: "2",
-          uploadPartSize: "16",
-          uploadConcurrency: "2",
-        }
-      : preset === "max"
-        ? {
-            threshold: "64",
-            downloadPartSize: "64",
-            downloadConcurrency: "10",
-            uploadPartSize: "64",
-            uploadConcurrency: "10",
-          }
-        : {
-            threshold: "128",
-            downloadPartSize: "32",
-            downloadConcurrency: "6",
-            uploadPartSize: "32",
-            uploadConcurrency: "6",
-          };
+  const values = PRESET_VALUES[preset];
+  for (const key of Object.keys(PRESET_CONTROL_IDS) as PresetControl[]) {
+    const control = presetControl(key);
+    if (control) control.value = values[key];
+  }
+}
 
-  const threshold = document.getElementById(
-    "setting-download-parallel-threshold-mb",
+/** "Custom" replaces the preset name once an Advanced value leaves its values. */
+function syncPresetWithControls(): void {
+  const select = document.getElementById(
+    "setting-transfer-performance-preset",
   ) as HTMLSelectElement | null;
-  if (threshold) threshold.value = values.threshold;
+  if (!select || !isTransferPreset(select.value)) return;
+  const values = PRESET_VALUES[select.value];
+  const matches = (Object.keys(PRESET_CONTROL_IDS) as PresetControl[]).every(
+    (key) => {
+      const control = presetControl(key);
+      return !control || control.value === values[key];
+    },
+  );
+  if (!matches) select.value = "custom";
+}
 
-  const downloadPartSize = document.getElementById(
-    "setting-download-part-size-mb",
-  ) as HTMLSelectElement | null;
-  if (downloadPartSize) downloadPartSize.value = values.downloadPartSize;
-
-  const downloadConcurrency = document.getElementById(
-    "setting-download-part-concurrency",
-  ) as HTMLSelectElement | null;
-  if (downloadConcurrency)
-    downloadConcurrency.value = values.downloadConcurrency;
-
-  const uploadPartSize = document.getElementById(
-    "setting-upload-part-size-mb",
-  ) as HTMLSelectElement | null;
-  if (uploadPartSize) uploadPartSize.value = values.uploadPartSize;
-
-  const uploadConcurrency = document.getElementById(
-    "setting-upload-part-concurrency",
-  ) as HTMLSelectElement | null;
-  if (uploadConcurrency) uploadConcurrency.value = values.uploadConcurrency;
+function initPresetSync(): void {
+  for (const key of Object.keys(PRESET_CONTROL_IDS) as PresetControl[]) {
+    const control = presetControl(key);
+    if (!control || control.dataset.presetWired === "true") continue;
+    control.dataset.presetWired = "true";
+    control.addEventListener("change", () => syncPresetWithControls());
+  }
 }
 
 export function applyTheme(theme: UserSettings["theme"]): void {
@@ -107,13 +156,98 @@ export function applyTheme(theme: UserSettings["theme"]): void {
   }
 }
 
+export function applyDensity(density: Density): void {
+  document.documentElement.dataset.density = density;
+}
+
+/** Re-renders the object table only when a size or date style actually changed. */
+function applyFormatPreferences(
+  sizeUnits: SizeUnits,
+  dateFormat: DateFormat,
+): void {
+  const before = getFormatPreferences();
+  setFormatPreferences({ sizeUnits, dateFormat });
+  if (before.sizeUnits !== sizeUnits || before.dateFormat !== dateFormat) {
+    renderObjectTableFromLayout();
+  }
+}
+
+/**
+ * Appearance applies at once, the way the theme always has. Cancel reverts it
+ * because it is applied again from the last saved values.
+ */
+function applyAppearance(
+  settings: Pick<
+    UserSettings,
+    "theme" | "density" | "sizeUnits" | "dateFormat"
+  >,
+): void {
+  applyTheme(settings.theme);
+  applyDensity(settings.density);
+  applyFormatPreferences(settings.sizeUnits, settings.dateFormat);
+}
+
+/**
+ * Reads a choice control. A missing control keeps the current value; an
+ * unknown value keeps it too, so a stray DOM value never reaches the settings.
+ */
+function readChoice<T extends string>(
+  id: string,
+  values: readonly T[],
+  current: T,
+): T {
+  const el = document.getElementById(id) as HTMLSelectElement | null;
+  if (!el) return current;
+  return values.find((value) => value === el.value) ?? current;
+}
+
+function readAppearanceDraft(): Pick<
+  UserSettings,
+  "density" | "sizeUnits" | "dateFormat"
+> {
+  return {
+    density: readChoice(
+      "setting-density",
+      DENSITY_VALUES,
+      state.currentSettings.density,
+    ),
+    sizeUnits: readChoice(
+      "setting-size-units",
+      SIZE_UNIT_VALUES,
+      state.currentSettings.sizeUnits,
+    ),
+    dateFormat: readChoice(
+      "setting-date-format",
+      DATE_FORMAT_VALUES,
+      state.currentSettings.dateFormat,
+    ),
+  };
+}
+
+function initAppearancePreview(): void {
+  for (const id of [
+    "setting-density",
+    "setting-size-units",
+    "setting-date-format",
+  ]) {
+    const control = document.getElementById(id);
+    if (!control || control.dataset.wired === "true") continue;
+    control.dataset.wired = "true";
+    control.addEventListener("change", () => {
+      const draft = readAppearanceDraft();
+      applyDensity(draft.density);
+      applyFormatPreferences(draft.sizeUnits, draft.dateFormat);
+    });
+  }
+}
+
 export async function loadSettings(): Promise<boolean> {
   const json = await invoke<string>("load_settings");
   const result = parseSettingsRaw(json);
   state.currentSettings = result.settings;
   state.lastPersistedSettings = { ...result.settings };
   state.settingsExtras = result.extras;
-  applyTheme(state.currentSettings.theme);
+  applyAppearance(state.currentSettings);
   setUpdateChannel(state.currentSettings.updateChannel);
   return !result.malformed;
 }
@@ -170,10 +304,6 @@ export function switchSettingsTab(tab: string): void {
     t.setAttribute("aria-selected", String(isActive));
     t.setAttribute("tabindex", isActive ? "0" : "-1");
   }
-  const footer = document.querySelector<HTMLElement>(
-    "#settings-overlay .modal__footer",
-  );
-  if (footer) footer.hidden = INSTANT_APPLY_TABS.has(tab);
   const panels = document.querySelectorAll<HTMLElement>(".settings-panel");
   for (const p of panels) {
     if (p.dataset.settingsPanel === "__search") {
@@ -185,6 +315,28 @@ export function switchSettingsTab(tab: string): void {
     p.hidden = !isActive;
     p.style.display = isActive ? "" : "none";
   }
+  updateSettingsFooter();
+}
+
+/**
+ * Save and Cancel show when an explicit-save setting is on screen (its tab, or
+ * a search result) or when the draft differs from the saved values. They do
+ * not depend on which tab was opened first.
+ */
+export function updateSettingsFooter(): void {
+  const footer = document.querySelector<HTMLElement>(
+    "#settings-overlay .modal__footer",
+  );
+  if (!footer) return;
+  const searchPanel = document.querySelector<HTMLElement>(
+    '[data-settings-panel="__search"]',
+  );
+  const searching = searchPanel !== null && !searchPanel.hidden;
+  const activeTab = getActiveSettingsTab();
+  const explicitVisible = searching
+    ? searchShowsExplicitSave
+    : activeTab !== null && isExplicitSaveTab(activeTab);
+  footer.hidden = !(explicitVisible || hasUnsavedSettingsChanges());
 }
 
 const searchOriginalParents = new Map<
@@ -209,6 +361,39 @@ function restoreSearchItems(): void {
   searchOriginalParents.clear();
 }
 
+/**
+ * What a row is searched by: its label, its help and description text, and its
+ * section heading. Option text is left out, so "default" finds no row by itself.
+ */
+const SEARCH_DESCRIPTION_SELECTOR =
+  ".setting-description, .setting-note, .setting-help__tip";
+const SEARCH_SKIP_SELECTOR = `select, option, button, input, textarea, .setting-section, .setting-help-wrap, ${SEARCH_DESCRIPTION_SELECTOR}`;
+
+function searchableText(item: HTMLElement): {
+  label: string;
+  description: string;
+  heading: string;
+} {
+  const labelOnly = item.cloneNode(true) as HTMLElement;
+  for (const el of labelOnly.querySelectorAll(SEARCH_SKIP_SELECTOR)) {
+    el.remove();
+  }
+  const description = Array.from(
+    item.querySelectorAll<HTMLElement>(SEARCH_DESCRIPTION_SELECTOR),
+  )
+    .map((el) => el.textContent ?? "")
+    .join(" ");
+  const heading =
+    item
+      .closest<HTMLElement>(".settings-group")
+      ?.querySelector<HTMLElement>(".setting-section")?.textContent ?? "";
+  return {
+    label: (labelOnly.textContent ?? "").toLowerCase(),
+    description: description.toLowerCase(),
+    heading: heading.toLowerCase(),
+  };
+}
+
 export function updateSettingsSearch(query: string): void {
   const searchPanel = document.querySelector<HTMLElement>(
     '[data-settings-panel="__search"]',
@@ -229,10 +414,11 @@ export function updateSettingsSearch(query: string): void {
 
   if (!trimmed) {
     if (empty) empty.hidden = true;
-    if (preSearchActiveTab) {
-      switchSettingsTab(preSearchActiveTab);
-      preSearchActiveTab = null;
-    }
+    const restoreTab = preSearchActiveTab;
+    preSearchActiveTab = null;
+    searchShowsExplicitSave = false;
+    if (restoreTab) switchSettingsTab(restoreTab);
+    updateSettingsFooter();
     return;
   }
 
@@ -243,6 +429,7 @@ export function updateSettingsSearch(query: string): void {
   ).filter((p) => p.dataset.settingsPanel !== "__search");
 
   let anyMatch = false;
+  let explicitMatch = false;
 
   for (const panel of allPanels) {
     const tabName = panel.dataset.settingsPanel ?? "";
@@ -259,19 +446,18 @@ export function updateSettingsSearch(query: string): void {
     );
     const matched: HTMLElement[] = [];
     for (const item of items) {
-      const labelText = (item.textContent ?? "").toLowerCase();
-      const tips = Array.from(
-        item.querySelectorAll<HTMLElement>(".setting-help__tip"),
-      )
-        .map((tip) => tip.textContent ?? "")
-        .join(" ")
-        .toLowerCase();
-      if (labelText.includes(trimmed) || tips.includes(trimmed)) {
+      const text = searchableText(item);
+      if (
+        text.label.includes(trimmed) ||
+        text.description.includes(trimmed) ||
+        text.heading.includes(trimmed)
+      ) {
         matched.push(item);
       }
     }
     if (matched.length === 0) continue;
     anyMatch = true;
+    if (isExplicitSaveTab(tabName)) explicitMatch = true;
 
     const group = document.createElement("div");
     group.className = "settings-search-group";
@@ -307,6 +493,8 @@ export function updateSettingsSearch(query: string): void {
   }
 
   if (empty) empty.hidden = anyMatch;
+  searchShowsExplicitSave = explicitMatch;
+  updateSettingsFooter();
 }
 
 function initSettingsSearch(): void {
@@ -360,10 +548,6 @@ function initThemePicker(): void {
       if (!r.checked) return;
       const value = r.value;
       if (value !== "system" && value !== "light" && value !== "dark") return;
-      const hidden = document.getElementById(
-        "setting-theme",
-      ) as HTMLInputElement | null;
-      if (hidden) hidden.value = value;
       syncThemeCards(value);
       applyTheme(value);
     });
@@ -372,10 +556,23 @@ function initThemePicker(): void {
 
 export function populateSettingsModal(): void {
   initThemePicker();
-  const themeSelect = document.getElementById("setting-theme") as
-    HTMLInputElement | HTMLSelectElement | null;
-  if (themeSelect) themeSelect.value = state.currentSettings.theme;
   syncThemeCards(state.currentSettings.theme);
+
+  const densitySelect = document.getElementById(
+    "setting-density",
+  ) as HTMLSelectElement | null;
+  if (densitySelect) densitySelect.value = state.currentSettings.density;
+
+  const sizeUnitsSelect = document.getElementById(
+    "setting-size-units",
+  ) as HTMLSelectElement | null;
+  if (sizeUnitsSelect) sizeUnitsSelect.value = state.currentSettings.sizeUnits;
+
+  const dateFormatSelect = document.getElementById(
+    "setting-date-format",
+  ) as HTMLSelectElement | null;
+  if (dateFormatSelect)
+    dateFormatSelect.value = state.currentSettings.dateFormat;
 
   const updatesCheckbox = document.getElementById(
     "setting-updates",
@@ -588,6 +785,9 @@ export function populateSettingsModal(): void {
 
   initSettingsSearch();
   initAdvancedTransferToggle();
+  initPresetSync();
+  syncPresetWithControls();
+  initAppearancePreview();
 
   const searchInput = document.getElementById(
     "settings-search",
@@ -616,13 +816,9 @@ export function readSettingsModal(): void {
       themeRadio.value === "dark")
   ) {
     state.currentSettings.theme = themeRadio.value;
-  } else {
-    const themeSelect = document.getElementById("setting-theme") as
-      HTMLInputElement | HTMLSelectElement | null;
-    if (themeSelect) {
-      state.currentSettings.theme = themeSelect.value as UserSettings["theme"];
-    }
   }
+
+  Object.assign(state.currentSettings, readAppearanceDraft());
 
   const updatesCheckbox = document.getElementById(
     "setting-updates",
@@ -726,7 +922,8 @@ export function readSettingsModal(): void {
   const presetSelect = document.getElementById(
     "setting-transfer-performance-preset",
   ) as HTMLSelectElement | null;
-  if (presetSelect) {
+  // "Custom" is only a display state: the saved preset name stays as it was.
+  if (presetSelect && presetSelect.value !== "custom") {
     state.currentSettings.transferPerformancePreset =
       presetSelect.value === "safe"
         ? "safe"
@@ -852,7 +1049,7 @@ async function saveAndCloseSettingsModal(): Promise<void> {
   setUpdateChannel(state.currentSettings.updateChannel);
   const attemptedSettings = { ...state.currentSettings };
   const attemptedExtras = { ...state.settingsExtras };
-  applyTheme(attemptedSettings.theme);
+  applyAppearance(attemptedSettings);
   setSettingsSaveBusy(true);
   try {
     await enqueueSettingsSnapshot(attemptedSettings, attemptedExtras);
@@ -865,7 +1062,7 @@ async function saveAndCloseSettingsModal(): Promise<void> {
         windowWidth: latestWindowWidth,
         windowHeight: latestWindowHeight,
       };
-      applyTheme(rollback.theme);
+      applyAppearance(rollback);
       state.currentSettings = rollback;
       setUpdateChannel(rollback.updateChannel);
     }
@@ -923,12 +1120,13 @@ async function discardSettingsDraft(): Promise<void> {
   if (discardPromptOpen) return;
   if (hasUnsavedSettingsChanges()) {
     discardPromptOpen = true;
-    let choice: "discard" | "keep";
+    let choice: "save" | "discard" | "keep";
     try {
-      choice = await showChoiceDialog<"discard" | "keep">(
+      choice = await showChoiceDialog<"save" | "discard" | "keep">(
         "Discard changes?",
         "Your Settings changes have not been saved.",
         [
+          { value: "save", label: "Save" },
           { value: "discard", label: "Discard changes", danger: true },
           { value: "keep", label: "Keep editing" },
         ],
@@ -937,9 +1135,13 @@ async function discardSettingsDraft(): Promise<void> {
     } finally {
       discardPromptOpen = false;
     }
+    if (choice === "save") {
+      await closeSettingsModal(true);
+      return;
+    }
     if (choice !== "discard") return;
   }
-  applyTheme(state.lastPersistedSettings.theme);
+  applyAppearance(state.lastPersistedSettings);
   state.currentSettings = { ...state.lastPersistedSettings };
   setUpdateChannel(state.lastPersistedSettings.updateChannel);
   document.getElementById("settings-overlay")?.classList.remove("active");
@@ -1000,67 +1202,102 @@ export async function resetSettings(): Promise<void> {
     { cancelValue: "cancel" },
   );
   if (scope === "cancel") return;
-  const fullReset = scope === "factory";
 
-  if (fullReset) {
-    const finalConfirmation = await showConfirm(
-      "Permanently Delete All App Data?",
-      "This permanently deletes saved connections, the last-used connection, encrypted storage, transfer checkpoints, and partial download files. Running transfers will be stopped. This cannot be undone.",
-      {
-        okLabel: "Delete Everything",
-        cancelLabel: "Cancel Reset",
-        okDanger: true,
-      },
-    );
-    if (!finalConfirmation) return;
-
-    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
-    try {
-      await invoke("factory_reset", { settingsJson: defaults });
-    } catch (err) {
-      await showAlert("Factory Reset Failed", friendlyError(err));
-      return;
-    }
-
-    // The backend transaction is the commit point. Browser storage cleanup is
-    // best-effort only: a disabled/unavailable localStorage implementation must
-    // not misreport a completed destructive reset as failed or suppress relaunch.
-    try {
-      localStorage.clear();
-    } catch {
-      // Reads will generally be unavailable under the same policy; the backend
-      // remains authoritative and the relaunch below must still happen.
-    }
+  if (scope === "factory") {
+    if (!(await confirmFactoryReset())) return;
+    if (!(await runFactoryReset())) return;
   } else {
-    // Partial reset: settings go to defaults but engagement extras survive
-    // so launchCount/support prompts do not re-fire after a routine reset.
-    const { launchCount, supportPromptDismissed, transfersHintDismissed } =
-      state.settingsExtras as {
-        launchCount?: unknown;
-        supportPromptDismissed?: unknown;
-        transfersHintDismissed?: unknown;
-      };
-    const carriedExtras: Record<string, unknown> = {
-      _setupComplete: true,
-    };
-    if (typeof launchCount === "number")
-      carriedExtras.launchCount = launchCount;
-    if (typeof supportPromptDismissed === "boolean")
-      carriedExtras.supportPromptDismissed = supportPromptDismissed;
-    if (typeof transfersHintDismissed === "boolean")
-      carriedExtras.transfersHintDismissed = transfersHintDismissed;
-    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, carriedExtras);
-    try {
-      // Credentials first: if clearing them fails, nothing is reset and the
-      // user is not left with default settings but surviving credentials.
-      await invoke("clear_saved_connection");
-      await invoke("save_settings", { json: defaults });
-    } catch (err) {
-      await showAlert("Reset Failed", friendlyError(err));
-      return;
-    }
+    if (!(await runPartialReset())) return;
   }
 
+  await relaunchApp();
+}
+
+/**
+ * "Forgot password?" on the Unlock prompt. A lost password cannot unlock the
+ * vault, so the only recovery is erasing it. Keeps the explicit final
+ * confirmation of a factory reset.
+ */
+export async function resetAfterForgottenPassword(): Promise<void> {
+  const confirmed = await showConfirm(
+    "Erase the Encrypted Vault?",
+    "A forgotten password can't be recovered. Continuing erases the encrypted vault and all saved connections inside it, including their saved secret keys. The last-used connection, transfer checkpoints and partial downloads are erased too. Running transfers are stopped. Settings return to their starting values and the app restarts.",
+    { okLabel: "Continue", okDanger: true },
+  );
+  if (!confirmed) return;
+  if (!(await confirmFactoryReset())) return;
+  if (!(await runFactoryReset())) return;
+  await relaunchApp();
+}
+
+async function confirmFactoryReset(): Promise<boolean> {
+  return showConfirm(
+    "Permanently Delete All App Data?",
+    "This permanently deletes saved connections, the last-used connection, encrypted storage, transfer checkpoints, and partial download files. Running transfers will be stopped. This cannot be undone.",
+    {
+      okLabel: "Delete Everything",
+      cancelLabel: "Cancel Reset",
+      okDanger: true,
+    },
+  );
+}
+
+/** The backend transaction is the commit point. Returns false after alerting. */
+async function runFactoryReset(): Promise<boolean> {
+  const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
+  try {
+    await invoke("factory_reset", { settingsJson: defaults });
+  } catch (err) {
+    await showAlert("Factory Reset Failed", friendlyError(err));
+    return false;
+  }
+
+  // Browser storage cleanup is best-effort only: a disabled/unavailable
+  // localStorage implementation must not misreport a completed destructive
+  // reset as failed or suppress relaunch.
+  try {
+    localStorage.clear();
+  } catch {
+    // Reads will generally be unavailable under the same policy; the backend
+    // remains authoritative and the relaunch below must still happen.
+  }
+  return true;
+}
+
+/**
+ * Settings go to defaults but engagement extras survive so launchCount and
+ * support prompts do not re-fire after a routine reset. Returns false after
+ * alerting.
+ */
+async function runPartialReset(): Promise<boolean> {
+  const { launchCount, supportPromptDismissed, transfersHintDismissed } =
+    state.settingsExtras as {
+      launchCount?: unknown;
+      supportPromptDismissed?: unknown;
+      transfersHintDismissed?: unknown;
+    };
+  const carriedExtras: Record<string, unknown> = {
+    _setupComplete: true,
+  };
+  if (typeof launchCount === "number") carriedExtras.launchCount = launchCount;
+  if (typeof supportPromptDismissed === "boolean")
+    carriedExtras.supportPromptDismissed = supportPromptDismissed;
+  if (typeof transfersHintDismissed === "boolean")
+    carriedExtras.transfersHintDismissed = transfersHintDismissed;
+  const defaults = mergeSettingsPayload(SETTING_DEFAULTS, carriedExtras);
+  try {
+    // Credentials first: if clearing them fails, nothing is reset and the
+    // user is not left with default settings but surviving credentials.
+    await invoke("clear_saved_connection");
+    await invoke("save_settings", { json: defaults });
+  } catch (err) {
+    await showAlert("Reset Failed", friendlyError(err));
+    return false;
+  }
+  return true;
+}
+
+async function relaunchApp(): Promise<void> {
   try {
     await relaunch();
   } catch {

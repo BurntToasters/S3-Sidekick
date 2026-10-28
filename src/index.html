@@ -1247,6 +1247,18 @@
               >
                 About
               </button>
+              <button
+                type="button"
+                class="settings-tab settings-tab--reset"
+                id="settings-tab-reset"
+                data-settings-tab="reset"
+                role="tab"
+                aria-selected="false"
+                aria-controls="settings-panel-reset"
+                tabindex="-1"
+              >
+                Reset
+              </button>
             </div>
             <button
               type="button"
@@ -1330,12 +1342,53 @@
                   </label>
                 </div>
               </div>
-              <input
-                type="hidden"
-                id="setting-theme"
-                value="system"
-                aria-hidden="true"
-              />
+              <div class="setting-item">
+                <label for="setting-density">Density</label>
+                <select
+                  id="setting-density"
+                  class="field field--sm"
+                  aria-describedby="help-density"
+                >
+                  <option value="comfortable">Comfortable (default)</option>
+                  <option value="compact">Compact</option>
+                </select>
+                <p id="help-density" class="setting-description">
+                  Compact fits more rows on screen. Comfortable leaves more room
+                  around each row.
+                </p>
+              </div>
+              <div class="setting-item">
+                <label for="setting-size-units">Size units</label>
+                <select
+                  id="setting-size-units"
+                  class="field field--sm"
+                  aria-describedby="help-size-units"
+                >
+                  <option value="binary">Binary, KB labels (default)</option>
+                  <option value="decimal">Decimal (1 KB = 1000 B)</option>
+                  <option value="iec">Binary (KiB)</option>
+                </select>
+                <p id="help-size-units" class="setting-description">
+                  Sizes in the object list and info panels. Binary divides by
+                  1024; decimal divides by 1000.
+                </p>
+              </div>
+              <div class="setting-item">
+                <label for="setting-date-format">Date format</label>
+                <select
+                  id="setting-date-format"
+                  class="field field--sm"
+                  aria-describedby="help-date-format"
+                >
+                  <option value="locale">Locale format (default)</option>
+                  <option value="iso">ISO 8601 (YYYY-MM-DD HH:mm)</option>
+                  <option value="relative">Relative (3 min ago)</option>
+                </select>
+                <p id="help-date-format" class="setting-description">
+                  Dates in the object list and info panels. Relative times
+                  switch to the locale format after seven days.
+                </p>
+              </div>
             </div>
 
             <div
@@ -1354,30 +1407,19 @@
                   </label>
                 </div>
                 <div class="setting-item">
-                  <span class="setting-label">
-                    <label for="setting-update-channel">Update channel</label>
-                    <span class="setting-help-wrap"
-                      ><button
-                        type="button"
-                        class="setting-help"
-                        aria-label="Help: Update channel"
-                        aria-describedby="help-update-channel"
-                      >
-                        ?</button
-                      ><span
-                        id="help-update-channel"
-                        role="tooltip"
-                        class="setting-help__tip"
-                        >Stable follows published releases. Beta follows
-                        pre-release builds and also includes newer stable
-                        releases.</span
-                      ></span
-                    >
-                  </span>
-                  <select id="setting-update-channel" class="field field--sm">
+                  <label for="setting-update-channel">Update channel</label>
+                  <select
+                    id="setting-update-channel"
+                    class="field field--sm"
+                    aria-describedby="help-update-channel"
+                  >
                     <option value="release">Stable</option>
                     <option value="beta">Beta</option>
                   </select>
+                  <p id="help-update-channel" class="setting-description">
+                    Stable follows published releases. Beta follows pre-release
+                    builds and also includes newer stable releases.
+                  </p>
                 </div>
                 <div class="setting-item">
                   <span class="setting-label">Check for updates now</span>
@@ -1418,476 +1460,370 @@
               aria-labelledby="settings-tab-transfers"
               hidden
             >
-              <div class="setting-item">
-                <span class="setting-label">
+              <section
+                class="settings-group"
+                aria-labelledby="transfers-group-performance"
+              >
+                <h3 id="transfers-group-performance" class="setting-section">
+                  Performance
+                </h3>
+                <div class="setting-item">
                   <label for="setting-transfer-performance-preset"
                     >Performance preset</label
                   >
-                  <span class="setting-help-wrap"
-                    ><button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help: Performance preset"
-                      aria-describedby="help-transfer-performance"
-                    >
-                      ?</button
-                    ><span
-                      id="help-transfer-performance"
-                      role="tooltip"
-                      class="setting-help__tip"
-                      >Safe: low memory, slower. Balanced: default. Max: highest
-                      throughput, more memory and CPU.</span
-                    ></span
+                  <select
+                    id="setting-transfer-performance-preset"
+                    class="field field--sm"
+                    aria-describedby="help-transfer-performance"
                   >
-                </span>
-                <select
-                  id="setting-transfer-performance-preset"
-                  class="field field--sm"
-                >
-                  <option value="safe">Safe</option>
-                  <option value="balanced">Balanced (default)</option>
-                  <option value="max">Max</option>
-                </select>
-              </div>
-              <div class="setting-item">
-                <label for="setting-max-concurrent">Concurrent transfers</label>
-                <select id="setting-max-concurrent" class="field field--sm">
-                  <option value="1">1 (sequential)</option>
-                  <option value="2">2</option>
-                  <option value="3">3 (default)</option>
-                  <option value="5">5</option>
-                  <option value="8">8</option>
-                  <option value="10">10 (maximum)</option>
-                </select>
-              </div>
-              <div class="setting-item">
-                <label for="setting-conflict-policy">Conflict policy</label>
-                <select id="setting-conflict-policy" class="field field--sm">
-                  <option value="ask">Ask (default)</option>
-                  <option value="skip">Skip existing</option>
-                  <option value="replace">Replace existing</option>
-                </select>
-              </div>
-              <div class="setting-item">
-                <span class="setting-label">
+                    <option value="safe">Safe</option>
+                    <option value="balanced">Balanced (default)</option>
+                    <option value="max">Max</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  <p id="help-transfer-performance" class="setting-description">
+                    Safe uses less memory and runs slower. Balanced suits most
+                    transfers. Max gives the highest throughput, using more
+                    memory and CPU. Custom appears once an Advanced value no
+                    longer matches the preset.
+                  </p>
+                </div>
+                <div class="setting-item">
+                  <label for="setting-max-concurrent"
+                    >Concurrent transfers</label
+                  >
+                  <select id="setting-max-concurrent" class="field field--sm">
+                    <option value="1">1 (sequential)</option>
+                    <option value="2">2</option>
+                    <option value="3">3 (default)</option>
+                    <option value="5">5</option>
+                    <option value="8">8</option>
+                    <option value="10">10 (maximum)</option>
+                  </select>
+                </div>
+              </section>
+
+              <section
+                class="settings-group"
+                aria-labelledby="transfers-group-behavior"
+              >
+                <h3 id="transfers-group-behavior" class="setting-section">
+                  Behavior
+                </h3>
+                <div class="setting-item">
+                  <label for="setting-conflict-policy">Conflict policy</label>
+                  <select id="setting-conflict-policy" class="field field--sm">
+                    <option value="ask">Ask (default)</option>
+                    <option value="skip">Skip existing</option>
+                    <option value="replace">Replace existing</option>
+                  </select>
+                </div>
+                <div class="setting-item">
                   <label class="toggle-row">
                     <input
                       id="setting-confirm-unguarded-writes"
                       type="checkbox"
+                      aria-describedby="help-unguarded-writes"
                     />
                     <span>Warn before unconditional writes</span>
                   </label>
-                  <span class="setting-help-wrap"
-                    ><button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help: Warn before unconditional writes"
-                      aria-describedby="help-unguarded-writes"
-                    >
-                      ?</button
-                    ><span
-                      id="help-unguarded-writes"
-                      role="tooltip"
-                      class="setting-help__tip"
-                      >Some providers cannot enforce create-only writes, so
-                      another client could create the same key before a transfer
-                      finishes. When on, S3 Sidekick asks before writing to
-                      those providers.</span
-                    ></span
-                  >
-                </span>
-              </div>
-              <div class="setting-item">
-                <label class="toggle-row">
-                  <input
-                    id="setting-desktop-notifications"
-                    type="checkbox"
-                    aria-describedby="help-desktop-notifications"
-                  />
-                  <span>Desktop notifications</span>
-                </label>
-                <p id="help-desktop-notifications" class="setting-note">
-                  OS notifications for finished transfers and updates stop when
-                  this is off; in-app toasts still appear; the operating system
-                  can also block them.
-                </p>
-              </div>
-              <div class="setting-item">
-                <span class="setting-label">
-                  <label for="setting-bandwidth-limit-mbps"
-                    >Bandwidth cap</label
-                  >
-                  <span class="setting-help-wrap"
-                    ><button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help: Bandwidth cap"
-                      aria-describedby="help-bandwidth-cap"
-                    >
-                      ?</button
-                    ><span
-                      id="help-bandwidth-cap"
-                      role="tooltip"
-                      class="setting-help__tip"
-                      >Maximum total network speed used for transfers. Unlimited
-                      uses all available bandwidth.</span
-                    ></span
-                  >
-                </span>
-                <select
-                  id="setting-bandwidth-limit-mbps"
-                  class="field field--sm"
-                >
-                  <option value="0">Unlimited (default)</option>
-                  <option value="10">10 Mbps</option>
-                  <option value="25">25 Mbps</option>
-                  <option value="50">50 Mbps</option>
-                  <option value="100">100 Mbps</option>
-                  <option value="250">250 Mbps</option>
-                  <option value="500">500 Mbps</option>
-                  <option value="1000">1000 Mbps</option>
-                </select>
-              </div>
-              <div class="setting-item">
-                <label for="setting-transfer-retries">Transfer retries</label>
-                <select id="setting-transfer-retries" class="field field--sm">
-                  <option value="0">0 (disabled)</option>
-                  <option value="1">1</option>
-                  <option value="2">2</option>
-                  <option value="3">3 (default)</option>
-                  <option value="5">5</option>
-                  <option value="8">8</option>
-                  <option value="10">10 (maximum)</option>
-                </select>
-              </div>
-              <div class="setting-item">
-                <span class="setting-label">
-                  <label for="setting-transfer-retry-base-ms"
-                    >Retry base delay</label
-                  >
-                  <span class="setting-help-wrap"
-                    ><button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help: Retry delay"
-                      aria-describedby="help-retry-delay"
-                    >
-                      ?</button
-                    ><span
-                      id="help-retry-delay"
-                      role="tooltip"
-                      class="setting-help__tip"
-                      >Initial wait before the first retry. Each subsequent
-                      retry waits longer using exponential backoff.</span
-                    ></span
-                  >
-                </span>
-                <select
-                  id="setting-transfer-retry-base-ms"
-                  class="field field--sm"
-                >
-                  <option value="100">100 ms</option>
-                  <option value="200">200 ms</option>
-                  <option value="400">400 ms (default)</option>
-                  <option value="800">800 ms</option>
-                  <option value="1200">1200 ms</option>
-                  <option value="2000">2000 ms</option>
-                </select>
-              </div>
-
-              <button
-                type="button"
-                class="advanced-toggle"
-                id="transfers-advanced-toggle"
-                aria-expanded="false"
-                aria-controls="transfers-advanced"
-              >
-                <span class="advanced-toggle__caret" aria-hidden="true"
-                  >&#x25B8;</span
-                >
-                Advanced
-              </button>
-              <div class="advanced-group" id="transfers-advanced" hidden>
+                  <p id="help-unguarded-writes" class="setting-description">
+                    Some providers cannot enforce create-only writes, so another
+                    client could create the same key before a transfer finishes.
+                    When on, S3 Sidekick asks before writing to those providers.
+                  </p>
+                </div>
                 <div class="setting-item">
                   <label class="toggle-row">
                     <input
-                      id="setting-remember-download-path"
+                      id="setting-desktop-notifications"
                       type="checkbox"
+                      aria-describedby="help-desktop-notifications"
                     />
-                    <span>Remember last download folder</span>
+                    <span>Desktop notifications</span>
                   </label>
+                  <p
+                    id="help-desktop-notifications"
+                    class="setting-description"
+                  >
+                    OS notifications for finished transfers and updates stop
+                    when this is off; in-app toasts still appear; the operating
+                    system can also block them.
+                  </p>
+                </div>
+              </section>
+
+              <section
+                class="settings-group"
+                aria-labelledby="transfers-group-network"
+              >
+                <h3 id="transfers-group-network" class="setting-section">
+                  Network
+                </h3>
+                <div class="setting-item">
+                  <label for="setting-bandwidth-limit-mbps"
+                    >Bandwidth cap</label
+                  >
+                  <select
+                    id="setting-bandwidth-limit-mbps"
+                    class="field field--sm"
+                    aria-describedby="help-bandwidth-cap"
+                  >
+                    <option value="0">Unlimited (default)</option>
+                    <option value="10">10 Mbps</option>
+                    <option value="25">25 Mbps</option>
+                    <option value="50">50 Mbps</option>
+                    <option value="100">100 Mbps</option>
+                    <option value="250">250 Mbps</option>
+                    <option value="500">500 Mbps</option>
+                    <option value="1000">1000 Mbps</option>
+                  </select>
+                  <p id="help-bandwidth-cap" class="setting-description">
+                    Maximum total network speed used for transfers. Unlimited
+                    uses all available bandwidth.
+                  </p>
                 </div>
                 <div class="setting-item">
-                  <label class="toggle-row">
-                    <input id="setting-open-transfer-drawer" type="checkbox" />
-                    <span>Open transfer drawer when a transfer starts</span>
-                  </label>
+                  <label for="setting-transfer-retries">Transfer retries</label>
+                  <select id="setting-transfer-retries" class="field field--sm">
+                    <option value="0">0 (disabled)</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3 (default)</option>
+                    <option value="5">5</option>
+                    <option value="8">8</option>
+                    <option value="10">10 (maximum)</option>
+                  </select>
                 </div>
                 <div class="setting-item">
-                  <span class="setting-label">
+                  <label for="setting-transfer-retry-base-ms"
+                    >Retry base delay</label
+                  >
+                  <select
+                    id="setting-transfer-retry-base-ms"
+                    class="field field--sm"
+                    aria-describedby="help-retry-delay"
+                  >
+                    <option value="100">100 ms</option>
+                    <option value="200">200 ms</option>
+                    <option value="400">400 ms (default)</option>
+                    <option value="800">800 ms</option>
+                    <option value="1200">1200 ms</option>
+                    <option value="2000">2000 ms</option>
+                  </select>
+                  <p id="help-retry-delay" class="setting-description">
+                    Initial wait before the first retry. Each subsequent retry
+                    waits longer using exponential backoff.
+                  </p>
+                </div>
+              </section>
+
+              <section
+                class="settings-group settings-group--advanced"
+                aria-labelledby="transfers-advanced-toggle"
+              >
+                <h3 class="setting-section">
+                  <button
+                    type="button"
+                    class="advanced-toggle"
+                    id="transfers-advanced-toggle"
+                    aria-expanded="false"
+                    aria-controls="transfers-advanced"
+                  >
+                    <span class="advanced-toggle__caret" aria-hidden="true"
+                      >&#x25B8;</span
+                    >
+                    Advanced
+                  </button>
+                </h3>
+                <div class="advanced-group" id="transfers-advanced" hidden>
+                  <div class="setting-item">
+                    <label class="toggle-row">
+                      <input
+                        id="setting-remember-download-path"
+                        type="checkbox"
+                      />
+                      <span>Remember last download folder</span>
+                    </label>
+                  </div>
+                  <div class="setting-item">
+                    <label class="toggle-row">
+                      <input
+                        id="setting-open-transfer-drawer"
+                        type="checkbox"
+                      />
+                      <span>Open transfer drawer when a transfer starts</span>
+                    </label>
+                  </div>
+                  <div class="setting-item">
                     <label for="setting-download-parallel-threshold-mb"
                       >Parallel download threshold</label
                     >
-                    <span class="setting-help-wrap"
-                      ><button
-                        type="button"
-                        class="setting-help"
-                        aria-label="Help: Parallel download threshold"
-                        aria-describedby="help-parallel-threshold"
-                      >
-                        ?</button
-                      ><span
-                        id="help-parallel-threshold"
-                        role="tooltip"
-                        class="setting-help__tip"
-                        >Files larger than this use parallel range-GET
-                        downloads. Smaller files use a single request.</span
-                      ></span
+                    <select
+                      id="setting-download-parallel-threshold-mb"
+                      class="field field--sm"
+                      aria-describedby="help-parallel-threshold"
                     >
-                  </span>
-                  <select
-                    id="setting-download-parallel-threshold-mb"
-                    class="field field--sm"
-                  >
-                    <option value="32">32 MB</option>
-                    <option value="64">64 MB</option>
-                    <option value="128">128 MB (default)</option>
-                    <option value="256">256 MB</option>
-                    <option value="512">512 MB</option>
-                    <option value="1024">1024 MB</option>
-                  </select>
-                </div>
-                <div class="setting-item">
-                  <span class="setting-label">
+                      <option value="32">32 MB</option>
+                      <option value="64">64 MB</option>
+                      <option value="128">128 MB (default)</option>
+                      <option value="256">256 MB</option>
+                      <option value="512">512 MB</option>
+                      <option value="1024">1024 MB</option>
+                    </select>
+                    <p id="help-parallel-threshold" class="setting-description">
+                      Files larger than this use parallel range-GET downloads.
+                      Smaller files use a single request.
+                    </p>
+                  </div>
+                  <div class="setting-item">
                     <label for="setting-download-part-size-mb"
                       >Download part size</label
                     >
-                    <span class="setting-help-wrap"
-                      ><button
-                        type="button"
-                        class="setting-help"
-                        aria-label="Help: Download part size"
-                        aria-describedby="help-download-part-size"
-                      >
-                        ?</button
-                      ><span
-                        id="help-download-part-size"
-                        role="tooltip"
-                        class="setting-help__tip"
-                        >Size of each range-GET chunk for parallel downloads.
-                        Larger = fewer requests, more memory per part.</span
-                      ></span
+                    <select
+                      id="setting-download-part-size-mb"
+                      class="field field--sm"
+                      aria-describedby="help-download-part-size"
                     >
-                  </span>
-                  <select
-                    id="setting-download-part-size-mb"
-                    class="field field--sm"
-                  >
-                    <option value="16">16 MB</option>
-                    <option value="24">24 MB</option>
-                    <option value="32">32 MB (default)</option>
-                    <option value="48">48 MB</option>
-                    <option value="64">64 MB</option>
-                    <option value="96">96 MB</option>
-                    <option value="128">128 MB</option>
-                  </select>
-                </div>
-                <div class="setting-item">
-                  <span class="setting-label">
+                      <option value="16">16 MB</option>
+                      <option value="24">24 MB</option>
+                      <option value="32">32 MB (default)</option>
+                      <option value="48">48 MB</option>
+                      <option value="64">64 MB</option>
+                      <option value="96">96 MB</option>
+                      <option value="128">128 MB</option>
+                    </select>
+                    <p id="help-download-part-size" class="setting-description">
+                      Size of each range-GET chunk for parallel downloads.
+                      Larger = fewer requests, more memory per part.
+                    </p>
+                  </div>
+                  <div class="setting-item">
                     <label for="setting-download-part-concurrency"
                       >Download part concurrency</label
                     >
-                    <span class="setting-help-wrap"
-                      ><button
-                        type="button"
-                        class="setting-help"
-                        aria-label="Help: Download part concurrency"
-                        aria-describedby="help-download-part-concurrency"
-                      >
-                        ?</button
-                      ><span
-                        id="help-download-part-concurrency"
-                        role="tooltip"
-                        class="setting-help__tip"
-                        >How many parts of a single file are downloaded in
-                        parallel.</span
-                      ></span
+                    <select
+                      id="setting-download-part-concurrency"
+                      class="field field--sm"
+                      aria-describedby="help-download-part-concurrency"
                     >
-                  </span>
-                  <select
-                    id="setting-download-part-concurrency"
-                    class="field field--sm"
-                  >
-                    <option value="1">1</option>
-                    <option value="2">2</option>
-                    <option value="4">4</option>
-                    <option value="6">6 (default)</option>
-                    <option value="8">8</option>
-                    <option value="10">10</option>
-                    <option value="12">12</option>
-                    <option value="16">16</option>
-                  </select>
-                </div>
-                <div class="setting-item">
-                  <span class="setting-label">
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="4">4</option>
+                      <option value="6">6 (default)</option>
+                      <option value="8">8</option>
+                      <option value="10">10</option>
+                      <option value="12">12</option>
+                      <option value="16">16</option>
+                    </select>
+                    <p
+                      id="help-download-part-concurrency"
+                      class="setting-description"
+                    >
+                      How many parts of a single file are downloaded in
+                      parallel.
+                    </p>
+                  </div>
+                  <div class="setting-item">
                     <label for="setting-upload-part-size-mb"
                       >Upload part size</label
                     >
-                    <span class="setting-help-wrap"
-                      ><button
-                        type="button"
-                        class="setting-help"
-                        aria-label="Help: Upload part size"
-                        aria-describedby="help-upload-part-size"
-                      >
-                        ?</button
-                      ><span
-                        id="help-upload-part-size"
-                        role="tooltip"
-                        class="setting-help__tip"
-                        >Size of each multipart upload chunk. Larger = fewer
-                        requests, more memory per part.</span
-                      ></span
+                    <select
+                      id="setting-upload-part-size-mb"
+                      class="field field--sm"
+                      aria-describedby="help-upload-part-size"
                     >
-                  </span>
-                  <select
-                    id="setting-upload-part-size-mb"
-                    class="field field--sm"
-                  >
-                    <option value="16">16 MB</option>
-                    <option value="24">24 MB</option>
-                    <option value="32">32 MB (default)</option>
-                    <option value="48">48 MB</option>
-                    <option value="64">64 MB</option>
-                    <option value="96">96 MB</option>
-                    <option value="128">128 MB</option>
-                  </select>
-                </div>
-                <div class="setting-item">
-                  <span class="setting-label">
+                      <option value="16">16 MB</option>
+                      <option value="24">24 MB</option>
+                      <option value="32">32 MB (default)</option>
+                      <option value="48">48 MB</option>
+                      <option value="64">64 MB</option>
+                      <option value="96">96 MB</option>
+                      <option value="128">128 MB</option>
+                    </select>
+                    <p id="help-upload-part-size" class="setting-description">
+                      Size of each multipart upload chunk. Larger = fewer
+                      requests, more memory per part.
+                    </p>
+                  </div>
+                  <div class="setting-item">
                     <label for="setting-upload-part-concurrency"
                       >Upload part concurrency</label
                     >
-                    <span class="setting-help-wrap"
-                      ><button
-                        type="button"
-                        class="setting-help"
-                        aria-label="Help: Upload part concurrency"
-                        aria-describedby="help-upload-part-concurrency"
-                      >
-                        ?</button
-                      ><span
-                        id="help-upload-part-concurrency"
-                        role="tooltip"
-                        class="setting-help__tip"
-                        >How many parts of a single file are uploaded in
-                        parallel.</span
-                      ></span
+                    <select
+                      id="setting-upload-part-concurrency"
+                      class="field field--sm"
+                      aria-describedby="help-upload-part-concurrency"
                     >
-                  </span>
-                  <select
-                    id="setting-upload-part-concurrency"
-                    class="field field--sm"
-                  >
-                    <option value="1">1</option>
-                    <option value="2">2</option>
-                    <option value="4">4</option>
-                    <option value="6">6 (default)</option>
-                    <option value="8">8</option>
-                    <option value="10">10</option>
-                    <option value="12">12</option>
-                    <option value="16">16</option>
-                  </select>
-                </div>
-                <div class="setting-item">
-                  <span class="setting-label">
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="4">4</option>
+                      <option value="6">6 (default)</option>
+                      <option value="8">8</option>
+                      <option value="10">10</option>
+                      <option value="12">12</option>
+                      <option value="16">16</option>
+                    </select>
+                    <p
+                      id="help-upload-part-concurrency"
+                      class="setting-description"
+                    >
+                      How many parts of a single file are uploaded in parallel.
+                    </p>
+                  </div>
+                  <div class="setting-item">
                     <label class="toggle-row">
                       <input
                         id="setting-enable-transfer-resume"
                         type="checkbox"
+                        aria-describedby="help-resume-downloads"
                       />
                       <span>Enable resumable large downloads</span>
                     </label>
-                    <span class="setting-help-wrap"
-                      ><button
-                        type="button"
-                        class="setting-help"
-                        aria-label="Help: Resume interrupted downloads"
-                        aria-describedby="help-resume-downloads"
-                      >
-                        ?</button
-                      ><span
-                        id="help-resume-downloads"
-                        role="tooltip"
-                        class="setting-help__tip"
-                        >Save progress for large multipart downloads so an
-                        interrupted transfer can resume from where it
-                        stopped.</span
-                      ></span
-                    >
-                  </span>
-                </div>
-                <div class="setting-item">
-                  <span class="setting-label">
+                    <p id="help-resume-downloads" class="setting-description">
+                      Save progress for large multipart downloads so an
+                      interrupted transfer can resume from where it stopped.
+                    </p>
+                  </div>
+                  <div class="setting-item">
                     <label class="toggle-row">
                       <input
                         id="setting-enable-transfer-checksum-verification"
                         type="checkbox"
+                        aria-describedby="help-verify-checksums"
                       />
                       <span>Verify transfer checksums when available</span>
                     </label>
-                    <span class="setting-help-wrap"
-                      ><button
-                        type="button"
-                        class="setting-help"
-                        aria-label="Help: Verify checksums"
-                        aria-describedby="help-verify-checksums"
-                      >
-                        ?</button
-                      ><span
-                        id="help-verify-checksums"
-                        role="tooltip"
-                        class="setting-help__tip"
-                        >Compare an integrity checksum after each transfer when
-                        the server provides one. Adds slight CPU cost.</span
-                      ></span
-                    >
-                  </span>
-                </div>
-                <div class="setting-item">
-                  <span class="setting-label">
+                    <p id="help-verify-checksums" class="setting-description">
+                      Compare an integrity checksum after each transfer when the
+                      server provides one. Adds slight CPU cost.
+                    </p>
+                  </div>
+                  <div class="setting-item">
                     <label for="setting-transfer-checkpoint-ttl-hours"
                       >Checkpoint retention</label
                     >
-                    <span class="setting-help-wrap"
-                      ><button
-                        type="button"
-                        class="setting-help"
-                        aria-label="Help: Checkpoint retention"
-                        aria-describedby="help-checkpoint-retention"
-                      >
-                        ?</button
-                      ><span
-                        id="help-checkpoint-retention"
-                        role="tooltip"
-                        class="setting-help__tip"
-                        >How long to keep resume checkpoints on disk before
-                        discarding them.</span
-                      ></span
+                    <select
+                      id="setting-transfer-checkpoint-ttl-hours"
+                      class="field field--sm"
+                      aria-describedby="help-checkpoint-retention"
                     >
-                  </span>
-                  <select
-                    id="setting-transfer-checkpoint-ttl-hours"
-                    class="field field--sm"
-                  >
-                    <option value="24">24 hours</option>
-                    <option value="72">72 hours</option>
-                    <option value="168">7 days (default)</option>
-                    <option value="336">14 days</option>
-                    <option value="720">30 days</option>
-                  </select>
+                      <option value="24">24 hours</option>
+                      <option value="72">72 hours</option>
+                      <option value="168">7 days (default)</option>
+                      <option value="336">14 days</option>
+                      <option value="720">30 days</option>
+                    </select>
+                    <p
+                      id="help-checkpoint-retention"
+                      class="setting-description"
+                    >
+                      How long to keep resume checkpoints on disk before
+                      discarding them.
+                    </p>
+                  </div>
                 </div>
-              </div>
+              </section>
             </div>
 
             <div
@@ -1899,30 +1835,13 @@
               hidden
             >
               <div class="setting-item">
-                <span class="setting-label">
-                  <label for="setting-presigned-expiration"
-                    >Pre-signed URL expiration</label
-                  >
-                  <span class="setting-help-wrap"
-                    ><button
-                      type="button"
-                      class="setting-help"
-                      aria-label="Help: Share link expiration"
-                      aria-describedby="help-link-expiration"
-                    >
-                      ?</button
-                    ><span
-                      id="help-link-expiration"
-                      role="tooltip"
-                      class="setting-help__tip"
-                      >How long generated share links stay valid before
-                      expiring.</span
-                    ></span
-                  >
-                </span>
+                <label for="setting-presigned-expiration"
+                  >Pre-signed URL expiration</label
+                >
                 <select
                   id="setting-presigned-expiration"
                   class="field field--sm"
+                  aria-describedby="help-link-expiration"
                 >
                   <option value="300">5 minutes</option>
                   <option value="900">15 minutes</option>
@@ -1932,6 +1851,9 @@
                   <option value="86400">24 hours</option>
                   <option value="604800">7 days</option>
                 </select>
+                <p id="help-link-expiration" class="setting-description">
+                  How long generated share links stay valid before expiring.
+                </p>
               </div>
             </div>
 
@@ -2203,19 +2125,36 @@
                   View
                 </button>
               </div>
-              <div class="setting-section">Danger Zone</div>
-              <div class="setting-item">
-                <span class="setting-label"
-                  >Reset all settings to defaults</span
-                >
-                <button
-                  type="button"
-                  id="settings-reset"
-                  class="btn btn--danger"
-                >
-                  Reset
-                </button>
-              </div>
+            </div>
+
+            <div
+              class="settings-panel"
+              id="settings-panel-reset"
+              data-settings-panel="reset"
+              role="tabpanel"
+              aria-labelledby="settings-tab-reset"
+              hidden
+            >
+              <section class="settings-group" aria-labelledby="reset-heading">
+                <h3 id="reset-heading" class="setting-section">Reset</h3>
+                <div class="setting-item">
+                  <span id="settings-reset-label" class="setting-label"
+                    >Reset all settings</span
+                  >
+                  <button
+                    type="button"
+                    id="settings-reset"
+                    class="btn btn--danger"
+                    aria-describedby="settings-reset-help"
+                  >
+                    Reset
+                  </button>
+                  <p id="settings-reset-help" class="setting-description">
+                    Returns every setting to its starting value and restarts the
+                    app. Next you choose whether to keep saved connections.
+                  </p>
+                </div>
+              </section>
             </div>
 
             <div

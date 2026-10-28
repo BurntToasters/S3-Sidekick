@@ -61,7 +61,7 @@ test("Escape on Reset Scope cancels without a partial reset and focuses Cancel",
   });
   await page.goto("/");
   await openSettings(page);
-  await page.locator("#settings-tab-about").click();
+  await page.locator("#settings-tab-reset").click();
   await page.locator("#settings-reset").click();
   await expect(dialog(page)).toHaveClass(/active/);
   await page.locator("#dialog-ok").click(); // "Continue" on Reset Settings
@@ -131,7 +131,7 @@ test("Check now keeps Settings open while the update check runs", async ({
   await expect(page.locator("#settings-overlay")).toHaveClass(/active/);
 });
 
-test("Help buttons expose specific names and their text via aria-describedby", async ({
+test("Settings descriptions are visible text linked to their control, not hover help", async ({
   page,
 }) => {
   await installLayoutTauriMock(page, { objectCount: 0, prefixes: [] });
@@ -139,21 +139,16 @@ test("Help buttons expose specific names and their text via aria-describedby", a
   await openSettings(page);
   await page.locator("#settings-tab-updates").click();
 
-  const help = page.getByRole("button", { name: "Help: Update channel" });
-  await expect(help).toBeVisible();
-  const describedBy = await help.getAttribute("aria-describedby");
+  const channel = page.locator("#setting-update-channel");
+  const describedBy = await channel.getAttribute("aria-describedby");
   expect(describedBy).toBeTruthy();
-  const text = await page.evaluate(
-    (id) => document.getElementById(id as string)?.textContent?.trim() ?? "",
-    describedBy,
-  );
-  expect(text).toMatch(/Beta/);
-  const box = await help.boundingBox();
-  expect(box?.width ?? 0).toBeGreaterThanOrEqual(24);
-  expect(box?.height ?? 0).toBeGreaterThanOrEqual(24);
+  const description = page.locator(`#${describedBy}`);
+  await expect(description).toBeVisible();
+  await expect(description).toContainText(/Beta/);
+  await expect(page.locator("#settings-overlay .setting-help")).toHaveCount(0);
 });
 
-test("Settings help tooltip text meets 4.5:1 contrast in the light theme", async ({
+test("Settings description text meets 4.5:1 contrast in the light theme", async ({
   page,
 }) => {
   await installLayoutTauriMock(page, {
@@ -166,9 +161,7 @@ test("Settings help tooltip text meets 4.5:1 contrast in the light theme", async
   await page.locator("#settings-tab-updates").click();
 
   const ratio = await page.evaluate(() => {
-    const help = document.querySelector<HTMLElement>(".setting-help");
-    const describedBy = help?.getAttribute("aria-describedby") ?? "";
-    const tip = document.getElementById(describedBy);
+    const tip = document.getElementById("help-update-channel");
     if (!tip) return -1;
     const parse = (value: string): [number, number, number, number] => {
       const match = value.match(/[\d.]+/g)?.map(Number) ?? [];
@@ -183,8 +176,14 @@ test("Settings help tooltip text meets 4.5:1 contrast in the light theme", async
     };
     const style = getComputedStyle(tip);
     const fg = parse(style.color);
-    const bg = parse(style.backgroundColor);
-    if (bg[3] < 1) return -2;
+    // A description paints no fill, so it reads against the nearest opaque ancestor.
+    let host: HTMLElement | null = tip;
+    let bg = parse(style.backgroundColor);
+    while (host && bg[3] < 1) {
+      host = host.parentElement;
+      if (host) bg = parse(getComputedStyle(host).backgroundColor);
+    }
+    if (!host || bg[3] < 1) return -2;
     const a = luminance(fg);
     const b = luminance(bg);
     const [hi, lo] = a > b ? [a, b] : [b, a];

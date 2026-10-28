@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   plural,
   $,
@@ -8,6 +8,7 @@ import {
   safeHref,
   formatSize,
   formatDate,
+  setFormatPreferences,
   basename,
   isEditableElement,
   getIconHtml,
@@ -450,5 +451,68 @@ describe("friendlyError internal failures", () => {
     expect(friendlyError("Bucket policy rejected the request")).toBe(
       "Bucket policy rejected the request",
     );
+  });
+});
+
+describe("display format preferences", () => {
+  afterEach(() => {
+    setFormatPreferences({ sizeUnits: "binary", dateFormat: "locale" });
+    vi.useRealTimers();
+  });
+
+  it("keeps the default size output byte-for-byte", () => {
+    setFormatPreferences({ sizeUnits: "binary", dateFormat: "locale" });
+    expect(formatSize(1536)).toBe("1.5 KB");
+    expect(formatSize(4608)).toBe("4.5 KB");
+    expect(formatSize(1048576)).toBe("1.0 MB");
+  });
+
+  it("decimal size units divide by 1000 and keep KB labels", () => {
+    setFormatPreferences({ sizeUnits: "decimal", dateFormat: "locale" });
+    expect(formatSize(0)).toBe("0 B");
+    expect(formatSize(999)).toBe("999 B");
+    expect(formatSize(1500)).toBe("1.5 KB");
+    expect(formatSize(1990)).toBe("2.0 KB");
+    expect(formatSize(4608)).toBe("4.6 KB");
+    expect(formatSize(1_000_000_000)).toBe("1.0 GB");
+    expect(formatSize(-1)).toBe("\u2014");
+  });
+
+  it("IEC size units divide by 1024 and label KiB and MiB", () => {
+    setFormatPreferences({ sizeUnits: "iec", dateFormat: "locale" });
+    expect(formatSize(512)).toBe("512 B");
+    expect(formatSize(1536)).toBe("1.5 KiB");
+    expect(formatSize(1048576)).toBe("1.0 MiB");
+  });
+
+  it("ISO date format prints local YYYY-MM-DD HH:mm", () => {
+    setFormatPreferences({ sizeUnits: "binary", dateFormat: "iso" });
+    const iso = new Date(2024, 0, 15, 9, 5).toISOString();
+    expect(formatDate(iso)).toBe("2024-01-15 09:05");
+    expect(formatDate("")).toBe("\u2014");
+    expect(formatDate("not-a-date")).toBe("not-a-date");
+  });
+
+  it("relative date format reads recent times and falls back past seven days", () => {
+    setFormatPreferences({ sizeUnits: "binary", dateFormat: "relative" });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2024, 0, 15, 12, 0));
+    expect(formatDate(new Date(2024, 0, 15, 11, 57).toISOString())).toBe(
+      "3 min ago",
+    );
+    expect(formatDate(new Date(2024, 0, 15, 11, 59, 30).toISOString())).toBe(
+      "just now",
+    );
+    expect(formatDate(new Date(2024, 0, 15, 10, 0).toISOString())).toBe(
+      "2 h ago",
+    );
+    expect(formatDate(new Date(2024, 0, 12, 12, 0).toISOString())).toBe(
+      "3 d ago",
+    );
+    const old = new Date(2024, 0, 1, 12, 0);
+    setFormatPreferences({ sizeUnits: "binary", dateFormat: "locale" });
+    const localeText = formatDate(old.toISOString());
+    setFormatPreferences({ sizeUnits: "binary", dateFormat: "relative" });
+    expect(formatDate(old.toISOString())).toBe(localeText);
   });
 });

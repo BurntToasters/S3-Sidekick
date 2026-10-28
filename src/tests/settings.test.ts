@@ -215,7 +215,7 @@ describe("settings module", () => {
       </div>
       <div class="settings-panel" data-settings-panel="general"></div>
       <div class="settings-panel" data-settings-panel="bookmarks"></div>
-      <select id="setting-theme"><option value="system">system</option><option value="dark" selected>dark</option></select>
+      <input type="radio" name="theme" value="dark" checked />
       <input id="setting-updates" type="checkbox" />
       <select id="setting-update-channel"><option value="release">release</option><option value="beta" selected>beta</option></select>
       <select id="setting-presigned-expiration"><option value="120" selected>120</option></select>
@@ -252,7 +252,7 @@ describe("settings module", () => {
 
   it("normalizes invalid modal values and defaults update channel", async () => {
     document.body.innerHTML = `
-      <select id="setting-theme"><option value="system">system</option><option value="light" selected>light</option></select>
+      <input type="radio" name="theme" value="light" checked />
       <input id="setting-updates" type="checkbox" checked />
       <select id="setting-update-channel"><option value="invalid" selected>invalid</option></select>
       <select id="setting-presigned-expiration"><option value="30" selected>30</option></select>
@@ -365,10 +365,6 @@ describe("settings module", () => {
       <div id="status"></div>
       <div id="settings-overlay" class="modal-overlay active"></div>
       <button id="settings-save">Save</button>
-      <select id="setting-theme">
-        <option value="light">light</option>
-        <option value="dark" selected>dark</option>
-      </select>
       <input id="setting-updates" type="checkbox" checked />
       <select id="setting-update-channel"><option value="release" selected>release</option></select>
       <select id="setting-presigned-expiration"><option value="3600" selected>3600</option></select>
@@ -1397,7 +1393,6 @@ describe("settings module", () => {
   it("wires theme radios, cards, and advanced transfer toggle", async () => {
     document.body.innerHTML = `
       <div id="settings-overlay" class="modal-overlay"></div>
-      <input id="setting-theme" value="system" />
       <input type="radio" name="theme" value="system" checked />
       <input type="radio" name="theme" value="light" />
       <input type="radio" name="theme" value="invalid-radio" />
@@ -1444,9 +1439,6 @@ describe("settings module", () => {
     lightRadio.checked = true;
     lightRadio.dispatchEvent(new Event("change", { bubbles: true }));
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
-    expect(
-      (document.getElementById("setting-theme") as HTMLInputElement).value,
-    ).toBe("light");
 
     // Invalid radio value is ignored.
     const invalid = document.querySelector(
@@ -1622,9 +1614,9 @@ describe("settings module", () => {
     expect(state.currentSettings.bandwidthLimitMbps).toBe(100);
   });
 
-  it("falls back to hidden theme input and normalizes conflict/preset values", async () => {
+  it("reads the theme radio and normalizes conflict/preset values", async () => {
     document.body.innerHTML = `
-      <input id="setting-theme" value="light" />
+      <input type="radio" name="theme" value="light" checked />
       <select id="setting-conflict-policy"><option value="weird" selected>weird</option></select>
       <select id="setting-transfer-performance-preset"><option value="weird" selected>weird</option></select>
       <select id="setting-transfer-retries"><option value="99" selected>99</option></select>
@@ -1653,7 +1645,7 @@ describe("settings module", () => {
   it("populates every settings control from state", async () => {
     document.body.innerHTML = `
       <div id="settings-overlay" class="modal-overlay"></div>
-      <select id="setting-theme"><option value="dark">dark</option></select>
+      <input type="radio" name="theme" value="dark" />
       <input id="setting-updates" type="checkbox" />
       <select id="setting-update-channel"><option value="beta">beta</option></select>
       <select id="setting-presigned-expiration"><option value="900">900</option></select>
@@ -1720,8 +1712,12 @@ describe("settings module", () => {
     await flushMicrotasks();
 
     expect(
-      (document.getElementById("setting-theme") as HTMLSelectElement).value,
-    ).toBe("dark");
+      (
+        document.querySelector(
+          'input[name="theme"][value="dark"]',
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
     expect(
       (document.getElementById("setting-updates") as HTMLInputElement).checked,
     ).toBe(false);
@@ -1750,6 +1746,252 @@ describe("settings module", () => {
     expect(
       (document.getElementById("settings-version") as HTMLElement).textContent,
     ).toBe("v0.6.0");
+  });
+
+  it("resetAfterForgottenPassword explains the erased vault and does nothing unless confirmed", async () => {
+    const settings = await import("../settings.ts");
+    mockShowConfirm.mockResolvedValueOnce(false);
+
+    await settings.resetAfterForgottenPassword();
+
+    expect(mockShowConfirm).toHaveBeenCalledTimes(1);
+    const [, message] = mockShowConfirm.mock.calls[0] as [string, string];
+    expect(message).toMatch(/encrypted vault/);
+    expect(message).toMatch(/saved connections/);
+    expect(mockShowChoiceDialog).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("resetAfterForgottenPassword runs one factory reset after the final confirmation", async () => {
+    const settings = await import("../settings.ts");
+    localStorage.setItem("s3-sidekick.transfer-manifest.v1", "plaintext");
+    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+    mockInvoke.mockResolvedValue(undefined);
+    mockRelaunch.mockResolvedValue(undefined);
+
+    await settings.resetAfterForgottenPassword();
+
+    expect(mockShowConfirm).toHaveBeenCalledTimes(2);
+    expect(mockShowChoiceDialog).not.toHaveBeenCalled();
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("factory_reset", {
+      settingsJson: expect.stringContaining('"theme": "system"'),
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("clear_saved_connection");
+    expect(localStorage.length).toBe(0);
+    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("resetAfterForgottenPassword resets nothing when the final confirmation is declined", async () => {
+    const settings = await import("../settings.ts");
+    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    await settings.resetAfterForgottenPassword();
+
+    expect(mockInvoke).not.toHaveBeenCalled();
+    expect(mockRelaunch).not.toHaveBeenCalled();
+  });
+
+  it("resetAfterForgottenPassword alerts and does not relaunch when the factory reset fails", async () => {
+    const settings = await import("../settings.ts");
+    mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+    mockInvoke.mockRejectedValueOnce(new Error("disk locked"));
+
+    await settings.resetAfterForgottenPassword();
+
+    expect(mockShowAlert).toHaveBeenCalledWith(
+      "Factory Reset Failed",
+      expect.any(String),
+    );
+    expect(mockRelaunch).not.toHaveBeenCalled();
+  });
+
+  it("the Discard changes prompt offers Save and saves the draft", async () => {
+    document.body.innerHTML = `
+      <div id="settings-overlay" class="modal-overlay active"></div>
+      <select id="setting-max-concurrent"><option value="3" selected>3</option><option value="5">5</option></select>
+    `;
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    (
+      document.getElementById("setting-max-concurrent") as HTMLSelectElement
+    ).value = "5";
+    mockShowChoiceDialog.mockResolvedValueOnce("save");
+    mockInvoke.mockResolvedValue(undefined);
+
+    await settings.closeSettingsModal(false);
+
+    const choices = mockShowChoiceDialog.mock.calls[0]?.[2] as {
+      value: string;
+      label: string;
+    }[];
+    expect(choices.map((choice) => choice.label)).toContain("Save");
+    expect(mockInvoke).toHaveBeenCalledWith("save_settings", {
+      json: expect.stringContaining('"maxConcurrentTransfers": 5'),
+    });
+    expect(state.lastPersistedSettings.maxConcurrentTransfers).toBe(5);
+    expect(
+      document.getElementById("settings-overlay")?.classList.contains("active"),
+    ).toBe(false);
+  });
+
+  it("search ignores option text and matches labels, descriptions and section headings", async () => {
+    document.body.innerHTML = `
+      <div class="settings-tabs">
+        <button class="settings-tab settings-tab--active" data-settings-tab="transfers">Transfers</button>
+      </div>
+      <div class="settings-panel" data-settings-panel="transfers">
+        <div class="setting-item"><label for="a">Concurrent transfers</label><select id="a"><option>Balanced (default)</option></select></div>
+        <section class="settings-group">
+          <h3 class="setting-section">Network</h3>
+          <div class="setting-item"><label for="b">Bandwidth cap</label><select id="b"><option>Unlimited</option></select>
+            <p class="setting-description">Maximum total speed.</p></div>
+        </section>
+      </div>
+      <div class="settings-panel" data-settings-panel="__search" hidden>
+        <div class="settings-search-empty" hidden>No results</div>
+      </div>
+    `;
+    const settings = await import("../settings.ts");
+
+    settings.updateSettingsSearch("default");
+    expect(document.querySelectorAll(".settings-search-group").length).toBe(0);
+    expect(
+      (document.querySelector(".settings-search-empty") as HTMLElement).hidden,
+    ).toBe(false);
+
+    settings.updateSettingsSearch("network");
+    expect(
+      document.querySelectorAll(".settings-search-group .setting-item").length,
+    ).toBe(1);
+
+    settings.updateSettingsSearch("maximum total");
+    expect(
+      document.querySelectorAll(".settings-search-group .setting-item").length,
+    ).toBe(1);
+    expect(
+      document.querySelector(".settings-search-group .setting-item label")
+        ?.textContent,
+    ).toBe("Bandwidth cap");
+  });
+
+  it("keeps Save reachable whenever an explicit-save setting is visible or dirty", async () => {
+    document.body.innerHTML = `
+      <div id="settings-overlay" class="modal-overlay active">
+        <div class="modal__footer" id="footer"></div>
+        <div class="settings-tabs">
+          <button class="settings-tab settings-tab--active" data-settings-tab="transfers">T</button>
+          <button class="settings-tab" data-settings-tab="security">S</button>
+        </div>
+        <div class="settings-panel" data-settings-panel="transfers">
+          <div class="setting-item"><label>Concurrent transfers</label>
+            <select id="setting-max-concurrent"><option value="3" selected>3</option><option value="5">5</option></select></div>
+        </div>
+        <div class="settings-panel" data-settings-panel="security" hidden>
+          <div class="setting-item"><label>Auto-lock after inactivity</label></div>
+        </div>
+        <div class="settings-panel" data-settings-panel="__search" hidden>
+          <div class="settings-search-empty" hidden>No results</div>
+        </div>
+      </div>
+    `;
+    const settings = await import("../settings.ts");
+    const footer = document.getElementById("footer") as HTMLElement;
+
+    settings.switchSettingsTab("security");
+    expect(footer.hidden).toBe(true);
+
+    settings.updateSettingsSearch("concurrent");
+    expect(footer.hidden).toBe(false);
+
+    settings.updateSettingsSearch("inactivity");
+    expect(footer.hidden).toBe(true);
+
+    settings.updateSettingsSearch("");
+    expect(footer.hidden).toBe(true);
+
+    settings.switchSettingsTab("transfers");
+    expect(footer.hidden).toBe(false);
+    (
+      document.getElementById("setting-max-concurrent") as HTMLSelectElement
+    ).value = "5";
+    settings.switchSettingsTab("security");
+    expect(footer.hidden).toBe(false);
+  });
+
+  it("applies density at startup and previews it on change until Cancel reverts it", async () => {
+    mockInvoke.mockResolvedValueOnce(JSON.stringify({ density: "compact" }));
+    const settings = await import("../settings.ts");
+    await settings.loadSettings();
+    expect(document.documentElement.dataset.density).toBe("compact");
+
+    document.body.innerHTML = `
+      <div id="settings-overlay" class="modal-overlay active"></div>
+      <select id="setting-density">
+        <option value="comfortable">Comfortable</option>
+        <option value="compact">Compact</option>
+      </select>
+    `;
+    const { state } = await import("../state.ts");
+    state.currentSettings = { ...SETTING_DEFAULTS };
+    state.lastPersistedSettings = { ...SETTING_DEFAULTS };
+    settings.populateSettingsModal();
+    const density = document.getElementById(
+      "setting-density",
+    ) as HTMLSelectElement;
+    density.value = "compact";
+    density.dispatchEvent(new Event("change"));
+    expect(document.documentElement.dataset.density).toBe("compact");
+
+    mockShowChoiceDialog.mockResolvedValueOnce("discard");
+    await settings.closeSettingsModal(false);
+    expect(document.documentElement.dataset.density).toBe("comfortable");
+  });
+
+  it("shows Custom when an Advanced value stops matching the chosen preset", async () => {
+    document.body.innerHTML = `
+      <div id="settings-overlay" class="modal-overlay"></div>
+      <select id="setting-transfer-performance-preset">
+        <option value="safe">safe</option><option value="balanced">balanced</option><option value="max">max</option><option value="custom">Custom</option>
+      </select>
+      <select id="setting-download-parallel-threshold-mb"><option value="128" selected>128</option><option value="256">256</option><option value="64">64</option></select>
+      <select id="setting-download-part-size-mb"><option value="32" selected>32</option><option value="16">16</option></select>
+      <select id="setting-download-part-concurrency"><option value="6" selected>6</option><option value="2">2</option></select>
+      <select id="setting-upload-part-size-mb"><option value="32" selected>32</option><option value="16">16</option></select>
+      <select id="setting-upload-part-concurrency"><option value="6" selected>6</option><option value="2">2</option></select>
+    `;
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    const preset = document.getElementById(
+      "setting-transfer-performance-preset",
+    ) as HTMLSelectElement;
+    const threshold = document.getElementById(
+      "setting-download-parallel-threshold-mb",
+    ) as HTMLSelectElement;
+
+    state.currentSettings = { ...SETTING_DEFAULTS };
+    state.lastPersistedSettings = { ...SETTING_DEFAULTS };
+    settings.populateSettingsModal();
+    expect(preset.value).toBe("balanced");
+
+    threshold.value = "256";
+    threshold.dispatchEvent(new Event("change"));
+    expect(preset.value).toBe("custom");
+
+    settings.readSettingsModal();
+    expect(state.currentSettings.transferPerformancePreset).toBe("balanced");
+
+    state.currentSettings = {
+      ...SETTING_DEFAULTS,
+      downloadParallelThresholdMb: 256,
+    };
+    settings.populateSettingsModal();
+    expect(preset.value).toBe("custom");
+
+    preset.value = "safe";
+    preset.dispatchEvent(new Event("change"));
+    expect(threshold.value).toBe("256");
+    expect(preset.value).toBe("safe");
   });
 });
 

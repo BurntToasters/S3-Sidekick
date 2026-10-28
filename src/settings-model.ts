@@ -3,8 +3,21 @@ export type UpdateChannel = "release" | "beta";
 export type ConflictPolicy = "ask" | "skip" | "replace";
 export type TransferPerformancePreset = "safe" | "balanced" | "max";
 
+/** Value lists start with the default, which the normalizers fall back to. */
+export const DENSITY_VALUES = ["comfortable", "compact"] as const;
+export const SIZE_UNIT_VALUES = ["binary", "decimal", "iec"] as const;
+export const DATE_FORMAT_VALUES = ["locale", "iso", "relative"] as const;
+
+export type Density = (typeof DENSITY_VALUES)[number];
+/** binary: 1024 with KB labels; decimal: 1000 with KB labels; iec: 1024 with KiB labels. */
+export type SizeUnits = (typeof SIZE_UNIT_VALUES)[number];
+export type DateFormat = (typeof DATE_FORMAT_VALUES)[number];
+
 export interface UserSettings {
   theme: ThemePreference;
+  density: Density;
+  sizeUnits: SizeUnits;
+  dateFormat: DateFormat;
   autoCheckUpdates: boolean;
   updateChannel: UpdateChannel;
   presignedUrlExpiration: number;
@@ -32,6 +45,9 @@ export interface UserSettings {
 
 export const SETTING_DEFAULTS: UserSettings = {
   theme: "system",
+  density: "comfortable",
+  sizeUnits: "binary",
+  dateFormat: "locale",
   autoCheckUpdates: true,
   updateChannel: "release",
   presignedUrlExpiration: 3600,
@@ -64,6 +80,16 @@ export function normalizeUserSettings(
     raw.theme === "light" || raw.theme === "dark" || raw.theme === "system"
       ? raw.theme
       : SETTING_DEFAULTS.theme;
+
+  const density =
+    DENSITY_VALUES.find((value) => value === raw.density) ??
+    SETTING_DEFAULTS.density;
+  const sizeUnits =
+    SIZE_UNIT_VALUES.find((value) => value === raw.sizeUnits) ??
+    SETTING_DEFAULTS.sizeUnits;
+  const dateFormat =
+    DATE_FORMAT_VALUES.find((value) => value === raw.dateFormat) ??
+    SETTING_DEFAULTS.dateFormat;
 
   const autoCheckUpdates =
     typeof raw.autoCheckUpdates === "boolean"
@@ -239,6 +265,9 @@ export function normalizeUserSettings(
 
   return {
     theme,
+    density,
+    sizeUnits,
+    dateFormat,
     autoCheckUpdates,
     updateChannel,
     presignedUrlExpiration,

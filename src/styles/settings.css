@@ -123,6 +123,13 @@
   background: var(--bg-hover);
 }
 
+/* Reset is separated from the settings tabs above it. */
+.settings-tab--reset {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
 .settings-tab--active {
   color: var(--accent-fg);
   background: var(--bg-active);
@@ -218,7 +225,53 @@
   line-height: 1.45;
 }
 
-/* The footer is hidden on tabs that apply changes immediately. */
+/* Always-visible help under a control, linked by aria-describedby. It takes a
+   row of its own, so it never sits beside the label or control. */
+.setting-description {
+  display: block;
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.settings-panel .setting-item {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.settings-panel .setting-item > .setting-description:last-child {
+  flex: 1 1 100%;
+  margin-left: 0;
+}
+
+/* Labels wrap at narrow widths instead of pushing into their control. */
+.settings-panel .toggle-row {
+  white-space: normal;
+}
+
+/* Section headings group related rows; a group is a column of its own rows. */
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.settings-group .setting-section {
+  margin: 0;
+  padding-top: 12px;
+}
+
+.settings-group--advanced .advanced-toggle {
+  margin-top: 0;
+}
+
+.settings-group--advanced .setting-section {
+  padding-top: 12px;
+}
+
+/* The footer is hidden when no explicit-save setting is on screen. */
 #settings-overlay .modal__footer[hidden] {
   display: none;
 }
