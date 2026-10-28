@@ -64,7 +64,19 @@ End-to-end suites are the primary evidence and each writes a repeatable report u
 
 ## Preview policy
 
-Preview responses are capped at 1 MiB and are streamed with a hard one-byte overflow check. Text detection ignores parameters such as `; charset=utf-8` and recognizes `text/*`, JSON, XML, JavaScript, SVG, YAML, and TOML. Other content is offered as a download rather than rendered as text.
+Text previews are capped at 1 MiB: larger text objects are read with a ranged request and returned truncated. Images have a separate 16 MiB cap and must arrive whole; an image above the cap, or one whose body streams past it, is refused rather than returned as a partial image. Every read is streamed with a hard one-byte overflow check. Text detection ignores parameters such as `; charset=utf-8` and recognizes `text/*`, JSON, XML, JavaScript, SVG, YAML, and TOML. The webview renders Markdown as plain text and never as HTML, so previews need no CSP change. PDF, audio, and video are offered as downloads; previewing them would require a CSP or asset-protocol decision. Other content is offered as a download rather than rendered as text.
+
+## Object actions
+
+`src/object-actions.ts` is the single registry of object actions (`id`, label, icon, shortcut, danger, group, availability, run). The row context menu, the selection bar's **More** menu, and the command palette's selection commands all render from it, so an action has one label and one availability rule. Shortcut hints come from `SHORTCUTS` in `src/shortcut-catalog.ts`, never from a second list.
+
+## Layout preferences
+
+Row density is a CSS token: `--row-height` is 36px, and `html[data-density="compact"]` sets it to 28px. The object table's virtualization reads the computed value and re-reads it when the attribute changes. The inspector opens by default only when the listing container is at least 1280px wide and the user has no stored open or closed choice; an explicit toggle is stored and always wins.
+
+## Connection location memory
+
+Each saved connection remembers its last bucket and prefix in local storage under `s3-sidekick.connection-memory`, keyed by the connection name and endpoint only. Credentials, session IDs, and secrets are never part of the key or the record. The memory is restored when the user switches connections and is forgotten when the connection is removed. **Test connection** connects, lists buckets, and disconnects; it never keeps the resulting session.
 
 ## Vault and biometric storage
 
