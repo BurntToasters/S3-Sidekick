@@ -18,13 +18,12 @@
   margin: 0 auto;
 }
 
-.object-row--selected {
+/* Selection outranks hover: the selected fill and accent bar stay on hover. */
+.object-row--selected,
+.object-table .object-row--selected:hover {
   background: var(--bg-active);
+  box-shadow: inset 3px 0 0 var(--accent);
   transition: box-shadow var(--transition-smooth);
-}
-
-.object-row--selected:hover {
-  background: var(--bg-active);
 }
 
 .object-row:focus-visible {

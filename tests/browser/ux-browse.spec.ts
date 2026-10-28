@@ -417,14 +417,20 @@ test.describe("browse table, keyboard and location bar", () => {
     expect(background).toBe("none");
   });
 
-  test("only the selection count is a live region", async ({ page }) => {
+  test("only the selection announcement is a live region", async ({ page }) => {
     await openMockListing(page, { objectCount: 3, prefixes: ["archive/"] });
 
     await expect(page.locator("#batch-toolbar")).not.toHaveAttribute(
       "aria-live",
       /.*/,
     );
+    // The visible count is rewritten on every filter tick, so it is not live.
+    // The status node beside it carries the announcements.
     await expect(page.locator("#batch-count")).toHaveAttribute(
+      "aria-live",
+      "off",
+    );
+    await expect(page.locator("[data-batch-announcer]")).toHaveAttribute(
       "aria-live",
       "polite",
     );

@@ -16,6 +16,7 @@ import {
   navigateBack,
   navigateForward,
   handleSelectAll,
+  clearSelection,
   enterLocationEditMode,
 } from "./browser.ts";
 import {
@@ -148,6 +149,14 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
         // panel open with no keyboard-visible way to dismiss it.
         e.preventDefault();
         void requestCloseInspector();
+        return;
+      }
+
+      // Clearing the object selection is the last layer: it runs only when no
+      // layer above consumed the press, and never while a field has focus.
+      if (selectionCount() > 0 && !isEditableElement(document.activeElement)) {
+        e.preventDefault();
+        clearSelection();
         return;
       }
     }

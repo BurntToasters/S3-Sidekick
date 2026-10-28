@@ -1,5 +1,6 @@
 import { state, dom, type ObjectInfo } from "./state.ts";
 import {
+  cancelPendingFilterRender,
   registerObjectTableRenderer,
   registerSelectionRestorer,
 } from "./layout-render-bridge.ts";
@@ -13,7 +14,6 @@ import {
   parseJsonObject,
 } from "./utils.ts";
 import { refreshObjects, MAX_ACCUMULATED_LISTING_ITEMS } from "./connection.ts";
-import { showToast } from "./toast.ts";
 import {
   closeInspectorOnMobile,
   isInspectorOpen,
@@ -41,10 +41,33 @@ import {
 
 type SortColumn = "name" | "size" | "modified";
 
-const OBJECT_ROW_HEIGHT = 36;
+// Row height follows the --row-height density token. The fallback is the
+// default 36px row and is used whenever the token is not set.
+const OBJECT_ROW_HEIGHT_FALLBACK = 36;
 const OBJECT_VIRTUALIZE_THRESHOLD = 250;
 const OBJECT_VIRTUAL_OVERSCAN = 8;
 const OBJECT_VIRTUAL_FALLBACK_VIEWPORT = 600;
+const TYPE_AHEAD_IDLE_MS = 1000;
+const ROW_NAV_KEYS: readonly string[] = [
+  "ArrowDown",
+  "ArrowUp",
+  "Home",
+  "End",
+  "PageDown",
+  "PageUp",
+];
+
+let objectRowHeight = OBJECT_ROW_HEIGHT_FALLBACK;
+
+function readObjectRowHeight(): number {
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue("--row-height")
+    .trim();
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : OBJECT_ROW_HEIGHT_FALLBACK;
+}
 
 type FileRowIconName =
   | "file"
@@ -380,17 +403,13 @@ export function getSelectableEntries(): SelectionEntry[] {
   ];
 }
 
-// Navigation failures used to only flash a 5s status line. Report them three
-// ways so they survive long enough to act on: status line, error toast with a
-// Retry action, and an inline table row (prepended after the re-render below,
-// so it is not wiped by it) with its own Retry button.
+// Navigation failures used to only flash a 5s status line. Report them two
+// ways so they survive long enough to act on: the status line, the one
+// announced region, and an inline table row (prepended after the re-render
+// below, so it is not wiped by it) with its own Retry button. An error toast
+// would announce the same failure a second time.
 export function reportNavFailure(message: string, retry: () => void): void {
   setStatus(message, 8000);
-  showToast(message, {
-    type: "error",
-    actionLabel: "Retry",
-    onAction: retry,
-  });
   const tbody = document.getElementById("object-tbody");
   if (!tbody) return;
   tbody.querySelector("[data-nav-error]")?.remove();
@@ -402,6 +421,7 @@ export function reportNavFailure(message: string, retry: () => void): void {
   }
   const row = document.createElement("tr");
   row.setAttribute("role", "row");
+  row.setAttribute("aria-rowindex", "2");
   row.dataset.navError = "true";
   const cell = document.createElement("td");
   cell.setAttribute("role", "gridcell");
@@ -487,9 +507,12 @@ function getCachedSortedListing(): {
     }
     return asc ? cmp : -cmp;
   });
-  const sortedPrefixes = [...state.prefixes].sort((a, b) =>
-    asc ? compareListingNames(a, b) : compareListingNames(b, a),
-  );
+  // Folders follow the direction only for the name column. Size and date keep
+  // them A to Z, listed ahead of the files.
+  const sortedPrefixes = [...state.prefixes].sort((a, b) => {
+    const cmp = compareListingNames(a, b);
+    return col === "name" && !asc ? -cmp : cmp;
+  });
   sortedListingCache = {
     objects: state.objects,
     prefixes: state.prefixes,
@@ -537,6 +560,7 @@ export function getVisibleSelectableEntries(): SelectionEntry[] {
 }
 
 export function clearSelection(): void {
+  rangeBaseEntries = null;
   clearAllSelection();
   updateSelectionUI();
 }
@@ -580,7 +604,18 @@ export function updateFilterClearButton(): void {
   clearButton.classList.toggle("filter-clear--visible", hasFilter);
 }
 
+/** Empty the filter and re-render, so every loaded row shows at once. */
 export function clearFilter(): void {
+  resetFilterText();
+  renderObjectTable();
+}
+
+/**
+ * Empty the filter without rendering. Navigation uses this because it renders
+ * the new listing itself. A filter render still pending is cancelled.
+ */
+function resetFilterText(): void {
+  cancelPendingFilterRender();
   state.filterText = "";
   const input = document.getElementById(
     "filter-input",
@@ -686,6 +721,51 @@ function selectAllLabel(filtered: boolean): string {
   return filtered ? "Select all (filtered)" : "Select all";
 }
 
+// Announcement state for the batch summary (see announceBatchStatus).
+const FILTER_SETTLE_ANNOUNCE_MS = 500;
+let announcedSelectionCount = 0;
+let announcedFilterText = "";
+let filterSettleTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Hidden status node that carries batch announcements, created on first use. */
+function ensureBatchAnnouncer(toolbar: HTMLElement): HTMLElement {
+  const existing = toolbar.querySelector<HTMLElement>("[data-batch-announcer]");
+  if (existing) return existing;
+  const announcer = document.createElement("span");
+  announcer.className = "sr-only";
+  announcer.dataset.batchAnnouncer = "";
+  announcer.setAttribute("role", "status");
+  announcer.setAttribute("aria-live", "polite");
+  announcer.setAttribute("aria-atomic", "true");
+  toolbar.appendChild(announcer);
+  return announcer;
+}
+
+/**
+ * Announce the selection count when it changes, and the filter summary once
+ * the filter has settled. The visible count is rewritten on every filter tick,
+ * so it is never the announced region.
+ */
+function announceBatchStatus(
+  toolbar: HTMLElement,
+  batchCount: HTMLElement,
+  totalSelected: number,
+  filterText: string,
+): void {
+  const announcer = ensureBatchAnnouncer(toolbar);
+  if (totalSelected !== announcedSelectionCount) {
+    announcedSelectionCount = totalSelected;
+    announcer.textContent = batchCount.textContent ?? "";
+  }
+  if (filterText === announcedFilterText) return;
+  announcedFilterText = filterText;
+  if (filterSettleTimer !== undefined) clearTimeout(filterSettleTimer);
+  filterSettleTimer = setTimeout(() => {
+    filterSettleTimer = undefined;
+    announcer.textContent = batchCount.textContent ?? "";
+  }, FILTER_SETTLE_ANNOUNCE_MS);
+}
+
 export function updateSelectionUI(): void {
   // Retain selection across filter input; only prune keys that left the
   // listing itself. Filtering merely hides rows, it must not deselect them.
@@ -750,6 +830,14 @@ export function updateSelectionUI(): void {
     batchCount.textContent = batchCountText;
     batchCount.title = batchCount.textContent;
     batchCount.setAttribute("aria-label", batchCountText);
+    // Not a live region itself: the summary is rewritten on every filter tick.
+    batchCount.setAttribute("aria-live", "off");
+    announceBatchStatus(
+      batchToolbar,
+      batchCount,
+      totalSelected,
+      state.filterText.trim(),
+    );
     if (totalSelected > 0) {
       batchCount.dataset.compactCount = getCompactSelectionCountText(
         totalSelected,
@@ -854,9 +942,39 @@ export function updateSelectionUI(): void {
 }
 
 let lastClickedEntry: SelectionEntry | null = null;
+// Selection the open Shift range grows from. Captured on the first Shift
+// extension after an anchor is set, so the range can grow and shrink without
+// dropping rows selected before it. Any other selection action clears it.
+let rangeBaseEntries: SelectionEntry[] | null = null;
+
+/** Set the Shift-range anchor and start a new range base. */
+function setAnchor(entry: SelectionEntry | null): void {
+  lastClickedEntry = entry;
+  rangeBaseEntries = null;
+}
 
 export function setLastClickedEntry(entry: SelectionEntry | null): void {
-  lastClickedEntry = entry;
+  setAnchor(entry);
+}
+
+/**
+ * Select the rows between the anchor and `targetIndex` on top of the selection
+ * from before the range began. Shift+click and Shift+Arrow share this, so the
+ * anchor stays put and the range can grow or shrink.
+ */
+function selectShiftRange(
+  ordered: readonly SelectionEntry[],
+  anchorIndex: number,
+  targetIndex: number,
+): void {
+  rangeBaseEntries ??= getSelectionEntries();
+  clearAllSelection();
+  for (const entry of rangeBaseEntries) addSelection(entry);
+  const from = Math.min(anchorIndex, targetIndex);
+  const to = Math.max(anchorIndex, targetIndex);
+  for (let i = from; i <= to; i += 1) {
+    addSelection(ordered[i]);
+  }
 }
 
 export function handleRowClick(entry: SelectionEntry, e: MouseEvent): void {
@@ -870,17 +988,15 @@ export function handleRowClick(entry: SelectionEntry, e: MouseEvent): void {
     const startIdx = indexOfEntry(lastClickedEntry);
     const endIdx = indexOfEntry(entry);
     if (startIdx >= 0 && endIdx >= 0) {
-      const [from, to] =
-        startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
-      for (let i = from; i <= to; i++) {
-        addSelection(allEntries[i]);
-      }
+      // Shift-click keeps the anchor where it is, as Shift+Arrow does.
+      selectShiftRange(allEntries, startIdx, endIdx);
     } else {
       // A filter can hide the anchor while the clicked row remains visible.
       // Treat that range as a normal click so Shift-click always selects the
       // row instead of silently doing nothing.
       clearAllSelection();
       addSelection(entry);
+      setAnchor(entry);
     }
   } else if (hasAccelModifier(e)) {
     if (isSelected(entry)) {
@@ -888,9 +1004,11 @@ export function handleRowClick(entry: SelectionEntry, e: MouseEvent): void {
     } else {
       addSelection(entry);
     }
+    setAnchor(entry);
   } else {
     clearAllSelection();
     addSelection(entry);
+    setAnchor(entry);
   }
 
   for (const row of dom.objectTbody.querySelectorAll<HTMLElement>(
@@ -905,11 +1023,11 @@ export function handleRowClick(entry: SelectionEntry, e: MouseEvent): void {
     return rowEntry !== null && isSameEntry(rowEntry, entry);
   });
   if (clickedRow) clickedRow.tabIndex = 0;
-  lastClickedEntry = entry;
   updateSelectionUI();
 }
 
 export function handleSelectAll(checked: boolean): void {
+  rangeBaseEntries = null;
   const allEntries = getVisibleSelectableEntries();
   if (checked) {
     for (const selectable of allEntries) addSelection(selectable);
@@ -1099,14 +1217,18 @@ function cancelPendingSkeleton(): void {
 }
 
 function paintObjectTableSkeleton(rowCount: number): void {
-  const row =
-    `<tr class="object-row object-row--skeleton" aria-hidden="true">` +
-    `<td class="col-check"><span class="skeleton skeleton--check"></span></td>` +
-    `<td class="object-name"><div class="object-name__inner"><span class="skeleton skeleton--icon"></span><span class="skeleton skeleton--text"></span></div></td>` +
-    `<td class="object-size"><span class="skeleton skeleton--text skeleton--sm"></span></td>` +
-    `<td class="object-modified"><span class="skeleton skeleton--text skeleton--md"></span></td>` +
-    `</tr>`;
-  dom.objectTbody.innerHTML = row.repeat(rowCount);
+  // Body rows start at aria-rowindex 2; the header is row 1.
+  const rows = Array.from(
+    { length: rowCount },
+    (_, index) =>
+      `<tr class="object-row object-row--skeleton" aria-hidden="true" aria-rowindex="${index + 2}">` +
+      `<td class="col-check"><span class="skeleton skeleton--check"></span></td>` +
+      `<td class="object-name"><div class="object-name__inner"><span class="skeleton skeleton--icon"></span><span class="skeleton skeleton--text"></span></div></td>` +
+      `<td class="object-size"><span class="skeleton skeleton--text skeleton--sm"></span></td>` +
+      `<td class="object-modified"><span class="skeleton skeleton--text skeleton--md"></span></td>` +
+      `</tr>`,
+  );
+  dom.objectTbody.innerHTML = rows.join("");
 }
 
 export function renderObjectTableSkeleton(rowCount = 8): void {
@@ -1139,7 +1261,7 @@ function emptyFolderRowHtml(atBucketRoot: boolean): string {
   const title = atBucketRoot ? "Empty bucket" : "Empty folder";
   const text = atBucketRoot ? "This bucket is empty" : "This folder is empty";
   return (
-    `<tr role="row" data-table-placeholder><td role="gridcell" colspan="4" class="table-empty">` +
+    `<tr role="row" aria-rowindex="2" data-table-placeholder><td role="gridcell" colspan="4" class="table-empty">` +
     `<div class="table-empty__content browse-empty">` +
     `${getIconHtml("folder", { className: "lucide-icon empty-state__icon", decorative: true })}` +
     `<h3 class="browse-empty__title">${title}</h3>` +
@@ -1153,7 +1275,7 @@ function emptyFolderRowHtml(atBucketRoot: boolean): string {
 
 function filterMissRowHtml(): string {
   return (
-    `<tr role="row" data-table-placeholder><td role="gridcell" colspan="4" class="table-empty">` +
+    `<tr role="row" aria-rowindex="2" data-table-placeholder><td role="gridcell" colspan="4" class="table-empty">` +
     `<div class="table-empty__content browse-empty">` +
     `${getIconHtml("search", { className: "lucide-icon empty-state__icon", decorative: true })}` +
     `<h3 class="browse-empty__title">Nothing matched</h3>` +
@@ -1182,7 +1304,7 @@ export function calculateObjectVirtualRange(
   total: number,
   scrollTop: number,
   viewportHeight: number,
-  rowHeight = OBJECT_ROW_HEIGHT,
+  rowHeight = objectRowHeight,
   overscan = OBJECT_VIRTUAL_OVERSCAN,
 ): ObjectVirtualRange {
   if (total <= 0) return { start: 0, end: 0 };
@@ -1207,7 +1329,8 @@ let virtualRenderScheduled = false;
 function createObjectRow(): HTMLTableRowElement {
   const row = document.createElement("tr");
   row.setAttribute("role", "row");
-  row.innerHTML = `<td role="gridcell" class="col-check"><input type="checkbox" class="row-check" /></td>
+  // The row itself is the Tab stop (roving); its checkbox stays clickable.
+  row.innerHTML = `<td role="gridcell" class="col-check"><input type="checkbox" class="row-check" tabindex="-1" /></td>
     <td role="gridcell" class="object-name"><div class="object-name__inner"><span class="object-kind-icon"></span><span class="object-name__text"></span></div></td>
     <td role="gridcell" class="object-size"></td>
     <td role="gridcell" class="object-modified"></td>`;
@@ -1307,7 +1430,12 @@ function renderCurrentObjectWindow(
       ? panel.clientHeight
       : OBJECT_VIRTUAL_FALLBACK_VIEWPORT;
   const range = virtualized
-    ? calculateObjectVirtualRange(entries.length, scrollTop, viewportHeight)
+    ? calculateObjectVirtualRange(
+        entries.length,
+        scrollTop,
+        viewportHeight,
+        objectRowHeight,
+      )
     : { start: 0, end: entries.length };
 
   const activeRow =
@@ -1330,7 +1458,7 @@ function renderCurrentObjectWindow(
   const fragment = document.createDocumentFragment();
   if (virtualized && range.start > 0) {
     fragment.appendChild(
-      createVirtualSpacer(range.start * OBJECT_ROW_HEIGHT, "top"),
+      createVirtualSpacer(range.start * objectRowHeight, "top"),
     );
   }
 
@@ -1369,7 +1497,7 @@ function renderCurrentObjectWindow(
   if (virtualized && range.end < entries.length) {
     fragment.appendChild(
       createVirtualSpacer(
-        (entries.length - range.end) * OBJECT_ROW_HEIGHT,
+        (entries.length - range.end) * objectRowHeight,
         "bottom",
       ),
     );
@@ -1414,10 +1542,10 @@ function scheduleVirtualWindowRender(): void {
 }
 
 /**
- * Select the logical range from the selection anchor to `index`, replacing the
- * selection. Without an anchor (or when it is filtered away) only the target
- * row is selected. The anchor itself does not move, so repeated Shift+Arrow
- * grows and shrinks the same range.
+ * Extend the selection from the anchor to `index`, on top of the selection that
+ * was in place before the range began. Without an anchor (or when it is
+ * filtered away) only the target row is selected. The anchor does not move, so
+ * repeated Shift+Arrow grows and shrinks the same range.
  */
 function extendSelectionTo(index: number): void {
   const anchor = lastClickedEntry;
@@ -1426,37 +1554,114 @@ function extendSelectionTo(index: number): void {
         isSameEntry(candidate, anchor),
       )
     : -1;
-  clearAllSelection();
   if (anchorIndex < 0) {
-    const target = renderedTableEntries[index];
-    addSelection(target);
-    lastClickedEntry = target;
+    selectRowOnly(index);
     return;
   }
-  const [from, to] =
-    anchorIndex < index ? [anchorIndex, index] : [index, anchorIndex];
-  for (let i = from; i <= to; i += 1) {
-    addSelection(renderedTableEntries[i]);
+  selectShiftRange(renderedTableEntries, anchorIndex, index);
+}
+
+/** Select only the rendered row at `index` and make it the anchor. */
+function selectRowOnly(index: number): void {
+  const target = renderedTableEntries[index];
+  clearAllSelection();
+  addSelection(target);
+  setAnchor(target);
+}
+
+/** Rows in one visible page, below the sticky header. Used by PageUp/PageDown. */
+function visibleRowCount(): number {
+  const panel = dom.objectPanel;
+  const viewportHeight =
+    panel.clientHeight > 0
+      ? panel.clientHeight
+      : OBJECT_VIRTUAL_FALLBACK_VIEWPORT;
+  const headerHeight = panel.querySelector("thead")?.offsetHeight ?? 0;
+  return Math.max(
+    1,
+    Math.floor((viewportHeight - headerHeight) / objectRowHeight),
+  );
+}
+
+/**
+ * Printable keys jump to the next row whose name starts with the characters
+ * typed so far. The buffer resets after an idle second. Modifier chords and
+ * keys typed into a field are left alone.
+ */
+let typeAheadBuffer = "";
+let typeAheadAt = 0;
+
+function handleTypeAhead(event: KeyboardEvent, currentIndex: number): void {
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.key.length !== 1 || event.key.trim() === "") return;
+  if ((event.target as HTMLElement).closest("input, textarea, select")) return;
+  const count = renderedTableEntries.length;
+  if (count === 0) return;
+  const now = Date.now();
+  if (now - typeAheadAt > TYPE_AHEAD_IDLE_MS) typeAheadBuffer = "";
+  typeAheadAt = now;
+  typeAheadBuffer += event.key.toLowerCase();
+  // A single key moves past the current row; a longer buffer may still match it.
+  const start = typeAheadBuffer.length === 1 ? currentIndex + 1 : currentIndex;
+  for (let step = 0; step < count; step += 1) {
+    const index = (start + step) % count;
+    if (
+      renderedTableEntries[index].name.toLowerCase().startsWith(typeAheadBuffer)
+    ) {
+      revealLogicalIndex(index);
+      selectRowOnly(index);
+      focusLogicalRow(index);
+      updateSelectionUI();
+      return;
+    }
   }
 }
 
-// Sole owner of Arrow/Home/End row navigation for the object table (both
-// virtualized and plain windows). Registered capture-phase so it runs before
-// the app-events tbody handler, which only handles Space/Enter.
+/**
+ * Shift+F10 and the ContextMenu key open the row menu at the focused row's
+ * on-screen position, as a right-click on that row would.
+ */
+function openFocusedRowContextMenu(event: KeyboardEvent): void {
+  const row = (event.target as HTMLElement).closest<HTMLElement>(".object-row");
+  if (!row) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const rect = row.getBoundingClientRect();
+  row.dispatchEvent(
+    new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.left + rect.width / 2,
+      clientY: rect.top + rect.height / 2,
+    }),
+  );
+}
+
+// Sole owner of Arrow/Home/End/PageUp/PageDown row navigation, Shift+F10 and
+// the ContextMenu key, and type-ahead for the object table (both virtualized
+// and plain windows). Registered capture-phase so it runs before the app-events
+// tbody handler, which only handles Space/Enter.
 // Plain arrows move focus and select that row; Shift extends a range from the
 // anchor; Ctrl/Cmd moves focus only. A focused row checkbox does not opt out.
 function handleObjectTableKeydown(event: KeyboardEvent): void {
-  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+  if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+    openFocusedRowContextMenu(event);
     return;
   }
   const row = (event.target as HTMLElement).closest<HTMLElement>(".object-row");
   if (!row) return;
   const currentIndex = Number.parseInt(row.dataset.logicalIndex ?? "", 10);
   if (!Number.isInteger(currentIndex)) return;
+  if (!ROW_NAV_KEYS.includes(event.key)) {
+    handleTypeAhead(event, currentIndex);
+    return;
+  }
 
   let nextIndex = currentIndex;
   if (event.key === "ArrowDown") nextIndex += 1;
   if (event.key === "ArrowUp") nextIndex -= 1;
+  if (event.key === "PageDown") nextIndex += visibleRowCount();
+  if (event.key === "PageUp") nextIndex -= visibleRowCount();
   if (event.key === "Home") nextIndex = 0;
   if (event.key === "End") nextIndex = renderedTableEntries.length - 1;
   nextIndex = Math.max(0, Math.min(renderedTableEntries.length - 1, nextIndex));
@@ -1474,10 +1679,7 @@ function handleObjectTableKeydown(event: KeyboardEvent): void {
     if (event.shiftKey) {
       extendSelectionTo(nextIndex);
     } else {
-      const target = renderedTableEntries[nextIndex];
-      clearAllSelection();
-      addSelection(target);
-      lastClickedEntry = target;
+      selectRowOnly(nextIndex);
     }
   }
   focusLogicalRow(nextIndex);
@@ -1496,10 +1698,10 @@ export function scrollTopToReveal(
   currentTop: number,
   viewportHeight: number,
 ): number {
-  const rowTop = index * OBJECT_ROW_HEIGHT;
+  const rowTop = index * objectRowHeight;
   if (rowTop < currentTop) return rowTop;
-  if (rowTop + OBJECT_ROW_HEIGHT > currentTop + viewportHeight) {
-    return rowTop + OBJECT_ROW_HEIGHT - viewportHeight;
+  if (rowTop + objectRowHeight > currentTop + viewportHeight) {
+    return rowTop + objectRowHeight - viewportHeight;
   }
   return currentTop;
 }
@@ -1572,7 +1774,7 @@ export function focusObjectTableRow(target: {
 export function selectOnlyEntry(entry: SelectionEntry): void {
   clearAllSelection();
   addSelection(entry);
-  lastClickedEntry = entry;
+  setAnchor(entry);
   updateSelectionUI();
 }
 
@@ -1594,11 +1796,10 @@ export function revealRow(key: string, kind: "file" | "folder"): boolean {
     )
   ) {
     clearFilter();
-    renderObjectTable();
   }
   clearAllSelection();
   addSelection(entry);
-  lastClickedEntry = entry;
+  setAnchor(entry);
   const focused = focusObjectTableRow({ entry });
   updateSelectionUI();
   return focused;
@@ -1647,8 +1848,14 @@ export function renderObjectTable(): void {
       lastModified: object.last_modified,
     })),
   ];
+  objectRowHeight = readObjectRowHeight();
   const table = tbody.closest("table");
-  table?.setAttribute("aria-rowcount", String(renderedTableEntries.length + 1));
+  // The header is row 1; a placeholder row stands in for the empty body.
+  table?.querySelector("thead tr")?.setAttribute("aria-rowindex", "1");
+  table?.setAttribute(
+    "aria-rowcount",
+    String(Math.max(renderedTableEntries.length + 1, 2)),
+  );
   if (renderedTableEntries.length === 0) {
     tbody.innerHTML =
       filter.length > 0
@@ -1888,7 +2095,7 @@ async function navigateToLocationFolder(parsed: {
   const snapshot = captureNavigationSnapshot();
   const bucketChanged = parsed.bucket !== snapshot.currentBucket;
   closeInspectorOnMobile();
-  clearFilter();
+  resetFilterText();
   renderObjectTableSkeleton();
 
   try {
@@ -2033,7 +2240,7 @@ function restoreListingSnapshot(snapshot: ListingSnapshot): void {
 
 function resetSelectionForListingChange(): void {
   clearAllSelection();
-  lastClickedEntry = null;
+  setAnchor(null);
   updateSelectionUI();
 }
 
@@ -2093,7 +2300,7 @@ export async function navigateBack(): Promise<void> {
   const entry = navHistory[targetIndex];
   const bucketChanged = entry.bucket !== state.currentBucket;
   historySuppressRequest = request;
-  clearFilter();
+  resetFilterText();
   renderObjectTableSkeleton();
 
   try {
@@ -2149,7 +2356,7 @@ export async function navigateForward(): Promise<void> {
   const entry = navHistory[targetIndex];
   const bucketChanged = entry.bucket !== state.currentBucket;
   historySuppressRequest = request;
-  clearFilter();
+  resetFilterText();
   renderObjectTableSkeleton();
 
   try {
@@ -2201,7 +2408,7 @@ export async function navigateToFolder(
   const snapshot = captureNavigationSnapshot();
   const bucket = state.currentBucket;
   closeInspectorOnMobile();
-  clearFilter();
+  resetFilterText();
   renderObjectTableSkeleton();
   try {
     const committed = await refreshObjects(bucket, prefix);
@@ -2257,7 +2464,7 @@ export async function selectBucket(name: string): Promise<void> {
   const request = ++navigationGeneration;
   const snapshot = captureNavigationSnapshot();
   closeInspectorOnMobile();
-  clearFilter();
+  resetFilterText();
   renderObjectTableSkeleton();
   try {
     const committed = await refreshObjects(name, "");
@@ -2324,9 +2531,26 @@ registerObjectTableRenderer(renderObjectTable);
 function restoreSelectionEntries(entries: readonly SelectionEntry[]): void {
   clearAllSelection();
   for (const entry of entries) addSelection(entry);
-  lastClickedEntry = entries[entries.length - 1] ?? null;
+  setAnchor(entries[entries.length - 1] ?? null);
   lastInspectorSelectionSignature = getInspectorSelectionSignature();
   updateSelectionUI();
 }
 
 registerSelectionRestorer(restoreSelectionEntries);
+
+// Density changes restyle the table without re-rendering it. Re-read the
+// --row-height token and rebuild the virtual window so spacers keep matching.
+if (
+  typeof MutationObserver !== "undefined" &&
+  typeof document !== "undefined"
+) {
+  new MutationObserver(() => {
+    const next = readObjectRowHeight();
+    if (next === objectRowHeight) return;
+    objectRowHeight = next;
+    renderCurrentObjectWindow();
+  }).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-density"],
+  });
+}

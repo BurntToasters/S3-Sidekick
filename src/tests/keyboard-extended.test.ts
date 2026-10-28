@@ -21,6 +21,7 @@ const mockNavigateForward = vi.fn<() => Promise<void>>();
 const mockGetSelectableKeys = vi.fn();
 const mockHandleSelectAll = vi.fn();
 const mockUpdateSelectionUI = vi.fn();
+const mockClearSelection = vi.fn();
 
 vi.mock("../context-menu.ts", () => ({
   hideContextMenu: mockHideContextMenu,
@@ -83,6 +84,7 @@ vi.mock("../browser.ts", () => ({
   getSelectableEntries: mockGetSelectableKeys,
   handleSelectAll: mockHandleSelectAll,
   updateSelectionUI: mockUpdateSelectionUI,
+  clearSelection: mockClearSelection,
 }));
 
 function renderFixture(): void {

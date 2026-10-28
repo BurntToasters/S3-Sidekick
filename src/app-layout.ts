@@ -1,6 +1,9 @@
 import { state } from "./state.ts";
 import { hideContextMenu } from "./context-menu.ts";
-import { renderObjectTableFromLayout } from "./layout-render-bridge.ts";
+import {
+  registerFilterRenderCanceller,
+  renderObjectTableFromLayout,
+} from "./layout-render-bridge.ts";
 
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 420;
@@ -38,6 +41,8 @@ export function clearFilterInputDebounce(): void {
 export function disposeFilterInputDebounce(): void {
   clearFilterInputDebounce();
 }
+
+registerFilterRenderCanceller(clearFilterInputDebounce);
 
 export function wireObjectFilterInput(): void {
   const filterInput = document.getElementById(

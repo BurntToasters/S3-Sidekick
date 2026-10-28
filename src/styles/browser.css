@@ -235,7 +235,7 @@
 }
 
 .object-table td {
-  height: 36px;
+  height: var(--row-height, 36px);
   padding: 0 14px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
@@ -250,17 +250,13 @@
     box-shadow var(--transition-smooth);
 }
 
+/* Hover is a plain fill. The accent bar belongs to selection (object-selection.css). */
 .object-row:hover {
   background: var(--bg-hover);
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .object-row--folder {
   cursor: pointer;
-}
-
-.object-row--folder:hover {
-  background: var(--bg-hover);
 }
 
 .object-name {
@@ -431,7 +427,7 @@
 }
 
 .object-table tbody .object-row > td {
-  height: 36px;
+  height: var(--row-height, 36px);
 }
 
 /* A focused row scrolled out of the virtual window stays mounted at zero
@@ -463,6 +459,6 @@
 }
 
 .metadata-batch-more {
-  color: var(--text-secondary, var(--muted));
+  color: var(--text-muted);
   font-style: italic;
 }
