@@ -39,20 +39,20 @@ body.modal-open .toast-region {
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
-  box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
+  box-shadow: var(--shadow-2), var(--glass-inset-highlight);
   color: var(--text);
   font-size: var(--text-md);
-  line-height: 1.4;
+  line-height: var(--line-height-body);
   pointer-events: auto;
-  animation: toast-in 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  animation: toast-in var(--duration-base) var(--ease-standard);
 }
 
 .toast--leaving {
-  animation: toast-out 0.18s ease forwards;
+  animation: toast-out var(--duration-fast) ease forwards;
 }
 
 .toast--success {
-  border-left-color: var(--badge-on-text);
+  border-left-color: var(--success);
 }
 
 .toast--warning {

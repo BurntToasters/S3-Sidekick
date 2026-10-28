@@ -1,4 +1,4 @@
-/* Buttons, text fields, checkboxes, toggles */
+/* Buttons, text fields, checkboxes, switches */
 
 .btn {
   display: inline-flex;
@@ -18,7 +18,7 @@
     background var(--transition-smooth),
     border-color var(--transition-smooth),
     box-shadow var(--transition-smooth),
-    transform 0.1s ease;
+    transform var(--duration-fast) ease;
   -webkit-app-region: no-drag;
 }
 
@@ -65,6 +65,19 @@
   color: var(--disconnect-text-hover);
 }
 
+/* Destructive outline; the filled hover keeps white text above 4.5:1. */
+.btn--danger {
+  background: transparent;
+  color: var(--danger-text);
+  border-color: var(--danger);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--danger-hover);
+  border-color: var(--danger-hover);
+  color: var(--accent-text);
+}
+
 /* Icon-only buttons keep a 32x32 pointer target (WCAG 2.5.8 plus margin). */
 .btn--icon {
   min-width: 32px;
@@ -72,7 +85,7 @@
   padding: var(--space-1) var(--space-2);
   border: none;
   background: transparent;
-  font-size: 18px;
+  font-size: var(--text-xl);
   color: var(--text-secondary);
   cursor: pointer;
 }
@@ -99,12 +112,13 @@
   transform: none;
 }
 
+/* One focus ring for buttons, fields, checkboxes and switches: colour, width and offset come from tokens. */
 .btn:focus-visible,
 .btn--icon:focus-visible,
 .field:focus-visible,
 input[type="checkbox"]:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring-color);
-  outline-offset: 2px;
+  outline-offset: var(--focus-ring-offset);
 }
 
 input[type="password"]::-ms-reveal,
@@ -133,12 +147,17 @@ input[type="password"]::-ms-clear {
   opacity: 1;
 }
 
+/* The chevron is two half-square gradients in currentColor, so it follows the
+   field's text colour in every theme. Native selects cannot host a pseudo-element. */
 select.field {
   appearance: none;
   -webkit-appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M3 5l3 3 3-3'/%3E%3C/svg%3E");
+  background-image:
+    linear-gradient(-45deg, transparent 50%, currentColor 50%),
+    linear-gradient(45deg, transparent 50%, currentColor 50%);
+  background-size: 8px 8px;
   background-repeat: no-repeat;
-  background-position: right 8px center;
+  background-position: right 10px center;
   padding-right: 28px;
   cursor: pointer;
 }
@@ -212,6 +231,51 @@ input[type="checkbox"]:indeterminate::after {
   width: 8px;
   height: 0;
   border-top: 2px solid var(--accent-text);
+}
+
+/* Switch: a checkbox drawn as a sliding toggle. It stays a real checkbox, so
+   forms, focus and forced-colors mode work as they do for any checkbox. */
+input[type="checkbox"].switch {
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  transition:
+    background-color var(--transition-smooth),
+    border-color var(--transition-smooth);
+}
+
+input[type="checkbox"].switch::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  transition: transform var(--transition-smooth);
+}
+
+input[type="checkbox"].switch:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+input[type="checkbox"].switch:checked::after {
+  left: 2px;
+  top: 2px;
+  width: 12px;
+  height: 12px;
+  border: 0;
+  background: var(--accent-text);
+  transform: translateX(14px);
+}
+
+input[type="checkbox"].switch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .toggle-row {

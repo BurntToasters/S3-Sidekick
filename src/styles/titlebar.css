@@ -14,7 +14,7 @@ body.titlebar-custom .header {
 }
 
 /*
- * Full-width top strip (IYERIS-style); reliable drag even with flex children below.
+ * Full-width top strip; reliable drag even with flex children below.
  * Kept below the header actions (z-index 2) so caption buttons and settings stay
  * clickable where they overlap the strip.
  */
@@ -121,8 +121,8 @@ body.titlebar-custom.platform-windows .bookmark-bar {
 }
 
 .titlebar-win-btn--close:hover {
-  background: #e81123;
-  color: #fff;
+  background: var(--titlebar-close-hover);
+  color: var(--accent-text);
 }
 
 .titlebar-win-btn:focus-visible {

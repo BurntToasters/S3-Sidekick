@@ -3,7 +3,7 @@
 .dialog-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   display: none;
@@ -46,12 +46,13 @@ body.modal-open .dialog-overlay.active {
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - var(--titlebar-height) - 32px);
   overflow: hidden;
-  box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
-  animation: modal-in 0.15s ease;
+  box-shadow: var(--shadow-3), var(--glass-inset-highlight);
+  animation: modal-in var(--duration-base) ease;
 }
 
+/* Same size as .modal__header h2, so dialog and modal headings match. */
 .dialog-box__title {
-  font-size: 16px;
+  font-size: var(--text-xl);
   font-weight: 600;
   margin-bottom: 8px;
   overflow-wrap: anywhere;
@@ -65,7 +66,7 @@ body.modal-open .dialog-overlay.active {
   font-size: var(--text-md);
   color: var(--text-secondary);
   margin-bottom: 20px;
-  line-height: 1.5;
+  line-height: var(--line-height-relaxed);
   white-space: pre-line;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -168,7 +169,7 @@ body.modal-open .dialog-overlay.active {
 .biometric-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   z-index: var(--z-biometric);

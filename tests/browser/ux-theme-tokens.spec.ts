@@ -1,5 +1,24 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
-import { mkdirSync, writeFileSync } from "node:fs";
+// Failure modes covered (UI overhaul 0.12.0, design tokens and primitives):
+// - A new spacing, type, motion, elevation, scrim or success token is missing
+//   in one theme, so the value resolves to an empty string.
+// - The default row height drifts from 36px, or compact density stops at 28px.
+// - An overlay backdrop uses its own colour instead of the shared --scrim.
+// - A focused field, settings search or palette input shows no focus ring.
+// - A stylesheet references a custom property that no token defines.
+// - Owned stylesheets reintroduce raw hex/rgb colours or px font sizes.
+// - The .badge, .switch and select chevron primitives are missing or unthemed.
+// - The connected-dot pulse repeats forever.
+// - The dialog title and modal title sizes diverge.
+// - Every 0.12.0 icon name resolves in the icon registry.
+// - .btn--danger lives in controls.css, not modals.css.
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type TestInfo,
+} from "@playwright/test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { installLayoutTauriMock, openMockListing } from "./tauri-layout.ts";
 
@@ -42,6 +61,84 @@ const PARITY_TOKENS = [
   "--disconnect-text",
   "--badge-off-bg",
   "--badge-on-text",
+  "--success",
+  "--success-bg",
+  "--success-text",
+  "--scrim",
+  "--danger-hover",
+  "--titlebar-close-hover",
+  "--shadow-1",
+  "--shadow-2",
+  "--shadow-3",
+];
+
+/** Tokens added for the 0.12.0 design system; each must resolve in both themes. */
+const DESIGN_TOKENS = [
+  "--space-6",
+  "--space-7",
+  "--space-8",
+  "--space-9",
+  "--text-base",
+  "--text-lg",
+  "--text-xl",
+  "--line-height-tight",
+  "--line-height-body",
+  "--line-height-relaxed",
+  "--font-sans",
+  "--font-mono",
+  "--duration-fast",
+  "--duration-base",
+  "--duration-slow",
+  "--ease-standard",
+  "--success",
+  "--success-bg",
+  "--success-text",
+  "--scrim",
+  "--shadow-1",
+  "--shadow-2",
+  "--shadow-3",
+  "--danger-hover",
+  "--titlebar-close-hover",
+  "--focus-ring-width",
+  "--focus-ring-offset",
+  "--row-height",
+];
+
+/** Stylesheets this worker owns; the static checks read them from src/styles. */
+const OWNED_STYLE_FILES = [
+  "tokens.css",
+  "controls.css",
+  "effects.css",
+  "feedback.css",
+  "dialogs.css",
+  "modals.css",
+  "command-palette.css",
+  "toasts.css",
+  "header.css",
+  "titlebar.css",
+];
+
+/** Icon names the 0.12.0 registry must resolve (each has a lucide-static file). */
+const UI_ICON_NAMES = [
+  "pencil",
+  "history",
+  "keyboard",
+  "grip-vertical",
+  "layers",
+  "filter",
+  "external-link",
+  "columns-3",
+  "chevron-right",
+  "chevron-left",
+  "chevrons-up-down",
+  "sun",
+  "moon",
+  "rows-3",
+  "share-2",
+  "copy",
+  "folder-input",
+  "unlock",
+  "fingerprint",
 ];
 
 /** Tokens other workers already reference; each must resolve to a value. */
@@ -91,6 +188,10 @@ const CONTRAST_PAIRS: readonly (readonly [string, string, number])[] = [
   ["--text-muted", "--bg-hover", 4.5],
   ["--tooltip-text", "--tooltip-bg", 4.5],
   ["--border-strong", "--bg-surface", 3],
+  ["--success-text", "--bg-surface", 4.5],
+  ["--success-text", "--success-bg", 4.5],
+  ["--accent-text", "--danger-hover", 4.5],
+  ["--accent-text", "--titlebar-close-hover", 4.5],
 ];
 
 interface PaletteRow {
@@ -524,4 +625,299 @@ test("forced colors keep a non-colour cue on active selections", async ({
   for (const [label, hasCue] of Object.entries(cues)) {
     expect(hasCue, label).toBe(true);
   }
+});
+
+function stripCssComments(css: string): string {
+  return css.replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+function ownedStyles(): { file: string; css: string }[] {
+  const dir = path.resolve(process.cwd(), "src/styles");
+  return OWNED_STYLE_FILES.map((file) => ({
+    file,
+    css: stripCssComments(readFileSync(path.join(dir, file), "utf8")),
+  }));
+}
+
+/** Computed focus indicator: an outline or a box-shadow ring. */
+async function focusIndicator(locator: Locator): Promise<boolean> {
+  await locator.focus();
+  return locator.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    const outline =
+      cs.outlineStyle !== "none" && parseFloat(cs.outlineWidth) > 0;
+    return outline || cs.boxShadow !== "none";
+  });
+}
+
+test("design tokens resolve in light and dark, with the new font stacks", async ({
+  page,
+}, testInfo) => {
+  const byTheme: Record<string, Record<string, string>> = {};
+  for (const os of OS_SCHEMES) {
+    const p = await openPalette(page, os, "system");
+    try {
+      byTheme[os] = await p.evaluate((names) => {
+        const computed = getComputedStyle(document.documentElement);
+        return Object.fromEntries(
+          names.map((name) => [name, computed.getPropertyValue(name).trim()]),
+        );
+      }, DESIGN_TOKENS);
+    } finally {
+      await p.close();
+    }
+  }
+  for (const os of OS_SCHEMES) {
+    for (const name of DESIGN_TOKENS) {
+      expect(byTheme[os][name], `${os} ${name}`).toBeTruthy();
+    }
+    expect(byTheme[os]["--font-sans"], `${os} --font-sans`).toMatch(
+      /^system-ui,/,
+    );
+    expect(byTheme[os]["--font-mono"], `${os} --font-mono`).toMatch(
+      /^ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace$/,
+    );
+  }
+  writeFileSync(
+    path.join(artifactDir(testInfo), "design-tokens.json"),
+    `${JSON.stringify(byTheme, null, 2)}\n`,
+  );
+});
+
+test("row height is 36px by default and 28px under compact density", async ({
+  page,
+}) => {
+  await openMockListing(page, { objectCount: 3 });
+  const read = () =>
+    page.evaluate(() =>
+      getComputedStyle(document.documentElement)
+        .getPropertyValue("--row-height")
+        .trim(),
+    );
+  expect(await read()).toBe("36px");
+  await page.evaluate(() =>
+    document.documentElement.setAttribute("data-density", "compact"),
+  );
+  expect(await read()).toBe("28px");
+});
+
+test("every overlay backdrop uses the one --scrim token", async ({ page }) => {
+  await openMockListing(page, { objectCount: 3 });
+  const scrim = (await resolveTokenColors(page, ["--scrim"]))["--scrim"];
+  expect(scrim, "--scrim resolves to a colour").toBeTruthy();
+  const backdrops = await page.evaluate(() =>
+    [
+      ...document.querySelectorAll<HTMLElement>(
+        ".modal-overlay, .dialog-overlay, .palette-overlay, .biometric-overlay",
+      ),
+    ].map((el) => ({
+      id: el.id,
+      bg: getComputedStyle(el).backgroundColor,
+    })),
+  );
+  expect(backdrops.length).toBeGreaterThanOrEqual(4);
+  for (const { id, bg } of backdrops) {
+    expect(bg, id).toBe(scrim);
+  }
+});
+
+test("focus ring is visible on a field, the settings search and the palette input", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page);
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+  expect(await focusIndicator(page.locator("#conn-endpoint"))).toBe(true);
+
+  await openMockListing(page, { objectCount: 3 });
+  await page.locator("#settings-btn").click();
+  await expect(page.locator("#settings-overlay")).toBeVisible();
+  expect(await focusIndicator(page.locator("#settings-search"))).toBe(true);
+  await page.locator("#settings-close").click();
+
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#palette-overlay")).toBeVisible();
+  expect(await focusIndicator(page.locator("#palette-input"))).toBe(true);
+});
+
+test("stylesheets reference only defined custom properties", async ({
+  page,
+}) => {
+  const names = new Set<string>();
+  for (const { css } of ownedStyles()) {
+    for (const match of css.matchAll(/var\(\s*(--[\w-]+)\s*\)/g)) {
+      names.add(match[1]);
+    }
+  }
+  expect(names.size).toBeGreaterThan(20);
+
+  for (const os of OS_SCHEMES) {
+    const p = await openPalette(page, os, "system");
+    try {
+      const undefinedNames = await p.evaluate(
+        (list) => {
+          const computed = getComputedStyle(document.documentElement);
+          return list.filter((name) => !computed.getPropertyValue(name).trim());
+        },
+        [...names],
+      );
+      expect(undefinedNames, `${os} undefined tokens`).toEqual([]);
+    } finally {
+      await p.close();
+    }
+  }
+});
+
+test("owned stylesheets use tokens instead of raw colours or px font sizes", () => {
+  for (const { file, css } of ownedStyles()) {
+    if (file === "tokens.css") continue;
+    expect(
+      {
+        file,
+        hex: css.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [],
+        rgb: css.match(/rgba?\([^)]*\)/g) ?? [],
+        px: css.match(/font-size:\s*\d+(\.\d+)?px/g) ?? [],
+      },
+      file,
+    ).toEqual({ file, hex: [], rgb: [], px: [] });
+  }
+});
+
+test("btn--danger is a button primitive in controls.css", () => {
+  const read = (file: string) =>
+    ownedStyles().find((entry) => entry.file === file)?.css ?? "";
+  expect(read("controls.css")).toMatch(/\.btn--danger\s*\{/);
+  expect(read("modals.css")).not.toMatch(/\.btn--danger\b/);
+});
+
+test("badge, count and alert primitives render with token colours", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page);
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+  const colors = await resolveTokenColors(page, [
+    "--accent",
+    "--danger-strong",
+  ]);
+  const badges = await page.evaluate(() => {
+    const host = document.createElement("div");
+    host.innerHTML =
+      '<span class="badge" data-kind="base">1</span>' +
+      '<span class="badge badge--count" data-kind="count">3</span>' +
+      '<span class="badge badge--alert" data-kind="alert">!</span>';
+    document.body.appendChild(host);
+    return [...host.querySelectorAll<HTMLElement>(".badge")].map((el) => {
+      const cs = getComputedStyle(el);
+      return {
+        kind: el.dataset.kind ?? "",
+        bg: cs.backgroundColor,
+        radius: cs.borderTopLeftRadius,
+      };
+    });
+  });
+  const byKind = Object.fromEntries(badges.map((b) => [b.kind, b]));
+  expect(byKind.base?.bg).not.toBe("rgba(0, 0, 0, 0)");
+  expect(byKind.count?.bg).toBe(colors["--accent"]);
+  expect(byKind.alert?.bg).toBe(colors["--danger-strong"]);
+  for (const badge of badges) {
+    expect(badge.radius, badge.kind).not.toBe("0px");
+  }
+});
+
+test("switch checkbox is a themed toggle with a focus ring", async ({
+  page,
+}) => {
+  // Reduced motion lands the colour change at once, so the reads are not mid-transition.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await installLayoutTauriMock(page);
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+  await page.evaluate(() => {
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.className = "switch";
+    input.id = "probe-switch";
+    document.body.appendChild(input);
+  });
+  const toggle = page.locator("#probe-switch");
+  const box = await toggle.boundingBox();
+  expect(box?.width ?? 0).toBeGreaterThanOrEqual(28);
+  const off = await toggle.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  await toggle.evaluate((el) => {
+    (el as HTMLInputElement).checked = true;
+  });
+  const on = await toggle.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  expect(on).not.toBe(off);
+  expect(await focusIndicator(toggle)).toBe(true);
+});
+
+test("select chevron is drawn in currentColor, not a hard-coded grey", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page);
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+  const image = await page.evaluate(() => {
+    const select = document.createElement("select");
+    select.className = "field";
+    select.id = "probe-select";
+    select.innerHTML = "<option>one</option>";
+    document.body.appendChild(select);
+    return getComputedStyle(select).backgroundImage;
+  });
+  expect(image).not.toMatch(/6b7280/);
+});
+
+test("connected-dot pulse does not repeat forever", async ({ page }) => {
+  await installLayoutTauriMock(page);
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+  const iterations = await page.evaluate(() => {
+    const badge = document.createElement("span");
+    badge.className = "connection-badge connection-badge--on";
+    document.body.appendChild(badge);
+    return getComputedStyle(badge, "::before").animationIterationCount;
+  });
+  expect(iterations).not.toBe("infinite");
+});
+
+test("dialog title and modal title share one font size", async ({ page }) => {
+  await installLayoutTauriMock(page);
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+  const sizes = await page.evaluate(() => {
+    const host = document.createElement("div");
+    host.innerHTML =
+      '<div class="modal__header"><h2 data-kind="modal">Modal</h2></div>' +
+      '<div class="dialog-box"><h2 class="dialog-box__title" data-kind="dialog">Dialog</h2></div>';
+    document.body.appendChild(host);
+    return Object.fromEntries(
+      [...host.querySelectorAll<HTMLElement>("h2")].map((el) => [
+        el.dataset.kind ?? "",
+        getComputedStyle(el).fontSize,
+      ]),
+    );
+  });
+  expect(sizes.dialog).toBe(sizes.modal);
+});
+
+test("every 0.12.0 icon name resolves in the icon registry", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page);
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+  const missing = await page.evaluate(async (names) => {
+    const url = new URL("/icons.ts", window.location.href).href;
+    const mod = (await import(/* @vite-ignore */ url)) as {
+      getIconHtml: (name: string) => string;
+    };
+    return names.filter((name) => !mod.getIconHtml(name).includes("<svg"));
+  }, UI_ICON_NAMES);
+  expect(missing).toEqual([]);
 });

@@ -3,7 +3,7 @@
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   display: none;
@@ -35,8 +35,8 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   width: min(420px, 92vw);
   max-height: 80vh;
   overflow-y: auto;
-  box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
-  animation: modal-in 0.2s ease;
+  box-shadow: var(--shadow-3), var(--glass-inset-highlight);
+  animation: modal-in var(--duration-base) ease;
 }
 
 @keyframes modal-in {
@@ -57,8 +57,9 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   padding: 16px 20px 8px;
 }
 
+/* Modal and dialog titles share --text-xl so every heading reads at one size. */
 .modal__header h2 {
-  font-size: 18px;
+  font-size: var(--text-xl);
   font-weight: 600;
 }
 
@@ -168,19 +169,6 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   border-top: 1px solid var(--border);
 }
 
-.btn--danger {
-  background: transparent;
-  color: var(--danger-text);
-  border-color: var(--danger);
-}
-
-.btn--danger:hover:not(:disabled) {
-  /* Darkened so white text stays above 4.5:1 (#ef4444 is only ~3.7:1). */
-  background: #dc2626;
-  border-color: #dc2626;
-  color: #fff;
-}
-
 .bookmark-list-toolbar {
   display: flex;
   gap: 6px;
@@ -237,7 +225,7 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1;
   border-radius: var(--radius-sm);
   flex-shrink: 0;
