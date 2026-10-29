@@ -59,6 +59,7 @@ permissions = [
   "allow-path-exists",
   "allow-write-text-file",
   "allow-open-local-path",
+  "allow-reveal-local-path",
 ]
 
 [[set]]

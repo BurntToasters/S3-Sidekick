@@ -2,10 +2,15 @@ import { invoke } from "./ipc.ts";
 import { applyTheme, saveSettings } from "./settings.ts";
 import { state } from "./state.ts";
 import type { ThemePreference } from "./settings-model.ts";
-import type { SecurityStatus } from "./security.ts";
+import {
+  biometricCaveat,
+  securityErrorMessage,
+  type SecurityStatus,
+} from "./security.ts";
 import { focusConnectionScreen } from "./app-connection.ts";
 
-const LAST_STEP = 4;
+/** Welcome + theme, security, then updates + done. */
+const STEP_COUNT = 3;
 
 interface SetupResult {
   theme: ThemePreference;
@@ -22,32 +27,42 @@ function $(id: string): HTMLElement {
 function setProgress(step: number): void {
   const bar = $("setup-wizard-progress-bar");
   const progress = bar.parentElement;
-  const pct = (step / LAST_STEP) * 100;
+  const pct = ((step + 1) / STEP_COUNT) * 100;
   bar.style.width = `${pct}%`;
   progress?.setAttribute("aria-valuenow", String(Math.round(pct)));
+  $("setup-step-count").textContent = `Step ${step + 1} of ${STEP_COUNT}`;
 }
 
-function showStep(step: number): void {
-  const overlay = document.getElementById("setup-wizard-overlay");
-  const headingIds = [
-    "setup-wizard-title-welcome",
-    "setup-wizard-title-theme",
-    "setup-wizard-title-encryption",
-    "setup-wizard-title-updates",
-    "setup-wizard-title-done",
-  ];
+/** Show numbered step `step` and focus the heading `focusId` inside it. */
+function showStep(step: number, focusId: string): void {
+  const overlay = $("setup-wizard-overlay");
   const steps = document.querySelectorAll<HTMLElement>(".setup-wizard-step");
   for (const s of steps) {
     const idx = Number(s.dataset.step);
     s.hidden = idx !== step;
     s.setAttribute("aria-hidden", String(idx !== step));
-    if (idx === step) {
-      s.tabIndex = -1;
-      s.focus();
+  }
+  setProgress(step);
+  overlay.setAttribute("aria-labelledby", focusId);
+  $(focusId).focus();
+}
+
+/** Show one sub-view (welcome, theme, updates or done) inside the current step. */
+function showSubstep(substepId: string): void {
+  const substep = $(substepId);
+  const container = substep.parentElement;
+  if (container) {
+    for (const sub of container.querySelectorAll<HTMLElement>(
+      ":scope > .setup-wizard-substep",
+    )) {
+      sub.hidden = sub !== substep;
     }
   }
-  overlay?.setAttribute("aria-labelledby", headingIds[step] ?? headingIds[0]);
-  setProgress(step);
+  const heading = substep.querySelector<HTMLElement>("h2");
+  if (heading) {
+    $("setup-wizard-overlay").setAttribute("aria-labelledby", heading.id);
+    heading.focus();
+  }
 }
 
 export function isSetupComplete(): boolean {
@@ -63,55 +78,30 @@ export function shouldShowSetupWizard(): boolean {
   return !isSetupComplete();
 }
 
+/**
+ * The vault state is read from the backend each time a step is about to
+ * change it. The startup read goes stale after a Skip, Back or Enable, and
+ * initializing an existing vault is refused by the backend.
+ */
+async function readVaultStatus(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>("get_security_status");
+}
+
 export function showSetupWizard(): Promise<SetupResult | null> {
   return new Promise((resolve) => {
     const overlay = $("setup-wizard-overlay");
     overlay.hidden = false;
 
     let selectedTheme: ThemePreference = "system";
-    let securityAlreadyInitialized = false;
-    let securityStatusError: string | null = null;
-
-    const checkSecurityStatus = (): Promise<void> =>
-      invoke<SecurityStatus>("get_security_status")
-        .then((secStatus) => {
-          securityAlreadyInitialized = secStatus.initialized;
-          securityStatusError = null;
-        })
-        .catch((err: unknown) => {
-          securityStatusError = String(err);
-        });
-    let securityCheckDone = checkSecurityStatus();
-
-    showStep(0);
-
-    function goTo(step: number): void {
-      showStep(step);
-    }
-
-    function cleanup(): void {
-      // Clear wizard passwords after init so secrets do not linger in DOM.
-      try {
-        encPassword.value = "";
-        encConfirm.value = "";
-      } catch {
-        // Best-effort: inputs may already be detached.
-      }
-      overlay.hidden = true;
-      welcomeNext.removeEventListener("click", onWelcomeNext);
-      themeBack.removeEventListener("click", onThemeBack);
-      themeNext.removeEventListener("click", wrappedThemeNext);
-      encBack.removeEventListener("click", onEncBack);
-      encSkip.removeEventListener("click", wrappedEncSkip);
-      encNext.removeEventListener("click", wrappedEncNext);
-      updatesBack.removeEventListener("click", wrappedUpdatesBack);
-      updatesNext.removeEventListener("click", onUpdatesNext);
-      doneBtn.removeEventListener("click", onDone);
-      for (const btn of themeBtns) {
-        btn.removeEventListener("click", onThemeSelect);
-      }
-      themeOptions?.removeEventListener("keydown", onThemeKeydown);
-    }
+    const cleanups: Array<() => void> = [];
+    const listen = (
+      target: EventTarget,
+      type: string,
+      handler: EventListener,
+    ): void => {
+      target.addEventListener(type, handler);
+      cleanups.push(() => target.removeEventListener(type, handler));
+    };
 
     const welcomeNext = $("setup-welcome-next") as HTMLButtonElement;
     const themeBack = $("setup-theme-back") as HTMLButtonElement;
@@ -126,30 +116,48 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     const encConfirm = $("setup-enc-confirm") as HTMLInputElement;
     const encConfirmReveal = $("setup-enc-confirm-reveal") as HTMLButtonElement;
     const encError = $("setup-enc-error") as HTMLElement;
+    const encStatus = $("setup-enc-status") as HTMLElement;
+    const encSkipNote = $("setup-enc-skip-note") as HTMLElement;
     const encBiometric = $("setup-enc-biometric") as HTMLInputElement;
     const biometricLabel = $("setup-biometric-label") as HTMLElement;
     const biometricText = $("setup-biometric-text") as HTMLElement;
+    const biometricCaveatEl = $("setup-biometric-caveat") as HTMLElement;
     const updatesBack = $("setup-updates-back") as HTMLButtonElement;
     const updatesNext = $("setup-updates-next") as HTMLButtonElement;
     const autoUpdates = $("setup-auto-updates") as HTMLInputElement;
     const updateChannel = $("setup-update-channel") as HTMLSelectElement;
     const doneBtn = $("setup-done-btn") as HTMLButtonElement;
-    const themeBtns = document.querySelectorAll<HTMLButtonElement>(
-      ".setup-wizard-theme-btn",
+    const themeInputs = document.querySelectorAll<HTMLInputElement>(
+      '#setup-substep-theme input[name="setup-theme"]',
     );
-    const themeOptions = document.getElementById("setup-theme-options");
+
+    function cleanup(): void {
+      // Clear wizard passwords after init so secrets do not linger in DOM.
+      encPassword.value = "";
+      encConfirm.value = "";
+      encPassword.type = "password";
+      encConfirm.type = "password";
+      encPassword.disabled = false;
+      encConfirm.disabled = false;
+      encPasswordReveal.disabled = false;
+      encConfirmReveal.disabled = false;
+      encStatus.hidden = true;
+      encBack.disabled = false;
+      overlay.hidden = true;
+      for (const remove of cleanups) remove();
+    }
 
     function wireRevealToggle(
       input: HTMLInputElement,
       btn: HTMLButtonElement,
     ): void {
-      btn.addEventListener("click", () => {
+      // Visible text carries the state; aria-pressed tells assistive tech it
+      // is a toggle. The accessible name stays "Show password".
+      listen(btn, "click", () => {
         const showing = input.type === "text";
         input.type = showing ? "password" : "text";
-        btn.setAttribute(
-          "aria-label",
-          showing ? "Show password" : "Hide password",
-        );
+        btn.textContent = showing ? "Show" : "Hide";
+        btn.setAttribute("aria-pressed", String(!showing));
         input.focus();
       });
     }
@@ -163,14 +171,39 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
     function restoreEncActionLabels(): void {
       encSkip.textContent = encSkipDefaultLabel;
-      encNext.textContent = encNextDefaultLabel;
+      encNext.textContent = encryptionCommitted
+        ? "Continue"
+        : encNextDefaultLabel;
+      // Skipping means "no encryption"; once it is on, the only way forward
+      // is Continue, so the skip action goes away.
+      encSkip.hidden = encryptionCommitted;
+      encSkipNote.hidden = encryptionCommitted;
     }
 
-    void initBiometricUI();
+    function setEncBusy(busy: boolean): void {
+      encNext.disabled = busy;
+      encSkip.disabled = busy;
+      encBack.disabled = busy;
+    }
+
+    /**
+     * Encryption is on: lock the password fields so the password cannot be
+     * changed (a second initialize would fail anyway) and say so.
+     */
+    function commitEncryptionUI(): void {
+      encryptionCommitted = true;
+      encPassword.disabled = true;
+      encConfirm.disabled = true;
+      encPasswordReveal.disabled = true;
+      encConfirmReveal.disabled = true;
+      encStatus.hidden = false;
+      hideEncError();
+      restoreEncActionLabels();
+    }
 
     async function initBiometricUI(): Promise<void> {
       try {
-        const status = await invoke<SecurityStatus>("get_security_status");
+        const status = await readVaultStatus();
         const platform = await invoke<string>("get_platform_info");
         if (status.biometric_available) {
           biometricLabel.hidden = false;
@@ -181,57 +214,39 @@ export function showSetupWizard(): Promise<SetupResult | null> {
           } else {
             biometricText.textContent = "Enable biometric unlock";
           }
+          biometricCaveatEl.textContent = biometricCaveat(platform);
+          biometricCaveatEl.hidden = false;
         }
       } catch {
         // biometric not available
       }
     }
+    void initBiometricUI();
 
-    function syncThemeRovingTabindex(): void {
-      for (const btn of themeBtns) {
-        btn.tabIndex = btn.getAttribute("aria-checked") === "true" ? 0 : -1;
+    function syncThemeCards(): void {
+      for (const input of themeInputs) {
+        input
+          .closest(".theme-card")
+          ?.classList.toggle("theme-card--active", input.checked);
       }
     }
 
-    function onThemeSelect(this: HTMLButtonElement): void {
-      for (const btn of themeBtns) {
-        btn.classList.remove("setup-wizard-theme-btn--active");
-        btn.setAttribute("aria-checked", "false");
-      }
-      this.classList.add("setup-wizard-theme-btn--active");
-      this.setAttribute("aria-checked", "true");
-      selectedTheme = (this.dataset.themeValue as ThemePreference) ?? "system";
+    function onThemeChange(input: HTMLInputElement): void {
+      if (!input.checked) return;
+      selectedTheme = input.value as ThemePreference;
       applyTheme(selectedTheme);
-      syncThemeRovingTabindex();
+      syncThemeCards();
     }
 
+    /** Arrow keys move through the radio group natively; Home and End do not. */
     function onThemeKeydown(event: KeyboardEvent): void {
-      if (
-        event.key !== "ArrowLeft" &&
-        event.key !== "ArrowRight" &&
-        event.key !== "ArrowUp" &&
-        event.key !== "ArrowDown" &&
-        event.key !== "Home" &&
-        event.key !== "End"
-      ) {
-        return;
-      }
+      if (event.key !== "Home" && event.key !== "End") return;
+      const list = Array.from(themeInputs);
+      const target = event.key === "Home" ? list[0] : list[list.length - 1];
+      if (!target) return;
       event.preventDefault();
-      const list = Array.from(themeBtns);
-      if (list.length === 0) return;
-      const current = list.findIndex(
-        (btn) => btn.getAttribute("aria-checked") === "true",
-      );
-      let next = current < 0 ? 0 : current;
-      if (event.key === "Home") next = 0;
-      else if (event.key === "End") next = list.length - 1;
-      else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-        next = (current + 1 + list.length) % list.length;
-      } else {
-        next = (current - 1 + list.length) % list.length;
-      }
-      list[next].click();
-      list[next].focus();
+      target.focus();
+      target.click();
     }
 
     function showEncError(msg: string): void {
@@ -244,84 +259,113 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     }
 
     function onWelcomeNext(): void {
-      goTo(1);
+      showSubstep("setup-substep-theme");
     }
 
     function onThemeBack(): void {
-      goTo(0);
+      showSubstep("setup-substep-welcome");
     }
 
     async function onThemeNext(): Promise<void> {
-      await securityCheckDone;
-      if (securityStatusError) {
-        securityCheckDone = checkSecurityStatus();
-        await securityCheckDone;
+      let readError: string | null = null;
+      let vault: SecurityStatus | null = null;
+      try {
+        vault = await readVaultStatus();
+      } catch (err) {
+        readError = securityErrorMessage(err);
       }
-      if (securityAlreadyInitialized) {
-        goTo(3);
+      showStep(1, "setup-wizard-title-encryption");
+      if (readError !== null) {
+        // Not knowing is not the same as "not set up". Enable and Skip both
+        // read the vault again and refuse to act if it still cannot be read.
+        showEncError(`Could not read the current security setup. ${readError}`);
         return;
       }
-      goTo(2);
-      if (securityStatusError) {
-        // Not knowing is not the same as "not set up". The backend refuses
-        // to re-initialize an existing vault, so say why a step may fail.
-        showEncError(
-          `Could not read the current security setup (${securityStatusError}). If encryption is already configured, skip this step and manage it in Settings.`,
-        );
-      }
+      if (vault?.encryption_enabled) commitEncryptionUI();
     }
 
     function onEncBack(): void {
       hideEncError();
       restoreEncActionLabels();
-      goTo(1);
+      showStep(0, "setup-wizard-title-theme");
+      showSubstep("setup-substep-theme");
     }
 
+    function goToUpdates(): void {
+      showStep(2, "setup-wizard-title-updates");
+      showSubstep("setup-substep-updates");
+    }
+
+    /** Skip setup: store unencrypted (not recommended), then continue. */
     async function onEncSkip(): Promise<void> {
       hideEncError();
       if (encryptionCommitted) {
         encBiometric.checked = false;
         restoreEncActionLabels();
-        goTo(3);
+        goToUpdates();
         return;
       }
+      setEncBusy(true);
       try {
-        await invoke<SecurityStatus>("initialize_security", {
-          enableEncryption: false,
-          password: null,
-        });
+        const vault = await readVaultStatus();
+        if (vault.encryption_enabled) {
+          commitEncryptionUI();
+          encBiometric.checked = false;
+        } else if (!vault.initialized) {
+          await invoke<SecurityStatus>("initialize_security", {
+            enableEncryption: false,
+            password: null,
+          });
+        }
+        // Already initialized without encryption: the state already matches a
+        // skip, so nothing is written again.
       } catch (err) {
-        showEncError(`Failed to disable encryption: ${String(err)}`);
+        showEncError(
+          `Could not turn off encryption. ${securityErrorMessage(err)}`,
+        );
         return;
+      } finally {
+        setEncBusy(false);
       }
-      goTo(3);
+      restoreEncActionLabels();
+      goToUpdates();
     }
 
     async function onEncNext(): Promise<void> {
       hideEncError();
-      const pw = encPassword.value;
-      const confirm = encConfirm.value;
-
-      if (!encryptionCommitted) {
-        if (pw.length < 8) {
-          showEncError("Password must be at least 8 characters.");
-          return;
-        }
-        if (pw !== confirm) {
-          showEncError("Passwords do not match.");
-          return;
-        }
-      }
-
-      encNext.disabled = true;
-      encSkip.disabled = true;
+      setEncBusy(true);
       try {
         if (!encryptionCommitted) {
-          await invoke<SecurityStatus>("initialize_security", {
-            enableEncryption: true,
-            password: pw,
-          });
-          encryptionCommitted = true;
+          const vault = await readVaultStatus();
+          if (vault.encryption_enabled) {
+            commitEncryptionUI();
+          } else {
+            const pw = encPassword.value;
+            const confirm = encConfirm.value;
+            if (pw.length < 8) {
+              showEncError("Password must be at least 8 characters.");
+              return;
+            }
+            if (pw !== confirm) {
+              showEncError("Passwords do not match.");
+              return;
+            }
+            if (vault.initialized) {
+              // Skipped earlier: the vault exists without encryption, so turn
+              // encryption on rather than initializing it again.
+              await invoke<SecurityStatus>("set_security_encryption", {
+                enableEncryption: true,
+                currentPassword: null,
+                newPassword: pw,
+              });
+            } else {
+              await invoke<SecurityStatus>("initialize_security", {
+                enableEncryption: true,
+                password: pw,
+              });
+            }
+            commitEncryptionUI();
+          }
         }
 
         if (encBiometric.checked && !biometricEnrolled) {
@@ -329,30 +373,34 @@ export function showSetupWizard(): Promise<SetupResult | null> {
             await invoke<SecurityStatus>("enable_biometric");
             biometricEnrolled = true;
           } catch (err) {
-            showEncError(`Failed to enable biometric: ${String(err)}`);
+            // Encryption is already on, so only biometric is offered again.
+            showEncError(
+              `Encryption is on, but biometric unlock was not enabled. ${securityErrorMessage(err)}`,
+            );
             encNext.textContent = "Retry biometric";
+            encSkip.hidden = false;
             encSkip.textContent = "Continue without biometric";
             return;
           }
         }
 
         restoreEncActionLabels();
-        goTo(3);
+        goToUpdates();
       } catch (err) {
-        showEncError(`Failed to enable encryption: ${String(err)}`);
+        showEncError(
+          `Could not turn on encryption. ${securityErrorMessage(err)}`,
+        );
       } finally {
-        encNext.disabled = false;
-        encSkip.disabled = false;
+        setEncBusy(false);
       }
     }
 
-    async function onUpdatesBack(): Promise<void> {
-      await securityCheckDone;
-      goTo(securityAlreadyInitialized ? 1 : 2);
+    function onUpdatesBack(): void {
+      showStep(1, "setup-wizard-title-encryption");
     }
 
     function onUpdatesNext(): void {
-      goTo(4);
+      showSubstep("setup-substep-done");
     }
 
     function onDone(): void {
@@ -368,24 +416,23 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       focusConnectionScreen();
     }
 
-    const wrappedThemeNext = () => void onThemeNext();
-    const wrappedEncSkip = () => void onEncSkip();
-    const wrappedEncNext = () => void onEncNext();
-    const wrappedUpdatesBack = () => void onUpdatesBack();
-
-    welcomeNext.addEventListener("click", onWelcomeNext);
-    themeBack.addEventListener("click", onThemeBack);
-    themeNext.addEventListener("click", wrappedThemeNext);
-    encBack.addEventListener("click", onEncBack);
-    encSkip.addEventListener("click", wrappedEncSkip);
-    encNext.addEventListener("click", wrappedEncNext);
-    updatesBack.addEventListener("click", wrappedUpdatesBack);
-    updatesNext.addEventListener("click", onUpdatesNext);
-    doneBtn.addEventListener("click", onDone);
-    for (const btn of themeBtns) {
-      btn.addEventListener("click", onThemeSelect);
+    listen(welcomeNext, "click", onWelcomeNext);
+    listen(themeBack, "click", onThemeBack);
+    listen(themeNext, "click", () => void onThemeNext());
+    listen(encBack, "click", onEncBack);
+    listen(encSkip, "click", () => void onEncSkip());
+    listen(encNext, "click", () => void onEncNext());
+    listen(updatesBack, "click", onUpdatesBack);
+    listen(updatesNext, "click", onUpdatesNext);
+    listen(doneBtn, "click", onDone);
+    for (const input of themeInputs) {
+      listen(input, "change", () => onThemeChange(input));
+      listen(input, "keydown", (event) =>
+        onThemeKeydown(event as KeyboardEvent),
+      );
     }
-    themeOptions?.addEventListener("keydown", onThemeKeydown);
-    syncThemeRovingTabindex();
+    syncThemeCards();
+
+    showStep(0, "setup-wizard-title-welcome");
   });
 }

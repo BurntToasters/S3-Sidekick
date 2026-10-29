@@ -158,9 +158,10 @@ describe("browser navigation recovery", () => {
       bucket: "bucket-a",
       prefix: "",
     });
+    // No trailing slash is kept: "docs/sub" may be a file or a folder.
     expect(browser.parseLocationPath("s3://bucket-a/docs/sub")).toEqual({
       bucket: "bucket-a",
-      prefix: "docs/sub/",
+      prefix: "docs/sub",
     });
     expect(browser.formatLocationPath("bucket-a", "docs/")).toBe(
       "bucket-a/docs/",

@@ -5,6 +5,7 @@ import {
   openSettingsModal,
   closeSettingsModal,
   resetSettings,
+  resetAfterForgottenPassword,
   setBookmarkSelectHandler,
   switchSettingsTab,
 } from "./settings.ts";
@@ -21,8 +22,7 @@ import {
   handleRowClick,
   handleBucketListKeydown,
   handleSelectAll,
-  clearSelection,
-  setLastClickedKey,
+  setLastClickedEntry,
   updateSelectionUI,
   toggleSort,
   navigateBack,
@@ -34,10 +34,17 @@ import {
   pruneStaleSelection,
   clearFilter,
   updateFilterClearButton,
+  reportNavFailure,
+  selectOnlyEntry,
+  isLocationEditMode,
 } from "./browser.ts";
 import { wireInspectorChrome, toggleInspector } from "./inspector.ts";
 import { wireWindowSizePersistence } from "./window-size.ts";
-import { checkUpdates, setUpdateChannel } from "./updater.ts";
+import {
+  checkUpdates,
+  getReleasePageUrl,
+  setUpdateChannel,
+} from "./updater.ts";
 import { loadBookmarks, clearBookmarks } from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
@@ -53,28 +60,37 @@ import {
   initTransferQueueUI,
   recoverPendingTransfers,
   disposeTransferQueueUI,
+  retryFailedTransfers,
 } from "./transfers.ts";
-import { wireKeyboardShortcuts } from "./keyboard.ts";
+import { openKeyboardShortcuts, wireKeyboardShortcuts } from "./keyboard.ts";
 import { canPreview, openPreview, closePreview } from "./preview.ts";
 import {
   logActivity,
   toggleActivityLog,
   clearActivityLog,
 } from "./activity-log.ts";
-import { initDrawer, getActiveTab } from "./bottom-drawer.ts";
+import {
+  initDrawer,
+  getActiveTab,
+  openDrawer,
+  setTransferFilter,
+} from "./bottom-drawer.ts";
+import { showConfirm } from "./dialogs.ts";
 import {
   handleSecurityChangePassword,
   handleSecurityToggle,
   handleLockNow,
   handleLockTimeoutChange,
   handleBiometricToggle,
+  setForgotPasswordHandler,
 } from "./security.ts";
 import {
   initPalette,
   registerCommands,
   openPalette,
+  type PaletteCommand,
 } from "./command-palette.ts";
-import { basename, friendlyError } from "./utils.ts";
+import { basename, friendlyError, plural } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { showToast } from "./toast.ts";
 import {
@@ -99,29 +115,31 @@ import {
   refreshBookmarkBar,
   updateBookmarkBtn,
   handleNewConnection,
-  awsRegionalEndpoint,
+  applyProviderPreset,
+  wireConnectionScreenExtras,
   setConnectionUI,
+  confirmSessionTeardown,
+  handleConnectButton,
+  setSavedConnectionsLocked,
 } from "./app-connection.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
 import {
   addSelection,
-  getSelectedFileKeys,
-  getSelectionEntries,
+  entryFromRow,
+  fileEntry,
   isSelected,
   removeSelection,
-  selectionCount,
 } from "./app-selection.ts";
 import {
   handleDelete,
   handleRename,
   handleCreateFolder,
   handleRefresh,
+  handleRefreshBuckets,
   handleExportActivityLog,
   handleGoToKeyOrPrefix,
-  handleCopyUrl,
 } from "./app-objects.ts";
 import {
-  handleDownload,
   handleOpenLastDownloadFolder,
   getRememberedDownloadDir,
 } from "./app-downloads.ts";
@@ -135,7 +153,14 @@ import {
   handleBucketContextMenu,
 } from "./app-context-menu.ts";
 import { showContextMenu, type MenuItem } from "./context-menu.ts";
-import { openCopyMoveDialog } from "./app-copy-move.ts";
+import {
+  MORE_MENU_ACTION_IDS,
+  currentActionContext,
+  getObjectAction,
+  resolveActionLabel,
+  runObjectAction,
+  syncSelectionBar,
+} from "./object-actions.ts";
 
 let dragDropUnlisten: (() => void) | null = null;
 
@@ -146,6 +171,7 @@ let dragDropUnlisten: (() => void) | null = null;
 export async function clearSessionAfterAutoLock(): Promise<boolean> {
   const hadSession = state.connected || Boolean(state.connectionId);
   setConnectionAccessLocked(true);
+  setSavedConnectionsLocked(true);
   setConnectionUI(false);
   closePreview();
   setConnectionInputs("", "", "", "");
@@ -162,8 +188,7 @@ export async function clearSessionAfterAutoLock(): Promise<boolean> {
 
 /** Connection form: connect, credentials, provider presets, saved list. */
 function wireConnectionForm(): void {
-  dom.connectBtn.addEventListener("click", handleConnect);
-  dom.disconnectBtn.addEventListener("click", handleDisconnect);
+  dom.connectBtn.addEventListener("click", handleConnectButton);
 
   const connectionFieldIds = [
     "conn-endpoint",
@@ -182,22 +207,26 @@ function wireConnectionForm(): void {
     });
   }
 
-  const secretToggle = document.getElementById(
-    "secret-key-toggle",
-  ) as HTMLButtonElement | null;
-  const secretInput = document.getElementById(
-    "conn-secret-key",
-  ) as HTMLInputElement | null;
-  if (secretToggle && secretInput) {
-    secretToggle.addEventListener("click", () => {
-      const showing = secretInput.type === "text";
-      secretInput.type = showing ? "password" : "text";
-      secretToggle.textContent = showing ? "Show" : "Hide";
-      secretToggle.setAttribute("aria-pressed", String(!showing));
-      secretToggle.setAttribute(
-        "aria-label",
-        showing ? "Show secret key" : "Hide secret key",
-      );
+  // Reveal toggles keep a fixed accessible name and expose state via aria-pressed.
+  const revealToggles: Array<
+    [toggleId: string, inputId: string, label: string]
+  > = [
+    ["secret-key-toggle", "conn-secret-key", "secret key"],
+    ["session-token-toggle", "conn-session-token", "session token"],
+  ];
+  for (const [toggleId, inputId, label] of revealToggles) {
+    const toggle = document.getElementById(
+      toggleId,
+    ) as HTMLButtonElement | null;
+    const input = document.getElementById(inputId) as HTMLInputElement | null;
+    if (!toggle || !input) continue;
+    toggle.setAttribute("aria-label", `Show ${label}`);
+    toggle.setAttribute("aria-pressed", "false");
+    toggle.addEventListener("click", () => {
+      const revealed = input.type === "text";
+      input.type = revealed ? "password" : "text";
+      toggle.textContent = revealed ? "Show" : "Hide";
+      toggle.setAttribute("aria-pressed", String(!revealed));
     });
   }
 
@@ -205,40 +234,15 @@ function wireConnectionForm(): void {
     "conn-provider-preset",
   ) as HTMLSelectElement | null;
   if (providerPreset) {
+    // Preset prefill (endpoint/region/Account ID) lives in app-connection.ts
+    // next to the rest of the connection-form behavior.
     providerPreset.addEventListener("change", () => {
-      const endpointInput = document.getElementById(
-        "conn-endpoint",
-      ) as HTMLInputElement | null;
-      const regionInput = document.getElementById(
-        "conn-region",
-      ) as HTMLInputElement | null;
-      const preset = providerPreset.value;
-      if (preset === "aws") {
-        const region = "us-east-1";
-        if (endpointInput) endpointInput.value = awsRegionalEndpoint(region);
-        if (regionInput) regionInput.value = region;
-      } else if (preset === "do") {
-        if (endpointInput)
-          endpointInput.value = "https://nyc3.digitaloceanspaces.com";
-        if (regionInput) regionInput.value = "nyc3";
-      } else if (preset === "backblaze") {
-        if (endpointInput)
-          endpointInput.value = "https://s3.us-west-004.backblazeb2.com";
-        if (regionInput) regionInput.value = "us-west-004";
-      } else if (preset === "cloudflare") {
-        if (endpointInput)
-          endpointInput.value = "https://<account-id>.r2.cloudflarestorage.com";
-        if (regionInput) regionInput.value = "auto";
-      } else if (preset === "minio") {
-        if (endpointInput) endpointInput.value = "http://localhost:9000";
-        if (regionInput) regionInput.value = "us-east-1";
-      } else if (preset === "wasabi") {
-        if (endpointInput) endpointInput.value = "https://s3.wasabisys.com";
-        if (regionInput) regionInput.value = "us-east-1";
-      }
-      providerPreset.value = "";
+      applyProviderPreset(providerPreset.value);
     });
   }
+
+  // Switcher, test connection, saved filter, reconnect card, blur validation.
+  wireConnectionScreenExtras();
 
   document
     .getElementById("bookmark-save-btn")!
@@ -289,18 +293,35 @@ function wireSettingsModal(): void {
   document
     .getElementById("settings-reset")!
     .addEventListener("click", resetSettings);
+  const checkNowButton = document.getElementById(
+    "settings-check-updates",
+  ) as HTMLButtonElement;
+  checkNowButton.addEventListener("click", () => {
+    // Runs inside Settings: the button shows progress and the result is
+    // reported in the panel. Settings stays open with unsaved edits intact.
+    const persistedChannel = state.lastPersistedSettings.updateChannel;
+    const channelSelect = document.getElementById(
+      "setting-update-channel",
+    ) as HTMLSelectElement | null;
+    setUpdateChannel(channelSelect?.value === "beta" ? "beta" : "release");
+    const idleLabel = checkNowButton.textContent;
+    checkNowButton.disabled = true;
+    checkNowButton.setAttribute("aria-busy", "true");
+    checkNowButton.textContent = "Checking\u2026";
+    void checkUpdates().finally(() => {
+      setUpdateChannel(persistedChannel);
+      checkNowButton.disabled = false;
+      checkNowButton.removeAttribute("aria-busy");
+      checkNowButton.textContent = idleLabel;
+    });
+  });
   document
-    .getElementById("settings-check-updates")!
+    .getElementById("settings-open-release-page")!
     .addEventListener("click", () => {
-      const persistedChannel = state.lastPersistedSettings.updateChannel;
-      const channelSelect = document.getElementById(
-        "setting-update-channel",
-      ) as HTMLSelectElement | null;
-      setUpdateChannel(channelSelect?.value === "beta" ? "beta" : "release");
-      void closeSettingsModal(false);
-      void checkUpdates().finally(() => {
-        setUpdateChannel(persistedChannel);
-      });
+      void invoke("open_external_url", { url: getReleasePageUrl() }).catch(
+        (err) =>
+          logActivity(`Failed to open release page: ${String(err)}`, "warning"),
+      );
     });
 
   document
@@ -378,7 +399,13 @@ function wireOverlaysAndDrawer(): void {
   document.getElementById("drawer-clear")!.addEventListener("click", () => {
     const tab = getActiveTab();
     if (tab === "activity") {
-      clearActivityLog();
+      void showConfirm(
+        "Clear activity log?",
+        "This removes every entry from the activity log. Files and transfers are not changed.",
+        { okLabel: "Clear", cancelLabel: "Keep", okDanger: true },
+      ).then((confirmed) => {
+        if (confirmed) clearActivityLog();
+      });
     } else {
       clearCompletedTransfers();
     }
@@ -417,6 +444,25 @@ function wireAppLifecycle(): void {
 }
 
 /** Preview overlay and batch selection actions. */
+
+/** The fixed More menu, built from the object-actions registry. */
+function moreMenuItems(): MenuItem[] {
+  const context = currentActionContext();
+  const items: MenuItem[] = [];
+  for (const id of MORE_MENU_ACTION_IDS) {
+    const action = getObjectAction(id);
+    if (!action || !action.isAvailable(context)) continue;
+    items.push({
+      label: resolveActionLabel(action, context),
+      action: id,
+      icon: action.icon,
+      danger: action.danger,
+      disabled: context.listingLoading,
+    });
+  }
+  return items;
+}
+
 function wireSelectionActions(): void {
   document.getElementById("preview-overlay")!.addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closePreview();
@@ -426,24 +472,27 @@ function wireSelectionActions(): void {
     .getElementById("activity-toggle")!
     .addEventListener("click", toggleActivityLog);
 
-  document.getElementById("batch-properties")!.addEventListener("click", () => {
-    const keys = Array.from(getSelectionEntries());
-    if (keys.length > 0) {
-      void openInfoPanel(keys);
-    }
-  });
-  document.getElementById("batch-download")!.addEventListener("click", () => {
-    void handleDownload();
-  });
-  document.getElementById("batch-delete")!.addEventListener("click", () => {
-    void handleDelete();
-  });
-  document.getElementById("batch-copy-urls")!.addEventListener("click", () => {
-    void handleCopyUrl();
-  });
-  document.getElementById("batch-deselect")!.addEventListener("click", () => {
-    clearSelection();
-  });
+  const runSelectionAction = (id: string): void => {
+    runObjectAction(id, currentActionContext());
+  };
+  document
+    .getElementById("batch-download")
+    ?.addEventListener("click", () => runSelectionAction("download"));
+  document
+    .getElementById("batch-copy-move")
+    ?.addEventListener("click", () => runSelectionAction("copy-move"));
+  document
+    .getElementById("batch-rename")
+    ?.addEventListener("click", () => runSelectionAction("rename"));
+  document
+    .getElementById("batch-copy-urls")
+    ?.addEventListener("click", () => runSelectionAction("copy-url"));
+  document
+    .getElementById("batch-delete")
+    ?.addEventListener("click", () => runSelectionAction("delete"));
+  document
+    .getElementById("batch-deselect")
+    ?.addEventListener("click", () => runSelectionAction("deselect-all"));
 
   const batchMore = document.getElementById(
     "batch-more",
@@ -455,55 +504,50 @@ function wireSelectionActions(): void {
     batchMore.addEventListener("click", () => {
       if (batchMore.hidden || batchMore.disabled) return;
       dismissMoreMenu();
-
-      const objectPanel = document.getElementById("object-panel");
-      const listingLoading = objectPanel?.getAttribute("aria-busy") === "true";
-      const selectedFiles = getSelectedFileKeys().length;
-      const selectedCount = selectionCount();
-      const deleteButton = document.getElementById(
-        "batch-delete",
-      ) as HTMLButtonElement | null;
-      const deleteInFlight = deleteButton?.dataset.operationInFlight === "true";
       const rect = batchMore.getBoundingClientRect();
-      const menuItems: MenuItem[] = [
-        {
-          label: "Delete",
-          action: "delete",
-          disabled: selectedCount === 0 || listingLoading || deleteInFlight,
-        },
-        {
-          label: "Copy URLs",
-          action: "copy-urls",
-          disabled: selectedFiles === 0 || listingLoading,
-        },
-        {
-          label: "Deselect All",
-          action: "deselect-all",
-          disabled: selectedCount === 0,
-        },
-      ];
       showContextMenu(
         rect.left,
         rect.bottom,
-        menuItems,
+        moreMenuItems(),
         (action) => {
           dismissMoreMenu();
-          if (action === "delete") void handleDelete();
-          else if (action === "copy-urls") void handleCopyUrl();
-          else if (action === "deselect-all") clearSelection();
+          runObjectAction(action, currentActionContext());
         },
         dismissMoreMenu,
       );
       batchMore.setAttribute("aria-expanded", "true");
     });
   }
+
+  // The bar's labels and Rename visibility follow the live selection. The
+  // count node is rewritten on every selection update, so watching it keeps
+  // the registry-derived bar in sync without touching the render path.
+  const selectionBarSync = new MutationObserver(() => syncSelectionBar());
+  const batchToolbar = document.getElementById("batch-toolbar");
+  const batchCount = document.getElementById("batch-count");
+  if (batchToolbar) {
+    selectionBarSync.observe(batchToolbar, {
+      attributes: true,
+      attributeFilter: ["data-selection-state", "aria-busy"],
+    });
+  }
+  if (batchCount) {
+    selectionBarSync.observe(batchCount, {
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }
+  syncSelectionBar();
 }
 
 /** Vault, biometric and lock controls in Settings. */
 function wireSecuritySettings(): void {
-  document.getElementById("security-toggle")!.addEventListener("click", () => {
+  // "Forgot password?" on the lock view goes straight to the erase explanation.
+  setForgotPasswordHandler(() => void resetAfterForgottenPassword());
+  const runSecurityAction = (action: "setup" | "unlock" | "disable"): void => {
     void (async () => {
-      const changed = await handleSecurityToggle(setStatus);
+      const changed = await handleSecurityToggle(setStatus, action);
       if (!changed) return;
       try {
         await loadBookmarks();
@@ -526,7 +570,16 @@ function wireSecuritySettings(): void {
         /* connection unavailable */
       }
     })();
-  });
+  };
+  document
+    .getElementById("security-setup-btn")!
+    .addEventListener("click", () => runSecurityAction("setup"));
+  document
+    .getElementById("security-unlock-btn")!
+    .addEventListener("click", () => runSecurityAction("unlock"));
+  document
+    .getElementById("security-disable-btn")!
+    .addEventListener("click", () => runSecurityAction("disable"));
   document
     .getElementById("security-change-password")!
     .addEventListener("click", () => {
@@ -536,12 +589,16 @@ function wireSecuritySettings(): void {
     .getElementById("security-lock-btn")!
     .addEventListener("click", () => {
       void (async () => {
+        // Ask before anything is torn down: running transfers stop on lock.
+        if (!(await confirmSessionTeardown("Lock now"))) return;
         // Disconnect first so the backend cancels and drains operations that
         // already cloned the S3 client before encrypted credentials are locked.
         if (state.connected && !(await handleDisconnect())) return;
         const locked = await handleLockNow(setStatus);
         if (locked) {
           setConnectionInputs("", "", "", "");
+          // Mirror clearSessionAfterAutoLock: show the locked saved list, not an empty one.
+          setSavedConnectionsLocked(true);
           clearBookmarks();
           refreshBookmarkBar();
           await closeSettingsModal(false);
@@ -585,37 +642,68 @@ function wireLocationAndFilters(): void {
     }
   });
 
+  // Leaving the editor by any route (Tab, a click elsewhere) closes it and
+  // restores the path, so it cannot linger as an unlabeled, stale input.
+  pathInput?.addEventListener("blur", () => {
+    if (isLocationEditMode()) exitLocationEditMode(true);
+  });
+
+  // One click anywhere on the bar outside a breadcrumb segment opens the
+  // editor. Segments keep their own click (navigate to that folder).
   const locationOmnibar = document.getElementById("location-omnibar");
-  locationOmnibar?.addEventListener("dblclick", (e) => {
-    if ((e.target as HTMLElement).closest(".breadcrumb__segment")) return;
+  locationOmnibar?.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    // The Edit button enters edit mode itself, so the bar ignores its clicks.
+    if (
+      target.closest(
+        ".breadcrumb__segment, .location-omnibar__edit, .location-omnibar__edit-btn",
+      )
+    )
+      return;
+    if (isLocationEditMode()) return;
     enterLocationEditMode();
   });
-  locationOmnibar?.addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).closest(".breadcrumb__segment")) return;
-    if (e.target === locationOmnibar) enterLocationEditMode();
-  });
+  document
+    .getElementById("location-edit")
+    ?.addEventListener("click", () => enterLocationEditMode());
 
   document
     .getElementById("btn-refresh")!
     .addEventListener("click", handleRefresh);
-  document
-    .getElementById("btn-palette")!
-    .addEventListener("click", openPalette);
   document
     .getElementById("palette-hint")!
     .addEventListener("click", openPalette);
   document
     .getElementById("btn-new-folder")!
     .addEventListener("click", handleCreateFolder);
-  document
-    .getElementById("btn-upload")!
-    .addEventListener("click", handleUploadButton);
-  document
-    .getElementById("btn-upload-folder")!
-    .addEventListener("click", handleUploadFolderButton);
-  document.getElementById("btn-download")!.addEventListener("click", () => {
-    void handleDownload();
-  });
+  const uploadButton = document.getElementById(
+    "btn-upload",
+  ) as HTMLButtonElement | null;
+  if (uploadButton) {
+    const dismissUploadMenu = (): void => {
+      uploadButton.setAttribute("aria-expanded", "false");
+    };
+    uploadButton.addEventListener("click", () => {
+      if (uploadButton.disabled) return;
+      dismissUploadMenu();
+      const rect = uploadButton.getBoundingClientRect();
+      showContextMenu(
+        rect.left,
+        rect.bottom,
+        [
+          { label: "Files\u2026", action: "upload-files" },
+          { label: "Folder\u2026", action: "upload-folder" },
+        ],
+        (action) => {
+          dismissUploadMenu();
+          if (action === "upload-files") void handleUploadButton();
+          else if (action === "upload-folder") void handleUploadFolderButton();
+        },
+        dismissUploadMenu,
+      );
+      uploadButton.setAttribute("aria-expanded", "true");
+    });
+  }
 
   wireObjectFilterInput();
 
@@ -689,13 +777,7 @@ function wireBucketList(): void {
     if (bucket) {
       void selectBucket(bucket)
         .then(() => closeSidebarOnMobile())
-        .catch((err) => {
-          setStatus(`Failed to open bucket "${bucket}": ${err}`);
-          logActivity(
-            `Failed to open bucket "${bucket}": ${String(err)}`,
-            "error",
-          );
-        });
+        .catch((err) => reportBucketOpenFailure(bucket, err));
     }
   });
   dom.bucketList.addEventListener("keydown", (e) => {
@@ -715,15 +797,16 @@ function wireBucketList(): void {
     (e as KeyboardEvent).preventDefault();
     void selectBucket(bucket)
       .then(() => closeSidebarOnMobile())
-      .catch((err) => {
-        setStatus(`Failed to open bucket "${bucket}": ${err}`);
-        logActivity(
-          `Failed to open bucket "${bucket}": ${String(err)}`,
-          "error",
-        );
-      });
+      .catch((err) => reportBucketOpenFailure(bucket, err));
   });
   dom.bucketPanel.addEventListener("contextmenu", handleBucketContextMenu);
+}
+
+/** A bucket that fails to open must not look like an empty bucket. */
+function reportBucketOpenFailure(bucket: string, err: unknown): void {
+  const message = `Failed to open bucket "${bucket}": ${friendlyError(err)}`;
+  reportNavFailure(message, () => void selectBucket(bucket));
+  logActivity(message, "error");
 }
 
 /** Object table clicks, keys, selection and breadcrumb. */
@@ -732,14 +815,19 @@ function wireObjectTable(): void {
     const target = e.target as HTMLElement;
     const row = target.closest<HTMLElement>(".object-row");
     if (!row) return;
+    // The whole checkbox cell is the target, not only the 13px box. Clicking
+    // the cell forwards to the input, whose change handler does the selection.
+    const checkCell = target.closest<HTMLElement>(".col-check");
+    if (checkCell && !target.closest(".row-check")) {
+      checkCell.querySelector<HTMLInputElement>(".row-check")?.click();
+      return;
+    }
     if (target.closest(".row-check")) return;
 
     // Standard file-manager behavior: single click selects (with
     // ctrl/shift support via handleRowClick); open on double-click/Enter.
-    const key =
-      row.dataset.key ??
-      (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
-    if (key) handleRowClick(key, e);
+    const entry = entryFromRow(row);
+    if (entry) handleRowClick(entry, e);
   });
 
   dom.objectTbody.addEventListener("change", (e) => {
@@ -749,16 +837,14 @@ function wireObjectTable(): void {
     if (!input) return;
     const row = input.closest<HTMLElement>(".object-row");
     if (!row) return;
-    const key =
-      row.dataset.key ??
-      (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
-    if (!key) return;
+    const entry = entryFromRow(row);
+    if (!entry) return;
     if (input.checked) {
-      addSelection(key);
+      addSelection(entry);
     } else {
-      removeSelection(key);
+      removeSelection(entry);
     }
-    setLastClickedKey(key);
+    setLastClickedEntry(entry);
     updateSelectionUI();
   });
 
@@ -769,16 +855,14 @@ function wireObjectTable(): void {
 
     if (e.key === " ") {
       e.preventDefault();
-      const key =
-        row.dataset.key ??
-        (row.dataset.prefix != null ? "prefix:" + row.dataset.prefix : null);
-      if (!key) return;
-      if (isSelected(key)) {
-        removeSelection(key);
+      const entry = entryFromRow(row);
+      if (!entry) return;
+      if (isSelected(entry)) {
+        removeSelection(entry);
       } else {
-        addSelection(key);
+        addSelection(entry);
       }
-      setLastClickedKey(key);
+      setLastClickedEntry(entry);
       updateSelectionUI();
       return;
     }
@@ -788,11 +872,18 @@ function wireObjectTable(): void {
     // tables share one owner; Space/Enter are handled here.
     if (e.key === "Enter") {
       e.preventDefault();
+      // Enter acts on the focused row, so it becomes the selection first; the
+      // open/preview below then refers to what the user sees highlighted.
+      const focusedEntry = entryFromRow(row);
+      if (focusedEntry) selectOnlyEntry(focusedEntry);
       if (row.classList.contains("object-row--folder")) {
         const prefix = row.dataset.prefix;
         if (prefix !== undefined) {
           void navigateToFolder(prefix).catch((err) => {
-            setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+            reportNavFailure(
+              `Failed to open folder: ${friendlyError(err)}`,
+              () => void navigateToFolder(prefix),
+            );
           });
         }
         return;
@@ -803,7 +894,7 @@ function wireObjectTable(): void {
       if (canPreview(basename(key))) {
         void openPreview(key);
       } else {
-        void openInfoPanel([key]);
+        void openInfoPanel([fileEntry(key)]);
       }
     }
   });
@@ -817,7 +908,10 @@ function wireObjectTable(): void {
       const prefix = row.dataset.prefix;
       if (prefix !== undefined) {
         void navigateToFolder(prefix).catch((err) => {
-          setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+          reportNavFailure(
+            `Failed to open folder: ${friendlyError(err)}`,
+            () => void navigateToFolder(prefix),
+          );
           logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
         });
       }
@@ -828,7 +922,7 @@ function wireObjectTable(): void {
     if (canPreview(basename(key))) {
       void openPreview(key);
     } else {
-      void openInfoPanel([key]);
+      void openInfoPanel([fileEntry(key)]);
     }
   });
 
@@ -842,6 +936,25 @@ function wireObjectTable(): void {
       void handleUploadButton();
     } else if (action === "new-folder") {
       void handleCreateFolder();
+    } else if (action === "clear-filter") {
+      clearFilterInputDebounce();
+      clearFilter();
+      renderObjectTable();
+      (
+        document.getElementById("filter-input") as HTMLInputElement | null
+      )?.focus();
+    }
+  });
+
+  dom.emptyState.addEventListener("click", (e) => {
+    const actionBtn = (e.target as HTMLElement).closest<HTMLElement>(
+      "[data-empty-action]",
+    );
+    if (!actionBtn) return;
+    if (actionBtn.dataset.emptyAction === "show-buckets") {
+      (
+        document.getElementById("sidebar-toggle") as HTMLButtonElement | null
+      )?.click();
     }
   });
 
@@ -864,10 +977,26 @@ function wireObjectTable(): void {
     const prefix = seg.dataset.prefix;
     if (prefix !== undefined) {
       void navigateToFolder(prefix).catch((err) => {
-        setStatus(`Failed to open folder: ${friendlyError(err)}`, 5000);
+        reportNavFailure(
+          `Failed to open folder: ${friendlyError(err)}`,
+          () => void navigateToFolder(prefix),
+        );
       });
     }
   });
+
+  // Clicking the header's checkbox cell (not the box itself) toggles select-all.
+  document
+    .getElementById("select-all")
+    ?.closest("th")
+    ?.addEventListener("click", (e) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("input, .sort-trigger")) return;
+      const selectAll = document.getElementById(
+        "select-all",
+      ) as HTMLInputElement | null;
+      selectAll?.click();
+    });
 }
 
 /** Drag-and-drop uploads onto the object panel. */
@@ -889,14 +1018,28 @@ function wireDropUpload(): void {
   objectPanel.addEventListener("drop", suppressDrag);
   dropOverlay.addEventListener("drop", suppressDrag);
 
+  // Escape dismisses the target without dropping; the next drag re-shows it.
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || dropOverlay.hidden) return;
+    dropOverlay.hidden = true;
+    objectPanel.classList.remove("object-panel--dragover");
+  });
+
   void getCurrentWebview()
     .onDragDropEvent((event) => {
       if (event.payload.type === "enter") {
-        if (state.connected && state.currentBucket) {
-          dropPath.textContent = `to /${state.currentBucket}/${state.currentPrefix}`;
+        // Only offer a target when a drop would actually upload: connected to
+        // a bucket, carrying files, and no dialog waiting for an answer.
+        const canUpload =
+          state.connected &&
+          Boolean(state.currentBucket) &&
+          event.payload.paths.length > 0 &&
+          !document.body.classList.contains("modal-open");
+        if (canUpload) {
+          dropPath.textContent = `${state.currentBucket}/${state.currentPrefix}`;
           dropOverlay.hidden = false;
+          objectPanel.classList.add("object-panel--dragover");
         }
-        objectPanel.classList.add("object-panel--dragover");
       } else if (event.payload.type === "leave") {
         objectPanel.classList.remove("object-panel--dragover");
         dropOverlay.hidden = true;
@@ -904,8 +1047,15 @@ function wireDropUpload(): void {
         objectPanel.classList.remove("object-panel--dragover");
         dropOverlay.hidden = true;
 
+        if (document.body.classList.contains("modal-open")) {
+          setStatus(
+            "Finish or close the open dialog before dropping files.",
+            5000,
+          );
+          return;
+        }
         if (!state.connected || !state.currentBucket) {
-          setStatus("Connect to a bucket first.");
+          setStatus("Connect to a bucket first.", 5000);
           return;
         }
 
@@ -945,8 +1095,10 @@ function wireTransferCompletion(): void {
       const bucket = state.currentBucket;
       const prefix = state.currentPrefix;
       try {
+        // A background refresh must not wipe what the user has selected.
         const committed = await refreshObjects(bucket, prefix, {
           supersedePending: false,
+          preserveSelection: true,
         });
         if (
           committed &&
@@ -995,13 +1147,22 @@ function wireTransferCompletion(): void {
       showToast("Transfer complete", { type: "success" });
     }
     if (summary.errorCount > 0) {
-      const n = summary.errorCount;
-      showToast(
-        `${n} transfer${n === 1 ? "" : "s"} failed \u2014 see Activity log`,
-        {
-          type: "error",
-        },
-      );
+      // Sticky, with the two things the user needs next: look at the rows, or
+      // retry them. Both open the Transfers tab rather than the log.
+      showToast(`${plural(summary.errorCount, "transfer")} failed`, {
+        type: "error",
+        duration: 0,
+        actions: [
+          {
+            label: "Show failed",
+            onClick: () => {
+              openDrawer("transfers");
+              setTransferFilter("failed");
+            },
+          },
+          { label: "Retry failed", onClick: () => retryFailedTransfers() },
+        ],
+      });
     }
     if (summary.skippedCount > 0) {
       showToast(
@@ -1013,6 +1174,25 @@ function wireTransferCompletion(): void {
 }
 
 /** Command palette entries and their shortcuts. */
+
+/** One palette command rendered from the shared object-actions registry. */
+function paletteCommandForAction(id: string): PaletteCommand {
+  const entry = getObjectAction(id);
+  if (!entry) throw new Error(`Unknown object action: ${id}`);
+  return {
+    id: entry.id,
+    get label() {
+      return resolveActionLabel(entry, currentActionContext());
+    },
+    icon: entry.icon,
+    shortcut: entry.shortcut,
+    keywords: entry.keywords,
+    action: () => entry.run(currentActionContext()),
+    available: () =>
+      state.connected && entry.isAvailable(currentActionContext()),
+  };
+}
+
 function wireCommandPalette(): void {
   initPalette();
   const isMac = state.platformName === "macos";
@@ -1036,9 +1216,10 @@ function wireCommandPalette(): void {
     },
     {
       id: "create-folder",
-      label: "Create Folder",
+      label: "New folder",
       icon: "folder-plus",
       shortcut: `${accelLabel}N`,
+      keywords: ["mkdir", "new folder"],
       action: () => void handleCreateFolder(),
       available: () => state.connected,
     },
@@ -1047,30 +1228,32 @@ function wireCommandPalette(): void {
       label: "Refresh",
       icon: "refresh-cw",
       shortcut: "F5",
+      keywords: ["reload"],
       action: () => void handleRefresh(),
       available: () => state.connected,
     },
     {
-      id: "download",
-      label: "Download Selected",
-      icon: "download",
-      action: () => void handleDownload(),
-      available: () => state.connected && getSelectedFileKeys().length > 0,
+      id: "refresh-buckets",
+      label: "Refresh Buckets",
+      icon: "refresh-cw",
+      keywords: ["bucket list", "reload buckets"],
+      action: () => void handleRefreshBuckets(),
+      available: () => state.connected,
     },
-    {
-      id: "delete",
-      label: "Delete Selected",
-      icon: "trash-2",
-      action: () => void handleDelete(),
-      available: () => state.connected && selectionCount() > 0,
-    },
-    {
-      id: "copy-move",
-      label: "Copy / Move to...",
-      icon: "folder",
-      action: () => openCopyMoveDialog(),
-      available: () => state.connected && selectionCount() > 0,
-    },
+    // Selection commands come from the object-actions registry, so their
+    // labels match the context menu and the batch More menu exactly.
+    paletteCommandForAction("download"),
+    paletteCommandForAction("delete"),
+    paletteCommandForAction("copy-move"),
+    paletteCommandForAction("rename"),
+    paletteCommandForAction("copy-url"),
+    paletteCommandForAction("share-link"),
+    paletteCommandForAction("copy-keys"),
+    paletteCommandForAction("copy-arns"),
+    paletteCommandForAction("copy-s3-uri"),
+    paletteCommandForAction("properties"),
+    paletteCommandForAction("deselect-all"),
+    paletteCommandForAction("preview"),
     {
       id: "select-all",
       label: "Select All",
@@ -1080,13 +1263,6 @@ function wireCommandPalette(): void {
         handleSelectAll(true);
       },
       available: () => state.connected,
-    },
-    {
-      id: "deselect-all",
-      label: "Deselect All",
-      icon: "x-square",
-      action: () => clearSelection(),
-      available: () => selectionCount() > 0,
     },
     {
       id: "filter",
@@ -1105,6 +1281,7 @@ function wireCommandPalette(): void {
       id: "go-to-key-prefix",
       label: "Go to Key/Prefix",
       icon: "compass",
+      keywords: ["jump", "path", "prefix"],
       action: () => void handleGoToKeyOrPrefix(),
       available: () => state.connected,
     },
@@ -1146,37 +1323,6 @@ function wireCommandPalette(): void {
       available: () => state.connected,
     },
     {
-      id: "preview-selected",
-      label: "Preview Selected File",
-      icon: "eye",
-      action: () => {
-        const fileKeys = getSelectedFileKeys();
-        if (fileKeys.length === 1 && canPreview(basename(fileKeys[0]))) {
-          void openPreview(fileKeys[0]);
-        }
-      },
-      available: () => {
-        const fileKeys = getSelectedFileKeys();
-        return (
-          state.connected &&
-          fileKeys.length === 1 &&
-          canPreview(basename(fileKeys[0]))
-        );
-      },
-    },
-    {
-      id: "properties-selected",
-      label: "Open Properties for Selection",
-      icon: "info",
-      action: () => {
-        const keys = Array.from(getSelectionEntries());
-        if (keys.length > 0) {
-          void openInfoPanel(keys);
-        }
-      },
-      available: () => state.connected && selectionCount() > 0,
-    },
-    {
       id: "go-up",
       label: "Go Up (Parent Folder)",
       icon: "arrow-up",
@@ -1184,6 +1330,51 @@ function wireCommandPalette(): void {
         void navigateUp();
       },
       available: () => state.connected && state.currentPrefix.length > 0,
+    },
+    {
+      id: "back",
+      label: "Back",
+      icon: "arrow-left",
+      keywords: ["previous", "history"],
+      action: () => void navigateBack(),
+      available: () => state.connected,
+    },
+    {
+      id: "forward",
+      label: "Forward",
+      icon: "arrow-right",
+      keywords: ["next", "history"],
+      action: () => void navigateForward(),
+      available: () => state.connected,
+    },
+    {
+      id: "clear-filter",
+      label: "Clear Filter",
+      icon: "x-square",
+      keywords: ["reset filter"],
+      action: () => clearFilter(),
+      available: () => {
+        const filter = document.getElementById(
+          "filter-input",
+        ) as HTMLInputElement | null;
+        return state.connected && (filter?.value.length ?? 0) > 0;
+      },
+    },
+    {
+      id: "edit-location",
+      label: "Edit Location",
+      icon: "compass",
+      keywords: ["address bar", "path", "url"],
+      action: () => enterLocationEditMode(),
+      available: () => state.connected,
+    },
+    {
+      id: "keyboard-shortcuts",
+      label: "Keyboard Shortcuts",
+      icon: "info",
+      shortcut: `${accelLabel}/`,
+      keywords: ["keys", "hotkeys", "bindings"],
+      action: () => void openKeyboardShortcuts(),
     },
   ]);
 }

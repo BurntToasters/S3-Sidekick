@@ -2,15 +2,11 @@
 
 @media (max-width: 1180px) {
   .content-toolbar {
-    gap: 8px;
+    gap: var(--space-2);
   }
 
   .filter-input {
     width: 120px;
-  }
-
-  .path-input {
-    width: min(200px, 28vw);
   }
 
   .location-omnibar {
@@ -20,21 +16,25 @@
 
 @media (max-width: 900px) {
   .main-layout {
+    /* Start the overlay below the toolbar toggle (its bottom edge is about 29px
+       into the layout). The toolbar is inert while the sidebar is open, so the
+       toggle's position falls on the backdrop, and a click there closes it. */
+    --sidebar-overlay-top: 36px;
     isolation: isolate;
   }
 
   .sidebar {
     position: absolute;
     left: 0;
-    top: 0;
+    top: var(--sidebar-overlay-top);
     bottom: 0;
     width: min(78vw, 320px);
     min-width: 0;
     max-width: none;
     transform: translateX(-104%);
     transition: transform 0.18s ease;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
-    z-index: 60;
+    box-shadow: var(--shadow-overlay);
+    z-index: var(--z-sidebar-overlay);
   }
 
   .main-layout.main-layout--sidebar-open .sidebar {
@@ -53,35 +53,23 @@
     display: inline-flex;
   }
 
+  .empty-state__show-buckets {
+    display: inline-flex;
+  }
+
   .breadcrumb {
-    padding-left: 8px;
+    padding-left: var(--space-2);
   }
 
+  /* The toolbar never wraps: the container query collapses labels first and
+     app-layout.ts collapses buttons into the overflow menu. */
   .content-toolbar {
-    flex-wrap: wrap;
-    padding-bottom: 4px;
-  }
-
-  .content-toolbar__actions {
-    width: 100%;
-    justify-content: flex-end;
-    padding-right: 8px;
+    flex-wrap: nowrap;
   }
 
   .filter-input {
     margin-left: auto;
-    margin-right: 8px;
-  }
-
-  .location-omnibar {
-    width: 100%;
-    max-width: none;
-    margin: 0 8px 4px;
-    order: 2;
-  }
-
-  .content-toolbar__left {
-    flex-wrap: wrap;
+    margin-right: var(--space-2);
   }
 
   .content-body {
@@ -98,8 +86,8 @@
     max-width: none;
     transform: translateX(104%);
     transition: transform 0.18s ease;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
-    z-index: 55;
+    box-shadow: var(--shadow-overlay);
+    z-index: var(--z-inspector-overlay);
   }
 
   .main-layout.main-layout--inspector-open .inspector-panel {
@@ -118,17 +106,8 @@
     display: none;
   }
 
-  .batch-toolbar {
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .batch-toolbar__count {
-    width: 100%;
-  }
-
   .statusbar {
-    padding: 4px 8px;
+    padding: var(--space-1) var(--space-2);
   }
 }
 
@@ -145,11 +124,20 @@
   }
 
   .connection-screen__main {
-    padding: 24px 16px;
+    padding: var(--space-6) var(--space-4);
   }
 
   .connection-screen__form-card {
-    padding: 20px;
+    padding: var(--space-5);
+  }
+
+  .reconnect-card {
+    margin-top: var(--space-4);
+    flex-wrap: wrap;
+  }
+
+  .conn-switcher__host {
+    display: none;
   }
 
   #conn-endpoint,
@@ -173,7 +161,7 @@
   }
 
   .statusbar__right {
-    gap: 4px;
+    gap: var(--space-1);
   }
 }
 
@@ -187,13 +175,13 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(127, 127, 127, 0.3);
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(127, 127, 127, 0.5);
+  background: var(--scrollbar-thumb-hover);
   background-clip: padding-box;
 }

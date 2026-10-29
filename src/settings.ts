@@ -4,9 +4,15 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { save } from "@tauri-apps/plugin-dialog";
 import { state } from "./state.ts";
 import {
+  type DateFormat,
+  type Density,
+  type SizeUnits,
   type TransferPerformancePreset,
   type UserSettings,
+  DATE_FORMAT_VALUES,
+  DENSITY_VALUES,
   SETTING_DEFAULTS,
+  SIZE_UNIT_VALUES,
   parseSettingsRaw,
   mergeSettingsPayload,
 } from "./settings-model.ts";
@@ -16,17 +22,91 @@ import {
   removeBookmark,
   exportBookmarksJson,
   importBookmarksJson,
+  updateBookmark,
   MAX_IMPORT_BYTES,
   type Bookmark,
+  type BookmarkImportResult,
+  type BookmarkPatch,
 } from "./bookmarks.ts";
 import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
 import { refreshSecuritySettingsUI } from "./security.ts";
-import { showConfirm, showAlert } from "./dialogs.ts";
-import { friendlyError } from "./utils.ts";
+import {
+  showConfirm,
+  showConfirmWithCheckbox,
+  showAlert,
+  showChoiceDialog,
+} from "./dialogs.ts";
+import {
+  friendlyError,
+  getFormatPreferences,
+  plural,
+  setFormatPreferences,
+} from "./utils.ts";
+import { renderObjectTableFromLayout } from "./layout-render-bridge.ts";
 
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
 let settingsSaveTail: Promise<void> = Promise.resolve();
 let settingsModalSaveOperation: Promise<void> | null = null;
+
+/**
+ * Tabs with no explicit-save settings: their controls apply at once or carry
+ * their own buttons. Save is shown only for other tabs or dirty drafts.
+ */
+const NO_SAVE_TABS = new Set(["security", "bookmarks", "about", "reset"]);
+
+/** Set by the last search: whether a result row needs the explicit Save. */
+let searchShowsExplicitSave = false;
+
+function isExplicitSaveTab(tab: string): boolean {
+  return !NO_SAVE_TABS.has(tab);
+}
+
+const PRESET_CONTROL_IDS = {
+  threshold: "setting-download-parallel-threshold-mb",
+  downloadPartSize: "setting-download-part-size-mb",
+  downloadConcurrency: "setting-download-part-concurrency",
+  uploadPartSize: "setting-upload-part-size-mb",
+  uploadConcurrency: "setting-upload-part-concurrency",
+} as const;
+
+type PresetControl = keyof typeof PRESET_CONTROL_IDS;
+
+const PRESET_VALUES: Record<
+  TransferPerformancePreset,
+  Record<PresetControl, string>
+> = {
+  safe: {
+    threshold: "256",
+    downloadPartSize: "16",
+    downloadConcurrency: "2",
+    uploadPartSize: "16",
+    uploadConcurrency: "2",
+  },
+  max: {
+    threshold: "64",
+    downloadPartSize: "64",
+    downloadConcurrency: "10",
+    uploadPartSize: "64",
+    uploadConcurrency: "10",
+  },
+  balanced: {
+    threshold: "128",
+    downloadPartSize: "32",
+    downloadConcurrency: "6",
+    uploadPartSize: "32",
+    uploadConcurrency: "6",
+  },
+};
+
+function isTransferPreset(value: string): value is TransferPerformancePreset {
+  return value === "safe" || value === "balanced" || value === "max";
+}
+
+function presetControl(key: PresetControl): HTMLSelectElement | null {
+  return document.getElementById(
+    PRESET_CONTROL_IDS[key],
+  ) as HTMLSelectElement | null;
+}
 
 export function setBookmarkSelectHandler(handler: (b: Bookmark) => void): void {
   onBookmarkSelect = handler;
@@ -35,56 +115,36 @@ export function setBookmarkSelectHandler(handler: (b: Bookmark) => void): void {
 function applyPresetToTransferControls(
   preset: TransferPerformancePreset,
 ): void {
-  const values =
-    preset === "safe"
-      ? {
-          threshold: "256",
-          downloadPartSize: "16",
-          downloadConcurrency: "2",
-          uploadPartSize: "16",
-          uploadConcurrency: "2",
-        }
-      : preset === "max"
-        ? {
-            threshold: "64",
-            downloadPartSize: "64",
-            downloadConcurrency: "10",
-            uploadPartSize: "64",
-            uploadConcurrency: "10",
-          }
-        : {
-            threshold: "128",
-            downloadPartSize: "32",
-            downloadConcurrency: "6",
-            uploadPartSize: "32",
-            uploadConcurrency: "6",
-          };
+  const values = PRESET_VALUES[preset];
+  for (const key of Object.keys(PRESET_CONTROL_IDS) as PresetControl[]) {
+    const control = presetControl(key);
+    if (control) control.value = values[key];
+  }
+}
 
-  const threshold = document.getElementById(
-    "setting-download-parallel-threshold-mb",
+/** "Custom" replaces the preset name once an Advanced value leaves its values. */
+function syncPresetWithControls(): void {
+  const select = document.getElementById(
+    "setting-transfer-performance-preset",
   ) as HTMLSelectElement | null;
-  if (threshold) threshold.value = values.threshold;
+  if (!select || !isTransferPreset(select.value)) return;
+  const values = PRESET_VALUES[select.value];
+  const matches = (Object.keys(PRESET_CONTROL_IDS) as PresetControl[]).every(
+    (key) => {
+      const control = presetControl(key);
+      return !control || control.value === values[key];
+    },
+  );
+  if (!matches) select.value = "custom";
+}
 
-  const downloadPartSize = document.getElementById(
-    "setting-download-part-size-mb",
-  ) as HTMLSelectElement | null;
-  if (downloadPartSize) downloadPartSize.value = values.downloadPartSize;
-
-  const downloadConcurrency = document.getElementById(
-    "setting-download-part-concurrency",
-  ) as HTMLSelectElement | null;
-  if (downloadConcurrency)
-    downloadConcurrency.value = values.downloadConcurrency;
-
-  const uploadPartSize = document.getElementById(
-    "setting-upload-part-size-mb",
-  ) as HTMLSelectElement | null;
-  if (uploadPartSize) uploadPartSize.value = values.uploadPartSize;
-
-  const uploadConcurrency = document.getElementById(
-    "setting-upload-part-concurrency",
-  ) as HTMLSelectElement | null;
-  if (uploadConcurrency) uploadConcurrency.value = values.uploadConcurrency;
+function initPresetSync(): void {
+  for (const key of Object.keys(PRESET_CONTROL_IDS) as PresetControl[]) {
+    const control = presetControl(key);
+    if (!control || control.dataset.presetWired === "true") continue;
+    control.dataset.presetWired = "true";
+    control.addEventListener("change", () => syncPresetWithControls());
+  }
 }
 
 export function applyTheme(theme: UserSettings["theme"]): void {
@@ -96,13 +156,98 @@ export function applyTheme(theme: UserSettings["theme"]): void {
   }
 }
 
+export function applyDensity(density: Density): void {
+  document.documentElement.dataset.density = density;
+}
+
+/** Re-renders the object table only when a size or date style actually changed. */
+function applyFormatPreferences(
+  sizeUnits: SizeUnits,
+  dateFormat: DateFormat,
+): void {
+  const before = getFormatPreferences();
+  setFormatPreferences({ sizeUnits, dateFormat });
+  if (before.sizeUnits !== sizeUnits || before.dateFormat !== dateFormat) {
+    renderObjectTableFromLayout();
+  }
+}
+
+/**
+ * Appearance applies at once, the way the theme always has. Cancel reverts it
+ * because it is applied again from the last saved values.
+ */
+function applyAppearance(
+  settings: Pick<
+    UserSettings,
+    "theme" | "density" | "sizeUnits" | "dateFormat"
+  >,
+): void {
+  applyTheme(settings.theme);
+  applyDensity(settings.density);
+  applyFormatPreferences(settings.sizeUnits, settings.dateFormat);
+}
+
+/**
+ * Reads a choice control. A missing control keeps the current value; an
+ * unknown value keeps it too, so a stray DOM value never reaches the settings.
+ */
+function readChoice<T extends string>(
+  id: string,
+  values: readonly T[],
+  current: T,
+): T {
+  const el = document.getElementById(id) as HTMLSelectElement | null;
+  if (!el) return current;
+  return values.find((value) => value === el.value) ?? current;
+}
+
+function readAppearanceDraft(): Pick<
+  UserSettings,
+  "density" | "sizeUnits" | "dateFormat"
+> {
+  return {
+    density: readChoice(
+      "setting-density",
+      DENSITY_VALUES,
+      state.currentSettings.density,
+    ),
+    sizeUnits: readChoice(
+      "setting-size-units",
+      SIZE_UNIT_VALUES,
+      state.currentSettings.sizeUnits,
+    ),
+    dateFormat: readChoice(
+      "setting-date-format",
+      DATE_FORMAT_VALUES,
+      state.currentSettings.dateFormat,
+    ),
+  };
+}
+
+function initAppearancePreview(): void {
+  for (const id of [
+    "setting-density",
+    "setting-size-units",
+    "setting-date-format",
+  ]) {
+    const control = document.getElementById(id);
+    if (!control || control.dataset.wired === "true") continue;
+    control.dataset.wired = "true";
+    control.addEventListener("change", () => {
+      const draft = readAppearanceDraft();
+      applyDensity(draft.density);
+      applyFormatPreferences(draft.sizeUnits, draft.dateFormat);
+    });
+  }
+}
+
 export async function loadSettings(): Promise<boolean> {
   const json = await invoke<string>("load_settings");
   const result = parseSettingsRaw(json);
   state.currentSettings = result.settings;
   state.lastPersistedSettings = { ...result.settings };
   state.settingsExtras = result.extras;
-  applyTheme(state.currentSettings.theme);
+  applyAppearance(state.currentSettings);
   setUpdateChannel(state.currentSettings.updateChannel);
   return !result.malformed;
 }
@@ -170,6 +315,28 @@ export function switchSettingsTab(tab: string): void {
     p.hidden = !isActive;
     p.style.display = isActive ? "" : "none";
   }
+  updateSettingsFooter();
+}
+
+/**
+ * Save and Cancel show when an explicit-save setting is on screen (its tab, or
+ * a search result) or when the draft differs from the saved values. They do
+ * not depend on which tab was opened first.
+ */
+export function updateSettingsFooter(): void {
+  const footer = document.querySelector<HTMLElement>(
+    "#settings-overlay .modal__footer",
+  );
+  if (!footer) return;
+  const searchPanel = document.querySelector<HTMLElement>(
+    '[data-settings-panel="__search"]',
+  );
+  const searching = searchPanel !== null && !searchPanel.hidden;
+  const activeTab = getActiveSettingsTab();
+  const explicitVisible = searching
+    ? searchShowsExplicitSave
+    : activeTab !== null && isExplicitSaveTab(activeTab);
+  footer.hidden = !(explicitVisible || hasUnsavedSettingsChanges());
 }
 
 const searchOriginalParents = new Map<
@@ -194,6 +361,38 @@ function restoreSearchItems(): void {
   searchOriginalParents.clear();
 }
 
+/**
+ * What a row is searched by: its label, its description text, and its section
+ * heading. Option text is left out, so "default" finds no row by itself.
+ */
+const SEARCH_DESCRIPTION_SELECTOR = ".setting-description, .setting-note";
+const SEARCH_SKIP_SELECTOR = `select, option, button, input, textarea, .setting-section, ${SEARCH_DESCRIPTION_SELECTOR}`;
+
+function searchableText(item: HTMLElement): {
+  label: string;
+  description: string;
+  heading: string;
+} {
+  const labelOnly = item.cloneNode(true) as HTMLElement;
+  for (const el of labelOnly.querySelectorAll(SEARCH_SKIP_SELECTOR)) {
+    el.remove();
+  }
+  const description = Array.from(
+    item.querySelectorAll<HTMLElement>(SEARCH_DESCRIPTION_SELECTOR),
+  )
+    .map((el) => el.textContent ?? "")
+    .join(" ");
+  const heading =
+    item
+      .closest<HTMLElement>(".settings-group")
+      ?.querySelector<HTMLElement>(".setting-section")?.textContent ?? "";
+  return {
+    label: (labelOnly.textContent ?? "").toLowerCase(),
+    description: description.toLowerCase(),
+    heading: heading.toLowerCase(),
+  };
+}
+
 export function updateSettingsSearch(query: string): void {
   const searchPanel = document.querySelector<HTMLElement>(
     '[data-settings-panel="__search"]',
@@ -214,10 +413,11 @@ export function updateSettingsSearch(query: string): void {
 
   if (!trimmed) {
     if (empty) empty.hidden = true;
-    if (preSearchActiveTab) {
-      switchSettingsTab(preSearchActiveTab);
-      preSearchActiveTab = null;
-    }
+    const restoreTab = preSearchActiveTab;
+    preSearchActiveTab = null;
+    searchShowsExplicitSave = false;
+    if (restoreTab) switchSettingsTab(restoreTab);
+    updateSettingsFooter();
     return;
   }
 
@@ -228,6 +428,7 @@ export function updateSettingsSearch(query: string): void {
   ).filter((p) => p.dataset.settingsPanel !== "__search");
 
   let anyMatch = false;
+  let explicitMatch = false;
 
   for (const panel of allPanels) {
     const tabName = panel.dataset.settingsPanel ?? "";
@@ -244,19 +445,18 @@ export function updateSettingsSearch(query: string): void {
     );
     const matched: HTMLElement[] = [];
     for (const item of items) {
-      const labelText = (item.textContent ?? "").toLowerCase();
-      const tips = Array.from(
-        item.querySelectorAll<HTMLElement>("[data-tooltip]"),
-      )
-        .map((b) => b.getAttribute("data-tooltip") ?? "")
-        .join(" ")
-        .toLowerCase();
-      if (labelText.includes(trimmed) || tips.includes(trimmed)) {
+      const text = searchableText(item);
+      if (
+        text.label.includes(trimmed) ||
+        text.description.includes(trimmed) ||
+        text.heading.includes(trimmed)
+      ) {
         matched.push(item);
       }
     }
     if (matched.length === 0) continue;
     anyMatch = true;
+    if (isExplicitSaveTab(tabName)) explicitMatch = true;
 
     const group = document.createElement("div");
     group.className = "settings-search-group";
@@ -292,6 +492,8 @@ export function updateSettingsSearch(query: string): void {
   }
 
   if (empty) empty.hidden = anyMatch;
+  searchShowsExplicitSave = explicitMatch;
+  updateSettingsFooter();
 }
 
 function initSettingsSearch(): void {
@@ -345,10 +547,6 @@ function initThemePicker(): void {
       if (!r.checked) return;
       const value = r.value;
       if (value !== "system" && value !== "light" && value !== "dark") return;
-      const hidden = document.getElementById(
-        "setting-theme",
-      ) as HTMLInputElement | null;
-      if (hidden) hidden.value = value;
       syncThemeCards(value);
       applyTheme(value);
     });
@@ -357,10 +555,23 @@ function initThemePicker(): void {
 
 export function populateSettingsModal(): void {
   initThemePicker();
-  const themeSelect = document.getElementById("setting-theme") as
-    HTMLInputElement | HTMLSelectElement | null;
-  if (themeSelect) themeSelect.value = state.currentSettings.theme;
   syncThemeCards(state.currentSettings.theme);
+
+  const densitySelect = document.getElementById(
+    "setting-density",
+  ) as HTMLSelectElement | null;
+  if (densitySelect) densitySelect.value = state.currentSettings.density;
+
+  const sizeUnitsSelect = document.getElementById(
+    "setting-size-units",
+  ) as HTMLSelectElement | null;
+  if (sizeUnitsSelect) sizeUnitsSelect.value = state.currentSettings.sizeUnits;
+
+  const dateFormatSelect = document.getElementById(
+    "setting-date-format",
+  ) as HTMLSelectElement | null;
+  if (dateFormatSelect)
+    dateFormatSelect.value = state.currentSettings.dateFormat;
 
   const updatesCheckbox = document.getElementById(
     "setting-updates",
@@ -438,6 +649,14 @@ export function populateSettingsModal(): void {
   if (confirmUnguardedWritesCheckbox) {
     confirmUnguardedWritesCheckbox.checked =
       state.currentSettings.confirmUnguardedWrites;
+  }
+
+  const desktopNotificationsCheckbox = document.getElementById(
+    "setting-desktop-notifications",
+  ) as HTMLInputElement | null;
+  if (desktopNotificationsCheckbox) {
+    desktopNotificationsCheckbox.checked =
+      state.currentSettings.desktopNotifications;
   }
 
   const presetSelect = document.getElementById(
@@ -529,12 +748,14 @@ export function populateSettingsModal(): void {
     );
   }
 
+  // Package-manager installs keep the auto-check toggle, Check now and the
+  // release-page button; only the in-app install is replaced by that note.
   const supported = isUpdaterEnabled();
-  const updaterSection = document.getElementById("updater-section");
   const updaterUnsupported = document.getElementById("updater-unsupported");
-  if (updaterSection) updaterSection.style.display = supported ? "" : "none";
   if (updaterUnsupported)
     updaterUnsupported.style.display = supported ? "none" : "";
+  const updateStatus = document.getElementById("settings-update-status");
+  if (updateStatus) updateStatus.textContent = "";
 
   void refreshBookmarkListUI();
   void refreshSecuritySettingsUI();
@@ -562,6 +783,9 @@ export function populateSettingsModal(): void {
 
   initSettingsSearch();
   initAdvancedTransferToggle();
+  initPresetSync();
+  syncPresetWithControls();
+  initAppearancePreview();
 
   const searchInput = document.getElementById(
     "settings-search",
@@ -590,13 +814,9 @@ export function readSettingsModal(): void {
       themeRadio.value === "dark")
   ) {
     state.currentSettings.theme = themeRadio.value;
-  } else {
-    const themeSelect = document.getElementById("setting-theme") as
-      HTMLInputElement | HTMLSelectElement | null;
-    if (themeSelect) {
-      state.currentSettings.theme = themeSelect.value as UserSettings["theme"];
-    }
   }
+
+  Object.assign(state.currentSettings, readAppearanceDraft());
 
   const updatesCheckbox = document.getElementById(
     "setting-updates",
@@ -611,7 +831,6 @@ export function readSettingsModal(): void {
   if (channelSelect) {
     state.currentSettings.updateChannel =
       channelSelect.value === "beta" ? "beta" : "release";
-    setUpdateChannel(state.currentSettings.updateChannel);
   }
 
   const presignedSelect = document.getElementById(
@@ -690,10 +909,19 @@ export function readSettingsModal(): void {
       confirmUnguardedWritesCheckbox.checked;
   }
 
+  const desktopNotificationsCheckbox = document.getElementById(
+    "setting-desktop-notifications",
+  ) as HTMLInputElement | null;
+  if (desktopNotificationsCheckbox) {
+    state.currentSettings.desktopNotifications =
+      desktopNotificationsCheckbox.checked;
+  }
+
   const presetSelect = document.getElementById(
     "setting-transfer-performance-preset",
   ) as HTMLSelectElement | null;
-  if (presetSelect) {
+  // "Custom" is only a display state: the saved preset name stays as it was.
+  if (presetSelect && presetSelect.value !== "custom") {
     state.currentSettings.transferPerformancePreset =
       presetSelect.value === "safe"
         ? "safe"
@@ -789,6 +1017,7 @@ export function readSettingsModal(): void {
 }
 
 export function openSettingsModal(): void {
+  hideBookmarkEdit();
   populateSettingsModal();
   const overlay = document.getElementById("settings-overlay");
   if (overlay) overlay.classList.add("active");
@@ -815,9 +1044,10 @@ function settingsMatchSnapshotExceptWindowSize(
 
 async function saveAndCloseSettingsModal(): Promise<void> {
   readSettingsModal();
+  setUpdateChannel(state.currentSettings.updateChannel);
   const attemptedSettings = { ...state.currentSettings };
   const attemptedExtras = { ...state.settingsExtras };
-  applyTheme(attemptedSettings.theme);
+  applyAppearance(attemptedSettings);
   setSettingsSaveBusy(true);
   try {
     await enqueueSettingsSnapshot(attemptedSettings, attemptedExtras);
@@ -830,18 +1060,18 @@ async function saveAndCloseSettingsModal(): Promise<void> {
         windowWidth: latestWindowWidth,
         windowHeight: latestWindowHeight,
       };
-      applyTheme(rollback.theme);
+      applyAppearance(rollback);
       state.currentSettings = rollback;
       setUpdateChannel(rollback.updateChannel);
     }
     const statusEl = document.getElementById("status");
     if (statusEl)
-      statusEl.textContent = `Failed to save settings: ${String(err)}`;
+      statusEl.textContent = `Settings were not saved. ${friendlyError(err)}`;
     // The modal overlay makes #status inert, so the failure must be visible
     // inside the modal (and the draft must stay open so nothing is lost).
     const errorEl = document.getElementById("settings-save-error");
     if (errorEl) {
-      errorEl.textContent = `Failed to save settings: ${String(err)}`;
+      errorEl.textContent = `Settings were not saved. ${friendlyError(err)}`;
       errorEl.hidden = false;
     }
     return;
@@ -854,14 +1084,70 @@ async function saveAndCloseSettingsModal(): Promise<void> {
   document.getElementById("settings-overlay")?.classList.remove("active");
 }
 
+/**
+ * True when the Settings form differs from the last saved values. Reads the
+ * form without leaving the draft in state, so callers can ask at any time.
+ * Security and bookmark changes apply immediately and are not part of this.
+ */
+export function hasUnsavedSettingsChanges(): boolean {
+  const saved = state.lastPersistedSettings;
+  const before = { ...state.currentSettings };
+  readSettingsModal();
+  const draft = state.currentSettings;
+  state.currentSettings = before;
+  const keys = Object.keys(draft) as (keyof UserSettings)[];
+  return keys.some(
+    (key) =>
+      key !== "windowWidth" &&
+      key !== "windowHeight" &&
+      draft[key] !== saved[key],
+  );
+}
+
+function settingsIsOpen(): boolean {
+  return (
+    document
+      .getElementById("settings-overlay")
+      ?.classList.contains("active") === true
+  );
+}
+
+let discardPromptOpen = false;
+
+async function discardSettingsDraft(): Promise<void> {
+  if (discardPromptOpen) return;
+  if (hasUnsavedSettingsChanges()) {
+    discardPromptOpen = true;
+    let choice: "save" | "discard" | "keep";
+    try {
+      choice = await showChoiceDialog<"save" | "discard" | "keep">(
+        "Discard changes?",
+        "Your Settings changes have not been saved.",
+        [
+          { value: "save", label: "Save" },
+          { value: "discard", label: "Discard changes", danger: true },
+          { value: "keep", label: "Keep editing" },
+        ],
+        { cancelValue: "keep" },
+      );
+    } finally {
+      discardPromptOpen = false;
+    }
+    if (choice === "save") {
+      await closeSettingsModal(true);
+      return;
+    }
+    if (choice !== "discard") return;
+  }
+  applyAppearance(state.lastPersistedSettings);
+  state.currentSettings = { ...state.lastPersistedSettings };
+  setUpdateChannel(state.lastPersistedSettings.updateChannel);
+  document.getElementById("settings-overlay")?.classList.remove("active");
+}
+
 export function closeSettingsModal(save: boolean): Promise<void> {
   if (settingsModalSaveOperation) return settingsModalSaveOperation;
-  if (!save) {
-    applyTheme(state.lastPersistedSettings.theme);
-    state.currentSettings = { ...state.lastPersistedSettings };
-    document.getElementById("settings-overlay")?.classList.remove("active");
-    return Promise.resolve();
-  }
+  if (!save) return discardSettingsDraft();
 
   const operation = saveAndCloseSettingsModal().finally(() => {
     if (settingsModalSaveOperation === operation) {
@@ -873,6 +1159,26 @@ export function closeSettingsModal(save: boolean): Promise<void> {
   return operation;
 }
 
+/**
+ * The ", skipped ..." clause for an import result. Duplicates and invalid
+ * entries are reported separately; `skipped` is only the fallback when neither
+ * count is provided.
+ */
+function importSkippedClause(result: BookmarkImportResult): string {
+  const parts: string[] = [];
+  if (result.duplicates !== undefined || result.invalid !== undefined) {
+    const duplicates = result.duplicates ?? 0;
+    const invalid = result.invalid ?? 0;
+    if (duplicates > 0) parts.push(plural(duplicates, "duplicate"));
+    if (invalid > 0) {
+      parts.push(plural(invalid, "invalid entry", "invalid entries"));
+    }
+  } else if (result.skipped > 0) {
+    parts.push(plural(result.skipped, "duplicate"));
+  }
+  return parts.length > 0 ? `, skipped ${parts.join(" and ")}` : "";
+}
+
 export async function resetSettings(): Promise<void> {
   const confirmed = await showConfirm(
     "Reset Settings",
@@ -881,71 +1187,115 @@ export async function resetSettings(): Promise<void> {
   );
   if (!confirmed) return;
 
-  const fullReset = await showConfirm(
+  // Escape and the default focus both mean Cancel: only an explicit choice
+  // runs a reset.
+  const scope = await showChoiceDialog<"partial" | "factory" | "cancel">(
     "Reset Scope",
-    "Keep your bookmarks, or factory reset everything?\n\nFactory reset removes all settings, bookmarks, saved connections, transfer recovery data, and encryption — a completely clean slate.",
-    { okLabel: "Factory Reset", cancelLabel: "Keep Bookmarks", okDanger: true },
+    "Choose what to reset. The app restarts afterwards.\n\nKeep saved connections: resets settings, clears the last-used connection, and interrupts running transfers. Saved connections and encryption stay.\n\nFactory reset: also deletes saved connections, transfer recovery data, and encryption.",
+    [
+      { value: "partial", label: "Keep saved connections" },
+      { value: "factory", label: "Factory reset", danger: true },
+      { value: "cancel", label: "Cancel" },
+    ],
+    { cancelValue: "cancel" },
   );
+  if (scope === "cancel") return;
 
-  if (fullReset) {
-    const finalConfirmation = await showConfirm(
-      "Permanently Delete All App Data?",
-      "This permanently deletes bookmarks, saved connections, encrypted storage, transfer checkpoints, and partial download files. Active transfers will be stopped. This cannot be undone.",
-      {
-        okLabel: "Delete Everything",
-        cancelLabel: "Cancel Reset",
-        okDanger: true,
-      },
-    );
-    if (!finalConfirmation) return;
-
-    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
-    try {
-      await invoke("factory_reset", { settingsJson: defaults });
-    } catch (err) {
-      await showAlert("Factory Reset Failed", friendlyError(err));
-      return;
-    }
-
-    // The backend transaction is the commit point. Browser storage cleanup is
-    // best-effort only: a disabled/unavailable localStorage implementation must
-    // not misreport a completed destructive reset as failed or suppress relaunch.
-    try {
-      localStorage.clear();
-    } catch {
-      // Reads will generally be unavailable under the same policy; the backend
-      // remains authoritative and the relaunch below must still happen.
-    }
+  if (scope === "factory") {
+    if (!(await confirmFactoryReset())) return;
+    if (!(await runFactoryReset())) return;
   } else {
-    // Partial reset: settings go to defaults but engagement extras survive
-    // so launchCount/support prompts do not re-fire after a routine reset.
-    const { launchCount, supportPromptDismissed, transfersHintDismissed } =
-      state.settingsExtras as {
-        launchCount?: unknown;
-        supportPromptDismissed?: unknown;
-        transfersHintDismissed?: unknown;
-      };
-    const carriedExtras: Record<string, unknown> = {
-      _setupComplete: true,
-    };
-    if (typeof launchCount === "number")
-      carriedExtras.launchCount = launchCount;
-    if (typeof supportPromptDismissed === "boolean")
-      carriedExtras.supportPromptDismissed = supportPromptDismissed;
-    if (typeof transfersHintDismissed === "boolean")
-      carriedExtras.transfersHintDismissed = transfersHintDismissed;
-    const defaults = mergeSettingsPayload(SETTING_DEFAULTS, carriedExtras);
-    try {
-      // Credentials first: if clearing them fails, nothing is reset and the
-      // user is not left with default settings but surviving credentials.
-      await invoke("clear_saved_connection");
-      await invoke("save_settings", { json: defaults });
-    } catch (err) {
-      await showAlert("Reset Failed", friendlyError(err));
-      return;
-    }
+    if (!(await runPartialReset())) return;
   }
 
+  await relaunchApp();
+}
+
+/**
+ * "Forgot password?" on the Unlock prompt. A lost password cannot unlock the
+ * vault, so the only recovery is erasing it. Keeps the explicit final
+ * confirmation of a factory reset.
+ */
+export async function resetAfterForgottenPassword(): Promise<void> {
+  const confirmed = await showConfirm(
+    "Erase the Encrypted Vault?",
+    "A forgotten password can't be recovered. Continuing erases the encrypted vault and all saved connections inside it, including their saved secret keys. The last-used connection, transfer checkpoints and partial downloads are erased too. Running transfers are stopped. Settings return to their starting values and the app restarts.",
+    { okLabel: "Continue", okDanger: true },
+  );
+  if (!confirmed) return;
+  if (!(await confirmFactoryReset())) return;
+  if (!(await runFactoryReset())) return;
+  await relaunchApp();
+}
+
+async function confirmFactoryReset(): Promise<boolean> {
+  return showConfirm(
+    "Permanently Delete All App Data?",
+    "This permanently deletes saved connections, the last-used connection, encrypted storage, transfer checkpoints, and partial download files. Running transfers will be stopped. This cannot be undone.",
+    {
+      okLabel: "Delete Everything",
+      cancelLabel: "Cancel Reset",
+      okDanger: true,
+    },
+  );
+}
+
+/** The backend transaction is the commit point. Returns false after alerting. */
+async function runFactoryReset(): Promise<boolean> {
+  const defaults = mergeSettingsPayload(SETTING_DEFAULTS, {});
+  try {
+    await invoke("factory_reset", { settingsJson: defaults });
+  } catch (err) {
+    await showAlert("Factory Reset Failed", friendlyError(err));
+    return false;
+  }
+
+  // Browser storage cleanup is best-effort only: a disabled/unavailable
+  // localStorage implementation must not misreport a completed destructive
+  // reset as failed or suppress relaunch.
+  try {
+    localStorage.clear();
+  } catch {
+    // Reads will generally be unavailable under the same policy; the backend
+    // remains authoritative and the relaunch below must still happen.
+  }
+  return true;
+}
+
+/**
+ * Settings go to defaults but engagement extras survive so launchCount and
+ * support prompts do not re-fire after a routine reset. Returns false after
+ * alerting.
+ */
+async function runPartialReset(): Promise<boolean> {
+  const { launchCount, supportPromptDismissed, transfersHintDismissed } =
+    state.settingsExtras as {
+      launchCount?: unknown;
+      supportPromptDismissed?: unknown;
+      transfersHintDismissed?: unknown;
+    };
+  const carriedExtras: Record<string, unknown> = {
+    _setupComplete: true,
+  };
+  if (typeof launchCount === "number") carriedExtras.launchCount = launchCount;
+  if (typeof supportPromptDismissed === "boolean")
+    carriedExtras.supportPromptDismissed = supportPromptDismissed;
+  if (typeof transfersHintDismissed === "boolean")
+    carriedExtras.transfersHintDismissed = transfersHintDismissed;
+  const defaults = mergeSettingsPayload(SETTING_DEFAULTS, carriedExtras);
+  try {
+    // Credentials first: if clearing them fails, nothing is reset and the
+    // user is not left with default settings but surviving credentials.
+    await invoke("clear_saved_connection");
+    await invoke("save_settings", { json: defaults });
+  } catch (err) {
+    await showAlert("Reset Failed", friendlyError(err));
+    return false;
+  }
+  return true;
+}
+
+async function relaunchApp(): Promise<void> {
   try {
     await relaunch();
   } catch {
@@ -992,14 +1342,16 @@ async function refreshBookmarkListUI(): Promise<void> {
   renderBookmarkList(
     listEl,
     (bookmark) => {
-      if (onBookmarkSelect) onBookmarkSelect(bookmark);
-      const overlay = document.getElementById("settings-overlay");
-      if (overlay) overlay.classList.remove("active");
+      // Same close path as Cancel: unsaved edits are asked about, and a
+      // previewed theme is reverted before the connection starts.
+      void closeSettingsModal(false).then(() => {
+        if (!settingsIsOpen() && onBookmarkSelect) onBookmarkSelect(bookmark);
+      });
     },
     async (bookmark) => {
       const confirmed = await showConfirm(
-        "Delete Bookmark",
-        `Delete bookmark "${bookmark.name}"?`,
+        "Delete saved connection",
+        `Delete saved connection "${bookmark.name}"?`,
         { okLabel: "Delete", okDanger: true },
       );
       if (!confirmed) return;
@@ -1011,6 +1363,7 @@ async function refreshBookmarkListUI(): Promise<void> {
       }
       void refreshBookmarkListUI();
     },
+    { onEdit: (bookmark) => editSavedConnection(bookmark) },
   );
 
   if (!bookmarkImportExportWired) {
@@ -1042,7 +1395,10 @@ function wireBookmarkImportExport(): void {
     // Reset now so choosing the same file again fires "change" again.
     importInput.value = "";
     if (file.size > MAX_IMPORT_BYTES) {
-      void showAlert("Import Failed", "Bookmark import is too large");
+      void showAlert(
+        "Import Failed",
+        "The saved connections file is too large.",
+      );
       return;
     }
     const reader = new FileReader();
@@ -1064,10 +1420,8 @@ function wireBookmarkImportExport(): void {
             return;
           }
           const msg =
-            `Imported ${result.imported} bookmark(s)` +
-            (result.skipped > 0
-              ? `, skipped ${result.skipped} duplicate(s)`
-              : "") +
+            `Imported ${plural(result.imported, "saved connection")}` +
+            importSkippedClause(result) +
             ".";
           void showAlert("Import Complete", msg);
           void refreshBookmarkListUI();
@@ -1084,25 +1438,21 @@ function wireBookmarkImportExport(): void {
 /// file (possibly with plaintext secrets) in the default Downloads folder
 /// without letting the user choose where it goes.
 async function exportBookmarksToFile(): Promise<void> {
-  const confirmed = await showConfirm(
-    "Export bookmarks?",
-    "Save bookmarks to a JSON file?",
-    { okLabel: "Export", cancelLabel: "Cancel" },
-  );
-  if (!confirmed) return;
-  const includeSecrets = await showConfirm(
-    "Export bookmark secrets?",
-    "Including secret keys writes them to a plaintext file. Choose redacted export to leave secrets out.",
+  const choice = await showConfirmWithCheckbox(
+    "Export saved connections",
+    "Save your saved connections to a JSON file. Secret keys are left out unless you tick the box below.",
     {
-      okLabel: "Include secrets",
-      cancelLabel: "Export redacted",
-      okDanger: true,
+      okLabel: "Export",
+      cancelLabel: "Cancel",
+      checkboxLabel: "Include secret keys (written as plain text)",
     },
   );
+  if (!choice.confirmed) return;
+  const includeSecrets = choice.checked;
   const path = await save({
     title: includeSecrets
-      ? "Save bookmarks (includes secret keys)"
-      : "Save bookmarks",
+      ? "Save saved connections (includes secret keys)"
+      : "Save saved connections",
     defaultPath: "s3-sidekick-bookmarks.json",
     filters: [{ name: "JSON", extensions: ["json"] }],
   });
@@ -1113,5 +1463,193 @@ async function exportBookmarksToFile(): Promise<void> {
     // The save dialog already asked before replacing an existing file.
     overwrite: true,
   });
-  await showAlert("Export Complete", `Saved bookmarks to ${path}.`);
+  const statusEl = document.getElementById("bookmarks-status");
+  if (statusEl) {
+    statusEl.textContent = `Exported saved connections${includeSecrets ? " with secret keys" : ""}.`;
+  }
+}
+
+/** The saved connection whose edit form is open, or null when none is. */
+let editingBookmark: Bookmark | null = null;
+let bookmarkEditSaving = false;
+
+type BookmarkEditField =
+  "name" | "endpoint" | "region" | "accessKey" | "secretKey" | "sessionToken";
+
+const BOOKMARK_EDIT_FIELD_IDS: Record<BookmarkEditField, string> = {
+  name: "bookmark-edit-name",
+  endpoint: "bookmark-edit-endpoint",
+  region: "bookmark-edit-region",
+  accessKey: "bookmark-edit-access-key",
+  secretKey: "bookmark-edit-secret-key",
+  sessionToken: "bookmark-edit-session-token",
+};
+
+function bookmarkEditField(field: BookmarkEditField): HTMLInputElement | null {
+  return document.getElementById(
+    BOOKMARK_EDIT_FIELD_IDS[field],
+  ) as HTMLInputElement | null;
+}
+
+function setBookmarkEditError(message: string | null): void {
+  const el = document.getElementById("bookmark-edit-error");
+  if (!el) return;
+  el.textContent = message ?? "";
+  el.hidden = !message;
+}
+
+function setBookmarkEditBusy(busy: boolean): void {
+  const button = document.getElementById(
+    "bookmark-edit-save",
+  ) as HTMLButtonElement | null;
+  if (!button) return;
+  button.disabled = busy;
+  button.setAttribute("aria-busy", String(busy));
+  button.textContent = busy ? "Saving\u2026" : "Save";
+}
+
+/** Close the edit form and clear every field, so no secret stays in the DOM. */
+function hideBookmarkEdit(): void {
+  editingBookmark = null;
+  setBookmarkEditError(null);
+  for (const field of Object.keys(
+    BOOKMARK_EDIT_FIELD_IDS,
+  ) as BookmarkEditField[]) {
+    const input = bookmarkEditField(field);
+    if (input) input.value = "";
+  }
+  const form = document.getElementById("bookmark-edit");
+  if (form) form.hidden = true;
+}
+
+function showBookmarkEdit(bookmark: Bookmark): void {
+  editingBookmark = bookmark;
+  setBookmarkEditError(null);
+  const values: Record<BookmarkEditField, string> = {
+    name: bookmark.name,
+    endpoint: bookmark.endpoint,
+    region: bookmark.region,
+    accessKey: bookmark.access_key,
+    // Secrets are never shown; blank means keep the stored value.
+    secretKey: "",
+    sessionToken: "",
+  };
+  for (const field of Object.keys(values) as BookmarkEditField[]) {
+    const input = bookmarkEditField(field);
+    if (input) input.value = values[field];
+  }
+  const sessionInput = bookmarkEditField("sessionToken");
+  if (sessionInput) {
+    sessionInput.placeholder = bookmark.session_token
+      ? "Leave blank to keep the current session token"
+      : "Optional";
+  }
+  const form = document.getElementById("bookmark-edit");
+  if (form) form.hidden = false;
+  bookmarkEditField("name")?.focus();
+}
+
+function setBookmarkStatus(message: string): void {
+  const el = document.getElementById("bookmarks-status");
+  if (el) el.textContent = message;
+}
+
+async function saveBookmarkEdit(): Promise<void> {
+  const target = editingBookmark;
+  if (!target || bookmarkEditSaving) return;
+  const name = bookmarkEditField("name")?.value.trim() ?? "";
+  const endpoint = bookmarkEditField("endpoint")?.value.trim() ?? "";
+  const region = bookmarkEditField("region")?.value.trim() ?? "";
+  const accessKey = bookmarkEditField("accessKey")?.value.trim() ?? "";
+  const secretKey = bookmarkEditField("secretKey")?.value.trim() ?? "";
+  const sessionToken = bookmarkEditField("sessionToken")?.value.trim() ?? "";
+  const accessKeyChanged = accessKey !== target.access_key;
+
+  // Same rules as the connect form. A changed access key cannot reuse the old
+  // secret, so it must come with a new one.
+  if (!name) {
+    setBookmarkEditError("Enter a name for this connection.");
+    return;
+  }
+  if (!endpoint) {
+    setBookmarkEditError("Enter the endpoint.");
+    return;
+  }
+  if (!/^https?:\/\/.+/i.test(endpoint)) {
+    setBookmarkEditError("Endpoint must start with http:// or https://.");
+    return;
+  }
+  if (!accessKey) {
+    setBookmarkEditError("Enter the access key.");
+    return;
+  }
+  if (accessKeyChanged && !secretKey) {
+    setBookmarkEditError("Enter the secret key for the new access key.");
+    return;
+  }
+
+  // A blank secret or session token keeps the stored one. A changed access key
+  // drops the old session token, because it belongs to the old key.
+  const patch: BookmarkPatch = {
+    name,
+    endpoint,
+    region,
+    access_key: accessKey,
+  };
+  if (secretKey) patch.secret_key = secretKey;
+  if (sessionToken) patch.session_token = sessionToken;
+  else if (accessKeyChanged) patch.session_token = undefined;
+
+  bookmarkEditSaving = true;
+  setBookmarkEditBusy(true);
+  setBookmarkEditError(null);
+  try {
+    const updated = await updateBookmark(
+      { endpoint: target.endpoint, access_key: target.access_key },
+      patch,
+    );
+    hideBookmarkEdit();
+    setBookmarkStatus(
+      updated
+        ? `Saved changes to "${name}".`
+        : "That saved connection is no longer saved.",
+    );
+    await refreshBookmarkListUI();
+  } catch (err) {
+    // Stays open so nothing typed is lost; the message never echoes secrets.
+    setBookmarkEditError(`Could not save changes: ${friendlyError(err)}`);
+  } finally {
+    bookmarkEditSaving = false;
+    setBookmarkEditBusy(false);
+  }
+}
+
+function wireBookmarkEdit(): void {
+  const form = document.getElementById("bookmark-edit");
+  if (!form || form.dataset.wired === "true") return;
+  form.dataset.wired = "true";
+  form.addEventListener("keydown", (e) => {
+    // Escape is for this form only: it must not also close Settings.
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    hideBookmarkEdit();
+  });
+  document
+    .getElementById("bookmark-edit-save")
+    ?.addEventListener("click", () => void saveBookmarkEdit());
+  document
+    .getElementById("bookmark-edit-cancel")
+    ?.addEventListener("click", () => hideBookmarkEdit());
+}
+
+/**
+ * Open Settings on the Saved connections tab with the edit form filled in.
+ * The live session keeps the credentials it already has; the form says so.
+ */
+export function editSavedConnection(bookmark: Bookmark): void {
+  wireBookmarkEdit();
+  if (!settingsIsOpen()) openSettingsModal();
+  switchSettingsTab("bookmarks");
+  showBookmarkEdit(bookmark);
 }

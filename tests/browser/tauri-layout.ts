@@ -45,6 +45,8 @@ export interface LayoutMockOptions {
   bookmarks?: unknown[];
   /** Optional independent backup rows. Defaults to `bookmarks`. */
   bookmarkBackup?: unknown[];
+  /** Buckets returned by `list_buckets`. Defaults to one layout-test bucket. */
+  buckets?: Array<{ name: string; creation_date?: string }>;
   /** Security state returned by the mock backend. */
   security?: Partial<MockSecurityStatus>;
   /** Passwords accepted by `unlock_security`; an empty list accepts any. */
@@ -80,6 +82,10 @@ export interface LayoutMockOptions {
    * ms pass without `touch_security_activity` or an unlock.
    */
   autoLockAfterMs?: number;
+  /** Platform reported by `get_platform_info`. Default: "linux". */
+  platform?: "linux" | "macos" | "windows";
+  /** Hold a biometric unlock until `releaseMockBiometric` is called. */
+  holdBiometric?: boolean;
 }
 
 export interface MockCall {
@@ -97,6 +103,7 @@ interface LayoutMockInit {
   listObjectsByPrefix: Record<string, MockListOverride>;
   bookmarks: unknown[];
   bookmarkBackup: unknown[];
+  buckets: Array<{ name: string; creation_date?: string }>;
   security: MockSecurityStatus;
   unlockPasswords: string[];
   deferUnlock: boolean;
@@ -108,6 +115,8 @@ interface LayoutMockInit {
   copyFailures: number;
   holdCopies: boolean;
   autoLockAfterMs: number;
+  platform: string;
+  holdBiometric: boolean;
 }
 
 /**
@@ -138,6 +147,7 @@ export async function installLayoutTauriMock(
     listObjectsByPrefix: options.listObjectsByPrefix ?? {},
     bookmarks: options.bookmarks ?? [],
     bookmarkBackup: options.bookmarkBackup ?? options.bookmarks ?? [],
+    buckets: options.buckets ?? [],
     security: {
       initialized: true,
       encryption_enabled: false,
@@ -158,6 +168,8 @@ export async function installLayoutTauriMock(
     copyFailures: options.transferBackend?.copyFailures ?? 0,
     holdCopies: options.transferBackend?.holdCopies ?? false,
     autoLockAfterMs: options.autoLockAfterMs ?? 0,
+    platform: options.platform ?? "linux",
+    holdBiometric: options.holdBiometric ?? false,
   };
 
   await page.addInitScript(
@@ -171,6 +183,7 @@ export async function installLayoutTauriMock(
       listObjectsByPrefix,
       bookmarks,
       bookmarkBackup,
+      buckets,
       security,
       unlockPasswords,
       deferUnlock,
@@ -182,6 +195,8 @@ export async function installLayoutTauriMock(
       copyFailures,
       holdCopies,
       autoLockAfterMs,
+      platform,
+      holdBiometric,
     }: LayoutMockInit) => {
       const callbacks = new Map<number, (value: unknown) => void>();
       const listeners = new Map<string, Set<number>>();
@@ -211,6 +226,15 @@ export async function installLayoutTauriMock(
       };
       let storedBookmarks = [...bookmarks];
       let storedBookmarkBackup = [...bookmarkBackup];
+      const storedBuckets =
+        buckets.length > 0
+          ? buckets
+          : [
+              {
+                name: "layout-test-bucket",
+                creation_date: "2025-01-01T00:00:00.000Z",
+              },
+            ];
       const securityState = { ...security };
       const testState = {
         scenario,
@@ -220,6 +244,8 @@ export async function installLayoutTauriMock(
         releaseListing: undefined as (() => void) | undefined,
         releaseUnlock: undefined as (() => void) | undefined,
         releaseDisconnect: undefined as (() => void) | undefined,
+        releaseBiometric: undefined as (() => void) | undefined,
+        biometricReleased: false,
         releaseCopies: [] as (() => void)[],
         setCommandError: undefined as
           ((command: string, error: string | null) => void) | undefined,
@@ -330,7 +356,7 @@ export async function installLayoutTauriMock(
 
         switch (command) {
           case "get_platform_info":
-            return "linux";
+            return platform;
           case "plugin:app|version":
             return "0.11.0-beta.7";
           case "load_settings":
@@ -425,6 +451,29 @@ export async function installLayoutTauriMock(
           case "lock_security":
             securityState.unlocked = false;
             return { ...securityState };
+          case "unlock_biometric":
+            if (holdBiometric && !testState.biometricReleased) {
+              await new Promise<void>((resolve) => {
+                testState.releaseBiometric = resolve;
+              });
+            }
+            securityState.unlocked = true;
+            lastVaultActivity = Date.now();
+            return { ...securityState };
+          case "enable_biometric":
+            securityState.biometric_enrolled = true;
+            return { ...securityState };
+          case "disable_biometric":
+            securityState.biometric_enrolled = false;
+            return { ...securityState };
+          case "set_security_encryption":
+            securityState.initialized = true;
+            securityState.encryption_enabled = args.enableEncryption === true;
+            securityState.unlocked = true;
+            return { ...securityState };
+          case "change_security_password":
+            securityState.unlocked = true;
+            return { ...securityState };
           case "load_transfer_manifest":
             return {
               recovery_session: "a".repeat(64),
@@ -440,14 +489,15 @@ export async function installLayoutTauriMock(
               connection_id: `browser-layout-connection-${connectSequence}`,
               connection_identity: "browser-layout-identity",
               create_only_capabilities: createOnlyCapabilities,
+              // Models AWS, the only provider that verifies conditional DELETE,
+              // so Move flows stay available.
+              conditional_delete_supported: true,
             };
           case "list_buckets":
-            return [
-              {
-                name: "layout-test-bucket",
-                creation_date: "2025-01-01T00:00:00.000Z",
-              },
-            ];
+            return storedBuckets.map((bucket) => ({
+              name: bucket.name,
+              creation_date: bucket.creation_date ?? "2025-01-01T00:00:00.000Z",
+            }));
           case "list_objects":
             if (scenario === "error") {
               throw new Error("Mock listing failed");
@@ -469,6 +519,11 @@ export async function installLayoutTauriMock(
               }
             }
             return listing;
+          case "generate_presigned_url": {
+            const key = encodeURIComponent(String(args.key ?? "object"));
+            const expires = Number(args.expiresInSecs ?? 3600);
+            return `https://layout-test.invalid/presigned/${key}?X-Amz-Expires=${expires}`;
+          }
           case "updater_support_info":
             return {
               mode: "manual",
@@ -690,6 +745,21 @@ export async function releaseMockCopies(page: Page): Promise<void> {
       }
     ).__S3_LAYOUT_TEST__;
     for (const release of state?.releaseCopies.splice(0) ?? []) release();
+  });
+}
+
+export async function releaseMockBiometric(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const state = (
+      window as typeof window & {
+        __S3_LAYOUT_TEST__?: {
+          releaseBiometric?: () => void;
+          biometricReleased?: boolean;
+        };
+      }
+    ).__S3_LAYOUT_TEST__;
+    if (state) state.biometricReleased = true;
+    state?.releaseBiometric?.();
   });
 }
 

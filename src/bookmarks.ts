@@ -213,11 +213,83 @@ export async function removeBookmark(
   });
 }
 
+/**
+ * Name suggested when saving a connection. Endpoint, region, and a masked
+ * access key tell apart connections that share a host or a generic name.
+ * Keys of eight characters or fewer are omitted rather than partly shown.
+ */
+export function suggestBookmarkName(
+  endpoint: string,
+  region: string,
+  accessKey: string,
+): string {
+  const parts = [deriveProviderLabelFromEndpoint(endpoint)];
+  const trimmedRegion = region.trim();
+  if (trimmedRegion) parts.push(trimmedRegion);
+  const key = accessKey.trim();
+  if (key.length > 8) parts.push(`${key.slice(0, 4)}…${key.slice(-4)}`);
+  return parts.join(" · ");
+}
+
+export type BookmarkPatch = Partial<
+  Pick<
+    Bookmark,
+    | "name"
+    | "endpoint"
+    | "region"
+    | "access_key"
+    | "secret_key"
+    | "session_token"
+  >
+>;
+
+/**
+ * Edit a saved connection in place, matched by identity like removeBookmark.
+ * Resolves false when it is no longer saved, so a stale edit cannot re-add it.
+ * Rejects, and saves nothing, when the edited row would not load again or
+ * would duplicate another saved endpoint and access key.
+ */
+export async function updateBookmark(
+  target: Pick<Bookmark, "endpoint" | "access_key">,
+  patch: BookmarkPatch,
+): Promise<boolean> {
+  return enqueueBookmarkMutation(async () => {
+    requireBookmarksLoaded();
+    if (!bookmarks.some((b) => sameBookmark(b, target))) return false;
+    const edited = bookmarks
+      .filter((b) => sameBookmark(b, target))
+      .map((b) => ({ ...b, ...patch }));
+    if (!edited.every(isBookmark)) {
+      throw new Error(
+        "Those details are not valid for a saved connection. Check the name, endpoint, and access key.",
+      );
+    }
+    for (const row of edited) {
+      const clash = bookmarks.some(
+        (b) => !sameBookmark(b, target) && sameBookmark(b, row),
+      );
+      if (clash) {
+        throw new Error(
+          "Another saved connection already uses this endpoint and access key.",
+        );
+      }
+    }
+    const next = bookmarks.map((b) =>
+      sameBookmark(b, target) ? { ...b, ...patch } : b,
+    );
+    await persistBookmarksSnapshot(next);
+    bookmarks = next;
+    onChangeCallback?.();
+    return true;
+  });
+}
+
 export function renderBookmarkBar(
   barEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
   activeEndpoint?: string,
   onNewTab?: () => void,
+  activeAccessKey?: string,
 ): void {
   barEl.innerHTML = "";
   if (bookmarks.length === 0 && !onNewTab) return;
@@ -225,13 +297,23 @@ export function renderBookmarkBar(
   for (let i = 0; i < bookmarks.length; i++) {
     const b = bookmarks[i];
     const chip = document.createElement("button");
+    // The endpoint alone is shared by every key saved for one host.
     const isActive =
-      activeEndpoint !== undefined && b.endpoint === activeEndpoint;
+      activeEndpoint !== undefined &&
+      b.endpoint === activeEndpoint &&
+      (activeAccessKey === undefined || b.access_key === activeAccessKey);
     chip.className = isActive
       ? "bookmark-chip bookmark-chip--active"
       : "bookmark-chip";
-    chip.textContent = b.name;
-    chip.title = b.region ? `${b.endpoint} (${b.region})` : b.endpoint;
+    chip.type = "button";
+    const label = document.createElement("span");
+    label.className = "bookmark-chip__label";
+    label.textContent = b.name;
+    chip.appendChild(label);
+    // The title carries the full name (the label may be truncated) and the endpoint.
+    const where = b.region ? `${b.endpoint} (${b.region})` : b.endpoint;
+    chip.title = `${b.name} · ${where}`;
+    chip.setAttribute("aria-label", b.name);
     chip.addEventListener("click", () => onSelect(b));
     barEl.appendChild(chip);
   }
@@ -239,6 +321,7 @@ export function renderBookmarkBar(
   if (onNewTab) {
     const plusBtn = document.createElement("button");
     plusBtn.className = "bookmark-chip bookmark-chip--new";
+    plusBtn.type = "button";
     plusBtn.title = "New connection";
     plusBtn.textContent = "+";
     plusBtn.addEventListener("click", onNewTab);
@@ -256,9 +339,18 @@ export function exportBookmarksJson(includeSecrets = false): string {
   return JSON.stringify(exported, null, 2);
 }
 
+export interface BookmarkImportResult {
+  imported: number;
+  /** Entries not imported: `duplicates` plus `invalid`. */
+  skipped: number;
+  duplicates?: number;
+  invalid?: number;
+  error?: string;
+}
+
 export async function importBookmarksJson(
   json: string,
-): Promise<{ imported: number; skipped: number; error?: string }> {
+): Promise<BookmarkImportResult> {
   if (typeof json !== "string" || json.length > MAX_IMPORT_BYTES) {
     return { imported: 0, skipped: 0, error: "Bookmark import is too large" };
   }
@@ -282,15 +374,16 @@ export async function importBookmarksJson(
   }
 
   const valid = parsed.filter(isBookmark);
+  const invalid = parsed.length - valid.length;
   if (valid.length === 0) {
-    return { imported: 0, skipped: parsed.length };
+    return { imported: 0, skipped: parsed.length, duplicates: 0, invalid };
   }
 
   try {
     return await enqueueBookmarkMutation(async () => {
       requireBookmarksLoaded();
       let imported = 0;
-      let skipped = 0;
+      let duplicates = 0;
       const nextBookmarks = [...bookmarks];
       for (const b of valid) {
         const exists = nextBookmarks.some(
@@ -299,7 +392,7 @@ export async function importBookmarksJson(
             existing.access_key === b.access_key,
         );
         if (exists) {
-          skipped++;
+          duplicates++;
         } else {
           nextBookmarks.push(b);
           imported++;
@@ -312,7 +405,12 @@ export async function importBookmarksJson(
         onChangeCallback?.();
       }
 
-      return { imported, skipped };
+      return {
+        imported,
+        skipped: duplicates + invalid,
+        duplicates,
+        invalid,
+      };
     });
   } catch (err) {
     return {
@@ -323,40 +421,166 @@ export async function importBookmarksJson(
   }
 }
 
+export function deriveProviderLabelFromEndpoint(endpoint: string): string {
+  const trimmed = endpoint.trim();
+  if (!trimmed) return "Custom";
+  try {
+    const url = new URL(
+      trimmed.includes("://") ? trimmed : `https://${trimmed}`,
+    );
+    const host = url.hostname.toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1") return "Local";
+    if (host.includes("amazonaws.com")) return "AWS";
+    if (host.includes("digitaloceanspaces.com")) return "Spaces";
+    if (host.includes("backblazeb2.com")) return "B2";
+    if (host.includes("r2.cloudflarestorage.com")) return "R2";
+    if (host.includes("wasabisys.com")) return "Wasabi";
+    return host.length > 24 ? `${host.slice(0, 21)}…` : host;
+  } catch {
+    return trimmed.length > 24 ? `${trimmed.slice(0, 21)}…` : trimmed;
+  }
+}
+
 export function renderBookmarkList(
   listEl: HTMLElement,
   onSelect: (bookmark: Bookmark) => void,
   onDelete: (bookmark: Bookmark) => void,
-  options: { emptyMessage?: string } = {},
+  options: {
+    emptyMessage?: string;
+    emptyTitle?: string;
+    layout?: "default" | "connection";
+    onRename?: (bookmark: Bookmark) => void;
+    onEdit?: (bookmark: Bookmark) => void;
+    onDuplicate?: (bookmark: Bookmark) => void;
+    /** Case-insensitive name/endpoint filter for the connection layout. */
+    filterText?: string;
+    /** Ready-made last-used marker text for a row, or null to hide it. */
+    lastUsedLabel?: (bookmark: Bookmark) => string | null;
+  } = {},
 ): void {
+  const layout = options.layout ?? "default";
   // Handlers resolve rows against this render's snapshot, so a click on a
   // list rendered before a change still names the bookmark it shows.
-  const rendered = [...bookmarks];
+  const filter = options.filterText?.trim().toLowerCase() ?? "";
+  const all = [...bookmarks];
+  const rendered = filter
+    ? all.filter(
+        (b) =>
+          b.name.toLowerCase().includes(filter) ||
+          b.endpoint.toLowerCase().includes(filter),
+      )
+    : all;
+  const lastUsed = options.lastUsedLabel ?? (() => null);
   if (rendered.length === 0) {
-    const message = options.emptyMessage ?? "No bookmarks saved";
-    listEl.innerHTML = `<li class="bookmark-empty">${escapeHtml(message)}</li>`;
+    const emptyDueToFilter = filter && all.length > 0;
+    const message = emptyDueToFilter
+      ? "No saved connections match that filter."
+      : (options.emptyMessage ?? "No bookmarks saved");
+    if (layout === "connection") {
+      const title = options.emptyTitle ?? "No saved connections";
+      listEl.innerHTML =
+        `<li class="conn-saved-empty">` +
+        `<p class="conn-saved-empty__title">${escapeHtml(emptyDueToFilter ? "No matches" : title)}</p>` +
+        `<p class="conn-saved-empty__text">${escapeHtml(message)}</p>` +
+        `</li>`;
+    } else {
+      listEl.innerHTML = `<li class="bookmark-empty">${escapeHtml(message)}</li>`;
+    }
     listEl.onkeydown = null;
     listEl.onclick = null;
     return;
   }
 
+  const deleteButton = (b: Bookmark, i: number) =>
+    `<button type="button" class="bookmark__delete" data-delete="${i}" aria-label="Delete ${escapeHtml(b.name)}" title="Delete ${escapeHtml(b.name)}">${getIconHtml("x", { className: "lucide-icon bookmark__delete-icon", decorative: true })}</button>`;
+  const editButton = (b: Bookmark, i: number) =>
+    `<button type="button" class="bookmark__edit" data-edit="${i}" aria-label="Edit ${escapeHtml(b.name)}" title="Edit ${escapeHtml(b.name)}">Edit</button>`;
+
+  // The icon registry has no ellipsis glyph; more-horizontal is the ⋯ menu.
+  const rowMenuButton = (b: Bookmark, i: number) =>
+    `<button type="button" class="bookmark__menu" data-menu="${i}" aria-label="More actions for ${escapeHtml(b.name)}" aria-haspopup="menu" aria-expanded="false" title="More actions for ${escapeHtml(b.name)}">${getIconHtml("more-horizontal", { className: "lucide-icon bookmark__menu-icon", decorative: true })}</button>`;
+  const rowMenu = (b: Bookmark, i: number) =>
+    `<div class="bookmark-row-menu" role="menu" aria-label="Actions for ${escapeHtml(b.name)}" hidden>` +
+    (options.onEdit
+      ? `<button type="button" class="bookmark-row-menu__item" role="menuitem" data-edit="${i}" aria-label="Edit ${escapeHtml(b.name)}">Edit</button>`
+      : "") +
+    (options.onRename
+      ? `<button type="button" class="bookmark-row-menu__item" role="menuitem" data-rename="${i}" aria-label="Rename ${escapeHtml(b.name)}">Rename</button>`
+      : "") +
+    (options.onDuplicate
+      ? `<button type="button" class="bookmark-row-menu__item" role="menuitem" data-duplicate="${i}" aria-label="Duplicate ${escapeHtml(b.name)}">Duplicate</button>`
+      : "") +
+    `<button type="button" class="bookmark-row-menu__item bookmark-row-menu__item--danger" role="menuitem" data-delete="${i}" aria-label="Delete ${escapeHtml(b.name)}">Delete</button>` +
+    `</div>`;
+
   listEl.innerHTML = rendered
     .map((b, i) => {
       const regionPart = b.region ? ` (${escapeHtml(b.region)})` : "";
-      return `<li class="bookmark-item" data-index="${i}" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
+      if (layout === "connection") {
+        const provider = escapeHtml(
+          deriveProviderLabelFromEndpoint(b.endpoint),
+        );
+        const used = lastUsed(b);
+        const usedMarker = used
+          ? `<span class="bookmark__last-used">${escapeHtml(used)}</span>`
+          : "";
+        return `<li class="bookmark-item bookmark-item--connection" data-index="${i}" title="${escapeHtml(b.endpoint)}${regionPart}">
+          <button type="button" class="bookmark-item__connect" data-connect="${i}">
+            <span class="bookmark-item__connect-body">
+              <span class="bookmark-item__top">
+                <span class="bookmark__name">${escapeHtml(b.name)}</span>
+                <span class="bookmark__provider">${provider}</span>
+              </span>
+              <span class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</span>
+            </span>
+            ${usedMarker}
+          </button>
+          ${rowMenuButton(b, i)}
+          ${rowMenu(b, i)}
+        </li>`;
+      }
+      return `<li class="bookmark-item" data-index="${i}" role="button" tabindex="0" title="${escapeHtml(b.endpoint)}${regionPart}">
           <div style="flex:1;min-width:0">
             <div class="bookmark__name">${escapeHtml(b.name)}</div>
             <div class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</div>
           </div>
-          <button class="bookmark__delete" data-delete="${i}" title="Remove bookmark">${getIconHtml("x", { className: "lucide-icon bookmark__delete-icon", decorative: true })}</button>
+          ${options.onEdit ? editButton(b, i) : ""}
+          ${deleteButton(b, i)}
         </li>`;
     })
     .join("");
 
+  const closeRowMenus = (except?: HTMLElement): void => {
+    listEl.querySelectorAll<HTMLElement>(".bookmark-row-menu").forEach((el) => {
+      if (el === except) return;
+      el.hidden = true;
+    });
+    listEl
+      .querySelectorAll<HTMLElement>(".bookmark__menu")
+      .forEach((el) => el.setAttribute("aria-expanded", "false"));
+  };
+
   listEl.onclick = (e) => {
-    const deleteBtn = (e.target as HTMLElement).closest<HTMLElement>(
-      "[data-delete]",
-    );
+    const target = e.target as HTMLElement;
+    const menuButton = target.closest<HTMLElement>("[data-menu]");
+    if (menuButton) {
+      e.stopPropagation();
+      const idx = parseInt(menuButton.dataset.menu!, 10);
+      if (Number.isInteger(idx) && idx >= 0 && idx < rendered.length) {
+        const li = menuButton.closest<HTMLElement>(".bookmark-item");
+        const menu = li?.querySelector<HTMLElement>(".bookmark-row-menu");
+        if (menu) {
+          const open = menu.hidden;
+          closeRowMenus(open ? menu : undefined);
+          menu.hidden = !open;
+          menuButton.setAttribute("aria-expanded", String(open));
+        }
+      }
+      return;
+    }
+    // Any other click (an item, the Connect button, a row) dismisses the menus.
+    closeRowMenus();
+    const deleteBtn = target.closest<HTMLElement>("[data-delete]");
     if (deleteBtn) {
       e.stopPropagation();
       const idx = parseInt(deleteBtn.dataset.delete!, 10);
@@ -365,10 +589,58 @@ export function renderBookmarkList(
       }
       return;
     }
-    const item = (e.target as HTMLElement).closest<HTMLElement>(
-      ".bookmark-item",
-    );
-    if (item) {
+    const renameBtn = target.closest<HTMLElement>("[data-rename]");
+    if (renameBtn) {
+      e.stopPropagation();
+      const idx = parseInt(renameBtn.dataset.rename!, 10);
+      if (
+        options.onRename &&
+        Number.isInteger(idx) &&
+        idx >= 0 &&
+        idx < rendered.length
+      ) {
+        options.onRename(rendered[idx]);
+      }
+      return;
+    }
+    const editBtn = target.closest<HTMLElement>("[data-edit]");
+    if (editBtn) {
+      e.stopPropagation();
+      const idx = parseInt(editBtn.dataset.edit!, 10);
+      if (
+        options.onEdit &&
+        Number.isInteger(idx) &&
+        idx >= 0 &&
+        idx < rendered.length
+      ) {
+        options.onEdit(rendered[idx]);
+      }
+      return;
+    }
+    const duplicateBtn = target.closest<HTMLElement>("[data-duplicate]");
+    if (duplicateBtn) {
+      e.stopPropagation();
+      const idx = parseInt(duplicateBtn.dataset.duplicate!, 10);
+      if (
+        options.onDuplicate &&
+        Number.isInteger(idx) &&
+        idx >= 0 &&
+        idx < rendered.length
+      ) {
+        options.onDuplicate(rendered[idx]);
+      }
+      return;
+    }
+    const connectBtn = target.closest<HTMLElement>("[data-connect]");
+    if (connectBtn) {
+      const idx = parseInt(connectBtn.dataset.connect!, 10);
+      if (Number.isInteger(idx) && idx >= 0 && idx < rendered.length) {
+        onSelect(rendered[idx]);
+      }
+      return;
+    }
+    const item = target.closest<HTMLElement>(".bookmark-item");
+    if (item && layout !== "connection") {
       highlightBookmarkListItem(listEl, item);
       const idx = parseInt(item.dataset.index!, 10);
       if (Number.isInteger(idx) && idx >= 0 && idx < rendered.length) {
@@ -378,18 +650,69 @@ export function renderBookmarkList(
   };
 
   listEl.onkeydown = (e) => {
-    if (e.key !== "Enter") return;
-    const item = (e.target as HTMLElement).closest<HTMLElement>(
-      ".bookmark-item",
+    // Controls inside a row keep their own keys: Enter on Delete must ask
+    // to delete, not connect through the row.
+    const target = e.target as HTMLElement;
+    if (
+      target.closest(
+        "[data-delete], [data-rename], [data-edit], [data-duplicate], [data-menu]",
+      )
+    ) {
+      if (e.key === "Escape") {
+        closeRowMenus();
+        const menuBtn = target.closest<HTMLElement>(".bookmark-item");
+        menuBtn?.querySelector<HTMLElement>(".bookmark__menu")?.focus();
+      }
+      return;
+    }
+    if (e.key === "Escape") {
+      closeRowMenus();
+      return;
+    }
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const connectButton = target.closest<HTMLElement>(
+      ".bookmark-item__connect",
     );
-    if (!item) return;
-    e.preventDefault();
-    highlightBookmarkListItem(listEl, item);
-    const idx = parseInt(item.dataset.index!, 10);
-    if (Number.isInteger(idx) && idx >= 0 && idx < rendered.length) {
-      onSelect(rendered[idx]);
+    if (connectButton) {
+      e.preventDefault();
+      const idx = parseInt(connectButton.dataset.connect!, 10);
+      if (Number.isInteger(idx) && idx >= 0 && idx < rendered.length) {
+        onSelect(rendered[idx]);
+      }
+      return;
+    }
+    const item = target.closest<HTMLElement>(".bookmark-item");
+    if (item && layout !== "connection") {
+      e.preventDefault();
+      highlightBookmarkListItem(listEl, item);
+      const idx = parseInt(item.dataset.index!, 10);
+      if (Number.isInteger(idx) && idx >= 0 && idx < rendered.length) {
+        onSelect(rendered[idx]);
+      }
     }
   };
+
+  // Close any open row menu when the pointer goes down elsewhere on the page.
+  wireRowMenuOutsideClose();
+}
+
+/** One document-level listener closes whichever row menu is open. */
+let rowMenuOutsideCloseWired = false;
+function wireRowMenuOutsideClose(): void {
+  if (rowMenuOutsideCloseWired) return;
+  rowMenuOutsideCloseWired = true;
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest(".bookmark-row-menu, .bookmark__menu")) return;
+    document
+      .querySelectorAll<HTMLElement>(".bookmark-row-menu")
+      .forEach((el) => {
+        el.hidden = true;
+      });
+    document
+      .querySelectorAll<HTMLElement>(".bookmark__menu")
+      .forEach((el) => el.setAttribute("aria-expanded", "false"));
+  });
 }
 
 function highlightBookmarkListItem(

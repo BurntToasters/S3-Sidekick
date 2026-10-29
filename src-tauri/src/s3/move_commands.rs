@@ -67,6 +67,12 @@ pub(crate) async fn delete_copied_objects(
     .await
 }
 
+/// Source folder of a prefix move. The folder is named with its trailing `/`,
+/// so a source such as `old` cannot reach sibling objects like `old.zip`.
+fn validate_move_source_prefix(prefix: &str) -> Result<(), String> {
+    validate_mutating_folder_prefix(prefix, "Source prefix")
+}
+
 #[tauri::command]
 pub(crate) async fn rename_prefix(
     state: tauri::State<'_, AppState>,
@@ -82,7 +88,7 @@ pub(crate) async fn rename_prefix(
     let client = require_client(&state, &connection_id, transfer_id)?;
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
-    validate_mutating_prefix(&old_prefix, "Source prefix")?;
+    validate_move_source_prefix(&old_prefix)?;
     validate_mutating_prefix(&new_prefix, "Destination prefix")?;
     if prefixes_overlap(&old_prefix, &new_prefix) {
         return Err("Source and destination prefixes overlap; move was refused.".to_string());
@@ -222,7 +228,7 @@ pub(crate) async fn copy_prefix_to(
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&src_bucket)?;
     validate_bucket_name(&dst_bucket)?;
-    validate_mutating_prefix(&src_prefix, "Source prefix")?;
+    validate_move_source_prefix(&src_prefix)?;
     validate_mutating_prefix(&dst_prefix, "Destination prefix")?;
     if src_bucket == dst_bucket && prefixes_overlap(&src_prefix, &dst_prefix) {
         return Err("Source and destination prefixes overlap; copy was refused.".to_string());
@@ -254,4 +260,22 @@ pub(crate) async fn copy_prefix_to(
         &cancel,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_source_prefix_requires_trailing_slash() {
+        // Without the trailing `/`, `old` also matches `old.zip` and
+        // `old-logs/...`, so a folder move would reach sibling objects.
+        for prefix in ["old", "old.zip", "old-logs"] {
+            assert!(
+                validate_move_source_prefix(prefix).is_err(),
+                "{prefix} must be refused as a move source without a trailing slash"
+            );
+        }
+        assert!(validate_move_source_prefix("old/").is_ok());
+    }
 }

@@ -3,15 +3,15 @@
 .info-tabs {
   display: flex;
   border-bottom: 1px solid var(--border);
-  padding: 0 20px;
+  padding: 0 var(--space-5);
 }
 
 .info-tab {
-  padding: 8px 14px;
+  padding: var(--space-2) 14px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-family: inherit;
   cursor: pointer;
   border-bottom: 2px solid transparent;
@@ -31,15 +31,50 @@
 }
 
 .info-tab--active {
-  color: var(--accent);
+  color: var(--accent-fg);
   border-bottom-color: var(--accent);
+}
+
+/* Paths and ETags wrap at slashes and long tokens instead of breaking mid-word.
+   Overrides the broad mono rule in feedback.css, which loads later. */
+.metadata-info-row__value.metadata-value-mono {
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.metadata-entry .metadata-entry__delete {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+}
+
+/* Invisible stand-in for rows without a delete button, so every metadata row
+   lines up with the 32px controls column. */
+.metadata-entry__spacer {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  flex-shrink: 0;
+}
+
+/* Empty state for a permission set without grants. */
+.acl-empty {
+  padding: 14px var(--space-3);
+  margin-top: var(--space-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  background: var(--bg);
 }
 
 .acl-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
-  margin-top: 4px;
+  font-size: var(--text-sm);
+  margin-top: var(--space-1);
 }
 
 .acl-table th {
@@ -48,7 +83,7 @@
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -60,9 +95,9 @@
 
 .metadata-value-url {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--text-xs);
   word-break: break-all;
-  color: var(--accent);
+  color: var(--accent-fg);
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -72,4 +107,10 @@
 
 .text-secondary {
   color: var(--text-secondary);
+}
+
+.metadata-empty {
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
 }

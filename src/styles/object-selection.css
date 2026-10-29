@@ -9,8 +9,8 @@
 .object-table th.col-check,
 .object-table td.col-check {
   width: 36px;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
 }
 
 .col-check input[type="checkbox"] {
@@ -18,13 +18,12 @@
   margin: 0 auto;
 }
 
-.object-row--selected {
+/* Selection outranks hover: the selected fill and accent bar stay on hover. */
+.object-row--selected,
+.object-table .object-row--selected:hover {
   background: var(--bg-active);
+  box-shadow: inset 3px 0 0 var(--accent);
   transition: box-shadow var(--transition-smooth);
-}
-
-.object-row--selected:hover {
-  background: var(--bg-active);
 }
 
 .object-row:focus-visible {
@@ -48,7 +47,7 @@
   padding: 0 14px;
   background: var(--bg-active);
   border-bottom: 1px solid var(--glass-border);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   flex-shrink: 0;
 }
@@ -72,11 +71,21 @@
   width: auto;
 }
 
+/* Accent marks the bar only while a selection is active; the idle row is a
+   neutral info strip. */
+.batch-toolbar[data-selection-state="selected"] {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.batch-toolbar[data-selection-state="selected"] .batch-toolbar__count {
+  color: var(--accent-fg);
+}
+
 .batch-toolbar__actions {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 4px;
+  gap: var(--space-1);
   min-width: 0;
   justify-content: flex-end;
   flex-wrap: nowrap;
@@ -87,34 +96,34 @@
   display: none;
 }
 
-#batch-more {
-  display: none;
+.batch-toolbar__close {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
 }
 
-/* The content-main container narrows when the inspector is docked. Keep the
-   permanent row on one line and move the less common actions into the shared
-   keyboard-aware context-menu surface. */
-@container content-main (max-width: 759px) {
+/* The content-main container is ~660px at a 1280 viewport (sidebar and
+   transfer pane take the rest). WebKit button metrics cannot fit the full
+   set there, so below 700px the bar keeps Download, More and the close
+   button, and the rest stay reachable through the object context menu.
+   Delete remains visible while the container is at least 760px wide. */
+@container content-main (max-width: 699px) {
   .batch-toolbar {
-    gap: 4px;
-    padding-inline: 8px;
+    gap: var(--space-1);
+    padding-inline: var(--space-2);
   }
 
   .batch-toolbar__actions .btn {
-    padding-inline: 8px;
+    padding-inline: var(--space-2);
   }
 
   .batch-toolbar__actions #batch-delete,
-  .batch-toolbar__actions #batch-copy-urls,
-  .batch-toolbar__actions #batch-deselect {
+  .batch-toolbar__actions #batch-copy-move,
+  .batch-toolbar__actions #batch-rename,
+  .batch-toolbar__actions #batch-copy-urls {
     display: none;
   }
 
-  .batch-toolbar__actions #batch-more {
-    display: inline-flex;
-  }
-
-  .batch-toolbar__actions #batch-properties .batch-toolbar__label,
   .batch-toolbar__actions #batch-download .batch-toolbar__label,
   .batch-toolbar__actions #batch-more .batch-toolbar__label {
     position: absolute;
@@ -141,6 +150,6 @@
     overflow: hidden;
     text-overflow: clip;
     white-space: nowrap;
-    font-size: 11px;
+    font-size: var(--text-xs);
   }
 }

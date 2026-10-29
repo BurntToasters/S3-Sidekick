@@ -9,10 +9,11 @@ import { state } from "./state.ts";
 import {
   enqueuePaths,
   enqueueFolderEntries,
+  type EnqueueResult,
   type TransferEnqueueTarget,
 } from "./transfers.ts";
 import { logActivity } from "./activity-log.ts";
-import { friendlyError } from "./utils.ts";
+import { friendlyError, plural } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 
 export interface LocalFolderFileEntry {
@@ -48,9 +49,13 @@ function enqueueFolderTransfers(
   entries: LocalFolderFileEntry[],
   targetPrefix: string,
   target: TransferEnqueueTarget,
-): boolean {
-  enqueueFolderEntries(entries, targetPrefix, target);
-  return true;
+): EnqueueResult {
+  return enqueueFolderEntries(entries, targetPrefix, target);
+}
+
+/** Reports a refused enqueue in the status line; never says "Queued" for it. */
+function reportRefusedEnqueue(result: EnqueueResult): void {
+  setStatus(result.reason ?? "Upload not queued.", 8000);
 }
 
 export async function handleUploadButton(): Promise<void> {
@@ -79,7 +84,12 @@ export async function handleUploadButton(): Promise<void> {
     (value): value is string => typeof value === "string",
   );
   if (filePaths.length > 0) {
-    enqueuePaths(filePaths, snap.prefix, enqueueTargetFromSnapshot(snap));
+    const result = enqueuePaths(
+      filePaths,
+      snap.prefix,
+      enqueueTargetFromSnapshot(snap),
+    );
+    if (!result.accepted) reportRefusedEnqueue(result);
   }
 }
 
@@ -128,18 +138,13 @@ export async function handleUploadFolderButton(): Promise<void> {
     }
 
     const target = enqueueTargetFromSnapshot(snap);
-    if (enqueueFolderTransfers(entries, snap.prefix, target)) {
-      setStatus(`Queued ${entries.length} file(s) from folder upload.`, 5000);
+    const result = enqueueFolderTransfers(entries, snap.prefix, target);
+    if (!result.accepted) {
+      reportRefusedEnqueue(result);
       return;
     }
-
-    enqueuePaths(
-      entries.map((entry) => entry.file_path),
-      snap.prefix,
-      target,
-    );
     setStatus(
-      `Queued ${entries.length} file(s) (folder structure unavailable).`,
+      `Queued ${plural(result.count, "file")} from folder upload.`,
       5000,
     );
   } catch (err) {
@@ -178,9 +183,13 @@ export async function queueDroppedPaths(
       setStatus("Nothing to upload: the dropped items contain no files.", 5000);
       return;
     }
-    enqueueFolderTransfers(entries, destPrefix, target);
+    const result = enqueueFolderTransfers(entries, destPrefix, target);
+    if (!result.accepted) {
+      reportRefusedEnqueue(result);
+      return;
+    }
     setStatus(
-      `Dropped ${cleaned.length} item(s). Queued ${entries.length} file(s) for upload.`,
+      `Dropped ${plural(cleaned.length, "item")}. Queued ${plural(result.count, "file")} for upload.`,
       5000,
     );
   } catch (err) {

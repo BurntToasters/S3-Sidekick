@@ -35,6 +35,7 @@ vite.config.ts.timestamp-*
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/.cargo/
+src-tauri/.cargo-safe-update.lock
 
 # Build outputs
 dist/

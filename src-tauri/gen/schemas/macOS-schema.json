@@ -183,10 +183,10 @@
           "markdownDescription": "Persist settings, bookmarks and the saved connection.\n#### This permission set includes:\n\n- `allow-load-settings`\n- `allow-save-settings`\n- `allow-load-bookmarks`\n- `allow-save-bookmarks`\n- `allow-load-bookmarks-backup`\n- `allow-save-bookmarks-backup`\n- `allow-load-connection`\n- `allow-save-connection`\n- `allow-clear-saved-connection`"
         },
         {
-          "description": "Read local folders and write exported text files.\n#### This permission set includes:\n\n- `allow-list-local-files-recursive`\n- `allow-path-exists`\n- `allow-write-text-file`\n- `allow-open-local-path`",
+          "description": "Read local folders and write exported text files.\n#### This permission set includes:\n\n- `allow-list-local-files-recursive`\n- `allow-path-exists`\n- `allow-write-text-file`\n- `allow-open-local-path`\n- `allow-reveal-local-path`",
           "type": "string",
           "const": "local-files",
-          "markdownDescription": "Read local folders and write exported text files.\n#### This permission set includes:\n\n- `allow-list-local-files-recursive`\n- `allow-path-exists`\n- `allow-write-text-file`\n- `allow-open-local-path`"
+          "markdownDescription": "Read local folders and write exported text files.\n#### This permission set includes:\n\n- `allow-list-local-files-recursive`\n- `allow-path-exists`\n- `allow-write-text-file`\n- `allow-open-local-path`\n- `allow-reveal-local-path`"
         },
         {
           "description": "Platform details, updater support and external links.\n#### This permission set includes:\n\n- `allow-get-platform-info`\n- `allow-is-app-translocated`\n- `allow-updater-supported`\n- `allow-updater-support-info`\n- `allow-open-external-url`",
@@ -475,6 +475,12 @@
           "type": "string",
           "const": "allow-rename-prefix",
           "markdownDescription": "Enables the rename_prefix command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the reveal_local_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-reveal-local-path",
+          "markdownDescription": "Enables the reveal_local_path command without any pre-configured scope."
         },
         {
           "description": "Enables the save_bookmarks command without any pre-configured scope.",
@@ -847,6 +853,12 @@
           "type": "string",
           "const": "deny-rename-prefix",
           "markdownDescription": "Denies the rename_prefix command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the reveal_local_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-reveal-local-path",
+          "markdownDescription": "Denies the reveal_local_path command without any pre-configured scope."
         },
         {
           "description": "Denies the save_bookmarks command without any pre-configured scope.",

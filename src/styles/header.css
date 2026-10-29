@@ -18,12 +18,12 @@
   position: absolute;
   left: -9999px;
   top: 0;
-  z-index: 10000;
-  padding: 8px 16px;
+  z-index: var(--z-skip-link);
+  padding: var(--space-2) var(--space-4);
   background: var(--accent);
   color: var(--accent-text);
   border-radius: var(--radius);
-  font-size: 13px;
+  font-size: var(--text-md);
   text-decoration: none;
 }
 
@@ -36,7 +36,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 16px;
+  padding: var(--space-2) var(--space-4);
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
@@ -46,7 +46,7 @@
 }
 
 .header__brand {
-  font-size: 16px;
+  font-size: var(--text-lg);
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -65,7 +65,8 @@
   flex: 1;
   min-width: 0;
   overflow-x: auto;
-  padding: 0 12px;
+  /* Vertical padding keeps chip focus rings (outline + offset) inside the scroll box. */
+  padding: var(--space-1) var(--space-3);
   scrollbar-width: none;
 }
 
@@ -84,13 +85,15 @@ body:not(.titlebar-custom) .bookmark-bar {
 .bookmark-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
+  min-height: 28px;
+  max-width: 200px;
   padding: 2px 10px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
@@ -100,6 +103,14 @@ body:not(.titlebar-custom) .bookmark-bar {
     transform var(--transition-smooth),
     box-shadow var(--transition-smooth);
   flex-shrink: 0;
+}
+
+/* Long names truncate with an ellipsis; the full name stays in the chip title. */
+.bookmark-chip__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bookmark-chip:hover {
@@ -121,7 +132,7 @@ body:not(.titlebar-custom) .bookmark-bar {
 .bookmark-chip--active {
   background: var(--bg-active);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-fg);
   font-weight: 600;
 }
 
@@ -131,15 +142,15 @@ body:not(.titlebar-custom) .bookmark-bar {
 }
 
 .bookmark-chip--new {
-  padding: 2px 8px;
-  font-size: 15px;
+  padding: 2px var(--space-2);
+  font-size: var(--text-lg);
   font-weight: 600;
   color: var(--text-secondary);
   border-style: dashed;
 }
 
 .bookmark-chip--new:hover {
-  color: var(--accent);
+  color: var(--accent-fg);
   border-color: var(--accent);
   border-style: solid;
 }
@@ -147,7 +158,7 @@ body:not(.titlebar-custom) .bookmark-bar {
 .header__actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 body:not(.titlebar-custom) .header__actions {
@@ -159,7 +170,7 @@ body:not(.titlebar-custom) .header__actions {
   align-items: center;
   padding: 3px 10px;
   border-radius: 20px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -184,7 +195,8 @@ body:not(.titlebar-custom) .header__actions {
   border-radius: 50%;
   background: currentColor;
   margin-right: 6px;
-  animation: pulse-dot 2s ease-in-out infinite;
+  /* Three pulses, then the dot rests at full opacity; it never animates forever. */
+  animation: pulse-dot var(--duration-pulse) ease-in-out 3;
 }
 
 @keyframes pulse-dot {
@@ -212,8 +224,9 @@ body:not(.titlebar-custom) .header__actions {
 .field-toggle-btn {
   position: absolute;
   right: 4px;
+  min-width: 24px;
+  min-height: 24px;
   padding: 2px;
-  opacity: 0.5;
   background: transparent;
   border: none;
 }
@@ -224,8 +237,8 @@ body:not(.titlebar-custom) .header__actions {
 
 .field-toggle-btn--text {
   padding: 2px 6px;
-  font-size: 0.75rem;
-  color: var(--text-muted);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
   cursor: pointer;
   border-radius: var(--radius-sm);
   line-height: 1;
@@ -240,4 +253,57 @@ body:not(.titlebar-custom) .header__actions {
   outline: var(--focus-ring-width) solid var(--focus-ring-color);
   outline-offset: 2px;
   opacity: 1;
+}
+
+/* Disconnect: text contrast on the tinted surface and a 24px minimum target. */
+.header__actions #disconnect-btn {
+  min-height: 24px;
+  color: var(--danger-text);
+}
+
+/* Narrow windows: the product name truncates rather than running into chips. */
+@media (max-width: 900px) {
+  .header__brand {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .header__actions {
+    flex-shrink: 0;
+  }
+}
+
+/* Saved-connection row actions (rename, delete): 24px minimum targets. Row layout stays in layout.css. */
+.conn-saved-list .bookmark__rename,
+.conn-saved-list .bookmark__delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.conn-saved-list .bookmark__rename:hover {
+  color: var(--accent-fg);
+  background: var(--bg-hover);
+}
+
+.conn-saved-list .bookmark__delete:hover {
+  color: var(--danger-text);
+  background: var(--bg-hover);
+}
+
+.conn-saved-list .bookmark__rename:focus-visible,
+.conn-saved-list .bookmark__delete:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
 }

@@ -55,7 +55,7 @@ describe("inspector chrome", () => {
           <aside id="inspector-panel" role="complementary" aria-label="Inspector" hidden>
             <span id="inspector-header-title">Inspector</span>
             <button type="button" class="inspector-tab" data-inspector-tab="preview" aria-selected="true">Preview</button>
-            <button type="button" class="inspector-tab" data-inspector-tab="properties" aria-selected="false">Properties</button>
+            <button type="button" class="inspector-tab" data-inspector-tab="details" aria-selected="false">Details</button>
             <button id="inspector-close">Close</button>
             <div id="inspector-pane-preview" hidden>
               <div id="inspector-preview-body"></div>

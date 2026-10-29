@@ -3,15 +3,15 @@
 .palette-overlay {
   position: fixed;
   inset: 0;
-  z-index: 400;
+  z-index: var(--z-palette);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: min(20vh, 140px);
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--scrim);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
-  animation: palette-overlay-in 0.12s ease;
+  animation: palette-overlay-in var(--duration-fast) ease;
 }
 .palette-overlay[hidden] {
   display: none;
@@ -33,16 +33,16 @@
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
+  box-shadow: var(--shadow-3), var(--glass-inset-highlight);
   overflow: hidden;
-  animation: modal-in 0.15s ease;
+  animation: modal-in var(--duration-base) ease;
 }
 
 .palette__input-wrap {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 16px;
+  padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--glass-border);
 }
 
@@ -55,12 +55,19 @@
 
 .palette__input {
   flex: 1;
+  min-height: 24px;
   border: none;
   background: transparent;
   color: var(--text);
-  font-size: 15px;
+  font-size: var(--text-lg);
   font-family: inherit;
-  outline: none;
+  border-radius: var(--radius-sm);
+}
+
+/* The input keeps the shared focus ring, so keyboard users see where typing lands. */
+.palette__input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .palette__input::placeholder {
@@ -70,19 +77,24 @@
 .palette__results {
   max-height: 320px;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: var(--space-1) 0;
 }
 
 .palette__item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 16px;
+  padding: var(--space-2) var(--space-4);
   cursor: pointer;
   transition: background var(--transition-smooth);
 }
 
-.palette__item:hover,
+/* Hover moves the active option (see initPalette), so only one row is ever
+   highlighted. */
+.palette__item {
+  min-height: 32px;
+}
+
 .palette__item--active {
   background: var(--bg-hover);
 }
@@ -95,27 +107,27 @@
 
 .palette__item-label {
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text);
 }
 
 .palette__item-shortcut {
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-family: var(--mono);
   color: var(--text-secondary);
 }
 
 .palette__hint {
-  padding: 6px 16px;
-  font-size: 11px;
+  padding: 6px var(--space-4);
+  font-size: var(--text-xs);
   color: var(--text-secondary);
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 4px;
+  border-top: 1px solid var(--border);
+  margin-bottom: var(--space-1);
 }
 
 .palette__empty {
-  padding: 20px 16px;
+  padding: var(--space-5) var(--space-4);
   text-align: center;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-md);
 }

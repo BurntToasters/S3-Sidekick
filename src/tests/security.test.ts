@@ -60,3 +60,40 @@ describe("isCancellationError", () => {
     expect(isCredentialRemovedError({ code: "EKEY" })).toBe(false);
   });
 });
+
+describe("securityErrorMessage", () => {
+  it("explains a wrong password and what to do next", async () => {
+    const { securityErrorMessage } = await loadSecurityModule();
+    const text = securityErrorMessage("Invalid password");
+    expect(text).toMatch(/password is incorrect/i);
+    expect(text).toMatch(/caps lock/i);
+  });
+
+  it("names the keychain and the fix when the system denies access", async () => {
+    const { securityErrorMessage } = await loadSecurityModule();
+    expect(
+      securityErrorMessage("Keychain error: user denied access to item"),
+    ).toMatch(/keychain denied access.*allow S3 Sidekick/i);
+  });
+
+  it("tells the user to unlock first when storage is locked", async () => {
+    const { securityErrorMessage } = await loadSecurityModule();
+    expect(
+      securityErrorMessage(
+        "Encrypted storage is locked; unlock before connecting.",
+      ),
+    ).toMatch(/locked.*unlock/i);
+  });
+
+  it("falls back to the friendly transport message for network failures", async () => {
+    const { securityErrorMessage } = await loadSecurityModule();
+    expect(securityErrorMessage("connection timeout")).toMatch(/timed out/i);
+  });
+
+  it("keeps unrecognized backend detail instead of dropping it", async () => {
+    const { securityErrorMessage } = await loadSecurityModule();
+    expect(securityErrorMessage("disk quota exceeded")).toContain(
+      "disk quota exceeded",
+    );
+  });
+});

@@ -182,7 +182,7 @@ pub(crate) async fn delete_prefix(
     let client = require_client(&state, &connection_id, None)?;
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
-    validate_mutating_prefix(&prefix, "Prefix")?;
+    validate_mutating_folder_prefix(&prefix, "Prefix")?;
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
         vec![crate::S3MutationScope::prefix(
             &connection_id,

@@ -19,6 +19,7 @@ describe("dialogs", () => {
             <button id="dialog-input-reveal" hidden></button>
           </div>
           <p id="dialog-validation-error" role="alert" hidden></p>
+          <div id="dialog-choices" class="dialog-choices" hidden></div>
           <div class="dialog-box__actions">
             <button id="dialog-cancel"></button>
             <button id="dialog-ok"></button>
@@ -236,6 +237,133 @@ describe("dialogs", () => {
     expect(title.textContent).toBe("Follow-up");
     ok.click();
     await expect(followUp).resolves.toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("showChoiceDialog renders choices in order and resolves the clicked value", async () => {
+    const dialogs = await import("../dialogs.ts");
+    const promise = dialogs.showChoiceDialog(
+      "Reset",
+      "Keep bookmarks, or factory reset?",
+      [
+        { value: "keep", label: "Keep bookmarks" },
+        { value: "factory", label: "Factory reset", danger: true },
+        { value: "cancel", label: "Cancel" },
+      ],
+      { cancelValue: "cancel" },
+    );
+    const choices = document.getElementById("dialog-choices") as HTMLElement;
+    const buttons = Array.from(
+      choices.querySelectorAll<HTMLButtonElement>("button"),
+    );
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "Keep bookmarks",
+      "Factory reset",
+      "Cancel",
+    ]);
+    expect(buttons[1].classList.contains("btn--danger")).toBe(true);
+    expect(buttons[0].classList.contains("btn--danger")).toBe(false);
+    expect(choices.hidden).toBe(false);
+    expect(
+      (document.getElementById("dialog-ok") as HTMLButtonElement).style.display,
+    ).toBe("none");
+
+    buttons[0].click();
+    await expect(promise).resolves.toBe("keep");
+    expect(choices.hidden).toBe(true);
+    expect(choices.childElementCount).toBe(0);
+    expect(dialogs.isDialogActive()).toBe(false);
+  });
+
+  it("showChoiceDialog resolves cancelValue on Escape and never a danger choice", async () => {
+    const dialogs = await import("../dialogs.ts");
+    const promise = dialogs.showChoiceDialog(
+      "Reset",
+      "Reset everything?",
+      [
+        { value: "factory", label: "Factory reset", danger: true },
+        { value: "cancel", label: "Cancel" },
+      ],
+      { cancelValue: "cancel" },
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await expect(promise).resolves.toBe("cancel");
+  });
+
+  it("showChoiceDialog focuses initialFocus, defaulting to the cancel choice", async () => {
+    const dialogs = await import("../dialogs.ts");
+    const choices = [
+      { value: "keep", label: "Keep bookmarks" },
+      { value: "factory", label: "Factory reset", danger: true },
+      { value: "cancel", label: "Cancel" },
+    ] as const;
+
+    const focusedPromise = dialogs.showChoiceDialog(
+      "Reset",
+      "Pick",
+      [...choices],
+      {
+        cancelValue: "cancel",
+        initialFocus: "keep",
+      },
+    );
+    expect(document.activeElement?.textContent).toBe("Keep bookmarks");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await expect(focusedPromise).resolves.toBe("cancel");
+
+    const defaultPromise = dialogs.showChoiceDialog(
+      "Reset",
+      "Pick",
+      [...choices],
+      {
+        cancelValue: "cancel",
+      },
+    );
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await expect(defaultPromise).resolves.toBe("cancel");
+  });
+
+  it("showChoiceDialog queues behind an open confirmation and restores confirm buttons", async () => {
+    vi.useFakeTimers();
+    const dialogs = await import("../dialogs.ts");
+    const first = dialogs.showConfirm("First", "First?");
+    const choice = dialogs.showChoiceDialog(
+      "Second",
+      "Second?",
+      [
+        { value: "a", label: "A" },
+        { value: "b", label: "B" },
+      ],
+      { cancelValue: "b" },
+    );
+    expect(
+      (document.getElementById("dialog-title") as HTMLElement).textContent,
+    ).toBe("First");
+    (document.getElementById("dialog-ok") as HTMLButtonElement).click();
+    await expect(first).resolves.toBe(true);
+    vi.runAllTimers();
+    await tick();
+    expect(
+      (document.getElementById("dialog-title") as HTMLElement).textContent,
+    ).toBe("Second");
+    document
+      .querySelector<HTMLButtonElement>("#dialog-choices button")!
+      .click();
+    await expect(choice).resolves.toBe("a");
+
+    const confirm = dialogs.showConfirm("Third", "Third?");
+    expect(
+      (document.getElementById("dialog-ok") as HTMLButtonElement).style.display,
+    ).toBe("");
+    (document.getElementById("dialog-cancel") as HTMLButtonElement).click();
+    await expect(confirm).resolves.toBe(false);
     vi.useRealTimers();
   });
 });

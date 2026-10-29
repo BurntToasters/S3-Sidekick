@@ -1,6 +1,6 @@
 {
   "name": "s3-sidekick",
-  "version": "0.11.3",
+  "version": "0.12.0-beta.1",
   "private": true,
   "packageManager": "npm@12.0.2",
   "description": "A Cross-Platform Desktop client for S3-compatible Object Storage.",
@@ -89,7 +89,7 @@
     "rust:targets:linux": "rustup target add --toolchain 1.98.0 x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu",
     "rust:target:linux:x64": "rustup target add --toolchain 1.98.0 x86_64-unknown-linux-gnu",
     "rust:target:linux:arm64": "rustup target add --toolchain 1.98.0 aarch64-unknown-linux-gnu",
-    "release:prepare": "npm run workspace:bootstrap && npm run test:all -- --require-clean-proof --skip-e2e && npm run release:supply-chain && npm run dist:clean-release-artifacts && npm run release:session:start",
+    "release:prepare": "npm run release:preflight && npm run workspace:bootstrap && npm run test:all && npm run release:supply-chain && npm run dist:clean-release-artifacts && npm run release:session:start",
     "release:draft": "dotenv -e .env -- node scripts/ensure-draft-release.cjs",
     "release:wait-draft": "dotenv -e .env -- node scripts/ensure-draft-release.cjs --wait",
     "release:preflight": "node scripts/release-preflight.js",

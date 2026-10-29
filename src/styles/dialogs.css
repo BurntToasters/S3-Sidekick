@@ -3,14 +3,14 @@
 .dialog-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   display: none;
   align-items: center;
   justify-content: center;
-  padding: 16px;
-  z-index: 320;
+  padding: var(--space-4);
+  z-index: var(--z-dialog);
 }
 
 body.modal-open {
@@ -41,19 +41,20 @@ body.modal-open .dialog-overlay.active {
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
-  padding: 24px;
+  padding: var(--space-6);
   width: min(360px, 92vw);
   max-width: calc(100vw - 32px);
-  max-height: calc(100vh - var(--titlebar-height, 0px) - 32px);
+  max-height: calc(100vh - var(--titlebar-height) - 32px);
   overflow: hidden;
-  box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
-  animation: modal-in 0.15s ease;
+  box-shadow: var(--shadow-3), var(--glass-inset-highlight);
+  animation: modal-in var(--duration-base) ease;
 }
 
+/* Same size as .modal__header h2, so dialog and modal headings match. */
 .dialog-box__title {
-  font-size: 16px;
+  font-size: var(--text-xl);
   font-weight: 600;
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
   overflow-wrap: anywhere;
 }
 
@@ -62,17 +63,17 @@ body.modal-open .dialog-overlay.active {
   max-height: min(42vh, 300px);
   overflow-x: hidden;
   overflow-y: auto;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
-  margin-bottom: 20px;
-  line-height: 1.5;
+  margin-bottom: var(--space-5);
+  line-height: var(--line-height-relaxed);
   white-space: pre-line;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
 .dialog-checkbox {
-  margin-bottom: 20px;
+  margin-bottom: var(--space-5);
   flex-shrink: 0;
   color: var(--text-secondary);
 }
@@ -83,7 +84,7 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-input-wrapper {
   position: relative;
-  margin-bottom: 20px;
+  margin-bottom: var(--space-5);
   flex-shrink: 0;
 }
 
@@ -113,15 +114,19 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-input-reveal {
   position: absolute;
-  right: 10px;
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
   background: none;
   border: none;
-  padding: 2px 4px;
+  /* 24px minimum target; text-secondary replaces the muted tone, which was
+     too faint on the dialog surface. */
+  min-width: 24px;
+  min-height: 24px;
+  padding: 2px 6px;
   cursor: pointer;
-  font-size: 0.75rem;
-  color: var(--text-muted);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
   border-radius: var(--radius-sm);
   line-height: 1;
 }
@@ -131,17 +136,43 @@ body.modal-open .dialog-overlay.active {
   background: var(--glass-bg);
 }
 
+.dialog-input-reveal:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
+}
+
+.dialog-input-reveal[aria-pressed="true"] {
+  color: var(--text-primary);
+  background: var(--glass-bg);
+}
+
+.dialog-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.dialog-choices[hidden] {
+  display: none;
+}
+
+.dialog-choices .btn {
+  width: 100%;
+  justify-content: center;
+}
+
 .dialog-input-wrapper--icon .dialog-box__input {
-  padding-right: 48px;
+  padding-right: var(--space-9);
 }
 
 .biometric-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  z-index: 259;
+  z-index: var(--z-biometric);
 }
 
 .biometric-overlay[hidden] {
@@ -151,7 +182,7 @@ body.modal-open .dialog-overlay.active {
 .dialog-box__actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-2);
   flex-shrink: 0;
 }
 
@@ -160,12 +191,16 @@ body.modal-open .dialog-overlay.active {
 }
 
 .dialog-validation-error {
-  margin: -12px 0 20px;
-  color: var(--danger);
-  font-size: 12px;
+  margin: -12px 0 var(--space-5);
+  color: var(--danger-text);
+  font-size: var(--text-sm);
   line-height: 1.4;
 }
 
 .dialog-box__input[aria-invalid="true"] {
   border-color: var(--danger);
+}
+
+.dialog-extra-action {
+  margin-right: auto;
 }

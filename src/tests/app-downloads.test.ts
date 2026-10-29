@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockSave = vi.fn<(...args: unknown[]) => Promise<string | null>>();
 const mockOpen = vi.fn<(...args: unknown[]) => Promise<string | null>>();
 const mockEnqueueDownloads = vi.fn();
+const ENQUEUE_ACCEPTED = { accepted: true, count: 1 };
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 
@@ -29,6 +30,7 @@ describe("download chooser account binding", () => {
     mockSave.mockReset();
     mockOpen.mockReset();
     mockEnqueueDownloads.mockReset();
+    mockEnqueueDownloads.mockImplementation(() => ENQUEUE_ACCEPTED);
     mockInvoke.mockReset();
     mockShowConfirm.mockReset();
     mockShowConfirm.mockResolvedValue(true);
@@ -94,6 +96,7 @@ describe("download disk preflight", () => {
     mockSave.mockReset();
     mockOpen.mockReset();
     mockEnqueueDownloads.mockReset();
+    mockEnqueueDownloads.mockImplementation(() => ENQUEUE_ACCEPTED);
     mockInvoke.mockReset();
     mockShowConfirm.mockReset();
     mockShowConfirm.mockResolvedValue(true);
@@ -295,6 +298,7 @@ describe("last download folder", () => {
     mockSave.mockReset();
     mockOpen.mockReset();
     mockEnqueueDownloads.mockReset();
+    mockEnqueueDownloads.mockImplementation(() => ENQUEUE_ACCEPTED);
     mockInvoke.mockReset();
     mockShowConfirm.mockReset();
     localStorage.clear();

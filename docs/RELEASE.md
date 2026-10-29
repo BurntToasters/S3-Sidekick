@@ -70,10 +70,13 @@ npm run release:mac
 npm run release:linux
 ```
 
-Each command checks branch/upstream state, bootstraps dependencies, runs the
-quality gate, creates or waits for the draft, builds current artifacts, signs
-updater payloads, creates checksums and GPG signatures, uploads to the draft,
-mirrors stable artifacts when configured, and cleans checkout.
+Each command checks branch/upstream state, requires the full `CI` workflow for
+the exact pushed commit to be completed successfully, bootstraps dependencies,
+runs the quality gate, creates or waits for the draft, builds current
+artifacts, signs updater payloads, creates checksums and GPG signatures,
+uploads to the draft, mirrors stable artifacts when configured, and cleans
+checkout. The gate includes the Ubuntu Playwright, MinIO, and full-stack jobs;
+a local-only run is not sufficient evidence for a release.
 
 Linux release contains x64 AppImage, DEB, RPM, and Flatpak. ARM64 Linux build
 commands remain available for local packaging, but public release matrix is

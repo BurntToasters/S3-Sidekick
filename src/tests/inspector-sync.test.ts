@@ -19,7 +19,7 @@ function inspectorFixture(): void {
     <div id="inspector-preview-body"></div>
     <div id="inspector-header-title"></div>
     <button type="button" data-inspector-tab="preview">Preview</button>
-    <button type="button" data-inspector-tab="properties">Properties</button>
+    <button type="button" data-inspector-tab="details">Details</button>
     <div id="preview-overlay"></div>
     <div id="preview-body"></div>
   `;
@@ -72,7 +72,9 @@ describe("syncInspectorFromSelection", () => {
     inspector.setInspectorOpen(true);
     inspector.focusInspectorPreviewPane();
 
-    await inspector.syncInspectorFromSelection(state.selectedKeys);
+    await inspector.syncInspectorFromSelection(
+      (await import("../app-selection.ts")).getSelectionEntries(),
+    );
 
     const body = document.getElementById("inspector-preview-body");
     expect(body?.textContent).toContain('"ok"');
@@ -102,28 +104,32 @@ describe("syncInspectorFromSelection", () => {
     inspector.setInspectorOpen(true);
     inspector.focusInspectorPreviewPane();
 
-    await inspector.syncInspectorFromSelection(state.selectedKeys, {
-      reason: "selection",
-    });
+    await inspector.syncInspectorFromSelection(
+      (await import("../app-selection.ts")).getSelectionEntries(),
+      {
+        reason: "selection",
+      },
+    );
 
-    // Preview is always offered; binary content renders unavailable copy.
-    expect(inspector.getInspectorTab()).toBe("preview");
+    // A known-binary extension never reaches the preview fetch: the selection
+    // opens Properties and the Preview tab is marked unavailable.
+    expect(inspector.getInspectorTab()).toBe("details");
     expect(
       (document.getElementById("inspector-empty") as HTMLElement).hidden,
     ).toBe(true);
     expect(
-      (document.getElementById("inspector-pane-preview") as HTMLElement).hidden,
+      (document.getElementById("inspector-pane-info") as HTMLElement).hidden,
     ).toBe(false);
-    expect(mockInvoke).toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "preview_object",
+      expect.anything(),
+    );
     const previewTab = document.querySelector(
       '[data-inspector-tab="preview"]',
-    ) as HTMLElement;
-    expect(previewTab.classList.contains("inspector-tab--unavailable")).toBe(
-      false,
-    );
-    expect(
-      document.getElementById("inspector-preview-body")?.textContent,
-    ).toMatch(/not available/i);
+    ) as HTMLButtonElement;
+    // The unavailable tab is truly inert now: disabled, not just faded.
+    expect(previewTab.disabled).toBe(true);
+    expect(previewTab.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("keeps Preview tab with unavailable copy when opened explicitly", async () => {
@@ -145,11 +151,14 @@ describe("syncInspectorFromSelection", () => {
 
     const inspector = await import("../inspector.ts");
     inspector.setInspectorOpen(true);
-    await inspector.syncInspectorFromSelection(state.selectedKeys, {
-      reason: "selection",
-    });
-    // Selection already lands on Preview with unavailable copy.
-    expect(inspector.getInspectorTab()).toBe("preview");
+    await inspector.syncInspectorFromSelection(
+      (await import("../app-selection.ts")).getSelectionEntries(),
+      {
+        reason: "selection",
+      },
+    );
+    // Selection lands on Properties because Preview does not apply.
+    expect(inspector.getInspectorTab()).toBe("details");
 
     inspector.setInspectorTab("preview");
     // setInspectorTab kicks off async sync — wait for the preview to settle.
@@ -195,14 +204,18 @@ describe("syncInspectorFromSelection", () => {
     const inspector = await import("../inspector.ts");
     inspector.setInspectorOpen(true);
     inspector.focusInspectorPreviewPane();
-    await inspector.syncInspectorFromSelection(state.selectedKeys);
+    await inspector.syncInspectorFromSelection(
+      (await import("../app-selection.ts")).getSelectionEntries(),
+    );
 
     expect(
       document.getElementById("inspector-preview-body")?.childElementCount,
     ).toBeGreaterThan(0);
 
     state.selectedKeys.clear();
-    await inspector.syncInspectorFromSelection(state.selectedKeys);
+    await inspector.syncInspectorFromSelection(
+      (await import("../app-selection.ts")).getSelectionEntries(),
+    );
 
     expect(
       document.getElementById("inspector-preview-body")?.childElementCount,
@@ -224,7 +237,7 @@ describe("syncInspectorFromSelection", () => {
 
     const inspector = await import("../inspector.ts");
     inspector.setInspectorOpen(true);
-    inspector.focusInspectorPropertiesPane();
+    inspector.focusInspectorInfoPane("details");
 
     await inspector.syncInspectorFromSelection(undefined, {
       reason: "selection",
@@ -258,12 +271,12 @@ describe("syncInspectorFromSelection", () => {
       const inspector = await import("../inspector.ts");
       expect(inspector.isInspectorOpen()).toBe(false);
 
-      inspector.ensureInspectorOpenForPane("properties");
+      inspector.ensureInspectorOpenForPane("details");
       expect(inspector.isInspectorOpen()).toBe(true);
-      expect(inspector.getInspectorTab()).toBe("properties");
+      expect(inspector.getInspectorTab()).toBe("details");
 
       await vi.advanceTimersByTimeAsync(400);
-      expect(inspector.getInspectorTab()).toBe("properties");
+      expect(inspector.getInspectorTab()).toBe("details");
       expect(mockInvoke).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -292,13 +305,13 @@ describe("syncInspectorFromSelection", () => {
       const inspector = await import("../inspector.ts");
       inspector.setInspectorOpen(true, { syncSelection: false });
       const syncPromise = inspector.syncInspectorFromSelection(
-        state.selectedKeys,
+        (await import("../app-selection.ts")).getSelectionEntries(),
       );
-      inspector.ensureInspectorOpenForPane("properties");
+      inspector.ensureInspectorOpenForPane("details");
       await vi.advanceTimersByTimeAsync(400);
       await syncPromise;
 
-      expect(inspector.getInspectorTab()).toBe("properties");
+      expect(inspector.getInspectorTab()).toBe("details");
       expect(mockInvoke).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();

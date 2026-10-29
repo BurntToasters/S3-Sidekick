@@ -20,7 +20,7 @@ function npmCommand() {
 
 export function parseReleaseArgs(argv) {
   const flags = argv.filter((arg) => arg.startsWith("-"));
-  const knownFlags = new Set(["--skip-e2e", "--skip-check"]);
+  const knownFlags = new Set(["--skip-check"]);
   const unknown = flags.filter((flag) => !knownFlags.has(flag));
   if (unknown.length > 0) {
     throw new Error(`Unknown release flag: ${unknown.join(", ")}`);

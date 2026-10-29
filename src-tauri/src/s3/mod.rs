@@ -24,8 +24,8 @@ use zeroize::Zeroize;
 use crate::{
     load_transfer_checkpoint_json, lock_s3_state, remove_transfer_checkpoint,
     save_transfer_checkpoint_json, validate_destination_path,
-    validate_destination_path_allow_overwrite, validate_existing_path,
-    validate_transfer_recovery_session, AppState, StorageProviderKind,
+    validate_destination_path_allow_overwrite, validate_transfer_recovery_session,
+    validate_upload_source_path, AppState, StorageProviderKind,
 };
 
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;

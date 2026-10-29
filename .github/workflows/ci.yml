@@ -3,7 +3,7 @@ name: CI
 on:
   push:
   pull_request:
-    branches: [main, beta, next-0.11.0]
+    branches: [main, beta, next-0.12.0]
   schedule:
     # Weekly re-audit catches advisories published against unchanged pins.
     - cron: "17 6 * * 1"
@@ -416,3 +416,118 @@ jobs:
             rust-coverage.txt
             rust-coverage.lcov
           retention-days: 14
+
+  windows-arm64-smoke:
+    name: Windows arm64 build (unsigned smoke)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install pinned npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          cache-targets: false
+          prefix-key: v2-windows-arm64-smoke
+          key: ${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build unsigned Windows arm64 artifacts
+        run: npm run tauri -- build --target aarch64-pc-windows-msvc --no-bundle -- --locked
+
+  macos-universal-smoke:
+    name: macOS universal build (unsigned smoke)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install pinned npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          cache-targets: false
+          prefix-key: v2-macos-universal-smoke
+          key: ${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build unsigned macOS universal artifacts
+        run: npm run tauri -- build --target universal-apple-darwin --no-bundle -- --locked
+
+  flatpak-smoke:
+    name: Flatpak build (unsigned smoke)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install pinned npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install Flatpak toolchain and runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y --noninteractive flathub \
+            org.gnome.Platform//49 \
+            org.gnome.Sdk//49 \
+            org.freedesktop.Sdk.Extension.node24//25.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build unsigned Flatpak bundle
+        run: npm run flatpak:bundle

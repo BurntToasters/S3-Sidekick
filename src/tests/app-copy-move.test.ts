@@ -3,6 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockEnqueueCopyMoveEntries = vi.fn();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+const mockClearSelection = vi.fn();
+
+/** Mirrors the transfers.ts EnqueueResult for an accepted batch. */
+function acceptedEnqueue(entries: unknown[]): {
+  accepted: boolean;
+  count: number;
+} {
+  return { accepted: true, count: entries.length };
+}
 
 vi.mock("../transfers.ts", () => ({
   enqueueCopyMoveEntries: (...args: unknown[]) =>
@@ -10,7 +19,7 @@ vi.mock("../transfers.ts", () => ({
 }));
 
 vi.mock("../browser.ts", () => ({
-  clearSelection: vi.fn(),
+  clearSelection: (...args: unknown[]) => mockClearSelection(...args),
 }));
 
 vi.mock("../dialogs.ts", () => ({
@@ -47,12 +56,19 @@ function renderCopyMoveFixture(): void {
     </div>
     <span id="status"></span>
   `;
+  const overlay = document.getElementById("copy-move-overlay");
+  if (overlay) {
+    overlay.insertAdjacentHTML(
+      "beforeend",
+      '<p id="copy-move-error" role="alert" hidden></p><p id="copy-move-move-reason" hidden></p>',
+    );
+  }
 }
 
 describe("copy/move chooser account binding", () => {
   beforeEach(async () => {
     vi.resetModules();
-    mockEnqueueCopyMoveEntries.mockReset();
+    mockEnqueueCopyMoveEntries.mockReset().mockImplementation(acceptedEnqueue);
     mockShowConfirm.mockReset();
     mockInvoke.mockReset();
     mockInvoke.mockImplementation(async (cmd) => {
@@ -81,6 +97,7 @@ describe("copy/move chooser account binding", () => {
     state.selectedKeys.clear();
     state.selectedKeys.add("docs/file.txt");
     state.currentSettings.conflictPolicy = "replace";
+    state.conditionalDeleteSupported = true;
   });
 
   it("queues against the snapshot identity captured when the dialog opened", async () => {
@@ -156,7 +173,7 @@ describe("copy/move chooser account binding", () => {
 describe("copy/move validation", () => {
   beforeEach(async () => {
     vi.resetModules();
-    mockEnqueueCopyMoveEntries.mockReset();
+    mockEnqueueCopyMoveEntries.mockReset().mockImplementation(acceptedEnqueue);
     mockShowConfirm.mockReset();
     mockInvoke.mockReset();
     mockInvoke.mockImplementation(async (cmd) => {
@@ -368,7 +385,7 @@ describe("copy/move validation", () => {
 describe("copy/move conflict routing", () => {
   beforeEach(async () => {
     vi.resetModules();
-    mockEnqueueCopyMoveEntries.mockReset();
+    mockEnqueueCopyMoveEntries.mockReset().mockImplementation(acceptedEnqueue);
     mockShowConfirm.mockReset();
     mockInvoke.mockReset();
     mockInvoke.mockImplementation(async (cmd) => {
@@ -669,7 +686,7 @@ describe("copy/move conflict routing", () => {
 describe("copy/move browser and recents", () => {
   beforeEach(async () => {
     vi.resetModules();
-    mockEnqueueCopyMoveEntries.mockReset();
+    mockEnqueueCopyMoveEntries.mockReset().mockImplementation(acceptedEnqueue);
     mockShowConfirm.mockReset();
     mockInvoke.mockReset();
     mockInvoke.mockImplementation(async (cmd) => {
@@ -821,5 +838,187 @@ describe("copy/move browser and recents", () => {
           .textContent,
       ).toContain("Failed to load folders");
     });
+  });
+
+  it("does not prefill the source location as the destination", async () => {
+    const { openCopyMoveDialog } = await import("../app-copy-move.ts");
+    openCopyMoveDialog();
+    expect(
+      (document.getElementById("copy-move-path") as HTMLInputElement).value,
+    ).not.toBe("docs/file.txt");
+  });
+
+  it("blocks a destination equal to the source inline without queuing", async () => {
+    const { openCopyMoveDialog } = await import("../app-copy-move.ts");
+    openCopyMoveDialog();
+    (document.getElementById("copy-move-path") as HTMLInputElement).value =
+      "docs/file.txt";
+    (
+      document.getElementById("copy-move-copy-btn") as HTMLButtonElement
+    ).click();
+
+    const error = document.getElementById("copy-move-error") as HTMLElement;
+    expect(error.hidden).toBe(false);
+    expect(error.textContent).toContain("source and destination");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockEnqueueCopyMoveEntries).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "copy_object_to",
+      expect.anything(),
+    );
+  });
+
+  it("disables Move with an explanation when conditional delete is unsupported", async () => {
+    const { state } = await import("../state.ts");
+    state.conditionalDeleteSupported = false;
+    const { openCopyMoveDialog } = await import("../app-copy-move.ts");
+    openCopyMoveDialog();
+
+    const moveBtn = document.getElementById(
+      "copy-move-move-btn",
+    ) as HTMLButtonElement;
+    const reason = document.getElementById(
+      "copy-move-move-reason",
+    ) as HTMLElement;
+    expect(moveBtn.disabled).toBe(true);
+    expect(reason.hidden).toBe(false);
+    expect(reason.textContent).toBe(
+      "This provider can't safely delete the source. Use Copy, then Delete.",
+    );
+    expect(
+      (document.getElementById("copy-move-copy-btn") as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+
+    (document.getElementById("copy-move-path") as HTMLInputElement).value =
+      "archive/file.txt";
+    moveBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockEnqueueCopyMoveEntries).not.toHaveBeenCalled();
+  });
+
+  it("closeCopyMoveDialog cancels an in-flight destination check", async () => {
+    let releaseExists: ((exists: boolean) => void) | undefined;
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") {
+        return new Promise<boolean>((resolve) => {
+          releaseExists = resolve;
+        });
+      }
+      return undefined;
+    });
+    const { openCopyMoveDialog, closeCopyMoveDialog } =
+      await import("../app-copy-move.ts");
+    openCopyMoveDialog();
+    (document.getElementById("copy-move-path") as HTMLInputElement).value =
+      "archive/file.txt";
+    (
+      document.getElementById("copy-move-copy-btn") as HTMLButtonElement
+    ).click();
+    await vi.waitFor(() => {
+      expect(releaseExists).toBeDefined();
+    });
+
+    closeCopyMoveDialog();
+    expect(
+      document
+        .getElementById("copy-move-overlay")
+        ?.classList.contains("active"),
+    ).toBe(false);
+    releaseExists?.(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockEnqueueCopyMoveEntries).not.toHaveBeenCalled();
+  });
+});
+
+describe("copy/move consumes the queue's enqueue result", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    mockEnqueueCopyMoveEntries.mockReset();
+    mockClearSelection.mockReset();
+    mockShowConfirm.mockReset();
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "object_exists") return false;
+      return undefined;
+    });
+    localStorage.clear();
+    renderCopyMoveFixture();
+
+    const { state } = await import("../state.ts");
+    state.connected = true;
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+    state.endpoint = "https://s3.example.com";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.buckets = [{ name: "bucket-a", creation_date: "" }];
+    state.selectedKeys.clear();
+    state.selectedKeys.add("docs/file.txt");
+    state.currentSettings.conflictPolicy = "replace";
+    state.conditionalDeleteSupported = true;
+  });
+
+  it("keeps the dialog and selection open, shows the reason, and never reports Queued when refused", async () => {
+    const reason =
+      "Pending transfers from the last session are not resolved yet. Resume or discard them before starting new transfers.";
+    mockEnqueueCopyMoveEntries.mockImplementation(() => ({
+      accepted: false,
+      count: 0,
+      reason,
+    }));
+    const { openCopyMoveDialog } = await import("../app-copy-move.ts");
+    openCopyMoveDialog();
+    (document.getElementById("copy-move-path") as HTMLInputElement).value =
+      "archive/file.txt";
+    (
+      document.getElementById("copy-move-copy-btn") as HTMLButtonElement
+    ).click();
+
+    await vi.waitFor(() => {
+      expect(document.getElementById("copy-move-error")?.textContent).toBe(
+        reason,
+      );
+    });
+    expect(
+      document
+        .getElementById("copy-move-overlay")
+        ?.classList.contains("active"),
+    ).toBe(true);
+    expect(mockClearSelection).not.toHaveBeenCalled();
+    expect(
+      (document.getElementById("copy-move-copy-btn") as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+    expect(document.getElementById("status")?.textContent ?? "").not.toContain(
+      "Queued",
+    );
+  });
+
+  it("reports an accepted batch by item count without a plural placeholder", async () => {
+    mockEnqueueCopyMoveEntries.mockImplementation((entries: unknown[]) => ({
+      accepted: true,
+      count: entries.length,
+    }));
+    const { openCopyMoveDialog } = await import("../app-copy-move.ts");
+    openCopyMoveDialog();
+    (document.getElementById("copy-move-path") as HTMLInputElement).value =
+      "archive/file.txt";
+    (
+      document.getElementById("copy-move-copy-btn") as HTMLButtonElement
+    ).click();
+
+    await vi.waitFor(() => {
+      expect(document.getElementById("status")?.textContent).toContain(
+        "Queued 1 item",
+      );
+    });
+    expect(document.getElementById("status")?.textContent).not.toContain("(s)");
+    expect(
+      document
+        .getElementById("copy-move-overlay")
+        ?.classList.contains("active"),
+    ).toBe(false);
+    expect(mockClearSelection).toHaveBeenCalled();
   });
 });

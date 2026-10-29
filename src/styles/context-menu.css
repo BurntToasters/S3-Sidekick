@@ -2,7 +2,7 @@
 
 .context-menu {
   position: fixed;
-  z-index: 300;
+  z-index: var(--z-context-menu);
   min-width: 180px;
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
@@ -10,22 +10,71 @@
   border: 1px solid var(--glass-border);
   border-radius: var(--radius);
   box-shadow: var(--glass-shadow-elevated);
-  padding: 4px 0;
+  padding: var(--space-1) 0;
   animation: modal-in 0.1s ease;
 }
 
+/* 28px rows keep every item above the 24px WCAG 2.5.8 floor. */
 .context-menu__item {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  box-sizing: border-box;
   width: 100%;
-  padding: 6px 14px;
+  min-height: 28px;
+  padding: 0 var(--space-3);
   border: none;
   background: transparent;
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-family: inherit;
   text-align: left;
   cursor: pointer;
   white-space: nowrap;
+}
+
+.context-menu__icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin-right: var(--space-2);
+  color: var(--text-secondary);
+}
+
+.context-menu__icon .lucide-icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* Destructive actions read as dangerous before and after the hover. */
+.context-menu__item--danger {
+  color: var(--danger-text);
+}
+
+.context-menu__item--danger:hover:not(:disabled) {
+  background: var(--danger-hover);
+  color: var(--accent-text);
+}
+
+.context-menu__item--danger .context-menu__icon {
+  color: inherit;
+}
+
+.context-menu__shortcut {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.context-menu__reason {
+  padding: 0 var(--space-3) var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.35;
+  white-space: normal;
+  max-width: 260px;
 }
 
 .context-menu__item:hover {
@@ -48,6 +97,54 @@
 
 .context-menu__sep {
   height: 1px;
-  margin: 4px 8px;
+  margin: var(--space-1) var(--space-2);
   background: var(--border);
+}
+
+/* Share link… dialog: reuses the shared dialog-overlay/dialog-box surfaces
+   with a small expiry field. */
+.share-link-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 400px;
+}
+
+.share-link-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.share-link-field .field {
+  width: 100%;
+}
+
+@media (forced-colors: active) {
+  .context-menu__item {
+    color: CanvasText;
+  }
+
+  .context-menu__item--danger {
+    color: CanvasText;
+  }
+
+  .context-menu__item:disabled {
+    color: GrayText;
+    opacity: 1;
+  }
+
+  /* Forced colors drop the hover fill, so focus needs an inverted fill. */
+  .context-menu__item:focus-visible {
+    outline: 2px solid Highlight;
+    background: Highlight;
+    color: HighlightText;
+  }
+
+  .context-menu__shortcut,
+  .context-menu__reason {
+    color: CanvasText;
+  }
 }

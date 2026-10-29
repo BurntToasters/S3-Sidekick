@@ -1,33 +1,40 @@
 /* Reduced-motion and backdrop-filter fallbacks */
 
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *,
+  *::before,
+  *::after {
     transition-duration: 0s !important;
     animation-duration: 0s !important;
     animation-iteration-count: 1 !important;
   }
+
+  /* With motion off, the indeterminate bar would freeze at 35% and read as
+     real progress. A full-width striped track says "working" without a value. */
+  .transfer-progress-wrap--indeterminate .transfer-progress__bar {
+    width: 100% !important;
+    opacity: 0.6;
+    background-image: repeating-linear-gradient(
+      45deg,
+      var(--accent) 0 4px,
+      transparent 4px 8px
+    );
+  }
 }
 
+/* Without backdrop-filter, glass surfaces become opaque. The selector list
+   matches the theme roots in tokens.css so the fallback wins at equal
+   specificity and follows whichever theme is active. */
 @supports not (backdrop-filter: blur(1px)) {
-  :root {
-    --glass-bg: rgba(255, 255, 255, 0.97);
-    --glass-bg-heavy: rgba(255, 255, 255, 0.99);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --glass-bg: rgba(30, 30, 30, 0.97);
-      --glass-bg-heavy: rgba(30, 30, 30, 0.99);
-    }
-  }
-
-  [data-theme="dark"] {
-    --glass-bg: rgba(30, 30, 30, 0.97);
-    --glass-bg-heavy: rgba(30, 30, 30, 0.99);
+  :root,
+  :root:not([data-theme="light"]) {
+    --glass-bg: var(--bg-surface);
+    --glass-bg-heavy: var(--bg-surface);
   }
 }
 
-/* Preserve selection, focus, progress, and severity cues in Windows High Contrast. */
+/* Preserve selection, focus, progress, severity and active-state cues in
+   Windows High Contrast. Colour alone is dropped in forced-colors mode. */
 @media (forced-colors: active) {
   :root {
     --focus-ring-color: Highlight;
@@ -35,6 +42,16 @@
 
   .object-row--selected,
   .transfer-item--selected {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  .settings-tab--active,
+  .info-tab--active,
+  .inspector-tab--active,
+  .bottom-drawer__tab--active,
+  .list__item--active,
+  .theme-card--active {
     outline: 2px solid Highlight;
     outline-offset: -2px;
   }

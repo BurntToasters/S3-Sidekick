@@ -2,7 +2,7 @@
 
 S3 Sidekick is your buddy for quick GUI S3-compatible storage management! I made this app beause I couldn't find any S3 GUI clients for Linux that I preferred so I decided to make my own!
 
-> **Package version in this checkout: 0.11.1.** See [GitHub Releases](https://github.com/BurntToasters/S3-Sidekick/releases) for currently available installers and release status, and [CHANGELOG.md](CHANGELOG.md) for the changes in this checkout.
+> **Package version in this checkout: 0.12.0-beta.1.** See [GitHub Releases](https://github.com/BurntToasters/S3-Sidekick/releases) for currently available installers and release status, and [CHANGELOG.md](CHANGELOG.md) for the changes in this checkout.
 
 ## ⬇️ Downloads
 

@@ -238,15 +238,7 @@ test.describe("production object table geometry", () => {
       beforeScroll,
     );
 
-    const directDeselect = page.locator("#batch-deselect");
-    if (await directDeselect.isVisible()) {
-      await directDeselect.click();
-    } else {
-      await page.locator("#batch-more").click();
-      await page
-        .locator('.context-menu [role="menuitem"]', { hasText: "Deselect All" })
-        .click();
-    }
+    await page.locator("#batch-deselect").click();
     await expect(page.locator("#batch-toolbar-actions")).toBeHidden();
     const afterZero = requireBoundingBox(
       await row.boundingBox(),
@@ -448,6 +440,11 @@ test.describe("production table at compact and wide viewports", () => {
   }) => {
     await page.setViewportSize({ width: 1100, height: 720 });
     await openMockListing(page, { objectCount: 16 });
+    // The default-open rule needs a 1280px content container, so open the
+    // docked inspector explicitly for the compression checks.
+    if (await page.locator("#inspector-panel").isHidden()) {
+      await page.locator("#btn-inspector").click();
+    }
     await expect(page.locator("#inspector-panel")).toBeVisible();
     await page.locator(".object-row--file").first().click();
     await expect(page.locator("#inspector-panel")).toBeVisible();
@@ -581,6 +578,9 @@ test.describe("production compact selection and dialogs", () => {
   }) => {
     await page.setViewportSize({ width: 901, height: 720 });
     await openMockListing(page, { objectCount: 12 });
+    if (await page.locator("#inspector-panel").isHidden()) {
+      await page.locator("#btn-inspector").click();
+    }
     await expect(page.locator("#inspector-panel")).toBeVisible();
     await page.locator(".object-row--file").first().click();
     await expect(page.locator("#inspector-panel")).toBeVisible();
@@ -646,14 +646,16 @@ test.describe("production compact selection and dialogs", () => {
     for (let index = 0; index < 5; index += 1) {
       await longRows.nth(index).locator(".row-check").check();
     }
-    const more = page.locator("#batch-more");
-    if (await more.isVisible()) {
-      await more.click();
+    // The More menu has no Delete; when the toolbar Delete button is hidden,
+    // delete via the row context menu instead.
+    const toolbarDelete = page.locator("#batch-delete");
+    if (await toolbarDelete.isVisible()) {
+      await toolbarDelete.click();
+    } else {
+      await longRows.nth(0).click({ button: "right" });
       await page
         .locator('.context-menu [role="menuitem"]', { hasText: "Delete" })
         .click();
-    } else {
-      await page.locator("#batch-delete").click();
     }
 
     await expect(page.locator("#dialog-overlay")).toHaveClass(/active/);
@@ -697,7 +699,8 @@ test.describe("production listing states", () => {
   test.use({ viewport: { width: 1100, height: 720 } });
 
   const stateCases: Array<[LayoutMockOptions["scenario"], string]> = [
-    ["empty", "This folder is empty"],
+    // The listing is the bucket root, so the empty copy names the bucket.
+    ["empty", "This bucket is empty"],
     ["error", "Failed to open bucket"],
   ];
 

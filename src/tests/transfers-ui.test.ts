@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TransferItem } from "../transfers.ts";
+import {
+  TRANSFER_TEXT,
+  computeQueueAggregates,
+  patchTransferRowElement,
+  renderTransferRow,
+  updateQueueSummary,
+} from "../transfer-render.ts";
+import { isClaimable, markCancelled } from "../transfer-state.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
@@ -341,5 +349,213 @@ describe("transfers UI shell", () => {
     expect(row.querySelector(".transfer-error")?.getAttribute("title")).toBe(
       error,
     );
+  });
+});
+
+describe("transfer row contracts (UX audit 0.12.0)", () => {
+  function rowFrom(html: string): HTMLElement {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    return template.content.firstElementChild as HTMLElement;
+  }
+
+  function downloadFixture(
+    overrides: Partial<TransferItem> = {},
+  ): TransferItem {
+    return transferFixture({
+      operation: "download",
+      fileName: "report.csv",
+      key: "reports/report.csv",
+      destination: "C:\\tmp\\report.csv",
+      status: "uploading",
+      phase: "running",
+      totalBytes: 64 * 1024 * 1024,
+      progress: 10,
+      ...overrides,
+    });
+  }
+
+  it("cancelled rows are neutral: not failed, not claimable, not counted as errors", () => {
+    const item = transferFixture({ status: "uploading" });
+    markCancelled(item);
+    expect(item.status).toBe("cancelled");
+    expect(isClaimable(item)).toBe(false);
+    const aggregates = computeQueueAggregates([item]);
+    expect(aggregates.failed).toBe(0);
+    expect(aggregates.attention).toBe(0);
+    expect(aggregates.cancelled).toBe(1);
+  });
+
+  it("renders a cancelled row as Cancelled with no retry or error styling", () => {
+    const item = transferFixture({ status: "uploading" });
+    markCancelled(item);
+    const row = rowFrom(renderTransferRow(item));
+    expect(row.textContent).toContain("Cancelled");
+    expect(row.querySelector(".transfer-status--error")).toBeNull();
+    expect(row.querySelector(".transfer-retry")).toBeNull();
+  });
+
+  it("gives row pause and cancel controls the base button class, an icon, and a file-name label", () => {
+    const row = rowFrom(
+      renderTransferRow(transferFixture({ status: "queued" })),
+    );
+    const pause = row.querySelector<HTMLElement>(".transfer-pause");
+    const cancel = row.querySelector<HTMLElement>(".transfer-cancel");
+    expect(pause?.className).toMatch(/\bbtn\b/);
+    expect(cancel?.className).toMatch(/\bbtn\b/);
+    expect(pause?.querySelector("svg")).not.toBeNull();
+    expect(cancel?.querySelector("svg")).not.toBeNull();
+    expect(pause?.getAttribute("aria-label")).toBe("Pause report.csv");
+    expect(cancel?.getAttribute("aria-label")).toBe("Cancel report.csv");
+  });
+
+  it("shows Cancelling and disables row controls once cancel was requested", () => {
+    const row = rowFrom(
+      renderTransferRow(downloadFixture({ cancelRequested: true })),
+    );
+    expect(row.textContent).toContain("Cancelling");
+    expect(
+      row.querySelector<HTMLButtonElement>(".transfer-pause")?.disabled,
+    ).toBe(true);
+    expect(
+      row.querySelector<HTMLButtonElement>(".transfer-cancel")?.disabled,
+    ).toBe(true);
+  });
+
+  it("does not call a healthy single-request upload stalled", () => {
+    const item = transferFixture({
+      operation: "upload",
+      status: "uploading",
+      phase: "running",
+      filePath: "/tmp/small.bin",
+      key: "uploads/small.bin",
+      fileName: "small.bin",
+      totalBytes: 1024,
+      progress: 0,
+      lastProgressAt: Date.now() - 60_000,
+    });
+    const row = rowFrom(renderTransferRow(item, { now: Date.now() }));
+    expect(row.textContent).not.toContain("Stalled");
+    expect(row.textContent).toContain("Running");
+  });
+
+  it("flags a multipart download that stops reporting progress as stalled", () => {
+    const now = Date.now();
+    const row = rowFrom(
+      renderTransferRow(downloadFixture({ lastProgressAt: now - 20_000 }), {
+        now,
+      }),
+    );
+    expect(row.textContent).toContain("Stalled");
+  });
+
+  it("counts down a retry wait in seconds instead of raw milliseconds", () => {
+    const now = Date.now();
+    const row = rowFrom(
+      renderTransferRow(
+        downloadFixture({ phase: "retry_wait", retryAt: now + 3000 }),
+        { now },
+      ),
+    );
+    expect(row.textContent).toContain("Retrying in 3 s");
+    expect(row.textContent).not.toContain("ms");
+  });
+
+  it("labels attempts consistently as Attempt N of M", () => {
+    const row = rowFrom(
+      renderTransferRow(downloadFixture({ attempt: 2, maxAttempts: 4 })),
+    );
+    expect(row.textContent).toContain("Attempt 2 of 4");
+  });
+
+  it("keeps live speed out of the queue summary and names a paused queue", () => {
+    document.body.innerHTML = `<div id="transfer-queue-summary"></div>`;
+    const queue = [
+      downloadFixture({ speedBps: 5 * 1024 * 1024 }),
+      transferFixture({ status: "queued" }),
+    ];
+    updateQueueSummary(computeQueueAggregates(queue), {
+      waiting: true,
+      heldForDisconnect: false,
+      offline: false,
+      queuePaused: true,
+      awaitingEndpoint: null,
+    });
+    const text =
+      document.getElementById("transfer-queue-summary")?.textContent ?? "";
+    expect(text).toContain("Queue paused");
+    expect(text).not.toMatch(/\/s\b/);
+    expect(text).not.toContain("MB");
+  });
+
+  it("counts paused rows separately from active ones", () => {
+    const aggregates = computeQueueAggregates([
+      transferFixture({ status: "queued", paused: true, phase: "paused" }),
+      transferFixture({ status: "queued" }),
+    ]);
+    expect(aggregates.paused).toBe(1);
+    expect(aggregates.active).toBe(1);
+  });
+
+  it("patches a progress update in place so Pause and Cancel nodes survive", () => {
+    const item = downloadFixture({ progress: 10 });
+    const row = rowFrom(renderTransferRow(item));
+    const container = document.createElement("div");
+    container.appendChild(row);
+    const pause = row.querySelector(".transfer-pause");
+    const cancel = row.querySelector(".transfer-cancel");
+
+    item.progress = 50;
+    patchTransferRowElement(row, rowFrom(renderTransferRow(item)));
+
+    expect(row.querySelector(".transfer-pause")).toBe(pause);
+    expect(row.querySelector(".transfer-cancel")).toBe(cancel);
+    expect(
+      row.querySelector(".transfer-progress__bar")?.getAttribute("style"),
+    ).toContain("50%");
+  });
+
+  it("keeps the wording for shared transfer actions in one table", () => {
+    expect(TRANSFER_TEXT.clearCompleted).toBe("Clear completed");
+    expect(TRANSFER_TEXT.clearFailed).toBe("Clear failed");
+    expect(TRANSFER_TEXT.replace).toBe("Replace");
+    expect(TRANSFER_TEXT.skip).toBe("Skip");
+  });
+
+  it("exposes each row's status so the drawer filter can match it", () => {
+    for (const status of ["queued", "uploading", "done", "error"] as const) {
+      const row = rowFrom(renderTransferRow(transferFixture({ status })));
+      expect(row.dataset.status).toBe(status);
+    }
+  });
+
+  it("makes rows programmatically focusable for arrow-key movement", () => {
+    const row = rowFrom(
+      renderTransferRow(transferFixture({ status: "queued" })),
+    );
+    expect(row.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("gives the row action icons from the shared icon set, with a 28px-capable icon button", () => {
+    const row = rowFrom(
+      renderTransferRow(transferFixture({ status: "queued" })),
+    );
+    expect(
+      row.querySelector(".transfer-pause svg")?.getAttribute("data-icon"),
+    ).toBe("pause");
+    expect(
+      row.querySelector(".transfer-cancel svg")?.getAttribute("data-icon"),
+    ).toBe("x");
+    const retry = rowFrom(
+      renderTransferRow(transferFixture({ status: "error", error: "Denied" })),
+    );
+    expect(
+      retry.querySelector(".transfer-retry svg")?.getAttribute("data-icon"),
+    ).toBe("rotate-ccw");
+    expect(
+      retry
+        .querySelector(".transfer-copy-error svg")
+        ?.getAttribute("data-icon"),
+    ).toBe("copy");
   });
 });

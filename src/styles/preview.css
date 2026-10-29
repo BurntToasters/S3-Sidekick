@@ -12,25 +12,176 @@
 
 .preview-text {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px;
+  padding: var(--space-3);
 }
 
+.preview-unsupported,
+.preview-too-large {
+  padding: var(--space-4);
+  font-size: var(--text-md);
+  color: var(--text-secondary);
+}
+
+.preview-too-large {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.preview-unsupported {
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+}
+
+.preview-truncated {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  margin-top: var(--space-2);
+}
+
+/* Code-style text listing: gutter numbers, wrap toggle and Copy. */
+.preview-code {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.preview-code__tools {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.preview-code__lines {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) 0;
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.preview-code__line {
+  display: flex;
+  align-items: flex-start;
+}
+
+.preview-code__num {
+  flex: none;
+  min-width: 3ch;
+  padding: 0 var(--space-2);
+  text-align: right;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.preview-code__text {
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--space-3) 0 var(--space-1);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.preview-code[data-wrap="off"] .preview-code__text {
+  white-space: pre;
+  word-break: normal;
+}
+
+/* JSON token colours come from theme variables, never raw hex, so both
+   themes keep contrast. */
+.tok-key {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tok-str {
+  color: var(--success-text);
+}
+
+.tok-num {
+  color: var(--accent-fg);
+}
+
+.tok-bool {
+  color: var(--warning-text);
+}
+
+.tok-null {
+  color: var(--danger-text);
+}
+
+/* Delimited table previews. */
+.preview-code--table {
+  overflow-x: auto;
+}
+
+.preview-table {
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.preview-table th,
+.preview-table td {
+  padding: var(--space-1) 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.preview-table th {
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  position: sticky;
+  top: 0;
+}
+
+.preview-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.preview-table-note {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  margin-top: var(--space-2);
+}
+
+/* Image previews: checkerboard so transparency is visible, with a fit/100%
+   zoom toggle. */
 .preview-image {
   display: flex;
   justify-content: center;
   align-items: center;
   min-height: 200px;
-  padding: 8px;
+  padding: var(--space-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg);
+  overflow: auto;
+}
+
+.preview-image--checker {
+  background: repeating-conic-gradient(
+      var(--bg-surface) 0% 25%,
+      var(--bg) 0% 50%
+    )
+    0 0 / 16px 16px;
 }
 
 .preview-image img {
@@ -39,13 +190,12 @@
   object-fit: contain;
 }
 
-.preview-unsupported {
-  color: var(--text-secondary);
-  font-size: 13px;
+.preview-image--fit {
+  max-width: 100%;
 }
 
-.preview-truncated {
-  color: var(--text-secondary);
-  font-size: 12px;
-  margin-top: 8px;
+.preview-image--zoom-100 img {
+  max-width: none;
+  max-height: none;
+  object-fit: initial;
 }

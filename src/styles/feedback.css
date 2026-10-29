@@ -7,14 +7,15 @@
   border: 2px solid var(--border);
   border-top-color: var(--accent);
   border-radius: 50%;
-  animation: spin 0.6s linear infinite;
+  animation: spin var(--duration-spin) linear infinite;
   vertical-align: middle;
 }
 
+/* The faint ring is the button text colour at 35%, so it follows the accent in every theme. */
 .spinner--btn {
   width: 14px;
   height: 14px;
-  border-color: rgba(255, 255, 255, 0.35);
+  border-color: color-mix(in srgb, var(--accent-text) 35%, transparent);
   border-top-color: var(--accent-text);
 }
 
@@ -25,20 +26,47 @@
 }
 
 .metadata-loading {
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
-  padding: 8px 0;
+  padding: var(--space-2) 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
+}
+
+.metadata-section-heading {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 14px 0 6px;
+}
+
+.metadata-section-heading:first-child {
+  margin-top: 0;
 }
 
 .metadata-info-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  font-size: 13px;
+  gap: var(--space-3);
+  font-size: var(--text-md);
+  padding: var(--space-1) 0;
+}
+
+.metadata-info-row--copyable .metadata-info-row__value {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+}
+
+.metadata-copy-btn {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  padding: 2px var(--space-2);
+  min-height: 28px;
 }
 
 .metadata-label {
@@ -49,7 +77,7 @@
 
 .metadata-value-mono {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
   word-break: break-all;
 }
 
@@ -71,22 +99,22 @@
 }
 
 .metadata-entry__delete {
-  font-size: 12px;
+  font-size: var(--text-sm);
   padding: 2px 6px;
   flex-shrink: 0;
 }
 
 .metadata-add-btn {
-  font-size: 12px;
-  padding: 4px 10px;
+  font-size: var(--text-sm);
+  padding: var(--space-1) 10px;
 }
 
 .metadata-batch-info {
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .metadata-batch-info p {
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
   color: var(--text-secondary);
 }
 
@@ -97,21 +125,21 @@
   gap: 2px;
   max-height: 200px;
   overflow-y: auto;
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-family: var(--mono);
   color: var(--text);
 }
 
 .metadata-batch-list li {
-  padding: 3px 8px;
+  padding: 3px var(--space-2);
   background: var(--bg);
   border-radius: 3px;
 }
 
 .metadata-batch-hint {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
-  margin: 4px 0 12px;
+  margin: var(--space-1) 0 var(--space-3);
 }
 
 .metadata-permissions-editor {
@@ -127,4 +155,34 @@
 
 .metadata-visibility-select {
   width: min(260px, 100%);
+}
+
+/* Badges: compact count or status pills. Colours come from tokens, so each reads in both themes. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 var(--space-1);
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Count: how many items are waiting, for example queued transfers. */
+.badge--count {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+/* Alert: something failed or needs attention. Uses the strong red so white text clears 4.5:1. */
+.badge--alert {
+  background: var(--danger-strong);
+  color: var(--accent-text);
 }

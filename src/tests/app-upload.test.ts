@@ -4,6 +4,7 @@ const mockOpen =
   vi.fn<(...args: unknown[]) => Promise<string | string[] | null>>();
 const mockEnqueuePaths = vi.fn();
 const mockEnqueueFolderEntries = vi.fn();
+const ENQUEUE_ACCEPTED = { accepted: true, count: 1 };
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -25,7 +26,9 @@ describe("upload chooser account binding", () => {
     vi.resetModules();
     mockOpen.mockReset();
     mockEnqueuePaths.mockReset();
+    mockEnqueuePaths.mockImplementation(() => ENQUEUE_ACCEPTED);
     mockEnqueueFolderEntries.mockReset();
+    mockEnqueueFolderEntries.mockImplementation(() => ENQUEUE_ACCEPTED);
     mockInvoke.mockReset();
     document.body.innerHTML = `<span id="status"></span>`;
 

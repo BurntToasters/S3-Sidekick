@@ -3,11 +3,11 @@
 .setup-wizard-overlay {
   position: fixed;
   inset: 0;
-  z-index: 500;
+  z-index: var(--z-wizard);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--setup-scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   animation: setup-overlay-in 0.3s ease;
@@ -73,8 +73,8 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 32px 28px 24px;
-  gap: 8px;
+  padding: var(--space-7) 28px var(--space-6);
+  gap: var(--space-2);
   min-width: 0;
 }
 
@@ -88,7 +88,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-1);
 }
 
 .setup-wizard-step__icon-svg {
@@ -104,7 +104,7 @@
 }
 
 .setup-wizard-step__desc {
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
   line-height: 1.6;
   margin: 0;
@@ -114,7 +114,7 @@
 .setup-wizard-step__actions {
   display: flex;
   gap: 10px;
-  margin-top: 12px;
+  margin-top: var(--space-3);
   width: 100%;
   justify-content: center;
 }
@@ -123,72 +123,30 @@
   min-width: 180px;
 }
 
-.setup-wizard-theme-options {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-  margin-bottom: 4px;
+.setup-wizard-step-count {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
 }
 
-.setup-wizard-theme-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 14px 20px;
-  border: 2px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-surface);
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-  cursor: pointer;
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease,
-    background 0.15s ease;
-  min-width: 100px;
-  flex: 1 1 100px;
+.setup-wizard-substep[hidden] {
+  display: none;
 }
 
-.setup-wizard-theme-btn:hover {
-  border-color: var(--accent);
-}
-
-.setup-wizard-theme-btn--active {
-  border-color: var(--accent);
-  box-shadow:
-    0 0 0 1px var(--accent),
-    0 2px 8px var(--glow-accent);
-}
-
-.setup-wizard-theme-btn__swatch {
-  width: 40px;
-  height: 28px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-}
-
-.setup-wizard-theme-btn__swatch--light {
-  background: linear-gradient(135deg, #f5f5f5 50%, #ffffff 50%);
-}
-
-.setup-wizard-theme-btn__swatch--dark {
-  background: linear-gradient(135deg, #1a1a1a 50%, #2a2a2a 50%);
-}
-
-.setup-wizard-theme-btn__swatch--system {
-  background: linear-gradient(135deg, #f5f5f5 50%, #2a2a2a 50%);
+.setup-wizard-theme-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
 }
 
 .setup-wizard-encryption-form {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   width: 100%;
   max-width: 300px;
-  margin-top: 8px;
+  margin-top: var(--space-2);
 }
 
 .setup-wizard-field {
@@ -202,8 +160,8 @@
 }
 
 .setup-wizard-enc-error {
-  font-size: 12px;
-  color: var(--danger);
+  font-size: var(--text-sm);
+  color: var(--danger-text, var(--danger));
   margin: 0;
   text-align: left;
 }
@@ -215,8 +173,8 @@
 .setup-wizard-checkbox-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: var(--space-2);
+  font-size: var(--text-md);
   color: var(--text);
   cursor: pointer;
   user-select: none;
@@ -227,12 +185,46 @@
 }
 
 .setup-wizard-skip-btn {
-  font-size: 12px;
-  opacity: 0.7;
+  font-size: var(--text-sm);
 }
 
-.setup-wizard-skip-btn:hover {
-  opacity: 1;
+.setup-wizard-skip-btn[hidden] {
+  display: none;
+}
+
+/* Biometric caveat: a convenience-gate note shown under the checkbox. */
+.setup-wizard-caveat {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  text-align: left;
+}
+
+.setup-wizard-caveat[hidden] {
+  display: none;
+}
+
+.setup-wizard-enc-status {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
+  text-align: left;
+}
+
+.setup-wizard-enc-status[hidden] {
+  display: none;
+}
+
+.setup-wizard-encryption-form .field-toggle-btn {
+  min-width: 48px;
+  min-height: 32px;
+  font-size: var(--text-sm);
+}
+
+.setup-wizard-encryption-form input:disabled {
+  opacity: 0.7;
 }
 
 .setup-wizard-updates-form {
@@ -241,7 +233,7 @@
   gap: 14px;
   width: 100%;
   max-width: 300px;
-  margin-top: 8px;
+  margin-top: var(--space-2);
   align-items: flex-start;
 }
 
@@ -253,7 +245,7 @@
 }
 
 .setup-wizard-channel-label {
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text);
   white-space: normal;
   overflow-wrap: anywhere;
@@ -266,7 +258,7 @@
 
 @media (max-width: 400px) {
   .setup-wizard-step {
-    padding: 24px 18px 20px;
+    padding: var(--space-6) 18px var(--space-5);
   }
 
   .setup-wizard-step__actions {

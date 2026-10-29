@@ -21,8 +21,8 @@
 .settings-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px 10px 14px 16px;
+  gap: var(--space-2);
+  padding: 14px 10px 14px var(--space-4);
   border-right: 1px solid var(--border);
   overflow-y: auto;
   min-height: 0;
@@ -35,11 +35,11 @@
 .settings-search {
   width: 100%;
   box-sizing: border-box;
-  font-size: 12px;
+  font-size: var(--text-sm);
   padding: 6px 10px;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: var(--bg-elevated, var(--glass-bg-heavy));
+  background: var(--bg-elevated);
   color: var(--text);
 }
 
@@ -49,13 +49,13 @@
 }
 
 .settings-content {
-  padding: 16px 20px 20px;
+  padding: var(--space-4) var(--space-5) var(--space-5);
   overflow-y: auto;
   min-height: 0;
 }
 
 .settings-content .settings-panel {
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .settings-tabs {
@@ -70,11 +70,11 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-family: inherit;
   font-weight: 500;
   cursor: pointer;
@@ -104,11 +104,11 @@
   display: block;
   width: 100%;
   text-align: left;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-family: inherit;
   font-weight: 500;
   cursor: pointer;
@@ -123,8 +123,15 @@
   background: var(--bg-hover);
 }
 
+/* Reset is separated from the settings tabs above it. */
+.settings-tab--reset {
+  margin-top: var(--space-2);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
 .settings-tab--active {
-  color: var(--accent);
+  color: var(--accent-fg);
   background: var(--bg-active);
   font-weight: 600;
 }
@@ -134,64 +141,78 @@
   outline-offset: -2px;
 }
 
-.setting-help {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  margin-left: 6px;
-  padding: 0;
-  border-radius: 50%;
-  border: 1px solid var(--border);
-  background: transparent;
+/* Short explanatory text under a control (not a tooltip). */
+.setting-note {
+  display: block;
+  margin-top: var(--space-1);
   color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1;
-  cursor: help;
-  vertical-align: middle;
-  position: relative;
+  font-size: var(--text-sm);
+  line-height: 1.45;
 }
 
-.setting-help:hover,
-.setting-help:focus-visible {
-  color: var(--text);
-  border-color: var(--accent);
-  outline: none;
+/* Always-visible help under a control, linked by aria-describedby. It takes a
+   row of its own, so it never sits beside the label or control. */
+.setting-description {
+  display: block;
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
 }
 
-.setting-help[data-tooltip]::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--bg-elevated, #1f2230);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 6px);
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 1.4;
+.settings-panel .setting-item {
+  flex-wrap: wrap;
+  row-gap: var(--space-1);
+}
+
+.settings-panel .setting-item > .setting-description:last-child {
+  flex: 1 1 100%;
+  margin-left: 0;
+}
+
+/* Labels wrap at narrow widths instead of pushing into their control. */
+.settings-panel .toggle-row {
   white-space: normal;
-  width: max-content;
-  max-width: 240px;
-  box-shadow: var(--glass-shadow-elevated, 0 6px 16px rgba(0, 0, 0, 0.35));
-  pointer-events: none;
-  opacity: 0;
-  visibility: hidden;
-  transition:
-    opacity 0.12s ease,
-    visibility 0.12s ease;
-  z-index: 10;
 }
 
-.setting-help:hover::after,
-.setting-help:focus-visible::after {
-  opacity: 1;
-  visibility: visible;
+/* Section headings group related rows; a group is a column of its own rows. */
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.settings-group .setting-section {
+  margin: 0;
+  padding-top: var(--space-3);
+}
+
+.settings-group--advanced .advanced-toggle {
+  margin-top: 0;
+}
+
+.settings-group--advanced .setting-section {
+  padding-top: var(--space-3);
+}
+
+/* The footer is hidden when no explicit-save setting is on screen. */
+#settings-overlay .modal__footer[hidden] {
+  display: none;
+}
+
+.settings-instant-note {
+  margin: 0 0 var(--space-1);
+  padding: var(--space-2) 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+}
+
+/* Select boxes keep room for their longest option so labels are not cut. */
+.settings-content .field--sm {
+  width: auto;
+  min-width: max-content;
 }
 
 .advanced-toggle {
@@ -201,16 +222,16 @@
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-family: inherit;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   cursor: pointer;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .advanced-toggle:hover {
@@ -235,9 +256,9 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding-top: 8px;
+  padding-top: var(--space-2);
   border-top: 1px dashed var(--border);
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 
 .advanced-group[hidden] {
@@ -252,24 +273,24 @@
 }
 
 .settings-panel--search .settings-search-group-title {
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-1);
 }
 
 .settings-search-empty {
   color: var(--text-secondary);
-  font-size: 13px;
-  padding: 12px 4px;
+  font-size: var(--text-md);
+  padding: var(--space-3) var(--space-1);
 }
 
 .theme-picker {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--space-3);
   width: 100%;
   max-width: 480px;
   margin-top: 6px;
@@ -278,10 +299,10 @@
 .theme-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 8px;
+  gap: var(--space-2);
+  padding: var(--space-2);
   border: 2px solid var(--border);
-  border-radius: var(--radius-md, 8px);
+  border-radius: var(--radius-md);
   background: transparent;
   cursor: pointer;
   transition:
@@ -309,7 +330,7 @@
 
 .theme-card--active {
   border-color: var(--accent);
-  background: var(--glass-bg-subtle, rgba(255, 255, 255, 0.04));
+  background: var(--glass-bg-subtle);
 }
 
 .theme-card-preview {
@@ -319,7 +340,7 @@
   gap: 6px;
   aspect-ratio: 16 / 10;
   padding: 10px;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   overflow: hidden;
 }
@@ -335,66 +356,89 @@
   width: 55%;
 }
 
+/* Preview swatches read the fixed --settings-preview-* tokens from tokens.css,
+   not the live theme tokens, so each card shows its own theme whichever theme
+   is active: the frame is the card background, the surface is the inset panel,
+   the accent is the accent line and the text is the text line (drawn at reduced
+   opacity). */
 .theme-card-preview--light {
-  background: #f4f5f8;
-  border-color: #d8dadf;
+  --preview-bg: var(--settings-preview-light-frame);
+  --preview-surface: var(--settings-preview-light-surface);
+  --preview-accent: var(--settings-preview-light-accent);
+  --preview-text: var(--settings-preview-light-text);
+  --preview-edge: var(--settings-preview-light-edge);
+  background:
+    linear-gradient(var(--preview-surface), var(--preview-surface)) content-box,
+    var(--preview-bg);
+  border-color: var(--preview-edge);
 }
 
 .theme-card-preview--light .theme-card-preview__row {
-  background: #d1d4db;
+  background: var(--preview-text);
+  opacity: 0.22;
 }
 
 .theme-card-preview--light .theme-card-preview__row--short {
-  background: #3a7bd5;
+  background: var(--preview-accent);
+  opacity: 1;
 }
 
 .theme-card-preview--dark {
-  background: #1b1d23;
-  border-color: #2c2f37;
+  --preview-bg: var(--settings-preview-dark-frame);
+  --preview-surface: var(--settings-preview-dark-surface);
+  --preview-accent: var(--settings-preview-dark-accent);
+  --preview-text: var(--settings-preview-dark-text);
+  --preview-edge: var(--settings-preview-dark-edge);
+  background:
+    linear-gradient(var(--preview-surface), var(--preview-surface)) content-box,
+    var(--preview-bg);
+  border-color: var(--preview-edge);
 }
 
 .theme-card-preview--dark .theme-card-preview__row {
-  background: #3a3d47;
+  background: var(--preview-text);
+  opacity: 0.22;
 }
 
 .theme-card-preview--dark .theme-card-preview__row--short {
-  background: #5aa9ff;
+  background: var(--preview-accent);
+  opacity: 1;
 }
 
 .theme-card-preview--system {
   background: linear-gradient(
     135deg,
-    #f4f5f8 0%,
-    #f4f5f8 49.5%,
-    #2c2f37 50.5%,
-    #1b1d23 100%
+    var(--settings-preview-light-frame) 0%,
+    var(--settings-preview-light-frame) 49.5%,
+    var(--settings-preview-dark-frame) 50.5%,
+    var(--settings-preview-dark-frame) 100%
   );
-  border-color: #6d7079;
+  border-color: var(--settings-preview-system-edge);
 }
 
 .theme-card-preview--system .theme-card-preview__row {
   background: linear-gradient(
     135deg,
-    #d1d4db 0%,
-    #d1d4db 49.5%,
-    #3a3d47 50.5%,
-    #3a3d47 100%
+    var(--settings-preview-system-light-row) 0%,
+    var(--settings-preview-system-light-row) 49.5%,
+    var(--settings-preview-system-dark-row) 50.5%,
+    var(--settings-preview-system-dark-row) 100%
   );
 }
 
 .theme-card-preview--system .theme-card-preview__row--short {
   background: linear-gradient(
     135deg,
-    #3a7bd5 0%,
-    #3a7bd5 49.5%,
-    #5aa9ff 50.5%,
-    #5aa9ff 100%
+    var(--settings-preview-light-accent) 0%,
+    var(--settings-preview-light-accent) 49.5%,
+    var(--settings-preview-dark-accent) 50.5%,
+    var(--settings-preview-dark-accent) 100%
   );
 }
 
 .theme-card-label {
   text-align: center;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text);
   font-weight: 500;
 }
@@ -407,7 +451,7 @@
     border-right: none;
     border-bottom: 1px solid var(--border);
     flex-direction: column;
-    padding: 12px;
+    padding: var(--space-3);
   }
   .settings-tabs {
     flex-direction: row;
@@ -417,6 +461,6 @@
     width: auto;
   }
   .settings-support-btn {
-    margin-top: 4px;
+    margin-top: var(--space-1);
   }
 }

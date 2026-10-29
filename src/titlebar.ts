@@ -1,5 +1,10 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { state } from "./state.ts";
+import { getIconHtml } from "./icons.ts";
+
+// Lucide `copy`: the restore glyph for a maximized window.
+const RESTORE_ICON_SVG =
+  '<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
 
 export function usesCustomTitlebar(): boolean {
   return state.platformName === "macos" || state.platformName === "windows";
@@ -11,7 +16,7 @@ const DRAG_REGION_SELECTOR =
 function isInteractiveTitlebarTarget(target: HTMLElement): boolean {
   return Boolean(
     target.closest(
-      "button, a, input, select, textarea, .bookmark-chip, .titlebar-win-controls",
+      "button, a, input, select, textarea, .titlebar-win-controls",
     ),
   );
 }
@@ -60,12 +65,21 @@ function onTitlebarDoubleClick(event: MouseEvent): void {
   const target = event.target as HTMLElement;
   if (
     target.closest(
-      ".header__actions, .bookmark-bar, .titlebar-win-controls, button, a, input, select, textarea",
+      ".header__actions, .titlebar-win-controls, button, a, input, select, textarea",
     )
   ) {
     return;
   }
   void getCurrentWindow().toggleMaximize();
+}
+
+function applyMaximizeState(maximize: HTMLElement, maximized: boolean): void {
+  const label = maximized ? "Restore" : "Maximize";
+  maximize.innerHTML = maximized
+    ? RESTORE_ICON_SVG
+    : getIconHtml("square", { className: "lucide-icon", decorative: true });
+  maximize.title = label;
+  maximize.setAttribute("aria-label", label);
 }
 
 function wireWindowsCaptionButtons(): void {
@@ -74,6 +88,14 @@ function wireWindowsCaptionButtons(): void {
   const maximize = document.getElementById("titlebar-maximize");
   const close = document.getElementById("titlebar-close");
 
+  const syncMaximize = (): void => {
+    if (!maximize || typeof win.isMaximized !== "function") return;
+    void win
+      .isMaximized()
+      .then((maximized) => applyMaximizeState(maximize, maximized))
+      .catch(() => undefined);
+  };
+
   minimize?.addEventListener("click", (event) => {
     event.stopPropagation();
     void win.minimize();
@@ -81,8 +103,15 @@ function wireWindowsCaptionButtons(): void {
 
   maximize?.addEventListener("click", (event) => {
     event.stopPropagation();
-    void win.toggleMaximize();
+    void Promise.resolve(win.toggleMaximize()).then(syncMaximize, syncMaximize);
   });
+
+  // Maximize also changes from outside the button (title bar double-click,
+  // window-manager shortcuts), so follow the window rather than the click.
+  if (typeof win.onResized === "function") {
+    void win.onResized(syncMaximize).catch(() => undefined);
+  }
+  syncMaximize();
 
   close?.addEventListener("click", (event) => {
     event.stopPropagation();

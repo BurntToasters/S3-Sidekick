@@ -8,6 +8,8 @@ S3 Sidekick follows semantic versioning. Stable releases use `X.Y.Z`; pre-releas
 
 The webview owns presentation state and sends named commands through Tauri. The Rust backend owns S3 clients, credentials, filesystem access, transfer checkpoints, and vault migration. Connection and listing generations prevent late async responses from changing a newer destination.
 
+Webview module boundaries avoid runtime import cycles. `app-layout.ts` renders the object table through `layout-render-bridge.ts`; preview and properties call the inspector through `inspector-host.ts`; and transfer row/chrome rendering lives in `transfer-render.ts` rather than the queue and recovery flow.
+
 ## Transfer integrity
 
 Uploads use S3 checksums when enabled. Large downloads use range requests pinned to a readable object version selector, including the literal `null`, or to an ETag when version IDs are unavailable. Resume checkpoints retain that identity and are rejected when the object generation changes. Copy receipts record source and destination ETags/version IDs plus canonical source HEAD, ACL-grant, and raw-tag fingerprints. Supported empty ACL/tag state is fingerprinted differently from a provider that explicitly reports the feature unsupported; ordinary read failures fail closed. Receipt-producing copies collect all three source fingerprints even for small objects.
@@ -28,15 +30,25 @@ Prefix copy and move operations first build a complete, duplicate-free, paginate
 
 `build.rs` declares an app manifest, so every app command gets an `allow-<command>` permission that only `capabilities/default.json` grants, through the permission sets in `permissions/app.toml`, and only to the `main` window. `src/ipc_acl.rs` runs Tauri's own access check against the real capabilities: every registered command is allowed for `main`; unknown commands and other windows are denied; and the build.rs list must equal the registered list.
 
+Show in folder for a completed download calls `reveal_local_path`, which takes the row's stored destination. It only shows the file: macOS runs `open -R` and Windows runs `explorer /select,`, and on Linux, where file managers cannot select a file, it opens the parent folder. Relative, missing, and symbolic-link paths are refused on every platform, and a bundle directory is refused on macOS. Nothing in this path runs the file: the selecting openers only highlight it, and the Linux opener receives only the folder.
+
 ## Cancellation and transfer state
 
 A transfer registers with the backend (`TransferGuard`) before it waits for the storage gate, so pause and cancel reach it at any point. A `cancel_transfer` that arrives before registration is kept for 30 seconds (at most 4,096 entries) and cancels the next command with that ID. The frontend treats the resulting cancellation as the pause it came from (`pauseCancelInFlight`), not as a failure.
 
 Queue rows change status only through the named transitions in `src/transfer-state.ts`, checked against a table of legal moves (`queued → uploading → done`, with side exits to `error`, `skipped`, and back to `queued`). An illegal move throws in development and tests. The queue loop and the worker claim share one `isClaimable` predicate and one `queueHeld` predicate, so the loop never spins on work that nothing may claim.
 
+## Selection identity
+
+The webview keeps files in `state.selectedKeys` and folders in `state.selectedPrefixes`. Every row, click and inspector path passes a `{ kind, key }` entry (`src/app-selection.ts`), and the row's `kind` comes from its dataset (`data-key` for files, `data-prefix` for folders), never from the text of a key. A legal object key such as `prefix:archive` is a file. Folder keys are always the trailing-slash prefix S3 returned, and native prefix delete refuses a prefix without that slash (`validate_mutating_folder_prefix`), so a bare `archive` cannot match `archive.zip` or `archived/…`.
+
 ## Create-only retries
 
 A create-only write can commit while its response is lost; the SDK retry then gets 412 against its own object. Uploads recognise their own write by size plus the SHA-256 ownership marker in metadata. Copy create-only is advertised only where the destination condition is documented and supported: the pinned MinIO server is excluded because it accepts an occupied CopyObject destination despite `If-None-Match`. Ambiguous copy completion fails without issuing a successful receipt. Persisted receipts record destination ownership ambiguity; missing legacy ownership claims are treated as ambiguous and cannot authorize source or rollback deletion. These move rows require inspection and reconciliation before removal. Providers without atomic create-only copy require explicit overwrite authorization; ordinary explicit overwrite remains supported.
+
+## Move capability exposure
+
+A move retires its source only on providers whose `DeleteObject` honours `If-Match`. The native `connect` result reports this as `conditional_delete_supported` (from `supports_conditional_delete` in `src-tauri/src/s3/create_only.rs`), and the webview stores it in `state.conditionalDeleteSupported`. The flag is false until a connect result says otherwise and is cleared on disconnect, so a missing field disables Move. It only gates the UI: the native transaction path checks the same provider rule before deleting a source, so a webview that ignores the flag still cannot retire an unverified source.
 
 ## Lock order
 
@@ -52,7 +64,19 @@ End-to-end suites are the primary evidence and each writes a repeatable report u
 
 ## Preview policy
 
-Preview responses are capped at 1 MiB and are streamed with a hard one-byte overflow check. Text detection ignores parameters such as `; charset=utf-8` and recognizes `text/*`, JSON, XML, JavaScript, SVG, YAML, and TOML. Other content is offered as a download rather than rendered as text.
+Text previews are capped at 1 MiB: larger text objects are read with a ranged request and returned truncated. Images have a separate 16 MiB cap and must arrive whole; an image above the cap, or one whose body streams past it, is refused rather than returned as a partial image. Every read is streamed with a hard one-byte overflow check. Text detection ignores parameters such as `; charset=utf-8` and recognizes `text/*`, JSON, XML, JavaScript, SVG, YAML, and TOML. The webview renders Markdown as plain text and never as HTML, so previews need no CSP change. PDF, audio, and video are offered as downloads; previewing them would require a CSP or asset-protocol decision. Other content is offered as a download rather than rendered as text.
+
+## Object actions
+
+`src/object-actions.ts` is the single registry of object actions (`id`, label, icon, shortcut, danger, group, availability, run). The row context menu, the selection bar's **More** menu, and the command palette's selection commands all render from it, so an action has one label and one availability rule. Shortcut hints come from `SHORTCUTS` in `src/shortcut-catalog.ts`, never from a second list.
+
+## Layout preferences
+
+Row density is a CSS token: `--row-height` is 36px, and `html[data-density="compact"]` sets it to 28px. The object table's virtualization reads the computed value and re-reads it when the attribute changes. The inspector opens by default only when the listing container is at least 1280px wide and the user has no stored open or closed choice; an explicit toggle is stored and always wins.
+
+## Connection location memory
+
+Each saved connection remembers its last bucket and prefix in local storage under `s3-sidekick.connection-memory`, keyed by the connection name and endpoint only. Credentials, session IDs, and secrets are never part of the key or the record. The memory is restored when the user switches connections and is forgotten when the connection is removed. **Test connection** connects, lists buckets, and disconnects; it never keeps the resulting session.
 
 ## Vault and biometric storage
 

@@ -2,6 +2,12 @@ import { escapeHtml, getIconHtml } from "./utils.ts";
 
 export type ToastType = "info" | "success" | "warning" | "error";
 
+export interface ToastAction {
+  label: string;
+  /** Runs when the button is pressed; the toast is dismissed afterwards. */
+  onClick: () => void;
+}
+
 export interface ToastOptions {
   type?: ToastType;
   /** Auto-dismiss delay in ms. Pass 0 to keep the toast until dismissed. */
@@ -9,6 +15,8 @@ export interface ToastOptions {
   /** Optional inline action button (e.g. "Undo", "View"). */
   actionLabel?: string;
   onAction?: () => void;
+  /** Ordered action buttons, e.g. "Show failed" and "Retry failed". */
+  actions?: ToastAction[];
 }
 
 const DEFAULT_DURATION: Record<ToastType, number> = {
@@ -137,6 +145,14 @@ export function clearToasts(): void {
   }
 }
 
+function actionList(options: ToastOptions): ToastAction[] {
+  const actions: ToastAction[] = [...(options.actions ?? [])];
+  if (options.actionLabel && options.onAction) {
+    actions.push({ label: options.actionLabel, onClick: options.onAction });
+  }
+  return actions;
+}
+
 export function showToast(message: string, options: ToastOptions = {}): void {
   const region = getRegion();
   if (!region) return;
@@ -170,21 +186,25 @@ export function showToast(message: string, options: ToastOptions = {}): void {
 
   const el = document.createElement("div");
   el.className = `toast toast--${type}`;
+  if (duration === 0) el.classList.add("toast--persistent");
   if (type === "error" || type === "warning") {
     el.setAttribute("role", "alert");
   } else {
     el.setAttribute("role", "status");
   }
 
-  const action =
-    options.actionLabel && options.onAction
-      ? `<button type="button" class="toast__action">${escapeHtml(options.actionLabel)}</button>`
-      : "";
+  const actions = actionList(options);
+  const actionButtons = actions
+    .map(
+      (action) =>
+        `<button type="button" class="toast__action">${escapeHtml(action.label)}</button>`,
+    )
+    .join("");
 
   el.innerHTML =
     `<span class="toast__icon" aria-hidden="true">${getIconHtml(TYPE_ICON[type], { className: "lucide-icon toast__icon-svg", decorative: true })}</span>` +
     `<span class="toast__msg">${escapeHtml(message)}<span class="toast__count" hidden></span></span>` +
-    action +
+    `<span class="toast__actions">${actionButtons}</span>` +
     `<button type="button" class="toast__close" aria-label="Dismiss notification">${getIconHtml("x", { className: "lucide-icon toast__close-svg", decorative: true })}</button>`;
 
   const countEl = el.querySelector<HTMLElement>(".toast__count")!;
@@ -192,18 +212,18 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     "click",
     () => dismissToast(el),
   );
-  if (options.actionLabel && options.onAction) {
-    el.querySelector<HTMLButtonElement>(".toast__action")!.addEventListener(
-      "click",
-      () => {
+  el.querySelectorAll<HTMLButtonElement>(".toast__action").forEach(
+    (button, index) => {
+      const action = actions[index];
+      button.addEventListener("click", () => {
         try {
-          options.onAction?.();
+          action.onClick();
         } finally {
           dismissToast(el);
         }
-      },
-    );
-  }
+      });
+    },
+  );
 
   const toast: ActiveToast = {
     el,

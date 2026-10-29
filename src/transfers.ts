@@ -1,7 +1,28 @@
 import { invoke } from "./ipc.ts";
 import { invokeS3For } from "./connection.ts";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { escapeHtml, getIconHtml, isLocalEndpoint } from "./utils.ts";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
+import { friendlyError, isLocalEndpoint, plural } from "./utils.ts";
+import {
+  captureTransferRenderFocus,
+  computeQueueAggregates,
+  reconcileTransferList,
+  remainingConflictsQuestion,
+  renderTransferRow,
+  restoreTransferRenderFocus,
+  syncTransferVisibility,
+  TRANSFER_TEXT,
+  updateQueueSummary,
+  updateTransferBadges,
+  updateTransferThroughput,
+  patchTransferRowElement,
+} from "./transfer-render.ts";
+
+export { renderTransferRow };
 import { state } from "./state.ts";
 import { logActivity } from "./activity-log.ts";
 import {
@@ -11,7 +32,7 @@ import {
   getActiveTab,
   toggleDrawer,
 } from "./bottom-drawer.ts";
-import { showConfirm } from "./dialogs.ts";
+import { showChoiceDialog, showConfirm } from "./dialogs.ts";
 import { promptUnguardedWrite } from "./app-conflicts.ts";
 import {
   claim,
@@ -42,6 +63,13 @@ import {
   SMALL_OBJECT_BYTE_LENGTH,
   isCreateOnlyUnsupportedError,
 } from "./create-only-capabilities.ts";
+
+/** Outcome of an enqueue call. A refusal leaves the queue untouched. */
+export interface EnqueueResult {
+  accepted: boolean;
+  count: number;
+  reason?: string;
+}
 
 export interface CopyReceipt {
   source_key: string;
@@ -79,7 +107,7 @@ export interface TransferItem {
   destinationKey?: string;
   destinationPrefix?: string;
   size: number;
-  status: "queued" | "uploading" | "done" | "error" | "skipped";
+  status: "queued" | "uploading" | "done" | "error" | "skipped" | "cancelled";
   error?: string;
   progress: number;
   totalBytes: number;
@@ -89,11 +117,16 @@ export interface TransferItem {
   conflictResolution: "ask" | "skip" | "replace";
   phase:
     | "running"
+    | "preparing"
     | "retry_wait"
     | "verifying"
     | "paused"
     | "resuming"
     | "finalizing";
+  /** When a retry wait ends; drives the "Retrying in N s" countdown. */
+  retryAt?: number;
+  /** False for refusals that a retry would only repeat. Persisted with errors. */
+  retryable?: boolean;
   tempPath?: string;
   speedBps: number;
   /** Wall-clock of the last progress event; drives the stalled indicator. */
@@ -215,6 +248,8 @@ interface PersistedTransferItem {
   /** Persist terminal failures so recovery ownership survives a restart. */
   failed?: boolean;
   error?: string;
+  /** Persisted only when a retry would just repeat the same refusal. */
+  retryable?: false;
   /** In-memory marker for manifests from beta.4 and earlier with no account binding. */
   legacyConnectionUnbound?: boolean;
 }
@@ -227,6 +262,14 @@ const BROWSER_UPLOAD_BYTES_LIMIT = 16 * 1024 * 1024;
 const LEGACY_QUEUE_MANIFEST_KEY = "s3-sidekick.transfer-manifest.v1";
 const TRANSFER_ID_SEQUENCE_KEY = "s3-sidekick.transfer-id-sequence.v1";
 const TRANSFER_ERROR_PREFIX = "__S3_SIDEKICK_TRANSFER_ERROR__";
+const PROVIDER_CANNOT_DELETE_MESSAGE =
+  "This provider can't safely delete the source. Use Copy, then Delete.";
+const RECOVERY_UNRESOLVED_MESSAGE =
+  "Pending transfers from the last session are not resolved yet. Resume or discard them before starting new transfers.";
+// Backend refusal from create_only.rs require_conditional_delete_support.
+const PROVIDER_CANNOT_DELETE_PATTERN = /cannot enforce conditional DELETE/i;
+const RECOVERY_DAMAGED_MESSAGE =
+  "Saved transfer recovery data is damaged and was kept for repair. Discard it or keep it before starting new transfers.";
 
 /// Transfer ids are the handle the backend uses to cancel a running transfer.
 ///
@@ -272,7 +315,6 @@ let renderQueued = false;
 let fullRenderQueued = false;
 const dirtyTransferIds = new Set<number>();
 let stallTicker: ReturnType<typeof setInterval> | null = null;
-const STALLED_AFTER_MS = 15_000;
 
 function ensureStallTicker(): void {
   if (stallTicker !== null) return;
@@ -285,7 +327,7 @@ function ensureStallTicker(): void {
       return;
     }
     queueRender();
-  }, 5_000);
+  }, 1_000);
 }
 
 function stopStallTicker(): void {
@@ -308,6 +350,8 @@ let offlineHold = false;
 let offlineListenersAttached = false;
 let manifestHydrated = false;
 let manifestRecoveryUnresolved = false;
+/** The stored recovery record is unreadable and kept for repair. */
+let recoveryDamaged = false;
 let recoverySession: string | null = null;
 let manifestWriteTail: Promise<void> = Promise.resolve();
 let normalManifestWritePending = false;
@@ -421,11 +465,12 @@ async function confirmUnguardedTransferWrite(
       authorizationKey !== null &&
       unguardedAuthorizationKey(entry, connectionId) === authorizationKey,
   ).length;
-  if (remaining > 1) {
+  const others = remaining - 1;
+  if (others > 0) {
     const applyAll = await showConfirm(
-      "Apply Choice",
-      'Apply "Write anyway" to remaining new destinations on this provider?',
-      { okLabel: "Apply to all", cancelLabel: "Only this one" },
+      TRANSFER_TEXT.applyToAllRemaining,
+      `Write ${plural(others, "remaining transfer")} the same way on this provider? Without a create-only guard, an object that appears at the destination during the transfer can be overwritten.`,
+      { okLabel: "Write all", cancelLabel: TRANSFER_TEXT.thisOneOnly },
     );
     if (applyAll && authorizationKey) {
       unguardedWriteAuthorizations.add(authorizationKey);
@@ -571,30 +616,6 @@ function getEffectiveTransferSettings(): EffectiveTransferSettings {
       state.currentSettings.transferCheckpointTtlHours,
     bandwidthLimitMbps: state.currentSettings.bandwidthLimitMbps,
   };
-}
-
-function formatSpeedBps(speedBps: number): string {
-  if (!Number.isFinite(speedBps) || speedBps <= 0) return "";
-  const kb = 1024;
-  const mb = kb * 1024;
-  const gb = mb * 1024;
-  if (speedBps >= gb) return `${(speedBps / gb).toFixed(2)} GB/s`;
-  if (speedBps >= mb) return `${(speedBps / mb).toFixed(2)} MB/s`;
-  if (speedBps >= kb) return `${(speedBps / kb).toFixed(1)} KB/s`;
-  return `${Math.round(speedBps)} B/s`;
-}
-
-function formatEtaSeconds(etaSeconds: number | null): string {
-  if (etaSeconds === null || !Number.isFinite(etaSeconds) || etaSeconds < 0) {
-    return "";
-  }
-  const total = Math.round(etaSeconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
 }
 
 function retryCountFromSettings(): number {
@@ -762,6 +783,8 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
     connectionIdentity: item.connectionIdentity,
     failed: item.status === "error",
     error: item.status === "error" ? item.error : undefined,
+    retryable:
+      item.status === "error" && item.retryable === false ? false : undefined,
     // Rows the user kept unbound must stay recognisably legacy after a v6
     // rewrite, or the next session would try to run them without an account.
     legacyConnectionUnbound: item.legacyConnectionUnbound === true || undefined,
@@ -903,13 +926,15 @@ function writeQueueManifest(): void {
   scheduleQueueManifestWrite();
 }
 
-function canMutateTransferQueue(): boolean {
-  if (!manifestRecoveryUnresolved) return true;
-  const message =
-    "Transfer recovery is unresolved; reload the application before starting new transfers.";
-  logActivity(message, "warning");
-  showToast(message, { type: "warning", duration: 0 });
-  return false;
+/** Refusal for enqueue calls while stored recovery is unresolved; null when allowed. */
+function refuseIfRecoveryUnresolved(): EnqueueResult | null {
+  if (!manifestRecoveryUnresolved) return null;
+  const reason = recoveryDamaged
+    ? RECOVERY_DAMAGED_MESSAGE
+    : RECOVERY_UNRESOLVED_MESSAGE;
+  logActivity(reason, "warning");
+  showToast(reason, { type: "warning" });
+  return { accepted: false, count: 0, reason };
 }
 
 function isCanonicalFingerprint(value: unknown): value is string {
@@ -1127,6 +1152,7 @@ function parseQueueManifest(
             : undefined,
         failed: row.failed === true,
         error: typeof row.error === "string" ? row.error : undefined,
+        retryable: row.retryable === false ? false : undefined,
         legacyConnectionUnbound:
           (version < 4 || row.legacyConnectionUnbound === true) &&
           !(
@@ -1227,6 +1253,15 @@ function discardClearedRecoveryState(removed: TransferItem[]): void {
 
 function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
   const resumable = item.resumable === true;
+  // Parts already completed before the restart stay complete in the row.
+  const totalParts =
+    item.totalParts && item.totalParts > 0 ? item.totalParts : 0;
+  const completedParts =
+    totalParts > 0 && item.completedParts
+      ? Math.min(item.completedParts, totalParts)
+      : 0;
+  const seededProgress =
+    totalParts > 0 ? (completedParts / totalParts) * 100 : 0;
   const checkpointId =
     typeof item.checkpointId === "string" && item.checkpointId.length > 0
       ? item.checkpointId
@@ -1259,7 +1294,7 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
         ? item.error
         : "Transfer failed before the previous session ended."
       : undefined,
-    progress: 0,
+    progress: seededProgress,
     totalBytes: item.totalBytes,
     attempt: 1,
     maxAttempts: Math.max(maxAttemptsFromSettings(), item.maxAttempts),
@@ -1288,7 +1323,99 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
     connectionId: item.connectionId,
     connectionIdentity: item.connectionIdentity,
     legacyConnectionUnbound: item.legacyConnectionUnbound,
+    retryable: item.retryable === false ? false : undefined,
   };
+}
+
+type RecoveryDecision = "resume" | "later" | "discard";
+
+interface RecoveryCounts {
+  toResume: number;
+  failed: number;
+  awaitingMoves: number;
+}
+
+function countRecoveryItems(items: PersistedTransferItem[]): RecoveryCounts {
+  let failed = 0;
+  let awaitingMoves = 0;
+  for (const row of items) {
+    if (row.failed) failed += 1;
+    if (row.operation === "move" && row.movePhase === "copied") {
+      awaitingMoves += 1;
+    }
+  }
+  // Failed rows come back as failed, not as resumable work.
+  return { toResume: items.length - failed, failed, awaitingMoves };
+}
+
+/**
+ * Startup prompt for work left by the last session. Escape and "Decide later"
+ * keep everything as it is. Discard needs a second, explicit confirmation.
+ */
+async function askRecoveryDecision(
+  items: PersistedTransferItem[],
+): Promise<RecoveryDecision> {
+  const counts = countRecoveryItems(items);
+  const lines = [`${counts.toResume} to resume.`];
+  if (counts.failed > 0) lines.push(`${counts.failed} failed (need review).`);
+  if (counts.awaitingMoves > 0) {
+    lines.push(
+      `${plural(counts.awaitingMoves, "move")} awaiting source deletion.`,
+    );
+  }
+  for (;;) {
+    const choice = await showChoiceDialog<RecoveryDecision>(
+      "Resume transfers from last session?",
+      lines.join("\n"),
+      [
+        { value: "resume", label: "Resume" },
+        { value: "discard", label: "Discard", danger: true },
+        { value: "later", label: "Decide later" },
+      ],
+      { cancelValue: "later", initialFocus: "resume" },
+    );
+    if (choice !== "discard") return choice;
+    const confirmed = await showConfirm(
+      "Discard recovered transfers?",
+      `Discarding removes resume data and temporary download files for ${plural(items.length, "transfer")}. ` +
+        "It does not delete any objects in storage. Moves that already copied keep their source objects and need manual reconciliation.",
+      { okLabel: "Discard recovery data", cancelLabel: "Keep", okDanger: true },
+    );
+    if (confirmed) return "discard";
+  }
+}
+
+/**
+ * The backend holds recovery data this build cannot read. Keep it unchanged
+ * unless the user explicitly discards it; never report it as a reload problem.
+ */
+async function handleDamagedRecoveryData(session: string): Promise<void> {
+  recoveryDamaged = true;
+  const choice = await showChoiceDialog<"discard" | "keep">(
+    "Transfer recovery data is damaged",
+    "Saved transfer recovery data is malformed or from an unsupported version, and it was kept unchanged. " +
+      "Discarding clears the recovery record so unfinished transfers are not resumed. No objects in storage are changed; temporary files from unfinished downloads may remain on disk.",
+    [
+      { value: "discard", label: "Discard recovery data", danger: true },
+      { value: "keep", label: "Keep for repair" },
+    ],
+    { cancelValue: "keep", initialFocus: "keep" },
+  );
+  if (choice !== "discard") {
+    logActivity(RECOVERY_DAMAGED_MESSAGE, "warning");
+    return;
+  }
+  const confirmed = await showConfirm(
+    "Discard damaged recovery data?",
+    "This cannot be undone. The unreadable recovery record will be deleted.",
+    { okLabel: "Discard recovery data", cancelLabel: "Keep", okDanger: true },
+  );
+  if (!confirmed) {
+    logActivity(RECOVERY_DAMAGED_MESSAGE, "warning");
+    return;
+  }
+  await invoke("clear_transfer_manifest", { recoverySession: session });
+  completeRecoveryHydration(session, null);
 }
 
 function completeRecoveryHydration(
@@ -1298,6 +1425,7 @@ function completeRecoveryHydration(
   recoverySession = hydratedRecoverySession;
   manifestHydrated = true;
   manifestRecoveryUnresolved = false;
+  recoveryDamaged = false;
   lastPersistedManifestJson = persistedManifestJson;
   recoveredQueue = true;
 }
@@ -1335,9 +1463,8 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
   let manifest = parseQueueManifest(manifestRaw);
   const backendHasManifest = manifestRaw.trim().length > 0;
   if (backendHasManifest && !manifest) {
-    throw new Error(
-      "Stored transfer recovery data is malformed or from an unsupported future version; it was retained for repair.",
-    );
+    await handleDamagedRecoveryData(hydratedRecoverySession);
+    return;
   }
   let legacyManifestMigrated = false;
   if (!manifest && hydration.legacy_import_allowed) {
@@ -1411,23 +1538,18 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     return;
   }
 
-  const tempCleanupFailures = await cleanupRecoveredTempFiles(manifest.items);
-  if (tempCleanupFailures.length > 0) {
-    // Leftover scratch only costs disk space: its lease stays on disk and the
-    // recovery sweep reclaims it later. Refusing to recover would instead
-    // block every transfer until the files could be removed.
-    const message = `Could not clean ${tempCleanupFailures.length} interrupted download(s); their scratch files will be retried later.`;
-    logActivity(`${message} ${tempCleanupFailures.join("; ")}`, "warning");
-    showToast(message, { type: "warning" });
+  const decision = await askRecoveryDecision(manifest.items);
+  if (decision === "later") {
+    // Nothing runs and the manifest stays durable. Queue entry points refuse
+    // until the user resumes or discards the pending work.
+    logActivity(
+      `${plural(manifest.items.length, "pending transfer")} kept for later. ${RECOVERY_UNRESOLVED_MESSAGE}`,
+      "warning",
+    );
+    return;
   }
 
-  const shouldResume = await showConfirm(
-    "Resume Transfers",
-    `Resume ${manifest.items.length} pending transfer(s) from last session?`,
-    { okLabel: "Resume", cancelLabel: "Discard" },
-  );
-
-  if (!shouldResume) {
+  if (decision === "discard") {
     const failures: string[] = [];
     for (const row of manifest.items) {
       try {
@@ -1450,6 +1572,18 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     return;
   }
 
+  // Resume: only now may non-resumable scratch be reclaimed. Before the
+  // decision the user's partial downloads are left exactly as they were.
+  const tempCleanupFailures = await cleanupRecoveredTempFiles(manifest.items);
+  if (tempCleanupFailures.length > 0) {
+    // Leftover scratch only costs disk space: its lease stays on disk and the
+    // recovery sweep reclaims it later. Refusing to recover would instead
+    // block every transfer until the files could be removed.
+    const message = `Could not clean ${tempCleanupFailures.length} interrupted download(s); their scratch files will be retried later.`;
+    logActivity(`${message} ${tempCleanupFailures.join("; ")}`, "warning");
+    showToast(message, { type: "warning" });
+  }
+
   for (const row of manifest.items) {
     queue.push(restoreItemFromManifest(row));
   }
@@ -1466,6 +1600,7 @@ interface TransferProgressPayload {
   attempt?: number;
   phase?:
     | "running"
+    | "preparing"
     | "retry_wait"
     | "verifying"
     | "paused"
@@ -1504,6 +1639,7 @@ function applyProgressPayload(
   }
   if (
     payload.phase === "running" ||
+    payload.phase === "preparing" ||
     payload.phase === "retry_wait" ||
     payload.phase === "verifying" ||
     payload.phase === "paused" ||
@@ -1723,8 +1859,7 @@ async function resumeRecoveredTransfersOnce(): Promise<void> {
 }
 
 export async function initTransferQueueUI(): Promise<void> {
-  syncTransferVisibility();
-  updateBadge();
+  updateQueueChrome();
   syncOfflineHold();
 
   if (!offlineListenersAttached && typeof window !== "undefined") {
@@ -1785,16 +1920,22 @@ export async function initTransferQueueUI(): Promise<void> {
       rect.left,
       rect.bottom + 4,
       [
-        { label: "Prioritize selected", action: "prioritize" },
-        { label: "Retry failed", action: "retry-failed" },
+        {
+          label: "Prioritize selected",
+          action: "prioritize",
+          ...prioritizeAvailability(),
+        },
+        { label: TRANSFER_TEXT.retryFailed, action: "retry-failed" },
         { label: "Retry skipped", action: "retry-skipped" },
-        { label: "Clear finished", action: "clear-non-active" },
+        { label: TRANSFER_TEXT.clearCompleted, action: "clear-completed" },
+        { label: TRANSFER_TEXT.clearFailed, action: "clear-failed" },
       ],
       (action) => {
         if (action === "prioritize") prioritizeSelectedTransfer();
         else if (action === "retry-failed") retryFailedTransfers();
         else if (action === "retry-skipped") retrySkippedTransfers();
-        else if (action === "clear-non-active") clearNonActiveTransfers();
+        else if (action === "clear-completed") clearCompletedTransfers();
+        else if (action === "clear-failed") void clearFailedTransfers();
       },
     );
   });
@@ -1808,12 +1949,30 @@ export async function initTransferQueueUI(): Promise<void> {
       const id = Number(row.dataset.id);
       if (!id) return;
 
-      if (target.closest(".transfer-cancel")) {
+      const action = target.closest<HTMLElement>("button[data-action]")?.dataset
+        .action;
+      if (action === "cancel") {
         void cancelTransferItem(id);
         return;
       }
-      if (target.closest(".transfer-pause")) {
+      if (action === "pause") {
         togglePauseTransferItem(id);
+        return;
+      }
+      if (action === "retry") {
+        retryTransfer(id);
+        return;
+      }
+      if (action === "remove") {
+        void removeTransfer(id);
+        return;
+      }
+      if (action === "copy-error") {
+        void copyTransferError(id);
+        return;
+      }
+      if (action === "reveal") {
+        void revealTransferDestination(id);
         return;
       }
       selectedTransferId = id;
@@ -1903,23 +2062,97 @@ function togglePauseTransferItem(id: number): void {
   writeQueueManifest();
 }
 
+function isAmbiguousMove(item: TransferItem): boolean {
+  return (
+    item.operation === "move" &&
+    item.receipts?.some((receipt) => receipt.ownership_ambiguous) === true
+  );
+}
+
+function operationLabel(item: TransferItem): string {
+  if (item.operation === "download") return "Download";
+  if (item.operation === "upload") return "Upload";
+  if (item.operation === "copy") return "Copy";
+  return "Move";
+}
+
+/** The row's source and destination, for activity entries. */
+function describeTransfer(item: TransferItem): string {
+  if (item.operation === "download") {
+    return `${item.bucket}/${item.key} to ${item.destination ?? item.fileName}`;
+  }
+  if (item.operation === "copy" || item.operation === "move") {
+    const from = `${item.sourceBucket ?? item.bucket}/${item.sourceKey ?? item.sourcePrefix ?? item.key}`;
+    const to = `${item.destinationBucket ?? item.bucket}/${item.destinationKey ?? item.destinationPrefix ?? ""}`;
+    return `${from} to ${to}`;
+  }
+  return `${item.fileName} to ${item.bucket}/${item.key}`;
+}
+
+/** Why a queued row is not moving, shown in its status text. */
+function rowHoldLabel(item: TransferItem): string | null {
+  if (item.status !== "queued" || item.paused) return null;
+  if (queuePaused) return TRANSFER_TEXT.queuePaused;
+  if (offlineHoldActive()) return "Waiting for network";
+  if (state.transfersHeldForDisconnect) return "Waiting to reconnect";
+  const endpoint = awaitingEndpoint();
+  if (endpoint !== null) return `Connect to ${endpoint} to resume`;
+  return null;
+}
+
+/** Recovered work exists but this session has no connection to run it. */
+function awaitingEndpoint(): string | null {
+  if (state.connected) return null;
+  const hasWork = queue.some(
+    (item) => item.status === "queued" || item.status === "uploading",
+  );
+  if (!hasWork) return null;
+  return state.endpoint || "your storage";
+}
+
+function rowRenderOptions(item: TransferItem): {
+  selectedTransferId: number | null;
+  holdLabel: string | null;
+} {
+  return {
+    selectedTransferId,
+    holdLabel: rowHoldLabel(item),
+  };
+}
+
+function logCancelled(item: TransferItem): void {
+  logActivity(`Cancelled ${describeTransfer(item)}.`, "info");
+}
+
+/**
+ * OS notification for work that needs the user while the window is in the
+ * background. Best effort: the in-app state is already correct without it.
+ */
+async function notifyIfUnfocused(title: string, body: string): Promise<void> {
+  if (!state.currentSettings.desktopNotifications) return;
+  if (typeof document === "undefined") return;
+  if (document.visibilityState === "visible" && document.hasFocus()) return;
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === "granted";
+    if (granted) sendNotification({ title, body });
+  } catch {
+    // No notification plugin or permission; nothing else to do.
+  }
+}
+
 export function retryFailedTransfers(): void {
   let ambiguousMovesHeld = 0;
   for (const item of queue) {
-    if (item.status !== "error") continue;
-    if (
-      item.operation === "move" &&
-      item.receipts?.some((receipt) => receipt.ownership_ambiguous)
-    ) {
+    if (item.status !== "error" || item.retryable === false) continue;
+    if (isAmbiguousMove(item)) {
       ambiguousMovesHeld += 1;
       continue;
     }
     resetForRetry(item, { clearPause: true });
   }
   if (ambiguousMovesHeld > 0) {
-    const message =
-      `${ambiguousMovesHeld} move(s) remain failed because destination ownership is ambiguous. ` +
-      "Inspect both objects and clear those rows only after reconciling them.";
+    const message = `${plural(ambiguousMovesHeld, "move")} still failed because destination ownership is unclear. Inspect both objects, then remove those rows.`;
     logActivity(message, "warning");
     showToast(message, { type: "warning", duration: 0 });
   }
@@ -1942,14 +2175,11 @@ export function retrySkippedTransfers(): void {
   );
 }
 
-export function clearNonActiveTransfers(): void {
-  const removed = queue.filter(
-    (item) => item.status !== "queued" && item.status !== "uploading",
-  );
+/** Drop rows from the queue and any recovery state they still hold. */
+function dropRows(removed: TransferItem[]): void {
   for (const item of removed) item.browserFile = undefined;
-  queue = queue.filter(
-    (item) => item.status === "queued" || item.status === "uploading",
-  );
+  const removedIds = new Set(removed.map((item) => item.id));
+  queue = queue.filter((item) => !removedIds.has(item.id));
   discardClearedRecoveryState(removed);
   if (
     selectedTransferId != null &&
@@ -1957,8 +2187,152 @@ export function clearNonActiveTransfers(): void {
   ) {
     selectedTransferId = null;
   }
+  renderQueue();
+  writeQueueManifest();
+  resetConflictApplyAllWhenIdle();
+}
+
+/** Completed rows hold nothing to recover, so this removes them without asking. */
+export function clearCompletedTransfers(): void {
+  const removed = queue.filter((item) => item.status === "done");
+  if (removed.length > 0) dropRows(removed);
+  if (queue.length === 0) {
+    hideTransferQueue();
+  }
+}
+
+/**
+ * Failed rows may hold resume data, so removing them needs a confirmation.
+ * Moves whose ownership is unclear stay until both objects are inspected.
+ */
+export async function clearFailedTransfers(): Promise<void> {
+  const ambiguous = queue.filter(
+    (item) => item.status === "error" && isAmbiguousMove(item),
+  ).length;
+  const removable = queue.filter(
+    (item) => item.status === "error" && !isAmbiguousMove(item),
+  );
+  if (ambiguous > 0) {
+    const message = `${plural(ambiguous, "move")} kept because destination ownership is unclear. Inspect both objects, then remove those rows.`;
+    logActivity(message, "warning");
+    showToast(message, { type: "warning" });
+  }
+  if (removable.length === 0) return;
+
+  const confirmed = await showConfirm(
+    "Clear failed transfers?",
+    `Remove ${plural(removable.length, "failed transfer")} from the list? Their saved resume data is discarded. No objects in storage are changed.`,
+    { okLabel: TRANSFER_TEXT.remove, cancelLabel: "Keep", okDanger: true },
+  );
+  if (!confirmed) return;
+
+  // The dialog was open; only rows that are still failed are removed.
+  const current = queue.filter(
+    (item) =>
+      item.status === "error" &&
+      !isAmbiguousMove(item) &&
+      removable.some((row) => row.id === item.id),
+  );
+  if (current.length > 0) dropRows(current);
+}
+
+/** Remove one finished, failed or cancelled row. Active rows are cancelled instead. */
+export async function removeTransfer(id: number): Promise<void> {
+  const item = queue.find((row) => row.id === id);
+  if (!item) return;
+  if (isAmbiguousMove(item)) {
+    const message = `Destination ownership is unclear, so ${item.fileName} stays until both objects are inspected.`;
+    logActivity(message, "warning");
+    showToast(message, { type: "warning" });
+    return;
+  }
+  if (item.status === "queued" || item.status === "uploading") return;
+  if (item.status === "error") {
+    const confirmed = await showConfirm(
+      "Remove failed transfer?",
+      `Remove ${item.fileName} from the list? Its saved resume data is discarded. No objects in storage are changed.`,
+      { okLabel: TRANSFER_TEXT.remove, cancelLabel: "Keep", okDanger: true },
+    );
+    if (!confirmed) return;
+  }
+  // The dialog may have been open while the row changed.
+  const current = queue.find((row) => row.id === id);
+  if (
+    !current ||
+    current.status === "queued" ||
+    current.status === "uploading"
+  ) {
+    return;
+  }
+  dropRows([current]);
+}
+
+/** Put one failed row back in the queue. Other rows are left alone. */
+export function retryTransfer(id: number): void {
+  const item = queue.find((row) => row.id === id);
+  if (item?.status !== "error") return;
+  if (item.retryable === false || isAmbiguousMove(item)) return;
+  resetForRetry(item, { clearPause: true });
   queueRender();
   writeQueueManifest();
+  void processQueue().catch((err) =>
+    logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
+  );
+}
+
+async function copyTransferError(id: number): Promise<void> {
+  const item = queue.find((row) => row.id === id);
+  if (!item?.error) return;
+  try {
+    await navigator.clipboard.writeText(item.error);
+    showToast("Error copied.", { type: "success" });
+  } catch {
+    showToast("Could not copy the error.", { type: "error" });
+  }
+}
+
+/** Show a completed download's file in the file manager, using the destination stored on its row. */
+async function revealTransferDestination(id: number): Promise<void> {
+  const item = queue.find((row) => row.id === id);
+  if (
+    !item?.destination ||
+    item.operation !== "download" ||
+    item.status !== "done"
+  ) {
+    return;
+  }
+  try {
+    await invoke("reveal_local_path", { path: item.destination });
+  } catch (err) {
+    showToast(
+      `Could not show ${item.fileName} in its folder: ${friendlyError(err)}`,
+      { type: "error" },
+    );
+  }
+}
+
+/** Whether "Prioritize selected" applies, and the reason when it does not. */
+function prioritizeAvailability(): {
+  disabled: boolean;
+  disabledReason?: string;
+} {
+  if (selectedTransferId == null) {
+    return {
+      disabled: true,
+      disabledReason: "Select a queued transfer to move it to the front.",
+    };
+  }
+  const index = queue.findIndex((item) => item.id === selectedTransferId);
+  if (index < 0) {
+    return { disabled: true, disabledReason: "The selected transfer is gone." };
+  }
+  if (index === 0) {
+    return {
+      disabled: true,
+      disabledReason: "It is already first in the queue.",
+    };
+  }
+  return { disabled: false };
 }
 
 export function prioritizeSelectedTransfer(): void {
@@ -1988,6 +2362,8 @@ export function showTransferQueue(): void {
 
 function maybeShowTransfersHintToast(): void {
   if (isTransfersHintDismissed()) return;
+  // The drawer already shows this queue; a toast pointing at it would repeat it.
+  if (isDrawerOpen() && getActiveTab() === "transfers") return;
   void markTransfersHintDismissed();
   showToast("View progress in Transfers (status bar icon).", {
     type: "info",
@@ -2003,29 +2379,6 @@ export function hideTransferQueue(): void {
 
 export function toggleTransferQueue(): void {
   toggleDrawer("transfers");
-}
-
-export function clearCompletedTransfers(): void {
-  const removed = queue.filter(
-    (item) => item.status !== "queued" && item.status !== "uploading",
-  );
-  for (const item of removed) item.browserFile = undefined;
-  queue = queue.filter(
-    (item) => item.status === "queued" || item.status === "uploading",
-  );
-  discardClearedRecoveryState(removed);
-  if (
-    selectedTransferId != null &&
-    !queue.some((item) => item.id === selectedTransferId)
-  ) {
-    selectedTransferId = null;
-  }
-  renderQueue();
-  writeQueueManifest();
-  if (queue.length === 0) {
-    hideTransferQueue();
-  }
-  resetConflictApplyAllWhenIdle();
 }
 
 export interface TransferEnqueueTarget {
@@ -2084,8 +2437,10 @@ export function enqueueFiles(
   files: FileList | File[],
   targetPrefix: string,
   target?: TransferEnqueueTarget,
-): void {
-  if (!canMutateTransferQueue()) return;
+): EnqueueResult {
+  const refusal = refuseIfRecoveryUnresolved();
+  if (refusal) return refusal;
+  const queuedBefore = queue.length;
   const enqueueTarget = resolveEnqueueTarget(target);
   const bucket = enqueueTarget.bucket;
   const allFiles = Array.from(files);
@@ -2129,7 +2484,7 @@ export function enqueueFiles(
 
   if (allFiles.length > 0) {
     logActivity(
-      `Queued ${allFiles.length} upload(s) to ${targetPrefix || "/"}.`,
+      `Queued ${plural(allFiles.length, "upload")} to ${targetPrefix || "/"}.`,
       "info",
     );
   }
@@ -2140,14 +2495,17 @@ export function enqueueFiles(
   void processQueue().catch((err) =>
     logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
   );
+  return { accepted: true, count: queue.length - queuedBefore };
 }
 
 export function enqueuePaths(
   paths: string[],
   targetPrefix: string,
   target?: TransferEnqueueTarget,
-): void {
-  if (!canMutateTransferQueue()) return;
+): EnqueueResult {
+  const refusal = refuseIfRecoveryUnresolved();
+  if (refusal) return refusal;
+  const queuedBefore = queue.length;
   const enqueueTarget = resolveEnqueueTarget(target);
   const bucket = enqueueTarget.bucket;
   const maxAttempts = maxAttemptsFromSettings();
@@ -2187,7 +2545,7 @@ export function enqueuePaths(
 
   if (paths.length > 0) {
     logActivity(
-      `Queued ${paths.length} upload(s) to ${targetPrefix || "/"}.`,
+      `Queued ${plural(paths.length, "upload")} to ${targetPrefix || "/"}.`,
       "info",
     );
   }
@@ -2198,14 +2556,17 @@ export function enqueuePaths(
   void processQueue().catch((err) =>
     logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
   );
+  return { accepted: true, count: queue.length - queuedBefore };
 }
 
 export function enqueueFolderEntries(
   entries: FolderUploadEntry[],
   targetPrefix: string,
   target?: TransferEnqueueTarget,
-): void {
-  if (!canMutateTransferQueue()) return;
+): EnqueueResult {
+  const refusal = refuseIfRecoveryUnresolved();
+  if (refusal) return refusal;
+  const queuedBefore = queue.length;
   const enqueueTarget = resolveEnqueueTarget(target);
   const bucket = enqueueTarget.bucket;
   const maxAttempts = maxAttemptsFromSettings();
@@ -2251,9 +2612,10 @@ export function enqueueFolderEntries(
     });
   }
 
-  if (entries.length > 0) {
+  const queued = queue.length - queuedBefore;
+  if (queued > 0) {
     logActivity(
-      `Queued ${entries.length} file(s) for folder upload to ${targetPrefix || "/"}.`,
+      `Queued ${plural(queued, "file")} for folder upload to ${targetPrefix || "/"}.`,
       "info",
     );
   }
@@ -2264,13 +2626,16 @@ export function enqueueFolderEntries(
   void processQueue().catch((err) =>
     logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
   );
+  return { accepted: true, count: queue.length - queuedBefore };
 }
 
 export function enqueueDownloads(
   entries: DownloadQueueEntry[],
   target?: TransferEnqueueTarget,
-): void {
-  if (!canMutateTransferQueue()) return;
+): EnqueueResult {
+  const refusal = refuseIfRecoveryUnresolved();
+  if (refusal) return refusal;
+  const queuedBefore = queue.length;
   const enqueueTarget = resolveEnqueueTarget(target);
   const maxAttempts = maxAttemptsFromSettings();
   const effective = getEffectiveTransferSettings();
@@ -2317,8 +2682,9 @@ export function enqueueDownloads(
     });
   }
 
-  if (entries.length > 0) {
-    logActivity(`Queued ${entries.length} download(s).`, "info");
+  const queued = queue.length - queuedBefore;
+  if (queued > 0) {
+    logActivity(`Queued ${plural(queued, "download")}.`, "info");
   }
 
   renderQueue();
@@ -2327,13 +2693,16 @@ export function enqueueDownloads(
   void processQueue().catch((err) =>
     logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
   );
+  return { accepted: true, count: queue.length - queuedBefore };
 }
 
 export function enqueueCopyMoveEntries(
   entries: CopyMoveQueueEntry[],
   target?: TransferEnqueueTarget,
-): void {
-  if (!canMutateTransferQueue()) return;
+): EnqueueResult {
+  const refusal = refuseIfRecoveryUnresolved();
+  if (refusal) return refusal;
+  const queuedBefore = queue.length;
   const enqueueTarget = resolveEnqueueTarget(target);
   const maxAttempts = maxAttemptsFromSettings();
   for (const entry of entries) {
@@ -2383,8 +2752,12 @@ export function enqueueCopyMoveEntries(
     queue.push(item);
   }
 
-  if (entries.length > 0) {
-    logActivity(`Queued ${entries.length} copy/move transfer(s).`, "info");
+  const queued = queue.length - queuedBefore;
+  if (queued > 0) {
+    logActivity(
+      `Queued ${plural(queued, "copy or move", "copies or moves")}.`,
+      "info",
+    );
   }
 
   renderQueue();
@@ -2393,6 +2766,7 @@ export function enqueueCopyMoveEntries(
   void processQueue().catch((err) =>
     logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
   );
+  return { accepted: true, count: queue.length - queuedBefore };
 }
 
 async function processQueue(): Promise<void> {
@@ -2469,13 +2843,6 @@ async function processQueue(): Promise<void> {
           moveCount += 1;
         }
         if (item.status === "skipped") skippedCount += 1;
-
-        if (completed) {
-          queue = queue.filter((t) => t.id !== item.id);
-          if (selectedTransferId === item.id) {
-            selectedTransferId = null;
-          }
-        }
       } catch (err) {
         const errorText = normalizeError(err);
         const pauseCancelled = item.pauseCancelInFlight === true;
@@ -2484,20 +2851,23 @@ async function processQueue(): Promise<void> {
           try {
             await discardTransferRecoveryState(item);
             markCancelled(item, "finalizing");
+            logCancelled(item);
           } catch (cleanupErr) {
             if (isNothingToDiscardError(cleanupErr)) {
               markCancelled(item, "finalizing");
+              logCancelled(item);
             } else {
+              // Cleanup failed: the row is held as an error, so it is counted.
               const cleanupMessage = `Cancellation cleanup failed: ${normalizeError(cleanupErr)}`;
               holdAfterCancelFailure(item, cleanupMessage);
+              errorCount += 1;
               logActivity(
-                `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(cleanupErr)}`,
+                `Cancellation cleanup failed for ${describeTransfer(item)}: ${normalizeError(cleanupErr)}`,
                 "error",
               );
               showToast(cleanupMessage, { type: "error", duration: 0 });
             }
           }
-          errorCount += 1;
         } else if (
           state.transfersHeldForDisconnect &&
           /cancel|not connected|connection changed/i.test(errorText)
@@ -2513,18 +2883,19 @@ async function processQueue(): Promise<void> {
           // run again instead of reporting the expected cancellation.
           requeueAfterPause(item);
         } else {
-          markFailed(item, errorText);
+          // Providers that cannot enforce DeleteObject If-Match make a move
+          // unsafe to retry automatically. Keep the source and say so plainly.
+          const refusedByProvider =
+            item.operation === "move" &&
+            PROVIDER_CANNOT_DELETE_PATTERN.test(errorText);
+          if (refusedByProvider) item.retryable = false;
+          markFailed(
+            item,
+            refusedByProvider ? PROVIDER_CANNOT_DELETE_MESSAGE : errorText,
+          );
           errorCount += 1;
-          const opLabel =
-            item.operation === "download"
-              ? "Download"
-              : item.operation === "upload"
-                ? "Upload"
-                : item.operation === "copy"
-                  ? "Copy"
-                  : "Move";
           logActivity(
-            `${opLabel} failed for ${item.fileName}: ${errorText}`,
+            `${operationLabel(item)} failed for ${describeTransfer(item)}: ${refusedByProvider ? PROVIDER_CANNOT_DELETE_MESSAGE : friendlyError(errorText)}`,
             "error",
           );
         }
@@ -2558,6 +2929,15 @@ async function processQueue(): Promise<void> {
       errorCount > 0 ||
       skippedCount > 0)
   ) {
+    const finished = uploadCount + downloadCount + copyCount + moveCount;
+    if (errorCount > 0 || finished > 0) {
+      void notifyIfUnfocused(
+        "Transfers finished",
+        errorCount > 0
+          ? `${plural(errorCount, "transfer")} failed. Open Transfers to review.`
+          : `${plural(finished, "transfer")} finished.`,
+      );
+    }
     onComplete({
       hadUpload: completedUploadThisRun,
       hadDownload: completedDownloadThisRun,
@@ -2606,6 +2986,7 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
     }
     item.attempt = attempt;
     item.phase = "running";
+    item.retryAt = undefined;
     item.speedBps = 0;
     item.etaSeconds = null;
     queueRender();
@@ -2649,28 +3030,18 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
           }
         }
       }
-      if (outcome === "skip" || outcome === "cancel") {
-        const cancelled = outcome === "cancel";
-        markSkipped(
-          item,
-          cancelled
-            ? "Cancelled (unconditional write not authorized)"
-            : "Skipped (destination exists)",
-        );
+      if (outcome === "cancel") {
+        markCancelled(item);
         logActivity(
-          `${
-            item.operation === "download"
-              ? "Download"
-              : item.operation === "upload"
-                ? "Upload"
-                : item.operation === "copy"
-                  ? "Copy"
-                  : "Move"
-          } ${cancelled ? "cancelled" : "skipped"} for ${item.fileName}: ${
-            cancelled
-              ? "unconditional write was not authorized"
-              : "destination exists"
-          }.`,
+          `Cancelled ${describeTransfer(item)}: unconditional write was not authorized.`,
+          "warning",
+        );
+        return false;
+      }
+      if (outcome === "skip") {
+        markSkipped(item, "Skipped — destination exists");
+        logActivity(
+          `${operationLabel(item)} skipped for ${describeTransfer(item)}: destination exists.`,
           "warning",
         );
         return false;
@@ -2690,13 +3061,13 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
       markDone(item);
 
       if (item.operation === "download") {
-        logActivity(`Downloaded ${item.fileName}.`, "success");
+        logActivity(`Downloaded ${describeTransfer(item)}.`, "success");
       } else if (item.operation === "upload") {
-        logActivity(`Uploaded ${item.fileName} to ${item.key}.`, "success");
+        logActivity(`Uploaded ${describeTransfer(item)}.`, "success");
       } else if (item.operation === "copy") {
-        logActivity(`Copied ${item.fileName}.`, "success");
+        logActivity(`Copied ${describeTransfer(item)}.`, "success");
       } else {
-        logActivity(`Moved ${item.fileName}.`, "success");
+        logActivity(`Moved ${describeTransfer(item)}.`, "success");
       }
       if (item.checkpointId && recoverySession) {
         const capturedRecoverySession = recoverySession;
@@ -2713,21 +3084,14 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
       if (attempt < maxAttempts && shouldRetryError(err)) {
         const waitMs = computeRetryDelayMs(attempt);
         item.phase = "retry_wait";
-        item.error = `Retrying in ${waitMs}ms`;
+        item.retryAt = Date.now() + waitMs;
         queueRender();
         logActivity(
-          `${
-            item.operation === "download"
-              ? "Download"
-              : item.operation === "upload"
-                ? "Upload"
-                : item.operation === "copy"
-                  ? "Copy"
-                  : "Move"
-          } retry ${attempt}/${maxAttempts - 1} for ${item.fileName} in ${waitMs}ms.`,
+          `${operationLabel(item)} retry ${attempt} of ${maxAttempts - 1} for ${describeTransfer(item)}: retrying in ${Math.ceil(waitMs / 1000)} s.`,
           "warning",
         );
         await delayCancellable(waitMs, item);
+        item.retryAt = undefined;
         if (item.cancelRequested) {
           throw new Error("Cancelled");
         }
@@ -3112,26 +3476,39 @@ async function resolveConflict(
               item.destinationBucket ?? item.bucket
             }/${item.destinationKey ?? item.destinationPrefix ?? item.fileName}`
           : `${item.bucket}/${item.key}`;
+    void notifyIfUnfocused(
+      "S3 Sidekick needs a decision",
+      `${target} already exists.`,
+    );
     const replace = await showConfirm(
-      "Transfer Conflict",
+      "Transfer conflict",
       `${target} already exists. Replace it?`,
       {
-        okLabel: "Replace",
-        cancelLabel: "Skip",
+        okLabel: TRANSFER_TEXT.replace,
+        cancelLabel: TRANSFER_TEXT.skip,
         okDanger: true,
       },
     );
 
     const decision: "skip" | "replace" = replace ? "replace" : "skip";
 
-    const remaining = queue.filter(
-      (entry) => entry.status === "queued" || entry.status === "uploading",
+    // Only offer "apply to all" when other rows are still waiting, and say how many.
+    const others = queue.filter(
+      (entry) =>
+        entry !== item &&
+        (entry.status === "queued" || entry.status === "uploading"),
     ).length;
-    if (remaining > 1) {
+    if (others > 0) {
       const applyAll = await showConfirm(
-        "Apply Choice",
-        `Apply "${decision}" to remaining transfer conflicts in this batch?`,
-        { okLabel: "Apply to all", cancelLabel: "This one only" },
+        TRANSFER_TEXT.applyToAllRemaining,
+        remainingConflictsQuestion(others),
+        {
+          okLabel:
+            decision === "replace"
+              ? `${TRANSFER_TEXT.replace} all`
+              : `${TRANSFER_TEXT.skip} all`,
+          cancelLabel: TRANSFER_TEXT.thisOneOnly,
+        },
       );
       if (applyAll) {
         conflictApplyAll = decision;
@@ -3184,246 +3561,6 @@ async function checkConflictExists(
   });
 }
 
-interface TransferRenderFocus {
-  id: number;
-  controlSelector: ".transfer-pause" | ".transfer-cancel";
-}
-
-function captureTransferRenderFocus(
-  list: HTMLElement,
-): TransferRenderFocus | null {
-  const active = document.activeElement;
-  if (!(active instanceof HTMLElement) || !list.contains(active)) return null;
-  const control = active.closest<HTMLElement>(
-    ".transfer-pause, .transfer-cancel",
-  );
-  const row = control?.closest<HTMLElement>(".transfer-item");
-  const id = Number(row?.dataset.id);
-  if (!control || !Number.isSafeInteger(id) || id <= 0) return null;
-  return {
-    id,
-    controlSelector: control.classList.contains("transfer-pause")
-      ? ".transfer-pause"
-      : ".transfer-cancel",
-  };
-}
-
-function restoreTransferRenderFocus(
-  list: HTMLElement,
-  focus: TransferRenderFocus | null,
-): void {
-  if (!focus) return;
-  const row = list.querySelector<HTMLElement>(
-    `.transfer-item[data-id="${focus.id}"]`,
-  );
-  const control = row?.querySelector<HTMLElement>(focus.controlSelector);
-  const target = control ?? row ?? list;
-  if (target === row || target === list) target.tabIndex = -1;
-  target.focus({ preventScroll: true });
-}
-
-export function renderTransferRow(t: TransferItem): string {
-  let statusIcon = "";
-  let statusClass = "";
-  if (t.status === "queued") {
-    statusIcon = getIconHtml("clock", {
-      className: "lucide-icon transfer-icon-svg",
-      decorative: true,
-    });
-    statusClass = "transfer-status--queued";
-  } else if (t.status === "uploading") {
-    statusIcon = getIconHtml("refresh-cw", {
-      className: "lucide-icon transfer-icon-svg",
-      decorative: true,
-    });
-    statusClass = "transfer-status--active";
-  } else if (t.status === "done") {
-    statusIcon = getIconHtml("check-circle", {
-      className: "lucide-icon transfer-icon-svg",
-      decorative: true,
-    });
-    statusClass = "transfer-status--done";
-  } else if (t.status === "skipped") {
-    statusIcon = getIconHtml("skip-forward", {
-      className: "lucide-icon transfer-icon-svg",
-      decorative: true,
-    });
-    statusClass = "transfer-status--queued";
-  } else {
-    statusIcon = getIconHtml("alert-circle", {
-      className: "lucide-icon transfer-icon-svg",
-      decorative: true,
-    });
-    statusClass = "transfer-status--error";
-  }
-
-  const progressPct = Math.max(0, Math.min(100, Math.round(t.progress) || 0));
-  // A row is busy only while the backend is actively transferring it. A
-  // pause request can briefly leave a download in the uploading state, so
-  // paused is part of this check as well.
-  const isPaused = t.paused || t.phase === "paused";
-  const isActive = t.status === "uploading" && !isPaused;
-  // Single-PUT uploads emit 0 then 100 with no hook in between, so a
-  // determinate bar would fake progress. Hide that fake 0% while queued or
-  // paused, and use an indeterminate bar only while the upload is running.
-  const isSinglePutUpload =
-    t.operation === "upload" &&
-    t.totalBytes > 0 &&
-    t.totalBytes < MULTIPART_UPLOAD_THRESHOLD_BYTES &&
-    t.progress < 100;
-  const hasStaticPartialProgress =
-    t.totalBytes > 0 && t.progress > 0 && (t.status === "error" || isPaused);
-  const showDeterminate =
-    t.totalBytes > 0 &&
-    ((isActive && !isSinglePutUpload) ||
-      hasStaticPartialProgress ||
-      (t.status === "queued" && !isSinglePutUpload));
-  const showIndeterminate = isActive && !showDeterminate;
-  const progressBusyAttribute = isActive ? ' aria-busy="true"' : "";
-  const progressBar = showDeterminate
-    ? `<div class="transfer-progress-wrap">` +
-      `<div class="transfer-progress" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressPct}"${progressBusyAttribute}><div class="transfer-progress__bar" style="width:${progressPct}%"></div></div>` +
-      `<span class="transfer-progress__label">${progressPct}%</span>` +
-      `</div>`
-    : showIndeterminate
-      ? `<div class="transfer-progress-wrap transfer-progress-wrap--indeterminate">` +
-        `<div class="transfer-progress transfer-progress--indeterminate" role="progressbar" aria-label="${escapeHtml(t.fileName)} progress" aria-busy="true"><div class="transfer-progress__bar"></div></div>` +
-        `</div>`
-      : "";
-  const opLabel =
-    t.operation === "download"
-      ? "Download"
-      : t.operation === "copy"
-        ? "Copy"
-        : t.operation === "move"
-          ? "Move"
-          : "Upload";
-  const target =
-    t.operation === "download"
-      ? (t.destination ?? "")
-      : t.operation === "copy" || t.operation === "move"
-        ? `${t.destinationBucket ?? t.bucket}/${t.destinationKey ?? t.destinationPrefix ?? ""}`
-        : t.key;
-  const source =
-    t.operation === "copy" || t.operation === "move"
-      ? `${t.sourceBucket ?? t.bucket}/${t.sourceKey ?? t.sourcePrefix ?? t.key}`
-      : t.operation === "download"
-        ? `${t.bucket}/${t.key}`
-        : t.filePath || t.fileName;
-  const arrow =
-    t.operation === "download"
-      ? getIconHtml("arrow-left", {
-          className: "lucide-icon transfer-arrow-svg",
-          decorative: true,
-        })
-      : getIconHtml("arrow-right", {
-          className: "lucide-icon transfer-arrow-svg",
-          decorative: true,
-        });
-
-  const attemptLabel =
-    t.maxAttempts > 1
-      ? `<span class="transfer-attempt">Attempt ${t.attempt}/${t.maxAttempts}</span>`
-      : "";
-
-  const stalled =
-    isActive &&
-    t.lastProgressAt !== undefined &&
-    Date.now() - t.lastProgressAt > STALLED_AFTER_MS;
-  const phaseLabel = isActive
-    ? `<span class="transfer-phase${stalled ? " transfer-phase--stalled" : ""}">${
-        stalled
-          ? "Stalled — waiting for data"
-          : t.phase === "retry_wait"
-            ? "Retry wait"
-            : t.phase === "verifying"
-              ? "Verifying"
-              : t.phase === "paused"
-                ? "Paused"
-                : t.phase === "resuming"
-                  ? "Resuming"
-                  : t.phase === "finalizing"
-                    ? "Finalizing"
-                    : "Running"
-      }</span>`
-    : "";
-  const statusLabel =
-    t.status === "done"
-      ? "Completed"
-      : t.status === "error"
-        ? "Failed"
-        : t.status === "skipped"
-          ? "Skipped"
-          : isPaused
-            ? "Paused"
-            : t.status === "queued"
-              ? "Queued"
-              : "";
-  const statusText = statusLabel
-    ? `<span class="transfer-phase transfer-phase--status">${statusLabel}</span>`
-    : "";
-  const speedLabel =
-    isActive && !stalled && t.speedBps > 0
-      ? `<span class="transfer-phase">${escapeHtml(formatSpeedBps(t.speedBps))}</span>`
-      : "";
-  const etaLabel =
-    isActive && !stalled && t.etaSeconds !== null
-      ? `<span class="transfer-phase">ETA ${escapeHtml(formatEtaSeconds(t.etaSeconds))}</span>`
-      : "";
-  const partsLabel =
-    t.totalParts > 0
-      ? `<span class="transfer-phase">Parts ${Math.min(t.completedParts, t.totalParts)}/${t.totalParts}</span>`
-      : "";
-  const rowClass =
-    selectedTransferId === t.id
-      ? "transfer-item transfer-item--selected"
-      : "transfer-item";
-  // In-flight uploads would have to restart from zero if interrupted, so
-  // only expose pause for downloads or transfers not yet running.
-  const canPause =
-    !(t.operation === "upload" && t.status === "uploading" && !t.paused) &&
-    (t.status === "queued" || t.status === "uploading" || t.paused);
-  const pauseButton = canPause
-    ? `<button class="transfer-pause btn--ghost" title="${
-        t.paused ? "Resume" : "Pause"
-      }" aria-label="${t.paused ? "Resume" : "Pause"} transfer">${
-        t.paused ? "▶" : "Ⅱ"
-      }</button>`
-    : "";
-
-  return (
-    `<div class="${rowClass}" data-id="${t.id}">` +
-    `<span class="transfer-status ${statusClass}">${statusIcon}</span>` +
-    `<div class="transfer-main">` +
-    `<div class="transfer-main__row">` +
-    `<span class="transfer-op">${escapeHtml(opLabel)}</span>` +
-    `<span class="transfer-name" title="${escapeHtml(source)}" aria-label="${escapeHtml(source)}">${escapeHtml(t.fileName)}</span>` +
-    (target
-      ? `<span class="transfer-arrow">${arrow}</span>` +
-        `<span class="transfer-key" title="${escapeHtml(target)}" aria-label="${escapeHtml(target)}">${escapeHtml(target)}</span>`
-      : "") +
-    `</div>` +
-    (attemptLabel ||
-    phaseLabel ||
-    statusText ||
-    speedLabel ||
-    etaLabel ||
-    partsLabel
-      ? `<div class="transfer-meta">${statusText}${attemptLabel}${phaseLabel}${speedLabel}${etaLabel}${partsLabel}</div>`
-      : "") +
-    progressBar +
-    (t.status === "error" || t.status === "skipped" || (isPaused && t.error)
-      ? `<span class="transfer-error" title="${escapeHtml(t.error ?? "")}">${escapeHtml(t.error ?? "Error")}</span>`
-      : "") +
-    `</div>` +
-    pauseButton +
-    (t.status === "queued" || t.status === "uploading"
-      ? `<button class="transfer-cancel btn--ghost" title="Cancel" aria-label="Cancel transfer">&times;</button>`
-      : "") +
-    `</div>`
-  );
-}
-
 function queueRender(dirtyTransferId?: number): void {
   if (dirtyTransferId === undefined) {
     fullRenderQueued = true;
@@ -3456,10 +3593,7 @@ function renderTransferRows(ids: readonly number[]): void {
   if (!list) return;
 
   const focus = captureTransferRenderFocus(list);
-  const replacements: Array<{
-    row: HTMLElement;
-    replacement: HTMLElement;
-  }> = [];
+  const patches: Array<{ row: HTMLElement; replacement: HTMLElement }> = [];
   for (const id of ids) {
     const item = queue.find((entry) => entry.id === id);
     const row = list.querySelector<HTMLElement>(
@@ -3471,17 +3605,17 @@ function renderTransferRows(ids: readonly number[]): void {
     }
 
     const template = document.createElement("template");
-    template.innerHTML = renderTransferRow(item);
+    template.innerHTML = renderTransferRow(item, rowRenderOptions(item));
     const replacement = template.content.firstElementChild;
     if (!(replacement instanceof HTMLElement)) {
       renderQueue();
       return;
     }
-    replacements.push({ row, replacement });
+    patches.push({ row, replacement });
   }
 
-  for (const { row, replacement } of replacements) {
-    row.replaceWith(replacement);
+  for (const { row, replacement } of patches) {
+    patchTransferRowElement(row, replacement);
   }
   restoreTransferRenderFocus(list, focus);
   updateQueueChrome();
@@ -3492,163 +3626,34 @@ function renderQueue(): void {
   if (!list) return;
 
   const focus = captureTransferRenderFocus(list);
-  if (queue.length === 0) {
-    list.innerHTML =
-      `<div class="transfer-empty">` +
-      `${getIconHtml("download", { className: "lucide-icon empty-state__icon", decorative: true })}` +
-      `<span>No transfers</span>` +
-      `</div>`;
-  } else {
-    list.innerHTML = queue.map(renderTransferRow).join("");
-  }
+  const template = document.createElement("template");
+  // The empty-queue message sits beside the list, not in it: a list may only
+  // hold list items.
+  template.innerHTML = queue
+    .map((item) => renderTransferRow(item, rowRenderOptions(item)))
+    .join("");
+  reconcileTransferList(list, template.content);
 
   restoreTransferRenderFocus(list, focus);
   updateQueueChrome();
 }
 
-interface QueueAggregates {
-  active: number;
-  running: number;
-  failed: number;
-  skipped: number;
-  attention: number;
-  totalSpeed: number;
-}
-
-function computeQueueAggregates(): QueueAggregates {
-  const aggregates: QueueAggregates = {
-    active: 0,
-    running: 0,
-    failed: 0,
-    skipped: 0,
-    attention: 0,
-    totalSpeed: 0,
-  };
-
-  for (const item of queue) {
-    if (item.status === "queued" || item.status === "uploading") {
-      aggregates.active += 1;
-    }
-    if (item.status === "error") {
-      aggregates.failed += 1;
-      aggregates.attention += 1;
-    } else if (item.status === "skipped") {
-      aggregates.skipped += 1;
-      aggregates.attention += 1;
-    }
-    if (item.status === "uploading") {
-      aggregates.running += 1;
-      aggregates.totalSpeed += Math.max(0, item.speedBps);
-    }
-  }
-
-  return aggregates;
-}
-
 function updateQueueChrome(): void {
-  const aggregates = computeQueueAggregates();
-  updateBadge(aggregates);
-  updateTransferThroughput(aggregates);
-  updateQueueSummary(aggregates);
-  syncTransferVisibility();
-}
-
-function updateQueueSummary(
-  aggregates: QueueAggregates = computeQueueAggregates(),
-): void {
-  const el = document.getElementById("transfer-queue-summary");
-  if (!el) return;
-
-  const parts: string[] = [];
-  // Held rows only say "Queued"; say why the queue is not moving.
-  const waiting = queue.some(
-    (item) => item.status === "queued" && !item.paused,
-  );
-  if (waiting && state.transfersHeldForDisconnect) {
-    parts.push("Waiting to reconnect");
-  } else if (waiting && offlineHoldActive()) {
-    parts.push("Offline — waiting for network");
-  }
-  if (aggregates.active > 0) parts.push(`${aggregates.active} active`);
-  if (aggregates.failed > 0) parts.push(`${aggregates.failed} failed`);
-  if (aggregates.skipped > 0) parts.push(`${aggregates.skipped} skipped`);
-  if (aggregates.totalSpeed > 0) {
-    parts.push(formatSpeedBps(aggregates.totalSpeed));
-  }
-  el.textContent = parts.length > 0 ? parts.join(" · ") : "No active transfers";
-}
-
-function updateBadge(
-  aggregates: QueueAggregates = computeQueueAggregates(),
-): void {
+  const aggregates = computeQueueAggregates(queue);
+  const emptyMessage = document.getElementById("transfer-queue-empty");
+  if (emptyMessage) emptyMessage.hidden = queue.length > 0;
   state.activeTransferCount = aggregates.active;
   state.runningTransferCount = aggregates.running;
-  const badgeText =
-    aggregates.active > 0
-      ? String(aggregates.active)
-      : aggregates.attention > 0
-        ? "!"
-        : "";
-  const badge = document.getElementById("transfer-badge");
-  if (badge) {
-    badge.textContent = badgeText;
-    badge.style.display =
-      aggregates.active > 0 || aggregates.attention > 0 ? "" : "none";
-    badge.classList.toggle(
-      "transfer-badge--alert",
-      aggregates.active === 0 && aggregates.attention > 0,
-    );
-  }
-  const drawerBadge = document.getElementById("drawer-transfer-badge");
-  if (drawerBadge) {
-    drawerBadge.textContent = badgeText;
-    drawerBadge.style.display =
-      aggregates.active > 0 || aggregates.attention > 0 ? "" : "none";
-    drawerBadge.classList.toggle(
-      "drawer-badge--alert",
-      aggregates.active === 0 && aggregates.attention > 0,
-    );
-  }
-  const toggle = document.getElementById("transfer-toggle");
-  if (toggle && (aggregates.active > 0 || aggregates.attention > 0)) {
-    const speedLabel =
-      aggregates.totalSpeed > 0 ? formatSpeedBps(aggregates.totalSpeed) : "";
-    toggle.title = speedLabel
-      ? `Transfers (${aggregates.active} active, ${speedLabel})`
-      : `Transfers (${aggregates.active} active)`;
-  } else if (toggle) {
-    toggle.title = "Transfers";
-  }
-}
-
-function updateTransferThroughput(
-  aggregates: QueueAggregates = computeQueueAggregates(),
-): void {
-  const label =
-    aggregates.totalSpeed > 0 ? formatSpeedBps(aggregates.totalSpeed) : "";
-  const statusEl = document.getElementById("statusbar-throughput");
-  if (statusEl) {
-    statusEl.textContent = label ? `Transfers ${label}` : "";
-  }
-  const drawerEl = document.getElementById("drawer-transfer-throughput");
-  if (drawerEl) {
-    drawerEl.textContent = label ? `Total ${label}` : "";
-  }
-}
-
-function syncTransferVisibility(): void {
-  const toggle = document.getElementById(
-    "transfer-toggle",
-  ) as HTMLButtonElement | null;
-  const hasQueue = queue.length > 0;
-
-  if (toggle) {
-    toggle.hidden = false;
-    toggle.classList.toggle("statusbar__transfer--idle", !hasQueue);
-    if (!hasQueue) {
-      toggle.setAttribute("aria-expanded", "false");
-    }
-  }
+  updateTransferBadges(aggregates);
+  updateTransferThroughput(aggregates);
+  updateQueueSummary(aggregates, {
+    waiting: queue.some((item) => item.status === "queued" && !item.paused),
+    heldForDisconnect: state.transfersHeldForDisconnect,
+    offline: offlineHoldActive(),
+    queuePaused,
+    awaitingEndpoint: awaitingEndpoint(),
+  });
+  syncTransferVisibility(queue.length > 0);
 }
 
 async function cancelTransferItem(id: number): Promise<void> {
@@ -3656,17 +3661,21 @@ async function cancelTransferItem(id: number): Promise<void> {
   if (!item) return;
   item.cancelRequested = true;
   if (item.status === "queued") {
+    // Show "Cancelling" while the recovery state is discarded.
+    renderQueue();
     try {
       await discardTransferRecoveryState(item);
       markCancelled(item);
+      logCancelled(item);
     } catch (err) {
       if (isNothingToDiscardError(err)) {
         markCancelled(item);
+        logCancelled(item);
       } else {
         const cleanupMessage = `Cancellation cleanup failed: ${normalizeError(err)}`;
         holdAfterCancelFailure(item, cleanupMessage);
         logActivity(
-          `Cancellation cleanup failed for ${item.fileName}: ${normalizeError(err)}`,
+          `Cancellation cleanup failed for ${describeTransfer(item)}: ${normalizeError(err)}`,
           "error",
         );
         showToast(cleanupMessage, { type: "error", duration: 0 });
@@ -3674,17 +3683,14 @@ async function cancelTransferItem(id: number): Promise<void> {
     }
     renderQueue();
   } else if (item.status === "uploading") {
-    // Shown before the IPC: an upload's worker can finish its cancel path
-    // before this call returns, and its final "Cancelled" must not be
-    // overwritten afterwards.
-    item.error = "Cancelling...";
+    // Rendered as "Cancelling" before the IPC: the worker can finish its
+    // cancel path before this call returns, and its "Cancelled" must win.
     renderQueue();
     try {
       await invoke("cancel_transfer", { transferId: id });
     } catch (err) {
       item.cancelRequested = false;
-      if (item.status === "uploading") item.error = undefined;
-      const message = `Could not cancel ${item.fileName}: ${normalizeError(err)}`;
+      const message = `Could not cancel ${describeTransfer(item)}: ${friendlyError(err)}`;
       logActivity(message, "error");
       showToast(message, { type: "error" });
       renderQueue();
