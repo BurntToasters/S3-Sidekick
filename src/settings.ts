@@ -1629,8 +1629,9 @@ function wireBookmarkEdit(): void {
   if (!form || form.dataset.wired === "true") return;
   form.dataset.wired = "true";
   form.addEventListener("keydown", (e) => {
-    // Escape is for this form only: it must not also close Settings.
-    if (e.key !== "Escape") return;
+    // Escape is for this form only: it must not also close Settings. A hidden
+    // form can still hold focus (WebKitGTK), so it leaves Escape to Settings.
+    if (e.key !== "Escape" || form.hidden) return;
     e.preventDefault();
     e.stopPropagation();
     hideBookmarkEdit();

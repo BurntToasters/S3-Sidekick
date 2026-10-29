@@ -62,6 +62,15 @@ async function fillCredentials(page: Page): Promise<void> {
   await page.locator("#conn-secret-key").fill("layout-secret-key");
 }
 
+// licenses-cargo.json is generated and gitignored. Without a stub the dev
+// server answers its path with index.html, which fails JSON parsing, so the
+// outcome would depend on whether the checkout ran `npm run licenses`.
+async function stubMissingCargoLicenses(page: Page): Promise<void> {
+  await page.route("**/licenses-cargo.json", (route) =>
+    route.fulfill({ status: 404, body: "" }),
+  );
+}
+
 async function dialogVisible(page: Page): Promise<boolean> {
   return page
     .locator("#dialog-overlay")
@@ -571,6 +580,7 @@ test.describe("connection screen UX", () => {
     page,
   }) => {
     await installLayoutTauriMock(page, {});
+    await stubMissingCargoLicenses(page);
     await page.route("**/licenses.json", (route) =>
       route.fulfill({
         contentType: "application/json",
@@ -617,6 +627,7 @@ test.describe("connection screen UX", () => {
 
   test("a failed license load offers Retry", async ({ page }) => {
     await installLayoutTauriMock(page, {});
+    await stubMissingCargoLicenses(page);
     let attempts = 0;
     await page.route("**/licenses.json", (route) => {
       attempts += 1;

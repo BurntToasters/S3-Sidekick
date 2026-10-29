@@ -228,6 +228,32 @@ test("Escape on the edit form discards the changes and keeps Settings open", asy
   expect(countCalls(calls, "save_bookmarks")).toBe(0);
 });
 
+// WebKitGTK can keep focus on Save after the edit form hides, so the next
+// Escape targets the hidden form. A hidden form must not consume it.
+test("Escape after saving closes Settings even if focus stayed in the hidden form", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, {
+    objectCount: 0,
+    prefixes: [],
+    bookmarks: [ALPHA, BETA],
+  });
+  await page.goto("/");
+  await editAlphaFromSettings(page);
+
+  await page
+    .locator("#bookmark-edit-endpoint")
+    .fill("https://alpha-new.example.com");
+  await page.locator("#bookmark-edit-save").click();
+  await expect(page.locator("#bookmark-edit")).toBeHidden();
+
+  await page.locator("#bookmark-edit-save").dispatchEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+  });
+  await expect(page.locator("#settings-overlay")).not.toHaveClass(/active/);
+});
+
 test("Cancel on the edit form discards the changes without saving", async ({
   page,
 }) => {

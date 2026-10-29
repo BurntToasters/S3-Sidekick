@@ -106,6 +106,9 @@ const cleanup = [];
 const abortController = new AbortController();
 const reportPath = path.join(outDir, "report.json");
 let currentPhase = "initialization";
+// The element the acceptance run is waiting on; a bare WebDriver timeout does
+// not name it.
+let currentAction = null;
 let failure = null;
 let interruption = null;
 let driverProcess;
@@ -198,6 +201,7 @@ function persistReport() {
 function setFailure(error, phase = currentPhase) {
   if (failure === null || error?.kind === "cancelled") {
     failure = normalizedError(error, phase);
+    if (phase === "acceptance" && currentAction) failure.action = currentAction;
   }
   persistReport();
 }
@@ -567,7 +571,10 @@ function captureSessionDiagnostics(error) {
 async function captureAcceptanceDiagnostics() {
   // Connect submitted but main layout never visible. Record error text,
   // button state, and layout display before cleanup. Bounded, never throws.
-  const lines = [`Captured at ${new Date().toISOString()} during acceptance`];
+  const lines = [
+    `Captured at ${new Date().toISOString()} during acceptance`,
+    `Waiting on: ${currentAction ?? "<none>"}`,
+  ];
   try {
     const snapshot = await withDeadline(
       driver.executeScript(() => {
@@ -589,6 +596,17 @@ async function captureAcceptanceDiagnostics() {
             document.getElementById("conn-endpoint")?.value ?? "<absent>",
           url: location.href,
           title: document.title,
+          setupOverlayHidden:
+            document
+              .getElementById("setup-wizard-overlay")
+              ?.hasAttribute("hidden") ?? "<absent>",
+          setupVisibleSections: [
+            ...document.querySelectorAll(
+              ".setup-wizard-step:not([hidden]), .setup-wizard-substep:not([hidden])",
+            ),
+          ].map((el) => el.id),
+          activeElement:
+            document.activeElement?.id || document.activeElement?.tagName,
         };
       }),
       15_000,
@@ -648,6 +666,7 @@ function forwardDriverOutput(channel, chunk) {
 }
 
 async function click(webDriver, id) {
+  currentAction = `click #${id}`;
   const element = await webDriver.wait(
     until.elementLocated(By.id(id)),
     STEP_TIMEOUT_MS,
@@ -657,6 +676,7 @@ async function click(webDriver, id) {
 }
 
 async function type(webDriver, id, value) {
+  currentAction = `type #${id}`;
   const element = await webDriver.wait(
     until.elementLocated(By.id(id)),
     STEP_TIMEOUT_MS,
@@ -677,6 +697,7 @@ async function run(webDriver) {
   if (await autoUpdates.isSelected()) await autoUpdates.click();
   await click(webDriver, "setup-updates-next");
   await click(webDriver, "setup-done-btn");
+  currentAction = "wait for #setup-wizard-overlay to hide";
   const overlay = await webDriver.findElement(By.id("setup-wizard-overlay"));
   await webDriver.wait(until.elementIsNotVisible(overlay), STEP_TIMEOUT_MS);
   check("first-run setup completes", true);
@@ -686,6 +707,7 @@ async function run(webDriver) {
   await type(webDriver, "conn-access-key", accessKey);
   await type(webDriver, "conn-secret-key", secretKey);
   await click(webDriver, "connect-btn");
+  currentAction = "wait for #main-layout to show";
   const layout = await webDriver.wait(
     until.elementLocated(By.id("main-layout")),
     STEP_TIMEOUT_MS,
