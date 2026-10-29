@@ -42,15 +42,7 @@ else if(args[0]==='rev-parse') console.log(${JSON.stringify(head)});
     path.join(bin, "gh"),
     `#!/usr/bin/env node
 import fs from 'node:fs'; const args=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(ghCalls)}, JSON.stringify(args)+'\\n');
-if(args[0] !== 'api') { console.error('unexpected gh command'); process.exit(1); }
-const mode = process.env.FIXTURE_CI_MODE || 'green';
-const run = (conclusion, status, sha) => ({ id: 1, name: 'CI', head_sha: sha, status, conclusion, html_url: 'https://example.invalid/run/1' });
-const runs = mode === 'missing' ? [] : [run(
-  mode === 'failed' ? 'failure' : mode === 'running' ? null : 'success',
-  mode === 'running' ? 'in_progress' : 'completed',
-  mode === 'wrong-sha' ? 'b'.repeat(40) : ${JSON.stringify(head)},
-)];
-process.stdout.write(JSON.stringify({ total_count: runs.length, workflow_runs: runs }));
+console.error('preflight must not call gh'); process.exit(1);
 `,
     { mode: 0o755 },
   );
@@ -69,40 +61,6 @@ process.stdout.write(JSON.stringify({ total_count: runs.length, workflow_runs: r
       origin: "https://github.com/BurntToasters/S3-Sidekick.git",
       pass: true,
       omitToolchain: true,
-    },
-    {
-      name: "ci-green",
-      origin: "https://github.com/BurntToasters/S3-Sidekick.git",
-      pass: true,
-      ciMode: "green",
-    },
-    {
-      name: "ci-missing",
-      origin: "https://github.com/BurntToasters/S3-Sidekick.git",
-      pass: false,
-      ciMode: "missing",
-      rejectBeforeFetch: false,
-    },
-    {
-      name: "ci-failed",
-      origin: "https://github.com/BurntToasters/S3-Sidekick.git",
-      pass: false,
-      ciMode: "failed",
-      rejectBeforeFetch: false,
-    },
-    {
-      name: "ci-running",
-      origin: "https://github.com/BurntToasters/S3-Sidekick.git",
-      pass: false,
-      ciMode: "running",
-      rejectBeforeFetch: false,
-    },
-    {
-      name: "ci-wrong-sha",
-      origin: "https://github.com/BurntToasters/S3-Sidekick.git",
-      pass: false,
-      ciMode: "wrong-sha",
-      rejectBeforeFetch: false,
     },
     {
       name: "fork",
@@ -151,7 +109,6 @@ process.stdout.write(JSON.stringify({ total_count: runs.length, workflow_runs: r
           FIXTURE_BRANCH: String(fixturePkg.version).includes("-beta.")
             ? "beta"
             : "main",
-          FIXTURE_CI_MODE: testCase.ciMode || "green",
           GH_REPO_OWNER: "BurntToasters",
           GH_REPO_NAME: "S3-Sidekick",
           ...testCase.overrides,
@@ -173,6 +130,7 @@ process.stdout.write(JSON.stringify({ total_count: runs.length, workflow_runs: r
     const rejectedBeforeFetch = !fetched;
     const passed =
       !result.error &&
+      ciCalls.length === 0 &&
       (testCase.pass
         ? result.status === 0
         : result.status !== 0 &&
@@ -194,7 +152,7 @@ process.stdout.write(JSON.stringify({ total_count: runs.length, workflow_runs: r
   fs.rmSync(scratch, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true });
   const passed =
-    !error && checks.length >= 13 && checks.every((check) => check.passed);
+    !error && checks.length >= 8 && checks.every((check) => check.passed);
   fs.writeFileSync(
     path.join(out, "report.json"),
     JSON.stringify(
