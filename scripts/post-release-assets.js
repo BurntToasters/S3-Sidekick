@@ -12,12 +12,10 @@ const RELEASE_DIR = path.join(REPOSITORY_ROOT, "release");
 const BUILD_ONLY_DIRECTORIES = [
   "app",
   "appimage",
-  "deb",
   "dmg",
   "macos",
   "msi",
   "nsis",
-  "rpm",
 ];
 const BUILD_ONLY_FILES = [
   "builder-debug.yml",

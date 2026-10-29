@@ -84,6 +84,6 @@ Saved connection data, bookmarks, transfer manifests, and checkpoints follow the
 
 ## Update modes
 
-AppImage builds use the native updater. Flatpak, DEB, and RPM installations use the release page or package manager because replacing package-managed files through the native updater is unsafe. Updater manifests contain Minisign signatures verified against the public key configured in `src-tauri/tauri.conf.json` before release upload.
+Linux ships as an AppImage and a side-loaded Flatpak; DEB and RPM packages were retired in 0.12.0 because Tauri's RPM bundler cannot package prerelease versions and neither format had an update path. AppImage builds use the native updater. Flatpak installations, and any remaining DEB or RPM installations, use the release page because replacing sandboxed or package-managed files through the native updater is unsafe. Updater manifests contain Minisign signatures verified against the public key configured in `src-tauri/tauri.conf.json` before release upload.
 
 The frontend unit suite enforces global coverage floors for lines, functions, statements, and branches. Native Tauri/WebDriver behavior still requires the signed desktop build matrix because it depends on OS credential stores, windowing, and real provider responses.

@@ -47,8 +47,6 @@ export function requiredDraftInstallerNames() {
     "S3-Sidekick-macOS.dmg",
     "S3-Sidekick-macOS.zip",
     "S3-Sidekick-Linux-x64.AppImage",
-    "S3-Sidekick-Linux-x64.deb",
-    "S3-Sidekick-Linux-x64.rpm",
     "S3-Sidekick-Linux-x64.flatpak",
   ];
 }

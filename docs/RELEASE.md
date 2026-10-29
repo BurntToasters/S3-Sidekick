@@ -78,9 +78,10 @@ not wait for or check the GitHub `CI` workflow. The local gate does not run the
 Ubuntu Playwright, MinIO, and full-stack jobs, so check CI for the release
 commit yourself before you publish.
 
-Linux release contains x64 AppImage, DEB, RPM, and Flatpak. ARM64 Linux build
-commands remain available for local packaging, but public release matrix is
-x64-only.
+Linux release contains the x64 AppImage and Flatpak. DEB and RPM packages are
+retired: they are not built, signed, or uploaded, and a stale `.deb` or `.rpm`
+left in a bundle directory is ignored. ARM64 Linux build commands remain
+available for local packaging, but public release matrix is x64-only.
 
 Beta signing copies `latest-*-beta-*.json` onto the latest *stable* GitHub
 release so native beta clients can fetch

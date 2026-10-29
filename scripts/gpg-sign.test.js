@@ -3,11 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import {
-  artifactMatchesVersion,
   assertLinuxX64PackageSet,
   assertReleaseTargetsCommit,
+  isArtifact,
   releaseArtifactSearchDirs,
-  rpmArtifactMatchesVersion,
 } from "./gpg-sign.js";
 import {
   configuredSecretValues,
@@ -15,6 +14,7 @@ import {
 } from "./flatpak-bundle.js";
 import {
   assertManifestReferences,
+  requiredDraftAssetNames,
   requiredDraftManifestNames,
 } from "./verify-release-draft.js";
 import { hasMinisignEnvelope } from "./validate-updater-manifest.js";
@@ -24,64 +24,51 @@ const packageVersion = JSON.parse(
 ).version;
 const packageTag = `v${packageVersion}`;
 
-test("RPM version matching accepts packaging suffixes", () => {
+test("retired DEB and RPM bundles are not collected as release artifacts", () => {
   for (const name of [
-    "s3-sidekick-0.11.0.rpm",
-    "s3-sidekick-0.11.0-1.x86_64.rpm",
-    "s3-sidekick-0.11.0-1.fc40.x86_64.rpm",
-    "s3-sidekick_0.11.0-2_noarch.rpm.sig",
+    "S3 Sidekick_0.12.0-beta.1_amd64.deb",
+    "S3 Sidekick-0.12.0-beta.1-1.x86_64.rpm",
+    "S3-Sidekick-Linux-x64.deb",
+    "S3-Sidekick-Linux-x64.rpm",
   ]) {
-    assert.equal(rpmArtifactMatchesVersion(name, "0.11.0"), true);
-    assert.equal(artifactMatchesVersion(name, "0.11.0"), true);
+    assert.equal(isArtifact(name), false, name);
+  }
+  for (const name of [
+    "S3 Sidekick_0.12.0-beta.1_amd64.AppImage",
+    "S3-Sidekick-Linux-x64.flatpak",
+  ]) {
+    assert.equal(isArtifact(name), true, name);
   }
 });
 
-test("RPM version matching accepts beta encodings", () => {
-  for (const name of [
-    "s3-sidekick-0.11.0-beta.5-1.x86_64.rpm",
-    "s3-sidekick-0.11.0_beta.5-1.x86_64.rpm",
-    "s3-sidekick-0.11.0~beta.5-1.fc40.x86_64.rpm",
-  ]) {
-    assert.equal(rpmArtifactMatchesVersion(name, "0.11.0-beta.5"), true);
-    assert.equal(artifactMatchesVersion(name, "0.11.0-beta.5"), true);
-  }
-});
-
-test("RPM version matching rejects wrong channel or stale versions", () => {
+test("draft matrix does not require DEB or RPM assets", () => {
   assert.equal(
-    rpmArtifactMatchesVersion(
-      "s3-sidekick-0.11.0-beta.5-1.x86_64.rpm",
-      "0.11.0",
+    requiredDraftAssetNames().some((name) =>
+      /\.(?:deb|rpm)(?:\.|$)/i.test(name),
     ),
-    false,
-  );
-  assert.equal(
-    rpmArtifactMatchesVersion(
-      "s3-sidekick-0.11.0-1.x86_64.rpm",
-      "0.11.0-beta.5",
-    ),
-    false,
-  );
-  assert.equal(
-    artifactMatchesVersion("s3-sidekick_0.11.0-beta.5_amd64.deb", "0.11.0"),
     false,
   );
 });
 
-test("Linux x64 package set requires AppImage, DEB, RPM, and Flatpak", () => {
+test("Linux x64 package set requires only AppImage and Flatpak", () => {
   assert.throws(
     () =>
       assertLinuxX64PackageSet(
         new Map([["S3-Sidekick-Linux-x64.AppImage", "/tmp/a"]]),
       ),
-    /Incomplete Linux x86_64 bundle set/,
+    /missing S3-Sidekick-Linux-x64\.flatpak/,
+  );
+  assert.throws(
+    () =>
+      assertLinuxX64PackageSet(
+        new Map([["S3-Sidekick-Linux-x64.flatpak", "/tmp/d"]]),
+      ),
+    /missing S3-Sidekick-Linux-x64\.AppImage/,
   );
   assert.doesNotThrow(() =>
     assertLinuxX64PackageSet(
       new Map([
         ["S3-Sidekick-Linux-x64.AppImage", "/tmp/a"],
-        ["S3-Sidekick-Linux-x64.deb", "/tmp/b"],
-        ["S3-Sidekick-Linux-x64.rpm", "/tmp/c"],
         ["S3-Sidekick-Linux-x64.flatpak", "/tmp/d"],
       ]),
     ),
