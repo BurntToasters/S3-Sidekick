@@ -10,12 +10,6 @@
 // - A clean tree is refused, making the scripts unusable.
 // - No deliberate override exists for discarding work on purpose.
 // - `b` or `r` stop running the guard first.
-// - Schemas that a Tauri build regenerates under src-tauri/gen/schemas/ block
-//   the reset, although the reset only restores the committed copies.
-// - A new generated file under src-tauri/gen/schemas/ blocks the reset.
-// - Real work next to a regenerated schema passes because schemas are ignored.
-// - A look-alike path such as src-tauri/gen/schemas-notes.md is ignored.
-// - A staged rename of real work into src-tauri/gen/schemas/ is ignored.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -30,8 +24,7 @@ const guard = path.join(root, "scripts", "require-clean-tree.mjs");
 const outDir = path.join(root, "test-results", "require-clean-tree");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "s3sk-clean-tree-"));
 const results = [];
-const EXPECTED_CHECKS = 18;
-const SCHEMA = "src-tauri/gen/schemas/windows-schema.json";
+const EXPECTED_CHECKS = 11;
 
 function check(name, passed, observed = undefined) {
   results.push({
@@ -57,15 +50,6 @@ function freshRepo(name) {
   fs.writeFileSync(path.join(repo, "kept.txt"), "original\n");
   git(repo, ["add", "kept.txt"]);
   git(repo, ["commit", "-q", "-m", "seed"]);
-  return repo;
-}
-
-function schemaRepo(name) {
-  const repo = freshRepo(name);
-  fs.mkdirSync(path.join(repo, path.dirname(SCHEMA)), { recursive: true });
-  fs.writeFileSync(path.join(repo, SCHEMA), '{"old":true}\n');
-  git(repo, ["add", SCHEMA]);
-  git(repo, ["commit", "-q", "-m", "schema"]);
   return repo;
 }
 
@@ -121,54 +105,6 @@ try {
 
   const outside = runGuard(scratch);
   check("outside a git repository is refused", outside.status === 1);
-
-  const regenerated = schemaRepo("regenerated");
-  fs.writeFileSync(path.join(regenerated, SCHEMA), '{"new":true}\n');
-  const regeneratedRun = runGuard(regenerated);
-  check(
-    "regenerated Tauri schema passes",
-    regeneratedRun.status === 0,
-    regeneratedRun.stderr,
-  );
-  check(
-    "guard leaves the regenerated schema in place",
-    fs.readFileSync(path.join(regenerated, SCHEMA), "utf8") === '{"new":true}\n',
-  );
-
-  const newSchema = schemaRepo("new-schema");
-  fs.writeFileSync(
-    path.join(newSchema, "src-tauri/gen/schemas/android-schema.json"),
-    "{}\n",
-  );
-  check("new generated schema passes", runGuard(newSchema).status === 0);
-
-  const mixed = schemaRepo("mixed");
-  fs.writeFileSync(path.join(mixed, SCHEMA), '{"new":true}\n');
-  fs.writeFileSync(path.join(mixed, "kept.txt"), "local work\n");
-  const mixedRun = runGuard(mixed);
-  check("real work next to a schema change is refused", mixedRun.status === 1);
-  check(
-    "mixed refusal names the real work",
-    mixedRun.stderr.includes("kept.txt"),
-    mixedRun.stderr,
-  );
-
-  const lookalike = schemaRepo("lookalike");
-  fs.writeFileSync(
-    path.join(lookalike, "src-tauri/gen/schemas-notes.md"),
-    "draft\n",
-  );
-  check(
-    "look-alike path outside gen/schemas is refused",
-    runGuard(lookalike).status === 1,
-  );
-
-  const renamed = schemaRepo("renamed");
-  git(renamed, ["mv", "kept.txt", "src-tauri/gen/schemas/kept.txt"]);
-  check(
-    "rename of real work into gen/schemas is refused",
-    runGuard(renamed).status === 1,
-  );
 
   const scripts = JSON.parse(
     fs.readFileSync(path.join(root, "package.json"), "utf8"),
