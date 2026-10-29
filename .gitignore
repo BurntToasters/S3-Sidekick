@@ -36,6 +36,8 @@ src-tauri/target/
 src-tauri/binaries/
 src-tauri/.cargo/
 src-tauri/.cargo-safe-update.lock
+# Rewritten by every Tauri build; capabilities use the hosted schema URL.
+src-tauri/gen/schemas/
 
 # Build outputs
 dist/
