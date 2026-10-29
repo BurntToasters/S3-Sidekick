@@ -491,7 +491,10 @@ jobs:
 
   flatpak-smoke:
     name: Flatpak build (unsigned smoke)
-    runs-on: ubuntu-22.04
+    # The build runs inside the GNOME SDK, so the host glibc baseline does not
+    # apply. 22.04's flatpak-builder 1.2 calls appstream-compose, which the 49
+    # SDK no longer ships; 24.04's 1.4 uses appstreamcli compose.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:

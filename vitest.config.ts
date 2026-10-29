@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["src/tests/**/*.test.ts"],
+    setupFiles: ["src/tests/setup/status-timer.ts"],
     // These suites are assertion-bound, not duration-bound: nothing here waits
     // on real I/O. The default 5s limit only ever expires when the machine is
     // starved of CPU (shared CI runners, parallel cargo builds), which turned
