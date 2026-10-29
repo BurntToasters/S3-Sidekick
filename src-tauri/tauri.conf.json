@@ -37,9 +37,7 @@
       "app",
       "nsis",
       "msi",
-      "appimage",
-      "deb",
-      "rpm"
+      "appimage"
     ],
     "icon": [
       "icons/32x32.png",
@@ -83,17 +81,6 @@
     "linux": {
       "appimage": {
         "bundleMediaFramework": false
-      },
-      "deb": {
-        "depends": [
-          "libwebkit2gtk-4.1-0"
-        ]
-      },
-      "rpm": {
-        "depends": [
-          "webkit2gtk4.1",
-          "gtk3"
-        ]
       }
     }
   },

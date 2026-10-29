@@ -27,6 +27,12 @@ cannot be mistaken for release authority. Release argument parsing must reject
 `--skip-e2e`; `release:prepare` must not advertise a flag that the quality gate
 ignores.
 
+Linux releases ship only the AppImage and the Flatpak; DEB and RPM are retired.
+A stale `.deb` or `.rpm` left in a bundle directory by an older build must not
+be collected, signed, checksummed, or uploaded. The Linux x64 package set must
+pass with only the AppImage and Flatpak and must still fail when either is
+missing. The draft matrix must not require a DEB or RPM asset.
+
 The AWS-null-version runner must bound frontend build and Cargo execution, record
 timeout/error status, preserve readable failure logs, clean its isolated app-data
 directory, reject a missing/failed/malformed check artifact, and pass a complete

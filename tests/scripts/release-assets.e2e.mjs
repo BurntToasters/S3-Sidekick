@@ -277,7 +277,7 @@ if (args[0] === 'auth') process.exit(0);
 const match = endpoint.match(/\\/releases\\/assets\\/(\\d+)$/);
 if (match) { const name = names[Number(match[1])-1]; if (!name) process.exit(2); fs.writeSync(1, fs.readFileSync(path.join(process.env.FIXTURE_ASSETS,name))); }
 else if (endpoint.includes('/assets?')) { const assets = names.map((name,i) => ({name,id:i+1})); if(process.env.FIXTURE_DUPLICATE==='1') assets.push({name:names[0],id:999}); console.log(JSON.stringify(assets)); }
-else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON.stringify(`v${pkg.version}`)},draft:process.env.FIXTURE_PUBLISHED !== '1',prerelease:false,target_commitish:${JSON.stringify(head)}}; console.log(JSON.stringify(endpoint.includes('/tags/') ? release : [release])); }
+else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON.stringify(`v${pkg.version}`)},draft:process.env.FIXTURE_PUBLISHED !== '1',prerelease:${JSON.stringify(/-beta\.\d+$/.test(pkg.version))},target_commitish:${JSON.stringify(head)}}; console.log(JSON.stringify(endpoint.includes('/tags/') ? release : [release])); }
 `;
   fs.writeFileSync(path.join(bin, "gh"), ghSource, { mode: 0o755 });
   cliCase("valid-approved-signing-subkey");

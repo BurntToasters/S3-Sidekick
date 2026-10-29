@@ -76,7 +76,7 @@ const ENFORCE_LINUX_X64_PACKAGE_SET =
 const BETA_SYNC_LOCK_NAME = "s3-sidekick-beta-manifest-sync-lock";
 const BETA_SYNC_LOCK_RETRIES = 30;
 const ARTIFACT_RULES = [
-  /\.(?:exe|msi|dmg|deb|rpm|flatpak)$/i,
+  /\.(?:exe|msi|dmg|flatpak)$/i,
   /\.(?:appimage|app\.tar\.gz|zip)$/i,
 ];
 const SIGN_RULES = ARTIFACT_RULES;
@@ -147,40 +147,7 @@ function walk(directory, result = []) {
   return result;
 }
 
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function rpmArtifactMatchesVersion(name, releaseVersion = VERSION) {
-  if (!/\.rpm(?:\.sig)?$/i.test(name)) return false;
-
-  const numericVersions = name.match(/\d+\.\d+\.\d+/g);
-  if (!numericVersions || numericVersions.length === 0) return true;
-
-  const betaMatch = releaseVersion.match(
-    /^(\d+\.\d+\.\d+)-beta\.(0|[1-9]\d*)$/,
-  );
-  const stableMatch = releaseVersion.match(/^(\d+\.\d+\.\d+)$/);
-  if (!betaMatch && !stableMatch) return false;
-
-  const numericVersion = betaMatch?.[1] ?? stableMatch[1];
-  const escapedNumericVersion = escapeRegExp(numericVersion);
-  const versionPattern = betaMatch
-    ? `${escapedNumericVersion}(?:-beta\\.${betaMatch[2]}|[._~]beta[._-]${betaMatch[2]})`
-    : escapedNumericVersion;
-  const rpmRelease = "[0-9][0-9A-Za-z_+~%^.-]*";
-  const rpmArch =
-    "(?:x86_64|amd64|aarch64|arm64|i[3-6]86|noarch|ppc64le|ppc64|s390x|riscv64|armv[67]hl)";
-  return new RegExp(
-    `(?:^|[^0-9A-Za-z])${versionPattern}(?:-${rpmRelease})?(?:\\.${rpmArch})?\\.rpm(?:\\.sig)?$`,
-    "i",
-  ).test(name);
-}
-
 function artifactMatchesVersion(name, releaseVersion = VERSION) {
-  if (/\.rpm(?:\.sig)?$/i.test(name)) {
-    return rpmArtifactMatchesVersion(name, releaseVersion);
-  }
   const versions = name.match(
     /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/g,
   );
@@ -223,10 +190,6 @@ function cleanArtifactName(name) {
   if (/amd64\.AppImage$/i.test(name)) return "S3-Sidekick-Linux-x64.AppImage";
   if (/aarch64\.AppImage$/i.test(name))
     return "S3-Sidekick-Linux-arm64.AppImage";
-  if (/amd64\.deb$/i.test(name)) return "S3-Sidekick-Linux-x64.deb";
-  if (/aarch64\.deb$/i.test(name)) return "S3-Sidekick-Linux-arm64.deb";
-  if (/x86_64\.rpm$/i.test(name)) return "S3-Sidekick-Linux-x64.rpm";
-  if (/aarch64\.rpm$/i.test(name)) return "S3-Sidekick-Linux-arm64.rpm";
   return name;
 }
 
@@ -239,8 +202,6 @@ function assertLinuxX64PackageSet(
   if (!names.some((name) => /^S3-Sidekick-Linux-x64\./i.test(name))) return;
   const required = [
     "S3-Sidekick-Linux-x64.AppImage",
-    "S3-Sidekick-Linux-x64.deb",
-    "S3-Sidekick-Linux-x64.rpm",
     "S3-Sidekick-Linux-x64.flatpak",
   ];
   const missing = required.filter((name) => !byName.has(name));
@@ -476,9 +437,7 @@ function targetKeysForArtifact(name) {
     ]);
   }
   const arch = inferArch(baseName);
-  if (
-    /^S3-Sidekick-Linux-(?:x64|arm64)\.(?:deb|rpm|flatpak)$/i.test(baseName)
-  ) {
+  if (/^S3-Sidekick-Linux-(?:x64|arm64)\.flatpak$/i.test(baseName)) {
     return [`linux-${arch}`, `linux-beta-${arch}`];
   }
   if (/^S3-Sidekick-Windows-(?:x64|arm64)\.msi$/i.test(baseName)) {
@@ -1113,12 +1072,12 @@ export {
   generateChecksums,
   generateUpdaterManifests,
   inferArch,
+  isArtifact,
   isGitHubConflict,
   isTransactionalStagingAssetName,
   normalizeUpdaterSignature,
   releaseArtifactSearchDirs,
   resolveUpdaterTargets,
-  rpmArtifactMatchesVersion,
   targetKeysForArtifact,
   verifyUpdaterSignature,
 };
