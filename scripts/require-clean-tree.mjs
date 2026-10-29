@@ -7,6 +7,17 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
+// Every Tauri build rewrites these from the resolved crate versions, and the
+// reset restores the committed copies, so they are not local work.
+const GENERATED_PREFIX = "src-tauri/gen/schemas/";
+
+function isGenerated(line) {
+  return line
+    .slice(3)
+    .split(" -> ")
+    .every((file) => file.startsWith(GENERATED_PREFIX));
+}
+
 const status = spawnSync("git", ["status", "--porcelain=v1"], {
   encoding: "utf8",
 });
@@ -17,7 +28,13 @@ if (status.status !== 0) {
   process.exit(1);
 }
 
-const changes = status.stdout.split("\n").filter(Boolean);
+const all = status.stdout.split("\n").filter(Boolean);
+const changes = all.filter((line) => !isGenerated(line));
+if (changes.length < all.length) {
+  process.stderr.write(
+    `require-clean-tree: ignoring ${all.length - changes.length} regenerated Tauri schema file(s); the reset restores them.\n`,
+  );
+}
 if (changes.length === 0) process.exit(0);
 
 if (/^(1|true|yes)$/i.test(process.env.ALLOW_DISCARD_LOCAL_CHANGES ?? "")) {
