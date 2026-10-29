@@ -87,6 +87,15 @@ async function readVaultStatus(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>("get_security_status");
 }
 
+/**
+ * Encryption is already set up only once the vault exists. A fresh install
+ * reports `encryption_enabled: true` before initialization (encryption is the
+ * default), and that still needs a password or an explicit Skip.
+ */
+function encryptionIsSetUp(vault: SecurityStatus | null): boolean {
+  return vault?.initialized === true && vault.encryption_enabled;
+}
+
 export function showSetupWizard(): Promise<SetupResult | null> {
   return new Promise((resolve) => {
     const overlay = $("setup-wizard-overlay");
@@ -281,7 +290,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
         showEncError(`Could not read the current security setup. ${readError}`);
         return;
       }
-      if (vault?.encryption_enabled) commitEncryptionUI();
+      if (encryptionIsSetUp(vault)) commitEncryptionUI();
     }
 
     function onEncBack(): void {
@@ -308,7 +317,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       setEncBusy(true);
       try {
         const vault = await readVaultStatus();
-        if (vault.encryption_enabled) {
+        if (encryptionIsSetUp(vault)) {
           commitEncryptionUI();
           encBiometric.checked = false;
         } else if (!vault.initialized) {
@@ -337,7 +346,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       try {
         if (!encryptionCommitted) {
           const vault = await readVaultStatus();
-          if (vault.encryption_enabled) {
+          if (encryptionIsSetUp(vault)) {
             commitEncryptionUI();
           } else {
             const pw = encPassword.value;
