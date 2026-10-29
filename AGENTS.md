@@ -61,8 +61,8 @@ layers cannot reach; write those tests before the implementation.
 ## Release work
 
 - Stable releases run from `main`; beta releases run from `beta`. Release
-  preflight requires a clean, pushed checkout and a green CI run for the
-  exact commit.
+  preflight requires a clean, pushed checkout. It does not check the CI
+  workflow for the commit.
 - `npm run release:prepare` is a real quality gate. Do not add `--skip-e2e`
   or equivalent flags that make the gate look stricter than it is.
 - Signed builds remain a manual per-host step. CI compiles the unsigned

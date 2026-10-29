@@ -15,9 +15,7 @@ Move the Tauri family as one change: the Cargo.toml pins, `Cargo.lock`, and pack
 
 Both updaters serialize their own runs. npm rollback and final Cargo lock installation compare expected bytes, preserving a concurrent process's lockfile edit instead of overwriting it.
 
-Review both lockfile diffs before committing. Push the update branch and let GitHub-hosted CI perform code-executing validation. CI installs npm packages with lifecycle scripts disabled, verifies registry signatures, and only then runs dependency code. CI is intentionally the first environment that installs or executes newly selected dependency code.
-
-Do not run `npm run workspace:prepare`, `npm run test:all`, Cargo checks, builds, or tests on a workstation immediately after updating locks. Those commands execute dependency code. If local validation is necessary, use a disposable VM with no credentials, mounted home directory, SSH agent, signing keys, cloud metadata access, or persistent package caches.
+Review both lockfile diffs, then run `npm run test:all` locally before committing. Local validation is allowed right after a lock update. `test:all`, `npm run workspace:prepare`, and Cargo checks, builds, and tests run the newly selected dependency code (build scripts, procedural macros, and test binaries) on the workstation. The publish-age filter is the only guard before that code runs, so read the lock diff first. Push the update branch afterward; CI repeats the validation with npm lifecycle scripts disabled and registry signatures verified.
 
 The three-day delay reduces exposure to newly published supply-chain attacks; it cannot prove that an older package is benign. Emergency young-crate and Git overrides must name one exact version or revision and include a written reason.
 
