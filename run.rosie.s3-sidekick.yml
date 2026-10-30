@@ -35,14 +35,15 @@ modules:
       # npm dependencies and Cargo sources remain locked and offline.
       build-args:
         - --share=network
-      append-path: /run/build/s3-sidekick/npm-global/bin:/usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
+      # Prepend so the extension Node wins over any older SDK /usr/bin/node.
+      prepend-path: /run/build/s3-sidekick/npm-global/bin:/usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
       env:
         CARGO_NET_OFFLINE: "true"
         HUSKY: "0"
         npm_config_ignore_scripts: "true"
         npm_config_offline: "true"
     build-commands:
-      - node -e "const [major, minor, patch] = process.versions.node.split('.').map((n) => Number.parseInt(n, 10)); const ok = (major === 24 && (minor > 22 || (minor === 22 && patch >= 1))) || (major === 26 && minor >= 13) || major > 26; if (!ok) { console.error('Node ^24.22.1 || >=26.13.0 required, found', process.version); process.exit(1); }"
+      - node -e "const [major, minor, patch] = process.versions.node.split('.').map((n) => Number.parseInt(n, 10)); const ok = (major === 24 && (minor > 22 || (minor === 22 && patch >= 1))) || (major === 26 && minor >= 13) || major > 26; if (!ok) { console.error('Node ^24.22.1 || >=26.13.0 required, found', process.version, 'at', process.execPath); process.exit(1); }"
       # The Node 24 SDK ships npm 11.x, while packageManager requires npm 12.2.1.
       # npm_config_offline stays on for later lockfile-only commands; --no-offline
       # is required here or the CLI uses only-if-cached and fails with ENOTCACHED.
