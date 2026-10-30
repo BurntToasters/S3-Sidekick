@@ -277,7 +277,7 @@ test("Flatpak npm 12 install overrides sandbox offline mode", () => {
     "utf8",
   );
   assert.match(yaml, /npm_config_offline:\s*"true"/);
-  assert.match(yaml, /npm install --global npm@12\.0\.2 --no-offline /);
+  assert.match(yaml, /npm install --global npm@12\.2\.1 --no-offline /);
   assert.match(yaml, /--share=network/);
   assert.match(yaml, /CARGO_NET_OFFLINE:\s*"true"/);
 });

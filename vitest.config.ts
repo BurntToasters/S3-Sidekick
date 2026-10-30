@@ -3,6 +3,10 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "jsdom",
+    execArgv:
+      Number(process.versions.node.split(".")[0]) >= 25
+        ? ["--no-webstorage"]
+        : [],
     include: ["src/tests/**/*.test.ts"],
     setupFiles: ["src/tests/setup/status-timer.ts"],
     // These suites are assertion-bound, not duration-bound: nothing here waits

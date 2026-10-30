@@ -18,9 +18,9 @@ import path from "node:path";
 import process from "node:process";
 import { isDirectExecution } from "./direct-execution.js";
 
-export const MINIMUM_NPM_VERSION = "12.0.1";
+export const MINIMUM_NPM_VERSION = "12.2.1";
 export const NPM_UPDATE_QUARANTINE_DAYS = 3;
-export const SUPPORTED_NODE_VERSIONS = "^22.22.2 || ^24.15.0 || >=26.0.0";
+export const SUPPORTED_NODE_VERSIONS = "^24.22.1 || >=26.13.0";
 export const STABLE_RUST_CHANNEL = "stable";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 
@@ -44,9 +44,9 @@ export function isVersionAtLeast(value, minimum) {
 
 export function isSupportedNodeVersion(value) {
   const [major] = parseVersion(value);
-  if (major === 22) return isVersionAtLeast(value, "22.22.2");
-  if (major === 24) return isVersionAtLeast(value, "24.15.0");
-  return major >= 26;
+  if (major === 24) return isVersionAtLeast(value, "24.22.1");
+  if (major === 26) return isVersionAtLeast(value, "26.13.0");
+  return major > 26;
 }
 
 export function hasStableRustToolchain(output, channel = STABLE_RUST_CHANNEL) {
