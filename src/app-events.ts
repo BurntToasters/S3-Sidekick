@@ -13,6 +13,8 @@ import {
   loadConnection,
   refreshObjects,
   loadMoreObjects,
+  currentConnectionGeneration,
+  currentListingGeneration,
 } from "./connection.ts";
 import {
   renderBucketList,
@@ -121,6 +123,8 @@ import {
   confirmSessionTeardown,
   handleConnectButton,
   setSavedConnectionsLocked,
+  rememberActiveConnectionLocation,
+  cancelPendingConnect,
 } from "./app-connection.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
 import {
@@ -164,11 +168,25 @@ import {
 
 let dragDropUnlisten: (() => void) | null = null;
 
+/** Surface an action that rejects after its click handler already returned. */
+function reportAsyncActionFailure(label: string, err: unknown): void {
+  const message = `${label} failed: ${friendlyError(err)}`;
+  setStatus(message);
+  logActivity(message, "error");
+}
+
 /**
  * After an inactivity auto-lock: end the S3 session and drop decrypted
  * credentials and bookmarks from memory, as the manual lock button does.
  */
 export async function clearSessionAfterAutoLock(): Promise<boolean> {
+  // Capture the saved connection's bucket/prefix while the session still owns
+  // state. The manual lock path records this from handleDisconnect; auto-lock
+  // would otherwise clear it before that snapshot can run.
+  rememberActiveConnectionLocation();
+  // Cancel any connect/test UI before the access lock invalidates workflows,
+  // so the connect button cannot stay stuck on "Cancel".
+  cancelPendingConnect();
   const hadSession = state.connected || Boolean(state.connectionId);
   setConnectionAccessLocked(true);
   setSavedConnectionsLocked(true);
@@ -202,7 +220,9 @@ function wireConnectionForm(): void {
     field?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        void handleConnect();
+        void handleConnect().catch((err) =>
+          reportAsyncActionFailure("Connect", err),
+        );
       }
     });
   }
@@ -249,7 +269,9 @@ function wireConnectionForm(): void {
     .addEventListener("click", handleBookmarkSave);
 
   document.getElementById("conn-new-btn")!.addEventListener("click", () => {
-    void handleNewConnection();
+    void handleNewConnection().catch((err) =>
+      reportAsyncActionFailure("Start new connection", err),
+    );
   });
 
   (
@@ -308,12 +330,14 @@ function wireSettingsModal(): void {
     checkNowButton.disabled = true;
     checkNowButton.setAttribute("aria-busy", "true");
     checkNowButton.textContent = "Checking\u2026";
-    void checkUpdates().finally(() => {
-      setUpdateChannel(persistedChannel);
-      checkNowButton.disabled = false;
-      checkNowButton.removeAttribute("aria-busy");
-      checkNowButton.textContent = idleLabel;
-    });
+    void checkUpdates()
+      .catch((err) => reportAsyncActionFailure("Check for updates", err))
+      .finally(() => {
+        setUpdateChannel(persistedChannel);
+        checkNowButton.disabled = false;
+        checkNowButton.removeAttribute("aria-busy");
+        checkNowButton.textContent = idleLabel;
+      });
   });
   document
     .getElementById("settings-open-release-page")!
@@ -349,25 +373,37 @@ function wireSettingsModal(): void {
     .getElementById("settings-overlay")!
     .addEventListener("click", (e) => {
       if ((e.target as HTMLElement).classList.contains("modal-overlay")) {
-        void closeSettingsModal(false);
+        void closeSettingsModal(false).catch((err) =>
+          reportAsyncActionFailure("Close settings", err),
+        );
       }
     });
 
-  document
-    .getElementById("info-close")!
-    .addEventListener("click", () => void requestCloseInfoPanel());
-  document
-    .getElementById("info-cancel")!
-    .addEventListener("click", () => void requestCloseInfoPanel());
-  document
-    .getElementById("info-save")!
-    .addEventListener("click", saveInfoPanel);
+  document.getElementById("info-close")!.addEventListener("click", () => {
+    void requestCloseInfoPanel().catch((err) =>
+      reportAsyncActionFailure("Close properties", err),
+    );
+  });
+  document.getElementById("info-cancel")!.addEventListener("click", () => {
+    void requestCloseInfoPanel().catch((err) =>
+      reportAsyncActionFailure("Close properties", err),
+    );
+  });
+  document.getElementById("info-save")!.addEventListener("click", () => {
+    void saveInfoPanel().catch((err) =>
+      reportAsyncActionFailure("Save properties", err),
+    );
+  });
 }
 
 /** Info overlay and the bottom activity drawer. */
 function wireOverlaysAndDrawer(): void {
   document.getElementById("info-overlay")!.addEventListener("click", (e) => {
-    if (e.target === e.currentTarget) void requestCloseInfoPanel();
+    if (e.target === e.currentTarget) {
+      void requestCloseInfoPanel().catch((err) =>
+        reportAsyncActionFailure("Close properties", err),
+      );
+    }
   });
 
   document.querySelectorAll<HTMLElement>(".info-tabs").forEach((infoTabs) => {
@@ -393,7 +429,9 @@ function wireOverlaysAndDrawer(): void {
     .addEventListener("click", toggleTransferQueue);
   document.getElementById("drawer-export")?.addEventListener("click", () => {
     if (getActiveTab() === "activity") {
-      void handleExportActivityLog();
+      void handleExportActivityLog().catch((err) =>
+        reportAsyncActionFailure("Export activity log", err),
+      );
     }
   });
   document.getElementById("drawer-clear")!.addEventListener("click", () => {
@@ -403,9 +441,11 @@ function wireOverlaysAndDrawer(): void {
         "Clear activity log?",
         "This removes every entry from the activity log. Files and transfers are not changed.",
         { okLabel: "Clear", cancelLabel: "Keep", okDanger: true },
-      ).then((confirmed) => {
-        if (confirmed) clearActivityLog();
-      });
+      )
+        .then((confirmed) => {
+          if (confirmed) clearActivityLog();
+        })
+        .catch((err) => reportAsyncActionFailure("Clear activity log", err));
     } else {
       clearCompletedTransfers();
     }
@@ -544,7 +584,11 @@ function wireSelectionActions(): void {
 /** Vault, biometric and lock controls in Settings. */
 function wireSecuritySettings(): void {
   // "Forgot password?" on the lock view goes straight to the erase explanation.
-  setForgotPasswordHandler(() => void resetAfterForgottenPassword());
+  setForgotPasswordHandler(() => {
+    void resetAfterForgottenPassword().catch((err) =>
+      reportAsyncActionFailure("Reset forgotten password", err),
+    );
+  });
   const runSecurityAction = (action: "setup" | "unlock" | "disable"): void => {
     void (async () => {
       const changed = await handleSecurityToggle(setStatus, action);
@@ -569,7 +613,7 @@ function wireSecuritySettings(): void {
       } catch {
         /* connection unavailable */
       }
-    })();
+    })().catch((err) => reportAsyncActionFailure(`Security ${action}`, err));
   };
   document
     .getElementById("security-setup-btn")!
@@ -583,7 +627,9 @@ function wireSecuritySettings(): void {
   document
     .getElementById("security-change-password")!
     .addEventListener("click", () => {
-      void handleSecurityChangePassword(setStatus);
+      void handleSecurityChangePassword(setStatus).catch((err) =>
+        reportAsyncActionFailure("Change password", err),
+      );
     });
   document
     .getElementById("security-lock-btn")!
@@ -603,26 +649,36 @@ function wireSecuritySettings(): void {
           refreshBookmarkBar();
           await closeSettingsModal(false);
         }
-      })();
+      })().catch((err) => reportAsyncActionFailure("Lock now", err));
     });
   document
     .getElementById("security-lock-timeout")!
     .addEventListener("change", () => {
-      void handleLockTimeoutChange();
+      void handleLockTimeoutChange().catch((err) =>
+        reportAsyncActionFailure("Change lock timeout", err),
+      );
     });
   document.getElementById("biometric-toggle")!.addEventListener("click", () => {
-    void handleBiometricToggle(setStatus);
+    void handleBiometricToggle(setStatus).catch((err) =>
+      reportAsyncActionFailure("Change biometric setting", err),
+    );
   });
 
-  document
-    .getElementById("nav-back")
-    ?.addEventListener("click", () => void navigateBack());
-  document
-    .getElementById("nav-forward")
-    ?.addEventListener("click", () => void navigateForward());
-  document
-    .getElementById("nav-up")
-    ?.addEventListener("click", () => void navigateUp());
+  document.getElementById("nav-back")?.addEventListener("click", () => {
+    void navigateBack().catch((err) =>
+      reportAsyncActionFailure("Navigate back", err),
+    );
+  });
+  document.getElementById("nav-forward")?.addEventListener("click", () => {
+    void navigateForward().catch((err) =>
+      reportAsyncActionFailure("Navigate forward", err),
+    );
+  });
+  document.getElementById("nav-up")?.addEventListener("click", () => {
+    void navigateUp().catch((err) =>
+      reportAsyncActionFailure("Navigate up", err),
+    );
+  });
 }
 
 /** Location omnibar, path input, filters and paging. */
@@ -633,9 +689,11 @@ function wireLocationAndFilters(): void {
   pathInput?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      void navigateToLocationPath(pathInput.value).then((ok) => {
-        if (ok) exitLocationEditMode(true);
-      });
+      void navigateToLocationPath(pathInput.value)
+        .then((ok) => {
+          if (ok) exitLocationEditMode(true);
+        })
+        .catch((err) => reportAsyncActionFailure("Go to location", err));
     } else if (e.key === "Escape") {
       e.preventDefault();
       exitLocationEditMode(true);
@@ -696,8 +754,15 @@ function wireLocationAndFilters(): void {
         ],
         (action) => {
           dismissUploadMenu();
-          if (action === "upload-files") void handleUploadButton();
-          else if (action === "upload-folder") void handleUploadFolderButton();
+          if (action === "upload-files") {
+            void handleUploadButton().catch((err) =>
+              reportAsyncActionFailure("Upload files", err),
+            );
+          } else if (action === "upload-folder") {
+            void handleUploadFolderButton().catch((err) =>
+              reportAsyncActionFailure("Upload folder", err),
+            );
+          }
         },
         dismissUploadMenu,
       );
@@ -716,7 +781,6 @@ function wireLocationAndFilters(): void {
     clearFilterInputDebounce();
     if (filterInput) filterInput.value = "";
     clearFilter();
-    renderObjectTable();
     filterInput?.focus();
   });
 
@@ -742,15 +806,39 @@ function wireLocationAndFilters(): void {
     "btn-load-more",
   ) as HTMLButtonElement;
   loadMoreBtn.addEventListener("click", async () => {
+    const connectionGeneration = currentConnectionGeneration();
+    const listingGeneration = currentListingGeneration();
+    const connectionId = state.connectionId;
+    const bucket = state.currentBucket;
+    const prefix = state.currentPrefix;
     loadMoreBtn.disabled = true;
     loadMoreBtn.textContent = "Loading\u2026";
     setStatus("Loading more...");
     try {
       await loadMoreObjects();
+      // A navigation or reconnect that finished during the request owns the
+      // table and status now; a stale page must not repaint over it.
+      if (
+        connectionGeneration !== currentConnectionGeneration() ||
+        listingGeneration !== currentListingGeneration() ||
+        connectionId !== state.connectionId ||
+        bucket !== state.currentBucket ||
+        prefix !== state.currentPrefix
+      ) {
+        return;
+      }
       renderObjectTable();
       setStatus("");
     } catch (err) {
-      setStatus(`Failed to load more: ${friendlyError(err)}`);
+      if (
+        connectionGeneration === currentConnectionGeneration() &&
+        listingGeneration === currentListingGeneration() &&
+        connectionId === state.connectionId &&
+        bucket === state.currentBucket &&
+        prefix === state.currentPrefix
+      ) {
+        setStatus(`Failed to load more: ${friendlyError(err)}`);
+      }
     } finally {
       loadMoreBtn.disabled = false;
       loadMoreBtn.textContent = "Load more";
@@ -805,7 +893,11 @@ function wireBucketList(): void {
 /** A bucket that fails to open must not look like an empty bucket. */
 function reportBucketOpenFailure(bucket: string, err: unknown): void {
   const message = `Failed to open bucket "${bucket}": ${friendlyError(err)}`;
-  reportNavFailure(message, () => void selectBucket(bucket));
+  reportNavFailure(message, () => {
+    void selectBucket(bucket).catch((retryErr) =>
+      reportBucketOpenFailure(bucket, retryErr),
+    );
+  });
   logActivity(message, "error");
 }
 
@@ -882,7 +974,11 @@ function wireObjectTable(): void {
           void navigateToFolder(prefix).catch((err) => {
             reportNavFailure(
               `Failed to open folder: ${friendlyError(err)}`,
-              () => void navigateToFolder(prefix),
+              () => {
+                void navigateToFolder(prefix).catch((retryErr) => {
+                  reportAsyncActionFailure("Open folder", retryErr);
+                });
+              },
             );
           });
         }
@@ -892,16 +988,22 @@ function wireObjectTable(): void {
       const key = row.dataset.key;
       if (!key) return;
       if (canPreview(basename(key))) {
-        void openPreview(key);
+        void openPreview(key).catch((err) =>
+          reportAsyncActionFailure("Open preview", err),
+        );
       } else {
-        void openInfoPanel([fileEntry(key)]);
+        void openInfoPanel([fileEntry(key)]).catch((err) =>
+          reportAsyncActionFailure("Open properties", err),
+        );
       }
     }
   });
 
   dom.objectTbody.addEventListener("dblclick", (e) => {
     const target = e.target as HTMLElement;
-    if (target.closest(".row-check")) return;
+    // Checkbox cells toggle selection on click; a double-click there must not
+    // fall through to opening the row.
+    if (target.closest(".col-check, .row-check")) return;
     const row = target.closest<HTMLElement>(".object-row");
     if (!row) return;
     if (row.classList.contains("object-row--folder")) {
@@ -910,7 +1012,11 @@ function wireObjectTable(): void {
         void navigateToFolder(prefix).catch((err) => {
           reportNavFailure(
             `Failed to open folder: ${friendlyError(err)}`,
-            () => void navigateToFolder(prefix),
+            () => {
+              void navigateToFolder(prefix).catch((retryErr) => {
+                reportAsyncActionFailure("Open folder", retryErr);
+              });
+            },
           );
           logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
         });
@@ -920,9 +1026,13 @@ function wireObjectTable(): void {
     const key = row.dataset.key;
     if (!key) return;
     if (canPreview(basename(key))) {
-      void openPreview(key);
+      void openPreview(key).catch((err) =>
+        reportAsyncActionFailure("Open preview", err),
+      );
     } else {
-      void openInfoPanel([fileEntry(key)]);
+      void openInfoPanel([fileEntry(key)]).catch((err) =>
+        reportAsyncActionFailure("Open properties", err),
+      );
     }
   });
 
@@ -933,13 +1043,16 @@ function wireObjectTable(): void {
     if (!actionBtn) return;
     const action = actionBtn.dataset.emptyAction;
     if (action === "upload") {
-      void handleUploadButton();
+      void handleUploadButton().catch((err) =>
+        reportAsyncActionFailure("Upload files", err),
+      );
     } else if (action === "new-folder") {
-      void handleCreateFolder();
+      void handleCreateFolder().catch((err) =>
+        reportAsyncActionFailure("Create folder", err),
+      );
     } else if (action === "clear-filter") {
       clearFilterInputDebounce();
       clearFilter();
-      renderObjectTable();
       (
         document.getElementById("filter-input") as HTMLInputElement | null
       )?.focus();
@@ -977,10 +1090,11 @@ function wireObjectTable(): void {
     const prefix = seg.dataset.prefix;
     if (prefix !== undefined) {
       void navigateToFolder(prefix).catch((err) => {
-        reportNavFailure(
-          `Failed to open folder: ${friendlyError(err)}`,
-          () => void navigateToFolder(prefix),
-        );
+        reportNavFailure(`Failed to open folder: ${friendlyError(err)}`, () => {
+          void navigateToFolder(prefix).catch((retryErr) => {
+            reportAsyncActionFailure("Open folder", retryErr);
+          });
+        });
       });
     }
   });
@@ -1018,16 +1132,21 @@ function wireDropUpload(): void {
   objectPanel.addEventListener("drop", suppressDrag);
   dropOverlay.addEventListener("drop", suppressDrag);
 
-  // Escape dismisses the target without dropping; the next drag re-shows it.
+  // Escape dismisses the target without dropping. The native drop event still
+  // arrives afterwards, so remember the escaped drag and ignore its matching
+  // drop. A dragleave starts a new drag and clears that memory.
+  let escapedDrop = false;
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || dropOverlay.hidden) return;
     dropOverlay.hidden = true;
     objectPanel.classList.remove("object-panel--dragover");
+    escapedDrop = true;
   });
 
   void getCurrentWebview()
     .onDragDropEvent((event) => {
       if (event.payload.type === "enter") {
+        escapedDrop = false;
         // Only offer a target when a drop would actually upload: connected to
         // a bucket, carrying files, and no dialog waiting for an answer.
         const canUpload =
@@ -1041,11 +1160,16 @@ function wireDropUpload(): void {
           objectPanel.classList.add("object-panel--dragover");
         }
       } else if (event.payload.type === "leave") {
+        escapedDrop = false;
         objectPanel.classList.remove("object-panel--dragover");
         dropOverlay.hidden = true;
       } else if (event.payload.type === "drop") {
         objectPanel.classList.remove("object-panel--dragover");
         dropOverlay.hidden = true;
+        if (escapedDrop) {
+          escapedDrop = false;
+          return;
+        }
 
         if (document.body.classList.contains("modal-open")) {
           setStatus(
@@ -1061,7 +1185,9 @@ function wireDropUpload(): void {
 
         const paths = event.payload.paths;
         if (paths.length > 0) {
-          void queueDroppedPaths(paths, state.currentPrefix);
+          void queueDroppedPaths(state.currentPrefix).catch((err) =>
+            reportAsyncActionFailure("Queue dropped files", err),
+          );
         } else {
           setStatus(
             "No dropped files detected. Try Upload Files instead.",
@@ -1203,7 +1329,11 @@ function wireCommandPalette(): void {
       label: "Upload Files",
       icon: "upload",
       shortcut: `${accelLabel}U`,
-      action: () => void handleUploadButton(),
+      action: () => {
+        void handleUploadButton().catch((err) =>
+          reportAsyncActionFailure("Upload files", err),
+        );
+      },
       available: () => state.connected,
     },
     {
@@ -1211,7 +1341,11 @@ function wireCommandPalette(): void {
       label: "Upload Folder",
       icon: "folder-up",
       shortcut: `${accelLabel}⇧U`,
-      action: () => void handleUploadFolderButton(),
+      action: () => {
+        void handleUploadFolderButton().catch((err) =>
+          reportAsyncActionFailure("Upload folder", err),
+        );
+      },
       available: () => state.connected,
     },
     {
@@ -1220,7 +1354,11 @@ function wireCommandPalette(): void {
       icon: "folder-plus",
       shortcut: `${accelLabel}N`,
       keywords: ["mkdir", "new folder"],
-      action: () => void handleCreateFolder(),
+      action: () => {
+        void handleCreateFolder().catch((err) =>
+          reportAsyncActionFailure("Create folder", err),
+        );
+      },
       available: () => state.connected,
     },
     {
@@ -1229,7 +1367,11 @@ function wireCommandPalette(): void {
       icon: "refresh-cw",
       shortcut: "F5",
       keywords: ["reload"],
-      action: () => void handleRefresh(),
+      action: () => {
+        void handleRefresh().catch((err) =>
+          reportAsyncActionFailure("Refresh", err),
+        );
+      },
       available: () => state.connected,
     },
     {
@@ -1237,7 +1379,11 @@ function wireCommandPalette(): void {
       label: "Refresh Buckets",
       icon: "refresh-cw",
       keywords: ["bucket list", "reload buckets"],
-      action: () => void handleRefreshBuckets(),
+      action: () => {
+        void handleRefreshBuckets().catch((err) =>
+          reportAsyncActionFailure("Refresh buckets", err),
+        );
+      },
       available: () => state.connected,
     },
     // Selection commands come from the object-actions registry, so their
@@ -1282,14 +1428,22 @@ function wireCommandPalette(): void {
       label: "Go to Key/Prefix",
       icon: "compass",
       keywords: ["jump", "path", "prefix"],
-      action: () => void handleGoToKeyOrPrefix(),
+      action: () => {
+        void handleGoToKeyOrPrefix().catch((err) =>
+          reportAsyncActionFailure("Go to key or prefix", err),
+        );
+      },
       available: () => state.connected,
     },
     {
       id: "open-last-download-folder",
       label: "Open Last Download Folder",
       icon: "folder",
-      action: () => void handleOpenLastDownloadFolder(),
+      action: () => {
+        void handleOpenLastDownloadFolder().catch((err) =>
+          reportAsyncActionFailure("Open download folder", err),
+        );
+      },
       available: () =>
         state.currentSettings.rememberDownloadPath &&
         getRememberedDownloadDir().length > 0,
@@ -1298,7 +1452,11 @@ function wireCommandPalette(): void {
       id: "export-activity-log",
       label: "Export Activity Log",
       icon: "save",
-      action: () => void handleExportActivityLog(),
+      action: () => {
+        void handleExportActivityLog().catch((err) =>
+          reportAsyncActionFailure("Export activity log", err),
+        );
+      },
     },
     {
       id: "activity",
@@ -1327,7 +1485,9 @@ function wireCommandPalette(): void {
       label: "Go Up (Parent Folder)",
       icon: "arrow-up",
       action: () => {
-        void navigateUp();
+        void navigateUp().catch((err) =>
+          reportAsyncActionFailure("Navigate up", err),
+        );
       },
       available: () => state.connected && state.currentPrefix.length > 0,
     },
@@ -1336,7 +1496,11 @@ function wireCommandPalette(): void {
       label: "Back",
       icon: "arrow-left",
       keywords: ["previous", "history"],
-      action: () => void navigateBack(),
+      action: () => {
+        void navigateBack().catch((err) =>
+          reportAsyncActionFailure("Navigate back", err),
+        );
+      },
       available: () => state.connected,
     },
     {
@@ -1344,7 +1508,11 @@ function wireCommandPalette(): void {
       label: "Forward",
       icon: "arrow-right",
       keywords: ["next", "history"],
-      action: () => void navigateForward(),
+      action: () => {
+        void navigateForward().catch((err) =>
+          reportAsyncActionFailure("Navigate forward", err),
+        );
+      },
       available: () => state.connected,
     },
     {
@@ -1374,7 +1542,11 @@ function wireCommandPalette(): void {
       icon: "info",
       shortcut: `${accelLabel}/`,
       keywords: ["keys", "hotkeys", "bindings"],
-      action: () => void openKeyboardShortcuts(),
+      action: () => {
+        void openKeyboardShortcuts().catch((err) =>
+          reportAsyncActionFailure("Open keyboard shortcuts", err),
+        );
+      },
     },
   ]);
 }
@@ -1417,7 +1589,7 @@ export function wireEvents(): void {
       bookmark.region,
       bookmark.access_key,
       bookmark.secret_key,
-    );
+    ).catch((err) => reportAsyncActionFailure("Open bookmark", err));
   });
 
   wireWindowSizePersistence();

@@ -153,15 +153,20 @@ pub(super) fn structured_transfer_sdk_error<E: std::fmt::Debug>(
     match err {
         SdkError::ServiceError(ctx) => {
             let status = ctx.raw().status().as_u16();
+            // Only 408/425/429 and 5xx can be fixed by re-sending the same
+            // request. Every other 4xx is deterministic for this request; a
+            // retry just burns bandwidth before the same answer.
             let retryable = status == 408 || status == 425 || status == 429 || status >= 500;
-            let code = if status == 429 {
-                "throttled"
-            } else if status >= 500 {
-                "server"
-            } else if status == 403 {
-                "forbidden"
-            } else {
-                default_code
+            let code = match status {
+                400 => "bad_request",
+                403 => "forbidden",
+                404 => "not_found",
+                408 => "timeout",
+                412 => "precondition_failed",
+                425 => "too_early",
+                429 => "throttled",
+                500..=599 => "server",
+                _ => default_code,
             };
             encode_transfer_error(code, retryable, Some(status), message)
         }

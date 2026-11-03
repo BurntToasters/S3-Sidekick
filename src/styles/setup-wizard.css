@@ -170,6 +170,29 @@
   display: none;
 }
 
+.setup-wizard-field-error {
+  font-size: var(--text-sm);
+  color: var(--danger-text, var(--danger));
+  margin: 0;
+  text-align: left;
+}
+
+.setup-wizard-field-error[hidden] {
+  display: none;
+}
+
+/* Keep the biometric row's place while the async availability check runs, so
+   the form does not grow under the pointer. A missing sensor gets an
+   explanation in the same slot rather than a silent gap. */
+.setup-wizard-biometric-slot {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 58px;
+}
+
 .setup-wizard-checkbox-row {
   display: flex;
   align-items: center;

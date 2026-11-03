@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+const mockPickDownloadFile =
+  vi.fn<(fileName?: string, title?: string) => Promise<unknown>>();
+const mockPickUploadFiles = vi.fn<() => Promise<unknown[]>>();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockShowChoiceDialog = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockListen =
@@ -61,6 +64,11 @@ async function loadTransfersModule() {
   vi.doMock("@tauri-apps/api/event", () => ({
     listen: mockListen,
   }));
+  vi.doMock("../path-grants.ts", () => ({
+    pickDownloadFile: (fileName?: string, title?: string) =>
+      mockPickDownloadFile(fileName, title),
+    pickUploadFiles: () => mockPickUploadFiles(),
+  }));
   vi.doMock("../dialogs.ts", () => ({
     showConfirm: mockShowConfirm,
     showChoiceDialog: mockShowChoiceDialog,
@@ -102,6 +110,20 @@ beforeEach(() => {
       addWindowListener(type, listener, options);
     },
   );
+  mockPickDownloadFile.mockReset();
+  mockPickDownloadFile.mockImplementation(async (fileName) => {
+    const name = fileName ?? "download.bin";
+    return {
+      token: "test-grant",
+      path: `C:\\tmp\\${name}`,
+      name,
+      isDir: false,
+      directoryToken: null,
+      directoryPath: null,
+    };
+  });
+  mockPickUploadFiles.mockReset();
+  mockPickUploadFiles.mockResolvedValue([]);
   mockInvoke.mockReset();
   mockInvoke.mockImplementation(async (cmd, payload) => {
     if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
@@ -147,6 +169,11 @@ afterEach(async () => {
   );
 });
 
+/** A backend-granted upload selection; the token is opaque to the frontend. */
+function uploadSelection(path: string): { path: string; token: string } {
+  return { path, token: `test-grant-${path.length}` };
+}
+
 describe("transfers queue UI", () => {
   it("keeps transfer toggle visible when idle", async () => {
     const transfers = await loadTransfersModule();
@@ -165,7 +192,7 @@ describe("transfers queue UI", () => {
   it("shows transfer controls after enqueueing files", async () => {
     const transfers = await loadTransfersModule();
     await transfers.initTransferQueueUI();
-    transfers.enqueuePaths(["C:\\tmp\\photo.png"], "uploads/");
+    transfers.enqueuePaths([uploadSelection("C:\\tmp\\photo.png")], "uploads/");
 
     const toggle = document.getElementById(
       "transfer-toggle",
@@ -219,7 +246,11 @@ describe("transfers queue UI", () => {
     await transfers.initTransferQueueUI();
 
     transfers.enqueuePaths(
-      ["C:\\tmp\\one.txt", "C:\\tmp\\two.txt", "C:\\tmp\\three.txt"],
+      [
+        uploadSelection("C:\\tmp\\one.txt"),
+        uploadSelection("C:\\tmp\\two.txt"),
+        uploadSelection("C:\\tmp\\three.txt"),
+      ],
       "uploads/",
     );
 
@@ -254,7 +285,10 @@ describe("transfers queue UI", () => {
     };
     await transfers.initTransferQueueUI();
 
-    transfers.enqueuePaths(["C:\\tmp\\declined.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\declined.txt")],
+      "uploads/",
+    );
 
     await vi.waitFor(() => expect(mockShowConfirm).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => {
@@ -314,7 +348,10 @@ describe("transfers queue UI", () => {
   it("marks transfer toggle idle after completed history is cleared", async () => {
     const transfers = await loadTransfersModule();
     await transfers.initTransferQueueUI();
-    transfers.enqueuePaths(["C:\\tmp\\archive.zip"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\archive.zip")],
+      "uploads/",
+    );
     await flushMicrotasks(8);
 
     transfers.clearCompletedTransfers();
@@ -336,19 +373,22 @@ describe("transfers queue UI", () => {
         bucket: "bucket-a",
         key: "docs/readme.txt",
         destination: "C:\\tmp\\readme.txt",
+        destinationToken: "test-grant",
       },
     ]);
     await flushMicrotasks(8);
 
     expect(mockInvoke).toHaveBeenCalledWith("path_exists", {
-      path: "C:\\tmp\\readme.txt",
+      token: "test-grant",
+      name: null,
     });
     expect(mockInvoke).toHaveBeenCalledWith(
       "download_object",
       expect.objectContaining({
         bucket: "bucket-a",
         key: "docs/readme.txt",
-        destination: "C:\\tmp\\readme.txt",
+        destinationToken: "test-grant",
+        destinationName: null,
       }),
     );
   });
@@ -365,6 +405,7 @@ describe("transfers queue UI", () => {
         bucket: "bucket-a",
         key: "docs/readme.txt",
         destination: "C:\\tmp\\readme.txt",
+        destinationToken: "test-grant",
       },
     ]);
     await flushMicrotasks(8);
@@ -384,7 +425,10 @@ describe("transfers queue UI", () => {
     });
     await flushMicrotasks(4);
     transfers.clearCompletedTransfers();
-    transfers.enqueuePaths(["C:\\tmp\\checksummed.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\checksummed.txt")],
+      "uploads/",
+    );
     await flushMicrotasks(12);
     expect(mockInvoke).toHaveBeenCalledWith(
       "upload_object",
@@ -423,6 +467,7 @@ describe("transfers queue UI", () => {
         bucket: "bucket-a",
         key: "docs/persist.txt",
         destination: "C:\\tmp\\persist.txt",
+        destinationToken: "test-grant",
       },
     ]);
     await flushMicrotasks(8);
@@ -464,7 +509,10 @@ describe("transfers queue UI", () => {
     });
 
     await transfers.initTransferQueueUI();
-    transfers.enqueuePaths(["C:\\tmp\\persist.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\persist.txt")],
+      "uploads/",
+    );
     await flushMicrotasks(8);
 
     // The upload is now in-flight ("uploading"); it must be excluded from the
@@ -476,7 +524,7 @@ describe("transfers queue UI", () => {
     await flushMicrotasks(8);
   });
 
-  it("hides the pause control for in-flight uploads but shows it for downloads", async () => {
+  it("explains the unavailable pause on in-flight uploads but shows pause for downloads", async () => {
     const transfers = await loadTransfersModule();
     const { state } = await import("../state.ts");
     state.currentSettings.maxConcurrentTransfers = 2;
@@ -504,9 +552,14 @@ describe("transfers queue UI", () => {
     });
 
     await transfers.initTransferQueueUI();
-    transfers.enqueuePaths(["C:\\tmp\\up.txt"], "uploads/");
+    transfers.enqueuePaths([uploadSelection("C:\\tmp\\up.txt")], "uploads/");
     transfers.enqueueDownloads([
-      { bucket: "b", key: "down.txt", destination: "C:\\tmp\\down.txt" },
+      {
+        bucket: "b",
+        key: "down.txt",
+        destination: "C:\\tmp\\down.txt",
+        destinationToken: "test-grant",
+      },
     ]);
     await flushMicrotasks(8);
 
@@ -521,8 +574,14 @@ describe("transfers queue UI", () => {
       r.textContent?.includes("down.txt"),
     ) as HTMLElement;
 
-    // In-flight upload: no pause control. In-flight download: pause available.
-    expect(uploadRow.querySelector(".transfer-pause")).toBeNull();
+    // In-flight upload: a disabled pause control and a visible reason.
+    // In-flight download: pause is available.
+    const uploadPause =
+      uploadRow.querySelector<HTMLButtonElement>(".transfer-pause");
+    expect(uploadPause).not.toBeNull();
+    expect(uploadPause?.disabled).toBe(true);
+    expect(uploadPause?.title).toContain("Pause unavailable during upload");
+    expect(uploadRow.textContent).toContain("Pause unavailable during upload");
     expect(downloadRow.querySelector(".transfer-pause")).not.toBeNull();
 
     resolveUpload();
@@ -564,6 +623,7 @@ describe("transfers queue UI", () => {
         bucket: "bucket-a",
         key: "docs/big.bin",
         destination: "C:\\tmp\\big.bin",
+        destinationToken: "test-grant",
       },
     ]);
     await flushMicrotasks(12);
@@ -591,7 +651,7 @@ describe("transfers queue UI", () => {
     transfers.setTransferCompleteHandler(onComplete);
     await transfers.initTransferQueueUI();
 
-    transfers.enqueuePaths(["C:\\tmp\\first.txt"], "uploads/");
+    transfers.enqueuePaths([uploadSelection("C:\\tmp\\first.txt")], "uploads/");
     await vi.waitFor(() => {
       expect(onComplete.mock.calls.length).toBe(1);
       expect(onComplete.mock.calls.at(-1)?.[0]).toEqual({
@@ -619,6 +679,7 @@ describe("transfers queue UI", () => {
         bucket: "bucket-a",
         key: "docs/guide.txt",
         destination: "C:\\tmp\\guide.txt",
+        destinationToken: "test-grant",
       },
     ]);
     await vi.waitFor(() => {
@@ -642,7 +703,10 @@ describe("transfers queue UI", () => {
       if (cmd === "head_object") return { content_length: 0 };
       return undefined;
     });
-    transfers.enqueuePaths(["C:\\tmp\\second.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\second.txt")],
+      "uploads/",
+    );
     await flushMicrotasks(20);
     await vi.waitFor(() => {
       expect(onComplete.mock.calls.length).toBe(3);
@@ -729,7 +793,7 @@ describe("transfers queue UI", () => {
       return undefined;
     });
 
-    transfers.enqueuePaths(["C:\\tmp\\slow.txt"], "uploads/");
+    transfers.enqueuePaths([uploadSelection("C:\\tmp\\slow.txt")], "uploads/");
     await flushMicrotasks(4);
     const slowCancel = document.querySelector(
       ".transfer-item .transfer-cancel",
@@ -739,6 +803,7 @@ describe("transfers queue UI", () => {
     expect(mockInvoke).toHaveBeenCalledWith(
       "cancel_transfer",
       expect.objectContaining({
+        connectionId: "test-connection",
         transferId: expect.any(Number),
       }),
     );
@@ -765,7 +830,10 @@ describe("transfers queue UI", () => {
     ).not.toContain("slow.txt");
 
     state.currentSettings.maxConcurrentTransfers = 0;
-    transfers.enqueuePaths(["C:\\tmp\\queued.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\queued.txt")],
+      "uploads/",
+    );
     await flushMicrotasks(2);
     const queuedRow = Array.from(
       document.querySelectorAll<HTMLDivElement>(".transfer-item"),
@@ -822,6 +890,7 @@ describe("transfers queue UI", () => {
         bucket: "bucket-a",
         key: "docs/cancel-me.txt",
         destination: "C:\\tmp\\cancel-me.txt",
+        destinationToken: "test-grant",
       },
     ]);
     await vi.waitFor(() => {
@@ -884,6 +953,7 @@ describe("transfers queue UI", () => {
         bucket: "bucket-a",
         key: "docs/retain-me.txt",
         destination: "C:\\tmp\\retain-me.txt",
+        destinationToken: "test-grant",
       },
     ]);
     await vi.waitFor(() => {
@@ -982,7 +1052,10 @@ describe("transfers queue UI", () => {
     });
     await transfers.initTransferQueueUI();
 
-    transfers.enqueuePaths(["C:\\tmp\\progress-upload.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\progress-upload.txt")],
+      "uploads/",
+    );
     await flushMicrotasks(4);
     uploadProgressCb({
       payload: { transfer_id: 1, bytes_sent: 50, total_bytes: 100 },
@@ -994,6 +1067,7 @@ describe("transfers queue UI", () => {
         bucket: "bucket-a",
         key: "docs/progress-download.txt",
         destination: "C:\\tmp\\progress-download.txt",
+        destinationToken: "test-grant",
       },
     ]);
     await flushMicrotasks(4);
@@ -1052,8 +1126,14 @@ describe("transfers queue UI", () => {
           file_path: "C:\\tmp\\a.txt",
           relative_path: "/nested/a.txt",
           size: 1,
+          file_token: "test-grant-nested",
         },
-        { file_path: "C:\\tmp\\skip.txt", relative_path: "", size: 1 },
+        {
+          file_path: "C:\\tmp\\skip.txt",
+          relative_path: "",
+          size: 1,
+          file_token: "test-grant-skip",
+        },
       ],
       "pref/",
     );
@@ -1067,7 +1147,12 @@ describe("transfers queue UI", () => {
     ).not.toContain("Verification failed");
 
     transfers.enqueueDownloads([
-      { bucket: "bucket-a", key: "docs/no-destination.txt", destination: "" },
+      {
+        bucket: "bucket-a",
+        key: "docs/no-destination.txt",
+        destination: "",
+        destinationToken: "test-grant",
+      },
     ]);
     await flushMicrotasks(8);
     expect(
@@ -1078,7 +1163,7 @@ describe("transfers queue UI", () => {
       expect.objectContaining({ key: "docs/no-destination.txt" }),
     );
 
-    transfers.enqueuePaths([""], "");
+    transfers.enqueuePaths([uploadSelection("")], "");
     await flushMicrotasks(8);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(
@@ -1095,12 +1180,12 @@ describe("transfers queue UI", () => {
       (document.getElementById("bottom-drawer") as HTMLDivElement).hidden,
     ).toBe(true);
 
-    transfers.enqueuePaths(["C:\\tmp\\noext"], "uploads/");
+    transfers.enqueuePaths([uploadSelection("C:\\tmp\\noext")], "uploads/");
     await flushMicrotasks(4);
     expect(mockInvoke).toHaveBeenCalledWith(
       "upload_object",
       expect.objectContaining({
-        filePath: "C:\\tmp\\noext",
+        uploadToken: uploadSelection("C:\\tmp\\noext").token,
         contentType: "application/octet-stream",
       }),
     );
@@ -1174,8 +1259,11 @@ describe("transfers queue UI", () => {
       return undefined;
     });
 
-    transfers.enqueuePaths(["C:\\tmp\\first.txt"], "uploads/");
-    transfers.enqueuePaths(["C:\\tmp\\second.txt"], "uploads/");
+    transfers.enqueuePaths([uploadSelection("C:\\tmp\\first.txt")], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\second.txt")],
+      "uploads/",
+    );
     uploadProgressCb({
       payload: { transfer_id: 1, bytes_sent: 1, total_bytes: 2 },
     });
@@ -1191,6 +1279,7 @@ describe("transfers queue UI", () => {
         bucket: "bucket-a",
         key: "docs/folder/",
         destination: "C:\\tmp\\folder",
+        destinationToken: "test-grant",
       },
     ]);
     await flushMicrotasks(4);
@@ -1307,6 +1396,87 @@ describe("transfers queue UI", () => {
       }),
     );
     expect(deleteIndex).toBeGreaterThan(markerSaveIndex);
+  });
+
+  it("keeps a cancelled move awaiting source deletion as a recoverable failure", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    const receipt = {
+      source_key: "source/file.txt",
+      source_etag: '"source-etag"',
+      source_fingerprint: TEST_SOURCE_FINGERPRINT,
+      source_acl_fingerprint: TEST_SOURCE_ACL_FINGERPRINT,
+      source_tag_fingerprint: TEST_SOURCE_TAG_FINGERPRINT,
+      source_version_id: "source-version-1",
+      destination_key: "archive/file.txt",
+      destination_etag: '"destination-etag"',
+      destination_fingerprint: TEST_DESTINATION_FINGERPRINT,
+      destination_acl_fingerprint: TEST_DESTINATION_ACL_FINGERPRINT,
+      destination_tag_fingerprint: TEST_DESTINATION_TAG_FINGERPRINT,
+      destination_version_id: null,
+      ownership_ambiguous: false,
+    };
+    let deleteStarted = false;
+    let rejectDelete = (_err: Error) => {};
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "object_exists") return false;
+      if (cmd === "copy_object_to") return receipt;
+      if (cmd === "save_transfer_manifest") return undefined;
+      if (cmd === "delete_copied_objects") {
+        deleteStarted = true;
+        return new Promise<number>((_resolve, reject) => {
+          rejectDelete = reject;
+        });
+      }
+      if (cmd === "cancel_transfer") return undefined;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueueCopyMoveEntries([
+      {
+        operation: "move",
+        sourceBucket: "source-bucket",
+        sourceKey: receipt.source_key,
+        fileName: "file.txt",
+        destinationBucket: "destination-bucket",
+        destinationKey: receipt.destination_key,
+      },
+    ]);
+    await vi.waitFor(() => expect(deleteStarted).toBe(true));
+
+    const row = Array.from(
+      document.querySelectorAll<HTMLDivElement>(".transfer-item"),
+    ).find((entry) => entry.textContent?.includes("file.txt"));
+    (row?.querySelector(".transfer-cancel") as HTMLButtonElement).click();
+    rejectDelete(new Error("Transfer cancelled"));
+
+    const list = document.getElementById("transfer-list") as HTMLDivElement;
+    await vi.waitFor(() => {
+      expect(list.textContent).toContain("Failed");
+    });
+    expect(list.textContent).toContain("source deletion");
+    expect(
+      mockInvoke.mock.calls.some(
+        ([cmd, payload]) =>
+          cmd === "save_transfer_manifest" &&
+          typeof payload === "object" &&
+          payload !== null &&
+          String((payload as { json?: unknown }).json).includes(
+            '"failed":true',
+          ) &&
+          String((payload as { json?: unknown }).json).includes(
+            '"movePhase":"copied"',
+          ) &&
+          String((payload as { json?: unknown }).json).includes(
+            '"source_key":"source/file.txt"',
+          ),
+      ),
+    ).toBe(true);
   });
 
   it("refuses malformed fresh receipts before persistence or deletion", async () => {
@@ -1752,18 +1922,21 @@ describe("transfers queue UI", () => {
     const { state } = await import("../state.ts");
     state.currentSettings.maxConcurrentTransfers = 1;
     await transfers.initTransferQueueUI();
-    transfers.enqueuePaths(["C:\\tmp\\headless.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\headless.txt")],
+      "uploads/",
+    );
     await flushMicrotasks(4);
 
     expect(mockInvoke).toHaveBeenCalledWith(
       "upload_object",
       expect.objectContaining({
-        filePath: "C:\\tmp\\headless.txt",
+        uploadToken: uploadSelection("C:\\tmp\\headless.txt").token,
       }),
     );
   });
 
-  it("covers unknown progress events, queued retention on clear, hide no-op, and file.path uploads", async () => {
+  it("covers unknown progress events, queued retention on clear, hide no-op, and browser-file uploads", async () => {
     let uploadProgressCb: (event: { payload: unknown }) => void = () => {};
     let downloadProgressCb: (event: { payload: unknown }) => void = () => {};
     mockListen.mockImplementation(async (event, callback) => {
@@ -1781,7 +1954,10 @@ describe("transfers queue UI", () => {
     transfers.hideTransferQueue();
 
     state.currentSettings.maxConcurrentTransfers = 0;
-    transfers.enqueuePaths(["C:\\tmp\\queued-only.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\queued-only.txt")],
+      "uploads/",
+    );
     await flushMicrotasks(3);
     uploadProgressCb({
       payload: { transfer_id: 1, bytes_sent: 0, total_bytes: 0 },
@@ -1814,12 +1990,10 @@ describe("transfers queue UI", () => {
       expect(
         mockInvoke.mock.calls.some(
           ([cmd, payload]) =>
-            cmd === "upload_object" &&
+            cmd === "upload_object_bytes" &&
             typeof payload === "object" &&
             payload !== null &&
-            (payload as { key?: string }).key === "direct/path-backed.txt" &&
-            (payload as { filePath?: string }).filePath ===
-              "C:\\tmp\\path-backed.txt",
+            (payload as { key?: string }).key === "direct/path-backed.txt",
         ),
       ).toBe(true);
     });
@@ -1946,6 +2120,134 @@ describe("transfer recovery ownership", () => {
         }),
       );
     });
+  });
+
+  it("holds queued retries while disconnected instead of failing them", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.connected = false;
+    state.connectionId = "";
+    state.connectionIdentity = "";
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<div id="dialog-overlay"></div>',
+    );
+    mockShowChoiceDialog.mockResolvedValue("resume");
+    const recoveredFailed = recoveredDownload(6, true);
+    const failedManifest = {
+      ...recoveredFailed,
+      items: [
+        {
+          ...recoveredFailed.items[0],
+          failed: true,
+          error: "Access denied",
+        },
+      ],
+    };
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        return {
+          ...EMPTY_HYDRATION,
+          manifest_json: JSON.stringify(failedManifest),
+        };
+      }
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "discard_download_scratch") return undefined;
+      if (cmd === "path_exists") return false;
+      if (cmd === "head_object") return { content_length: 5 };
+      if (cmd === "download_object") return 5;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    const list = document.getElementById("transfer-list") as HTMLDivElement;
+    expect(list.textContent).toContain("Failed");
+
+    transfers.retryFailedTransfers();
+    await new Promise<void>((resolve) =>
+      window.requestAnimationFrame(() => resolve()),
+    );
+    expect(list.textContent).toContain("Connect to resume");
+    expect(list.textContent).not.toContain("Failed");
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "download_object",
+      expect.anything(),
+    );
+
+    window.dispatchEvent(new Event("online"));
+    await flushMicrotasks(4);
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "download_object",
+      expect.anything(),
+    );
+
+    state.connected = true;
+    state.connectionId = "new-session";
+    state.connectionIdentity = "test-identity";
+    await transfers.resumeRecoveredTransfersAfterConnect();
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "download_object",
+        expect.objectContaining({
+          connectionId: "new-session",
+          key: "docs/recovered.txt",
+        }),
+      );
+    });
+  });
+
+  it("keeps receipts when a queued recovered move is cancelled before deletion", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 0;
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<div id="dialog-overlay"></div>',
+    );
+    mockShowChoiceDialog.mockResolvedValue("resume");
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        return {
+          ...EMPTY_HYDRATION,
+          manifest_json: JSON.stringify(recoveredMove(6, recoveredReceipt)),
+        };
+      }
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "save_transfer_manifest") return undefined;
+      return undefined;
+    });
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    const row = Array.from(
+      document.querySelectorAll<HTMLDivElement>(".transfer-item"),
+    ).find((entry) => entry.textContent?.includes("recovered.txt"));
+    expect(row?.textContent).toContain("Queued");
+    (row?.querySelector(".transfer-cancel") as HTMLButtonElement).click();
+
+    const list = document.getElementById("transfer-list") as HTMLDivElement;
+    await vi.waitFor(() => {
+      expect(list.textContent).toContain("Failed");
+    });
+    expect(list.textContent).toContain("source deletion");
+    expect(
+      mockInvoke.mock.calls.some(
+        ([cmd, payload]) =>
+          cmd === "save_transfer_manifest" &&
+          typeof payload === "object" &&
+          payload !== null &&
+          String((payload as { json?: unknown }).json).includes(
+            '"failed":true',
+          ) &&
+          String((payload as { json?: unknown }).json).includes(
+            '"movePhase":"copied"',
+          ) &&
+          String((payload as { json?: unknown }).json).includes(
+            '"source_key":"source/recovered.txt"',
+          ),
+      ),
+    ).toBe(true);
   });
 
   it.each([1, 2, 3, 4, 5] as const)(
@@ -2158,7 +2460,10 @@ describe("transfer recovery ownership", () => {
       return undefined;
     });
 
-    transfers.enqueuePaths(["C:\\tmp\\failed.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\failed.txt")],
+      "uploads/",
+    );
     await vi.waitFor(() => {
       expect(
         mockInvoke.mock.calls.some(
@@ -2243,7 +2548,12 @@ describe("transfer coverage lift", () => {
     await transfers.initTransferQueueUI();
     await transfers.recoverPendingTransfers();
     transfers.enqueueDownloads([
-      { bucket: "b", key: "big.bin", destination: "C:\\tmp\\big.bin" },
+      {
+        bucket: "b",
+        key: "big.bin",
+        destination: "C:\\tmp\\big.bin",
+        destinationToken: "test-grant",
+      },
     ]);
     await vi.waitFor(() => {
       expect(
@@ -2367,6 +2677,7 @@ describe("transfer coverage lift", () => {
           file_path: "C:\\tmp\\adopt.txt",
           relative_path: "adopt.txt",
           size: 1,
+          file_token: "test-grant-adopt",
         },
       ],
       "pref/",
@@ -2436,6 +2747,7 @@ describe("transfer coverage lift", () => {
         bucket: "b",
         key: "clear-me.txt",
         destination: "C:\\tmp\\clear-me.txt",
+        destinationToken: "test-grant",
       },
     ]);
     await vi.waitFor(() => {
@@ -2464,7 +2776,8 @@ describe("transfer coverage lift", () => {
       expect.objectContaining({ okLabel: "Remove", okDanger: true }),
     );
     expect(mockInvoke).toHaveBeenCalledWith("discard_download_scratch", {
-      destination: "C:\\tmp\\clear-me.txt",
+      destinationToken: "test-grant",
+      destinationName: null,
     });
     expect(mockInvoke).toHaveBeenCalledWith(
       "transfer_checkpoint_remove",
@@ -2495,6 +2808,7 @@ describe("transfer coverage lift", () => {
         bucket: "b",
         key: "clear-nonactive.txt",
         destination: "C:\\tmp\\clear-nonactive.txt",
+        destinationToken: "test-grant",
       },
     ]);
     await vi.waitFor(() => {
@@ -2510,7 +2824,8 @@ describe("transfer coverage lift", () => {
     await transfers.removeTransfer(Number(failedRow?.dataset.id));
     await flushMicrotasks(4);
     expect(mockInvoke).toHaveBeenCalledWith("discard_download_scratch", {
-      destination: "C:\\tmp\\clear-nonactive.txt",
+      destinationToken: "test-grant",
+      destinationName: null,
     });
   });
 
@@ -2530,7 +2845,12 @@ describe("transfer coverage lift", () => {
     await transfers.recoverPendingTransfers();
     window.dispatchEvent(new Event("offline"));
     transfers.enqueueDownloads([
-      { bucket: "b", key: "offline.txt", destination: "C:\\tmp\\offline.txt" },
+      {
+        bucket: "b",
+        key: "offline.txt",
+        destination: "C:\\tmp\\offline.txt",
+        destinationToken: "test-grant",
+      },
     ]);
     await flushMicrotasks(6);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -2561,7 +2881,12 @@ describe("transfer coverage lift", () => {
     await transfers.initTransferQueueUI();
     await transfers.recoverPendingTransfers();
     transfers.enqueueDownloads([
-      { bucket: "b", key: "queued.txt", destination: "C:\\tmp\\queued.txt" },
+      {
+        bucket: "b",
+        key: "queued.txt",
+        destination: "C:\\tmp\\queued.txt",
+        destinationToken: "test-grant",
+      },
     ]);
     await flushMicrotasks(3);
     const row = Array.from(
@@ -2591,7 +2916,12 @@ describe("transfer coverage lift", () => {
     await transfers.initTransferQueueUI();
     await transfers.recoverPendingTransfers();
     transfers.enqueueDownloads([
-      { bucket: "b", key: "parked.txt", destination: "C:\\tmp\\parked.txt" },
+      {
+        bucket: "b",
+        key: "parked.txt",
+        destination: "C:\\tmp\\parked.txt",
+        destinationToken: "test-grant",
+      },
     ]);
     await flushMicrotasks(3);
     const row = Array.from(
@@ -2625,7 +2955,10 @@ describe("transfer coverage lift", () => {
     });
     await transfers.initTransferQueueUI();
     await transfers.recoverPendingTransfers();
-    transfers.enqueuePaths(["C:\\tmp\\cancel-fail.txt"], "uploads/");
+    transfers.enqueuePaths(
+      [uploadSelection("C:\\tmp\\cancel-fail.txt")],
+      "uploads/",
+    );
     await flushMicrotasks(4);
     const row = Array.from(
       document.querySelectorAll<HTMLDivElement>(".transfer-item"),
@@ -2666,7 +2999,12 @@ describe("transfer coverage lift", () => {
       await transfers.initTransferQueueUI();
       await transfers.recoverPendingTransfers();
       transfers.enqueueDownloads([
-        { bucket: "b", key: "retry.txt", destination: "C:\\tmp\\retry.txt" },
+        {
+          bucket: "b",
+          key: "retry.txt",
+          destination: "C:\\tmp\\retry.txt",
+          destinationToken: "test-grant",
+        },
       ]);
       // Reach the retry_wait backoff.
       await vi.advanceTimersByTimeAsync(0);
@@ -2722,6 +3060,7 @@ describe("transfer coverage lift", () => {
           bucket: "b",
           key: "cancel-backoff.txt",
           destination: "C:\\tmp\\cancel-backoff.txt",
+          destinationToken: "test-grant",
         },
       ]);
       await vi.advanceTimersByTimeAsync(0);
@@ -2784,6 +3123,7 @@ describe("transfer coverage lift", () => {
           bucket: "b",
           key: "offline-backoff.txt",
           destination: "C:\\tmp\\offline-backoff.txt",
+          destinationToken: "test-grant",
         },
       ]);
       await vi.advanceTimersByTimeAsync(0);
@@ -2812,5 +3152,61 @@ describe("transfer coverage lift", () => {
       vi.useRealTimers();
       window.dispatchEvent(new Event("online"));
     }
+  });
+
+  it("removes queue UI listeners on dispose and re-initializes once", async () => {
+    const transfers = await loadTransfersModule();
+    await transfers.initTransferQueueUI();
+    await transfers.initTransferQueueUI();
+    transfers.disposeTransferQueueUI();
+
+    const activity = document.getElementById("activity-list") as HTMLDivElement;
+    activity.innerHTML = "";
+    window.dispatchEvent(new Event("offline"));
+    await flushMicrotasks(2);
+    expect(activity.textContent).not.toContain("Network offline");
+
+    await transfers.initTransferQueueUI();
+    window.dispatchEvent(new Event("online"));
+    window.dispatchEvent(new Event("offline"));
+    await flushMicrotasks(2);
+    expect((activity.textContent.match(/Network offline/g) ?? []).length).toBe(
+      1,
+    );
+    transfers.disposeTransferQueueUI();
+  });
+
+  it("keeps only the most recent terminal history", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+
+    // Rendering 205 rows while they finish is not what this test measures; the
+    // list is restored once for the final bounded history.
+    document.getElementById("transfer-list")?.remove();
+    const runFinished = new Promise<void>((resolve) => {
+      transfers.setTransferCompleteHandler(() => resolve());
+    });
+    const entries = Array.from({ length: 205 }, (_, index) => ({
+      bucket: "bulk-bucket",
+      key: `bulk-${index}.txt`,
+      destination: `C:\\tmp\\bulk-${index}.txt`,
+    }));
+    transfers.enqueueDownloads(entries);
+    await runFinished;
+
+    const list = document.createElement("div");
+    list.id = "transfer-list";
+    list.className = "transfer-list";
+    document.getElementById("drawer-panel-transfers")?.append(list);
+    transfers.showTransferQueue();
+
+    expect(list.textContent).toContain("bulk-204.txt");
+    expect(list.querySelectorAll(".transfer-item").length).toBe(200);
+    expect(list.textContent).not.toContain("bulk-0.txt");
+    // Leave the next test's afterEach with an empty list instead of 200 rows.
+    transfers.clearCompletedTransfers();
   });
 });

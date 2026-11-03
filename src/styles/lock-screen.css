@@ -66,6 +66,13 @@
   color: var(--text-secondary);
 }
 
+.lock-view__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
 .lock-view__form {
   display: flex;
   flex-direction: column;

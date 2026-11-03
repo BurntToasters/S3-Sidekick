@@ -443,8 +443,7 @@ test.describe("frontend mutation and recovery safety", () => {
       objectCount: 0,
       prefixes: [],
       errors: {
-        load_bookmarks: "Encrypted storage is locked.",
-        load_bookmarks_backup: "Backup unavailable",
+        load_bookmarks_state: "Encrypted storage is locked.",
       },
     });
 

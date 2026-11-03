@@ -27,12 +27,35 @@ pub(super) fn is_text_content_type(ct: &str) -> bool {
 
 pub(super) fn encode_copy_source(bucket: &str, key: &str) -> String {
     let encoded_bucket = urlencoding::encode(bucket);
-    let encoded_key = key
-        .split('/')
-        .map(|segment| urlencoding::encode(segment).to_string())
-        .collect::<Vec<_>>()
-        .join("/");
+    let encoded_key = if super::key_has_unsafe_url_segments(key) {
+        // `bucket/key` is a path. Leaving a `..` segment or a `//` empty
+        // segment raw lets an endpoint or proxy normalize it into a different
+        // key. Encode the whole key, including its separators, so the server
+        // decodes exactly the literal key and never sees a dot/empty path
+        // segment. Ordinary keys keep readable slash separators.
+        encode_copy_source_key_strict(key)
+    } else {
+        key.split('/')
+            .map(|segment| urlencoding::encode(segment).to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
     format!("{}/{}", encoded_bucket, encoded_key)
+}
+
+fn encode_copy_source_key_strict(key: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(key.len() * 3);
+    for byte in key.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
 }
 
 pub(super) fn parse_endpoint_host(endpoint: &str) -> Option<String> {
@@ -154,6 +177,85 @@ pub(super) fn strip_aws_virtual_host(host: &str) -> Option<(String, String)> {
     Some((format!("{}{}", labels[1..].join("."), suffix), bucket))
 }
 
+/// Hostnames that resolve to a cloud instance metadata service. These are
+/// never valid S3 endpoints, and following them would let a saved connection
+/// reach credentials inside the user's cloud account.
+const BLOCKED_METADATA_HOSTS: &[&str] = &[
+    "metadata.google.internal",
+    "metadata.goog",
+    "instance-data",
+    "instance-data.ec2.internal",
+    "metadata.azure.com",
+];
+
+fn is_blocked_metadata_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    BLOCKED_METADATA_HOSTS.iter().any(|blocked| {
+        host == *blocked
+            || host
+                .strip_suffix(blocked)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
+/// Describe why an IP literal is unsafe as an S3 endpoint host. Loopback and
+/// private LAN ranges stay allowed because MinIO and local gateways use them.
+fn blocked_ip_kind(ip: std::net::IpAddr) -> Option<&'static str> {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            if v4.is_link_local() {
+                Some("IPv4 link-local")
+            } else if v4.is_unspecified() {
+                Some("unspecified")
+            } else if v4.is_broadcast() {
+                Some("broadcast")
+            } else if v4.is_multicast() {
+                Some("IPv4 multicast")
+            } else {
+                None
+            }
+        }
+        std::net::IpAddr::V6(v6) => {
+            if v6.is_unspecified() {
+                Some("unspecified")
+            } else if v6.is_multicast() {
+                Some("IPv6 multicast")
+            } else if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                Some("IPv6 link-local")
+            } else {
+                // Also catch IPv4-mapped/compatible forms such as
+                // `::ffff:169.254.169.254`, which embed a blocked v4 address.
+                v6.to_ipv4()
+                    .and_then(|v4| blocked_ip_kind(std::net::IpAddr::V4(v4)))
+            }
+        }
+    }
+}
+
+fn validate_endpoint_host(host: &str, endpoint: &str) -> Result<(), String> {
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host)
+        .trim_end_matches('.');
+    if is_blocked_metadata_host(unbracketed) {
+        return Err(format!(
+            "Endpoint '{endpoint}' uses a cloud metadata host, which is not allowed."
+        ));
+    }
+    // A scoped IPv6 literal carries a zone identifier (`fe80::1%25eth0` in a
+    // URL); drop it so the address is still classified as link-local.
+    let ip_literal = unbracketed.split('%').next().unwrap_or(unbracketed);
+    if let Ok(ip) = ip_literal.parse::<std::net::IpAddr>() {
+        if let Some(kind) = blocked_ip_kind(ip) {
+            return Err(format!(
+                "Endpoint '{endpoint}' uses an unsafe {kind} address, which is not allowed."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Normalize an endpoint string into a full URL suitable for the AWS SDK.
 pub(super) fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), String> {
     let trimmed = raw.trim().trim_end_matches('/');
@@ -176,11 +278,23 @@ pub(super) fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), 
         .unwrap_or("")
         .trim_matches('/');
 
-    // Separate host from optional port.
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
-        _ => (authority, None),
+    // Userinfo is not part of a host. Drop it before parsing so a value like
+    // `user@169.254.169.254` cannot smuggle a blocked address past validation.
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+
+    // Separate host from optional port. An unbracketed authority with more
+    // than one colon is an IPv6 literal, not a host plus port.
+    let (host, port) = if host_port.matches(':').count() > 1 && !host_port.starts_with('[') {
+        (host_port, None)
+    } else {
+        match host_port.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
+            _ => (host_port, None),
+        }
     };
+
+    let host_lower = host.to_ascii_lowercase();
+    validate_endpoint_host(&host_lower, trimmed)?;
 
     // A single trailing path segment is accepted as a bucket hint (pasting a
     // bucket URL). Anything deeper is a reverse-proxy base path that
@@ -193,7 +307,6 @@ pub(super) fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), 
         );
     }
 
-    let host_lower = host.to_ascii_lowercase();
     let mut bucket_hint: Option<String> = if path.is_empty() {
         None
     } else {

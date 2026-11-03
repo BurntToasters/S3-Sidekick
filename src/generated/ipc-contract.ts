@@ -10,13 +10,16 @@ export interface IpcCommandArgs {
     key: string;
   };
   cancel_transfer: {
+    connectionId: string;
     transferId: number;
   };
   change_security_password: {
     currentPassword: string;
     newPassword: string;
   };
-  clear_saved_connection: Record<never, never>;
+  clear_saved_connection: {
+    connectionId?: string | null;
+  };
   clear_transfer_manifest: {
     recoverySession: string;
   };
@@ -73,7 +76,8 @@ export interface IpcCommandArgs {
   };
   disable_biometric: Record<never, never>;
   discard_download_scratch: {
-    destination: string;
+    destinationToken: string;
+    destinationName?: string | null;
   };
   disconnect: {
     connectionId: string;
@@ -82,7 +86,8 @@ export interface IpcCommandArgs {
     connectionId: string;
     bucket: string;
     key: string;
-    destination: string;
+    destinationToken: string;
+    destinationName?: string | null;
     transferId: number;
     overwrite: boolean;
     attempt?: number | null;
@@ -92,7 +97,8 @@ export interface IpcCommandArgs {
     connectionId: string;
     bucket: string;
     key: string;
-    destination: string;
+    destinationToken: string;
+    destinationName?: string | null;
     transferId: number;
     overwrite: boolean;
     attempt?: number | null;
@@ -106,6 +112,10 @@ export interface IpcCommandArgs {
     checksumVerification?: boolean | null;
   };
   enable_biometric: Record<never, never>;
+  export_text_file: {
+    token: string;
+    text: string;
+  };
   factory_reset: {
     settingsJson: string;
   };
@@ -116,7 +126,7 @@ export interface IpcCommandArgs {
     expiresInSecs: number;
   };
   get_available_disk_bytes: {
-    path: string;
+    token: string;
   };
   get_object_acl: {
     connectionId: string;
@@ -139,7 +149,7 @@ export interface IpcCommandArgs {
     connectionId: string;
   };
   list_local_files_recursive: {
-    roots: string[];
+    rootTokens: string[];
   };
   list_objects: {
     connectionId: string;
@@ -150,6 +160,7 @@ export interface IpcCommandArgs {
   };
   load_bookmarks: Record<never, never>;
   load_bookmarks_backup: Record<never, never>;
+  load_bookmarks_state: Record<never, never>;
   load_connection: Record<never, never>;
   load_settings: Record<never, never>;
   load_transfer_manifest: Record<never, never>;
@@ -163,11 +174,25 @@ export interface IpcCommandArgs {
     url: string;
   };
   open_local_path: {
-    path: string;
+    token: string;
   };
   path_exists: {
-    path: string;
+    token: string;
+    name?: string | null;
   };
+  pick_download_directory: {
+    title?: string | null;
+  };
+  pick_download_file: {
+    fileName?: string | null;
+    title?: string | null;
+  };
+  pick_text_export: {
+    fileName?: string | null;
+    title?: string | null;
+  };
+  pick_upload_files: Record<never, never>;
+  pick_upload_folder: Record<never, never>;
   preview_object: {
     connectionId: string;
     bucket: string;
@@ -190,7 +215,8 @@ export interface IpcCommandArgs {
     transferId?: number | null;
   };
   reveal_local_path: {
-    path: string;
+    token: string;
+    name?: string | null;
   };
   save_bookmarks: {
     json: string;
@@ -224,6 +250,7 @@ export interface IpcCommandArgs {
     currentPassword?: string | null;
     newPassword?: string | null;
   };
+  take_dropped_upload_grants: Record<never, never>;
   touch_security_activity: Record<never, never>;
   transfer_checkpoint_gc: {
     ttlHours: number;
@@ -251,7 +278,7 @@ export interface IpcCommandArgs {
     connectionId: string;
     bucket: string;
     key: string;
-    filePath: string;
+    uploadToken: string;
     contentType: string;
     transferId: number;
     attempt?: number | null;
@@ -271,11 +298,6 @@ export interface IpcCommandArgs {
     attempt?: number | null;
     overwrite?: boolean | null;
     checksumVerification?: boolean | null;
-  };
-  write_text_file: {
-    path: string;
-    text: string;
-    overwrite: boolean;
   };
 }
 

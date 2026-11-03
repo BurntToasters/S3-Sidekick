@@ -2,6 +2,61 @@
 
 use super::*;
 
+struct OpenedFileDigests {
+    sha256: Vec<u8>,
+    md5_hex: String,
+}
+
+/// Hash one open handle once for both upload integrity and single-part
+/// create-only recovery. The MD5 is only used to compare against a HEAD ETag;
+/// it is never treated as a deletion receipt.
+async fn sha256_and_md5_opened_file(
+    file: &mut tokio::fs::File,
+    cancel: &CancelToken,
+) -> Result<OpenedFileDigests, String> {
+    use md5::{Digest as _, Md5};
+    use tokio::io::AsyncReadExt;
+
+    let mut sha256 = Sha256::new();
+    let mut md5 = Md5::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let read = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = file.read(&mut buf) => {
+                result.map_err(|e| format!("Failed to read file for checksum: {}", e))?
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        sha256.update(&buf[..read]);
+        md5.update(&buf[..read]);
+    }
+    Ok(OpenedFileDigests {
+        sha256: sha256.finalize().to_vec(),
+        md5_hex: hex_lower(&md5.finalize()),
+    })
+}
+
+fn md5_hex_bytes(bytes: &[u8]) -> String {
+    use md5::{Digest as _, Md5};
+
+    let mut hasher = Md5::new();
+    hasher.update(bytes);
+    hex_lower(&hasher.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(hex, "{:02x}", byte);
+    }
+    hex
+}
+
 #[tauri::command]
 pub(crate) async fn upload_object(
     app: tauri::AppHandle,
@@ -9,7 +64,7 @@ pub(crate) async fn upload_object(
     connection_id: String,
     bucket: String,
     key: String,
-    file_path: String,
+    upload_token: String,
     content_type: String,
     transfer_id: u32,
     attempt: Option<u32>,
@@ -25,7 +80,10 @@ pub(crate) async fn upload_object(
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     validate_mutating_key(&key, "Object key")?;
-    let upload_path = validate_upload_source_path(&file_path)?;
+    // The upload source is the exact file the native picker or the native drop
+    // granted. Re-check it now: the file may have been replaced by a symlink,
+    // become unreadable, or changed size since the picker closed.
+    let upload_path = crate::path_authority::revalidate_upload_source(&upload_token)?;
     let provider = client.provider();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
@@ -43,13 +101,14 @@ pub(crate) async fn upload_object(
     let overwrite = overwrite.unwrap_or(false);
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
+    let multipart_upload = file_size >= MULTIPART_THRESHOLD;
     // Multipart safety always needs a baseline digest, even when remote checksum
     // headers are disabled for provider compatibility. This extra local read is
     // what detects same-size rewrites before CompleteMultipartUpload publishes.
     // Create-only writes also carry the digest as an ownership marker so a
     // retried request that hits 412 can recognise its own committed object.
-    let needs_digest = checksum_enabled || file_size >= MULTIPART_THRESHOLD || !overwrite;
-    if needs_digest && file_size >= MULTIPART_THRESHOLD {
+    let needs_digest = checksum_enabled || multipart_upload || !overwrite;
+    if needs_digest && multipart_upload {
         // Hashing a large file takes a while; the row says so instead of sitting at 0%.
         emit_transfer_progress(
             &app,
@@ -66,12 +125,17 @@ pub(crate) async fn upload_object(
             None,
         );
     }
-    let expected_checksum = if needs_digest {
+    // The multipart path re-hashes the bytes it actually reads, so its baseline
+    // digest may come from the path. The single-PUT path hashes and streams from
+    // one opened handle below; hashing the path separately would let a swapped
+    // file be hashed here and a different file uploaded.
+    let mut expected_checksum = if multipart_upload && needs_digest {
         let digest = sha256_file(&upload_path, &cancel).await?;
         Some(sha256_checksum_from_digest(&digest))
     } else {
         None
     };
+    let mut expected_md5_hex: Option<String> = None;
     emit_transfer_progress(
         &app,
         "upload-progress",
@@ -87,7 +151,8 @@ pub(crate) async fn upload_object(
         None,
     );
 
-    if file_size >= MULTIPART_THRESHOLD {
+    let mut reported_size = file_size;
+    if multipart_upload {
         let part_size_bytes = choose_upload_part_size_bytes(file_size, part_size_mb)?;
         let requested_workers = clamp_transfer_concurrency(part_concurrency);
         let part_workers = clamp_concurrency_for_budget(
@@ -128,9 +193,39 @@ pub(crate) async fn upload_object(
             require_put_create_only_support(provider, &key)?;
         }
 
-        let body = aws_sdk_s3::primitives::ByteStream::from_path(upload_path.as_path())
+        let mut file = tokio::fs::File::open(&upload_path)
+            .await
+            .map_err(|e| format!("Failed to open upload source: {}", e))?;
+        let opened_size = file
+            .metadata()
+            .await
+            .map_err(|e| format!("Failed to inspect upload source: {}", e))?
+            .len();
+        if opened_size != file_size {
+            return Err(format!(
+                "File changed before upload: expected {} bytes but the opened file has {} bytes. Retry the upload.",
+                file_size, opened_size
+            ));
+        }
+        if needs_digest {
+            use tokio::io::AsyncSeekExt;
+            let digests = sha256_and_md5_opened_file(&mut file, &cancel).await?;
+            file.seek(std::io::SeekFrom::Start(0))
+                .await
+                .map_err(|e| format!("Failed to rewind upload source: {}", e))?;
+            expected_checksum = Some(sha256_checksum_from_digest(&digests.sha256));
+            if !overwrite {
+                expected_md5_hex = Some(digests.md5_hex);
+            }
+        }
+        let body = aws_sdk_s3::primitives::ByteStream::read_from()
+            .file(file)
+            .length(aws_sdk_s3::primitives::Length::Exact(file_size))
+            .buffer_size(256 * 1024)
+            .build()
             .await
             .map_err(|e| format!("Failed to open file stream: {}", e))?;
+        reported_size = opened_size;
 
         let mut req = client.put_object().bucket(&bucket).key(&key).body(body);
 
@@ -175,6 +270,7 @@ pub(crate) async fn upload_object(
                             &key,
                             &checksum.hex,
                             file_size,
+                            expected_md5_hex.as_deref(),
                             &cancel,
                         )
                         .await
@@ -206,8 +302,8 @@ pub(crate) async fn upload_object(
         &app,
         "upload-progress",
         transfer_id,
-        file_size,
-        file_size,
+        reported_size,
+        reported_size,
         attempt,
         "verifying",
         started_at,
@@ -217,9 +313,10 @@ pub(crate) async fn upload_object(
         None,
     );
 
-    // Report the stat'ed size so the frontend can verify against a known
-    // expectation instead of trusting progress events.
-    Ok(file_size)
+    // Report the size verified from the handle that supplied the bytes, not the
+    // earlier metadata probe. Multipart already proves `bytes_sent == file_size`
+    // before completion.
+    Ok(reported_size)
 }
 
 pub(super) async fn upload_part_with_retry(
@@ -600,8 +697,17 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
             .send();
         let complete_result = tokio::select! {
             _ = cancel.cancelled() => {
-                abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
-                return Err(cancelled_error());
+                // The completion request may already have reached the service.
+                // Aborting here could delete the upload ID while the service is
+                // still assembling and publishing the destination, so retain
+                // the upload and report an outcome the caller can retry safely.
+                return Err(encode_transfer_error(
+                    "completion_pending",
+                    true,
+                    None,
+                    "Upload cancelled while completion was in flight. The multipart upload was not aborted because it may still complete; retry or verify the destination before uploading again."
+                        .to_string(),
+                ));
             }
             result = complete_request => result,
         };
@@ -619,6 +725,7 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
                         key,
                         &baseline_checksum.hex,
                         file_size,
+                        None,
                         cancel,
                     )
                     .await
@@ -731,6 +838,7 @@ pub(crate) async fn upload_object_bytes(
     let started_at = Instant::now();
     let checksum_enabled = checksum_verification.unwrap_or(false);
     let expected_checksum = (checksum_enabled || !overwrite).then(|| sha256_checksum_bytes(&bytes));
+    let expected_md5_hex = (!overwrite).then(|| md5_hex_bytes(&bytes));
     emit_transfer_progress(
         &app,
         "upload-progress",
@@ -786,8 +894,16 @@ pub(crate) async fn upload_object_bytes(
         Err(e) => {
             let own_write = match expected_checksum.as_ref() {
                 Some(checksum) if !overwrite && is_destination_occupied(&e) => {
-                    destination_is_own_write(&client, &bucket, &key, &checksum.hex, total, &cancel)
-                        .await
+                    destination_is_own_write(
+                        &client,
+                        &bucket,
+                        &key,
+                        &checksum.hex,
+                        total,
+                        expected_md5_hex.as_deref(),
+                        &cancel,
+                    )
+                    .await
                 }
                 _ => false,
             };
@@ -845,6 +961,66 @@ mod e2e_multipart_recovery {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
+
+    #[test]
+    fn upload_retry_ownership_accepts_marker_or_content_md5_but_copy_remains_etag_bound() {
+        const MARKER: &str = "4f7e3f2d1c0b9a8f7e6d5c4b3a2918070605040302010f0e0d0c0b0a09080706";
+        const MD5: &str = "d41d8cd98f00b204e9800998ecf8427e";
+
+        // Marker plus size is sufficient for upload recovery even when the
+        // provider's ETag is not a content MD5 (multipart, SSE-KMS, ...).
+        assert!(super::head_confirms_own_upload(
+            Some(11),
+            Some("\"not-a-content-md5\""),
+            Some(MARKER),
+            MARKER,
+            11,
+            None
+        ));
+
+        // A content-MD5 ETag is positive proof even when the marker differs.
+        assert!(super::head_confirms_own_upload(
+            Some(11),
+            Some("\"D41D8CD98F00B204E9800998ECF8427E\""),
+            Some("external-writer-marker"),
+            MARKER,
+            11,
+            Some(MD5)
+        ));
+
+        // Neither proof overrides a size mismatch.
+        assert!(!super::head_confirms_own_upload(
+            Some(12),
+            Some("\"D41D8CD98F00B204E9800998ECF8427E\""),
+            Some(MARKER),
+            MARKER,
+            11,
+            Some(MD5)
+        ));
+
+        // Same size but neither the marker nor the content MD5 matches is
+        // still a real conflict.
+        assert!(!super::head_confirms_own_upload(
+            Some(11),
+            Some("\"not-a-content-md5\""),
+            Some("external-writer-marker"),
+            MARKER,
+            11,
+            Some(MD5)
+        ));
+
+        // Copy/move ownership remains source-ETag equality; no upload marker
+        // is consulted, so a spoofed marker cannot authorize source deletion.
+        let source_etag = "\"source-etag\"";
+        assert!(super::destination_etag_matches_source(
+            Some(source_etag),
+            Some(source_etag)
+        ));
+        assert!(!super::destination_etag_matches_source(
+            Some(MARKER),
+            Some(source_etag)
+        ));
+    }
 
     #[derive(Clone, Copy)]
     enum CommitMode {

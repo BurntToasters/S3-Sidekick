@@ -347,5 +347,5 @@ pub(crate) async fn delete_prefix(
         }
     }
 
-    Ok(result)
+    finish_delete_result(result, "Prefix delete")
 }

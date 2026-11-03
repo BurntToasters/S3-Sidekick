@@ -5,6 +5,13 @@ import { setConnectionAccessLocked } from "./connection.ts";
 import { friendlyError, plural } from "./utils.ts";
 import { getIconHtml } from "./icons.ts";
 
+/**
+ * The same locked-vault explanation the connect screen and switcher use.
+ * Keep the wording in sync with app-connection.ts.
+ */
+const LOCKED_SAVED_CONNECTIONS_MESSAGE =
+  "Saved connections stay unavailable until you unlock encrypted storage with your password.";
+
 const NEW_PASSWORD_WARNING =
   "Set a password to encrypt saved connections and your last-used connection with AES-256.\n\nThis password can't be recovered. If you forget it, the only way back is a factory reset, which deletes saved connections.";
 
@@ -140,6 +147,9 @@ export function securityErrorMessage(err: unknown): string {
   if (/invalid password|incorrect password/i.test(text)) {
     return "That password is incorrect. Check caps lock and try again.";
   }
+  if (/too many failed unlock attempts/i.test(text)) {
+    return text;
+  }
   if (/keychain/i.test(text) && /denied|refus|access/i.test(text)) {
     return "The system keychain denied access. Allow S3 Sidekick to use the keychain (or unlock it), then try again.";
   }
@@ -230,9 +240,9 @@ async function waitForWindowFocus(timeoutMs: number): Promise<void> {
 async function promptForNewPassword(): Promise<string | null> {
   const first = await showPrompt("Set Password", NEW_PASSWORD_WARNING, {
     inputType: "password",
-    inputPlaceholder: "Password (8+ characters)",
-    validationMessage: "Password must be at least 8 characters.",
-    validate: async (value) => value.length >= 8,
+    inputPlaceholder: "Password (12+ characters)",
+    validationMessage: "Password must be at least 12 characters.",
+    validate: async (value) => value.length >= 12,
   });
   if (first === null) return null;
 
@@ -406,6 +416,8 @@ function promptLockView(
   const overlayCancel = document.getElementById(
     "biometric-overlay-cancel",
   ) as HTMLButtonElement | null;
+  const viewDesc = document.getElementById("lock-view-desc");
+  if (viewDesc) viewDesc.textContent = LOCKED_SAVED_CONNECTIONS_MESSAGE;
   if (
     !view ||
     !password ||
@@ -699,8 +711,7 @@ function describeVault(status: SecurityStatus): {
   }
   return {
     title: "Encrypted (AES-256) and locked",
-    detail:
-      "Saved connections stay unavailable until you unlock them with your password.",
+    detail: LOCKED_SAVED_CONNECTIONS_MESSAGE,
     icon: "lock",
   };
 }
@@ -716,6 +727,12 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
   const disableBtn = document.getElementById("security-disable-btn");
   const warning = document.getElementById("security-warning");
   const lockSettings = document.getElementById("security-lock-settings");
+  const lockNeverWarning = document.getElementById(
+    "security-lock-never-warning",
+  );
+  const retryBtn = document.getElementById(
+    "security-status-retry",
+  ) as HTMLButtonElement | null;
   const lockTimeoutSelect = document.getElementById(
     "security-lock-timeout",
   ) as HTMLSelectElement | null;
@@ -727,6 +744,17 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
   ) as HTMLButtonElement | null;
   const biometricNote = document.getElementById("biometric-security-note");
   if (!statusText) return;
+  if (retryBtn && retryBtn.dataset.wired !== "true") {
+    retryBtn.dataset.wired = "true";
+    retryBtn.addEventListener("click", () => {
+      retryBtn.hidden = true;
+      retryBtn.disabled = true;
+      statusText.textContent = "Loading...";
+      void refreshSecuritySettingsUI().finally(() => {
+        retryBtn.disabled = false;
+      });
+    });
+  }
 
   try {
     const status = await getSecurityStatus();
@@ -736,6 +764,7 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
     const unlocked = status.encryption_enabled && status.unlocked;
 
     statusText.textContent = view.title;
+    if (retryBtn) retryBtn.hidden = true;
     if (detailEl) detailEl.textContent = view.detail;
     if (iconHost) {
       iconHost.innerHTML = getIconHtml(view.icon, {
@@ -749,6 +778,7 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
     setHidden(disableBtn, !unlocked);
     setHidden(warning, status.encryption_enabled);
     setHidden(lockSettings, !unlocked);
+    setHidden(lockNeverWarning, !unlocked || status.lock_timeout_minutes > 0);
     if (status.encryption_enabled && lockTimeoutSelect) {
       lockTimeoutSelect.value = String(status.lock_timeout_minutes);
     }
@@ -770,6 +800,10 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
   } catch (err) {
     statusText.textContent = `Could not read encryption status. ${securityErrorMessage(err)}`;
     if (detailEl) detailEl.textContent = "";
+    if (retryBtn) {
+      retryBtn.hidden = false;
+      retryBtn.disabled = false;
+    }
   }
 }
 
@@ -886,6 +920,11 @@ export async function handleSecurityToggle(
     await refreshSecuritySettingsUI();
     return true;
   } catch (err) {
+    // A declined native confirmation is a deliberate no-op, not a failure.
+    if (isCancellationError(err)) {
+      await refreshSecuritySettingsUI();
+      return false;
+    }
     await showAlert(
       "Error",
       `Could not update encryption. ${securityErrorMessage(err)}`,
@@ -965,14 +1004,20 @@ export async function handleLockTimeoutChange(): Promise<void> {
     "security-lock-timeout",
   ) as HTMLSelectElement | null;
   const statusEl = document.getElementById("security-lock-status");
+  const neverWarning = document.getElementById("security-lock-never-warning");
   if (!select) return;
 
   const minutes = Number(select.value);
+  if (neverWarning) neverWarning.hidden = minutes > 0;
   try {
     await setLockTimeoutMinutes(minutes);
     if (statusEl) statusEl.textContent = autoLockLabel(minutes);
   } catch (err) {
     if (statusEl) statusEl.textContent = "";
+    if (isCancellationError(err)) {
+      await refreshSecuritySettingsUI();
+      return;
+    }
     await showAlert(
       "Error",
       `Could not change auto-lock. ${securityErrorMessage(err)}`,
@@ -1002,6 +1047,10 @@ export async function handleBiometricToggle(
     }
     await refreshSecuritySettingsUI();
   } catch (err) {
+    if (isCancellationError(err)) {
+      await refreshSecuritySettingsUI();
+      return;
+    }
     await showAlert(
       "Error",
       `Could not change biometric unlock. ${securityErrorMessage(err)}`,
@@ -1014,6 +1063,8 @@ export async function handleBiometricToggle(
 const AUTO_LOCK_POLL_MS = 15_000;
 const ACTIVITY_TOUCH_INTERVAL_MS = 30_000;
 let autoLockTimer: ReturnType<typeof setInterval> | null = null;
+let removeAutoLockListeners: (() => void) | null = null;
+let stopAutoLockChecks: (() => void) | null = null;
 /** Last lock state the watcher saw; null until the first poll. */
 let lastSeenUnlocked: boolean | null = null;
 
@@ -1037,8 +1088,13 @@ export function noteManualLock(): void {
  */
 export function startAutoLockWatcher(onLocked: () => Promise<boolean>): void {
   if (autoLockTimer !== null) return;
+  let stopped = false;
+  stopAutoLockChecks = () => {
+    stopped = true;
+  };
   let lastTouch = 0;
   let handling = false;
+  let checking = false;
   let pendingAutoLockCleanup = false;
   const touch = (): void => {
     const now = Date.now();
@@ -1046,65 +1102,136 @@ export function startAutoLockWatcher(onLocked: () => Promise<boolean>): void {
     lastTouch = now;
     void invoke("touch_security_activity").catch(() => undefined);
   };
+  const onWindowActive = (): void => {
+    // A focus or pageshow event while the window is hidden must not skip the
+    // check the next visible poll would have run.
+    if (document.visibilityState !== "visible") return;
+    void checkAutoLockNow().catch(() => undefined);
+  };
   document.addEventListener("pointerdown", touch, true);
   document.addEventListener("keydown", touch, true);
+  window.addEventListener("focus", onWindowActive);
+  window.addEventListener("pageshow", onWindowActive);
+  document.addEventListener("visibilitychange", onWindowActive);
+  removeAutoLockListeners = () => {
+    document.removeEventListener("pointerdown", touch, true);
+    document.removeEventListener("keydown", touch, true);
+    window.removeEventListener("focus", onWindowActive);
+    window.removeEventListener("pageshow", onWindowActive);
+    document.removeEventListener("visibilitychange", onWindowActive);
+  };
+
+  const verifyNativeLock = async (): Promise<boolean> => {
+    // The status read can fail while the backend still holds the key. Force a
+    // lock before any reconnect path runs, then verify the result. A lock call
+    // that fails is not evidence; never reopen on an unverified state.
+    try {
+      const locked = await lockSecurity();
+      if (!locked.encryption_enabled || !locked.unlocked) return true;
+    } catch {
+      // Fall through to the status check.
+    }
+    try {
+      const status = await getSecurityStatus();
+      return !status.encryption_enabled || !status.unlocked;
+    } catch {
+      return false;
+    }
+  };
 
   const retryLockedCleanup = async (): Promise<void> => {
     if (handling || !pendingAutoLockCleanup) return;
     handling = true;
     try {
+      if (!(await verifyNativeLock())) {
+        setConnectionAccessLocked(true);
+        return;
+      }
       if (await onLocked()) {
         pendingAutoLockCleanup = false;
         lastSeenUnlocked = false;
       }
     } catch {
-      // Keep the fail-closed state and retry on the next poll.
+      // Keep the fail-closed state and retry on the next check.
+      setConnectionAccessLocked(true);
     } finally {
       handling = false;
     }
   };
 
-  autoLockTimer = setInterval(() => {
-    if (handling) return;
-    // A running transfer counts as activity. Locking would disconnect the
-    // session and interrupt it (uploads restart from zero); the timeout
-    // starts once the queue is idle.
-    const keepAlive: Promise<unknown> =
-      state.runningTransferCount > 0
-        ? invoke("touch_security_activity").catch(() => undefined)
-        : Promise.resolve();
-    void keepAlive
-      .then(async () => {
-        let status: SecurityStatus;
-        try {
-          status = await getSecurityStatus();
-        } catch {
-          if (lastSeenUnlocked === true) {
-            pendingAutoLockCleanup = true;
-            setConnectionAccessLocked(true);
-            await retryLockedCleanup();
-          }
-          return;
-        }
+  /**
+   * One shared lock check. The 15s poll and the focus/pageshow/visibility
+   * wakeups all run this, so a returned window locks at once instead of
+   * waiting for the next tick. `checking` keeps a focus burst from stacking
+   * status reads; `handling` keeps cleanup single-flight.
+   */
+  const checkAutoLockNow = async (): Promise<void> => {
+    if (checking || handling || stopped) return;
+    checking = true;
+    try {
+      // A running transfer counts as activity. Locking would disconnect the
+      // session and interrupt it (uploads restart from zero); the timeout
+      // starts once the queue is idle.
+      if (state.runningTransferCount > 0) {
+        await invoke("touch_security_activity").catch(() => undefined);
+      }
 
-        const unlocked = !status.encryption_enabled || status.unlocked;
-        const wasUnlocked = lastSeenUnlocked;
-        if (unlocked) {
-          lastSeenUnlocked = true;
-        } else if (
-          wasUnlocked === true ||
-          (wasUnlocked === null &&
-            (state.connected || Boolean(state.connectionId)))
+      let status: SecurityStatus;
+      try {
+        status = await getSecurityStatus();
+      } catch {
+        // Unknown is not unlocked. Keep any pending cleanup and fail closed
+        // whenever a session could still be open.
+        if (
+          pendingAutoLockCleanup ||
+          lastSeenUnlocked === true ||
+          state.connected ||
+          Boolean(state.connectionId)
         ) {
           pendingAutoLockCleanup = true;
           setConnectionAccessLocked(true);
-        } else if (!pendingAutoLockCleanup) {
-          lastSeenUnlocked = false;
-          return;
+          await retryLockedCleanup();
         }
+        return;
+      }
 
-        await retryLockedCleanup();
-      })
-      .catch(() => undefined);
+      const unlocked = !status.encryption_enabled || status.unlocked;
+      const wasUnlocked = lastSeenUnlocked;
+      if (unlocked) {
+        lastSeenUnlocked = true;
+      } else if (
+        wasUnlocked === true ||
+        (wasUnlocked === null &&
+          (state.connected || Boolean(state.connectionId)))
+      ) {
+        pendingAutoLockCleanup = true;
+        setConnectionAccessLocked(true);
+      } else if (!pendingAutoLockCleanup) {
+        lastSeenUnlocked = false;
+        return;
+      }
+
+      await retryLockedCleanup();
+    } finally {
+      checking = false;
+    }
+  };
+
+  autoLockTimer = setInterval(() => {
+    void checkAutoLockNow().catch(() => undefined);
   }, AUTO_LOCK_POLL_MS);
+}
+
+/**
+ * Stop the auto-lock watcher and drop its listeners. Idempotent; the next
+ * `startAutoLockWatcher` starts a fresh poll and watcher state.
+ */
+export function stopAutoLockWatcher(): void {
+  stopAutoLockChecks?.();
+  stopAutoLockChecks = null;
+  if (autoLockTimer !== null) clearInterval(autoLockTimer);
+  autoLockTimer = null;
+  removeAutoLockListeners?.();
+  removeAutoLockListeners = null;
+  lastSeenUnlocked = null;
 }

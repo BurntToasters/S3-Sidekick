@@ -3,8 +3,8 @@ use zeroize::Zeroizing;
 
 use crate::security::{
     constant_time_eq, ensure_migration_recovered, key_verifier, load_security_config,
-    require_unlocked_key, save_security_config, security_status, set_unlocked_key, SecurityStatus,
-    KEY_LEN, PBKDF2_ITERATIONS,
+    refresh_policy_mac_for_config, require_unlocked_key, save_security_config, security_status,
+    set_unlocked_key, verify_policy_integrity, SecurityStatus, KEY_LEN, PBKDF2_ITERATIONS,
 };
 use crate::{
     atomic_write, fsync_parent, lock_storage_ops, security_journal_path, try_lock_storage_ops,
@@ -246,6 +246,7 @@ pub(crate) fn recover_pending_biometric_cleanup<R: tauri::Runtime, M: tauri::Man
         BiometricCleanupMode::ClearUnconditionally => {
             if config.biometric_enrolled {
                 config.biometric_enrolled = false;
+                refresh_policy_mac_for_config(&mut config);
                 save_security_config(app, &config)?;
             }
             clear_stored_key_verified()?;
@@ -321,6 +322,8 @@ fn enable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, Stri
     // the process dies before the config commit, startup removes the key; if the
     // committed config says enrolled, recovery knows the enrollment succeeded.
     let key = require_unlocked_key()?;
+    // Do not launder a policy file that was edited after this vault was opened.
+    verify_policy_integrity(&config, &key)?;
     write_biometric_cleanup_journal(&app, BiometricCleanupMode::ClearUnlessEnrolled)?;
     if let Err(store_error) = store_key(&key) {
         let cleanup = crate::security::recover_interrupted_migration(&app);
@@ -334,6 +337,7 @@ fn enable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, Stri
     }
 
     config.biometric_enrolled = true;
+    refresh_policy_mac_for_config(&mut config);
     let save_result = save_security_config(&app, &config);
     let cleanup_result = crate::security::recover_interrupted_migration(&app);
     if let Err(save_error) = save_result {
@@ -351,7 +355,21 @@ fn enable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, Stri
 
 #[tauri::command]
 pub(crate) async fn disable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
-    crate::security::run_blocking(move || disable_biometric_inner(&app)).await
+    crate::security::run_blocking(move || {
+        // Disabling biometric unlock removes the stored vault key from the OS
+        // credential store. A renderer call alone must not be able to erase that
+        // security state, so ask for a fresh native decision first.
+        if !crate::security::confirm_security_state_change(
+            &app,
+            "Disable Biometric Unlock",
+            "The stored vault key will be removed from the system credential store. You will need your password to unlock encrypted storage. Continue?",
+            "Disable Biometric Unlock",
+        ) {
+            return Err(crate::security::SECURITY_CONFIRMATION_CANCELLED.to_string());
+        }
+        disable_biometric_inner(&app)
+    })
+    .await
 }
 
 fn disable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, String> {
@@ -443,6 +461,10 @@ fn unlock_biometric_inner(
         );
     }
 
+    // The stored key proves vault possession the same way the password does,
+    // so the policy tag can be checked before any protected data is served.
+    verify_policy_integrity(&config, &key)?;
+
     refresh_key_persistence(&key)?;
     let timeout = config.lock_timeout_minutes as u64 * 60;
     set_unlocked_key(Some(*key), timeout)?;
@@ -454,6 +476,13 @@ fn unlock_biometric_inner(
     if let Err(err) = crate::security::adopt_legacy_plaintext_files(&app, &mut config) {
         let _ = set_unlocked_key(None, 0);
         return Err(err);
+    }
+    // Upgrade a legacy configuration and re-sign flags changed by adoption.
+    // Best-effort for the same reason as password unlock.
+    let previous_mac = config.policy_mac.clone();
+    refresh_policy_mac_for_config(&mut config);
+    if config.policy_mac != previous_mac {
+        let _ = save_security_config(&app, &config);
     }
     Ok(security_status(&config))
 }
@@ -1028,13 +1057,15 @@ mod platform {
             }
 
             let cred = &*pcred;
-            let blob =
-                std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize);
-
-            if blob.len() != KEY_LEN {
+            // `CredentialBlob` can be null even when `CredReadW` succeeded.
+            // Constructing a slice from it is undefined behaviour, so check the
+            // pointer and length before touching the memory.
+            if cred.CredentialBlob.is_null() || cred.CredentialBlobSize as usize != KEY_LEN {
                 CredFree(pcred as *const std::ffi::c_void);
                 return Err("Invalid credential length".to_string());
             }
+            let blob =
+                std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize);
 
             let mut key = [0u8; KEY_LEN];
             key.copy_from_slice(blob);
@@ -1053,10 +1084,9 @@ mod platform {
 
     /// Whether the credential still exists and is readable. Does not prompt.
     ///
-    /// Returns `Ok(false)` both when the item is missing and when the credential
-    /// store is unreachable for this process (no logon session). Presence checks
-    /// after delete only need to fail closed when the key is *still readable*;
-    /// an inaccessible store cannot hand the key to the app either.
+    /// Only an explicit "not found" proves removal. An unreachable credential
+    /// store (for example, no logon session) cannot prove the key is gone, so
+    /// it fails closed and the cleanup journal is retained for a later retry.
     pub fn has_stored_key() -> Result<bool, String> {
         let target_wide = to_wide(TARGET);
         unsafe {
@@ -1073,12 +1103,11 @@ mod platform {
                     }
                     Ok(true)
                 }
-                Err(err)
-                    if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT
-                        || err.code().0 == WINDOWS_NO_SUCH_LOGON_SESSION_HRESULT =>
-                {
-                    Ok(false)
-                }
+                Err(err) if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT => Ok(false),
+                Err(err) if err.code().0 == WINDOWS_NO_SUCH_LOGON_SESSION_HRESULT => Err(format!(
+                    "Cannot verify biometric credential removal because the credential store is unavailable: {}",
+                    err
+                )),
                 Err(err) => Err(format!(
                     "Failed to verify biometric credential removal: {}",
                     err

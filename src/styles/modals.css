@@ -26,6 +26,13 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   height: auto;
 }
 
+/* The context menu is positioned by JS, so it publishes the titlebar offset
+   as a custom property for the placement clamp and caps its own height. */
+body.titlebar-custom #context-menu {
+  --context-menu-top-offset: var(--titlebar-height);
+  max-height: calc(100vh - var(--titlebar-height) - 8px);
+}
+
 .modal {
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
@@ -33,10 +40,16 @@ body.titlebar-custom #palette-overlay:not([hidden]) {
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   width: min(420px, 92vw);
-  max-height: 80vh;
+  max-height: min(80vh, calc(100vh - var(--titlebar-height) - 32px));
   overflow-y: auto;
   box-shadow: var(--shadow-3), var(--glass-inset-highlight);
   animation: modal-in var(--duration-base) ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal {
+    animation: none;
+  }
 }
 
 @keyframes modal-in {

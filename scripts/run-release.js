@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { commandRequiresShell } from "./npm-safe-update.mjs";
+
+const require = createRequire(import.meta.url);
+const {
+  isStableReleaseVersion,
+  readPackageVersion,
+} = require("./release-policy.cjs");
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -51,8 +58,34 @@ function runNpm(script, extraArgs = [], environment = {}) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
+export function assertSkipCheckAllowed(
+  skipCheck,
+  { environment = process.env, version = readPackageVersion() } = {},
+) {
+  if (!skipCheck) return false;
+  if (isStableReleaseVersion(version)) {
+    throw new Error(
+      `--skip-check is not allowed for stable release ${version}; stable releases must use release:prepare and the CI release gate.`,
+    );
+  }
+  if (
+    !/^(1|true|yes|on)$/i.test(
+      String(environment.ALLOW_RELEASE_SKIP_CHECK || "").trim(),
+    )
+  ) {
+    throw new Error(
+      "--skip-check is an explicit beta recovery override; set ALLOW_RELEASE_SKIP_CHECK=1 to confirm it.",
+    );
+  }
+  console.warn(
+    `WARNING: ALLOW_RELEASE_SKIP_CHECK=1 set for beta ${version}; this run sets FORCE_UPLOAD=1 and bypasses the draft target check.`,
+  );
+  return true;
+}
+
 export function main(argv = process.argv.slice(2), runner = runNpm) {
   const { continueScript, skipCheck } = parseReleaseArgs(argv);
+  assertSkipCheckAllowed(skipCheck);
   runner("prerelease:prepare");
   runner("release:prepare");
   runner(continueScript, [], skipCheck ? { FORCE_UPLOAD: "1" } : {});

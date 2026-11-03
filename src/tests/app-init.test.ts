@@ -13,6 +13,7 @@ const mockMarkSupportPromptDismissed = vi.fn<() => Promise<void>>();
 const mockIsSupportPromptDismissed = vi.fn<() => boolean>();
 
 const mockLoadConnection = vi.fn<() => Promise<unknown>>();
+const mockGetConnectionLoadError = vi.fn<() => string | null>(() => null);
 const mockLoadBookmarks = vi.fn<() => Promise<void>>();
 const mockSetBookmarkChangeHandler = vi.fn();
 const mockInitUpdater = vi.fn<() => Promise<void>>();
@@ -76,6 +77,7 @@ vi.mock("../settings.ts", () => ({
 
 vi.mock("../connection.ts", () => ({
   loadConnection: mockLoadConnection,
+  getConnectionLoadError: mockGetConnectionLoadError,
 }));
 
 vi.mock("../bookmarks.ts", () => ({
@@ -168,6 +170,7 @@ describe("app-init startup waterfall", () => {
     mockMarkSupportPromptDismissed.mockReset();
     mockIsSupportPromptDismissed.mockReset();
     mockLoadConnection.mockReset();
+    mockGetConnectionLoadError.mockReset().mockReturnValue(null);
     mockLoadBookmarks.mockReset();
     mockSetBookmarkChangeHandler.mockReset();
     mockInitUpdater.mockReset();
@@ -469,8 +472,8 @@ describe("app-init startup waterfall", () => {
       expect.stringContaining("Secure storage is locked"),
     );
     expect(mockLoadBookmarks).not.toHaveBeenCalled();
-    // Wizard path still attempts the saved connection.
-    expect(mockLoadConnection).toHaveBeenCalledTimes(1);
+    // The wizard path must not load a saved connection over the lock message.
+    expect(mockLoadConnection).not.toHaveBeenCalled();
   });
 
   it("defers transfer recovery failures to the activity log", async () => {
@@ -535,6 +538,28 @@ describe("app-init startup waterfall", () => {
       "sk2",
       "",
     );
+  });
+
+  it("warns about a corrupt saved connection but keeps startup usable", async () => {
+    mockLoadConnection.mockResolvedValueOnce(null);
+    mockGetConnectionLoadError.mockReturnValueOnce(
+      "the saved connection file is corrupt.",
+    );
+    const { init } = await import("../app-init.ts");
+
+    await init();
+    await flushMicrotasks();
+
+    expect(mockSetConnectionInputs).not.toHaveBeenCalled();
+    expect(mockSetStatus).toHaveBeenCalledWith(
+      expect.stringContaining("Saved connection could not be loaded"),
+      10000,
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.stringContaining("Saved connection could not be loaded"),
+      "warning",
+    );
+    expect(mockInitUpdater).toHaveBeenCalledTimes(1);
   });
 
   it("skips window restore for empty sizes and warns on failure", async () => {

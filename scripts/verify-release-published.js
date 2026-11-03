@@ -25,6 +25,10 @@ const {
 const {
   verifyReleaseAssetIntegrity,
 } = require("./release-asset-verification.cjs");
+const {
+  assertNoSignatureSkips,
+  verifyDownloadedArtifactSignature,
+} = require("./release-signature-gate.cjs");
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const version = JSON.parse(
@@ -77,6 +81,7 @@ async function verifyUpdaterAssets(assets) {
       const artifactPath = path.join(temp, artifactName);
       const signaturePath = path.join(temp, asset.name);
       downloadReleaseAsset(`${owner}/${repository}`, artifact.id, artifactPath);
+      verifyDownloadedArtifactSignature(artifactName, artifactPath);
       downloadReleaseAsset(`${owner}/${repository}`, asset.id, signaturePath);
       normalizeUpdaterSignature(signaturePath);
       verifyUpdaterSignature(artifactPath, signaturePath);
@@ -87,6 +92,7 @@ async function verifyUpdaterAssets(assets) {
 }
 
 async function main() {
+  assertNoSignatureSkips(process.env);
   assertGitHubCliAuthenticated();
   const release = loadRelease();
   const assets = listAssets(release.id);
@@ -103,6 +109,7 @@ async function main() {
     assets,
     repository: `${owner}/${repository}`,
     requiredNames: requiredDraftAssetNames(),
+    verifyArtifact: verifyDownloadedArtifactSignature,
   });
   await verifyUpdaterAssets(assets);
   const live = spawnSync(

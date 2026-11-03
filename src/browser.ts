@@ -14,6 +14,7 @@ import {
   parseJsonObject,
 } from "./utils.ts";
 import { refreshObjects, MAX_ACCUMULATED_LISTING_ITEMS } from "./connection.ts";
+import { iconForFileName, type FileIconName } from "./icon-map.ts";
 import {
   closeInspectorOnMobile,
   isInspectorOpen,
@@ -48,6 +49,12 @@ const OBJECT_VIRTUALIZE_THRESHOLD = 250;
 const OBJECT_VIRTUAL_OVERSCAN = 8;
 const OBJECT_VIRTUAL_FALLBACK_VIEWPORT = 600;
 const TYPE_AHEAD_IDLE_MS = 1000;
+const TYPE_AHEAD_ANNOUNCE_MS = 250;
+const TYPE_AHEAD_STATUS_RESET_MS = 1500;
+const NAV_HISTORY_LIMIT = 200;
+/** UI reset event for dialogs that captured a connection-bound action. */
+export const CONNECTION_RESET_EVENT = "s3-sidekick:connection-reset";
+let typeAheadAnnounceTimer: ReturnType<typeof setTimeout> | undefined;
 const ROW_NAV_KEYS: readonly string[] = [
   "ArrowDown",
   "ArrowUp",
@@ -69,113 +76,6 @@ function readObjectRowHeight(): number {
     : OBJECT_ROW_HEIGHT_FALLBACK;
 }
 
-type FileRowIconName =
-  | "file"
-  | "file-text"
-  | "file-image"
-  | "file-code"
-  | "file-archive"
-  | "file-video"
-  | "file-audio";
-
-const TEXT_DATA_EXTENSIONS = new Set([
-  "txt",
-  "md",
-  "csv",
-  "json",
-  "xml",
-  "html",
-  "htm",
-  "log",
-]);
-const IMAGE_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "svg",
-  "ico",
-  "bmp",
-  "avif",
-]);
-const CODE_EXTENSIONS = new Set([
-  "js",
-  "mjs",
-  "cjs",
-  "ts",
-  "tsx",
-  "jsx",
-  "py",
-  "go",
-  "rs",
-  "java",
-  "c",
-  "cpp",
-  "h",
-  "hpp",
-  "css",
-  "scss",
-  "sh",
-  "bash",
-  "yaml",
-  "yml",
-  "toml",
-  "sql",
-  "rb",
-  "php",
-  "swift",
-  "kt",
-  "lua",
-  "wasm",
-]);
-const ARCHIVE_EXTENSIONS = new Set([
-  "zip",
-  "tar",
-  "gz",
-  "tgz",
-  "bz2",
-  "xz",
-  "7z",
-  "rar",
-]);
-const VIDEO_EXTENSIONS = new Set([
-  "mp4",
-  "mov",
-  "avi",
-  "mkv",
-  "webm",
-  "m4v",
-  "wmv",
-]);
-const AUDIO_EXTENSIONS = new Set([
-  "mp3",
-  "wav",
-  "flac",
-  "ogg",
-  "m4a",
-  "aac",
-  "opus",
-]);
-
-function fileExtensionFromName(name: string): string {
-  const trimmed = name.endsWith("/") ? name.slice(0, -1) : name;
-  const dot = trimmed.lastIndexOf(".");
-  if (dot <= 0 || dot === trimmed.length - 1) return "";
-  return trimmed.slice(dot + 1).toLowerCase();
-}
-
-function resolveFileRowIconName(name: string): FileRowIconName {
-  const ext = fileExtensionFromName(name);
-  if (IMAGE_EXTENSIONS.has(ext)) return "file-image";
-  if (TEXT_DATA_EXTENSIONS.has(ext)) return "file-text";
-  if (CODE_EXTENSIONS.has(ext)) return "file-code";
-  if (ARCHIVE_EXTENSIONS.has(ext)) return "file-archive";
-  if (VIDEO_EXTENSIONS.has(ext)) return "file-video";
-  if (AUDIO_EXTENSIONS.has(ext)) return "file-audio";
-  return "file";
-}
-
 function rowIconHtml(iconName: string, fileKind: string): string {
   const html = getIconHtml(iconName, {
     className: "lucide-icon lucide-icon--inline",
@@ -187,7 +87,7 @@ function rowIconHtml(iconName: string, fileKind: string): string {
 
 // Row icons are static markup: build once instead of per row per render.
 const FOLDER_ROW_ICON_HTML = rowIconHtml("folder", "folder");
-const FILE_ROW_ICON_HTML_BY_KIND: Record<FileRowIconName, string> = {
+const FILE_ROW_ICON_HTML_BY_KIND: Record<FileIconName, string> = {
   file: rowIconHtml("file", "file"),
   "file-text": rowIconHtml("file-text", "file-text"),
   "file-image": rowIconHtml("file-image", "file-image"),
@@ -364,7 +264,9 @@ function syncInspectorForSemanticSelectionChange(): void {
   const signature = getInspectorSelectionSignature();
   if (signature === lastInspectorSelectionSignature) return;
   lastInspectorSelectionSignature = signature;
-  void syncInspectorFromSelection(getSelectionEntries());
+  void syncInspectorFromSelection(getSelectionEntries()).catch((err) => {
+    setStatus(`Inspector sync failed: ${friendlyError(err)}`, 5000);
+  });
 }
 
 export function invalidateInspectorSelectionSync(): void {
@@ -378,7 +280,15 @@ function hasAccelModifier(e: MouseEvent | KeyboardEvent): boolean {
   return e.ctrlKey;
 }
 
+/** A newer status or navigation supersedes a delayed type-ahead announcement. */
+function cancelTypeAheadAnnouncement(): void {
+  if (typeAheadAnnounceTimer === undefined) return;
+  clearTimeout(typeAheadAnnounceTimer);
+  typeAheadAnnounceTimer = undefined;
+}
+
 function setStatus(text: string, autoResetMs?: number): void {
+  cancelTypeAheadAnnouncement();
   if (state.statusTimeout !== undefined) {
     clearTimeout(state.statusTimeout);
     state.statusTimeout = undefined;
@@ -600,7 +510,13 @@ export function updateFilterClearButton(): void {
   const inputFilter = filterInput?.value.trim();
   const hasFilter = [inputFilter, state.filterText.trim()].some(Boolean);
   clearButton.disabled = !hasFilter;
-  clearButton.setAttribute("aria-hidden", String(!hasFilter));
+  // Expose the button only while it can act. index.html may start with the
+  // static attribute present or absent; either way this owns the live state.
+  if (hasFilter) {
+    clearButton.removeAttribute("aria-hidden");
+  } else {
+    clearButton.setAttribute("aria-hidden", "true");
+  }
   clearButton.classList.toggle("filter-clear--visible", hasFilter);
 }
 
@@ -727,6 +643,16 @@ let announcedSelectionCount = 0;
 let announcedFilterText = "";
 let filterSettleTimer: ReturnType<typeof setTimeout> | undefined;
 
+/**
+ * The visible batch count is rewritten on every selection and filter change, so
+ * it must not be a live region. One hidden announcer carries both kinds of
+ * update instead.
+ */
+function suppressBatchLiveRegion(batchCount: HTMLElement): void {
+  batchCount.setAttribute("aria-live", "off");
+  batchCount.setAttribute("aria-atomic", "false");
+}
+
 /** Hidden status node that carries batch announcements, created on first use. */
 function ensureBatchAnnouncer(toolbar: HTMLElement): HTMLElement {
   const existing = toolbar.querySelector<HTMLElement>("[data-batch-announcer]");
@@ -742,9 +668,24 @@ function ensureBatchAnnouncer(toolbar: HTMLElement): HTMLElement {
 }
 
 /**
+ * Prepare the selection live regions before the first selection can change.
+ * index.html ships `#batch-count` as a polite live region and has no announcer
+ * node; correcting both here keeps startup announcements single-sourced.
+ */
+function initSelectionAccessibility(): void {
+  if (typeof document === "undefined") return;
+  const batchCount = document.getElementById("batch-count");
+  if (batchCount) suppressBatchLiveRegion(batchCount);
+  const toolbar = document.getElementById("batch-toolbar");
+  if (toolbar) ensureBatchAnnouncer(toolbar);
+  // Duplicate visual count; the batch toolbar and statusbar own the semantics.
+  document.getElementById("object-count")?.setAttribute("aria-hidden", "true");
+}
+
+/**
  * Announce the selection count when it changes, and the filter summary once
- * the filter has settled. The visible count is rewritten on every filter tick,
- * so it is never the announced region.
+ * the filter has settled. A selection answer supersedes a pending filter
+ * announcement, so one interaction never speaks twice.
  */
 function announceBatchStatus(
   toolbar: HTMLElement,
@@ -755,7 +696,13 @@ function announceBatchStatus(
   const announcer = ensureBatchAnnouncer(toolbar);
   if (totalSelected !== announcedSelectionCount) {
     announcedSelectionCount = totalSelected;
+    announcedFilterText = filterText;
+    if (filterSettleTimer !== undefined) {
+      clearTimeout(filterSettleTimer);
+      filterSettleTimer = undefined;
+    }
     announcer.textContent = batchCount.textContent ?? "";
+    return;
   }
   if (filterText === announcedFilterText) return;
   announcedFilterText = filterText;
@@ -831,7 +778,7 @@ export function updateSelectionUI(): void {
     batchCount.title = batchCount.textContent;
     batchCount.setAttribute("aria-label", batchCountText);
     // Not a live region itself: the summary is rewritten on every filter tick.
-    batchCount.setAttribute("aria-live", "off");
+    suppressBatchLiveRegion(batchCount);
     announceBatchStatus(
       batchToolbar,
       batchCount,
@@ -1052,12 +999,28 @@ export function toggleSort(column: SortColumn): void {
   renderObjectTable();
 }
 
+const SORT_COLUMN_LABELS: Record<SortColumn, string> = {
+  name: "name",
+  size: "size",
+  modified: "last modified",
+};
+
+function nextSortDirection(
+  column: SortColumn,
+  active: boolean,
+): "ascending" | "descending" {
+  if (active) return state.sortAsc ? "descending" : "ascending";
+  // toggleSort starts names A-Z and size/date largest or newest first.
+  return column === "name" ? "ascending" : "descending";
+}
+
 function updateSortIndicators(): void {
-  const cols: ("name" | "size" | "modified")[] = ["name", "size", "modified"];
+  const cols: SortColumn[] = ["name", "size", "modified"];
   for (const col of cols) {
+    const active = state.sortColumn === col;
     const el = document.getElementById("sort-" + col);
     if (el) {
-      if (state.sortColumn === col) {
+      if (active) {
         el.innerHTML = state.sortAsc
           ? getIconHtml("arrow-up", {
               className: "lucide-icon lucide-icon--sort",
@@ -1075,12 +1038,20 @@ function updateSortIndicators(): void {
     if (th) {
       th.setAttribute(
         "aria-sort",
-        state.sortColumn === col
-          ? state.sortAsc
-            ? "ascending"
-            : "descending"
-          : "none",
+        active ? (state.sortAsc ? "ascending" : "descending") : "none",
       );
+      // Native buttons already toggle on Enter/Space. The label names the
+      // current state and the direction the next activation will apply.
+      const label = SORT_COLUMN_LABELS[col];
+      const button = th.querySelector<HTMLButtonElement>(".sort-trigger");
+      if (button) {
+        button.setAttribute(
+          "aria-label",
+          active
+            ? `Sort by ${label}, currently ${state.sortAsc ? "ascending" : "descending"}; activate to sort ${nextSortDirection(col, true)}`
+            : `Sort by ${label}; activate to sort ${nextSortDirection(col, false)}`,
+        );
+      }
     }
   }
 }
@@ -1234,6 +1205,7 @@ function paintObjectTableSkeleton(rowCount: number): void {
 }
 
 export function renderObjectTableSkeleton(rowCount = 8): void {
+  cancelTypeAheadAnnouncement();
   dom.objectPanel.style.display = "";
   dom.objectPanel.setAttribute("aria-busy", "true");
   dom.emptyState.style.display = "none";
@@ -1382,7 +1354,7 @@ function updateObjectRow(
     if (entry.kind === "folder") {
       icon.innerHTML = FOLDER_ROW_ICON_HTML;
     } else {
-      const iconName = resolveFileRowIconName(entry.name);
+      const iconName = iconForFileName(entry.name);
       icon.innerHTML = FILE_ROW_ICON_HTML_BY_KIND[iconName];
     }
   }
@@ -1593,6 +1565,15 @@ function visibleRowCount(): number {
 let typeAheadBuffer = "";
 let typeAheadAt = 0;
 
+/** Announce the matched row through the existing status live region. */
+function announceTypeAheadMatch(name: string): void {
+  cancelTypeAheadAnnouncement();
+  typeAheadAnnounceTimer = setTimeout(() => {
+    typeAheadAnnounceTimer = undefined;
+    setStatus(name, TYPE_AHEAD_STATUS_RESET_MS);
+  }, TYPE_AHEAD_ANNOUNCE_MS);
+}
+
 function handleTypeAhead(event: KeyboardEvent, currentIndex: number): void {
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.key.length !== 1 || event.key.trim() === "") return;
@@ -1614,6 +1595,7 @@ function handleTypeAhead(event: KeyboardEvent, currentIndex: number): void {
       selectRowOnly(index);
       focusLogicalRow(index);
       updateSelectionUI();
+      announceTypeAheadMatch(renderedTableEntries[index].name);
       return;
     }
   }
@@ -1825,6 +1807,7 @@ function ensureObjectPanelListeners(): void {
 
 export function renderObjectTable(): void {
   cancelPendingSkeleton();
+  cancelTypeAheadAnnouncement();
   const tbody = dom.objectTbody;
   const filter = state.filterText.trim().toLowerCase();
   // Reuse the exact filtered order used by getVisibleSelectableEntries so a
@@ -1888,11 +1871,21 @@ function updateObjectCount(): void {
   if (fileCount > 0)
     parts.push(`${fileCount} file${fileCount !== 1 ? "s" : ""}`);
 
+  const countText = parts.join(", ");
   const countEl = document.getElementById("statusbar-count");
-  if (countEl) countEl.textContent = parts.join(", ");
+  if (countEl) {
+    countEl.textContent = countText;
+    countEl.title = countText;
+  }
 
+  // The batch toolbar and statusbar already expose the same counts to assistive
+  // technology. This inline copy is visual-only, with a title for hover.
   const inlineCount = document.getElementById("object-count");
-  if (inlineCount) inlineCount.textContent = parts.join(", ");
+  if (inlineCount) {
+    inlineCount.textContent = countText;
+    inlineCount.title = countText;
+    inlineCount.setAttribute("aria-hidden", "true");
+  }
 }
 
 function updateLoadMore(): void {
@@ -2132,7 +2125,9 @@ async function navigateToLocationFolder(parsed: {
       () =>
         void navigateToLocationPath(
           formatLocationPath(parsed.bucket, parsed.prefix),
-        ),
+        ).catch((retryErr) => {
+          setStatus(`Navigation failed: ${friendlyError(retryErr)}`, 5000);
+        }),
     );
     return false;
   }
@@ -2251,6 +2246,8 @@ function pushNav(bucket: string, prefix: string, request: number): void {
   if (historySuppressRequest === request) return;
   navHistory = navHistory.slice(0, navIndex + 1);
   navHistory.push({ bucket, prefix });
+  const overflow = navHistory.length - NAV_HISTORY_LIMIT;
+  if (overflow > 0) navHistory.splice(0, overflow);
   navIndex = navHistory.length - 1;
   updateNavButtons();
 }
@@ -2328,7 +2325,10 @@ export async function navigateBack(): Promise<void> {
     renderBreadcrumb();
     reportNavFailure(
       `Navigation failed: ${friendlyError(err)}`,
-      () => void navigateBack(),
+      () =>
+        void navigateBack().catch((retryErr) => {
+          setStatus(`Navigation failed: ${friendlyError(retryErr)}`, 5000);
+        }),
     );
   } finally {
     if (historySuppressRequest === request) {
@@ -2384,7 +2384,10 @@ export async function navigateForward(): Promise<void> {
     renderBreadcrumb();
     reportNavFailure(
       `Navigation failed: ${friendlyError(err)}`,
-      () => void navigateForward(),
+      () =>
+        void navigateForward().catch((retryErr) => {
+          setStatus(`Navigation failed: ${friendlyError(retryErr)}`, 5000);
+        }),
     );
   } finally {
     if (historySuppressRequest === request) {
@@ -2455,7 +2458,10 @@ export async function navigateUp(): Promise<void> {
   } catch (err) {
     reportNavFailure(
       `Navigation failed: ${friendlyError(err)}`,
-      () => void navigateUp(),
+      () =>
+        void navigateUp().catch((retryErr) => {
+          setStatus(`Navigation failed: ${friendlyError(retryErr)}`, 5000);
+        }),
     );
   }
 }
@@ -2502,7 +2508,17 @@ export async function selectBucket(name: string): Promise<void> {
 
 export function showEmptyState(): void {
   cancelPendingSkeleton();
+  cancelTypeAheadAnnouncement();
+  // Drop listing-derived refs so a reconnect cannot read the old session's
+  // metadata through the inspector signature or stale rendered rows.
+  objectRevisionIndex = null;
+  indexedObjects = null;
+  indexedListingSizes = "";
+  sortedListingCache = null;
+  lastInspectorSelectionSignature = null;
+  renderedTableEntries = [];
   committedListingSnapshot = null;
+  clearNavHistory();
   dom.objectPanel.style.display = "none";
   dom.objectPanel.setAttribute("aria-busy", "false");
   dom.emptyState.style.display = "";
@@ -2521,6 +2537,8 @@ export function showEmptyState(): void {
   if (downloadBtn) downloadBtn.disabled = true;
   updateSelectionUI();
   updateNavButtons();
+  // Close dialogs whose action was bound to the session that just ended.
+  document.dispatchEvent(new Event(CONNECTION_RESET_EVENT));
 }
 
 registerObjectTableRenderer(renderObjectTable);
@@ -2556,3 +2574,5 @@ if (
     attributeFilter: ["data-density"],
   });
 }
+
+initSelectionAccessibility();

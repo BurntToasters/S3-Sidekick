@@ -7,7 +7,11 @@ import {
 import { canPreview, openPreview } from "./preview.ts";
 import { openInfoPanel } from "./info-panel.ts";
 import { basename, friendlyError, plural } from "./utils.ts";
-import { invokeS3 } from "./connection.ts";
+import {
+  captureConnectionSnapshot,
+  connectionIdentityChanged,
+  invokeS3For,
+} from "./connection.ts";
 import {
   isAwsEndpoint,
   handleCopyArn,
@@ -22,6 +26,7 @@ import { setStatus } from "./app-status.ts";
 import { logActivity } from "./activity-log.ts";
 import { SHORTCUTS } from "./shortcut-catalog.ts";
 import {
+  CONNECTION_RESET_EVENT,
   navigateToFolder,
   reportNavFailure,
   clearSelection,
@@ -267,7 +272,7 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     group: "transfer",
     shortcut: shortcutLabelFor("Rename selected item"),
     keywords: ["move", "name"],
-    isAvailable: (context) => context.total === 1,
+    isAvailable: (context) => context.total === 1 && !context.listingLoading,
     run: () => void handleRename(),
   },
   {
@@ -324,7 +329,7 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     danger: true,
     shortcut: shortcutLabelFor("Delete selected items"),
     keywords: ["trash", "remove"],
-    isAvailable: (context) => context.total > 0,
+    isAvailable: (context) => context.total > 0 && !context.listingLoading,
     run: () => void handleDelete(),
   },
   {
@@ -423,6 +428,12 @@ function closeShareLinkDialog(
 export function openShareLinkDialog(): void {
   const keys = getSelectedFileKeys();
   if (keys.length !== 1 || !state.currentBucket) return;
+  let snapshot: ReturnType<typeof captureConnectionSnapshot>;
+  try {
+    snapshot = captureConnectionSnapshot();
+  } catch {
+    return;
+  }
   const key = keys[0];
   const opener =
     document.activeElement instanceof HTMLElement
@@ -488,7 +499,14 @@ export function openShareLinkDialog(): void {
   box.appendChild(actions);
   overlay.appendChild(box);
 
-  const close = (): void => closeShareLinkDialog(overlay, opener);
+  const close = (): void => {
+    document.removeEventListener(CONNECTION_RESET_EVENT, handleConnectionReset);
+    closeShareLinkDialog(overlay, opener);
+  };
+  function handleConnectionReset(): void {
+    close();
+  }
+  document.addEventListener(CONNECTION_RESET_EVENT, handleConnectionReset);
 
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) close();
@@ -505,12 +523,28 @@ export function openShareLinkDialog(): void {
     copy.disabled = true;
     void (async () => {
       const expiresInSecs = Number.parseInt(select.value, 10);
+      if (connectionIdentityChanged(snapshot)) {
+        close();
+        setStatus("Share link cancelled because the connection changed.", 5000);
+        return;
+      }
       try {
-        const url = await invokeS3<string>("generate_presigned_url", {
-          bucket: state.currentBucket,
-          key,
-          expiresInSecs,
-        });
+        const url = await invokeS3For<string>(
+          snapshot.connectionId,
+          "generate_presigned_url",
+          {
+            bucket: snapshot.bucket,
+            key,
+            expiresInSecs,
+          },
+        );
+        if (connectionIdentityChanged(snapshot)) {
+          setStatus(
+            "Share link discarded because the connection changed.",
+            5000,
+          );
+          return;
+        }
         await navigator.clipboard.writeText(url);
         setStatus(
           `Share link copied (expires in ${formatExpiration(expiresInSecs)}).`,

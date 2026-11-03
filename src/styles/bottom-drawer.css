@@ -3,8 +3,10 @@
 .bottom-drawer {
   display: flex;
   flex-direction: column;
-  height: 240px;
-  min-height: 120px;
+  /* Cap the natural size against short windows; JS still writes an explicit
+     drag height, and min() keeps that height from overflowing the viewport. */
+  height: min(240px, 50vh);
+  min-height: min(120px, 50vh);
   max-height: 50vh;
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
@@ -77,16 +79,20 @@
 
 .bottom-drawer__header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-1);
   padding: 0 var(--space-3);
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .bottom-drawer__tabs {
   display: flex;
   gap: 0;
+  min-width: 0;
 }
 
 .bottom-drawer__tab {
@@ -141,8 +147,11 @@
 
 .bottom-drawer__actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-1);
+  min-width: 0;
 }
 
 /* Icon-only header controls meet the 32px pointer target floor. */
@@ -162,4 +171,18 @@
 .bottom-drawer__panel {
   height: 100%;
   overflow-y: auto;
+}
+
+@media (max-width: 480px) {
+  .bottom-drawer__header {
+    padding: 0 var(--space-2);
+  }
+
+  .bottom-drawer__tab {
+    padding: 8px var(--space-2);
+  }
+
+  .bottom-drawer__actions .btn--ghost {
+    padding-inline: var(--space-2);
+  }
 }

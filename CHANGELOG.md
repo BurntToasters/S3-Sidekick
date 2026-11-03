@@ -3,10 +3,10 @@
 
 # ⬇️ Downloads
 
-| <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux |
-| :--- | :--- | :--- |
+| <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows                                                                                                                                | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS          | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux                                                                                                                                                      |
+| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> --> | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-macOS.zip)** | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-Linux-arm64.flatpak) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> -->                                          | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-macOS.zip)** | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.1/S3-Sidekick-Linux-arm64.flatpak) -->    |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
@@ -37,12 +37,15 @@
 - **Lock and setup:** A full-window lock view with a password field, a Touch ID or Windows Hello retry, and **Forgot password?**, which explains that the encrypted vault will be erased before doing so. The Security tab shows a status card with explicit Set up, Unlock, Lock now, Change password, and Disable actions. Setup is three steps (Welcome and Theme, Security, Updates) with a step counter and **Skip setup**, and no longer re-initializes a vault after Skip and Back.
 - **Visual refresh:** New design tokens for spacing, type, motion, elevation, overlay scrim, success colors, and row density, one focus ring across controls, shared badge and switch styles, and a connected-status dot that pulses three times instead of forever.
 - **Security:** S3 diagnostics redact authorization headers, presigned-query credentials, and secret fields before logging. Upload sources and overwrite destinations that are symbolic links are refused.
-- **Release:** `release:prepare` now requires the full CI workflow, including the Playwright, MinIO, and full-stack jobs, to pass for the exact pushed commit. The ignored `--skip-e2e` flag was removed.
+- **Release:** `release:prepare` now runs the local `test:all` evidence gate, Cargo audit, and license checks, and requires the aggregate CI `Release gate` check to pass for the exact pushed commit. The local gate still runs icon validation and release-asset script tests, but not Playwright, MinIO, or full-stack tests; those remain CI jobs. The ignored `--skip-e2e` flag was removed.
+- **Updater security:** Updater manifests now require signatures bound to the announced app version. The isolated signing step passes `--app-version` from `package.json` and refuses to sign when the version is missing.
+- **Project metadata:** The package declares the MPL-2.0 license, and Prettier now checks `scripts/*.mjs`.
 - **Maintainability:** Transfer row and queue-chrome rendering moved out of the queue/recovery module, and the browser, inspector, preview, and properties import cycles were replaced with explicit dependency boundaries. Stylesheets take every color from design tokens and use the spacing, type, and radius tokens wherever a value is on the scale, with no visual change.
 - **CI:** Unsigned Windows arm64, macOS universal, and Flatpak builds now run in CI so platform toolchain breaks surface before a release host spends a session.
 
 ## Changes in `v0.11.3:`
-* **Security:** Updated PKGs to address: https://arstechnica.com/security/2026/10/the-internet-goes-on-high-alert-after-discovery-of-8-compromised-tls-certs/
+
+- **Security:** Updated PKGs to address: https://arstechnica.com/security/2026/10/the-internet-goes-on-high-alert-after-discovery-of-8-compromised-tls-certs/
 
 ## Changes in `v0.11.0:`
 
@@ -83,7 +86,7 @@ It's finally here! v0.11.0 is a major reliability and UX release: a docked **Ins
 
 - **Create-only writes:** Uploads, copies, moves, and renames use provider-supported atomic create-only requests when overwrite is disabled, preventing a concurrent writer from being silently replaced after the initial conflict check. Create-only support is detected per operation for AWS S3, Cloudflare R2, MinIO, Wasabi, Backblaze B2, and DigitalOcean Spaces.
 - **Conflict UX:** Providers that cannot guarantee a create-only write require an explicit **Write anyway** confirmation. Apply-to-all consent is serialized, cancellations are distinguished from destination conflicts, and queued copies retain source size so multipart safety is evaluated correctly. A failed “does this already exist?” check now counts as a conflict and prompts for both downloads and object writes.
-- **Upload integrity:** Single `PUT`s, browser-byte uploads, every multipart part, and multipart completion send a precalculated SHA-256 and the response checksum is checked against it.
+- **Upload integrity:** Multipart uploads always hash the whole source and every part; single `PUT`s and browser-byte uploads hash when create-only safety needs it. With checksum verification enabled, each request sends a SHA-256 and the response checksum is checked against it.
 - **Downloads:** Parallel downloads pin every range to one object generation (version ID where versioned, `If-Match` otherwise). Before publishing a completed parallel download, the pinned generation is re-checked; if the object changed, the destination is left untouched and scratch data is kept for resume. Resume checkpoints record version ID as well as ETag; native S3 checksums are preferred when verifying finished downloads. Checkpoint garbage collection no longer expires resume state for queued transfers.
 - **Moves:** A move records a durable copy receipt (key, ETag, version ID for both sides) before anything is deleted; a crash between copy and delete resumes the delete instead of duplicating. Source deletion re-verifies both sides against the receipt. On versioned buckets the source is retired with a conditional delete marker. Prefix copies keep rollback backups and name any backup that could not be cleaned up.
 - **Filesystem safety:** S3 keys map to local file names structurally — traversal segments are rejected, Windows-illegal characters are percent-encoded with collision detection, and Unicode is folded to NFC. Create-only downloads fall back to exclusive reservation or atomic no-replace move on filesystems without hard links.
@@ -149,9 +152,9 @@ v0.10.0 introduces a comprehensive UI/UX modernization, window size memory on re
 ## ℹ️ Release Info
 
 > [!IMPORTANT]
-> **Note:** MSI builds are NOT provided for beta releases. Use the EXE installer.
+> **Note:** Beta releases publish the same Windows x64 and arm64 NSIS `.exe` and `.msi` installers as stable releases. The `.exe` supports in-app updates; the `.msi` targets managed deployment and updates manually.
 
 - **GPG Signed:** My public key is attached to every release to ensure authenticity.
 - **GPG Key:** You can get my public GPG key here: https://tuxedo.rosie.run/GPG/BurntToasters_0xF2FBC20F_public.asc
 - **Code Signing:** macOS releases are fully signed. Windows releases are fully signed using Azure Artifact Signing. Linux releases are GPG signed.
-- **Legacy Binaries:** Separate x64/arm64 Windows binaries are deprecated in favor of the Universal installer. They are still listed in the downloads section, but the universal installer is recommended for simplicity.
+- **Windows binaries:** Windows ships separate x64 and arm64 installers; there is no universal Windows package. macOS ships a universal DMG and ZIP.

@@ -90,13 +90,19 @@
 }
 
 /* Hover moves the active option (see initPalette), so only one row is ever
-   highlighted. */
+   highlighted. The inset rail keeps the selection readable without relying on
+   a subtle background difference alone. */
 .palette__item {
   min-height: 32px;
 }
 
-.palette__item--active {
+.palette__item:hover {
   background: var(--bg-hover);
+}
+
+.palette__item.palette__item--active {
+  background: var(--bg-active);
+  box-shadow: inset 2px 0 0 var(--accent-fg);
 }
 
 .palette__item-icon {
@@ -130,4 +136,21 @@
   text-align: center;
   color: var(--text-secondary);
   font-size: var(--text-md);
+}
+
+@media (forced-colors: active) {
+  /* Selection is carried by an outline/fill, not by the background token that
+     forced-colors mode drops. */
+  .palette__item.palette__item--active {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+    background: Highlight;
+    box-shadow: none;
+  }
+
+  .palette__item--active .palette__item-label,
+  .palette__item--active .palette__item-shortcut,
+  .palette__item--active .palette__item-icon {
+    color: HighlightText;
+  }
 }

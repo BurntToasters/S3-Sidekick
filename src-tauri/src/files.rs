@@ -1,5 +1,6 @@
-use crate::{detect_case_fold_collision, strip_extended_windows_prefix, validate_existing_path};
+use crate::{detect_case_fold_collision, path_authority, strip_extended_windows_prefix};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 const MAX_LOCAL_SCAN_FILES: usize = 20_000;
 const MAX_LOCAL_SCAN_DEPTH: usize = 64;
@@ -21,11 +22,14 @@ impl ScanWarnings {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub(crate) struct LocalFileEntry {
     pub file_path: String,
     pub relative_path: String,
     pub size: u64,
+    /// Backend-issued `upload-file` grant for this exact file. The webview
+    /// never names an upload source path again.
+    pub file_token: String,
 }
 
 pub(crate) fn normalize_slashes(path: &std::path::Path) -> String {
@@ -50,6 +54,22 @@ pub(crate) fn absolute_path_string(path: &std::path::Path) -> String {
         Ok(cwd) => strip_extended_windows_prefix(&cwd.join(path).to_string_lossy()),
         Err(_) => strip_extended_windows_prefix(&path.to_string_lossy()),
     }
+}
+
+/// Absolute display path that never resolves a symbolic link.
+///
+/// `absolute_path_string` canonicalizes, which is right for labels but wrong
+/// for grants: canonicalizing a selected link would silently grant its target
+/// instead of the link the user picked.
+pub(crate) fn absolute_path_string_no_follow(path: &std::path::Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    strip_extended_windows_prefix(&absolute.to_string_lossy())
 }
 
 pub(crate) fn root_label(root: &std::path::Path) -> String {
@@ -106,6 +126,7 @@ fn collect_local_files_from_root(
             file_path: absolute_path_string(root),
             relative_path: normalize_slashes(std::path::Path::new(label)),
             size: root_meta.len(),
+            file_token: String::new(),
         });
         return;
     }
@@ -234,19 +255,25 @@ fn collect_local_files_from_root(
                 file_path: absolute_path_string(&path),
                 relative_path: normalize_slashes(&rel_with_root),
                 size: meta.len(),
+                file_token: String::new(),
             });
         }
     }
 }
 
-fn list_local_files_recursive_inner(roots: Vec<String>) -> Result<Vec<LocalFileEntry>, String> {
+fn list_local_files_recursive_inner(roots: Vec<PathBuf>) -> Result<Vec<LocalFileEntry>, String> {
     let mut normalized_roots = Vec::new();
     for root in roots {
-        let trimmed = root.trim();
-        if trimmed.is_empty() {
-            continue;
+        if !root.is_absolute() {
+            return Err(format!(
+                "Selected root must be absolute: {}",
+                root.display()
+            ));
         }
-        normalized_roots.push(validate_existing_path(trimmed, "Selected root")?);
+        if !root.exists() {
+            return Err(format!("Selected root does not exist: {}", root.display()));
+        }
+        normalized_roots.push(root);
     }
 
     if normalized_roots.is_empty() {
@@ -301,6 +328,17 @@ fn list_local_files_recursive_inner(roots: Vec<String>) -> Result<Vec<LocalFileE
         "upload paths",
     )?;
 
+    // Bind every enumerated file to its own upload grant. The webview can
+    // only upload files this scan found under the user-selected roots.
+    for entry in &mut entries {
+        entry.file_token = path_authority::mint(
+            path_authority::GrantPurpose::UploadFile,
+            std::path::Path::new(&entry.file_path),
+            false,
+            Some(entry.size),
+        );
+    }
+
     if warnings.total > 0 {
         eprintln!(
             "list_local_files_recursive skipped {} path(s). Sample: {}",
@@ -319,10 +357,27 @@ fn list_local_files_recursive_inner(roots: Vec<String>) -> Result<Vec<LocalFileE
     Ok(entries)
 }
 
+/// Enumerate every file under the granted upload roots.
+///
+/// Each root must be spent from an `upload-root` grant minted by the native
+/// folder picker or a native drop. The renderer cannot widen the scan past the
+/// roots the user chose.
 #[tauri::command]
 pub(crate) async fn list_local_files_recursive(
-    roots: Vec<String>,
+    root_tokens: Vec<String>,
 ) -> Result<Vec<LocalFileEntry>, String> {
+    let mut roots = Vec::new();
+    for token in root_tokens {
+        let granted = path_authority::authorize(&token, path_authority::GrantUse::ScanUploadRoot)?;
+        if !granted.is_dir {
+            return Err(format!(
+                "Selected root must be a folder: {}",
+                granted.path.display()
+            ));
+        }
+        granted.reject_symlink()?;
+        roots.push(granted.path);
+    }
     tokio::task::spawn_blocking(move || list_local_files_recursive_inner(roots))
         .await
         .map_err(|err| format!("Local file scan task failed: {}", err))?
@@ -370,5 +425,63 @@ mod tests {
         let path = Path::new("/");
         let label = root_label(path);
         assert!(!label.is_empty());
+    }
+
+    fn scan_scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "s3-sidekick-scan-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn scan_rejects_a_raw_path_without_a_grant() {
+        let err = list_local_files_recursive(vec!["/tmp".to_string()])
+            .await
+            .expect_err("a raw root path must not authorize a scan");
+        assert!(err.contains("grant"), "unexpected error: {}", err);
+    }
+
+    #[tokio::test]
+    async fn scan_rejects_a_file_grant() {
+        let dir = scan_scratch("file-grant");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"a").unwrap();
+        let token = path_authority::mint(
+            path_authority::GrantPurpose::UploadFile,
+            &file,
+            false,
+            Some(1),
+        );
+        let err = list_local_files_recursive(vec![token])
+            .await
+            .expect_err("an upload-file grant must not widen into a folder scan");
+        assert!(err.contains("cannot be used"), "unexpected error: {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn scan_mints_upload_file_tokens_under_the_granted_root() {
+        let dir = scan_scratch("root-grant");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let root = path_authority::mint(path_authority::GrantPurpose::UploadRoot, &dir, true, None);
+        let entries = list_local_files_recursive(vec![root]).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].size, 5);
+        let granted = path_authority::authorize(
+            &entries[0].file_token,
+            path_authority::GrantUse::ReadUploadFile,
+        )
+        .expect("the scan must mint a file grant");
+        assert_eq!(granted.path, Path::new(&entries[0].file_path));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

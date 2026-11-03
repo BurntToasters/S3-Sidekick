@@ -28,6 +28,7 @@ const REPO_RELEASES_API =
   "https://api.github.com/repos/BurntToasters/S3-Sidekick/releases";
 const DEFAULT_RELEASE_URL =
   "https://github.com/BurntToasters/S3-Sidekick/releases/latest";
+const TRUSTED_RELEASE_HOST = "github.com";
 
 let updaterEnabled = true;
 let updateChannel: UpdateChannel = "release";
@@ -306,6 +307,17 @@ function isNewerVersion(candidate: string, current: string): boolean {
   return compareVersions(candidate, current) > 0;
 }
 
+/** Only open a release page that parses to the expected HTTPS host. */
+function isTrustedReleaseUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === TRUSTED_RELEASE_HOST;
+  } catch {
+    return false;
+  }
+}
+
 async function fetchLatestReleaseInfo(
   channel: UpdateChannel,
 ): Promise<LatestReleaseInfo> {
@@ -325,11 +337,9 @@ async function fetchLatestReleaseInfo(
       throw new Error("Latest release did not include a valid version.");
     }
 
-    const htmlUrl =
-      typeof payload.html_url === "string" &&
-      payload.html_url.startsWith("https://github.com/")
-        ? payload.html_url
-        : updaterSupport.release_url || DEFAULT_RELEASE_URL;
+    const htmlUrl = isTrustedReleaseUrl(payload.html_url)
+      ? payload.html_url
+      : updaterSupport.release_url || DEFAULT_RELEASE_URL;
     return { version, releaseUrl: htmlUrl };
   }
 
@@ -358,11 +368,9 @@ async function fetchLatestReleaseInfo(
       parseReleaseVersion(release.name);
     if (!version) continue;
 
-    const htmlUrl =
-      typeof release.html_url === "string" &&
-      release.html_url.startsWith("https://github.com/")
-        ? release.html_url
-        : DEFAULT_RELEASE_URL;
+    const htmlUrl = isTrustedReleaseUrl(release.html_url)
+      ? release.html_url
+      : DEFAULT_RELEASE_URL;
     if (!latest || isNewerVersion(version, latest.version)) {
       latest = { version, releaseUrl: htmlUrl };
     }

@@ -76,6 +76,23 @@
     position: relative;
   }
 
+  /* Keep the 701–900px range from squeezing a 260px saved-connections rail
+     next to the 460px form card and its padding. */
+  .connection-screen {
+    flex-direction: column;
+  }
+
+  .connection-screen__sidebar {
+    width: 100%;
+    max-height: 220px;
+    border-right: none;
+    border-bottom: 1px solid var(--glass-border);
+  }
+
+  .connection-screen__main {
+    padding: var(--space-6) var(--space-4);
+  }
+
   .inspector-panel {
     position: absolute;
     right: 0;
@@ -112,21 +129,6 @@
 }
 
 @media (max-width: 700px) {
-  .connection-screen {
-    flex-direction: column;
-  }
-
-  .connection-screen__sidebar {
-    width: 100%;
-    max-height: 160px;
-    border-right: none;
-    border-bottom: 1px solid var(--glass-border);
-  }
-
-  .connection-screen__main {
-    padding: var(--space-6) var(--space-4);
-  }
-
   .connection-screen__form-card {
     padding: var(--space-5);
   }
@@ -140,20 +142,33 @@
     display: none;
   }
 
-  #conn-endpoint,
-  #conn-access-key,
-  #conn-secret-key {
-    grid-column: 1 / span 2;
+  /* The old rules targeted grid-column on flex parents. Let the two-column
+     rows wrap and give every field group a usable minimum width instead. */
+  .form-row {
+    flex-wrap: wrap;
+  }
+
+  .form-row > .form-group {
+    flex: 1 1 180px;
   }
 
   .field-with-toggle {
-    grid-column: 1 / span 2;
+    width: 100%;
   }
 
-  #bookmark-save-btn,
-  #connect-btn,
-  #disconnect-btn {
-    justify-self: stretch;
+  .form-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .form-actions__end {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .form-actions .btn {
+    flex: 1 1 auto;
+    justify-content: center;
   }
 
   .shortcut-chip {
@@ -162,6 +177,22 @@
 
   .statusbar__right {
     gap: var(--space-1);
+  }
+}
+
+@media (max-width: 420px) {
+  .form-row {
+    flex-direction: column;
+  }
+
+  .form-row > .form-group {
+    flex-basis: auto;
+    width: 100%;
+  }
+
+  .form-actions__end {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 

@@ -2,31 +2,29 @@
   "$schema": "https://schema.tauri.app/capabilities/2",
   "identifier": "default",
   "description": "Default permissions",
-  "windows": [
-    "main"
-  ],
+  "windows": ["main"],
   "permissions": [
     "s3-session",
     "s3-mutation",
     "transfers",
+    "path-grants",
     "local-files",
     "app-storage",
     "vault",
     "platform",
     "core:app:default",
-    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "core:window:default",
     "core:window:allow-start-dragging",
     "core:window:allow-set-size",
     "core:window:allow-minimize",
-    "core:window:allow-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-close",
     "core:window:allow-toggle-maximize",
-    "core:webview:default",
     "dialog:default",
     "updater:default",
-    "process:default",
+    "process:allow-restart",
     "notification:default"
   ]
 }

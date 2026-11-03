@@ -9,18 +9,32 @@
     <p>S3 Sidekick is a cross-platform desktop client for S3-compatible object storage.</p>
   </description>
   <launchable type="desktop-id">run.rosie.s3-sidekick.desktop</launchable>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Browse buckets and objects with a familiar file manager layout</caption>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/main/docs/screenshots/browse-light.png</image>
+    </screenshot>
+    <screenshot type="additional">
+      <caption>Preview object contents and inspect details without leaving the list</caption>
+      <image type="source" width="1440" height="800">https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/main/docs/screenshots/inspector-dark.png</image>
+    </screenshot>
+    <screenshot type="additional">
+      <caption>Tune transfer concurrency, conflict handling, and bandwidth limits</caption>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/main/docs/screenshots/settings-dark.png</image>
+    </screenshot>
+  </screenshots>
   <categories>
     <category>Network</category>
     <category>Utility</category>
   </categories>
   <url type="homepage">https://github.com/BurntToasters/S3-Sidekick</url>
   <url type="bugtracker">https://github.com/BurntToasters/S3-Sidekick/issues</url>
-  <developer>
+  <developer id="run.rosie">
     <name>BurntToasters</name>
   </developer>
   <content_rating type="oars-1.1" />
   <releases>
-    <release version="0.12.0-beta.1" date="2026-10-24"/>
+    <release version="0.12.0-beta.1" date="2026-10-29"/>
     <release version="0.11.3" date="2026-10-21"/>
     <release version="0.11.2" date="2026-10-02"/>
     <release version="0.11.1" date="2026-09-30"/>

@@ -255,12 +255,6 @@ body:not(.titlebar-custom) .header__actions {
   opacity: 1;
 }
 
-/* Disconnect: text contrast on the tinted surface and a 24px minimum target. */
-.header__actions #disconnect-btn {
-  min-height: 24px;
-  color: var(--danger-text);
-}
-
 /* Narrow windows: the product name truncates rather than running into chips. */
 @media (max-width: 900px) {
   .header__brand {

@@ -30,6 +30,7 @@ vi.mock("../connection.ts", () => ({
 }));
 
 vi.mock("../info-panel.ts", () => ({
+  INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
   hasUnsavedInfoChanges: () => false,
   confirmDiscardInfoProperties: async () => true,
 }));

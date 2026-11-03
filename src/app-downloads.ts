@@ -5,7 +5,11 @@ import {
   invokeS3For,
   type ConnectionSnapshot,
 } from "./connection.ts";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import {
+  pickDownloadDirectory,
+  pickDownloadFile,
+  type NativePathGrant,
+} from "./path-grants.ts";
 import { state } from "./state.ts";
 import {
   enqueueDownloads,
@@ -31,6 +35,10 @@ export interface DownloadQueueEntry {
   bucket: string;
   key: string;
   destination: string;
+  /** Backend grant for the chosen file or folder. */
+  destinationToken: string;
+  /** File name when the grant is a folder. */
+  destinationName?: string;
   conflictResolution?: Exclude<ConflictPolicy, "ask">;
 }
 
@@ -93,6 +101,28 @@ function rememberDownloadDirectory(dir: string): void {
   writeRecentDownloadDirs(updated);
 }
 
+/**
+ * Grants are session memory. Remember the last folder's reveal grant so
+ * "Open download folder" keeps working without asking again; after a restart
+ * the command opens a native picker instead of trusting localStorage.
+ */
+let rememberedDirectoryGrant: { directory: string; token: string } | null =
+  null;
+
+function rememberDirectoryGrant(grant: NativePathGrant): void {
+  const directory = grant.directoryPath ?? (grant.isDir ? grant.path : "");
+  const token = grant.directoryToken ?? (grant.isDir ? grant.token : null);
+  if (!directory || !token) return;
+  rememberedDirectoryGrant = { directory, token };
+}
+
+function revealTokenForRememberedDirectory(directory: string): string | null {
+  if (!rememberedDirectoryGrant) return null;
+  return rememberedDirectoryGrant.directory === directory
+    ? rememberedDirectoryGrant.token
+    : null;
+}
+
 export function getRememberedDownloadDir(): string {
   try {
     const direct = localStorage.getItem(LAST_DOWNLOAD_DIR_STORAGE_KEY);
@@ -120,6 +150,7 @@ async function uniqueDownloadEntries(
   keys: string[],
   destinationDir: string,
   bucket: string,
+  destinationToken: string,
 ): Promise<DownloadQueueEntry[]> {
   const taken = new Set<string>();
   const entries: DownloadQueueEntry[] = [];
@@ -142,6 +173,8 @@ async function uniqueDownloadEntries(
       bucket,
       key,
       destination: joinPath(destinationDir, candidate, state.platformName),
+      destinationToken,
+      destinationName: candidate,
     });
   }
 
@@ -203,22 +236,31 @@ async function preflightDownloadDiskSpace(
     return true;
   }
 
-  const requiredByDirectory = new Map<string, number>();
+  const requiredByDirectory = new Map<
+    string,
+    { required: number; token: string }
+  >();
   for (let i = 0; i < entries.length; i += 1) {
     const dir = parentDirectory(entries[i].destination);
     if (!dir) continue;
     const size = knownBytes[i];
     if (!Number.isFinite(size) || size <= 0) continue;
-    requiredByDirectory.set(dir, (requiredByDirectory.get(dir) ?? 0) + size);
+    const existing = requiredByDirectory.get(dir);
+    requiredByDirectory.set(dir, {
+      required: (existing?.required ?? 0) + size,
+      token: existing?.token ?? entries[i].destinationToken,
+    });
   }
   if (requiredByDirectory.size === 0) return true;
 
   const shortages: Array<{ dir: string; required: number; available: number }> =
     [];
-  for (const [dir, required] of requiredByDirectory) {
+  for (const [dir, requirement] of requiredByDirectory) {
+    const { required, token } = requirement;
+    if (!token) continue;
     try {
       const available = await invoke<number>("get_available_disk_bytes", {
-        path: dir,
+        token,
       });
       if (!Number.isFinite(available) || available < 0) continue;
       if (available < required) {
@@ -282,23 +324,16 @@ export async function handleDownload(): Promise<void> {
   }
   const capturedKeys = [...keys];
   const entries: DownloadQueueEntry[] = [];
-  const rememberedDir = getRememberedDownloadDir();
-
   if (capturedKeys.length === 1) {
     const fileName = safeFileName(capturedKeys[0], state.platformName);
-    let destination: string | null;
+    let grant: NativePathGrant | null;
     try {
-      destination = await save({
-        defaultPath: rememberedDir
-          ? joinPath(rememberedDir, fileName, state.platformName)
-          : fileName,
-        title: `Save ${fileName}`,
-      });
+      grant = await pickDownloadFile(fileName, `Save ${fileName}`);
     } catch (err) {
       setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
       return;
     }
-    if (!destination) return;
+    if (!grant) return;
     if (connectionSnapshotChanged(snap)) {
       setStatus(
         "Download cancelled because connection or location changed.",
@@ -306,29 +341,26 @@ export async function handleDownload(): Promise<void> {
       );
       return;
     }
-    saveRememberedDownloadDir(destination);
+    saveRememberedDownloadDir(grant.path);
+    rememberDirectoryGrant(grant);
     // The save dialog already asked the user about replacing an existing file,
     // so that answer is the confirmed replace; no second prompt follows.
     entries.push({
       bucket: snap.bucket,
       key: capturedKeys[0],
-      destination,
+      destination: grant.path,
+      destinationToken: grant.token,
       conflictResolution: "replace",
     });
   } else {
-    let selected: string | string[] | null;
+    let grant: NativePathGrant | null;
     try {
-      selected = await open({
-        title: "Select destination folder",
-        multiple: false,
-        directory: true,
-        defaultPath: rememberedDir || undefined,
-      });
+      grant = await pickDownloadDirectory();
     } catch (err) {
       setStatus(`Failed to open folder picker: ${friendlyError(err)}`);
       return;
     }
-    if (!selected || Array.isArray(selected)) return;
+    if (!grant) return;
     if (connectionSnapshotChanged(snap)) {
       setStatus(
         "Download cancelled because connection or location changed.",
@@ -336,9 +368,15 @@ export async function handleDownload(): Promise<void> {
       );
       return;
     }
-    saveRememberedDownloadDirectoryValue(selected);
+    saveRememberedDownloadDirectoryValue(grant.path);
+    rememberDirectoryGrant(grant);
     entries.push(
-      ...(await uniqueDownloadEntries(capturedKeys, selected, snap.bucket)),
+      ...(await uniqueDownloadEntries(
+        capturedKeys,
+        grant.path,
+        snap.bucket,
+        grant.token,
+      )),
     );
   }
 
@@ -399,7 +437,16 @@ export async function handleOpenLastDownloadFolder(): Promise<void> {
     return;
   }
   try {
-    await invoke("open_local_path", { path: dir });
+    let token = revealTokenForRememberedDirectory(dir);
+    if (!token) {
+      // Grants end with the session. Ask the user to confirm the remembered
+      // folder in a native picker instead of trusting the stored path.
+      const grant = await pickDownloadDirectory("Open download folder");
+      if (!grant) return;
+      rememberDirectoryGrant(grant);
+      token = grant.directoryToken ?? grant.token;
+    }
+    await invoke("open_local_path", { token });
     setStatus("Opened last download folder.", 3000);
   } catch (err) {
     setStatus(`Failed to open folder: ${friendlyError(err)}`);

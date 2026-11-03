@@ -1,5 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const jsonReportPath =
+  process.env.PLAYWRIGHT_JSON_OUTPUT_FILE ??
+  "test-results/playwright-report.json";
+
 export default defineConfig({
   testDir: "./tests/browser",
   // Keep Playwright's automatic cleanup away from repeatable MinIO and script
@@ -10,7 +14,11 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
-  reporter: process.env.CI ? "github" : "list",
+  // The JSON file is the machine-checked evidence artifact. Configure it here
+  // instead of relying on an environment variable Playwright does not read.
+  reporter: process.env.CI
+    ? [["github"], ["json", { outputFile: jsonReportPath }]]
+    : "list",
   use: {
     baseURL: "http://127.0.0.1:5173",
     trace: "retain-on-failure",

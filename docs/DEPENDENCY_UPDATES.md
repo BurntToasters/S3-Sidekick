@@ -2,7 +2,11 @@
 
 `npm run u` is a lockfile-only dependency proposal. It does not install npm packages, run npm lifecycle scripts, compile Rust, execute Cargo build scripts or procedural macros, format source files, or run tests.
 
-The command requires Node.js `^24.22.1 || >=26.13.0`, npm 12.2.1 or newer, and an already-installed Rust stable toolchain. It performs these steps:
+The command requires Node.js `^24.22.1 || >=26.13.0`, npm 12.2.1 or newer, and an already-installed Rust stable toolchain.
+
+Toolchain pins have one canonical value each. Node's supported floor is `engines.node` in `package.json`; CI's `NODE_VERSION=26.13.0` is the tested release line, and the Node 24 floor is not exercised in CI. The Flatpak sandbox is a documented build-only exception at Node 24.18 (the version in `org.freedesktop.Sdk.Extension.node24//26.08`), not a supported local floor. Rust is pinned by `rust-version` in `src-tauri/Cargo.toml` and installed by `npm run rust:update`; CI's `RUST_VERSION` must match. Update the canonical value first, then the duplicate pins.
+
+It performs these steps:
 
 1. Resolve npm updates with `--package-lock-only`, `--ignore-scripts`, and a three-day minimum release age in a disposable npm cache.
 2. Reject high-severity npm audit findings without populating the project `node_modules` directory.

@@ -9,7 +9,8 @@ pub(crate) async fn download_object(
     connection_id: String,
     bucket: String,
     key: String,
-    destination: String,
+    destination_token: String,
+    destination_name: Option<String>,
     transfer_id: u32,
     overwrite: bool,
     attempt: Option<u32>,
@@ -21,11 +22,17 @@ pub(crate) async fn download_object(
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     validate_readable_key(&key, "Object key")?;
-    let destination_path = if overwrite {
-        validate_destination_path_allow_overwrite(&destination)?
+    // The destination is the file the user picked in a native save dialog, or
+    // one backend-validated file name inside the folder they picked. The
+    // webview never supplies an absolute destination path.
+    let destination_path =
+        crate::resolve_download_destination(&destination_token, destination_name.as_deref())?;
+    if overwrite {
+        validate_destination_path_allow_overwrite_parsed(&destination_path)?;
     } else {
-        validate_destination_path(&destination)?
-    };
+        validate_destination_path_parsed(&destination_path)?;
+    }
+    crate::validate_user_write_target(&app, &destination_path)?;
     // The scratch path is derived here rather than accepted from the caller.
     // Accepting it meant any script in the webview could name an arbitrary
     // existing file and have the backend truncate and overwrite it.
@@ -85,6 +92,7 @@ pub(crate) async fn download_object(
     } else {
         None
     };
+    let expected_object_bytes = sanitized_content_length(generation_head.content_length());
 
     let mut download_request = client.get_object().bucket(&bucket).key(&key);
     if let Some(version_id) = object_version_id.as_deref() {
@@ -92,7 +100,10 @@ pub(crate) async fn download_object(
     } else {
         download_request = download_request.if_match(&object_etag);
     }
-    let download_request = download_request.send();
+    let download_request = download_request
+        .customize()
+        .config_override(body_attempt_timeout_override(expected_object_bytes))
+        .send();
     let output = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
         result = download_request => {
@@ -193,7 +204,30 @@ pub(crate) async fn download_object(
         ));
     }
 
-    publish_completed_download_file(&temp_path, &destination_path, overwrite, false).await?;
+    let scratch_identity = match open_download_scratch_async(&temp_path, false, None).await {
+        Ok((_, identity)) => identity,
+        Err(err) => {
+            remove_download_scratch(&temp_path).await;
+            release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;
+            return Err(err);
+        }
+    };
+    if let Err(err) = publish_verified_download_file(
+        &temp_path,
+        &scratch_identity,
+        &destination_path,
+        overwrite,
+        false,
+    )
+    .await
+    {
+        // A non-checkpointed sequential download has nothing to resume, so a
+        // failed publication must not strand a full-size scratch file or its
+        // lease beside the destination.
+        remove_download_scratch(&temp_path).await;
+        release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;
+        return Err(err);
+    }
     release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;
 
     emit_transfer_progress(
@@ -231,9 +265,11 @@ pub(super) async fn stream_body_to_temp(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut reader = output.body.into_async_read();
-    let mut file = tokio::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(temp_path)
         .await
         .map_err(|e| format!("Failed to create temp file: {}", e))?;
@@ -493,6 +529,7 @@ fn open_download_scratch_file(
             target_os = "netbsd"
         ))]
         options.custom_flags(O_NOFOLLOW);
+        options.mode(0o600);
     }
 
     #[cfg(windows)]
@@ -509,6 +546,13 @@ fn open_download_scratch_file(
     ));
 
     let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `mode` only applies on creation. Tighten a scratch file left by an
+        // older build or created under a laxer umask as well.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
     let identity = download_scratch_identity(&file)?;
     if expected_identity.is_some_and(|expected| expected != &identity) {
         return Err(std::io::Error::new(
@@ -619,11 +663,11 @@ async fn publish_verified_download_file(
     tokio::task::spawn_blocking(move || {
         let (_validated_file, _) = open_download_scratch_file(&temp_path, false, Some(&identity))
             .map_err(|error| {
-                format!(
-                    "Download scratch identity changed before publication; scratch and checkpoint were retained: {}",
-                    error
-                )
-            })?;
+            format!(
+                "Download scratch identity changed before publication: {}",
+                error
+            )
+        })?;
         crate::publish_temp_file(
             &temp_path,
             &destination_path,
@@ -636,6 +680,7 @@ async fn publish_verified_download_file(
     .map_err(|error| format!("Failed to finalize download: {}", error))
 }
 
+#[cfg(test)]
 pub(super) async fn publish_completed_download_file(
     temp_path: &Path,
     destination_path: &Path,
@@ -799,7 +844,10 @@ async fn download_parallel_part(
     } else {
         request = request.if_match(etag);
     }
-    let request = request.send();
+    let request = request
+        .customize()
+        .config_override(body_attempt_timeout_override(expected_len))
+        .send();
     let output = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
         result = request => {
@@ -879,7 +927,8 @@ pub(crate) async fn download_object_parallel(
     connection_id: String,
     bucket: String,
     key: String,
-    destination: String,
+    destination_token: String,
+    destination_name: Option<String>,
     transfer_id: u32,
     overwrite: bool,
     attempt: Option<u32>,
@@ -909,11 +958,17 @@ pub(crate) async fn download_object_parallel(
     // becomes a local path (the destination is caller-chosen and validated
     // separately), so `.`/`..` segments must remain downloadable.
     validate_readable_key(&key, "Object key")?;
-    let destination_path = if overwrite {
-        validate_destination_path_allow_overwrite(&destination)?
+    // The destination is the file the user picked in a native save dialog, or
+    // one backend-validated file name inside the folder they picked. The
+    // webview never supplies an absolute destination path.
+    let destination_path =
+        crate::resolve_download_destination(&destination_token, destination_name.as_deref())?;
+    if overwrite {
+        validate_destination_path_allow_overwrite_parsed(&destination_path)?;
     } else {
-        validate_destination_path(&destination)?
-    };
+        validate_destination_path_parsed(&destination_path)?;
+    }
+    crate::validate_user_write_target(&app, &destination_path)?;
     // Derived, not caller-supplied: see `download_object`.
     let temp_path = crate::download_temp_path(&destination_path);
     if temp_path == destination_path {
@@ -974,7 +1029,8 @@ pub(crate) async fn download_object_parallel(
             connection_id,
             bucket,
             key,
-            destination,
+            destination_token,
+            destination_name,
             transfer_id,
             overwrite,
             Some(attempt),
@@ -1005,7 +1061,8 @@ pub(crate) async fn download_object_parallel(
             connection_id,
             bucket,
             key,
-            destination,
+            destination_token,
+            destination_name,
             transfer_id,
             overwrite,
             Some(attempt),

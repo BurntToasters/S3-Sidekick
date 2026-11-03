@@ -52,12 +52,24 @@ permissions = [
 ]
 
 [[set]]
+identifier = "path-grants"
+description = "Ask native dialogs for local path grants; the renderer never names a path."
+permissions = [
+  "allow-pick-upload-files",
+  "allow-pick-upload-folder",
+  "allow-pick-download-file",
+  "allow-pick-download-directory",
+  "allow-pick-text-export",
+  "allow-take-dropped-upload-grants",
+  "allow-export-text-file",
+]
+
+[[set]]
 identifier = "local-files"
-description = "Read local folders and write exported text files."
+description = "Use backend-issued path grants for local reads and exports."
 permissions = [
   "allow-list-local-files-recursive",
   "allow-path-exists",
-  "allow-write-text-file",
   "allow-open-local-path",
   "allow-reveal-local-path",
 ]
@@ -69,6 +81,7 @@ permissions = [
   "allow-load-settings",
   "allow-save-settings",
   "allow-load-bookmarks",
+  "allow-load-bookmarks-state",
   "allow-save-bookmarks",
   "allow-load-bookmarks-backup",
   "allow-save-bookmarks-backup",

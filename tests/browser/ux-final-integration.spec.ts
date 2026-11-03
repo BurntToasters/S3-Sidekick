@@ -537,8 +537,15 @@ test.describe("single download overwrite", () => {
           set: (value: { invoke: Invoke }) => {
             const original = value.invoke;
             value.invoke = async (command, args) => {
-              if (command === "plugin:dialog|save") {
-                return "/tmp/s3-final/notes.txt";
+              if (command === "pick_download_file") {
+                return {
+                  token: "download-token",
+                  path: "/tmp/s3-final/notes.txt",
+                  name: "notes.txt",
+                  isDir: false,
+                  directoryToken: null,
+                  directoryPath: null,
+                };
               }
               if (command === "path_exists") return true;
               return original(command, args);

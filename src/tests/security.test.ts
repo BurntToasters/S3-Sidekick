@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 
@@ -95,5 +95,154 @@ describe("securityErrorMessage", () => {
     expect(securityErrorMessage("disk quota exceeded")).toContain(
       "disk quota exceeded",
     );
+  });
+});
+
+const mockSetConnectionAccessLocked = vi.fn();
+const mockState = {
+  connected: false,
+  connectionId: "",
+  runningTransferCount: 0,
+};
+
+function makeStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    initialized: true,
+    encryption_enabled: true,
+    unlocked: true,
+    lock_timeout_minutes: 15,
+    biometric_available: false,
+    biometric_enrolled: false,
+    ...overrides,
+  };
+}
+
+async function loadAutoLockWatcher() {
+  vi.doMock("@tauri-apps/api/core", () => ({ invoke: mockInvoke }));
+  vi.doMock("../state.ts", () => ({ state: mockState }));
+  vi.doMock("../connection.ts", () => ({
+    setConnectionAccessLocked: mockSetConnectionAccessLocked,
+  }));
+  return import("../security.ts");
+}
+
+describe("auto-lock watcher", () => {
+  let stopWatcher: (() => void) | null = null;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockState.connected = false;
+    mockState.connectionId = "";
+    mockState.runningTransferCount = 0;
+  });
+
+  afterEach(() => {
+    stopWatcher?.();
+    stopWatcher = null;
+    vi.useRealTimers();
+    vi.doUnmock("../state.ts");
+    vi.doUnmock("../connection.ts");
+  });
+
+  it("locks on focus without waiting for the 15s poll", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_security_status") return makeStatus();
+      if (command === "lock_security") return makeStatus({ unlocked: false });
+      return undefined;
+    });
+    const security = await loadAutoLockWatcher();
+    stopWatcher = security.stopAutoLockWatcher;
+    const onLocked = vi.fn(async () => true);
+
+    security.startAutoLockWatcher(onLocked);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(onLocked).not.toHaveBeenCalled();
+
+    // The backend expires the vault key while the window is in the background.
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_security_status")
+        return makeStatus({ unlocked: false });
+      if (command === "lock_security") return makeStatus({ unlocked: false });
+      return undefined;
+    });
+
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onLocked).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the fail-closed cleanup when the status read is unknown", async () => {
+    mockState.connected = true;
+    mockState.connectionId = "conn-1";
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_security_status") return makeStatus();
+      if (command === "lock_security") return makeStatus({ unlocked: false });
+      return undefined;
+    });
+    const security = await loadAutoLockWatcher();
+    stopWatcher = security.stopAutoLockWatcher;
+    const onLocked = vi.fn(async () => true);
+
+    security.startAutoLockWatcher(onLocked);
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onLocked).not.toHaveBeenCalled();
+
+    // Both the forced lock and the status read fail: state is unknown, which
+    // must never read as unlocked or clear a pending cleanup.
+    mockInvoke.mockImplementation(async () => {
+      throw new Error("native state unavailable");
+    });
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(mockSetConnectionAccessLocked).toHaveBeenCalledWith(true);
+    expect(onLocked).not.toHaveBeenCalled();
+
+    // The next poll confirms the lock and the retained cleanup runs.
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_security_status")
+        return makeStatus({ unlocked: false });
+      if (command === "lock_security") return makeStatus({ unlocked: false });
+      return undefined;
+    });
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(onLocked).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not stack checks on repeated focus and detaches on stop", async () => {
+    let resolveStatus: (value: unknown) => void = () => undefined;
+    const statusReady = new Promise<unknown>((resolve) => {
+      resolveStatus = resolve;
+    });
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_security_status") return statusReady;
+      if (command === "lock_security") {
+        return Promise.resolve(makeStatus({ unlocked: false }));
+      }
+      return Promise.resolve(undefined);
+    });
+    const security = await loadAutoLockWatcher();
+    stopWatcher = security.stopAutoLockWatcher;
+    security.startAutoLockWatcher(async () => true);
+
+    const statusReads = () =>
+      mockInvoke.mock.calls.filter(
+        ([command]) => command === "get_security_status",
+      ).length;
+
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("focus"));
+    expect(statusReads()).toBe(1);
+
+    resolveStatus(makeStatus());
+    await vi.advanceTimersByTimeAsync(0);
+
+    security.stopAutoLockWatcher();
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(statusReads()).toBe(1);
   });
 });

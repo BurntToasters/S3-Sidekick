@@ -6,12 +6,14 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  REQUIRED_QUALITY_CHECK_NAMES,
   createReleaseSession,
   isAcceptableReleaseWorkingTree,
   parsePorcelainPaths,
   recordSuccessfulQualityGate,
   sha256WorkingTree,
   validateQualityGate,
+  verifyQualityGate,
 } from "./release-session.js";
 
 const repoRoot = path.resolve(
@@ -25,14 +27,24 @@ test("isAcceptableReleaseWorkingTree allows bootstrap-only drift", () => {
     isAcceptableReleaseWorkingTree(" M run.rosie.s3-sidekick.metainfo.xml"),
     true,
   );
-  assert.equal(isAcceptableReleaseWorkingTree(" M src-tauri/Cargo.lock"), true);
   assert.equal(
     isAcceptableReleaseWorkingTree(
       " M src-tauri/gen/schemas/linux-schema.json",
     ),
     true,
   );
-  assert.equal(isAcceptableReleaseWorkingTree(" M package-lock.json"), true);
+  for (const filePath of [
+    "package-lock.json",
+    "src-tauri/Cargo.toml",
+    "src-tauri/Cargo.lock",
+    "src-tauri/tauri.conf.json",
+  ]) {
+    assert.equal(
+      isAcceptableReleaseWorkingTree(` M ${filePath}`),
+      false,
+      `${filePath} must not be bootstrap drift`,
+    );
+  }
   assert.equal(isAcceptableReleaseWorkingTree(" M package.json"), false);
 });
 
@@ -47,10 +59,7 @@ test("blockingReleaseWorkingTreePaths ignores bootstrap-only drift", () => {
     isAcceptableReleaseWorkingTree(" M run.rosie.s3-sidekick.metainfo.xml"),
     true,
   );
-  assert.equal(
-    isAcceptableReleaseWorkingTree(" M package.json"),
-    false,
-  );
+  assert.equal(isAcceptableReleaseWorkingTree(" M package.json"), false);
 });
 
 test("parsePorcelainPaths preserves leading XY status spaces", () => {
@@ -132,6 +141,54 @@ function initTempGitRepo(root) {
   );
 }
 
+function seedQualityEvidence(root, { now = Date.now() } = {}) {
+  const coverage = path.join(root, "coverage");
+  const reportDir = path.join(root, "test-results", "release-assets-e2e");
+  fs.mkdirSync(coverage, { recursive: true });
+  fs.mkdirSync(reportDir, { recursive: true });
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  fs.writeFileSync(
+    path.join(coverage, ".release-tests.json"),
+    `${JSON.stringify({
+      suite: "release-quality-evidence",
+      commit,
+      startedAt: now - 60_000,
+      completedAt: now - 30_000,
+      passed: true,
+      checks: Object.fromEntries(
+        REQUIRED_QUALITY_CHECK_NAMES.map((name) => [
+          name,
+          { status: "passed" },
+        ]),
+      ),
+    })}\n`,
+  );
+  fs.writeFileSync(
+    path.join(coverage, "coverage-summary.json"),
+    `${JSON.stringify({ total: { lines: { pct: 80 } } })}\n`,
+  );
+  fs.writeFileSync(
+    path.join(reportDir, "report.json"),
+    `${JSON.stringify({
+      suite: "release-assets-integrity",
+      passed: true,
+      exitStatus: "passed",
+      checkCount: 41,
+      expectedCheckCount: 41,
+      completedAt: now - 20_000,
+      checks: [],
+    })}\n`,
+  );
+  return {
+    commit,
+    coveragePath: path.join(coverage, "coverage-summary.json"),
+    reportPath: path.join(reportDir, "report.json"),
+  };
+}
+
 test("recordSuccessfulQualityGate accepts bootstrap-only metainfo drift", () => {
   const root = fs.mkdtempSync(path.join(repoRoot, ".tmp-quality-gate-"));
   const coverageDir = path.join(root, "coverage");
@@ -150,13 +207,14 @@ test("recordSuccessfulQualityGate accepts bootstrap-only metainfo drift", () => 
     );
     fs.writeFileSync(
       path.join(root, ".gitignore"),
-      "coverage/\nrelease/\n",
+      "coverage/\ntest-results/\nrelease/\n",
     );
     initTempGitRepo(root);
     fs.appendFileSync(
       path.join(root, "run.rosie.s3-sidekick.metainfo.xml"),
       "\n",
     );
+    seedQualityEvidence(root);
 
     assert.equal(recordSuccessfulQualityGate(root), true);
     assert.equal(fs.existsSync(proofPath), true);
@@ -180,6 +238,7 @@ test("recordSuccessfulQualityGate rejects non-bootstrap drift", () => {
       "<component/>",
     );
     initTempGitRepo(root);
+    seedQualityEvidence(root);
     fs.appendFileSync(path.join(root, "package.json"), "\n");
 
     assert.equal(recordSuccessfulQualityGate(root), false);
@@ -187,6 +246,62 @@ test("recordSuccessfulQualityGate rejects non-bootstrap drift", () => {
       fs.existsSync(path.join(root, "coverage", ".release-quality.json")),
       false,
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function createEvidenceRepo() {
+  const root = fs.mkdtempSync(path.join(repoRoot, ".tmp-quality-gate-"));
+  fs.mkdirSync(path.join(root, "src-tauri"), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "package.json"),
+    `${JSON.stringify({ version: "0.11.0-beta.7" })}\n`,
+  );
+  fs.writeFileSync(path.join(root, "package-lock.json"), "{}\n");
+  fs.writeFileSync(path.join(root, "src-tauri", "Cargo.lock"), "{}\n");
+  fs.writeFileSync(
+    path.join(root, "run.rosie.s3-sidekick.metainfo.xml"),
+    "<component/>",
+  );
+  fs.writeFileSync(
+    path.join(root, ".gitignore"),
+    "coverage/\ntest-results/\nrelease/\n",
+  );
+  initTempGitRepo(root);
+  return root;
+}
+
+test("quality-gate proof refuses missing test evidence", () => {
+  const root = createEvidenceRepo();
+  try {
+    assert.equal(recordSuccessfulQualityGate(root), false);
+    assert.equal(
+      fs.existsSync(path.join(root, "coverage", ".release-quality.json")),
+      false,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quality-gate proof refuses stale test evidence", () => {
+  const root = createEvidenceRepo();
+  try {
+    seedQualityEvidence(root, { now: Date.now() - 48 * 60 * 60 * 1000 });
+    assert.equal(recordSuccessfulQualityGate(root), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quality-gate proof refuses evidence changed after recording", () => {
+  const root = createEvidenceRepo();
+  try {
+    const { coveragePath } = seedQualityEvidence(root);
+    assert.equal(recordSuccessfulQualityGate(root), true);
+    fs.appendFileSync(coveragePath, "\n");
+    assert.throws(() => verifyQualityGate(root), /evidence|changed/i);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

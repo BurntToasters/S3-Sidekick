@@ -1,18 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { NativePathGrant } from "../path-grants.ts";
 
-const mockOpen =
-  vi.fn<(...args: unknown[]) => Promise<string | string[] | null>>();
+const mockPickUploadFiles = vi.fn<() => Promise<NativePathGrant[]>>();
+const mockPickUploadFolder = vi.fn<() => Promise<NativePathGrant[]>>();
+const mockTakeDroppedUploadGrants = vi.fn<() => Promise<NativePathGrant[]>>();
 const mockEnqueuePaths = vi.fn();
 const mockEnqueueFolderEntries = vi.fn();
 const ENQUEUE_ACCEPTED = { accepted: true, count: 1 };
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: (...args: unknown[]) => mockOpen(...args),
-}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
+}));
+
+vi.mock("../path-grants.ts", () => ({
+  pickUploadFiles: () => mockPickUploadFiles(),
+  pickUploadFolder: () => mockPickUploadFolder(),
+  takeDroppedUploadGrants: () => mockTakeDroppedUploadGrants(),
 }));
 
 vi.mock("../transfers.ts", () => ({
@@ -21,10 +27,23 @@ vi.mock("../transfers.ts", () => ({
     mockEnqueueFolderEntries(...args),
 }));
 
+function fileGrant(path: string): NativePathGrant {
+  return {
+    token: `grant-${path}`,
+    path,
+    name: path.split("/").pop() ?? path,
+    isDir: false,
+    directoryToken: null,
+    directoryPath: null,
+  };
+}
+
 describe("upload chooser account binding", () => {
   beforeEach(async () => {
     vi.resetModules();
-    mockOpen.mockReset();
+    mockPickUploadFiles.mockReset();
+    mockPickUploadFolder.mockReset();
+    mockTakeDroppedUploadGrants.mockReset();
     mockEnqueuePaths.mockReset();
     mockEnqueuePaths.mockImplementation(() => ENQUEUE_ACCEPTED);
     mockEnqueueFolderEntries.mockReset();
@@ -41,13 +60,13 @@ describe("upload chooser account binding", () => {
     state.currentPrefix = "uploads/";
   });
 
-  it("queues files against the snapshot identity captured before the dialog", async () => {
-    mockOpen.mockResolvedValue(["/tmp/photo.png"]);
+  it("queues backend-granted files against the snapshot identity captured before the dialog", async () => {
+    mockPickUploadFiles.mockResolvedValue([fileGrant("/tmp/photo.png")]);
     const { handleUploadButton } = await import("../app-upload.ts");
     await handleUploadButton();
 
     expect(mockEnqueuePaths).toHaveBeenCalledWith(
-      ["/tmp/photo.png"],
+      [{ path: "/tmp/photo.png", token: "grant-/tmp/photo.png" }],
       "uploads/",
       {
         bucket: "bucket-a",
@@ -58,11 +77,11 @@ describe("upload chooser account binding", () => {
   });
 
   it("aborts when credentials change for the same endpoint and bucket", async () => {
-    mockOpen.mockImplementation(async () => {
+    mockPickUploadFiles.mockImplementation(async () => {
       const { state } = await import("../state.ts");
       state.connectionIdentity = "ident-2";
       state.connectionId = "conn-2";
-      return ["/tmp/photo.png"];
+      return [fileGrant("/tmp/photo.png")];
     });
     const { handleUploadButton } = await import("../app-upload.ts");
     await handleUploadButton();
@@ -70,6 +89,58 @@ describe("upload chooser account binding", () => {
     expect(mockEnqueuePaths).not.toHaveBeenCalled();
     expect(document.getElementById("status")?.textContent).toContain(
       "destination changed",
+    );
+  });
+
+  it("scans folders only through the backend's upload-root grants", async () => {
+    mockPickUploadFolder.mockResolvedValue([
+      {
+        token: "root-grant",
+        path: "/tmp/photos",
+        name: "photos",
+        isDir: true,
+        directoryToken: null,
+        directoryPath: null,
+      },
+    ]);
+    mockInvoke.mockResolvedValue([
+      {
+        file_path: "/tmp/photos/a.txt",
+        relative_path: "photos/a.txt",
+        size: 3,
+        file_token: "file-grant-a",
+      },
+    ]);
+    const { handleUploadFolderButton } = await import("../app-upload.ts");
+    await handleUploadFolderButton();
+
+    expect(mockInvoke).toHaveBeenCalledWith("list_local_files_recursive", {
+      rootTokens: ["root-grant"],
+    });
+    expect(mockEnqueueFolderEntries).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          file_path: "/tmp/photos/a.txt",
+          file_token: "file-grant-a",
+        }),
+      ],
+      "uploads/",
+      expect.anything(),
+    );
+  });
+
+  it("never forwards renderer paths for a native drop", async () => {
+    mockTakeDroppedUploadGrants.mockResolvedValue([]);
+    const { queueDroppedPaths } = await import("../app-upload.ts");
+    await queueDroppedPaths("uploads/");
+
+    expect(mockTakeDroppedUploadGrants).toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "list_local_files_recursive",
+      expect.anything(),
+    );
+    expect(document.getElementById("status")?.textContent).toContain(
+      "No dropped files",
     );
   });
 });

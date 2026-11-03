@@ -8,7 +8,11 @@ import {
   markSupportPromptDismissed,
   isSupportPromptDismissed,
 } from "./settings.ts";
-import { loadConnection, setConnectionAccessLocked } from "./connection.ts";
+import {
+  loadConnection,
+  setConnectionAccessLocked,
+  getConnectionLoadError,
+} from "./connection.ts";
 import {
   getBookmarkLoadError,
   loadBookmarks,
@@ -244,6 +248,13 @@ async function loadSavedConnectionIntoInputs(): Promise<void> {
         saved.secret_key,
         saved.session_token ?? "",
       );
+      return;
+    }
+    const loadError = getConnectionLoadError();
+    if (loadError) {
+      const message = `Saved connection could not be loaded (${loadError}) Enter credentials to connect.`;
+      logActivity(message, "warning");
+      setStatus(message, 10000);
     }
   } catch (err) {
     setStatus(`Failed to load saved connection: ${String(err)}`);
@@ -343,9 +354,8 @@ export async function init(): Promise<void> {
 
     if (wizardSecurityReady) {
       await loadBookmarksIntoBar();
+      await loadSavedConnectionIntoInputs();
     }
-
-    await loadSavedConnectionIntoInputs();
 
     await initUpdater();
     scheduleAutoCheckUpdates();

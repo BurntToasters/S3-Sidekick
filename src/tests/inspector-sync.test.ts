@@ -317,4 +317,40 @@ describe("syncInspectorFromSelection", () => {
       vi.useRealTimers();
     }
   });
+
+  it("re-renders after the info panel closes instead of reusing the old signature", async () => {
+    appendInfoFixture();
+
+    const { state } = await import("../state.ts");
+    state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
+    state.selectedKeys.clear();
+    state.selectedPrefixes.clear();
+    state.selectedPrefixes.add("folder/");
+
+    const inspector = await import("../inspector.ts");
+    const info = await import("../info-panel.ts");
+    inspector.setInspectorOpen(true);
+    inspector.focusInspectorInfoPane("details");
+    await inspector.syncInspectorFromSelection(undefined, {
+      reason: "selection",
+    });
+
+    expect(document.getElementById("inspector-info-body")?.textContent).toMatch(
+      /folder/i,
+    );
+
+    info.closeInfoPanel();
+    expect(
+      document.getElementById("inspector-info-body")?.childElementCount,
+    ).toBe(0);
+
+    // The explicit resync after Cancel must render again; the previous
+    // completed-selection signature cannot suppress it.
+    await inspector.syncInspectorFromSelection();
+    expect(document.getElementById("inspector-info-body")?.textContent).toMatch(
+      /folder/i,
+    );
+  });
 });

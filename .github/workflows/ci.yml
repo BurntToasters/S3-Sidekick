@@ -169,7 +169,7 @@ jobs:
       - name: Run browser layout harness
         env:
           PLAYWRIGHT_JSON_OUTPUT_FILE: test-results/playwright-report.json
-        run: npm run test:ui -- --add-reporter=json
+        run: npm run test:ui
 
       - name: Run script E2E suites
         run: npm run test:e2e:scripts
@@ -212,7 +212,7 @@ jobs:
             test-results/playwright/**/trace.zip
             test-results/frontend-safety/
             test-results/ui-security-regressions/
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 14
 
   minio-e2e:
@@ -530,3 +530,50 @@ jobs:
 
       - name: Build unsigned Flatpak bundle
         run: npm run flatpak:bundle
+
+  # Exact release gate: a release may only start from a commit where this job
+  # is green. It aggregates the native test/format matrix, Playwright browser
+  # suite, MinIO command-layer suite, full-stack WebDriver suite, and the
+  # unsigned Windows/macOS/Flatpak toolchain smokes. `release:ci-status`
+  # reads this check-run name ("Release gate") for the exact HEAD SHA.
+  release-gate:
+    name: Release gate
+    if: always()
+    needs:
+      - verify
+      - browser-layout
+      - minio-e2e
+      - fullstack-e2e
+      - windows-arm64-smoke
+      - macos-universal-smoke
+      - flatpak-smoke
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Require every release suite to pass
+        env:
+          VERIFY: ${{ needs.verify.result }}
+          BROWSER: ${{ needs.browser-layout.result }}
+          MINIO: ${{ needs.minio-e2e.result }}
+          FULLSTACK: ${{ needs.fullstack-e2e.result }}
+          WINDOWS_SMOKE: ${{ needs.windows-arm64-smoke.result }}
+          MACOS_SMOKE: ${{ needs.macos-universal-smoke.result }}
+          FLATPAK_SMOKE: ${{ needs.flatpak-smoke.result }}
+        run: |
+          failed=0
+          for entry in \
+            "verify=$VERIFY" \
+            "browser-layout=$BROWSER" \
+            "minio-e2e=$MINIO" \
+            "fullstack-e2e=$FULLSTACK" \
+            "windows-arm64-smoke=$WINDOWS_SMOKE" \
+            "macos-universal-smoke=$MACOS_SMOKE" \
+            "flatpak-smoke=$FLATPAK_SMOKE"; do
+            name=${entry%%=*}
+            result=${entry#*=}
+            if [ "$result" != "success" ]; then
+              echo "::error::$name result is $result, expected success"
+              failed=1
+            fi
+          done
+          exit "$failed"

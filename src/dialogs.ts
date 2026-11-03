@@ -108,6 +108,20 @@ function els() {
   };
 }
 
+/**
+ * Fixed-position controls report `offsetParent === null` even while visible,
+ * so the focus trap must test layout boxes and computed styles instead.
+ */
+function isVisibleForFocusTrap(node: HTMLElement): boolean {
+  if (node.getClientRects().length === 0) return false;
+  const style = window.getComputedStyle(node);
+  return (
+    style.visibility !== "hidden" &&
+    style.visibility !== "collapse" &&
+    style.display !== "none"
+  );
+}
+
 function shakeDialogBox(box: HTMLElement) {
   if (
     typeof window.matchMedia === "function" &&
@@ -171,6 +185,11 @@ function present(
       }
       shakeDialogBox(el.box);
       el.input.focus();
+    }
+
+    function setOkBusy(busy: boolean) {
+      if (busy) el.ok.setAttribute("aria-busy", "true");
+      else el.ok.removeAttribute("aria-busy");
     }
 
     clearValidationError();
@@ -274,7 +293,7 @@ function present(
             ];
       return candidates.filter(
         (node): node is HTMLElement =>
-          node !== null && node.offsetParent !== null,
+          node !== null && isVisibleForFocusTrap(node),
       );
     }
 
@@ -313,11 +332,13 @@ function present(
     function cleanup() {
       el.overlay.classList.remove("active");
       el.cancel.removeEventListener("click", onCancel);
+      extraButton?.removeEventListener("click", onExtra);
       extraButton?.remove();
       el.ok.removeEventListener("click", onOk);
       el.input.removeEventListener("keydown", onInputKey);
       el.input.removeEventListener("input", clearValidationError);
       el.reveal.removeEventListener("click", onReveal);
+      setOkBusy(false);
       clearValidationError();
       // Never leave a typed password sitting in the hidden input.
       el.input.value = "";
@@ -394,6 +415,7 @@ function present(
         const generation = ++validateGeneration;
         validating = true;
         el.ok.disabled = true;
+        setOkBusy(true);
         try {
           const ok = await config.validate(el.input.value);
           if (generation !== validateGeneration) return;
@@ -416,6 +438,7 @@ function present(
           if (generation === validateGeneration) {
             validating = false;
             el.ok.disabled = false;
+            setOkBusy(false);
           }
         }
       }

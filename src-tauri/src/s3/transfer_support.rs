@@ -123,17 +123,22 @@ pub(super) fn choose_upload_part_size_bytes(
     let mut part_size = (part_mb as u64) * 1024 * 1024;
     let mut parts = file_size.div_ceil(part_size);
     if parts > 10_000 {
-        // Grow the part size toward the 5 GiB provider maximum rather than
-        // refusing objects above ~1.25 TiB at the default preset. Every part
-        // except the last must be equal, which `div_ceil` preserves.
-        const MAX_UPLOAD_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
-        part_size = file_size.div_ceil(10_000).min(MAX_UPLOAD_PART_SIZE);
-        parts = file_size.div_ceil(part_size);
-        if parts > 10_000 {
-            return Err(
-                "Object is too large to upload within the 10,000-part multipart limit.".to_string(),
-            );
-        }
+        // Grow the part size rather than refusing objects above ~1.25 TiB at
+        // the default preset. Every part except the last must be equal, which
+        // `div_ceil` preserves.
+        part_size = file_size.div_ceil(10_000);
+    }
+    // The upload path buffers one whole part per worker before handing it to
+    // the SDK. A part larger than the whole in-flight budget would exceed
+    // `MAX_UPLOAD_INFLIGHT_BYTES` even at concurrency 1, so cap it here and
+    // reject only the sizes that then cannot fit inside the 10,000-part limit.
+    part_size = part_size.min(MAX_UPLOAD_INFLIGHT_BYTES);
+    parts = file_size.div_ceil(part_size);
+    if parts > 10_000 {
+        return Err(format!(
+            "Object is too large to upload within the 10,000-part multipart limit and the {} MiB in-flight buffer limit.",
+            MAX_UPLOAD_INFLIGHT_BYTES / (1024 * 1024)
+        ));
     }
     Ok(part_size as usize)
 }
@@ -349,12 +354,12 @@ pub(super) fn sha256_composite_checksum(
     Ok((base64, response_value))
 }
 
-pub(super) async fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<Vec<u8>, String> {
+pub(super) async fn sha256_opened_file(
+    file: &mut tokio::fs::File,
+    cancel: &CancelToken,
+) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncReadExt;
     let mut hasher = Sha256::new();
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| format!("Failed to open file for checksum: {}", e))?;
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         let read = tokio::select! {
@@ -369,6 +374,13 @@ pub(super) async fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<Vec
         hasher.update(&buf[..read]);
     }
     Ok(hasher.finalize().to_vec())
+}
+
+pub(super) async fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<Vec<u8>, String> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("Failed to open file for checksum: {}", e))?;
+    sha256_opened_file(&mut file, cancel).await
 }
 
 pub(super) fn expected_checksum_from_head(
@@ -424,14 +436,13 @@ pub(super) async fn expected_download_checksum(
     let checksum_head = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
         result = request => result.map_err(|err| {
-            encode_transfer_error(
-                "checksum_unsupported",
-                false,
-                None,
-                format!(
-                    "Checksum verification was requested, but the provider could not return object checksums: {}",
-                    err
-                ),
+            // A failed checksum-mode HEAD says nothing about whether the object
+            // supports checksums: preserve the HTTP/network classification so a
+            // transient outage stays retryable and a 403 stays an authorization
+            // failure instead of becoming a permanent "unsupported" verdict.
+            generation_pinned_download_error(
+                "Checksum verification was requested, but the provider could not read object metadata",
+                &err,
             )
         })?,
     };

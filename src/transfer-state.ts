@@ -31,11 +31,14 @@ function moveTo(item: TransferItem, next: TransferStatus): void {
 }
 
 /** Why a claimed item went back to the queue without running. */
-export type ParkReason = "offline" | "disconnected";
+export type ParkReason = "offline" | "disconnected" | "no-connection";
+
+export const CONNECT_TO_RESUME_MESSAGE = "Connect to resume";
 
 const PARK_MESSAGES: Record<ParkReason, string> = {
   offline: "Offline — waiting for connection",
   disconnected: "Disconnected — waiting to reconnect",
+  "no-connection": CONNECT_TO_RESUME_MESSAGE,
 };
 
 /**

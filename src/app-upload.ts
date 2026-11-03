@@ -1,5 +1,10 @@
 import { invoke } from "./ipc.ts";
-import { open } from "@tauri-apps/plugin-dialog";
+import {
+  pickUploadFiles,
+  pickUploadFolder,
+  takeDroppedUploadGrants,
+  type NativePathGrant,
+} from "./path-grants.ts";
 import {
   captureConnectionSnapshot,
   connectionSnapshotChanged,
@@ -20,6 +25,7 @@ export interface LocalFolderFileEntry {
   file_path: string;
   relative_path: string;
   size: number;
+  file_token: string;
 }
 
 function enqueueTargetFromSnapshot(
@@ -62,30 +68,25 @@ export async function handleUploadButton(): Promise<void> {
   const snap = captureUploadSnapshot();
   if (!snap) return;
 
-  let selected: string | string[] | null;
+  let selected: NativePathGrant[];
   try {
-    selected = await open({
-      title: "Select files to upload",
-      multiple: true,
-      directory: false,
-    });
+    selected = await pickUploadFiles();
   } catch (err) {
     setStatus(`Failed to open file picker: ${String(err)}`);
     return;
   }
-  if (!selected) return;
+  if (selected.length === 0) return;
   if (destinationChanged(snap)) {
     setStatus("Upload cancelled because destination changed.", 5000);
     return;
   }
 
-  const paths = Array.isArray(selected) ? selected : [selected];
-  const filePaths = paths.filter(
-    (value): value is string => typeof value === "string",
-  );
-  if (filePaths.length > 0) {
+  const files = selected
+    .filter((grant) => !grant.isDir && grant.token.length > 0)
+    .map((grant) => ({ path: grant.path, token: grant.token }));
+  if (files.length > 0) {
     const result = enqueuePaths(
-      filePaths,
+      files,
       snap.prefix,
       enqueueTargetFromSnapshot(snap),
     );
@@ -97,24 +98,19 @@ export async function handleUploadFolderButton(): Promise<void> {
   const snap = captureUploadSnapshot();
   if (!snap) return;
 
-  let selected: string | string[] | null;
+  let selected: NativePathGrant[];
   try {
-    selected = await open({
-      title: "Select folder(s) to upload",
-      multiple: true,
-      directory: true,
-    });
+    selected = await pickUploadFolder();
   } catch (err) {
     setStatus(`Failed to open folder picker: ${String(err)}`);
     return;
   }
-  if (!selected) return;
+  if (selected.length === 0) return;
 
-  const roots = Array.isArray(selected) ? selected : [selected];
-  const folderPaths = roots.filter(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
-  if (folderPaths.length === 0) return;
+  const rootTokens = selected
+    .filter((grant) => grant.isDir && grant.token.length > 0)
+    .map((grant) => grant.token);
+  if (rootTokens.length === 0) return;
   if (destinationChanged(snap)) {
     setStatus("Folder upload cancelled because destination changed.", 5000);
     return;
@@ -124,7 +120,7 @@ export async function handleUploadFolderButton(): Promise<void> {
     setStatus("Scanning folder(s)...");
     const entries = await invoke<LocalFolderFileEntry[]>(
       "list_local_files_recursive",
-      { roots: folderPaths },
+      { rootTokens },
     );
 
     if (destinationChanged(snap)) {
@@ -153,43 +149,73 @@ export async function handleUploadFolderButton(): Promise<void> {
   }
 }
 
-export async function queueDroppedPaths(
-  paths: string[],
-  targetPrefix: string,
-): Promise<void> {
-  const cleaned = paths.filter((path) => path.trim().length > 0);
-  if (cleaned.length === 0) return;
-
+export async function queueDroppedPaths(targetPrefix: string): Promise<void> {
   const snap = captureUploadSnapshot();
   if (!snap) return;
   const destPrefix = targetPrefix;
-
-  setStatus(`Dropped ${cleaned.length} item(s). Preparing upload...`, 3000);
 
   const targetUnchanged = (): boolean =>
     !destinationChanged(snap) && state.currentPrefix === destPrefix;
   const target = enqueueTargetFromSnapshot(snap);
 
   try {
-    const entries = await invoke<LocalFolderFileEntry[]>(
-      "list_local_files_recursive",
-      { roots: cleaned },
-    );
+    // The backend minted these grants from the native drop event. The paths in
+    // the DOM event are display data; using them as authority would let a
+    // compromised webview nominate any file.
+    let grants = await takeDroppedUploadGrants();
+    if (grants.length === 0) {
+      // The native window event that mints grants and the webview drop event
+      // are delivered separately; give the window event one turn to land.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      grants = await takeDroppedUploadGrants();
+    }
+    if (grants.length === 0) {
+      setStatus("No dropped files detected. Try Upload Files instead.", 5000);
+      return;
+    }
+
+    setStatus(`Dropped ${grants.length} item(s). Preparing upload...`, 3000);
+
+    const rootTokens = grants
+      .filter((grant) => grant.isDir)
+      .map((grant) => grant.token);
+    const files = grants
+      .filter((grant) => !grant.isDir)
+      .map((grant) => ({ path: grant.path, token: grant.token }));
+
+    const entries =
+      rootTokens.length > 0
+        ? await invoke<LocalFolderFileEntry[]>("list_local_files_recursive", {
+            rootTokens,
+          })
+        : [];
     if (!targetUnchanged()) {
       setStatus("Upload cancelled because destination changed.", 5000);
       return;
     }
-    if (entries.length === 0) {
+    if (entries.length === 0 && files.length === 0) {
       setStatus("Nothing to upload: the dropped items contain no files.", 5000);
       return;
     }
-    const result = enqueueFolderTransfers(entries, destPrefix, target);
-    if (!result.accepted) {
-      reportRefusedEnqueue(result);
-      return;
+    let queued = 0;
+    if (entries.length > 0) {
+      const result = enqueueFolderTransfers(entries, destPrefix, target);
+      if (!result.accepted) {
+        reportRefusedEnqueue(result);
+        return;
+      }
+      queued += result.count;
+    }
+    if (files.length > 0) {
+      const result = enqueuePaths(files, destPrefix, target);
+      if (!result.accepted) {
+        reportRefusedEnqueue(result);
+        return;
+      }
+      queued += result.count;
     }
     setStatus(
-      `Dropped ${plural(cleaned.length, "item")}. Queued ${plural(result.count, "file")} for upload.`,
+      `Dropped ${plural(grants.length, "item")}. Queued ${plural(queued, "file")} for upload.`,
       5000,
     );
   } catch (err) {

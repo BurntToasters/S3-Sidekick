@@ -4,21 +4,22 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 6px 14px;
-  border: 1px solid var(--border);
+  padding: var(--space-1-5) var(--space-3-5);
+  min-height: var(--control-height);
+  border: 1px solid var(--border-control);
   border-radius: var(--radius);
   background: var(--bg-surface);
   color: var(--text);
   font-size: var(--text-md);
   font-family: inherit;
   cursor: pointer;
-  gap: 6px;
+  gap: var(--space-1-5);
   white-space: nowrap;
   transition:
     background var(--transition-smooth),
     border-color var(--transition-smooth),
     box-shadow var(--transition-smooth),
-    transform var(--duration-fast) ease;
+    transform var(--duration-fast) var(--ease-standard);
   -webkit-app-region: no-drag;
 }
 
@@ -80,8 +81,8 @@
 
 /* Icon-only buttons keep a 32x32 pointer target (WCAG 2.5.8 plus margin). */
 .btn--icon {
-  min-width: 32px;
-  min-height: 32px;
+  min-width: var(--control-height);
+  min-height: var(--control-height);
   padding: var(--space-1) var(--space-2);
   border: none;
   background: transparent;
@@ -90,9 +91,12 @@
   cursor: pointer;
 }
 
-/* Compact buttons keep a 28px pointer target height. */
+/* Compact buttons keep a 28px pointer target with tighter padding and type. */
 .btn--sm {
-  min-height: 28px;
+  min-height: var(--control-height-sm);
+  padding: var(--space-1) var(--space-3);
+  gap: var(--space-1);
+  font-size: var(--text-sm);
 }
 
 .btn--icon:hover:not(:disabled) {
@@ -104,7 +108,7 @@
    cannot restore active colors, hover effects, or press transforms. */
 .btn:disabled {
   background: var(--bg-hover);
-  border-color: var(--border);
+  border-color: var(--border-control);
   color: var(--text-muted);
   cursor: not-allowed;
   opacity: 0.55;
@@ -112,10 +116,9 @@
   transform: none;
 }
 
-/* One focus ring for buttons, fields, checkboxes and switches: colour, width and offset come from tokens. */
+/* One focus ring for buttons and checkboxes: colour, width and offset come from tokens. */
 .btn:focus-visible,
 .btn--icon:focus-visible,
-.field:focus-visible,
 input[type="checkbox"]:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring-color);
   outline-offset: var(--focus-ring-offset);
@@ -128,8 +131,8 @@ input[type="password"]::-ms-clear {
 
 /* Field and checkbox outlines are UI boundaries, so they meet WCAG 1.4.11 (3:1). */
 .field {
-  padding: 6px 10px;
-  border: 1px solid var(--border-strong);
+  padding: var(--space-1-5) var(--space-2-5);
+  border: 1px solid var(--border-control);
   border-radius: var(--radius);
   background: var(--bg-surface);
   color: var(--text);
@@ -155,10 +158,10 @@ select.field {
   background-image:
     linear-gradient(-45deg, transparent 50%, currentColor 50%),
     linear-gradient(45deg, transparent 50%, currentColor 50%);
-  background-size: 8px 8px;
+  background-size: var(--space-2) var(--space-2);
   background-repeat: no-repeat;
-  background-position: right 10px center;
-  padding-right: 28px;
+  background-position: right var(--space-2-5) center;
+  padding-right: var(--space-6);
   cursor: pointer;
 }
 
@@ -172,6 +175,12 @@ select.field option {
   box-shadow: 0 0 0 3px var(--glow-accent);
 }
 
+/* Keyboard focus adds the shared ring; the glow stays on every focus state. */
+.field:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
 .field--sm {
   width: 100px;
 }
@@ -180,10 +189,10 @@ input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
   position: relative;
-  width: 16px;
-  height: 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: 3px;
+  width: var(--checkbox-size);
+  height: var(--checkbox-size);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-xs);
   background: var(--bg-surface);
   cursor: pointer;
   position: relative;
@@ -208,7 +217,7 @@ input[type="checkbox"]:checked {
 input[type="checkbox"]:checked::after {
   content: "";
   position: absolute;
-  left: 4px;
+  left: var(--space-1);
   top: 1px;
   width: 5px;
   height: 9px;
@@ -227,19 +236,34 @@ input[type="checkbox"]:indeterminate::after {
   content: "";
   position: absolute;
   left: 3px;
-  top: 6px;
-  width: 8px;
+  top: var(--space-1-5);
+  width: var(--space-2);
   height: 0;
   border-top: 2px solid var(--accent-text);
+}
+
+/* Disabled checkboxes mirror the button disabled affordance. Checked and
+   indeterminate boxes keep the accent fill under the shared opacity. */
+input[type="checkbox"]:not(.switch):disabled {
+  background: var(--bg-hover);
+  border-color: var(--border-control);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+input[type="checkbox"]:not(.switch):checked:disabled,
+input[type="checkbox"]:not(.switch):indeterminate:disabled {
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 /* Switch: a checkbox drawn as a sliding toggle. It stays a real checkbox, so
    forms, focus and forced-colors mode work as they do for any checkbox. */
 input[type="checkbox"].switch {
-  width: 32px;
-  height: 18px;
-  border-radius: 999px;
-  border-color: var(--border-strong);
+  width: var(--switch-width);
+  height: var(--switch-height);
+  border-radius: var(--radius-full);
+  border-color: var(--border-control);
   background: var(--bg-hover);
   transition:
     background-color var(--transition-smooth),
@@ -249,11 +273,11 @@ input[type="checkbox"].switch {
 input[type="checkbox"].switch::after {
   content: "";
   position: absolute;
-  left: 2px;
-  top: 2px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
+  left: var(--space-0-5);
+  top: var(--space-0-5);
+  width: var(--switch-thumb-size);
+  height: var(--switch-thumb-size);
+  border-radius: var(--radius-full);
   background: var(--text-secondary);
   transition: transform var(--transition-smooth);
 }
@@ -264,13 +288,20 @@ input[type="checkbox"].switch:checked {
 }
 
 input[type="checkbox"].switch:checked::after {
-  left: 2px;
-  top: 2px;
-  width: 12px;
-  height: 12px;
+  left: var(--space-0-5);
+  top: var(--space-0-5);
+  width: var(--switch-thumb-size);
+  height: var(--switch-thumb-size);
   border: 0;
   background: var(--accent-text);
-  transform: translateX(14px);
+  transform: translateX(var(--switch-thumb-travel));
+}
+
+/* Dense rows can clip an outside ring, so draw the switch focus ring just
+   inside the pill. The width and colour still come from the shared tokens. */
+input[type="checkbox"].switch:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-width));
+  box-shadow: inset 0 0 0 var(--space-1) var(--bg-surface);
 }
 
 input[type="checkbox"].switch:disabled {
@@ -281,7 +312,7 @@ input[type="checkbox"].switch:disabled {
 .toggle-row {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
   font-size: var(--text-md);
   cursor: pointer;
   white-space: nowrap;

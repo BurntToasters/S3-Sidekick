@@ -9,6 +9,13 @@
     animation-iteration-count: 1 !important;
   }
 
+  /* With motion off, a skeleton would freeze mid-sweep; show a flat
+     placeholder instead of a misleading static highlight. */
+  .skeleton {
+    animation: none !important;
+    background: var(--skeleton-base);
+  }
+
   /* With motion off, the indeterminate bar would freeze at 35% and read as
      real progress. A full-width striped track says "working" without a value. */
   .transfer-progress-wrap--indeterminate .transfer-progress__bar {

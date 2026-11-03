@@ -23,9 +23,9 @@ use zeroize::Zeroize;
 
 use crate::{
     load_transfer_checkpoint_json, lock_s3_state, remove_transfer_checkpoint,
-    save_transfer_checkpoint_json, validate_destination_path,
-    validate_destination_path_allow_overwrite, validate_transfer_recovery_session,
-    validate_upload_source_path, AppState, StorageProviderKind,
+    save_transfer_checkpoint_json, validate_destination_path_allow_overwrite_parsed,
+    validate_destination_path_parsed, validate_transfer_recovery_session, AppState,
+    StorageProviderKind,
 };
 
 const MAX_UPLOAD_OBJECT_BYTES: usize = 16 * 1024 * 1024;
@@ -266,6 +266,69 @@ mod tests {
     fn normalize_endpoint_rejects_multi_segment_base_path() {
         assert!(normalize_endpoint("https://gateway.example.com/s3/proxy").is_err());
         assert!(normalize_endpoint("https://gateway.example.com/s3/proxy/").is_err());
+    }
+
+    #[test]
+    fn normalize_endpoint_allows_localhost_and_private_hosts() {
+        for (endpoint, expected) in [
+            ("http://localhost:9000", "http://localhost:9000"),
+            ("http://127.0.0.1:9000", "http://127.0.0.1:9000"),
+            ("http://[::1]:9000", "http://[::1]:9000"),
+            ("http://10.0.0.5:9000", "http://10.0.0.5:9000"),
+            ("http://172.16.4.5:9000", "http://172.16.4.5:9000"),
+            ("http://192.168.1.20:9000", "http://192.168.1.20:9000"),
+        ] {
+            let (url, bucket) =
+                normalize_endpoint(endpoint).expect("local/private endpoint must be allowed");
+            assert_eq!(url, expected);
+            assert_eq!(bucket, None);
+        }
+    }
+
+    #[test]
+    fn normalize_endpoint_rejects_link_local_metadata_and_unspecified_hosts() {
+        for endpoint in [
+            "http://169.254.169.254",
+            "http://169.254.169.254:9000/latest/meta-data",
+            "http://[fe80::1]:9000",
+            "http://[fe80::1%25eth0]:9000",
+            "http://[::ffff:169.254.169.254]",
+            "http://0.0.0.0:9000",
+            "http://[::]:9000",
+            "http://metadata.google.internal",
+            "http://metadata.goog",
+            "http://instance-data",
+            "http://instance-data.ec2.internal",
+            "http://metadata.azure.com.",
+        ] {
+            let error = normalize_endpoint(endpoint).expect_err("unsafe endpoint must be rejected");
+            assert!(
+                error.contains(endpoint.trim()),
+                "error should name rejected endpoint {endpoint}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_endpoint_rejects_broadcast_and_multicast_hosts() {
+        for endpoint in [
+            "http://255.255.255.255",
+            "http://224.0.0.1:9000",
+            "http://239.255.255.250",
+            "http://[ff02::1]:9000",
+        ] {
+            assert!(
+                normalize_endpoint(endpoint).is_err(),
+                "{endpoint} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_endpoint_rejects_userinfo_smuggled_metadata_host() {
+        let error = normalize_endpoint("http://user@169.254.169.254")
+            .expect_err("metadata address must not hide behind userinfo");
+        assert!(error.contains("169.254.169.254"));
     }
 
     #[test]
@@ -636,7 +699,7 @@ mod tests {
         // Two IPC handlers can be scheduled in reverse order. A short-lived
         // pending cancel must bridge that gap without latching forever.
         let id = 990_001;
-        cancel_transfer(id);
+        cancel_transfer_in_registry("test-connection", id);
         let guard = TransferGuard::register(id).expect("registration should succeed");
         assert!(
             guard.is_cancelled(),
@@ -649,7 +712,7 @@ mod tests {
         let id = 990_002;
         let guard = TransferGuard::register(id).expect("registration should succeed");
         assert!(!guard.is_cancelled());
-        cancel_transfer(id);
+        cancel_transfer_in_registry("test-connection", id);
         assert!(guard.is_cancelled());
     }
 
@@ -671,7 +734,7 @@ mod tests {
         let id = 990_004;
         let first = TransferGuard::register(id).expect("first registration should succeed");
         let second = TransferGuard::register(id).expect("second registration should succeed");
-        cancel_transfer(id);
+        cancel_transfer_in_registry("test-connection", id);
         assert!(
             second.is_cancelled(),
             "the newer registration must be cancelled"
@@ -682,8 +745,64 @@ mod tests {
         );
         // Dropping either guard must not deregister the other registration.
         drop(first);
-        cancel_transfer(id);
+        cancel_transfer_in_registry("test-connection", id);
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_is_scoped_to_the_owning_connection() {
+        let id = 990_005;
+        let guard = TransferGuard::register(id).expect("registration should succeed");
+        cancel_transfer_in_registry("other-connection", id);
+        assert!(
+            !guard.is_cancelled(),
+            "another session must not cancel this registration"
+        );
+        cancel_transfer_in_registry("test-connection", id);
+        assert!(guard.is_cancelled());
+
+        let pending_id = 990_006;
+        cancel_transfer_in_registry("other-connection", pending_id);
+        let pending = TransferGuard::register(pending_id).expect("registration should succeed");
+        assert!(
+            !pending.is_cancelled(),
+            "a pending cancel from another session must not latch onto this one"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_replacement_retires_only_the_previous_session() {
+        let old_id = "replacement-old";
+        let new_id = "replacement-new";
+        let old = TransferGuard::register_optional(Some(old_id), Some(990_010))
+            .expect("old registration should succeed");
+        let old_token = old.token();
+        let new = TransferGuard::register_optional(Some(new_id), Some(990_011))
+            .expect("new registration should succeed");
+        // The drain waits for the actual command guard to drop.
+        let retirement =
+            tokio::spawn(async { retire_connection_transfers(old_id, "test replacement").await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(old_token.is_cancelled());
+        drop(old);
+
+        retirement
+            .await
+            .expect("retirement task should not panic")
+            .expect("retirement should drain the old session");
+        assert!(
+            !new.is_cancelled(),
+            "a replacement must not cancel the newer session"
+        );
+        assert!(
+            TransferGuard::register_optional(Some(old_id), Some(990_012)).is_err(),
+            "new work must not register for a session being replaced"
+        );
+
+        finish_connection_retirement(old_id);
+        let retry = TransferGuard::register_optional(Some(old_id), Some(990_012))
+            .expect("a failed replacement must not poison the old session forever");
+        drop(retry);
     }
 
     #[tokio::test]

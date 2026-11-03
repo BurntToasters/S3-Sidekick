@@ -2,7 +2,11 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { clearQualityGateProof } from "./release-session.js";
+import {
+  clearQualityGateEvidence,
+  clearQualityGateProof,
+  writeQualityGateEvidence,
+} from "./release-session.js";
 import { isDirectExecution } from "./direct-execution.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,12 +34,14 @@ function createInitialResults() {
     cargoSafeUpdate: { status: "pending" },
     cargoUpdatePolicy: { status: "pending" },
     tauriAlignment: { status: "pending" },
+    icons: { status: "pending" },
     clippy: { status: "pending" },
     cargoFmt: { status: "pending" },
     frontendBuild: { status: "pending" },
     nativeBuild: { status: "pending" },
     tauriBuild: { status: "pending" },
     scriptTests: { status: "pending" },
+    releaseAssets: { status: "pending" },
     test: { status: "pending", passed: null, failed: null, files: null },
     rust: { status: "pending", passed: null, failed: null },
   };
@@ -222,6 +228,13 @@ ${colors.reset}`);
     }${colors.reset}`,
   );
   console.log(
+    `${colors.bold}Icons:${colors.reset}     ${
+      results.icons?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
     `${colors.bold}Clippy:${colors.reset}     ${
       results.clippy.status === "passed"
         ? `${colors.green}✓ PASS`
@@ -259,6 +272,13 @@ ${colors.reset}`);
   console.log(
     `${colors.bold}Script tests:${colors.reset} ${
       results.scriptTests.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Release assets:${colors.reset} ${
+      results.releaseAssets?.status === "passed"
         ? `${colors.green}✓ PASS`
         : `${colors.red}✗ FAIL`
     }${colors.reset}`,
@@ -303,9 +323,13 @@ ${colors.reset}`);
 function main({
   root = resolve(__dirname, ".."),
   clearProof = clearQualityGateProof,
+  clearEvidence = clearQualityGateEvidence,
+  writeEvidence = false,
   runner = runCommand,
 } = {}) {
+  const startedAt = Date.now();
   clearProof(root);
+  if (writeEvidence) clearEvidence(root);
   const results = createInitialResults();
   const npm = getNpmCommand();
   printBanner();
@@ -334,6 +358,7 @@ function main({
     null,
     results,
   );
+  runner("icons", npm, ["run", "icons:check"], null, results);
   runner(
     "clippy",
     "cargo",
@@ -395,6 +420,7 @@ function main({
     null,
     results,
   );
+  runner("releaseAssets", npm, ["run", "test:release-assets"], null, results);
   runner("test", npm, ["run", "test:cov"], parseTest, results);
   runner(
     "rust",
@@ -406,11 +432,35 @@ function main({
   );
 
   const exitCode = printSummary(results);
+  if (writeEvidence) {
+    const commit = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const sha = String(commit.stdout || "").trim();
+    if (commit.status !== 0 || !/^[0-9a-f]{40}$/i.test(sha)) {
+      console.error(
+        "Could not bind release quality-gate evidence to an exact git commit.",
+      );
+      return 1;
+    }
+    const evidencePath = writeQualityGateEvidence(root, {
+      commit: sha,
+      startedAt,
+      completedAt: Date.now(),
+      checks: results,
+      passed: exitCode === 0,
+    });
+    console.log(`Release quality-gate evidence: ${evidencePath}`);
+  }
   return exitCode;
 }
 
 if (isDirectExecution(import.meta.url)) {
-  process.exit(main());
+  process.exit(
+    main({ writeEvidence: process.argv.includes("--write-evidence") }),
+  );
 }
 
 export {

@@ -112,12 +112,65 @@ function parseBookmarksArray(raw: string): Bookmark[] | null {
   return valid;
 }
 
-async function loadBackupBookmarks(): Promise<Bookmark[] | null> {
+interface BookmarkFileState {
+  present: boolean;
+  contents: string;
+  error?: string | null;
+}
+
+interface BookmarksState {
+  primary: BookmarkFileState;
+  backup: BookmarkFileState;
+}
+
+function bookmarkFileError(file: BookmarkFileState): string | null {
+  return file.error ?? null;
+}
+
+export async function loadBookmarks(): Promise<void> {
+  let state: BookmarksState;
   try {
-    const raw = await invoke<string>("load_bookmarks_backup");
-    return parseBookmarksArray(raw);
-  } catch {
-    return null;
+    state = await invoke<BookmarksState>("load_bookmarks_state");
+  } catch (err) {
+    bookmarks = [];
+    loadError = err instanceof Error ? err.message : String(err);
+    return;
+  }
+
+  let primaryError = bookmarkFileError(state.primary);
+  if (state.primary.present && primaryError === null) {
+    const primary = parseBookmarksArray(state.primary.contents);
+    if (primary !== null) {
+      bookmarks = primary;
+      loadError = null;
+      // Loading never writes the backup: a bad primary must not replace the
+      // only good copy with an empty in-memory list.
+      return;
+    }
+    primaryError = "the bookmark file is corrupt.";
+  }
+
+  if (state.backup.present && !state.backup.error) {
+    const backup = parseBookmarksArray(state.backup.contents);
+    if (backup !== null) {
+      bookmarks = backup;
+      loadError = null;
+      console.warn(
+        "Primary bookmarks were unavailable; loaded the saved backup instead.",
+      );
+      return;
+    }
+  }
+
+  bookmarks = [];
+  if (state.primary.present) {
+    loadError = primaryError ?? "the bookmark file is corrupt.";
+  } else if (state.backup.present) {
+    loadError = state.backup.error ?? "the bookmark backup is corrupt.";
+  } else {
+    // Fresh install: both files are absent, which is an empty list, not an
+    // unreadable one.
+    loadError = null;
   }
 }
 
@@ -129,32 +182,6 @@ async function saveBookmarksBackupSafe(next: Bookmark[]): Promise<void> {
   } catch (err) {
     console.warn("Failed to update bookmark backup:", err);
   }
-}
-
-export async function loadBookmarks(): Promise<void> {
-  let primaryError: string | null = null;
-  try {
-    const raw = await invoke<string>("load_bookmarks");
-    const primary = parseBookmarksArray(raw);
-    if (primary !== null) {
-      bookmarks = primary;
-      loadError = null;
-      await saveBookmarksBackupSafe(bookmarks);
-      return;
-    }
-    if (raw.trim().length > 0) primaryError = "the bookmark file is corrupt.";
-  } catch (err) {
-    // Primary unavailable (vault locked or IO error): fall through to backup.
-    primaryError = `${err instanceof Error ? err.message : String(err)}`;
-  }
-  const backup = await loadBackupBookmarks();
-  if (backup !== null) {
-    bookmarks = backup;
-    loadError = null;
-    return;
-  }
-  bookmarks = [];
-  loadError = primaryError;
 }
 
 async function persistBookmarksSnapshot(next: Bookmark[]): Promise<void> {
@@ -332,10 +359,16 @@ export function renderBookmarkBar(
 export function exportBookmarksJson(includeSecrets = false): string {
   const exported = includeSecrets
     ? bookmarks
-    : bookmarks.map(({ secret_key: _secretKey, ...bookmark }) => ({
-        ...bookmark,
-        secret_key: "",
-      }));
+    : bookmarks.map(
+        ({
+          secret_key: _secretKey,
+          session_token: _sessionToken,
+          ...bookmark
+        }) => ({
+          ...bookmark,
+          secret_key: "",
+        }),
+      );
   return JSON.stringify(exported, null, 2);
 }
 

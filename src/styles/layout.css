@@ -103,6 +103,17 @@
   outline-offset: -2px;
 }
 
+/* The bucket toggle is always available so a desktop user can reclaim the
+   sidebar; browser.css hides it by default, hence the extra specificity. */
+.content-toolbar__nav .sidebar-toggle {
+  display: inline-flex;
+}
+
+.main-layout--sidebar-collapsed .sidebar,
+.main-layout--sidebar-collapsed .sidebar-resizer {
+  display: none;
+}
+
 .sidebar-backdrop {
   position: absolute;
   inset: 0;
@@ -149,8 +160,11 @@
 .connection-screen__main {
   flex: 1;
   display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
   align-items: flex-start;
   justify-content: center;
+  gap: var(--space-4);
   padding: 28px var(--space-7);
   overflow-y: auto;
   min-height: 0;
@@ -201,6 +215,7 @@
 
 .form-row {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
 }
 
@@ -238,8 +253,10 @@
 
 .form-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: var(--space-2);
   margin-top: var(--space-2);
 }
 
@@ -339,8 +356,8 @@
 }
 
 /* Stage 1 of the collapse: drop the visible labels, keep the icons.
-   949 matches the pre-existing shortcut-chip breakpoint: at a 900px
-   viewport the container is the full 900px window width. */
+   949 matches the shortcut-chip query in browser.css; app-layout.ts adds a
+   160px breadcrumb minimum plus 24px slack before hiding buttons. */
 @container content-toolbar (max-width: 949px) {
   .content-toolbar__actions .btn__label {
     display: none;
@@ -716,6 +733,8 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
 
 .form-actions__end {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+  margin-left: auto;
 }

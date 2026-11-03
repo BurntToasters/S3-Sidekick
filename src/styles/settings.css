@@ -209,6 +209,12 @@
   background: var(--bg-hover);
 }
 
+/* Inline recovery when the Security status request fails. */
+.security-status-card__retry {
+  align-self: flex-start;
+  margin-top: var(--space-1);
+}
+
 /* Select boxes keep room for their longest option so labels are not cut. */
 .settings-content .field--sm {
   width: auto;

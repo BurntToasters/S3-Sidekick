@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { parseReleaseArgs } from "./run-release.js";
+import { assertSkipCheckAllowed, parseReleaseArgs } from "./run-release.js";
 import {
   requiredDraftAssetNames,
   requiredDraftInstallerNames,
@@ -18,6 +18,16 @@ import {
 } from "./release-draft-metadata.cjs";
 import { getCleanTargets } from "./dist-tools.js";
 import { shouldStage } from "./flatpak-bundle.js";
+import { isMirrorableReleaseEntry } from "./post-release-assets.js";
+import { assertNoSignatureSkips } from "./release-signature-gate.cjs";
+import {
+  assertLiveAssetsMatchReceipt,
+  assertPublishedResponse,
+  assertReceiptMatchesRelease,
+} from "./publish-release.cjs";
+import { DEFAULT_GATE_JOB, selectReleaseGateRun } from "./release-ci-status.js";
+import { readAppVersion, signerArgs } from "./updater-sign.js";
+import { hasMinisignEnvelope } from "./validate-updater-manifest.js";
 import {
   bundleConfig,
   msiVersionForAppVersion,
@@ -29,6 +39,7 @@ const packageJson = JSON.parse(
   fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
 );
 const packageVersion = packageJson.version;
+const packageTag = `v${packageVersion}`;
 
 test("run-release accepts only canonical host commands", () => {
   assert.equal(
@@ -280,6 +291,281 @@ test("Flatpak npm 12 install overrides sandbox offline mode", () => {
   assert.match(yaml, /npm install --global npm@12\.2\.1 --no-offline /);
   assert.match(yaml, /--share=network/);
   assert.match(yaml, /CARGO_NET_OFFLINE:\s*"true"/);
+});
+
+test("--skip-check is explicit and never allowed for stable releases", () => {
+  assert.equal(assertSkipCheckAllowed(false), false);
+  assert.throws(
+    () =>
+      assertSkipCheckAllowed(true, {
+        environment: { ALLOW_RELEASE_SKIP_CHECK: "1" },
+        version: "0.12.0",
+      }),
+    /stable release/,
+  );
+  assert.throws(
+    () =>
+      assertSkipCheckAllowed(true, {
+        environment: {},
+        version: "0.12.0-beta.1",
+      }),
+    /ALLOW_RELEASE_SKIP_CHECK=1/,
+  );
+  assert.equal(
+    assertSkipCheckAllowed(true, {
+      environment: { ALLOW_RELEASE_SKIP_CHECK: "1" },
+      version: "0.12.0-beta.1",
+    }),
+    true,
+  );
+});
+
+test("release cleanup is non-destructive and guarded", () => {
+  const scripts = packageJson.scripts;
+  assert.equal(
+    scripts["release:cleanup:checkout"],
+    "node scripts/release-cleanup-checkout.mjs",
+  );
+  const guard = fs.readFileSync(
+    path.join(process.cwd(), "scripts", "release-cleanup-checkout.mjs"),
+    "utf8",
+  );
+  assert.match(guard, /ALLOW_RELEASE_CLEANUP_STASH/);
+  assert.match(guard, /merge", "--ff-only/);
+  assert.doesNotMatch(guard, /reset", "--hard|clean", "-fd/);
+  assert.match(scripts["release:finalize"], /npm run release:cleanup:checkout/);
+  for (const name of [
+    "release:win:continue",
+    "release:mac:continue",
+    "release:linux:x64:continue",
+  ]) {
+    assert.match(scripts[name], /npm run release:ci-status/);
+    assert.match(scripts[name], /npm run release:finalize/);
+    assert.doesNotMatch(scripts[name], /ALLOW_RELEASE_CLEANUP_STASH/);
+  }
+  assert.equal(
+    scripts["release:linux:continue"],
+    "npm run release:linux:x64:continue",
+  );
+  assert.match(scripts["release:prepare"], /npm run release:ci-status/);
+});
+
+test("retired Linux package formats are never mirrored", () => {
+  assert.equal(isMirrorableReleaseEntry("S3-Sidekick-Linux-x64.deb"), false);
+  assert.equal(isMirrorableReleaseEntry("S3-Sidekick-Linux-x64.rpm"), false);
+  assert.equal(
+    isMirrorableReleaseEntry("S3-Sidekick-Linux-x64.AppImage"),
+    true,
+  );
+  assert.equal(isMirrorableReleaseEntry("S3-Sidekick-Linux-x64.flatpak"), true);
+  assert.equal(
+    isMirrorableReleaseEntry("S3 Sidekick_0.12.0-beta.1_amd64.deb"),
+    false,
+  );
+});
+
+test("release verification fails closed when signing was skipped", () => {
+  assert.doesNotThrow(() => assertNoSignatureSkips({}));
+  assert.throws(
+    () => assertNoSignatureSkips({ SKIP_WIN_CODESIGN: "1" }),
+    /refuses SKIP_WIN_CODESIGN/,
+  );
+  assert.throws(
+    () => assertNoSignatureSkips({ SKIP_MAC_NOTARIZATION: "true" }),
+    /refuses SKIP_MAC_NOTARIZATION/,
+  );
+});
+
+test("published response must actually leave draft state", () => {
+  const isPrerelease = /-beta\.\d+$/.test(packageVersion);
+  const published = {
+    draft: false,
+    prerelease: isPrerelease,
+    tag_name: packageTag,
+  };
+  assert.equal(assertPublishedResponse(published), published);
+  assert.throws(
+    () => assertPublishedResponse({ ...published, draft: true }),
+    /still reports draft=true/,
+  );
+  assert.throws(
+    () => assertPublishedResponse({ ...published, prerelease: !isPrerelease }),
+    /prerelease/,
+  );
+  assert.throws(
+    () => assertPublishedResponse({ ...published, tag_name: "untagged-abc" }),
+    /tag_name/,
+  );
+  assert.throws(
+    () =>
+      assertPublishedResponse(
+        { ...published, target_commitish: "b".repeat(40) },
+        { commit: "a".repeat(40) },
+      ),
+    /targets/,
+  );
+});
+
+test("publish receipt rejects changed release assets", () => {
+  const receipt = {
+    suite: "release-draft-verification",
+    version: packageVersion,
+    tag: packageTag,
+    release: {
+      id: 7,
+      tag_name: packageTag,
+      draft: true,
+    },
+    assets: [
+      { id: 1, name: "a.exe", size: 10, digest: "sha256:aa" },
+      { id: 2, name: "a.exe.asc", size: 5, digest: "sha256:bb" },
+    ],
+  };
+  const release = {
+    id: 7,
+    tag_name: packageTag,
+    draft: true,
+  };
+  assert.doesNotThrow(() => assertReceiptMatchesRelease(release, receipt));
+  assert.throws(
+    () => assertReceiptMatchesRelease({ ...release, id: 8 }, receipt),
+    /changed after verification/,
+  );
+  assert.doesNotThrow(() =>
+    assertLiveAssetsMatchReceipt(receipt.assets, receipt),
+  );
+  assert.throws(
+    () =>
+      assertLiveAssetsMatchReceipt(
+        [...receipt.assets, { id: 3, name: "extra.exe", size: 1 }],
+        receipt,
+      ),
+    /unexpected: extra\.exe/,
+  );
+  assert.throws(
+    () =>
+      assertLiveAssetsMatchReceipt(
+        [{ ...receipt.assets[0], digest: "sha256:cc" }, receipt.assets[1]],
+        receipt,
+      ),
+    /changed after verification/,
+  );
+});
+
+test("CI release gate requires a successful run for the exact HEAD", () => {
+  const sha = "a".repeat(40);
+  const success = {
+    id: 2,
+    name: "Release gate",
+    head_sha: sha,
+    status: "completed",
+    conclusion: "success",
+    completed_at: "2026-01-01T00:00:02Z",
+  };
+  assert.equal(
+    selectReleaseGateRun(
+      [
+        success,
+        {
+          ...success,
+          id: 1,
+          conclusion: "failure",
+          completed_at: "2026-01-01T00:00:01Z",
+        },
+      ],
+      { sha },
+    ),
+    success,
+  );
+  assert.throws(() => selectReleaseGateRun([], { sha }), /has no run/);
+  assert.throws(
+    () =>
+      selectReleaseGateRun([{ ...success, conclusion: "failure" }], { sha }),
+    /requires success/,
+  );
+  assert.throws(
+    () =>
+      selectReleaseGateRun([{ ...success, head_sha: "b".repeat(40) }], {
+        sha,
+      }),
+    /has no run/,
+  );
+});
+
+test("workflow defines the check-run name release-ci-status requires", () => {
+  const workflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "ci.yml"),
+    "utf8",
+  );
+  assert.match(
+    workflow,
+    new RegExp(`^  release-gate:\\n    name: ${DEFAULT_GATE_JOB}$`, "m"),
+  );
+});
+
+test("updater signing binds signatures to the package version", () => {
+  const version = readAppVersion();
+  assert.equal(version, packageVersion);
+  assert.deepEqual(signerArgs("/tmp/app.tar.gz", version), [
+    "signer",
+    "sign",
+    "--app-version",
+    version,
+    "/tmp/app.tar.gz",
+  ]);
+  assert.throws(() => signerArgs("/tmp/app.tar.gz", ""), /app version/);
+
+  const directory = fs.mkdtempSync(
+    path.join(process.cwd(), ".tmp-updater-version-"),
+  );
+  try {
+    const packageJsonFile = path.join(directory, "package.json");
+    fs.writeFileSync(packageJsonFile, "{}\n");
+    assert.throws(
+      () => readAppVersion({ packageJsonFile }),
+      /no version|version is required/,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+
+  const config = JSON.parse(
+    fs.readFileSync(
+      path.join(process.cwd(), "src-tauri", "tauri.conf.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(config.plugins.updater.requireSignedVersion, true);
+});
+
+test("minisign envelope rejects malformed and truncated signatures", () => {
+  assert.equal(hasMinisignEnvelope("not-base64"), false);
+  assert.equal(
+    hasMinisignEnvelope(
+      Buffer.from(
+        "untrusted comment: test\nAAAA\ntrusted comment: test\nAAAA\n",
+      ).toString("base64"),
+    ),
+    false,
+  );
+  assert.equal(
+    hasMinisignEnvelope(Buffer.from("short").toString("base64")),
+    false,
+  );
+});
+
+test("stable release rejects every signing/upload bypass", () => {
+  for (const name of [
+    "SKIP_WIN_CODESIGN",
+    "FORCE_UPLOAD",
+    "SKIP_RELEASE_MIRROR",
+    "ALLOW_ASSET_REPLACE",
+  ]) {
+    assert.throws(
+      () => assertStableReleaseOverridesAllowed({ [name]: "1" }, "0.12.0"),
+      new RegExp(`refuses ${name}`),
+    );
+  }
 });
 
 test("Flatpak staging and clean omit nested builder caches", () => {

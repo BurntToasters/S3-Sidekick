@@ -7,6 +7,9 @@ import {
   refreshBuckets,
   currentConnectionGeneration,
   finishConnecting,
+  CONNECTION_MEMORY_STORAGE_KEY,
+  connectionMemoryKey,
+  forgetConnectionLocation,
 } from "./connection.ts";
 import {
   renderBucketList,
@@ -34,10 +37,10 @@ import { friendlyError, isLocalEndpoint, plural, escapeHtml } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
 import { clearFilterInputDebounce, setSidebarOpen } from "./app-layout.ts";
-import { setInspectorOpen } from "./inspector.ts";
+import { requestCloseInspector, setInspectorOpen } from "./inspector.ts";
 import { showConfirm, showPrompt } from "./dialogs.ts";
 import { showToast } from "./toast.ts";
-import { openSettingsModal, switchSettingsTab } from "./settings.ts";
+import { openSettingsModal } from "./settings.ts";
 import { handleLockNow } from "./security.ts";
 import {
   recoverPendingTransfers,
@@ -47,6 +50,8 @@ import {
 /** One user-initiated connect. Cancel flips `cancelled` so the flow discards its result. */
 interface ConnectAttempt {
   cancelled: boolean;
+  /** Session published by connect(), once it resolves. */
+  sessionId: string;
 }
 
 const CREDENTIAL_FIELD_IDS = [
@@ -63,6 +68,13 @@ let connectedAccessKey = "";
 /** Startup or explicit lock: saved connections are unavailable until unlocked. */
 let savedConnectionsLocked = false;
 let unlockHandler: (() => Promise<boolean>) | null = null;
+
+/**
+ * One explanation for locked saved connections. The connect screen sidebar,
+ * header switcher and reconnect card all use this copy.
+ */
+const LOCKED_SAVED_CONNECTIONS_MESSAGE =
+  "Saved connections stay unavailable until you unlock encrypted storage with your password.";
 
 export function awsRegionalEndpoint(region: string): string {
   const trimmed = region.trim() || "us-east-1";
@@ -156,12 +168,9 @@ export interface ConnectionLocationMemory {
   lastUsedAt: number;
 }
 
-const CONNECTION_MEMORY_KEY = "s3-sidekick.connection-memory";
+const CONNECTION_MEMORY_KEY = CONNECTION_MEMORY_STORAGE_KEY;
 
-/** The memory key is the connection name and endpoint alone. */
-export function connectionMemoryKey(name: string, endpoint: string): string {
-  return `${name}\n${endpoint}`;
-}
+export { connectionMemoryKey, forgetConnectionLocation } from "./connection.ts";
 
 function readConnectionMemoryStore(): Record<string, unknown> {
   try {
@@ -234,19 +243,6 @@ export function rememberConnectionLocation(
     window.localStorage.setItem(CONNECTION_MEMORY_KEY, JSON.stringify(store));
   } catch {
     // Storage unavailable; the memory is best effort.
-  }
-}
-
-/** Drop the memory of a removed connection so the key is never stale. */
-export function forgetConnectionLocation(name: string, endpoint: string): void {
-  try {
-    const store = readConnectionMemoryStore();
-    const key = connectionMemoryKey(name, endpoint);
-    if (!(key in store)) return;
-    delete store[key];
-    window.localStorage.setItem(CONNECTION_MEMORY_KEY, JSON.stringify(store));
-  } catch {
-    // Storage unavailable; nothing to clean up.
   }
 }
 
@@ -408,8 +404,8 @@ function renderSwitcherMenu(): void {
   if (!saved) return;
   if (isSavedConnectionsLocked()) {
     saved.innerHTML =
-      `<p class="conn-switcher__locked">Saved connections are locked.</p>` +
-      `<button type="button" class="conn-switcher__connection" data-unlock>Unlock</button>`;
+      `<p class="conn-switcher__locked">${LOCKED_SAVED_CONNECTIONS_MESSAGE}</p>` +
+      `<button type="button" role="menuitem" class="conn-switcher__connection" data-unlock>Unlock</button>`;
     saved.onclick = (event) => {
       if ((event.target as HTMLElement | null)?.closest("[data-unlock]")) {
         closeSwitcherMenu();
@@ -432,7 +428,7 @@ function renderSwitcherMenu(): void {
         active.endpoint === bookmark.endpoint &&
         active.access_key === bookmark.access_key;
       return (
-        `<button type="button" class="conn-switcher__connection"${current ? ' aria-current="true"' : ""} data-index="${bookmarks.indexOf(bookmark)}">` +
+        `<button type="button" role="menuitem" class="conn-switcher__connection"${current ? ' aria-current="true"' : ""} data-index="${bookmarks.indexOf(bookmark)}">` +
         `<span class="conn-switcher__connection-name">${escapeHtml(bookmark.name)}</span>` +
         `<span class="conn-switcher__connection-host">${escapeHtml(endpointHost(bookmark.endpoint))}</span>` +
         `</button>`
@@ -461,10 +457,40 @@ function renderSwitcherMenu(): void {
 /** Wire the header switcher (idempotent; called from the form wiring). */
 export function wireConnectionSwitcher(): void {
   const btn = document.getElementById("conn-switcher-btn");
+  const menu = document.getElementById("conn-switcher-menu");
   if (!btn || switcherWired) return;
   switcherWired = true;
+  btn.setAttribute("aria-controls", "conn-switcher-menu");
+  btn.setAttribute("aria-haspopup", "menu");
+  menu?.setAttribute("role", "menu");
+  const enabledItems = (): HTMLElement[] =>
+    Array.from(
+      menu?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [],
+    ).filter((item) => !item.hidden && !item.hasAttribute("disabled"));
+  const focusItem = (position: "first" | "last"): void => {
+    const items = enabledItems();
+    const target = position === "first" ? items[0] : items[items.length - 1];
+    target?.focus();
+  };
   btn.addEventListener("click", () => {
     setSwitcherMenuOpen(!isSwitcherMenuOpen());
+  });
+  btn.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    if (!isSwitcherMenuOpen()) setSwitcherMenuOpen(true);
+    focusItem(event.key === "ArrowDown" ? "first" : "last");
+  });
+  menu?.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const items = enabledItems();
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    const next =
+      current < 0 ? (delta > 0 ? 0 : items.length - 1) : current + delta;
+    items[(next + items.length) % items.length]?.focus();
   });
   document.addEventListener("pointerdown", (event) => {
     if (!isSwitcherMenuOpen()) return;
@@ -479,22 +505,27 @@ export function wireConnectionSwitcher(): void {
   });
 
   const newBtn = document.getElementById("conn-switcher-new");
+  newBtn?.setAttribute("role", "menuitem");
   newBtn?.addEventListener("click", () => {
     closeSwitcherMenu();
     void handleNewConnection();
   });
   const manageBtn = document.getElementById("conn-switcher-manage");
+  manageBtn?.setAttribute("role", "menuitem");
   manageBtn?.addEventListener("click", () => {
     closeSwitcherMenu();
-    openSettingsModal();
-    switchSettingsTab("bookmarks");
+    // Open on Saved connections before the overlay becomes visible, so the
+    // Appearance panel is never painted first.
+    openSettingsModal("bookmarks");
   });
   const disconnectBtn = document.getElementById("conn-switcher-disconnect");
+  disconnectBtn?.setAttribute("role", "menuitem");
   disconnectBtn?.addEventListener("click", () => {
     closeSwitcherMenu();
     void handleDisconnectRequest();
   });
   const lockBtn = document.getElementById("conn-switcher-lock");
+  lockBtn?.setAttribute("role", "menuitem");
   lockBtn?.addEventListener("click", () => {
     closeSwitcherMenu();
     void handleSwitcherLockNow();
@@ -521,7 +552,7 @@ function renderLockedSavedConnections(list: HTMLElement): void {
   list.innerHTML =
     `<li class="conn-saved-empty conn-saved-empty--locked">` +
     `<p class="conn-saved-empty__title">Saved connections are locked</p>` +
-    `<p class="conn-saved-empty__text">Unlock encrypted storage to use your saved connections.</p>` +
+    `<p class="conn-saved-empty__text">${LOCKED_SAVED_CONNECTIONS_MESSAGE}</p>` +
     `<button type="button" class="btn btn--sm" data-unlock>Unlock</button>` +
     `</li>`;
   list.onclick = (event) => {
@@ -550,6 +581,7 @@ async function renameSavedConnection(bookmark: Bookmark): Promise<void> {
   try {
     const updated = await updateBookmark(bookmark, { name });
     if (updated) {
+      forgetConnectionLocation(bookmark.name, bookmark.endpoint);
       showToast(`Renamed to "${name}".`, { type: "success" });
     } else {
       setStatus("That saved connection is no longer saved.", 5000);
@@ -712,22 +744,76 @@ export function focusConnectionScreen(): void {
   endpoint?.focus();
 }
 
+/**
+ * Most recently used connection from the location-memory store. Used while the
+ * vault is locked, when the bookmark list is cleared and only the non-secret
+ * name/endpoint memory remains.
+ */
+function mostRecentRememberedConnectionFromStore(): {
+  name: string;
+  endpoint: string;
+} | null {
+  let best: { name: string; endpoint: string; lastUsedAt: number } | null =
+    null;
+  for (const [key, value] of Object.entries(readConnectionMemoryStore())) {
+    const separator = key.indexOf("\n");
+    if (separator <= 0) continue;
+    const memory = sanitizeLocationRecord(value);
+    if (!memory) continue;
+    if (!best || memory.lastUsedAt > best.lastUsedAt) {
+      best = {
+        name: key.slice(0, separator),
+        endpoint: key.slice(separator + 1),
+        lastUsedAt: memory.lastUsedAt,
+      };
+    }
+  }
+  return best ? { name: best.name, endpoint: best.endpoint } : null;
+}
+
 /** Show or hide the "Reconnect to <last>" card on the connect screen. */
 function refreshReconnectCard(): void {
   const card = document.getElementById("reconnect-card");
   if (!card) return;
-  const recent =
-    !isSavedConnectionsLocked() && !state.connected
+  const locked = isSavedConnectionsLocked();
+  const recent = locked
+    ? mostRecentRememberedConnectionFromStore()
+    : !state.connected
       ? mostRecentRememberedConnection(getBookmarks())
       : null;
   if (!recent) {
     card.hidden = true;
     return;
   }
+  const titleEl = document.getElementById("reconnect-card-title");
   const nameEl = document.getElementById("reconnect-card-name");
   const endpointEl = document.getElementById("reconnect-card-endpoint");
-  if (nameEl) nameEl.textContent = recent.name;
-  if (endpointEl) endpointEl.textContent = endpointHost(recent.endpoint);
+  const lockedEl = document.getElementById("reconnect-card-locked");
+  const button = document.getElementById(
+    "reconnect-card-btn",
+  ) as HTMLButtonElement | null;
+  if (locked) {
+    if (titleEl) titleEl.hidden = true;
+    if (endpointEl) endpointEl.hidden = true;
+    if (lockedEl) {
+      lockedEl.textContent = LOCKED_SAVED_CONNECTIONS_MESSAGE;
+      lockedEl.hidden = false;
+    }
+    if (button) {
+      button.textContent = "Unlock";
+      button.setAttribute("aria-label", "Unlock saved connections");
+    }
+  } else {
+    if (titleEl) titleEl.hidden = false;
+    if (endpointEl) endpointEl.hidden = false;
+    if (lockedEl) lockedEl.hidden = true;
+    if (nameEl) nameEl.textContent = recent.name;
+    if (endpointEl) endpointEl.textContent = endpointHost(recent.endpoint);
+    if (button) {
+      button.textContent = "Reconnect";
+      button.setAttribute("aria-label", `Reconnect to ${recent.name}`);
+    }
+  }
   card.hidden = false;
 }
 
@@ -931,10 +1017,13 @@ function setConnectionFormDisabled(disabled: boolean): void {
 /** Cancel the in-flight connect. Any session it establishes is torn down. */
 export function cancelPendingConnect(): void {
   const attempt = pendingConnectAttempt;
-  if (!attempt || attempt.cancelled) return;
-  attempt.cancelled = true;
+  if (!attempt && !state.connecting) return;
+  if (attempt) attempt.cancelled = true;
   pendingConnectAttempt = null;
   state.connecting = false;
+  // Begin teardown now rather than waiting for a slow save/listing await to
+  // return: the session is already established, so it must not stay live.
+  if (attempt?.sessionId) void releaseEstablishedSession(attempt.sessionId);
   setConnectButtonBusy(false);
   setConnectionFormError(null);
   setStatus("Connection cancelled.", 5000);
@@ -977,10 +1066,33 @@ function isGenerationCurrent(
 }
 
 /**
+ * Close only the session this workflow published. A newer session that already
+ * owns state is never touched, so a cancelled or superseded connect cannot tear
+ * down the user's replacement connection.
+ */
+const releasingSessions = new Set<string>();
+async function releaseEstablishedSession(connectionId: string): Promise<void> {
+  if (!connectionId || state.connectionId !== connectionId) return;
+  if (releasingSessions.has(connectionId)) return;
+  releasingSessions.add(connectionId);
+  try {
+    await disconnect(connectionId);
+  } catch (cleanupErr) {
+    logActivity(
+      `Cleanup after an abandoned connect failed: ${friendlyError(cleanupErr)}`,
+      "warning",
+    );
+  } finally {
+    releasingSessions.delete(connectionId);
+  }
+}
+
+/**
  * Snapshot the live location under the active saved connection's name+endpoint
  * key (never under credentials). No-op when the session is not a saved one.
+ * Exported for lock paths that must capture it before clearing state.
  */
-function rememberActiveConnectionLocation(): void {
+export function rememberActiveConnectionLocation(): void {
   const active = activeSavedConnection();
   if (!active) return;
   rememberConnectionLocation(
@@ -1097,6 +1209,13 @@ async function confirmCleartextEndpoint(endpoint: string): Promise<boolean> {
 }
 
 export async function handleConnect(): Promise<void> {
+  if (testConnectionInFlight) {
+    setStatus(
+      "Wait for the connection test to finish before connecting.",
+      5000,
+    );
+    return;
+  }
   // Allow superseding connects: rapid bookmark switches start a newer
   // generation in connect() that wins; stale flows exit via generation checks.
   const { endpoint, region, accessKey, secretKey, sessionToken } =
@@ -1121,7 +1240,7 @@ export async function handleConnect(): Promise<void> {
 
   setConnectionFormError(null);
   state.connecting = true;
-  const attempt: ConnectAttempt = { cancelled: false };
+  const attempt: ConnectAttempt = { cancelled: false, sessionId: "" };
   pendingConnectAttempt = attempt;
   setConnectButtonBusy(true);
   const wasConnected = state.connected;
@@ -1135,6 +1254,7 @@ export async function handleConnect(): Promise<void> {
       setStatus("Connection cancelled.", 5000);
       return;
     }
+    if (attempt.cancelled) return;
 
     setStatus("Connecting...");
     const connectionAttempt = connect(
@@ -1148,16 +1268,11 @@ export async function handleConnect(): Promise<void> {
     const generation = workflowGeneration;
     const resolvedRegion = await connectionAttempt;
     establishedConnectionId = state.connectionId;
+    attempt.sessionId = establishedConnectionId;
     if (attempt.cancelled) {
       // Cancel already restored the form; release the session this connect
       // published so a cancelled attempt does not stay connected.
-      await disconnect(establishedConnectionId).catch((cleanupErr: unknown) => {
-        logActivity(
-          `Cleanup after a cancelled connect failed: ${friendlyError(cleanupErr)}`,
-          "warning",
-        );
-        return false;
-      });
+      await releaseEstablishedSession(establishedConnectionId);
       return;
     }
     (document.getElementById("conn-region") as HTMLInputElement).value =
@@ -1172,6 +1287,10 @@ export async function handleConnect(): Promise<void> {
         sessionToken,
       );
     } catch (saveErr) {
+      if (attempt.cancelled) {
+        await releaseEstablishedSession(establishedConnectionId);
+        return;
+      }
       if (!isGenerationCurrent(generation, establishedConnectionId)) {
         return;
       }
@@ -1181,11 +1300,21 @@ export async function handleConnect(): Promise<void> {
         "warning",
       );
     }
+    // Cancel may arrive while credentials are saving: never publish a session
+    // the user already gave up on.
+    if (attempt.cancelled) {
+      await releaseEstablishedSession(establishedConnectionId);
+      return;
+    }
     if (!isGenerationCurrent(generation, establishedConnectionId)) {
       return;
     }
     renderBucketListSkeleton();
     await refreshBuckets();
+    if (attempt.cancelled) {
+      await releaseEstablishedSession(establishedConnectionId);
+      return;
+    }
     if (!isGenerationCurrent(generation, establishedConnectionId)) {
       return;
     }
@@ -1220,7 +1349,12 @@ export async function handleConnect(): Promise<void> {
       logActivity(message, "warning");
     }
   } catch (e) {
-    if (attempt.cancelled) return;
+    if (attempt.cancelled) {
+      // A cancelled workflow may have published a session just before the
+      // failure surfaced. Release only that exact session.
+      await releaseEstablishedSession(establishedConnectionId);
+      return;
+    }
     const stillOwnSession =
       Boolean(establishedConnectionId) &&
       state.connectionId === establishedConnectionId;
@@ -1283,6 +1417,9 @@ function finishConnectAttempt(
 }
 
 export async function handleDisconnect(): Promise<boolean> {
+  // Unsaved Properties edits belong to the session being torn down. Ask before
+  // the inspector is closed; Cancel keeps both the session and the edits.
+  if (!(await requestCloseInspector())) return false;
   // Snapshot the location under the saved connection's name+endpoint before
   // the teardown clears state, so switching back restores it.
   rememberActiveConnectionLocation();
@@ -1361,14 +1498,17 @@ function setTestButtonBusy(busy: boolean): void {
 
 /**
  * Close the throwaway session minted for a connection test. Only the exact
- * session connect() published is torn down: a session that was superseded by
- * a newer workflow is left to its own owner.
+ * session and generation connect() published are torn down: a session that a
+ * newer real connect published is left to its own owner.
  */
-async function endTestSession(testSessionId: string | null): Promise<void> {
+async function endTestSession(
+  testSessionId: string | null,
+  testGeneration: number,
+): Promise<void> {
   if (!testSessionId) return;
   if (state.connectionId !== testSessionId) return;
-  const closed = await disconnect(testSessionId);
-  if (!closed) throw new Error("Could not close the test session.");
+  if (currentConnectionGeneration() !== testGeneration) return;
+  await disconnect(testSessionId);
 }
 
 /**
@@ -1401,9 +1541,11 @@ export async function handleTestConnection(): Promise<void> {
   }
 
   testConnectionInFlight = true;
+  dom.connectBtn.disabled = true;
   setTestButtonBusy(true);
   setConnectionFormDisabled(true);
   let testSessionId: string | null = null;
+  let testGeneration = 0;
   try {
     if (!(await confirmCleartextEndpoint(endpoint))) {
       setStatus("Connection test cancelled.", 5000);
@@ -1418,10 +1560,11 @@ export async function handleTestConnection(): Promise<void> {
       sessionToken,
     );
     testSessionId = state.connectionId;
+    testGeneration = currentConnectionGeneration();
     try {
       await refreshBuckets();
     } finally {
-      await endTestSession(testSessionId);
+      await endTestSession(testSessionId, testGeneration);
     }
     const regionInput = document.getElementById(
       "conn-region",
@@ -1434,14 +1577,16 @@ export async function handleTestConnection(): Promise<void> {
     setStatus(message, 8000);
     logActivity(message, "error");
   } finally {
-    // Belt and braces: a test never leaves a live session behind.
+    // Belt and braces: a test never leaves a live session behind, and it
+    // never closes a newer real session that replaced its throwaway one.
     try {
-      await endTestSession(testSessionId);
+      await endTestSession(testSessionId, testGeneration);
     } catch {
       // Already reported through the catch path above when relevant.
     }
     testSessionId = null;
     testConnectionInFlight = false;
+    dom.connectBtn.disabled = false;
     setConnectionFormDisabled(false);
     setTestButtonBusy(false);
     refreshConnectionSwitcher();
@@ -1556,6 +1701,10 @@ export function wireConnectionScreenExtras(): void {
   document
     .getElementById("reconnect-card-btn")
     ?.addEventListener("click", () => {
+      if (isSavedConnectionsLocked()) {
+        void unlockHandler?.();
+        return;
+      }
       const recent = mostRecentRememberedConnection(getBookmarks());
       const bookmark = recent
         ? getBookmarks().find(
@@ -1679,6 +1828,9 @@ async function saveInlineBookmarkEdit(
     if (!updated) {
       setStatus("That saved connection is no longer saved.", 5000);
     } else {
+      if (name !== target.name || values.endpoint !== target.endpoint) {
+        forgetConnectionLocation(target.name, target.endpoint);
+      }
       showToast(`Updated "${name}".`, { type: "success" });
       setConnectionInputs(
         values.endpoint,

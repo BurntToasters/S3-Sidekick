@@ -476,6 +476,12 @@ pub(super) async fn rollback_prefix_copy_unbounded(
     failures
 }
 
+/// Bound automatic rollback so a stalled provider cannot hold the caller's
+/// mutation lease and storage gate forever. The timeout drops the rollback
+/// future; every backup not explicitly confirmed restored or removed is still
+/// present and reported as retained.
+const ROLLBACK_DEADLINE: Duration = Duration::from_secs(180);
+
 pub(super) async fn rollback_prefix_copy(
     client: &Client,
     bucket: &str,
@@ -483,8 +489,16 @@ pub(super) async fn rollback_prefix_copy(
     backups: &[DestinationBackup],
     provider: StorageProviderKind,
 ) -> Vec<String> {
-    // Rollback owns the only in-memory map from overwritten destinations to
-    // their backups. Dropping it on a timer can strand a partially restored
-    // transaction, so once rollback begins it must be awaited to completion.
-    rollback_prefix_copy_unbounded(client, bucket, created_destinations, backups, provider).await
+    match tokio::time::timeout(
+        ROLLBACK_DEADLINE,
+        rollback_prefix_copy_unbounded(client, bucket, created_destinations, backups, provider),
+    )
+    .await
+    {
+        Ok(failures) => failures,
+        Err(_) => vec![format!(
+            "rollback exceeded its {} second deadline; backups whose restoration or removal was not confirmed were retained and must be resolved manually before retrying",
+            ROLLBACK_DEADLINE.as_secs()
+        )],
+    }
 }

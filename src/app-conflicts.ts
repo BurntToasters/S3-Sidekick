@@ -156,8 +156,14 @@ export async function resolveDownloadEntriesWithConflicts(
   const existingResults = await Promise.all(
     entries.map(async (entry) => {
       try {
+        if (!entry.destinationToken) {
+          // Without a grant the backend cannot check the path; fail closed by
+          // treating it as an existing destination.
+          throw new Error("destination grant is unavailable");
+        }
         return await invoke<boolean>("path_exists", {
-          path: entry.destination,
+          token: entry.destinationToken,
+          name: entry.destinationName ?? null,
         });
       } catch (err) {
         // Fail closed: an unreadable destination must not be taken as "free to

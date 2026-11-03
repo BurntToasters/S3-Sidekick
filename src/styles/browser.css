@@ -13,7 +13,9 @@
   container-name: content-toolbar;
 }
 
-@container content-toolbar (max-width: 950px) {
+/* 949 matches the label-collapse query in layout.css; labels and shortcut
+   chips disappear on the same toolbar width. */
+@container content-toolbar (max-width: 949px) {
   .content-toolbar .shortcut-chip {
     display: none;
   }
@@ -405,6 +407,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
   padding: var(--space-1) var(--space-4);
   font-size: var(--text-sm);
   color: var(--text-secondary);
@@ -412,6 +416,82 @@
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border-top: 1px solid var(--glass-border);
+}
+
+/* Status text yields first: it can ellipsize down to nothing while the right
+   cluster keeps its controls and counters usable. */
+.statusbar > #status {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar .statusbar__right {
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.statusbar .statusbar__right > * {
+  flex-shrink: 0;
+}
+
+/* Counters are the only shrinkable items on the right; ellipsis beats clipping
+   the fixed buttons or the version label. */
+.statusbar .statusbar__right > .statusbar__count {
+  flex: 0 1 auto;
+  min-width: 3ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar .statusbar__count:empty {
+  display: none;
+}
+
+#version-label {
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  /* Tighter gaps and an icon-only palette button keep count, throughput,
+     version and both drawer controls on one row at 320px. The palette keeps
+     its aria-label. */
+  .statusbar.statusbar {
+    gap: var(--space-1);
+    padding-inline: var(--space-1);
+  }
+
+  .statusbar .statusbar__right {
+    gap: var(--space-1);
+  }
+
+  .statusbar .statusbar__right > #statusbar-count {
+    max-width: 68px;
+  }
+
+  .statusbar .statusbar__right > #statusbar-throughput {
+    max-width: 56px;
+  }
+
+  .statusbar #version-label {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    font-size: var(--text-xs);
+    text-overflow: ellipsis;
+  }
+
+  .statusbar #palette-hint {
+    padding-inline: var(--space-1);
+  }
+
+  #palette-hint > span:not(.lucide-icon):not(.shortcut-chip) {
+    display: none;
+  }
 }
 
 .statusbar__palette {

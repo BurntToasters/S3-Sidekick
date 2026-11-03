@@ -9,6 +9,8 @@ S3 Sidekick is your buddy for quick GUI S3-compatible storage management! I made
 Download the installers for Windows, macOS, and Linux from [GitHub Releases](https://github.com/BurntToasters/S3-Sidekick/releases).
 
 > **Windows:** the `.exe` (NSIS) installer supports in-app updates. The `.msi` package targets managed deployments and updates manually. Machines without WebView2 fetch it with Microsoft's bootstrapper, so that first install needs a network connection.
+>
+> **macOS:** requires macOS 13.3 (Ventura) or newer. The universal DMG and ZIP cover Apple silicon and Intel.
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
@@ -18,3 +20,7 @@ See [architecture and security notes](docs/ARCHITECTURE.md), [release runbook](d
 
 I dont collect your information from this app. There is no automatic crash reports, no telemetry, no B.S. Your device, your data.
 It is important to note: By default on app start S3 Sidekick does ping github to see if there is a new release available and if there is, auto-downloads the file and asks if you want to restart to update. This behavior can be switched off in settings.
+
+## License
+
+S3 Sidekick is licensed under the [Mozilla Public License 2.0](LICENSE).

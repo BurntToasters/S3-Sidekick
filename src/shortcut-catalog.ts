@@ -1,7 +1,8 @@
 /**
  * The one list of keyboard shortcuts shown to the user. Every entry must be
- * handled by `wireKeyboardShortcuts` in keyboard.ts (or the Escape branch
- * there); do not list a chord the app does not act on.
+ * handled by the app: global chords in `wireKeyboardShortcuts` (keyboard.ts),
+ * row and bucket navigation in browser.ts, Space/Enter in app-events.ts, and
+ * tab/resizer keys in app-layout.ts.
  */
 export interface ShortcutEntry {
   /** What the shortcut does, shown before the keys. */
@@ -44,6 +45,76 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
     action: "Close the topmost panel, dialog, or palette",
     macos: ["Escape"],
     other: ["Escape"],
+  },
+  // Object table navigation. Arrow/Home/End/Page keys are handled by
+  // browser.ts; Space and Enter by app-events.ts.
+  { action: "Move between objects", macos: ["↑", "↓"], other: ["↑", "↓"] },
+  {
+    action: "Extend selection between objects",
+    macos: ["⇧↑", "⇧↓"],
+    other: ["Shift+↑", "Shift+↓"],
+  },
+  {
+    action: "Jump to the first or last object",
+    macos: ["Home", "End"],
+    other: ["Home", "End"],
+  },
+  {
+    action: "Page through objects",
+    macos: ["Page Up", "Page Down"],
+    other: ["Page Up", "Page Down"],
+  },
+  {
+    action: "Toggle the focused object's selection",
+    macos: ["Space"],
+    other: ["Space"],
+  },
+  {
+    action: "Open or preview the focused object",
+    macos: ["Enter"],
+    other: ["Enter"],
+  },
+  {
+    action: "Open the focused object's context menu",
+    macos: ["⇧F10", "Context Menu"],
+    other: ["Shift+F10", "Context Menu"],
+  },
+  {
+    action: "Jump to an object by typing its name",
+    macos: ["Type letters"],
+    other: ["Type letters"],
+  },
+  // Bucket list roving focus.
+  {
+    action: "Move between buckets",
+    macos: ["↑", "↓"],
+    other: ["↑", "↓"],
+  },
+  {
+    action: "Jump to the first or last bucket",
+    macos: ["Home", "End"],
+    other: ["Home", "End"],
+  },
+  // Inspector tabs and the sidebar/inspector resizers.
+  {
+    action: "Move between tabs",
+    macos: ["←", "→", "Home", "End"],
+    other: ["←", "→", "Home", "End"],
+  },
+  {
+    action: "Resize the sidebar or inspector",
+    macos: ["←", "→"],
+    other: ["←", "→"],
+  },
+  {
+    action: "Jump to a panel width limit",
+    macos: ["Home", "End"],
+    other: ["Home", "End"],
+  },
+  {
+    action: "Resize in larger steps",
+    macos: ["⇧←", "⇧→"],
+    other: ["Shift+←", "Shift+→"],
   },
 ];
 

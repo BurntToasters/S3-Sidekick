@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 // The builder is pure; these modules are only needed by the click handlers,
 // so empty factories keep the import graph out of the test.
 vi.mock("../browser.ts", () => ({}));
-vi.mock("../info-panel.ts", () => ({}));
+vi.mock("../info-panel.ts", () => ({
+  INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
+}));
 vi.mock("../preview.ts", () => ({}));
 vi.mock("../app-objects.ts", () => ({}));
 vi.mock("../app-downloads.ts", () => ({}));

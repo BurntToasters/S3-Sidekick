@@ -609,16 +609,33 @@ pub(super) async fn copy_one(
     };
 
     let mut include_acl = info.acl.is_some();
+    let copy_bytes = u64::try_from(info.size).unwrap_or(0);
+    let copy_timeout = attempt_timeout_for_bytes(copy_bytes);
     let copy_output = loop {
         let request = build_copy(include_acl);
-        let send = send_copy_object_create_only(request, create_only_strategy);
+        let send = tokio::time::timeout(
+            copy_timeout,
+            send_copy_object_create_only(request, create_only_strategy),
+        );
         let result = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
             result = send => result,
         };
         match result {
-            Ok(output) => break output,
-            Err(err) => {
+            Ok(Ok(output)) => break output,
+            Err(_) => {
+                return Err(encode_transfer_error(
+                    "copy_timeout",
+                    true,
+                    None,
+                    format!(
+                        "Copy of '{}' did not finish within {} seconds; retry the copy.",
+                        src_key,
+                        copy_timeout.as_secs()
+                    ),
+                ));
+            }
+            Ok(Err(err)) => {
                 let detail = format!("{:?}", err);
                 if include_acl && acls_are_unavailable(&detail) {
                     // The destination disables ACLs, so the source ACL is not a
@@ -671,6 +688,21 @@ pub(super) async fn copy_one(
     .await
 }
 
+/// A single-part `CopyObject` preserves the source ETag, so an occupied
+/// destination with that exact ETag is this operation's committed copy. This
+/// decision is deliberately ETag-only: upload ownership markers never grant
+/// copy/move authority because a successful receipt can authorize deleting
+/// the source.
+pub(super) fn destination_etag_matches_source(
+    destination_etag: Option<&str>,
+    source_etag: Option<&str>,
+) -> bool {
+    matches!(
+        (destination_etag, source_etag),
+        (Some(destination), Some(source)) if !destination.is_empty() && destination == source
+    )
+}
+
 /// A single-part create-only copy failed with 412. That status has three
 /// causes, told apart by the destination:
 /// - absent: `x-amz-copy-source-if-match` failed, so the source changed;
@@ -696,11 +728,7 @@ pub(super) async fn resolve_copy_precondition_failure(
             src_key
         )),
         Ok(head) => {
-            let own_copy = matches!(
-                (head.e_tag(), info.etag.as_deref()),
-                (Some(dst), Some(src)) if !dst.is_empty() && dst == src
-            );
-            if own_copy {
+            if destination_etag_matches_source(head.e_tag(), info.etag.as_deref()) {
                 ambiguous_destination_identity(&head, dst_key)
             } else {
                 Err(destination_conflict_error(dst_key))
@@ -910,11 +938,24 @@ pub(super) async fn copy_object_multipart(
         complete_request =
             apply_complete_multipart_create_only_guard(complete_request, provider, dest_key)?;
     }
-    let complete_request = complete_request.send();
+    let complete_request = complete_request
+        .customize()
+        .config_override(body_attempt_timeout_override(size))
+        .send();
     let complete_result = tokio::select! {
         _ = cancel.cancelled() => {
-            abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
-            return Err(cancelled_error());
+            // Completion may already be live. Aborting the upload would race a
+            // service that is still publishing the destination, so retain it and
+            // let the caller verify or retry.
+            return Err(encode_transfer_error(
+                "completion_pending",
+                true,
+                None,
+                format!(
+                    "Copy to '{}' was cancelled while completion was in flight. The multipart upload was not aborted because it may still complete; retry or verify the destination before copying again.",
+                    dest_key
+                ),
+            ));
         }
         result = complete_request => result,
     };
@@ -1111,7 +1152,8 @@ pub(crate) async fn rename_object(
         preflight_optional_move_version(&client, &bucket, &old_key, &cancel).await?;
     require_conditional_delete_support(provider, &old_key)?;
 
-    if !overwrite && destination_object_exists(&client, &bucket, &new_key, &cancel).await? {
+    let destination_exists = destination_object_exists(&client, &bucket, &new_key, &cancel).await?;
+    if !overwrite && destination_exists {
         return Err(format!(
             "Destination '{}' already exists. Rename with overwrite to replace it.",
             new_key
@@ -1130,7 +1172,55 @@ pub(crate) async fn rename_object(
         &cancel,
     )
     .await?;
-    let receipt = copy_with_receipt(
+
+    // An overwrite rename destroys the current destination. Secure a rollback
+    // copy of it before touching that key; the source is never deleted unless
+    // this backup committed.
+    let mut destination_backup: Option<(RollbackNamespaceGuard, DestinationBackup)> = None;
+    if overwrite && destination_exists {
+        let namespace = RollbackNamespaceGuard::new();
+        let backup_key = format!("{}{}/0", ROLLBACK_BACKUP_PREFIX, namespace.namespace);
+        let destination_info = describe_source(&client, &bucket, &new_key, &cancel).await?;
+        let backup_receipt = copy_with_receipt(
+            &client,
+            &bucket,
+            &new_key,
+            &bucket,
+            &backup_key,
+            Some(destination_info.clone()),
+            false,
+            provider,
+            &cancel,
+        )
+        .await
+        .map_err(|err| {
+            format!(
+                "Refusing to overwrite '{}' because its rollback backup could not be secured: {}. A partial backup may exist at '{}'; verify it before retrying.",
+                new_key, err, backup_key
+            )
+        })?;
+        if backup_receipt.ownership_ambiguous {
+            return Err(format!(
+                "Refusing to overwrite '{}' because the rollback backup's ownership is ambiguous. The destination was not changed.",
+                new_key
+            ));
+        }
+        let mut backup_source_info = destination_info.clone();
+        backup_source_info.etag = Some(backup_receipt.destination_etag);
+        backup_source_info.version_id = backup_receipt.destination_version_id;
+        destination_backup = Some((
+            namespace,
+            DestinationBackup {
+                destination_key: new_key.clone(),
+                backup_key,
+                original_info: destination_info,
+                source_info: backup_source_info,
+                replacement: None,
+            },
+        ));
+    }
+
+    let receipt = match copy_with_receipt(
         &client,
         &bucket,
         &old_key,
@@ -1141,7 +1231,54 @@ pub(crate) async fn rename_object(
         provider,
         &cancel,
     )
-    .await?;
-    delete_move_receipts_checked(&client, &bucket, &bucket, &[receipt], provider, &cancel).await?;
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            if let Some((_, backup)) = destination_backup.as_ref() {
+                // The failed copy may have replaced the destination without
+                // returning an identity. Reuse the prefix rollback: it restores
+                // only the response-owned replacement, and otherwise retains the
+                // backup for manual recovery.
+                let failures = rollback_prefix_copy(
+                    &client,
+                    &bucket,
+                    &[],
+                    std::slice::from_ref(backup),
+                    provider,
+                )
+                .await;
+                return Err(rollback_error(err, failures));
+            }
+            return Err(err);
+        }
+    };
+    if let Some((_, backup)) = destination_backup.as_mut() {
+        backup.replacement = Some(receipt.clone());
+    }
+
+    if let Err(err) =
+        delete_move_receipts_checked(&client, &bucket, &bucket, &[receipt], provider, &cancel).await
+    {
+        let backup_note = destination_backup
+            .as_ref()
+            .map(|(_, backup)| {
+                format!(
+                    " The original destination was backed up at '{}'; do not delete it until the source outcome is confirmed.",
+                    backup.backup_key
+                )
+            })
+            .unwrap_or_default();
+        return Err(format!("{}{}", err, backup_note));
+    }
+
+    if let Some((_, backup)) = destination_backup.as_ref() {
+        if let Err(err) = remove_backup_object(&client, &bucket, backup, provider).await {
+            return Err(format!(
+                "Renamed '{}' to '{}', but the rollback backup '{}' could not be removed: {}. Delete it before starting another prefix copy or move.",
+                old_key, new_key, backup.backup_key, err
+            ));
+        }
+    }
     Ok(())
 }

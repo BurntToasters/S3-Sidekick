@@ -7,10 +7,42 @@ import { fileURLToPath } from "node:url";
 import { isDirectExecution } from "./direct-execution.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
+const packageJsonPath = path.join(root, "package.json");
 const tauriCli = fileURLToPath(
   new URL("../node_modules/@tauri-apps/cli/tauri.js", import.meta.url),
 );
 const targetRoot = path.join(root, "src-tauri", "target");
+
+function readAppVersion({ packageJsonFile = packageJsonPath } = {}) {
+  let packageJson;
+  try {
+    packageJson = JSON.parse(fs.readFileSync(packageJsonFile, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Could not read the updater app version from ${packageJsonFile}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  const version =
+    typeof packageJson.version === "string" ? packageJson.version.trim() : "";
+  if (!version) {
+    throw new Error(
+      `package.json at ${packageJsonFile} has no version; refusing to sign updater artifacts without --app-version.`,
+    );
+  }
+  return version;
+}
+
+function signerArgs(artifact, appVersion) {
+  const version = String(appVersion || "").trim();
+  if (!version) {
+    throw new Error(
+      "Updater signing requires an app version for the signer --app-version flag.",
+    );
+  }
+  return ["signer", "sign", "--app-version", version, artifact];
+}
 
 function walk(directory) {
   if (!fs.existsSync(directory)) return [];
@@ -49,7 +81,9 @@ function assertSigningCredential(environment = process.env) {
 function signUpdaterArtifacts({
   targetRootPath = targetRoot,
   environment = process.env,
+  appVersion,
 } = {}) {
+  const version = appVersion ?? readAppVersion();
   assertSigningCredential(environment);
   const artifacts = walk(targetRootPath).filter(isUpdaterArtifact);
   if (artifacts.length === 0) {
@@ -60,7 +94,7 @@ function signUpdaterArtifacts({
     fs.rmSync(signaturePath, { force: true });
     const result = spawnSync(
       process.execPath,
-      [tauriCli, "signer", "sign", artifact],
+      [tauriCli, ...signerArgs(artifact, version)],
       { cwd: root, env: environment, stdio: "inherit" },
     );
     if (result.error) throw result.error;
@@ -90,6 +124,8 @@ if (isDirectExecution(import.meta.url)) {
 export {
   assertSigningCredential,
   isUpdaterArtifact,
+  readAppVersion,
   signUpdaterArtifacts,
+  signerArgs,
   walk,
 };

@@ -492,10 +492,19 @@ describe("app-conflicts object and download routing", () => {
     const { resolveDownloadEntriesWithConflicts } =
       await import("../app-conflicts.ts");
     const out = await resolveDownloadEntriesWithConflicts([
-      { bucket: "b", key: "a.txt", destination: "/tmp/a.txt" } as never,
+      {
+        bucket: "b",
+        key: "a.txt",
+        destination: "/tmp/a.txt",
+        destinationToken: "grant-a",
+      } as never,
     ]);
     expect(out).toHaveLength(1);
     expect(mockShowConfirm).not.toHaveBeenCalled();
+    expect(mockInvoke).toHaveBeenCalledWith("path_exists", {
+      token: "grant-a",
+      name: null,
+    });
   });
 
   it("download entries overwrite under replace policy", async () => {
@@ -505,7 +514,12 @@ describe("app-conflicts object and download routing", () => {
     const { resolveDownloadEntriesWithConflicts } =
       await import("../app-conflicts.ts");
     const out = await resolveDownloadEntriesWithConflicts([
-      { bucket: "b", key: "a.txt", destination: "/tmp/a.txt" } as never,
+      {
+        bucket: "b",
+        key: "a.txt",
+        destination: "/tmp/a.txt",
+        destinationToken: "grant-a",
+      } as never,
     ]);
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ conflictResolution: "replace" });
@@ -518,7 +532,12 @@ describe("app-conflicts object and download routing", () => {
     const { resolveDownloadEntriesWithConflicts } =
       await import("../app-conflicts.ts");
     const out = await resolveDownloadEntriesWithConflicts([
-      { bucket: "b", key: "a.txt", destination: "/tmp/a.txt" } as never,
+      {
+        bucket: "b",
+        key: "a.txt",
+        destination: "/tmp/a.txt",
+        destinationToken: "grant-a",
+      } as never,
     ]);
     expect(out).toHaveLength(0);
   });
@@ -529,7 +548,12 @@ describe("app-conflicts object and download routing", () => {
     const { resolveDownloadEntriesWithConflicts } =
       await import("../app-conflicts.ts");
     const out = await resolveDownloadEntriesWithConflicts([
-      { bucket: "b", key: "a.txt", destination: "/tmp/a.txt" } as never,
+      {
+        bucket: "b",
+        key: "a.txt",
+        destination: "/tmp/a.txt",
+        destinationToken: "grant-a",
+      } as never,
     ]);
     expect(out).toHaveLength(1);
     expect(mockShowConfirm).toHaveBeenCalledTimes(1);
@@ -541,7 +565,12 @@ describe("app-conflicts object and download routing", () => {
     const { resolveDownloadEntriesWithConflicts } =
       await import("../app-conflicts.ts");
     const out = await resolveDownloadEntriesWithConflicts([
-      { bucket: "b", key: "a.txt", destination: "/tmp/a.txt" } as never,
+      {
+        bucket: "b",
+        key: "a.txt",
+        destination: "/tmp/a.txt",
+        destinationToken: "grant-a",
+      } as never,
     ]);
     expect(out).toHaveLength(0);
   });
@@ -553,7 +582,12 @@ describe("app-conflicts object and download routing", () => {
     const { resolveDownloadEntriesWithConflicts } =
       await import("../app-conflicts.ts");
     const out = await resolveDownloadEntriesWithConflicts([
-      { bucket: "b", key: "a.txt", destination: "/tmp/a.txt" } as never,
+      {
+        bucket: "b",
+        key: "a.txt",
+        destination: "/tmp/a.txt",
+        destinationToken: "grant-a",
+      } as never,
     ]);
     expect(out).toHaveLength(0);
   });
@@ -564,7 +598,12 @@ describe("app-conflicts object and download routing", () => {
     const { resolveDownloadEntriesWithConflicts } =
       await import("../app-conflicts.ts");
     const out = await resolveDownloadEntriesWithConflicts([
-      { bucket: "b", key: "a.txt", destination: "/tmp/a.txt" } as never,
+      {
+        bucket: "b",
+        key: "a.txt",
+        destination: "/tmp/a.txt",
+        destinationToken: "grant-a",
+      } as never,
       { bucket: "b", key: "b.txt", destination: "/tmp/b.txt" } as never,
     ]);
     expect(out).toHaveLength(2);

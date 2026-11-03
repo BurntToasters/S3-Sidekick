@@ -4,6 +4,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   blockingReleaseWorkingTreePaths,
+  qualityGateEvidenceProblems,
   recordSuccessfulQualityGate,
 } from "./release-session.js";
 import { isDirectExecution } from "./direct-execution.js";
@@ -18,6 +19,7 @@ export function finalizeQualityGate(
   return {
     ok: false,
     blockers: blockingReleaseWorkingTreePaths(root),
+    evidenceProblems: qualityGateEvidenceProblems(root).problems,
   };
 }
 
@@ -37,8 +39,14 @@ function main() {
       console.error(`  - ${p}`);
     }
   }
+  if (result.evidenceProblems.length > 0) {
+    console.error("Missing or stale quality-gate evidence:");
+    for (const problem of result.evidenceProblems) {
+      console.error(`  - ${problem}`);
+    }
+  }
   console.error(
-    "Commit or remove changes before running test:all; release bootstrap must be idempotent on this checkout.",
+    "Commit or remove changes, then run test:all so proof binds this exact commit and the report hashes.",
   );
   process.exit(1);
 }

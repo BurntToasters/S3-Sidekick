@@ -1,7 +1,7 @@
 import { invoke } from "./ipc.ts";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { save } from "@tauri-apps/plugin-dialog";
+import { pickTextExport } from "./path-grants.ts";
 import { state } from "./state.ts";
 import {
   type DateFormat,
@@ -29,7 +29,8 @@ import {
   type BookmarkPatch,
 } from "./bookmarks.ts";
 import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
-import { refreshSecuritySettingsUI } from "./security.ts";
+import { forgetConnectionLocation } from "./connection.ts";
+import { refreshSecuritySettingsUI, isCancellationError } from "./security.ts";
 import {
   showConfirm,
   showConfirmWithCheckbox,
@@ -56,6 +57,9 @@ const NO_SAVE_TABS = new Set(["security", "bookmarks", "about", "reset"]);
 
 /** Set by the last search: whether a result row needs the explicit Save. */
 let searchShowsExplicitSave = false;
+
+/** Advanced transfer settings stay expanded for the session after the user opens them. */
+let transfersAdvancedExpanded = false;
 
 function isExplicitSaveTab(tab: string): boolean {
   return !NO_SAVE_TABS.has(tab);
@@ -362,8 +366,9 @@ function restoreSearchItems(): void {
 }
 
 /**
- * What a row is searched by: its label, its description text, and its section
- * heading. Option text is left out, so "default" finds no row by itself.
+ * What a row is searched by: its label, description text, section heading and
+ * the visible text of its options. Option text is what makes queries like
+ * "default" or "custom" find the control that offers those choices.
  */
 const SEARCH_DESCRIPTION_SELECTOR = ".setting-description, .setting-note";
 const SEARCH_SKIP_SELECTOR = `select, option, button, input, textarea, .setting-section, ${SEARCH_DESCRIPTION_SELECTOR}`;
@@ -372,15 +377,29 @@ function searchableText(item: HTMLElement): {
   label: string;
   description: string;
   heading: string;
+  options: string;
 } {
   const labelOnly = item.cloneNode(true) as HTMLElement;
   for (const el of labelOnly.querySelectorAll(SEARCH_SKIP_SELECTOR)) {
     el.remove();
   }
-  const description = Array.from(
+  const descriptions = Array.from(
     item.querySelectorAll<HTMLElement>(SEARCH_DESCRIPTION_SELECTOR),
-  )
-    .map((el) => el.textContent ?? "")
+  ).map((el) => el.textContent ?? "");
+  // Help text can live outside the row but be linked by aria-describedby.
+  for (const described of Array.from(
+    item.querySelectorAll<HTMLElement>("[aria-describedby]"),
+  )) {
+    for (const id of (described.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/)
+      .filter(Boolean)) {
+      const help = document.getElementById(id);
+      if (help) descriptions.push(help.textContent ?? "");
+    }
+  }
+  const description = descriptions.join(" ");
+  const options = Array.from(item.querySelectorAll<HTMLOptionElement>("option"))
+    .map((option) => option.textContent ?? "")
     .join(" ");
   const heading =
     item
@@ -390,6 +409,7 @@ function searchableText(item: HTMLElement): {
     label: (labelOnly.textContent ?? "").toLowerCase(),
     description: description.toLowerCase(),
     heading: heading.toLowerCase(),
+    options: options.toLowerCase(),
   };
 }
 
@@ -449,7 +469,8 @@ export function updateSettingsSearch(query: string): void {
       if (
         text.label.includes(trimmed) ||
         text.description.includes(trimmed) ||
-        text.heading.includes(trimmed)
+        text.heading.includes(trimmed) ||
+        text.options.includes(trimmed)
       ) {
         matched.push(item);
       }
@@ -517,6 +538,7 @@ function initAdvancedTransferToggle(): void {
   toggle.addEventListener("click", () => {
     const expanded = toggle.getAttribute("aria-expanded") === "true";
     const next = !expanded;
+    transfersAdvancedExpanded = next;
     toggle.setAttribute("aria-expanded", String(next));
     group.hidden = !next;
   });
@@ -797,8 +819,12 @@ export function populateSettingsModal(): void {
     "transfers-advanced",
   ) as HTMLElement | null;
   const advancedToggle = document.getElementById("transfers-advanced-toggle");
-  if (advancedGroup) advancedGroup.hidden = true;
-  if (advancedToggle) advancedToggle.setAttribute("aria-expanded", "false");
+  if (advancedGroup) advancedGroup.hidden = !transfersAdvancedExpanded;
+  if (advancedToggle)
+    advancedToggle.setAttribute(
+      "aria-expanded",
+      String(transfersAdvancedExpanded),
+    );
 
   switchSettingsTab("appearance");
 }
@@ -1016,9 +1042,15 @@ export function readSettingsModal(): void {
   }
 }
 
-export function openSettingsModal(): void {
+/**
+ * Open Settings. An optional tab name (or the click Event the toolbar passes)
+ * selects the panel before the overlay is made visible, so a caller that opens
+ * Saved connections never paints Appearance first.
+ */
+export function openSettingsModal(initialTab?: string | Event): void {
   hideBookmarkEdit();
   populateSettingsModal();
+  switchSettingsTab(typeof initialTab === "string" ? initialTab : "appearance");
   const overlay = document.getElementById("settings-overlay");
   if (overlay) overlay.classList.add("active");
 }
@@ -1179,6 +1211,14 @@ function importSkippedClause(result: BookmarkImportResult): string {
   return parts.length > 0 ? `, skipped ${parts.join(" and ")}` : "";
 }
 
+/** Wait for any in-flight Settings save writes before a reset writes. */
+async function joinPendingSettingsSaves(): Promise<void> {
+  if (settingsModalSaveOperation) {
+    await settingsModalSaveOperation.catch(() => undefined);
+  }
+  await settingsSaveTail.catch(() => undefined);
+}
+
 export async function resetSettings(): Promise<void> {
   const confirmed = await showConfirm(
     "Reset Settings",
@@ -1201,10 +1241,14 @@ export async function resetSettings(): Promise<void> {
   );
   if (scope === "cancel") return;
 
+  // A Settings save that was already running must land before the reset does,
+  // otherwise it can overwrite the reset payload or resurrect a cleared state.
   if (scope === "factory") {
     if (!(await confirmFactoryReset())) return;
+    await joinPendingSettingsSaves();
     if (!(await runFactoryReset())) return;
   } else {
+    await joinPendingSettingsSaves();
     if (!(await runPartialReset())) return;
   }
 
@@ -1246,6 +1290,9 @@ async function runFactoryReset(): Promise<boolean> {
   try {
     await invoke("factory_reset", { settingsJson: defaults });
   } catch (err) {
+    // Declining the native confirmation is a no-op; the caller then does not
+    // relaunch or clear local state.
+    if (isCancellationError(err)) return false;
     await showAlert("Factory Reset Failed", friendlyError(err));
     return false;
   }
@@ -1285,8 +1332,12 @@ async function runPartialReset(): Promise<boolean> {
   const defaults = mergeSettingsPayload(SETTING_DEFAULTS, carriedExtras);
   try {
     // Credentials first: if clearing them fails, nothing is reset and the
-    // user is not left with default settings but surviving credentials.
-    await invoke("clear_saved_connection");
+    // user is not left with default settings but surviving credentials. The
+    // active session id lets the backend reject a stale reset; a disconnected
+    // reset passes none and still removes the stored credentials.
+    await invoke("clear_saved_connection", {
+      connectionId: state.connectionId || null,
+    });
     await invoke("save_settings", { json: defaults });
   } catch (err) {
     await showAlert("Reset Failed", friendlyError(err));
@@ -1325,7 +1376,13 @@ export function isTransfersHintDismissed(): boolean {
 
 export async function markTransfersHintDismissed(): Promise<void> {
   state.settingsExtras.transfersHintDismissed = true;
-  await saveSettings();
+  try {
+    await saveSettings();
+  } catch (err) {
+    // Best-effort hint state: a failed save must not surface as an unhandled
+    // rejection from the transfer UI's fire-and-forget call.
+    console.warn("Failed to save transfers hint preference:", err);
+  }
 }
 
 export function isSupportPromptDismissed(): boolean {
@@ -1357,6 +1414,7 @@ async function refreshBookmarkListUI(): Promise<void> {
       if (!confirmed) return;
       try {
         await removeBookmark(bookmark);
+        forgetConnectionLocation(bookmark.name, bookmark.endpoint);
       } catch (err) {
         void showAlert("Delete Failed", friendlyError(err));
         return;
@@ -1449,19 +1507,16 @@ async function exportBookmarksToFile(): Promise<void> {
   );
   if (!choice.confirmed) return;
   const includeSecrets = choice.checked;
-  const path = await save({
-    title: includeSecrets
+  const grant = await pickTextExport(
+    "s3-sidekick-bookmarks.json",
+    includeSecrets
       ? "Save saved connections (includes secret keys)"
       : "Save saved connections",
-    defaultPath: "s3-sidekick-bookmarks.json",
-    filters: [{ name: "JSON", extensions: ["json"] }],
-  });
-  if (!path) return;
-  await invoke("write_text_file", {
-    path,
+  );
+  if (!grant) return;
+  await invoke("export_text_file", {
+    token: grant.token,
     text: exportBookmarksJson(includeSecrets),
-    // The save dialog already asked before replacing an existing file.
-    overwrite: true,
   });
   const statusEl = document.getElementById("bookmarks-status");
   if (statusEl) {
@@ -1472,6 +1527,9 @@ async function exportBookmarksToFile(): Promise<void> {
 /** The saved connection whose edit form is open, or null when none is. */
 let editingBookmark: Bookmark | null = null;
 let bookmarkEditSaving = false;
+/** Bumped whenever the edit form opens or closes, so an in-flight save from an
+ * older form cannot hide or rewrite a form the user opened meanwhile. */
+let bookmarkEditRevision = 0;
 
 type BookmarkEditField =
   "name" | "endpoint" | "region" | "accessKey" | "secretKey" | "sessionToken";
@@ -1510,6 +1568,7 @@ function setBookmarkEditBusy(busy: boolean): void {
 
 /** Close the edit form and clear every field, so no secret stays in the DOM. */
 function hideBookmarkEdit(): void {
+  bookmarkEditRevision += 1;
   editingBookmark = null;
   setBookmarkEditError(null);
   for (const field of Object.keys(
@@ -1523,6 +1582,7 @@ function hideBookmarkEdit(): void {
 }
 
 function showBookmarkEdit(bookmark: Bookmark): void {
+  bookmarkEditRevision += 1;
   editingBookmark = bookmark;
   setBookmarkEditError(null);
   const values: Record<BookmarkEditField, string> = {
@@ -1557,6 +1617,7 @@ function setBookmarkStatus(message: string): void {
 async function saveBookmarkEdit(): Promise<void> {
   const target = editingBookmark;
   if (!target || bookmarkEditSaving) return;
+  const editRevision = bookmarkEditRevision;
   const name = bookmarkEditField("name")?.value.trim() ?? "";
   const endpoint = bookmarkEditField("endpoint")?.value.trim() ?? "";
   const region = bookmarkEditField("region")?.value.trim() ?? "";
@@ -1608,7 +1669,12 @@ async function saveBookmarkEdit(): Promise<void> {
       { endpoint: target.endpoint, access_key: target.access_key },
       patch,
     );
-    hideBookmarkEdit();
+    const stillEditingTarget =
+      editingBookmark === target && bookmarkEditRevision === editRevision;
+    if (updated && (name !== target.name || endpoint !== target.endpoint)) {
+      forgetConnectionLocation(target.name, target.endpoint);
+    }
+    if (stillEditingTarget) hideBookmarkEdit();
     setBookmarkStatus(
       updated
         ? `Saved changes to "${name}".`
@@ -1616,8 +1682,15 @@ async function saveBookmarkEdit(): Promise<void> {
     );
     await refreshBookmarkListUI();
   } catch (err) {
-    // Stays open so nothing typed is lost; the message never echoes secrets.
-    setBookmarkEditError(`Could not save changes: ${friendlyError(err)}`);
+    // The form may have been replaced while the save was in flight; never write
+    // the old target's error into a newer form.
+    if (editingBookmark === target && bookmarkEditRevision === editRevision) {
+      setBookmarkEditError(`Could not save changes: ${friendlyError(err)}`);
+    } else {
+      setBookmarkStatus(
+        `Could not save changes to "${target.name}": ${friendlyError(err)}`,
+      );
+    }
   } finally {
     bookmarkEditSaving = false;
     setBookmarkEditBusy(false);
@@ -1650,7 +1723,7 @@ function wireBookmarkEdit(): void {
  */
 export function editSavedConnection(bookmark: Bookmark): void {
   wireBookmarkEdit();
-  if (!settingsIsOpen()) openSettingsModal();
+  if (!settingsIsOpen()) openSettingsModal("bookmarks");
   switchSettingsTab("bookmarks");
   showBookmarkEdit(bookmark);
 }

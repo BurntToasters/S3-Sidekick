@@ -20,6 +20,7 @@ const COMMANDS: &[&str] = &[
     "disconnect",
     "download_object",
     "download_object_parallel",
+    "export_text_file",
     "enable_biometric",
     "factory_reset",
     "generate_presigned_url",
@@ -35,6 +36,7 @@ const COMMANDS: &[&str] = &[
     "list_objects",
     "load_bookmarks",
     "load_bookmarks_backup",
+    "load_bookmarks_state",
     "load_connection",
     "load_settings",
     "load_transfer_manifest",
@@ -43,6 +45,11 @@ const COMMANDS: &[&str] = &[
     "open_external_url",
     "open_local_path",
     "path_exists",
+    "pick_download_directory",
+    "pick_download_file",
+    "pick_text_export",
+    "pick_upload_files",
+    "pick_upload_folder",
     "preview_object",
     "rename_object",
     "rename_prefix",
@@ -64,8 +71,8 @@ const COMMANDS: &[&str] = &[
     "updater_support_info",
     "updater_supported",
     "upload_object",
+    "take_dropped_upload_grants",
     "upload_object_bytes",
-    "write_text_file",
 ];
 
 // Windows gives the main thread a 1 MiB stack. Tauri runs the

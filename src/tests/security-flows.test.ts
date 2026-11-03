@@ -363,6 +363,44 @@ describe("security flows", () => {
     expect(setStatus).toHaveBeenCalledWith("Windows Hello disabled.");
   });
 
+  it("treats a declined native confirmation as a quiet no-op", async () => {
+    const status = makeStatus({
+      initialized: true,
+      encryption_enabled: true,
+      unlocked: true,
+      biometric_available: true,
+      biometric_enrolled: true,
+    });
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "get_security_status") return status;
+      if (cmd === "get_platform_info") return "windows";
+      if (
+        cmd === "set_lock_timeout" ||
+        cmd === "disable_biometric" ||
+        cmd === "set_security_encryption"
+      ) {
+        throw new Error("Cancelled by the user; no security settings changed.");
+      }
+      return status;
+    });
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowPrompt.mockResolvedValueOnce("current-pass");
+
+    const security = await import("../security.ts");
+    const setStatus = vi.fn();
+
+    const timeoutSelect = document.getElementById(
+      "security-lock-timeout",
+    ) as HTMLSelectElement;
+    timeoutSelect.value = "5";
+    await security.handleLockTimeoutChange();
+    await security.handleBiometricToggle(setStatus);
+    await security.handleSecurityToggle(setStatus, "disable");
+
+    expect(mockShowAlert).not.toHaveBeenCalled();
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
   it("ensures ready by initializing and then unlocking with password fallback", async () => {
     let status = makeStatus({
       initialized: false,
@@ -486,7 +524,7 @@ describe("security flows", () => {
     await security.handleSecurityToggle(setStatus, "setup");
     const lengthRule = mockShowPrompt.mock.calls.at(-1)?.[2] as ValidateOptions;
     expect(await lengthRule.validate("short")).toBe(false);
-    expect(await lengthRule.validate("long-pass")).toBe(true);
+    expect(await lengthRule.validate("long-pass-12")).toBe(true);
 
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowPrompt

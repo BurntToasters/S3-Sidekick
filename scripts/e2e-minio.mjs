@@ -30,12 +30,57 @@ const endpointGeneric = `http://${bindHost}:19000`;
 const accessKey = "e2eadmin";
 const secretKey = "e2eadmin-secret";
 
+// Every check name the Rust suite must emit. A partial run, a renamed check, or
+// an empty report is a failure, not a pass with fewer assertions.
+const EXPECTED_CHECKS = Object.freeze([
+  "localhost:9000 is MinIO: create-only PUT, no CopyObject create-only, no multipart completion",
+  "another loopback port is a generic provider with no create-only guarantees",
+  "listing returns 'a b.txt' and 'a+b.txt' as two distinct keys",
+  "folder prefixes 'x y/' and 'x+y/' are listed as written",
+  "delete of 'a b.txt' removes it and leaves 'a+b.txt' untouched",
+  "delete_prefix('x y/') removes that folder and keeps 'x+y/'",
+  "copy_prefix_to writes 'report final.txt', not 'report+final.txt'",
+  "MinIO creates a folder with a create-only PUT",
+  "creating an existing folder create-only reports 'already exists'",
+  "generic provider refuses a create-only folder with 'cannot enforce a create-only'",
+  "the authorized (unconditional) retry creates the folder",
+  "prefix move copy phase refuses before destination mutation without conditional DELETE",
+  "generic rename_prefix refuses an unsupported conditional move and leaves the source intact",
+  "explicit overwrite does not authorize an unsafe automatic source delete",
+  "discarding scratch for a destination whose folder is gone succeeds (recovery is not blocked)",
+  "a cancel arriving before registration rejects the transfer and commits no object",
+  "no copy receipt exists that can authorize rollback of the external objects",
+  "the pinned MinIO server ignores a stale If-Match DELETE after external replacement",
+  "automatic object-move copy refuses before mutation when conditional DELETE is unverified",
+  "rename_object refuses before destination mutation when conditional DELETE is unverified",
+  "explicit overwrite copy replaces an existing destination without deleting its source",
+  "receipt-backed source deletion is refused on MinIO and retains the source",
+  "MinIO suspended write is copyable and rename refuses safely with its reported version identity",
+  "ordinary copy can still read and copy the current null version",
+  "ordinary copy receipt cannot authorize source deletion on the actual MinIO provider route",
+  "real AWS SDK HEAD parses literal null and rename refuses before any mutation request",
+  "a conflict already present on later source B prevents deletion of source A",
+  "unversioned overwrite prefix refuses before any destination or backup mutation when conditional DELETE is unsupported",
+  "a later source failure restores both originals and removes operation-owned backup versions",
+  "a 3 MiB image is returned whole, byte-for-byte, with truncated false",
+  "a 2 MiB text/plain object is cut to its first 1 MiB and flagged truncated",
+  "MinIO refuses create-only CopyObject against an absent destination before mutation",
+  "MinIO refuses create-only CopyObject against an different destination before mutation",
+  "MinIO refuses create-only CopyObject against an identical destination before mutation",
+]);
+
 function run(cmd, args, options = {}) {
-  return spawnSync(cmd, args, { encoding: "utf8", ...options });
+  return spawnSync(cmd, args, {
+    encoding: "utf8",
+    timeout: 30_000,
+    killSignal: "SIGKILL",
+    ...options,
+  });
 }
 
 function docker(...args) {
-  const result = run("docker", args);
+  const options = typeof args.at(-1) === "object" ? args.pop() : {};
+  const result = run("docker", args, options);
   if (result.status !== 0) {
     throw new Error(`docker ${args[0]} failed: ${result.stderr.trim()}`);
   }
@@ -67,7 +112,7 @@ async function main() {
   let containerStarted = false;
   let failure = null;
   try {
-    docker("pull", image);
+    docker("pull", image, { timeout: 10 * 60 * 1000 });
     docker(
       "run",
       "-d",
@@ -83,9 +128,12 @@ async function main() {
       "-e",
       `MINIO_ROOT_PASSWORD=${secretKey}`,
       image,
+      { timeout: 2 * 60 * 1000 },
     );
     containerStarted = true;
-    serverVersion = run("docker", ["exec", container, "minio", "--version"])
+    serverVersion = run("docker", ["exec", container, "minio", "--version"], {
+      timeout: 60_000,
+    })
       .stdout.split("\n")[0]
       .trim();
     imageDigest = docker(
@@ -94,6 +142,7 @@ async function main() {
       "--format",
       "{{index .RepoDigests 0}}",
       image,
+      { timeout: 60_000 },
     );
     await waitForHealth(`${endpointMinio}/minio/health/live`, 60_000);
     await waitForHealth(`${endpointGeneric}/minio/health/live`, 10_000);
@@ -101,17 +150,19 @@ async function main() {
     const cargo = run(
       "cargo",
       [
-      "test",
-      "--locked",
-      "--manifest-path",
-      path.join(root, "src-tauri", "Cargo.toml"),
-      "e2e_minio::",
+        "test",
+        "--locked",
+        "--manifest-path",
+        path.join(root, "src-tauri", "Cargo.toml"),
+        "e2e_minio::",
         "--",
         "--ignored",
         "--test-threads=1",
       ],
       {
         stdio: ["ignore", "pipe", "pipe"],
+        timeout: 45 * 60 * 1000,
+        killSignal: "SIGKILL",
         env: {
           ...process.env,
           S3_SIDEKICK_E2E_ENDPOINT: endpointMinio,
@@ -137,7 +188,7 @@ async function main() {
     fs.writeFileSync(path.join(outDir, "cargo-test.log"), `${failure}\n`);
   } finally {
     if (containerStarted) {
-      run("docker", ["rm", "-f", container]);
+      run("docker", ["rm", "-f", container], { timeout: 60_000 });
     }
     fs.rmSync(appData, { recursive: true, force: true });
   }
@@ -149,8 +200,27 @@ async function main() {
         .filter(Boolean)
         .map((line) => JSON.parse(line))
     : [];
+  const expected = new Set(EXPECTED_CHECKS);
+  const seen = new Map();
+  for (const check of checks) {
+    if (typeof check?.check === "string") {
+      seen.set(check.check, (seen.get(check.check) ?? 0) + 1);
+    }
+  }
+  const missingChecks = EXPECTED_CHECKS.filter((name) => !seen.has(name));
+  const unexpectedChecks = [...seen.keys()].filter(
+    (name) => !expected.has(name),
+  );
+  const duplicateChecks = [...seen.entries()]
+    .filter(([, count]) => count !== 1)
+    .map(([name]) => name);
   const passed =
-    testStatus === 0 && checks.length > 0 && checks.every((c) => c.passed);
+    testStatus === 0 &&
+    checks.length === EXPECTED_CHECKS.length &&
+    missingChecks.length === 0 &&
+    unexpectedChecks.length === 0 &&
+    duplicateChecks.length === 0 &&
+    checks.every((c) => c.passed === true);
   const report = {
     suite: "s3-command-layer-minio",
     server: { image, imageDigest, version: serverVersion },
@@ -161,6 +231,10 @@ async function main() {
     ...(failure ? { error: failure } : {}),
     passed,
     checkCount: checks.length,
+    expectedCheckCount: EXPECTED_CHECKS.length,
+    missingChecks,
+    unexpectedChecks,
+    duplicateChecks,
     checks,
   };
   fs.writeFileSync(

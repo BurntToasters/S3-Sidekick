@@ -21,16 +21,20 @@ const showConfirmMock = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const recoverPendingTransfersMock = vi.fn<() => Promise<void>>();
 const resumeRecoveredTransfersAfterConnectMock = vi.fn<() => Promise<void>>();
 
-vi.mock("../connection.ts", () => ({
-  connect: connectMock,
-  disconnect: disconnectMock,
-  saveConnection: saveConnectionMock,
-  refreshBuckets: refreshBucketsMock,
-  refreshObjects: refreshObjectsMock,
-  currentConnectionGeneration: () => 1,
-  finishConnecting: finishConnectingMock,
-  MAX_ACCUMULATED_LISTING_ITEMS: 10000,
-}));
+vi.mock("../connection.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../connection.ts")>();
+  return {
+    ...actual,
+    connect: connectMock,
+    disconnect: disconnectMock,
+    saveConnection: saveConnectionMock,
+    refreshBuckets: refreshBucketsMock,
+    refreshObjects: refreshObjectsMock,
+    currentConnectionGeneration: () => 1,
+    finishConnecting: finishConnectingMock,
+    MAX_ACCUMULATED_LISTING_ITEMS: 10000,
+  };
+});
 
 vi.mock("../bookmarks.ts", () => ({
   addBookmark: saveBookmarkMock,

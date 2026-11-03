@@ -241,6 +241,8 @@ export async function installLayoutTauriMock(
         objectCount,
         calls: [] as string[],
         callLog: [] as { command: string; args: unknown }[],
+        readCallLog: undefined as
+          (() => { command: string; args: unknown }[]) | undefined,
         releaseListing: undefined as (() => void) | undefined,
         releaseUnlock: undefined as (() => void) | undefined,
         releaseDisconnect: undefined as (() => void) | undefined,
@@ -251,6 +253,16 @@ export async function installLayoutTauriMock(
           ((command: string, error: string | null) => void) | undefined,
         emit: undefined as
           ((event: string, payload: unknown) => void) | undefined,
+      };
+      // Tests assert against the raw arguments. Artifact writers redact secret
+      // fields when they persist the log (see saveArtifact in helpers.ts).
+      testState.readCallLog = () => testState.callLog;
+      const recordCall = (
+        command: string,
+        args: Record<string, unknown> | null,
+      ): void => {
+        const raw = JSON.parse(JSON.stringify(args ?? null)) as unknown;
+        testState.callLog.push({ command, args: raw });
       };
 
       const addListener = (event: string, id: number): void => {
@@ -281,7 +293,12 @@ export async function installLayoutTauriMock(
       const commandErrors = { ...errors };
       let lastVaultActivity = Date.now();
       const logEvent = (command: string, args: unknown): void => {
-        testState.callLog.push({ command, args });
+        recordCall(
+          command,
+          args && typeof args === "object"
+            ? (args as Record<string, unknown>)
+            : null,
+        );
       };
       const vaultExpired = (): boolean =>
         autoLockAfterMs > 0 &&
@@ -326,10 +343,7 @@ export async function installLayoutTauriMock(
       ) => {
         testState.calls.push(command);
         if (!command.startsWith("plugin:")) {
-          testState.callLog.push({
-            command,
-            args: JSON.parse(JSON.stringify(args ?? null)) as unknown,
-          });
+          recordCall(command, args);
         }
 
         if (command === "plugin:event|listen") {
@@ -372,6 +386,19 @@ export async function installLayoutTauriMock(
             return "";
           case "load_bookmarks":
             return JSON.stringify(storedBookmarks);
+          case "load_bookmarks_state":
+            return {
+              primary: {
+                present: true,
+                contents: JSON.stringify(storedBookmarks),
+                error: null,
+              },
+              backup: {
+                present: true,
+                contents: JSON.stringify(storedBookmarkBackup),
+                error: null,
+              },
+            };
           case "load_bookmarks_backup":
             return JSON.stringify(storedBookmarkBackup);
           case "save_bookmarks": {
@@ -688,10 +715,13 @@ export async function readMockCallLog(page: Page): Promise<MockCall[]> {
   return page.evaluate(() => {
     const state = (
       window as typeof window & {
-        __S3_LAYOUT_TEST__?: { callLog: { command: string; args: unknown }[] };
+        __S3_LAYOUT_TEST__?: {
+          callLog: { command: string; args: unknown }[];
+          readCallLog?: () => { command: string; args: unknown }[];
+        };
       }
     ).__S3_LAYOUT_TEST__;
-    return state ? [...state.callLog] : [];
+    return state ? [...(state.readCallLog?.() ?? state.callLog)] : [];
   });
 }
 

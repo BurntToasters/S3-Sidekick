@@ -27,6 +27,10 @@ const { releaseTargetMatchesCommit } = require("./release-draft-target.cjs");
 const {
   verifyReleaseAssetIntegrity,
 } = require("./release-asset-verification.cjs");
+const {
+  assertNoSignatureSkips,
+  verifyDownloadedArtifactSignature,
+} = require("./release-signature-gate.cjs");
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const packageJson = JSON.parse(
@@ -270,6 +274,7 @@ async function verifyUpdaterArtifacts(release, assets, manifests) {
         artifact.id,
         artifactPath,
       );
+      verifyDownloadedArtifactSignature(name, artifactPath);
       downloadReleaseAsset(
         `${REPO_OWNER}/${REPO_NAME}`,
         signature.id,
@@ -293,7 +298,52 @@ async function verifyUpdaterArtifacts(release, assets, manifests) {
   return release;
 }
 
+export function receiptPathFromArgs(argv = process.argv.slice(2)) {
+  const inline = argv.find((arg) => arg.startsWith("--receipt="));
+  if (inline) return inline.slice("--receipt=".length);
+  const index = argv.indexOf("--receipt");
+  return index >= 0 ? argv[index + 1] || "" : "";
+}
+
+function writeVerificationReceipt(receiptPath, release, assets, fingerprint) {
+  if (!receiptPath) return;
+  const absolute = path.resolve(receiptPath);
+  fs.mkdirSync(path.dirname(absolute), { recursive: true });
+  fs.writeFileSync(
+    absolute,
+    `${JSON.stringify(
+      {
+        suite: "release-draft-verification",
+        version: VERSION,
+        tag: TAG,
+        verifiedAt: Date.now(),
+        fingerprint,
+        release: {
+          id: release.id,
+          name: release.name,
+          tag_name: release.tag_name,
+          target_commitish: release.target_commitish,
+          draft: Boolean(release.draft),
+          prerelease: Boolean(release.prerelease),
+        },
+        assets: assets
+          .map((asset) => ({
+            id: asset.id,
+            name: asset.name,
+            size: asset.size,
+            digest: asset.digest ?? null,
+          }))
+          .sort((left, right) => String(left.name).localeCompare(right.name)),
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+}
+
 async function main() {
+  assertNoSignatureSkips(process.env);
   assertGitHubCliAuthenticated();
   const release = loadDraft();
   const assets = [];
@@ -312,10 +362,11 @@ async function main() {
     headCommit: currentHead(),
     release,
   });
-  verifyReleaseAssetIntegrity({
+  const integrity = verifyReleaseAssetIntegrity({
     assets,
     repository: `${REPO_OWNER}/${REPO_NAME}`,
     requiredNames: requiredDraftAssetNames(),
+    verifyArtifact: verifyDownloadedArtifactSignature,
   });
   const manifests = [];
   const manifestDirectory = fs.mkdtempSync(
@@ -339,8 +390,16 @@ async function main() {
     fs.rmSync(manifestDirectory, { force: true, recursive: true });
   }
   await verifyUpdaterArtifacts(release, assets, manifests);
+  writeVerificationReceipt(
+    receiptPathFromArgs(),
+    release,
+    assets,
+    integrity.fingerprint,
+  );
   console.log(`verify-draft: ok (${TAG}, ${assets.length} assets).`);
 }
+
+export { writeVerificationReceipt };
 
 if (isDirectExecution(import.meta.url)) {
   main().catch((error) => {

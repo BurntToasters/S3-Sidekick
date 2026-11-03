@@ -9,7 +9,7 @@
   <body>
     <a href="#main-content" class="skip-link">Skip to main content</a>
     <div id="app" class="app">
-      <header class="header" data-tauri-drag-region>
+      <header class="header" role="banner" data-tauri-drag-region>
         <div
           class="titlebar-drag-handle"
           data-tauri-drag-region
@@ -140,6 +140,7 @@
       </header>
 
       <main id="main-content" class="app-main">
+        <h1 class="sr-only">S3 Sidekick object browser</h1>
         <div id="connection-screen" class="connection-screen">
           <div class="connection-screen__sidebar">
             <div class="connection-screen__sidebar-header">
@@ -169,7 +170,7 @@
           <div class="connection-screen__main">
             <div id="reconnect-card" class="reconnect-card" hidden>
               <div class="reconnect-card__body">
-                <span class="reconnect-card__title"
+                <span id="reconnect-card-title" class="reconnect-card__title"
                   >Reconnect to
                   <span
                     id="reconnect-card-name"
@@ -179,6 +180,11 @@
                 <span
                   id="reconnect-card-endpoint"
                   class="reconnect-card__endpoint"
+                ></span>
+                <span
+                  id="reconnect-card-locked"
+                  class="conn-saved-empty__text"
+                  hidden
                 ></span>
               </div>
               <button
@@ -190,7 +196,7 @@
               </button>
             </div>
             <div class="connection-screen__form-card">
-              <h1 class="connection-screen__title">Connect to S3 Storage</h1>
+              <h2 class="connection-screen__title">Connect to S3 Storage</h2>
               <p class="connection-screen__subtitle">
                 Enter credentials, or pick a saved connection to connect
                 instantly.
@@ -415,8 +421,6 @@
             id="inspector-backdrop"
             class="inspector-backdrop"
             aria-label="Close inspector"
-            aria-hidden="true"
-            tabindex="-1"
             hidden
           ></button>
           <aside id="bucket-panel" class="sidebar" aria-label="Buckets">
@@ -446,9 +450,12 @@
             tabindex="0"
             aria-label="Resize bucket sidebar"
             aria-orientation="vertical"
+            aria-valuemin="200"
+            aria-valuemax="420"
+            aria-valuenow="240"
           ></div>
 
-          <section class="content">
+          <section class="content" aria-label="Object browser">
             <div class="content-toolbar">
               <div class="content-toolbar__left">
                 <div class="content-toolbar__nav">
@@ -535,7 +542,6 @@
                   type="button"
                   title="Clear object filter"
                   aria-label="Clear object filter"
-                  aria-hidden="true"
                   disabled
                 >
                   <span class="lucide-icon" data-icon="x"></span>
@@ -606,7 +612,7 @@
                   <span
                     id="batch-count"
                     class="batch-toolbar__count"
-                    aria-live="polite"
+                    aria-live="off"
                     aria-atomic="true"
                   ></span>
                   <div
@@ -846,6 +852,9 @@
                 tabindex="0"
                 aria-label="Resize inspector"
                 aria-orientation="vertical"
+                aria-valuemin="280"
+                aria-valuemax="560"
+                aria-valuenow="360"
                 hidden
               ></div>
               <aside
@@ -897,7 +906,7 @@
                       data-inspector-tab="permissions"
                       role="tab"
                       aria-selected="false"
-                      aria-controls="inspector-pane-info"
+                      aria-controls="inspector-pane-permissions"
                       tabindex="-1"
                     >
                       Permissions
@@ -909,7 +918,7 @@
                       data-inspector-tab="metadata"
                       role="tab"
                       aria-selected="false"
-                      aria-controls="inspector-pane-info"
+                      aria-controls="inspector-pane-metadata"
                       tabindex="-1"
                     >
                       Metadata
@@ -958,11 +967,12 @@
                   >
                     File Info
                   </h3>
+                  <!-- Details, Permissions and Metadata each own a panel. The
+                       title, body and footer above are shared; inspector.ts
+                       moves these same nodes into the active panel. -->
                   <div
                     id="inspector-info-body"
                     class="inspector-info__body modal__body"
-                    role="tabpanel"
-                    aria-label="Property details"
                   ></div>
                   <div class="inspector-panel__footer" hidden>
                     <button
@@ -981,21 +991,50 @@
                     </button>
                   </div>
                 </div>
+                <div
+                  id="inspector-pane-permissions"
+                  class="inspector-pane"
+                  role="tabpanel"
+                  aria-labelledby="inspector-tab-permissions"
+                  tabindex="0"
+                  hidden
+                ></div>
+                <div
+                  id="inspector-pane-metadata"
+                  class="inspector-pane"
+                  role="tabpanel"
+                  aria-labelledby="inspector-tab-metadata"
+                  tabindex="0"
+                  hidden
+                ></div>
               </aside>
             </div>
           </section>
         </div>
 
-        <div id="bottom-drawer" class="bottom-drawer" hidden>
+        <div
+          id="bottom-drawer"
+          class="bottom-drawer"
+          role="region"
+          aria-label="Activity and transfers"
+          hidden
+        >
           <div
             class="bottom-drawer__resize-handle"
             role="separator"
             aria-label="Resize bottom panel"
             aria-orientation="horizontal"
             tabindex="0"
+            aria-valuemin="120"
+            aria-valuemax="450"
+            aria-valuenow="240"
           ></div>
           <div class="bottom-drawer__header">
-            <div class="bottom-drawer__tabs" role="tablist">
+            <div
+              class="bottom-drawer__tabs"
+              role="tablist"
+              aria-label="Panel views"
+            >
               <button
                 type="button"
                 class="bottom-drawer__tab bottom-drawer__tab--active"
@@ -1191,7 +1230,7 @@
           </div>
         </div>
 
-        <footer class="statusbar">
+        <footer class="statusbar" role="contentinfo">
           <span id="status" role="status" aria-live="polite"></span>
           <div class="statusbar__right">
             <span id="statusbar-count" class="statusbar__count"></span>
@@ -1983,6 +2022,9 @@
               aria-labelledby="settings-tab-bookmarks"
               hidden
             >
+              <p class="setting-note settings-instant-note">
+                Changes apply immediately. Save and Cancel do not apply them.
+              </p>
               <div class="bookmark-list-toolbar">
                 <button
                   type="button"
@@ -2146,6 +2188,14 @@
                       id="security-status-detail"
                       class="setting-description"
                     ></p>
+                    <button
+                      type="button"
+                      id="security-status-retry"
+                      class="btn btn--sm security-status-card__retry"
+                      hidden
+                    >
+                      Retry
+                    </button>
                   </div>
                 </div>
                 <div id="security-warning" class="security-warning" hidden>
@@ -2211,6 +2261,15 @@
                   the timer starts only when the queue is idle. Locking
                   disconnects the current session.
                 </p>
+                <p
+                  id="security-lock-never-warning"
+                  class="security-warning"
+                  role="status"
+                  hidden
+                >
+                  Auto-lock is off. The vault stays unlocked in memory until you
+                  lock it or quit S3 Sidekick.
+                </p>
                 <span
                   id="security-lock-status"
                   class="setting-note"
@@ -2246,6 +2305,9 @@
               aria-labelledby="settings-tab-about"
               hidden
             >
+              <p class="setting-note settings-instant-note">
+                Changes apply immediately. Save and Cancel do not apply them.
+              </p>
               <div class="setting-item">
                 <span class="setting-label">Version</span>
                 <span id="settings-version" class="text-secondary"></span>
@@ -2270,6 +2332,9 @@
               aria-labelledby="settings-tab-reset"
               hidden
             >
+              <p class="setting-note settings-instant-note">
+                Changes apply immediately. Save and Cancel do not apply them.
+              </p>
               <section class="settings-group" aria-labelledby="reset-heading">
                 <h3 id="reset-heading" class="setting-section">Reset</h3>
                 <div class="setting-item">
@@ -2499,7 +2564,8 @@
           S3 Sidekick is locked
         </h2>
         <p id="lock-view-desc" class="lock-view__desc">
-          Enter your password to load saved connections.
+          Saved connections stay unavailable until you unlock encrypted storage
+          with your password.
         </p>
         <p
           id="lock-view-notice"
@@ -2554,10 +2620,19 @@
           <button type="button" id="lock-view-forgot" class="lock-view__link">
             Forgot password?
           </button>
-          <button type="button" id="lock-view-continue" class="lock-view__link">
+          <button
+            type="button"
+            id="lock-view-continue"
+            class="lock-view__link"
+            aria-describedby="lock-view-continue-note"
+            title="Continue without unlocking. Saved connections stay unavailable until you unlock."
+          >
             Continue locked
           </button>
         </div>
+        <p id="lock-view-continue-note" class="lock-view__note">
+          Continue locked keeps saved connections unavailable until you unlock.
+        </p>
         <div
           id="biometric-overlay"
           class="biometric-overlay"
@@ -2995,8 +3070,9 @@
                 id="setup-enc-password"
                 class="field"
                 type="password"
-                placeholder="Password (8+ characters)"
+                placeholder="Password (12+ characters)"
                 autocomplete="new-password"
+                aria-describedby="setup-enc-password-error setup-enc-error"
               />
               <button
                 type="button"
@@ -3008,6 +3084,12 @@
                 Show
               </button>
             </div>
+            <p
+              id="setup-enc-password-error"
+              class="setup-wizard-field-error"
+              role="alert"
+              hidden
+            ></p>
             <div class="field-with-toggle setup-wizard-field">
               <label class="sr-only" for="setup-enc-confirm"
                 >Confirm password</label
@@ -3018,6 +3100,7 @@
                 type="password"
                 placeholder="Confirm password"
                 autocomplete="new-password"
+                aria-describedby="setup-enc-confirm-error setup-enc-error"
               />
               <button
                 type="button"
@@ -3029,6 +3112,12 @@
                 Show
               </button>
             </div>
+            <p
+              id="setup-enc-confirm-error"
+              class="setup-wizard-field-error"
+              role="alert"
+              hidden
+            ></p>
             <p
               id="setup-enc-error"
               class="setup-wizard-enc-error"
@@ -3045,23 +3134,33 @@
             >
               Encryption enabled.
             </p>
-            <label
-              id="setup-biometric-label"
-              class="setup-wizard-checkbox-row"
-              hidden
-            >
-              <input id="setup-enc-biometric" type="checkbox" />
-              <span id="setup-biometric-text">Enable biometric unlock</span>
-            </label>
-            <p
-              id="setup-biometric-caveat"
-              class="setup-wizard-caveat"
-              hidden
-            ></p>
+            <div id="setup-biometric-slot" class="setup-wizard-biometric-slot">
+              <label
+                id="setup-biometric-label"
+                class="setup-wizard-checkbox-row"
+                hidden
+              >
+                <input id="setup-enc-biometric" type="checkbox" />
+                <span id="setup-biometric-text">Enable biometric unlock</span>
+              </label>
+              <p
+                id="setup-biometric-unavailable"
+                class="setup-wizard-caveat"
+                hidden
+              >
+                Biometric unlock is not available on this device. Your password
+                still protects saved connections.
+              </p>
+              <p
+                id="setup-biometric-caveat"
+                class="setup-wizard-caveat"
+                hidden
+              ></p>
+            </div>
           </div>
           <p id="setup-enc-skip-note" class="setting-description">
-            Skipping stores saved connections unencrypted (not recommended). You
-            can turn on encryption later in Settings.
+            Continuing without encryption stores saved connections unencrypted
+            (not recommended). You can turn on encryption later in Settings.
           </p>
           <div class="setup-wizard-step__actions">
             <button type="button" id="setup-enc-back" class="btn btn--ghost">
@@ -3072,7 +3171,7 @@
               id="setup-enc-skip"
               class="btn btn--ghost setup-wizard-skip-btn"
             >
-              Skip setup
+              Continue without encryption
             </button>
             <button type="button" id="setup-enc-next" class="btn btn--primary">
               Enable Encryption
@@ -3157,8 +3256,8 @@
             </h2>
             <p class="setup-wizard-step__desc">
               Connect to your first S3-compatible storage. Saved connections
-              become bookmark chips in the title bar for one-click access later.
-              You can change any setup choices in Settings.
+              appear in the connection switcher for one-click access later. You
+              can change any setup choices in Settings.
             </p>
             <div class="setup-wizard-step__actions">
               <button

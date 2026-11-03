@@ -76,11 +76,30 @@ pub(super) fn encode_object_url_segment(segment: &str) -> String {
     urlencoding::encode(segment).into_owned()
 }
 
-/// Dot-segment keys cannot be turned into browser-safe path URLs; `%2E%2E` still
-/// normalises to `..` under the URL standard.
+/// Keys with dot segments or interior empty segments cannot be addressed
+/// reliably through a URL path: browsers and proxies fold `%2E%2E` and collapse
+/// `//`. A single trailing empty segment is the legal folder-marker suffix.
 pub(super) fn key_has_unsafe_url_segments(key: &str) -> bool {
-    key.split('/')
-        .any(|segment| segment == "." || segment == "..")
+    let segment_count = key.split('/').count();
+    key.split('/').enumerate().any(|(index, segment)| {
+        segment == "." || segment == ".." || (segment.is_empty() && index + 1 != segment_count)
+    })
+}
+
+/// Validate a key used as an S3 `CopySource`.
+///
+/// The CopySource header is a path, so a dot segment or interior empty segment
+/// can be normalized by an endpoint or proxy into a different key. Refuse those
+/// keys before any copy request instead of copying the wrong object.
+pub(super) fn validate_copy_source_key(key: &str, label: &str) -> Result<(), String> {
+    validate_readable_key(key, label)?;
+    if key_has_unsafe_url_segments(key) {
+        return Err(format!(
+            "{} contains a '.' or '..' path segment or an empty interior segment and cannot be used as a copy source safely.",
+            label
+        ));
+    }
+    Ok(())
 }
 
 /// Reject an empty prefix for operations that mutate everything beneath it.
@@ -253,5 +272,23 @@ mod tests {
         assert!(empty.contains("must not be empty"), "{empty}");
         assert!(validate_mutating_folder_prefix("../etc/", "Prefix").is_err());
         assert!(validate_mutating_folder_prefix(".s3-sidekick-rollback/", "Prefix").is_err());
+    }
+
+    #[test]
+    fn url_segment_guard_rejects_dot_and_empty_interior_segments() {
+        assert!(key_has_unsafe_url_segments("data/../odd.txt"));
+        assert!(key_has_unsafe_url_segments("a/./b.txt"));
+        assert!(key_has_unsafe_url_segments("a//b.txt"));
+        assert!(key_has_unsafe_url_segments("/a.txt"));
+        assert!(!key_has_unsafe_url_segments("data/odd.txt"));
+        assert!(!key_has_unsafe_url_segments("folder/"));
+    }
+
+    #[test]
+    fn copy_source_validation_refuses_ambiguous_segments() {
+        assert!(validate_copy_source_key("data/odd.txt", "Source key").is_ok());
+        assert!(validate_copy_source_key("folder/", "Source key").is_ok());
+        assert!(validate_copy_source_key("data/../odd.txt", "Source key").is_err());
+        assert!(validate_copy_source_key("a//b.txt", "Source key").is_err());
     }
 }

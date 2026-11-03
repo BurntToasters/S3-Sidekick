@@ -60,6 +60,10 @@
   color: var(--text-secondary);
 }
 
+.transfer-filter-empty[hidden] {
+  display: none;
+}
+
 /* Filtering hides rows by status; the rows themselves are not re-rendered. */
 #transfer-list[data-filter="active"]
   .transfer-item:not([data-status="queued"]):not([data-status="uploading"]),
@@ -215,6 +219,17 @@
   color: var(--text-secondary);
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.transfer-hint {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.transfer-pause--unavailable:disabled {
+  opacity: 0.4;
 }
 
 .transfer-arrow {

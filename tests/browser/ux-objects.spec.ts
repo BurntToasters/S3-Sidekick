@@ -415,12 +415,21 @@ test.describe("go to, export and bucket refresh", () => {
     await saveArtifact(page, testInfo, ARTIFACT_SUITE, "go-to-reveal", calls);
   });
 
-  test("exporting the activity log asks once, through the save dialog", async ({
+  test("exporting the activity log asks once, through the native picker", async ({
     page,
   }, testInfo) => {
     await installNative(page, {
       commands: {
-        "plugin:dialog|save": { result: "/tmp/s3-sidekick-activity.txt" },
+        pick_text_export: {
+          result: {
+            token: "grant-activity",
+            path: "/tmp/s3-sidekick-activity.txt",
+            name: "s3-sidekick-activity.txt",
+            isDir: false,
+            directoryToken: null,
+            directoryPath: null,
+          },
+        },
         path_exists: { result: true },
       },
     });
@@ -434,15 +443,16 @@ test.describe("go to, export and bucket refresh", () => {
 
     await expect
       .poll(async () =>
-        commandCalls(await readMockCallLog(page), "write_text_file"),
+        commandCalls(await readMockCallLog(page), "export_text_file"),
       )
       .toHaveLength(1);
     await expect(page.locator("#dialog-overlay")).toBeHidden();
     const [write] = commandCalls(
       await readMockCallLog(page),
-      "write_text_file",
+      "export_text_file",
     );
-    expect(write.args).toMatchObject({ overwrite: true });
+    expect(write.args).toMatchObject({ token: "grant-activity" });
+    expect(write.args).not.toHaveProperty("path");
 
     await saveArtifact(page, testInfo, ARTIFACT_SUITE, "export-once", []);
   });

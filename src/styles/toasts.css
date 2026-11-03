@@ -97,6 +97,10 @@ body.modal-open .toast-region {
 }
 
 .toast__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
   min-height: 28px;
   border: none;
   background: transparent;
@@ -167,6 +171,30 @@ body.modal-open .toast-region {
   to {
     opacity: 0;
     transform: translateY(8px);
+  }
+}
+
+@media (forced-colors: active) {
+  .toast {
+    border: 1px solid CanvasText;
+  }
+
+  .toast__count {
+    color: CanvasText;
+  }
+
+  .toast__action {
+    color: LinkText;
+  }
+
+  .toast__close {
+    color: ButtonText;
+  }
+
+  .toast__action:focus-visible,
+  .toast__close:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
   }
 }
 

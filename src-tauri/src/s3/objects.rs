@@ -179,6 +179,7 @@ pub(crate) async fn update_metadata(
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     validate_mutating_key(&key, "Object key")?;
+    validate_copy_source_key(&key, "Object key")?;
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
         vec![crate::S3MutationScope::key(&connection_id, &bucket, &key)],
         &client.token(),
@@ -209,6 +210,10 @@ pub(crate) async fn update_metadata(
     }
 
     let source = encode_copy_source_with_version(&bucket, &key, existing.version_id.as_deref());
+    // The server-side copy still has to move the object body through the
+    // endpoint. A fixed 45s attempt timeout cuts off copies of large objects on
+    // slow links, so scale it with the source size like every other copy path.
+    let copy_bytes = u64::try_from(existing.size).unwrap_or(0);
     let build_request = |include_acl: bool| {
         let mut req = client
             .copy_object()
@@ -263,7 +268,10 @@ pub(crate) async fn update_metadata(
 
     let mut include_acl = existing.acl.is_some();
     loop {
-        let request = build_request(include_acl).send();
+        let request = build_request(include_acl)
+            .customize()
+            .config_override(body_attempt_timeout_override(copy_bytes))
+            .send();
         let result = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
             result = request => result,
@@ -296,6 +304,27 @@ pub(super) fn record_delete_error(result: &mut DeleteResult, detail: String) {
     if result.errors.len() < MAX_DELETE_ERROR_DETAILS {
         result.errors.push(detail);
     }
+}
+
+/// Turn a partial batch into an error instead of an `Ok` receipt that callers
+/// can mistake for success. The counts and recorded details stay in the
+/// message so the frontend can still report what was actually removed.
+pub(super) fn finish_delete_result(
+    result: DeleteResult,
+    action: &str,
+) -> Result<DeleteResult, String> {
+    if !result.incomplete {
+        return Ok(result);
+    }
+    let details = if result.errors.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", result.errors.join("; "))
+    };
+    Err(format!(
+        "{} did not finish: {} object(s) deleted, {} failed{}",
+        action, result.deleted, result.failed, details
+    ))
 }
 
 #[tauri::command]
@@ -411,7 +440,7 @@ pub(crate) async fn delete_objects(
         }
     }
 
-    Ok(result)
+    finish_delete_result(result, "Delete")
 }
 
 #[tauri::command]
@@ -508,6 +537,17 @@ pub(crate) async fn set_object_acl(
     }
 }
 
+pub(super) const FOLDER_MARKER_NONCE_KEY: &str = "s3-sidekick-folder-nonce";
+
+fn folder_marker_nonce() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = ROLLBACK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{}", std::process::id(), timestamp, sequence)
+}
+
 #[tauri::command]
 pub(crate) async fn create_folder(
     state: tauri::State<'_, AppState>,
@@ -531,6 +571,10 @@ pub(crate) async fn create_folder(
     } else {
         format!("{}/", key)
     };
+    // Validate the derived marker, not just the caller's key. A key such as
+    // `.s3-sidekick-rollback` passes the key check but becomes the reserved
+    // rollback namespace marker once `/` is appended.
+    validate_mutating_folder_prefix(&folder_key, "Folder key")?;
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
         vec![crate::S3MutationScope::key(
             &connection_id,
@@ -543,18 +587,43 @@ pub(crate) async fn create_folder(
     let provider = client.provider();
     let cancel = client.token();
     let overwrite = overwrite.unwrap_or(false);
+    let marker_nonce = folder_marker_nonce();
+
+    // Inspect the destination before writing. Without overwrite an existing
+    // marker is still a conflict for the caller, but with overwrite only an
+    // empty folder marker may be replaced; a non-empty object at `foo/` must
+    // never be silently truncated to a zero-byte marker.
+    let head_request = client.head_object().bucket(&bucket).key(&folder_key).send();
+    let head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = head_request => result,
+    };
+    match head {
+        Ok(head) => {
+            let length = head.content_length().unwrap_or(-1);
+            if length != 0 {
+                return Err(format!(
+                    "Destination '{}' already exists and is not an empty folder marker ({} bytes). Refusing to replace its contents.",
+                    folder_key, length
+                ));
+            }
+            if !overwrite {
+                return Err(destination_conflict_error(&folder_key));
+            }
+        }
+        Err(err) if is_not_found(&err) => {}
+        Err(err) => {
+            return Err(format!(
+                "Failed to check folder destination '{}': {}",
+                folder_key, err
+            ));
+        }
+    }
 
     // A folder marker is a zero-byte PutObject like any other write, so it
-    // goes through the same absent-probe plus atomic create-only guard as
-    // uploads: without this an unconditional write silently claimed an
-    // existing key. Providers without create-only support fail closed here and
+    // goes through the same create-only guard as uploads when overwrite was not
+    // authorized. Providers without create-only support fail closed here and
     // require an explicit overwrite retry, exactly like Put/Multipart/Copy.
-    if !overwrite && destination_object_exists(&client, &bucket, &folder_key, &cancel).await? {
-        return Err(format!(
-            "Destination '{}' already exists. Choose overwrite to replace it.",
-            folder_key
-        ));
-    }
     if !overwrite {
         require_put_create_only_support(provider, &folder_key)?;
     }
@@ -563,6 +632,7 @@ pub(crate) async fn create_folder(
         .put_object()
         .bucket(&bucket)
         .key(&folder_key)
+        .metadata(FOLDER_MARKER_NONCE_KEY, &marker_nonce)
         .body(aws_sdk_s3::primitives::ByteStream::from_static(b""));
     if !overwrite {
         request = apply_put_create_only_guard(request, provider, &folder_key)?;
@@ -577,15 +647,21 @@ pub(crate) async fn create_folder(
         Err(err) => err,
     };
     if !overwrite && is_destination_occupied(&err) {
-        // A folder marker carries no data: if a retried request hit a
-        // zero-byte marker (ours or another client's), the folder exists as
-        // requested and nothing was replaced.
+        // A retried create-only request can meet the zero-byte marker it just
+        // wrote. Accept that only when the marker still carries this request's
+        // nonce; an identical marker from another client is not our write.
         let head = client.head_object().bucket(&bucket).key(&folder_key).send();
-        let marker_exists = tokio::select! {
+        let marker_is_own_write = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_error()),
-            result = head => matches!(result, Ok(ref head) if head.content_length() == Some(0)),
+            result = head => matches!(result, Ok(ref head)
+                if head.content_length() == Some(0)
+                    && head
+                        .metadata()
+                        .and_then(|metadata| metadata.get(FOLDER_MARKER_NONCE_KEY))
+                        .map(String::as_str)
+                        == Some(marker_nonce.as_str())),
         };
-        if marker_exists {
+        if marker_is_own_write {
             return Ok(());
         }
     }
@@ -611,8 +687,9 @@ pub(crate) fn build_object_url(
     validate_readable_key(&key, "Object key")?;
     if key_has_unsafe_url_segments(&key) {
         return Err(
-            "Object keys containing '.' or '..' path segments cannot be copied as browser URLs. \
-             Use Download or Preview in S3 Sidekick instead."
+            "Object keys containing '.' or '..' segments, a leading slash, or an empty interior \
+             segment cannot be copied as browser URLs because browsers and proxies normalize \
+             them. Use Download or Preview in S3 Sidekick instead."
                 .to_string(),
         );
     }
@@ -639,9 +716,9 @@ pub(crate) async fn generate_presigned_url(
     validate_readable_key(&key, "Object key")?;
     if key_has_unsafe_url_segments(&key) {
         return Err(
-            "Object keys containing '.' or '..' path segments cannot be shared as presigned URLs \
-             because browsers normalize those path segments and break the signature. \
-             Use Download or Preview in S3 Sidekick instead."
+            "Object keys containing '.' or '..' segments, a leading slash, or an empty interior \
+             segment cannot be shared as presigned URLs because browsers normalize those path \
+             segments and break the signature. Use Download or Preview in S3 Sidekick instead."
                 .to_string(),
         );
     }

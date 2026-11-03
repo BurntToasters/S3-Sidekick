@@ -112,9 +112,15 @@ fn save_plaintext_e2e_security_config(app: &tauri::App<tauri::test::MockRuntime>
             verifier: String::new(),
             lock_timeout_minutes: 0,
             pbkdf2_iterations: 0,
+            kdf: crate::security::KdfAlgorithm::Pbkdf2,
+            argon2_memory_kib: 0,
+            argon2_iterations: 1,
+            argon2_parallelism: 1,
+            policy_schema: 2,
             biometric_enrolled: false,
             legacy_plaintext_adopted: true,
             legacy_plaintext_adoption_proof: String::new(),
+            policy_mac: String::new(),
         },
     )
     .expect("save explicit plaintext test security configuration");
@@ -506,8 +512,7 @@ async fn e2e_scratch_discard_tolerates_missing_destination_folder() {
     let missing = std::env::temp_dir()
         .join(format!("s3sk-e2e-unplugged-{}", std::process::id()))
         .join("download.bin");
-    let result =
-        crate::discard_download_scratch_for_destination(app.handle(), &missing.to_string_lossy());
+    let result = crate::discard_download_scratch_for_destination(app.handle(), &missing);
     record(
         test,
         "discarding scratch for a destination whose folder is gone succeeds (recovery is not blocked)",
@@ -531,7 +536,7 @@ async fn e2e_cancel_before_backend_registration_prevents_write() {
 
     // This ordering reproduces two IPC handlers being scheduled in the wrong
     // order: cancellation reaches Rust before the transfer command registers.
-    s3::cancel_transfer(transfer_id);
+    s3::cancel_transfer_in_registry(&session.connection_id, transfer_id);
     let result = s3::copy_object_to(
         app.state::<AppState>(),
         session.connection_id,

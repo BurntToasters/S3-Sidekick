@@ -76,7 +76,9 @@ test("skipping says that saved connections are stored unencrypted", async ({
   await expect(page.locator("#setup-enc-skip-note")).toContainText(
     /unencrypted.*not recommended/is,
   );
-  await expect(page.locator("#setup-enc-skip")).toHaveText("Skip setup");
+  await expect(page.locator("#setup-enc-skip")).toHaveText(
+    "Continue without encryption",
+  );
 });
 
 test("the theme choices form one radio group that arrow keys move through", async ({

@@ -36,12 +36,30 @@ pub(super) fn mint_connection_id() -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-pub(super) fn connection_identity(endpoint: &str, access_key: &str) -> String {
+pub(crate) fn connection_identity(endpoint: &str, access_key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(endpoint.as_bytes());
     hasher.update([0u8]);
     hasher.update(access_key.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Identity of a credential payload the webview is about to persist.
+///
+/// The persisted endpoint is normalized the same way `connect` normalizes it,
+/// so a valid save cannot be rejected merely for spelling the endpoint with a
+/// trailing slash while a payload for a different endpoint or access key is.
+pub(crate) fn persisted_connection_identity(json: &str) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct PersistedConnection {
+        endpoint: String,
+        access_key: String,
+    }
+
+    let persisted: PersistedConnection = serde_json::from_str(json)
+        .map_err(|err| format!("Saved connection payload is invalid: {}", err))?;
+    let (normalized, _) = super::endpoint::normalize_endpoint(&persisted.endpoint)?;
+    Ok(connection_identity(&normalized, &persisted.access_key))
 }
 
 pub(crate) fn require_connection_session(
@@ -129,7 +147,7 @@ pub(super) fn require_client(
     transfer_id: Option<u32>,
 ) -> Result<RegisteredClient, String> {
     crate::security::require_s3_access()?;
-    let guard = TransferGuard::register_optional(transfer_id)?;
+    let guard = TransferGuard::register_optional(Some(connection_id), transfer_id)?;
     if guard.is_cancelled() {
         return Err(cancelled_error());
     }
@@ -158,7 +176,7 @@ pub(super) fn require_client_and_bucket_hint(
     transfer_id: Option<u32>,
 ) -> Result<(RegisteredClient, Option<String>), String> {
     crate::security::require_s3_access()?;
-    let guard = TransferGuard::register_optional(transfer_id)?;
+    let guard = TransferGuard::register_optional(Some(connection_id), transfer_id)?;
     if guard.is_cancelled() {
         return Err(cancelled_error());
     }
@@ -222,16 +240,16 @@ pub(crate) async fn connect(
     // Pending connection attempts are anonymous session activity. Register
     // before touching credentials or S3State so disconnect/reset can cancel and
     // drain the attempt without leaving a credential-bearing client behind.
-    let connect_guard = TransferGuard::register_optional(None)?;
+    let connect_guard = TransferGuard::register_optional(None, None)?;
     let cancel = connect_guard.token();
-    let connection_generation = {
+    let (connection_generation, previous_connection_id) = {
         let mut s3 = lock_s3_state(&state)?;
         if connect_guard.is_cancelled() {
             return Err(cancelled_error());
         }
         crate::security::prepare_s3_connect(s3.connection_id.is_some())?;
         s3.connection_generation = s3.connection_generation.wrapping_add(1);
-        s3.connection_generation
+        (s3.connection_generation, s3.connection_id.clone())
     };
     let resolved_region = resolve_region(&endpoint, &region)?;
     let (normalized, bucket_hint) = normalize_endpoint(&endpoint)?;
@@ -315,9 +333,28 @@ pub(crate) async fn connect(
         }
     }
 
+    // Replacing a live session must retire its registered clients before the
+    // new credentials are installed. The previous session ID is pinned before
+    // the network work: a connect that has since been superseded returns here
+    // without touching the newer session's registrations.
+    if let Some(previous_id) = previous_connection_id.as_deref() {
+        {
+            let s3 = lock_s3_state(&state)?;
+            if s3.connection_generation != connection_generation
+                || s3.connection_id.as_deref() != Some(previous_id)
+            {
+                return Err("Connection attempt superseded".to_string());
+            }
+        }
+        retire_connection_transfers(previous_id, "connection replacement").await?;
+        if connect_guard.is_cancelled() {
+            return Err(cancelled_error());
+        }
+    }
+
     let connection_id = mint_connection_id();
     let storage_provider = detect_storage_provider(&normalized);
-    connect_guard.with_open_registration(|| {
+    let install_result = connect_guard.with_open_registration(|| {
         let mut s3 = lock_s3_state(&state)?;
         if s3.connection_generation != connection_generation {
             return Err("Connection attempt superseded".to_string());
@@ -331,7 +368,25 @@ pub(crate) async fn connect(
         s3.connection_identity = Some(identity.clone());
         s3.storage_provider = storage_provider;
         Ok(())
-    })?;
+    });
+    if let Err(err) = install_result {
+        // A failed replacement must not leave the still-active previous session
+        // permanently unable to register new work. Keep the retirement fence
+        // when a newer connect has already taken over that generation.
+        if let Some(previous_id) = previous_connection_id.as_deref() {
+            let still_previous = lock_s3_state(&state).is_ok_and(|s3| {
+                s3.connection_generation == connection_generation
+                    && s3.connection_id.as_deref() == Some(previous_id)
+            });
+            if still_previous {
+                finish_connection_retirement(previous_id);
+            }
+        }
+        return Err(err);
+    }
+    if let Some(previous_id) = previous_connection_id.as_deref() {
+        finish_connection_retirement(previous_id);
+    }
 
     Ok(build_connect_result(
         resolved_region,
@@ -350,19 +405,21 @@ pub(crate) async fn disconnect(
     // it takes that state lock, so once this succeeds no untracked client clone
     // from the session can appear behind the drain.
     let tokens = close_transfer_registry()?;
-    let should_invalidate = match lock_s3_state(&state) {
-        Ok(s3) => match s3.connection_id.as_deref() {
-            Some(current) if current == connection_id => true,
-            Some(_) => {
-                let _ = reopen_transfer_registry();
-                return Err("Connection changed".to_string());
-            }
-            None => false,
-        },
-        Err(err) => {
+    let (current_connection, lock_error) = match lock_s3_state(&state) {
+        Ok(s3) => (s3.connection_id.clone(), None),
+        Err(err) => (None, Some(err)),
+    };
+    if let Some(err) = lock_error {
+        let _ = reopen_transfer_registry();
+        return Err(err);
+    }
+    let should_invalidate = match current_connection.as_deref() {
+        Some(current) if current == connection_id => true,
+        Some(_) => {
             let _ = reopen_transfer_registry();
-            return Err(err);
+            return Err("Connection changed".to_string());
         }
+        None => false,
     };
 
     cancel_tokens(tokens);
@@ -437,6 +494,15 @@ pub(crate) async fn list_buckets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_connection_identity_matches_normalized_endpoint() {
+        let identity = persisted_connection_identity(
+            r#"{"endpoint":"https://Example.COM/","region":"us-east-1","access_key":"AKIA","secret_key":"secret"}"#,
+        )
+        .expect("persisted payload should parse");
+        assert_eq!(identity, connection_identity("https://example.com", "AKIA"));
+    }
 
     #[test]
     fn connect_result_reports_conditional_delete_only_for_verified_providers() {

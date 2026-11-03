@@ -482,6 +482,12 @@ describe("info panel", () => {
     expect(
       (document.getElementById("status") as HTMLDivElement).textContent,
     ).toContain("1 failed");
+    const batchStatus = document.getElementById("status") as HTMLDivElement;
+    expect(batchStatus.textContent).toContain("saved on 1 of 2 files");
+    expect(batchStatus.textContent).toContain("head failed");
+    const saveBtn = document.getElementById("info-save") as HTMLButtonElement;
+    expect(saveBtn.disabled).toBe(false);
+    expect(saveBtn.textContent).toBe("Save");
   });
 
   it("resets panel state on close", async () => {

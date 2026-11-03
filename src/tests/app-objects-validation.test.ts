@@ -38,6 +38,7 @@ vi.mock("../dialogs.ts", () => ({
 }));
 
 vi.mock("../browser.ts", () => ({
+  CONNECTION_RESET_EVENT: "s3-sidekick:connection-reset",
   renderObjectTable: (...args: unknown[]) => mockRenderObjectTable(...args),
   renderBreadcrumb: (...args: unknown[]) => mockRenderBreadcrumb(...args),
   renderBucketList: vi.fn(),
@@ -927,17 +928,18 @@ describe("export and go-to guards", () => {
     const { logActivity } = await import("../activity-log.ts");
     logActivity("hello", "info");
     await setupConnected();
-    mockSave.mockResolvedValueOnce("/tmp/log.txt");
     mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "path_exists") return true;
+      if (cmd === "pick_text_export") {
+        return { path: "/tmp/log.txt", token: "export-token" };
+      }
       return defaultInvoke(cmd);
     });
     const { handleExportActivityLog } = await import("../app-objects.ts");
     await handleExportActivityLog();
     expect(mockShowConfirm).not.toHaveBeenCalled();
     expect(mockInvoke).toHaveBeenCalledWith(
-      "write_text_file",
-      expect.objectContaining({ path: "/tmp/log.txt", overwrite: true }),
+      "export_text_file",
+      expect.objectContaining({ token: "export-token" }),
     );
   });
 
@@ -954,6 +956,45 @@ describe("export and go-to guards", () => {
     await handleGoToKeyOrPrefix();
     expect(state.selectedKeys.has("docs/target.txt")).toBe(true);
     expect(mockRevealRow).toHaveBeenCalledWith("docs/target.txt", "file");
+  });
+
+  it("go-to aborts when navigation is superseded before the leaf resolves", async () => {
+    const state = await setupConnected();
+    state.objects = [
+      { key: "docs/target.txt", size: 1, last_modified: "", is_folder: false },
+    ];
+    state.currentPrefix = "docs/";
+    mockShowPrompt.mockResolvedValueOnce("docs/target.txt");
+    mockNavigateToFolder.mockImplementationOnce(async () => {
+      // Another navigation owns the table by the time this await returns.
+      state.currentPrefix = "other/";
+    });
+
+    const { handleGoToKeyOrPrefix } = await import("../app-objects.ts");
+    await handleGoToKeyOrPrefix();
+
+    expect(state.selectedKeys.has("docs/target.txt")).toBe(false);
+    expect(mockRevealRow).not.toHaveBeenCalled();
+  });
+
+  it("clears the bucket refresh banner on connection reset", async () => {
+    const panel = document.createElement("div");
+    const list = document.createElement("ul");
+    list.id = "bucket-list";
+    panel.appendChild(list);
+    document.body.appendChild(panel);
+    await setupConnected();
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "list_buckets") throw new Error("bucket failure");
+      return defaultInvoke(cmd);
+    });
+
+    const { handleRefreshBuckets } = await import("../app-objects.ts");
+    await handleRefreshBuckets();
+    expect(panel.querySelector(".bucket-refresh-banner")).not.toBeNull();
+
+    document.dispatchEvent(new Event("s3-sidekick:connection-reset"));
+    expect(panel.querySelector(".bucket-refresh-banner")).toBeNull();
   });
 
   it("refuses to copy ARNs for a non-AWS endpoint", async () => {

@@ -172,7 +172,12 @@ describe("transfers UI shell", () => {
     await transfers.initTransferQueueUI();
     await transfers.recoverPendingTransfers();
     transfers.enqueueDownloads([
-      { bucket: "b", key: "a.txt", destination: "C:\\tmp\\a.txt" },
+      {
+        bucket: "b",
+        key: "a.txt",
+        destination: "C:\\tmp\\a.txt",
+        destinationToken: "test-grant",
+      },
     ]);
     await vi.waitFor(() => {
       expect(

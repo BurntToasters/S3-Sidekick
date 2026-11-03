@@ -70,23 +70,48 @@ npm run release:mac
 npm run release:linux
 ```
 
-Each command checks branch/upstream state, bootstraps dependencies, runs the
-quality gate, creates or waits for the draft, builds current artifacts, signs
-updater payloads, creates checksums and GPG signatures, uploads to the draft,
-mirrors stable artifacts when configured, and cleans checkout. Preflight does
-not wait for or check the GitHub `CI` workflow. The local gate does not run the
-Ubuntu Playwright, MinIO, and full-stack jobs, so check CI for the release
-commit yourself before you publish.
+Each command checks branch/upstream state, bootstraps dependencies, runs
+`release:prepare` (including `test:all`, Cargo audit, and license checks),
+creates or waits for the draft, builds current artifacts, signs updater
+payloads, creates checksums and GPG signatures, uploads to the draft, mirrors
+stable artifacts when configured, and cleans checkout.
+
+`release:prepare` runs two gates. The local `test:all` gate covers typecheck,
+lint, formatting (including `scripts/*.mjs`), Cargo update policy, Tauri
+alignment, icon validation, Clippy, `cargo fmt`, both builds, script and
+release-asset tests, Vitest, and Rust tests. It does not run the Ubuntu
+Playwright, MinIO, or full-stack jobs. `release:ci-status` then requires a
+completed, successful check run named `Release gate` for the exact HEAD
+through the GitHub API. `.github/workflows/ci.yml` defines that aggregate job
+over the browser, MinIO, WebDriver, and platform smoke jobs. `release:prepare`
+and every `*:continue` chain call `release:ci-status`, so a release cannot
+skip the CI gate.
+
+`release:cleanup:checkout` fast-forwards to the configured upstream and
+refuses a dirty tree. Set `ALLOW_RELEASE_CLEANUP_STASH=1` only to stash local
+work first (restore it with `git stash pop`); the cleanup never runs
+`reset --hard` or `clean -fd`. The continue chains call it through
+`release:finalize`, so they cannot bypass the dirty-tree guard.
 
 Linux release contains the x64 AppImage and Flatpak. DEB and RPM packages are
 retired: they are not built, signed, or uploaded, and a stale `.deb` or `.rpm`
 left in a bundle directory is ignored. ARM64 Linux build commands remain
 available for local packaging, but public release matrix is x64-only.
 
-Beta signing copies `latest-*-beta-*.json` onto the latest *stable* GitHub
+Beta signing copies `latest-*-beta-*.json` onto the latest _stable_ GitHub
 release so native beta clients can fetch
 `/releases/latest/download/latest-{{target}}-{{arch}}.json`. If that copy is
 interrupted, recover with `npm run release:sync-beta-manifests`.
+
+## Updater signature version binding
+
+The updater enables `plugins.updater.requireSignedVersion`, which rejects a
+manifest that pairs a version with an artifact signed for another version.
+`tauri build` embeds the version automatically. The isolated
+`release:sign:updater` re-sign step reads `package.json` and passes
+`tauri signer sign --app-version <version>` for every artifact; it fails
+instead of signing when the version is missing. Keep the package and
+`src-tauri` versions synchronized with `npm run sync-version`.
 
 ## Verify and publish
 

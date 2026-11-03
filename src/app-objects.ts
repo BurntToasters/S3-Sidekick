@@ -1,8 +1,9 @@
 import { invoke } from "./ipc.ts";
-import { save } from "@tauri-apps/plugin-dialog";
+import { pickTextExport } from "./path-grants.ts";
 import { state } from "./state.ts";
 import {
   captureConnectionSnapshot,
+  connectionIdentityChanged,
   connectionSnapshotChanged,
   invokeS3,
   invokeS3For,
@@ -21,6 +22,7 @@ import {
   renderedIndexOfSelection,
   focusObjectTableRow,
   revealRow,
+  CONNECTION_RESET_EVENT,
 } from "./browser.ts";
 import { showConfirm, showPrompt } from "./dialogs.ts";
 import { logActivity, exportActivityLogText } from "./activity-log.ts";
@@ -985,7 +987,9 @@ function showBucketRefreshBanner(
   retryBtn.className = "btn btn--sm";
   retryBtn.textContent = "Retry bucket refresh";
   retryBtn.addEventListener("click", () => {
-    void handleRefreshBuckets();
+    void handleRefreshBuckets().catch((err) => {
+      setStatus(`Failed to refresh buckets: ${friendlyError(err)}`);
+    });
   });
   banner.replaceChildren(text, retryBtn);
 }
@@ -995,6 +999,15 @@ function clearBucketRefreshBanner(list: HTMLElement | null): void {
 }
 
 let bucketRefreshInFlight = false;
+let bucketResetListenerInstalled = false;
+
+function installBucketResetListener(): void {
+  if (bucketResetListenerInstalled) return;
+  bucketResetListenerInstalled = true;
+  document.addEventListener(CONNECTION_RESET_EVENT, () => {
+    clearBucketRefreshBanner(document.getElementById("bucket-list"));
+  });
+}
 
 export function isBucketRefreshInFlight(): boolean {
   return bucketRefreshInFlight;
@@ -1002,6 +1015,7 @@ export function isBucketRefreshInFlight(): boolean {
 
 export async function handleRefreshBuckets(): Promise<void> {
   if (!state.connected || bucketRefreshInFlight) return;
+  installBucketResetListener();
   const connectionId = state.connectionId;
   const bucketList = document.getElementById("bucket-list");
   bucketRefreshInFlight = true;
@@ -1037,28 +1051,27 @@ export async function handleExportActivityLog(): Promise<void> {
     return;
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  let destination: string | null;
+  let grant: Awaited<ReturnType<typeof pickTextExport>>;
   try {
-    destination = await save({
-      title: "Export Activity Log",
-      defaultPath: `s3-sidekick-activity-${stamp}.txt`,
-    });
+    grant = await pickTextExport(
+      `s3-sidekick-activity-${stamp}.txt`,
+      "Export Activity Log",
+    );
   } catch (err) {
     setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
     return;
   }
-  if (!destination) return;
+  if (!grant) return;
 
   // The save dialog already asked about replacing an existing file. A second
   // overwrite prompt would ask the same question twice, so write directly.
   try {
-    await invoke("write_text_file", {
-      path: destination,
+    await invoke("export_text_file", {
+      token: grant.token,
       text,
-      overwrite: true,
     });
     setStatus("Activity log exported.", 5000);
-    logActivity(`Exported activity log to ${destination}.`, "success");
+    logActivity(`Exported activity log to ${grant.path}.`, "success");
   } catch (err) {
     setStatus(`Failed to export activity log: ${friendlyError(err)}`);
     logActivity(
@@ -1070,12 +1083,17 @@ export async function handleExportActivityLog(): Promise<void> {
 
 export async function handleGoToKeyOrPrefix(): Promise<void> {
   if (!state.connected || !state.currentBucket) return;
-  const targetBucket = state.currentBucket;
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    return;
+  }
   const raw = await showPrompt("Go To", "Enter key or prefix:", {
     inputPlaceholder: "e.g. folder/file.txt or folder/subfolder/",
   });
   if (!raw) return;
-  if (!state.connected || state.currentBucket !== targetBucket) {
+  if (connectionIdentityChanged(target)) {
     setStatus("Go To cancelled because connection changed.", 5000);
     return;
   }
@@ -1091,7 +1109,15 @@ export async function handleGoToKeyOrPrefix(): Promise<void> {
 
     const idx = input.lastIndexOf("/");
     const parentPrefix = idx >= 0 ? input.slice(0, idx + 1) : "";
+    const navigationTarget: ConnectionSnapshot = {
+      ...target,
+      prefix: parentPrefix,
+    };
     await navigateToFolder(parentPrefix);
+    // Navigation can be superseded while its listing loads (another jump,
+    // reconnect, or bucket change). Only select from the exact view this
+    // request asked for; abort silently when a newer action owns the table.
+    if (connectionSnapshotChanged(navigationTarget)) return;
 
     const targetKey = input;
     if (state.objects.some((obj) => obj.key === targetKey)) {

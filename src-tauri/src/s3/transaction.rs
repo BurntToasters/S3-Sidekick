@@ -56,6 +56,13 @@ async fn copy_prefix_objects_inner(
         cancel,
     )
     .await?;
+    // CopySource is a URL path. A dot segment or interior empty segment can be
+    // folded by an endpoint into a different key, so refuse the whole plan
+    // before any destination is touched.
+    for source in &source_plan {
+        validate_copy_source_key(&source.source_key, "Source key")
+            .map_err(|err| format!("{} No destination was changed.", err))?;
+    }
 
     preflight_prefix_overwrite_rollback(
         client,
@@ -317,6 +324,41 @@ async fn copy_prefix_objects_inner(
                 return Err(rollback_error(err, failures));
             }
         }
+        if !destination_was_absent {
+            let Some(backup) = backups
+                .last()
+                .filter(|backup| backup.destination_key == new_key)
+            else {
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
+                return Err(rollback_error(
+                    format!(
+                        "Internal rollback state lost the backup for '{}'; it was not replaced.",
+                        new_key
+                    ),
+                    failures,
+                ));
+            };
+            if let Err(err) =
+                require_destination_unchanged_since_backup(client, dst_bucket, backup, cancel).await
+            {
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
+                return Err(rollback_error(err, failures));
+            }
+        }
         match copy_with_receipt(
             client,
             src_bucket,
@@ -441,6 +483,55 @@ async fn require_versioned_prefix_rollback(
             "Prefix overwrite rollback for '{}' requires an enabled versioned bucket (bucket versioning Enabled) because this provider cannot enforce conditional DELETE; no unsafe rollback will be attempted.",
             key
         ))
+    }
+}
+
+/// Re-read the destination immediately before replacing it and require the
+/// exact generation that was copied into the rollback backup. A concurrent
+/// external write after the backup would otherwise be overwritten and the
+/// backup (its only surviving copy) then deleted during cleanup.
+async fn require_destination_unchanged_since_backup(
+    client: &Client,
+    bucket: &str,
+    backup: &DestinationBackup,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    let original = &backup.original_info;
+    let etag = original
+        .etag
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Destination '{}' has no ETag to bind the rollback backup; it was not replaced and backup '{}' was retained.",
+                backup.destination_key, backup.backup_key
+            )
+        })?;
+    let fingerprint = source_generation_fingerprint(original);
+    match current_source_identity_matches(
+        client,
+        bucket,
+        &backup.destination_key,
+        etag,
+        None,
+        original.version_id.as_deref(),
+        &fingerprint,
+        &original.acl_fingerprint,
+        &original.tag_fingerprint,
+        cancel,
+    )
+    .await?
+    {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
+            "Destination '{}' changed after its rollback backup was created; it was not replaced and backup '{}' was retained.",
+            backup.destination_key, backup.backup_key
+        )),
+        None => Err(format!(
+            "Destination '{}' disappeared after its rollback backup was created; it was not replaced and backup '{}' was retained.",
+            backup.destination_key, backup.backup_key
+        )),
     }
 }
 
