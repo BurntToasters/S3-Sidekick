@@ -16,5 +16,13 @@
         "titleBarStyle": "Overlay"
       }
     ]
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
   }
 }

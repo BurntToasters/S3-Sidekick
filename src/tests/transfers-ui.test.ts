@@ -541,6 +541,53 @@ describe("transfer row contracts (UX audit 0.12.0)", () => {
     expect(row.getAttribute("tabindex")).toBe("-1");
   });
 
+  it("shows a re-select action and keeps receipt-backed moves out of remove", () => {
+    const reselect = rowFrom(
+      renderTransferRow(
+        transferFixture({
+          operation: "upload",
+          status: "error",
+          fileName: "photo.png",
+          needsReselection: true,
+          error: "Local path grant expired",
+        }),
+      ),
+    );
+    expect(
+      reselect.querySelector('[data-action="reselect"]')?.getAttribute("title"),
+    ).toContain("Re-select local path");
+
+    const receipt = {
+      source_key: "a.txt",
+      source_etag: "etag",
+      source_fingerprint: "1".repeat(64),
+      source_acl_fingerprint: "2".repeat(64),
+      source_tag_fingerprint: "3".repeat(64),
+      source_version_id: null,
+      destination_key: "b.txt",
+      destination_etag: "etag",
+      destination_fingerprint: "4".repeat(64),
+      destination_acl_fingerprint: "5".repeat(64),
+      destination_tag_fingerprint: "6".repeat(64),
+      destination_version_id: null,
+      ownership_ambiguous: false,
+    };
+    const heldMove = rowFrom(
+      renderTransferRow(
+        transferFixture({
+          operation: "move",
+          status: "error",
+          key: "a.txt",
+          sourceKey: "a.txt",
+          destinationKey: "b.txt",
+          movePhase: "copied",
+          receipts: [receipt],
+        }),
+      ),
+    );
+    expect(heldMove.querySelector('[data-action="remove"]')).toBeNull();
+  });
+
   it("gives the row action icons from the shared icon set, with a 28px-capable icon button", () => {
     const row = rowFrom(
       renderTransferRow(transferFixture({ status: "queued" })),

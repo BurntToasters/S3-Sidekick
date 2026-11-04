@@ -74,6 +74,11 @@ export interface IpcCommandArgs {
     bucket: string;
     prefix: string;
   };
+  delete_rollback_backups: {
+    connectionId: string;
+    bucket: string;
+    namespaces: string[];
+  };
   disable_biometric: Record<never, never>;
   discard_download_scratch: {
     destinationToken: string;
@@ -128,6 +133,7 @@ export interface IpcCommandArgs {
   get_available_disk_bytes: {
     token: string;
   };
+  get_connection_id: Record<never, never>;
   get_object_acl: {
     connectionId: string;
     bucket: string;
@@ -158,6 +164,10 @@ export interface IpcCommandArgs {
     delimiter: string;
     continuationToken: string;
   };
+  list_rollback_backups: {
+    connectionId: string;
+    bucket: string;
+  };
   load_bookmarks: Record<never, never>;
   load_bookmarks_backup: Record<never, never>;
   load_bookmarks_state: Record<never, never>;
@@ -182,17 +192,24 @@ export interface IpcCommandArgs {
   };
   pick_download_directory: {
     title?: string | null;
+    defaultDirectory?: string | null;
   };
   pick_download_file: {
     fileName?: string | null;
     title?: string | null;
+    defaultDirectory?: string | null;
   };
   pick_text_export: {
     fileName?: string | null;
     title?: string | null;
+    defaultDirectory?: string | null;
   };
-  pick_upload_files: Record<never, never>;
-  pick_upload_folder: Record<never, never>;
+  pick_upload_files: {
+    defaultPath?: string | null;
+  };
+  pick_upload_folder: {
+    defaultPath?: string | null;
+  };
   preview_object: {
     connectionId: string;
     bucket: string;

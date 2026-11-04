@@ -93,6 +93,14 @@ export function plural(
   return `${count.toLocaleString()} ${count === 1 ? singular : pluralForm}`;
 }
 
+/**
+ * Length in Unicode code points, not UTF-16 code units. A password made of
+ * emoji or astral characters must not count twice toward the minimum.
+ */
+export function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
 export function formatDate(iso: string): string {
   if (!iso) return "—";
   // Relative times change with the clock, so they are never cached.

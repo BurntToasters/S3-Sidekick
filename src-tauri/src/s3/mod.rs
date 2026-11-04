@@ -94,7 +94,7 @@ pub(crate) use prefix::*;
 pub(crate) use preview::*;
 #[cfg(test)]
 pub(crate) use rollback::e2e_copy_with_receipt;
-use rollback::*;
+pub(crate) use rollback::*;
 use sdk_errors::*;
 pub(crate) use session::*;
 use transaction::*;
@@ -329,6 +329,69 @@ mod tests {
         let error = normalize_endpoint("http://user@169.254.169.254")
             .expect_err("metadata address must not hide behind userinfo");
         assert!(error.contains("169.254.169.254"));
+    }
+
+    #[test]
+    fn normalize_endpoint_rejects_cgnat_and_ipv6_metadata_ranges() {
+        for endpoint in [
+            "http://100.100.100.200",
+            "http://100.64.0.1:9000",
+            "http://168.63.129.16",
+            "http://[fd00:ec2::254]",
+            "http://[fd20:ce::254]",
+        ] {
+            let error =
+                normalize_endpoint(endpoint).expect_err("metadata/SSRF range must be rejected");
+            assert!(
+                error.contains(endpoint.trim_matches('/')),
+                "error should name {endpoint}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_endpoint_rejects_non_canonical_ipv4() {
+        for endpoint in ["http://127.1", "http://0177.0.0.1", "http://2852039166"] {
+            assert!(
+                normalize_endpoint(endpoint).is_err(),
+                "{endpoint} must be rejected as a non-canonical IPv4 literal"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_endpoint_splits_query_and_fragment() {
+        let (url, bucket) =
+            normalize_endpoint("https://s3.example.com?x=1#frag").expect("valid endpoint");
+        assert_eq!(url, "https://s3.example.com");
+        assert_eq!(bucket, None);
+    }
+
+    #[test]
+    fn normalize_endpoint_rejects_conflicting_bucket_hints() {
+        let error = normalize_endpoint("https://mybucket.s3.us-east-1.amazonaws.com/otherbucket")
+            .expect_err("conflicting virtual-host and path buckets must fail");
+        assert!(
+            error.contains("mybucket") && error.contains("otherbucket"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unencoded_listing_pages_are_not_decoded() {
+        // Without an echoed encoding-type=url the key is literal; decoding it
+        // would address a different object.
+        let decoded = ListedEncoding::raw().decode("a%20b+c");
+        assert_eq!(decoded, "a%20b+c");
+    }
+
+    #[test]
+    fn legacy_checkpoints_have_no_scratch_identity_or_part_digests() {
+        let json = r#"{"version":1,"mode":"download_parallel","bucket":"b","key":"k","destination":null,"temp_path":"t","total_bytes":10,"part_size":5,"completed_parts":[0],"updated_at_ms":0,"etag":"e"}"#;
+        let checkpoint = checkpoint_from_json(json).expect("legacy checkpoint parses");
+        assert!(checkpoint.scratch_device.is_none());
+        assert!(checkpoint.scratch_inode.is_none());
+        assert!(checkpoint.part_digests.is_empty());
     }
 
     #[test]
@@ -786,7 +849,7 @@ mod tests {
         assert!(old_token.is_cancelled());
         drop(old);
 
-        retirement
+        let fence = retirement
             .await
             .expect("retirement task should not panic")
             .expect("retirement should drain the old session");
@@ -799,7 +862,9 @@ mod tests {
             "new work must not register for a session being replaced"
         );
 
-        finish_connection_retirement(old_id);
+        // Dropping the fence (a cancelled or failed replacement) must unfence
+        // the session so it can keep serving if it is still current.
+        drop(fence);
         let retry = TransferGuard::register_optional(Some(old_id), Some(990_012))
             .expect("a failed replacement must not poison the old session forever");
         drop(retry);
@@ -896,6 +961,9 @@ mod tests {
             updated_at_ms: 0,
             etag: "etag".to_string(),
             version_id: None,
+            scratch_device: None,
+            scratch_inode: None,
+            part_digests: Vec::new(),
         };
         assert!(checkpoint_generation_matches(&checkpoint, "etag", None));
         assert!(!checkpoint_generation_matches(

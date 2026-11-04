@@ -39,15 +39,24 @@ import {
   reportNavFailure,
   selectOnlyEntry,
   isLocationEditMode,
+  LOCATION_FLUSH_EVENT,
 } from "./browser.ts";
-import { wireInspectorChrome, toggleInspector } from "./inspector.ts";
+import {
+  wireInspectorChrome,
+  toggleInspector,
+  setInspectorOpen,
+} from "./inspector.ts";
 import { wireWindowSizePersistence } from "./window-size.ts";
 import {
   checkUpdates,
   getReleasePageUrl,
   setUpdateChannel,
 } from "./updater.ts";
-import { loadBookmarks, clearBookmarks } from "./bookmarks.ts";
+import {
+  loadBookmarks,
+  clearBookmarks,
+  setBookmarkChangeHandler,
+} from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
   openInfoPanel,
@@ -125,6 +134,8 @@ import {
   setSavedConnectionsLocked,
   rememberActiveConnectionLocation,
   cancelPendingConnect,
+  cancelPendingTestConnection,
+  unlockSavedConnectionsNow,
 } from "./app-connection.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
 import {
@@ -187,15 +198,20 @@ export async function clearSessionAfterAutoLock(): Promise<boolean> {
   // Cancel any connect/test UI before the access lock invalidates workflows,
   // so the connect button cannot stay stuck on "Cancel".
   cancelPendingConnect();
+  cancelPendingTestConnection();
   const hadSession = state.connected || Boolean(state.connectionId);
   setConnectionAccessLocked(true);
   setSavedConnectionsLocked(true);
   setConnectionUI(false);
   closePreview();
+  // Drop the inspector without a discard prompt: the vault is already locked,
+  // so unsaved property edits can no longer be saved and asking would stall
+  // the teardown behind a dialog.
+  setInspectorOpen(false);
   setConnectionInputs("", "", "", "");
   clearBookmarks();
   refreshBookmarkBar();
-  if (hadSession && !(await handleDisconnect())) {
+  if (hadSession && !(await handleDisconnect({ skipInspectorPrompt: true }))) {
     // A failed drain leaves the backend client retained for a safe retry. Keep
     // the browsing surface closed and retain only the session ID for retirement.
     setConnectionUI(false);
@@ -424,6 +440,27 @@ function wireOverlaysAndDrawer(): void {
   });
 
   initDrawer();
+  // Opening the drawer moves focus into it, the same way the mobile sidebar
+  // focuses its filter. Covered here because the drawer opens from several
+  // entry points (statusbar buttons, palette, toast actions).
+  const drawer = document.getElementById("bottom-drawer");
+  if (drawer) {
+    let drawerWasOpen = !drawer.hidden;
+    const focusDrawer = (): void => {
+      if (drawer.hidden) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && drawer.contains(active)) return;
+      const target =
+        drawer.querySelector<HTMLElement>(".bottom-drawer__tab--active") ??
+        drawer.querySelector<HTMLElement>("button, [tabindex='0']");
+      target?.focus();
+    };
+    new MutationObserver(() => {
+      const open = !drawer.hidden;
+      if (open && !drawerWasOpen) focusDrawer();
+      drawerWasOpen = open;
+    }).observe(drawer, { attributes: true, attributeFilter: ["hidden"] });
+  }
   document
     .getElementById("transfer-toggle")!
     .addEventListener("click", toggleTransferQueue);
@@ -470,13 +507,33 @@ function wireAppLifecycle(): void {
       );
     });
   });
+  // Every navigation announces the view it is leaving, so the per-connection
+  // location memory records the last real bucket/prefix before it changes.
+  window.addEventListener(LOCATION_FLUSH_EVENT, () => {
+    rememberActiveConnectionLocation();
+  });
   window.addEventListener("beforeunload", () => {
+    rememberActiveConnectionLocation();
     disposeFilterInputDebounce();
     disposeModalLayerObserver();
     dragDropUnlisten?.();
     dragDropUnlisten = null;
     void disposeTransferQueueUI();
   });
+  // Long dialog copy scrolls independently; keyboard users need the message
+  // area itself in the tab order, and the title names the group for heading
+  // navigation in screen readers.
+  const dialogTitle = document.getElementById("dialog-title");
+  if (dialogTitle) {
+    dialogTitle.setAttribute("role", "heading");
+    dialogTitle.setAttribute("aria-level", "2");
+  }
+  const dialogMessage = document.getElementById("dialog-message");
+  if (dialogMessage) {
+    dialogMessage.setAttribute("tabindex", "0");
+    dialogMessage.setAttribute("role", "region");
+    dialogMessage.setAttribute("aria-labelledby", "dialog-title");
+  }
 
   document
     .getElementById("preview-close")!
@@ -491,7 +548,7 @@ function moreMenuItems(): MenuItem[] {
   const items: MenuItem[] = [];
   for (const id of MORE_MENU_ACTION_IDS) {
     const action = getObjectAction(id);
-    if (!action || !action.isAvailable(context)) continue;
+    if (!action?.isAvailable(context)) continue;
     items.push({
       label: resolveActionLabel(action, context),
       action: id,
@@ -593,11 +650,23 @@ function wireSecuritySettings(): void {
     void (async () => {
       const changed = await handleSecurityToggle(setStatus, action);
       if (!changed) return;
-      try {
-        await loadBookmarks();
-        refreshBookmarkBar();
-      } catch {
-        /* bookmarks unavailable */
+      if (action === "unlock") {
+        // One unlock path for Settings, the lock view and auto-lock: it loads
+        // bookmarks, registers the change handler, and clears the access lock.
+        if (!(await unlockSavedConnectionsNow())) {
+          // No handler registered (unit fixture): at least reload and rewire.
+          await loadBookmarks();
+          setBookmarkChangeHandler(refreshBookmarkBar);
+          refreshBookmarkBar();
+        }
+      } else {
+        try {
+          await loadBookmarks();
+          setBookmarkChangeHandler(refreshBookmarkBar);
+          refreshBookmarkBar();
+        } catch {
+          /* bookmarks unavailable */
+        }
       }
       try {
         const saved = await loadConnection();
@@ -642,6 +711,9 @@ function wireSecuritySettings(): void {
         if (state.connected && !(await handleDisconnect())) return;
         const locked = await handleLockNow(setStatus);
         if (locked) {
+          cancelPendingConnect();
+          cancelPendingTestConnection();
+          setConnectionAccessLocked(true);
           setConnectionInputs("", "", "", "");
           // Mirror clearSessionAfterAutoLock: show the locked saved list, not an empty one.
           setSavedConnectionsLocked(true);
@@ -1589,6 +1661,7 @@ export function wireEvents(): void {
       bookmark.region,
       bookmark.access_key,
       bookmark.secret_key,
+      bookmark.session_token ?? "",
     ).catch((err) => reportAsyncActionFailure("Open bookmark", err));
   });
 

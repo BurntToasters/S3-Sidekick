@@ -32,10 +32,22 @@ export const QUALITY_GATE_RELATIVE_PATH: string;
 export const QUALITY_GATE_REPORT_SPECS: ReadonlyArray<{
   path: string;
   kind: string;
+  platforms: ReadonlyArray<string> | null;
 }>;
 export const RELEASE_SESSION_RELATIVE_PATH: string;
 export const RELEASE_BOOTSTRAP_PATHS: Set<string>;
 export const REQUIRED_QUALITY_CHECK_NAMES: ReadonlyArray<string>;
+
+export function activeQualityGateReportSpecs(
+  platform?: string,
+): ReadonlyArray<{
+  path: string;
+  kind: string;
+  platforms: ReadonlyArray<string> | null;
+}>;
+export function requiredQualityCheckNames(
+  platform?: string,
+): ReadonlyArray<string>;
 
 export function currentReleaseIdentity(root?: string): ReleaseIdentity;
 export function sha256WorkingTree(root?: string): string;
@@ -51,6 +63,8 @@ export function writeQualityGateEvidence(
     completedAt: number;
     checks: Record<string, { status: string }>;
     passed: boolean;
+    workingTreeSha256Start: string;
+    workingTreeSha256End: string;
   },
 ): string;
 export function qualityGateEvidenceProblems(
@@ -63,6 +77,8 @@ export function qualityGateEvidenceProblems(
     startedAt: number;
     completedAt: number;
     passed: boolean;
+    workingTreeSha256Start: string;
+    workingTreeSha256End: string;
     checks: Record<string, { status: string }>;
   } | null;
   evidenceSha256: string | null;

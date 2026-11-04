@@ -1,13 +1,17 @@
 import { invoke } from "./ipc.ts";
 import { invokeS3For } from "./connection.ts";
-import { pickDownloadFile, pickUploadFiles } from "./path-grants.ts";
+import {
+  pickDownloadDirectory,
+  pickDownloadFile,
+  pickUploadFiles,
+} from "./path-grants.ts";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   isPermissionGranted,
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { friendlyError, isLocalEndpoint, plural } from "./utils.ts";
+import { friendlyError, isLocalEndpoint, plural, joinPath } from "./utils.ts";
 import {
   captureTransferRenderFocus,
   computeQueueAggregates,
@@ -39,6 +43,7 @@ import {
   claim,
   CONNECT_TO_RESUME_MESSAGE,
   holdAfterCancelFailure,
+  isAutoParked,
   isClaimable,
   markCancelled,
   markDone,
@@ -168,6 +173,8 @@ export interface TransferItem {
   destinationName?: string;
   /** The row is waiting for the user to re-select its local path. */
   needsReselection?: boolean;
+  /** Loaded from the recovery manifest in this session; never persisted. */
+  recovered?: boolean;
   /** Explicit overwrite intent for S3 writes; not persisted in the manifest. */
   overwrite?: boolean;
   /** Session/capability/operation scope for transient overwrite consent. */
@@ -298,6 +305,8 @@ const RECOVERY_UNRESOLVED_MESSAGE =
   "Pending transfers from the last session are not resolved yet. Resume or discard them before starting new transfers.";
 // Backend refusal from create_only.rs require_conditional_delete_support.
 const PROVIDER_CANNOT_DELETE_PATTERN = /cannot enforce conditional DELETE/i;
+const SESSION_REPLACEMENT_PATTERN =
+  /connection changed|connection superseded|session (?:changed|closed|replaced|expired)|not connected/i;
 const RECOVERY_DAMAGED_MESSAGE =
   "Saved transfer recovery data is damaged and was kept for repair. Discard it or keep it before starting new transfers.";
 
@@ -335,6 +344,20 @@ function allocateTransferId(): number {
     // Non-fatal: ids stay unique for this page's lifetime regardless.
   }
   return id;
+}
+
+/**
+ * A retry must never reuse an id that a pending cancel still targets. Minting
+ * a fresh id keeps the old attempt's cancel (and any late progress event)
+ * disconnected from the new attempt.
+ */
+function reassignTransferId(item: TransferItem): void {
+  const previous = item.id;
+  const next = allocateTransferId();
+  item.id = next;
+  // Any cancel still addressed to the previous id cannot reach this attempt.
+  item.pauseCancelInFlight = false;
+  if (selectedTransferId === previous) selectedTransferId = next;
 }
 let queue: TransferItem[] = [];
 let processing = false;
@@ -387,11 +410,18 @@ let manifestHydrated = false;
 let manifestRecoveryUnresolved = false;
 /** The stored recovery record is unreadable and kept for repair. */
 let recoveryDamaged = false;
+/** Legacy localStorage recovery is malformed and blocks enqueue until discarded. */
+let legacyRecoveryMalformed = false;
+let pendingRecoverySession: string | null = null;
 let recoverySession: string | null = null;
 let manifestWriteTail: Promise<void> = Promise.resolve();
 let normalManifestWritePending = false;
 let normalManifestClearRequested = false;
 let lastPersistedManifestJson: string | null | undefined;
+/** Session id the queue last ran against; a different id means replacement. */
+let lastActiveConnectionId: string | null = null;
+/** One registration pass even when init is called concurrently. */
+let transferQueueInitInFlight: Promise<void> | null = null;
 
 interface EffectiveTransferSettings {
   downloadParallelThresholdMb: number;
@@ -603,6 +633,210 @@ function buildCheckpointId(
   return btoa(binary).replace(/=+$/g, "");
 }
 
+const INVALID_LOCAL_GRANT_PATTERNS = [
+  /local path grant/i,
+  /grant (?:expired|is no longer valid)/i,
+  /choose the path again/i,
+  /re-select the (?:file|destination|path)/i,
+  /changed since it was selected/i,
+  /changed before it could be read/i,
+  /local file is no longer (?:readable|accessible)/i,
+  /granted upload path/i,
+  /granted path (?:is a file|now resolves elsewhere)/i,
+  /cannot inspect granted path/i,
+  /symbolic link or reparse point for the granted path/i,
+];
+
+/**
+ * Grant expiry, identity swaps, and size changes make the backend refuse the
+ * same token forever. They are recoverable by asking the user once more, not
+ * by turning the row into a permanent error.
+ */
+function isInvalidLocalGrantError(err: unknown): boolean {
+  const text = normalizeError(err);
+  return INVALID_LOCAL_GRANT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function clearInvalidLocalGrant(item: TransferItem): void {
+  if (item.operation === "upload") item.uploadToken = undefined;
+  if (item.operation === "download") item.destinationToken = undefined;
+  item.needsReselection = true;
+  queueRender();
+}
+
+function parentDirectory(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const idx = normalized.lastIndexOf("/");
+  return idx > 0 ? normalized.slice(0, idx) : "";
+}
+
+function pathLeaf(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+function uploadGrantMatchesItem(
+  item: TransferItem,
+  grant: { path: string; name?: string },
+): "match" | "name" | "mismatch" {
+  const expectedName = item.fileName.normalize("NFC");
+  const selectedName = (
+    grant.name && grant.name.length > 0 ? grant.name : pathLeaf(grant.path)
+  ).normalize("NFC");
+  if (selectedName !== expectedName) return "mismatch";
+  const expectedSize =
+    item.size > 0 ? item.size : item.totalBytes > 0 ? item.totalBytes : 0;
+  const selectedSize = (grant as { size?: number }).size;
+  if (
+    expectedSize > 0 &&
+    typeof selectedSize === "number" &&
+    Number.isFinite(selectedSize) &&
+    selectedSize !== expectedSize
+  ) {
+    return "name";
+  }
+  return "match";
+}
+
+async function grantRecoveredUpload(item: TransferItem): Promise<void> {
+  item.needsReselection = true;
+  queueRender();
+  showToast(
+    `Re-select ${item.fileName}. The saved grant expired or no longer matches.`,
+    { type: "info", duration: 0 },
+  );
+  const picked = await pickUploadFiles(parentDirectory(item.filePath));
+  const files = picked.filter((entry) => !entry.isDir);
+  const nameMatches = files.filter(
+    (entry) => uploadGrantMatchesItem(item, entry) !== "mismatch",
+  );
+  const exact = nameMatches.find(
+    (entry) => uploadGrantMatchesItem(item, entry) === "match",
+  );
+  const near = nameMatches.find(
+    (entry) => uploadGrantMatchesItem(item, entry) === "name",
+  );
+  if (!exact && near) {
+    const expectedSize =
+      item.size > 0 ? item.size : item.totalBytes > 0 ? item.totalBytes : 0;
+    const selectedSize = (near as { size?: number }).size;
+    throw new Error(
+      `Re-selected file "${near.name || pathLeaf(near.path)}" does not match the recovered upload "${item.fileName}": expected ${expectedSize} bytes, selected ${selectedSize ?? "unknown"} bytes. Choose the original file.`,
+    );
+  }
+  const grant = exact ?? nameMatches[0];
+  if (!grant) {
+    const selected =
+      files.length > 0
+        ? ` You selected ${files.map((entry) => entry.name || pathLeaf(entry.path)).join(", ")}.`
+        : "";
+    throw new Error(
+      `Re-selected file does not match the recovered upload "${item.fileName}". Choose the original file.${selected}`,
+    );
+  }
+  item.uploadToken = grant.token;
+  item.filePath = grant.path;
+  item.needsReselection = false;
+  queueRender();
+}
+
+async function grantRecoveredDownload(item: TransferItem): Promise<void> {
+  if (!item.destination) return;
+  const directory = parentDirectory(item.destination);
+  const siblings = queue.filter(
+    (other) =>
+      item.recovered === true &&
+      other !== item &&
+      other.recovered === true &&
+      other.operation === "download" &&
+      other.destination &&
+      !other.destinationToken &&
+      (other.status === "queued" || other.status === "error") &&
+      parentDirectory(other.destination) === directory,
+  );
+  item.needsReselection = true;
+  for (const row of [item, ...siblings]) row.needsReselection = true;
+  queueRender();
+
+  const applyDirectoryGrant = (grant: {
+    token: string;
+    path: string;
+    isDir: boolean;
+  }): void => {
+    for (const row of [item, ...siblings]) {
+      if (!row.destination) continue;
+      const leaf = pathLeaf(row.destination);
+      row.destinationName = leaf;
+      row.destination = joinPath(grant.path, leaf, state.platformName);
+      row.destinationToken = grant.token;
+      row.tempPath = buildDownloadTempPath(row.destination);
+      if (
+        row.resumable &&
+        getEffectiveTransferSettings().enableTransferResume
+      ) {
+        row.checkpointId = buildCheckpointId({
+          operation: row.operation,
+          bucket: row.bucket,
+          key: row.key,
+          destination: row.destination,
+        });
+      }
+      row.needsReselection = false;
+    }
+    queueRender();
+  };
+
+  if (siblings.length > 0) {
+    showToast(
+      `Re-select the folder for ${plural(siblings.length + 1, "download")}.`,
+      { type: "info", duration: 0 },
+    );
+    const grant = await pickDownloadDirectory(
+      `Re-select folder for ${siblings.length + 1} downloads`,
+      directory,
+    );
+    if (!grant) {
+      throw new Error(
+        "Download needs its destination folder re-selected after restart before it can continue.",
+      );
+    }
+    applyDirectoryGrant(grant);
+    return;
+  }
+
+  showToast(`Re-select the destination for ${item.fileName}.`, {
+    type: "info",
+    duration: 0,
+  });
+  const grant = await pickDownloadFile(
+    item.fileName,
+    `Re-select destination for ${item.fileName}`,
+    directory,
+  );
+  if (!grant) {
+    throw new Error(
+      "Download needs its destination re-selected after restart before it can continue.",
+    );
+  }
+  item.destination = grant.path;
+  item.destinationName = undefined;
+  item.destinationToken = grant.token;
+  item.tempPath = buildDownloadTempPath(grant.path);
+  const effective = getEffectiveTransferSettings();
+  if (item.resumable && effective.enableTransferResume) {
+    // The checkpoint is bound to its destination. Point it at the new grant
+    // and leave the old record to the recovery sweep.
+    item.checkpointId = buildCheckpointId({
+      operation: item.operation,
+      bucket: item.bucket,
+      key: item.key,
+      destination: grant.path,
+    });
+  }
+  item.needsReselection = false;
+  queueRender();
+}
+
 /**
  * A recovered row has no grant: grants live in backend memory for one
  * session. Re-ask through a native picker rather than trusting the path the
@@ -610,61 +844,14 @@ function buildCheckpointId(
  */
 async function ensureLocalPathGrant(item: TransferItem): Promise<void> {
   if (item.operation === "upload" && item.filePath && !item.uploadToken) {
-    item.needsReselection = true;
-    queueRender();
-    showToast(`Re-select ${item.fileName} before its upload resumes.`, {
-      type: "info",
-      duration: 0,
-    });
-    const picked = await pickUploadFiles();
-    const grant = picked.find((entry) => !entry.isDir);
-    if (!grant) {
-      throw new Error(
-        "Upload needs its local file re-selected before it can continue.",
-      );
-    }
-    item.uploadToken = grant.token;
-    item.filePath = grant.path;
-    item.needsReselection = false;
-    queueRender();
+    await grantRecoveredUpload(item);
   }
   if (
     item.operation === "download" &&
     item.destination &&
     !item.destinationToken
   ) {
-    item.needsReselection = true;
-    queueRender();
-    showToast(`Re-select the destination for ${item.fileName}.`, {
-      type: "info",
-      duration: 0,
-    });
-    const grant = await pickDownloadFile(
-      item.fileName,
-      `Re-select destination for ${item.fileName}`,
-    );
-    if (!grant) {
-      throw new Error(
-        "Download needs its destination re-selected after restart before it can continue.",
-      );
-    }
-    item.destination = grant.path;
-    item.destinationToken = grant.token;
-    item.destinationName = undefined;
-    item.tempPath = buildDownloadTempPath(grant.path);
-    const effective = getEffectiveTransferSettings();
-    if (item.resumable && effective.enableTransferResume) {
-      // The checkpoint is bound to its destination. Point it at the new grant
-      // and leave the old record to the recovery sweep.
-      item.checkpointId = buildCheckpointId({
-        operation: item.operation,
-        bucket: item.bucket,
-        key: item.key,
-        destination: grant.path,
-      });
-    }
-    item.needsReselection = false;
-    queueRender();
+    await grantRecoveredDownload(item);
   }
 }
 
@@ -793,6 +980,30 @@ function syncOfflineHold(): void {
   }
 }
 
+/**
+ * A new live session replaced the one these rows were running against. The
+ * old backend session cannot finish them; keep the work queued (not failed)
+ * and let the user resume against the new connection. This mirrors the gate
+ * `disconnect()` sets before it closes the backend session.
+ */
+function parkRowsForReplacedSession(newConnectionId: string): void {
+  let parked = 0;
+  for (const item of queue) {
+    if (item.status !== "queued" && item.status !== "uploading") continue;
+    if (!item.connectionId || item.connectionId === newConnectionId) continue;
+    if (item.status === "uploading") pause(item);
+    park(item, "session-replaced");
+    item.paused = true;
+    item.pauseCancelInFlight = false;
+    parked += 1;
+  }
+  if (parked > 0) {
+    const message = `${plural(parked, "transfer")} parked because the live session was replaced. Resume when the new connection is ready.`;
+    logActivity(message, "warning");
+    showToast(message, { type: "warning", duration: 0 });
+  }
+}
+
 /// A refused scratch discard for a path that was never registered means there
 /// is nothing to clean up, so cancelling must succeed rather than strand the
 /// row as paused-with-error.
@@ -813,6 +1024,9 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 function shouldRetryError(err: unknown): boolean {
+  // A re-pick gives these errors a new token; the original failure must not
+  // become a permanent non-retry before that offer is made.
+  if (isInvalidLocalGrantError(err)) return true;
   const structured = parseStructuredTransferError(err);
   if (structured) return structured.retryable;
   const text = normalizeError(err).toLowerCase();
@@ -1045,6 +1259,24 @@ function writeQueueManifest(): void {
 /** Refusal for enqueue calls while stored recovery is unresolved; null when allowed. */
 function refuseIfRecoveryUnresolved(): EnqueueResult | null {
   if (!manifestRecoveryUnresolved) return null;
+  if (legacyRecoveryMalformed) {
+    const reason =
+      "Saved legacy transfer recovery data is malformed. Discard it before starting new transfers.";
+    logActivity(reason, "warning");
+    showToast(reason, {
+      type: "warning",
+      duration: 0,
+      actions: [
+        {
+          label: "Discard malformed recovery",
+          onClick: () => {
+            void discardMalformedRecovery().catch(() => undefined);
+          },
+        },
+      ],
+    });
+    return { accepted: false, count: 0, reason };
+  }
   const reason = recoveryDamaged
     ? RECOVERY_DAMAGED_MESSAGE
     : RECOVERY_UNRESOLVED_MESSAGE;
@@ -1330,30 +1562,65 @@ async function discardTransferRecoveryState(
 /// actions below. Unlike terminal success, cleared error/skipped rows never
 /// pass through the cancel path, so discard here or orphan the state.
 function discardClearedRecoveryState(removed: TransferItem[]): void {
-  // Checkpoint IDs and scratch paths derive from bucket/key/destination, so a
-  // cleared failed row can share them with a live row that downloads the same
-  // object to the same place. That live row owns the state.
-  const live = queue.filter(
-    (entry) => entry.status === "queued" || entry.status === "uploading",
-  );
-  const liveDestinations = new Set(
-    live
-      .filter((entry) => entry.operation === "download" && entry.destination)
-      .map((entry) => entry.destination),
-  );
-  const liveCheckpoints = new Set(
-    live.map((entry) => entry.checkpointId).filter(Boolean),
-  );
-  for (const item of removed) {
-    if (item.operation !== "download" && !item.checkpointId) continue;
-    if (
-      (item.destination && liveDestinations.has(item.destination)) ||
-      (item.checkpointId && liveCheckpoints.has(item.checkpointId))
-    ) {
-      continue;
-    }
-    void discardTransferRecoveryState(item).catch(() => undefined);
+  if (
+    !removed.some((item) => item.operation === "download" || item.checkpointId)
+  ) {
+    return;
   }
+  void (async () => {
+    // Checkpoint IDs and scratch paths derive from bucket/key/destination, so a
+    // cleared failed row can share them with a live row that downloads the same
+    // object to the same place. That live row owns the state.
+    const live = queue.filter(
+      (entry) => entry.status === "queued" || entry.status === "uploading",
+    );
+    const liveDestinations = new Set(
+      live
+        .filter((entry) => entry.operation === "download" && entry.destination)
+        .map((entry) => entry.destination),
+    );
+    const liveCheckpoints = new Set(
+      live.map((entry) => entry.checkpointId).filter(Boolean),
+    );
+    const failures: string[] = [];
+    for (const item of removed) {
+      if (item.operation !== "download" && !item.checkpointId) continue;
+      if (
+        (item.destination && liveDestinations.has(item.destination)) ||
+        (item.checkpointId && liveCheckpoints.has(item.checkpointId))
+      ) {
+        continue;
+      }
+      try {
+        await discardTransferRecoveryState(item);
+      } catch (err) {
+        failures.push(`${item.fileName}: ${normalizeError(err)}`);
+      }
+    }
+    // Removing the checkpoint only drops its map to the scratch file. Sweep
+    // the now-unreferenced leases so discarded recovered rows really remove
+    // their temporary downloads.
+    if (!recoverySession) {
+      failures.push(
+        "scratch cleanup: transfer recovery session is unavailable",
+      );
+    } else {
+      try {
+        await invoke("transfer_checkpoint_gc", {
+          ttlHours: getEffectiveTransferSettings().transferCheckpointTtlHours,
+          keepCheckpointIds: Array.from(liveCheckpoints) as string[],
+          recoverySession,
+        });
+      } catch (err) {
+        failures.push(`scratch cleanup: ${normalizeError(err)}`);
+      }
+    }
+    if (failures.length > 0) {
+      const message = `Cleared ${plural(failures.length, "transfer")}, but some saved resume data could not be removed: ${failures.join("; ")}`;
+      logActivity(message, "warning");
+      showToast(message, { type: "warning", duration: 0 });
+    }
+  })();
 }
 
 function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
@@ -1428,6 +1695,7 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
     connectionId: item.connectionId,
     connectionIdentity: item.connectionIdentity,
     legacyConnectionUnbound: item.legacyConnectionUnbound,
+    recovered: true,
     retryable: item.retryable === false ? false : undefined,
   };
 }
@@ -1523,14 +1791,44 @@ async function handleDamagedRecoveryData(session: string): Promise<void> {
   completeRecoveryHydration(session, null);
 }
 
+/**
+ * Clear both the malformed legacy record and the backend recovery fence it
+ * blocked. This is the visible escape hatch offered by the warning toast and
+ * by every refused enqueue while the dead end is active.
+ */
+export async function discardMalformedRecovery(): Promise<void> {
+  const session = pendingRecoverySession ?? recoverySession;
+  if (!session) {
+    throw new Error(
+      "Transfer recovery session is unavailable; reload the application.",
+    );
+  }
+  try {
+    persistLegacyQueueManifest(true);
+    await invoke("clear_transfer_manifest", { recoverySession: session });
+    completeRecoveryHydration(session, null);
+    const message =
+      "Malformed legacy transfer recovery was discarded. New transfers can start again.";
+    logActivity(message, "success");
+    showToast(message, { type: "success" });
+  } catch (err) {
+    const message = `Could not discard malformed transfer recovery: ${normalizeError(err)}`;
+    logActivity(message, "error");
+    showToast(message, { type: "error", duration: 0 });
+    throw err;
+  }
+}
+
 function completeRecoveryHydration(
   hydratedRecoverySession: string,
   persistedManifestJson: string | null | undefined,
 ): void {
   recoverySession = hydratedRecoverySession;
+  pendingRecoverySession = hydratedRecoverySession;
   manifestHydrated = true;
   manifestRecoveryUnresolved = false;
   recoveryDamaged = false;
+  legacyRecoveryMalformed = false;
   lastPersistedManifestJson = persistedManifestJson;
   recoveredQueue = true;
 }
@@ -1557,6 +1855,7 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     );
   }
   const hydratedRecoverySession = hydration.recovery_session;
+  pendingRecoverySession = hydratedRecoverySession;
   const manifestRaw = hydration.manifest_json;
 
   // Browser storage is a one-time compatibility source. Once the backend closes
@@ -1575,9 +1874,24 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
   if (!manifest && hydration.legacy_import_allowed) {
     manifest = parseQueueManifest(legacyManifestRaw);
     if (legacyManifestRaw?.trim() && !manifest) {
-      throw new Error(
-        "Legacy transfer recovery data is malformed; it was retained for repair.",
-      );
+      legacyRecoveryMalformed = true;
+      recoveryDamaged = true;
+      const message =
+        "Saved legacy transfer recovery data is malformed. Discard it before starting new transfers; no storage objects are changed.";
+      logActivity(message, "warning");
+      showToast(message, {
+        type: "warning",
+        duration: 0,
+        actions: [
+          {
+            label: "Discard malformed recovery",
+            onClick: () => {
+              void discardMalformedRecovery().catch(() => undefined);
+            },
+          },
+        ],
+      });
+      throw new Error(message);
     }
     if (manifest) {
       await invoke("save_transfer_manifest", {
@@ -1662,6 +1976,18 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
       } catch (err) {
         failures.push(`${row.fileName}: ${normalizeError(err)}`);
       }
+    }
+    // Checkpoint removal alone leaves the derived scratch file on disk. Sweep
+    // every lease that no surviving checkpoint references before clearing the
+    // manifest, and surface a failure instead of claiming the files are gone.
+    try {
+      await invoke("transfer_checkpoint_gc", {
+        ttlHours: getEffectiveTransferSettings().transferCheckpointTtlHours,
+        keepCheckpointIds: [],
+        recoverySession: hydratedRecoverySession,
+      });
+    } catch (err) {
+      failures.push(`scratch cleanup: ${normalizeError(err)}`);
     }
     if (failures.length > 0) {
       // Their download leases remain on disk, so the recovery sweep reclaims
@@ -1839,6 +2165,17 @@ let resumeAfterConnectInFlight: Promise<void> | null = null;
 let legacyBindingPromptedConnectionId: string | null = null;
 
 export function resumeRecoveredTransfersAfterConnect(): Promise<void> {
+  // A new session replaced the one active transfers were using. Park those
+  // rows before releasing the disconnect gate so they cannot fail against a
+  // session that no longer exists.
+  if (
+    lastActiveConnectionId &&
+    state.connectionId &&
+    lastActiveConnectionId !== state.connectionId
+  ) {
+    parkRowsForReplacedSession(state.connectionId);
+  }
+  if (state.connectionId) lastActiveConnectionId = state.connectionId;
   // A connection is established again; transfers parked by a disconnect may
   // run (items for another account are paused below).
   if (state.connected && state.connectionIdentity) {
@@ -1938,8 +2275,20 @@ async function resumeRecoveredTransfersOnce(): Promise<void> {
 
   let mismatched = 0;
   for (const item of queue) {
-    if (item.status !== "queued" || item.paused) continue;
-    if (item.connectionIdentity !== state.connectionIdentity) {
+    if (item.status !== "queued") continue;
+    const identityMatches =
+      !item.connectionIdentity ||
+      item.connectionIdentity === state.connectionIdentity;
+    if (isAutoParked(item) && identityMatches) {
+      // A disconnect/session-replacement hold is not a user pause. Rebind it
+      // to the fresh session and let the queue resume automatically.
+      item.connectionId = state.connectionId;
+      item.connectionIdentity = state.connectionIdentity;
+      releaseHold(item);
+      continue;
+    }
+    if (item.paused) continue;
+    if (!identityMatches) {
       pause(item);
       mismatched += 1;
       continue;
@@ -2030,7 +2379,16 @@ function handleTransferMoreClick(event: Event): void {
   );
 }
 
-export async function initTransferQueueUI(): Promise<void> {
+export function initTransferQueueUI(): Promise<void> {
+  // `listen()` is async, so two callers can both observe a null unlisten and
+  // register duplicate Tauri listeners. One in-flight registration is shared.
+  transferQueueInitInFlight ??= initializeTransferQueueUI().finally(() => {
+    transferQueueInitInFlight = null;
+  });
+  return transferQueueInitInFlight;
+}
+
+async function initializeTransferQueueUI(): Promise<void> {
   updateQueueChrome();
   syncOfflineHold();
 
@@ -2114,6 +2472,10 @@ export async function initTransferQueueUI(): Promise<void> {
         void revealTransferDestination(id);
         return;
       }
+      if (action === "reselect") {
+        void reselectTransferPath(id);
+        return;
+      }
       selectedTransferId = id;
       queueRender(id);
     };
@@ -2171,7 +2533,10 @@ function pauseAllTransfers(): void {
 function resumeAllTransfers(): void {
   queuePaused = false;
   for (const item of queue) {
-    if (item.paused) resume(item);
+    if (item.paused) {
+      reassignTransferId(item);
+      resume(item);
+    }
   }
   queueRender();
   writeQueueManifest();
@@ -2185,6 +2550,7 @@ function togglePauseTransferItem(id: number): void {
   if (!item) return;
   if (item.paused) {
     if (resume(item)) {
+      reassignTransferId(item);
       void processQueue().catch((err) =>
         logActivity(
           `Transfer processing error: ${normalizeError(err)}`,
@@ -2211,6 +2577,14 @@ function isAmbiguousMove(item: TransferItem): boolean {
   return (
     item.operation === "move" &&
     item.receipts?.some((receipt) => receipt.ownership_ambiguous) === true
+  );
+}
+
+/** A move whose copy is durable carries the only proof recovery may need. */
+function hasReceiptBackedMoveProgress(item: TransferItem): boolean {
+  return (
+    item.operation === "move" &&
+    (item.movePhase === "copied" || (item.receipts?.length ?? 0) > 0)
   );
 }
 
@@ -2301,6 +2675,7 @@ export function retryFailedTransfers(): void {
       continue;
     }
     resetForRetry(item, { clearPause: true });
+    reassignTransferId(item);
   }
   if (ambiguousMovesHeld > 0) {
     const message = `${plural(ambiguousMovesHeld, "move")} still failed because destination ownership is unclear. Inspect both objects, then remove those rows.`;
@@ -2318,6 +2693,7 @@ export function retrySkippedTransfers(): void {
   for (const item of queue) {
     if (item.status !== "skipped") continue;
     resetForRetry(item, { clearPause: false });
+    reassignTransferId(item);
   }
   queueRender();
   writeQueueManifest();
@@ -2368,7 +2744,7 @@ function pruneTerminalHistory(): void {
     if (excess <= 0) return true;
     if (!PRUNABLE_TERMINAL_STATUSES.has(item.status)) return true;
     if (item.id === selectedTransferId) return true;
-    if (item.receipts && item.receipts.length > 0) return true;
+    if (hasReceiptBackedMoveProgress(item)) return true;
     excess -= 1;
     removed.push(item);
     return false;
@@ -2387,17 +2763,23 @@ export function clearCompletedTransfers(): void {
 
 /**
  * Failed rows may hold resume data, so removing them needs a confirmation.
- * Moves whose ownership is unclear stay until both objects are inspected.
+ * Moves whose ownership is unclear stay until both objects are inspected, and
+ * any receipt-backed copied move keeps its durable progress even when the
+ * copy's ownership was unambiguous.
  */
 export async function clearFailedTransfers(): Promise<void> {
-  const ambiguous = queue.filter(
-    (item) => item.status === "error" && isAmbiguousMove(item),
-  ).length;
-  const removable = queue.filter(
-    (item) => item.status === "error" && !isAmbiguousMove(item),
+  const heldMoves = queue.filter(
+    (item) => item.status === "error" && hasReceiptBackedMoveProgress(item),
   );
-  if (ambiguous > 0) {
-    const message = `${plural(ambiguous, "move")} kept because destination ownership is unclear. Inspect both objects, then remove those rows.`;
+  const removable = queue.filter(
+    (item) => item.status === "error" && !hasReceiptBackedMoveProgress(item),
+  );
+  if (heldMoves.length > 0) {
+    const ambiguous = heldMoves.filter(isAmbiguousMove).length;
+    const message =
+      ambiguous > 0
+        ? `${plural(heldMoves.length, "move")} kept because their copies are recorded${ambiguous > 0 ? " and destination ownership is unclear" : ""}. Inspect both objects, then remove those rows if reconciliation is complete.`
+        : `${plural(heldMoves.length, "move")} kept because their copies are already recorded. Retry to finish source deletion or inspect both objects.`;
     logActivity(message, "warning");
     showToast(message, { type: "warning" });
   }
@@ -2414,7 +2796,7 @@ export async function clearFailedTransfers(): Promise<void> {
   const current = queue.filter(
     (item) =>
       item.status === "error" &&
-      !isAmbiguousMove(item) &&
+      !hasReceiptBackedMoveProgress(item) &&
       removable.some((row) => row.id === item.id),
   );
   if (current.length > 0) dropRows(current);
@@ -2424,8 +2806,8 @@ export async function clearFailedTransfers(): Promise<void> {
 export async function removeTransfer(id: number): Promise<void> {
   const item = queue.find((row) => row.id === id);
   if (!item) return;
-  if (isAmbiguousMove(item)) {
-    const message = `Destination ownership is unclear, so ${item.fileName} stays until both objects are inspected.`;
+  if (hasReceiptBackedMoveProgress(item)) {
+    const message = `Its copy is already recorded, so ${item.fileName} stays until the source deletion finishes or both objects are inspected.`;
     logActivity(message, "warning");
     showToast(message, { type: "warning" });
     return;
@@ -2457,11 +2839,60 @@ export function retryTransfer(id: number): void {
   if (item?.status !== "error") return;
   if (item.retryable === false || isAmbiguousMove(item)) return;
   resetForRetry(item, { clearPause: true });
+  reassignTransferId(item);
   queueRender();
   writeQueueManifest();
   void processQueue().catch((err) =>
     logActivity(`Transfer processing error: ${normalizeError(err)}`, "error"),
   );
+}
+
+/**
+ * Re-open the local picker for one row whose grant expired, was invalidated,
+ * or was never present after recovery. A completed download only needs the
+ * reveal grant refreshed; queued/failed work resumes through the queue.
+ */
+export async function reselectTransferPath(id: number): Promise<void> {
+  const item = queue.find((row) => row.id === id);
+  if (!item) return;
+  clearInvalidLocalGrant(item);
+  try {
+    await ensureLocalPathGrant(item);
+    if (item.status === "uploading" || item.status === "queued") {
+      reassignTransferId(item);
+      if (item.paused) {
+        item.paused = false;
+        item.phase = "resuming";
+      }
+      void processQueue().catch((err) =>
+        logActivity(
+          `Transfer processing error: ${normalizeError(err)}`,
+          "error",
+        ),
+      );
+    } else if (item.status === "error") {
+      resetForRetry(item, { clearPause: true });
+      reassignTransferId(item);
+      void processQueue().catch((err) =>
+        logActivity(
+          `Transfer processing error: ${normalizeError(err)}`,
+          "error",
+        ),
+      );
+    } else if (item.status === "done") {
+      showToast(`Path re-selected for ${item.fileName}.`, { type: "success" });
+    }
+    item.error = undefined;
+    renderQueue();
+    writeQueueManifest();
+  } catch (err) {
+    const message = `Could not re-select the path for ${item.fileName}: ${normalizeError(err)}`;
+    item.needsReselection = true;
+    item.error = message;
+    logActivity(message, "error");
+    showToast(message, { type: "error", duration: 0 });
+    renderQueue();
+  }
 }
 
 async function copyTransferError(id: number): Promise<void> {
@@ -2494,6 +2925,27 @@ async function revealTransferDestination(id: number): Promise<void> {
       name: item.destinationName ?? null,
     });
   } catch (err) {
+    if (isInvalidLocalGrantError(err) || !item.destinationToken) {
+      clearInvalidLocalGrant(item);
+      try {
+        await ensureLocalPathGrant(item);
+        const token = item.destinationToken;
+        if (!token) throw new Error("destination grant is still unavailable");
+        await invoke("reveal_local_path", {
+          token,
+          name: item.destinationName ?? null,
+        });
+        writeQueueManifest();
+        return;
+      } catch (reselectErr) {
+        showToast(
+          `Could not show ${item.fileName} in its folder. Re-select its local path: ${friendlyError(reselectErr)}`,
+          { type: "error", duration: 0 },
+        );
+        renderQueue();
+        return;
+      }
+    }
     showToast(
       `Could not show ${item.fileName} in its folder: ${friendlyError(err)}`,
       { type: "error" },
@@ -2976,6 +3428,7 @@ async function processQueue(): Promise<void> {
     writeQueueManifest();
     return;
   }
+  lastActiveConnectionId = state.connectionId || lastActiveConnectionId;
   const maxConcurrent = state.currentSettings.maxConcurrentTransfers;
   if (!Number.isInteger(maxConcurrent) || maxConcurrent <= 0) {
     writeQueueManifest();
@@ -3081,12 +3534,21 @@ async function processQueue(): Promise<void> {
             }
           }
         } else if (
-          (state.transfersHeldForDisconnect || !state.connected) &&
-          /cancel|not connected|connection changed/i.test(errorText)
+          (state.transfersHeldForDisconnect ||
+            !state.connected ||
+            SESSION_REPLACEMENT_PATTERN.test(errorText)) &&
+          /cancel|not connected|connection|session|expired/i.test(errorText)
         ) {
-          // Interrupted by disconnect: park it for the next connection
-          // instead of failing every queued item at once.
-          park(item, queueParkReason(item) ?? "disconnected");
+          // Interrupted by disconnect or a live session replacement: park it
+          // for the next connection instead of failing every queued item.
+          park(item, queueParkReason(item) ?? "session-replaced");
+          if (SESSION_REPLACEMENT_PATTERN.test(errorText)) {
+            item.paused = true;
+            item.pauseCancelInFlight = false;
+            if (state.connectionId) {
+              parkRowsForReplacedSession(state.connectionId);
+            }
+          }
         } else if (
           (item.paused || pauseCancelled) &&
           /cancel/i.test(errorText)
@@ -3094,6 +3556,7 @@ async function processQueue(): Promise<void> {
           // Stopped by a pause. If the user already resumed, requeue it to
           // run again instead of reporting the expected cancellation.
           requeueAfterPause(item);
+          if (!item.paused) reassignTransferId(item);
         } else {
           // Providers that cannot enforce DeleteObject If-Match make a move
           // unsafe to retry automatically. Keep the source and say so plainly.
@@ -3204,12 +3667,16 @@ function holdReceiptBackedMoveForReview(item: TransferItem): void {
 async function runItemWithRetry(item: TransferItem): Promise<boolean> {
   const maxAttempts = Math.max(1, item.maxAttempts, maxAttemptsFromSettings());
   item.maxAttempts = maxAttempts;
+  let grantRepicked = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (item.paused || queueHeld()) {
       park(item, queueParkReason(item));
       return false;
     }
+    // A cancel that arrived while no backend command owned this id must stop
+    // the retry before it starts.
+    if (item.cancelRequested) throw new Error("Cancelled");
     item.attempt = attempt;
     item.phase = "running";
     item.retryAt = undefined;
@@ -3307,6 +3774,32 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
       // A disconnect is not a transient failure to back off from; the worker
       // parks the item until the next connection.
       if (state.transfersHeldForDisconnect || !state.connected) throw err;
+      if (isInvalidLocalGrantError(err) && grantRepicked) {
+        clearInvalidLocalGrant(item);
+        throw new Error(
+          `Local path grant is no longer usable; re-select the path for ${item.fileName}. ${normalizeError(err)}`,
+        );
+      }
+      if (
+        !grantRepicked &&
+        isInvalidLocalGrantError(err) &&
+        (item.operation === "upload" || item.operation === "download")
+      ) {
+        grantRepicked = true;
+        logActivity(
+          `${operationLabel(item)} for ${describeTransfer(item)} needs its local path re-selected: ${normalizeError(err)}`,
+          "warning",
+        );
+        clearInvalidLocalGrant(item);
+        await ensureLocalPathGrant(item);
+        ensureTransferActive(item);
+        // The old attempt's cancel/progress identity must not attach to the
+        // re-picked attempt.
+        reassignTransferId(item);
+        item.phase = "running";
+        attempt -= 1;
+        continue;
+      }
       if (attempt < maxAttempts && shouldRetryError(err)) {
         const waitMs = computeRetryDelayMs(attempt);
         item.phase = "retry_wait";
@@ -3321,6 +3814,7 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
         if (item.cancelRequested) {
           throw new Error("Cancelled");
         }
+        reassignTransferId(item);
         continue;
       }
       throw err;

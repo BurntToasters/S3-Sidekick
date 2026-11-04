@@ -75,7 +75,9 @@ describe("bookmarks fallback and backup sync", () => {
     await bookmarks.loadBookmarks();
 
     expect(bookmarks.getBookmarks()).toEqual([betaBookmark]);
-    expect(bookmarks.getBookmarkLoadError()).toBeNull();
+    // Degraded mode: the backup is usable but read-only until the primary is
+    // readable again, so a save can never overwrite the unreadable copy.
+    expect(bookmarks.getBookmarkLoadError()).toMatch(/corrupt|backup/i);
     expect(commandCalls("save_bookmarks")).toHaveLength(0);
     expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
   });

@@ -6,6 +6,13 @@ pub(super) fn normalize_attempt(attempt: Option<u32>) -> u32 {
     attempt.unwrap_or(1).max(1)
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(super) struct TransferPartDigest {
+    pub(super) part: u32,
+    /// SHA-256 of exactly this part's bytes, hex-encoded.
+    pub(super) sha256: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub(super) struct TransferCheckpoint {
     pub(super) version: u8,
@@ -29,6 +36,18 @@ pub(super) struct TransferCheckpoint {
     // a versioned object: an ETag can be reused by distinct versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) version_id: Option<String>,
+    // Stable identity of the scratch inode/device that produced the completed
+    // ranges. File length alone cannot distinguish the original scratch from a
+    // same-size replacement or a preallocated file, so a checkpoint without a
+    // matching identity is restarted rather than trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) scratch_device: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) scratch_inode: Option<u64>,
+    // Digest of each completed part. Old checkpoints have none, so none of
+    // their ranges can be trusted on resume.
+    #[serde(default)]
+    pub(super) part_digests: Vec<TransferPartDigest>,
 }
 
 pub(super) fn clamp_part_size_mb(value: Option<u32>, fallback: u32) -> u32 {

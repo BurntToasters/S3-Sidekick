@@ -41,6 +41,7 @@ const environment = {
   GH_REPO_OWNER: "BurntToasters",
   GH_REPO_NAME: "S3-Sidekick",
   S3_SIDEKICK_RELEASE_FIXTURE: "1",
+  S3_SIDEKICK_RELEASE_E2E: "1",
   PATH: `${bin}${path.delimiter}${process.env.PATH}`,
 };
 const digest = (bytes) =>

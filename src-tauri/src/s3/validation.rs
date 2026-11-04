@@ -86,22 +86,6 @@ pub(super) fn key_has_unsafe_url_segments(key: &str) -> bool {
     })
 }
 
-/// Validate a key used as an S3 `CopySource`.
-///
-/// The CopySource header is a path, so a dot segment or interior empty segment
-/// can be normalized by an endpoint or proxy into a different key. Refuse those
-/// keys before any copy request instead of copying the wrong object.
-pub(super) fn validate_copy_source_key(key: &str, label: &str) -> Result<(), String> {
-    validate_readable_key(key, label)?;
-    if key_has_unsafe_url_segments(key) {
-        return Err(format!(
-            "{} contains a '.' or '..' path segment or an empty interior segment and cannot be used as a copy source safely.",
-            label
-        ));
-    }
-    Ok(())
-}
-
 /// Reject an empty prefix for operations that mutate everything beneath it.
 ///
 /// `validate_list_prefix` deliberately allows `""` because listing the bucket root is
@@ -285,10 +269,13 @@ mod tests {
     }
 
     #[test]
-    fn copy_source_validation_refuses_ambiguous_segments() {
-        assert!(validate_copy_source_key("data/odd.txt", "Source key").is_ok());
-        assert!(validate_copy_source_key("folder/", "Source key").is_ok());
-        assert!(validate_copy_source_key("data/../odd.txt", "Source key").is_err());
-        assert!(validate_copy_source_key("a//b.txt", "Source key").is_err());
+    fn dot_and_empty_segments_stay_readable_and_strictly_encoded() {
+        // HEAD/ACL/preview read these keys, and every CopySource is strictly
+        // percent-encoded, so there is no longer a separate copy-source refusal.
+        assert!(validate_readable_key("data/../odd.txt", "Source key").is_ok());
+        assert!(validate_readable_key("a//b.txt", "Source key").is_ok());
+        let encoded = encode_copy_source("bucket", "data/../odd.txt");
+        assert_eq!(encoded, "bucket/data%2F%2E%2E%2Fodd%2Etxt");
+        assert!(!encoded.contains("../"));
     }
 }

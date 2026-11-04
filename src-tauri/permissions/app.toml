@@ -1,5 +1,11 @@
 # Permission sets for the app's own commands, grouped by area.
 # Each command is also listed in build.rs; src/ipc_acl.rs checks both.
+#
+# capabilities/default.json grants the core and plugin commands explicitly
+# instead of using a `:default` set: app version, event listen/unlisten, the
+# window commands used by titlebar.ts and window-size.ts, dialog message (ask is
+# an alias), notification permission, updater check/download/install,
+# and process restart.
 
 [[set]]
 identifier = "s3-session"
@@ -31,6 +37,8 @@ permissions = [
   "allow-copy-object-to",
   "allow-copy-prefix-to",
   "allow-delete-copied-objects",
+  "allow-list-rollback-backups",
+  "allow-delete-rollback-backups",
 ]
 
 [[set]]
@@ -86,6 +94,7 @@ permissions = [
   "allow-load-bookmarks-backup",
   "allow-save-bookmarks-backup",
   "allow-load-connection",
+  "allow-get-connection-id",
   "allow-save-connection",
   "allow-clear-saved-connection",
 ]

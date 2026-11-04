@@ -9,6 +9,22 @@ function isTruthy(value) {
 }
 
 /** Release verification must never accept an artifact whose signing was skipped. */
+/**
+ * Production release commands must never run with the synthetic-installer
+ * fixture bypass. Only the test harness may set it, and only when invoking
+ * the verification helpers directly rather than the published CLI.
+ */
+function assertProductionSignatureEnvironment(environment = process.env) {
+  if (
+    environment.S3_SIDEKICK_RELEASE_FIXTURE === "1" &&
+    environment.S3_SIDEKICK_RELEASE_E2E !== "1"
+  ) {
+    throw new Error(
+      "S3_SIDEKICK_RELEASE_FIXTURE is test-only and cannot be used by a release command.",
+    );
+  }
+}
+
 function assertNoSignatureSkips(environment = process.env) {
   const skipped = SKIP_ENV.filter((name) => isTruthy(environment[name]));
   if (skipped.length > 0) {
@@ -98,5 +114,6 @@ function verifyDownloadedArtifactSignature(
 module.exports = {
   SKIP_ENV,
   assertNoSignatureSkips,
+  assertProductionSignatureEnvironment,
   verifyDownloadedArtifactSignature,
 };

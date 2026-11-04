@@ -216,6 +216,7 @@
                       autocapitalize="off"
                       autocorrect="off"
                       autocomplete="off"
+                      maxlength="256"
                     />
                   </div>
                 </div>
@@ -272,6 +273,7 @@
                       autocapitalize="off"
                       autocorrect="off"
                       autocomplete="off"
+                      maxlength="2048"
                     />
                   </div>
                   <div class="form-group form-group--narrow">
@@ -286,6 +288,7 @@
                       autocapitalize="off"
                       autocorrect="off"
                       autocomplete="off"
+                      maxlength="128"
                     />
                   </div>
                 </div>
@@ -303,6 +306,7 @@
                       autocapitalize="off"
                       autocorrect="off"
                       autocomplete="off"
+                      maxlength="256"
                     />
                   </div>
                 </div>
@@ -321,6 +325,7 @@
                         autocapitalize="off"
                         autocorrect="off"
                         autocomplete="off"
+                        maxlength="4096"
                       />
                       <button
                         id="secret-key-toggle"
@@ -352,6 +357,7 @@
                         autocapitalize="off"
                         autocorrect="off"
                         autocomplete="off"
+                        maxlength="16384"
                       />
                       <button
                         id="session-token-toggle"
@@ -1229,59 +1235,59 @@
             </div>
           </div>
         </div>
-
-        <footer class="statusbar" role="contentinfo">
-          <span id="status" role="status" aria-live="polite"></span>
-          <div class="statusbar__right">
-            <span id="statusbar-count" class="statusbar__count"></span>
-            <span id="statusbar-throughput" class="statusbar__count"></span>
-            <button
-              type="button"
-              id="activity-toggle"
-              class="btn btn--icon statusbar__transfer"
-              title="Activity log"
-              aria-label="Activity log"
-              aria-controls="bottom-drawer"
-              aria-expanded="false"
-            >
-              <span class="lucide-icon" data-icon="clipboard-list"></span
-              ><span
-                id="activity-badge"
-                class="transfer-badge activity-badge"
-                style="display: none"
-              ></span>
-            </button>
-            <button
-              type="button"
-              id="transfer-toggle"
-              class="btn btn--icon statusbar__transfer"
-              title="Transfers"
-              aria-label="Transfers"
-              aria-controls="bottom-drawer"
-              aria-expanded="false"
-            >
-              <span class="lucide-icon" data-icon="download"></span
-              ><span
-                id="transfer-badge"
-                class="transfer-badge"
-                style="display: none"
-              ></span>
-            </button>
-            <span id="version-label"></span>
-            <button
-              type="button"
-              id="palette-hint"
-              class="btn btn--ghost btn--sm statusbar__palette"
-              title="Commands (Ctrl+K)"
-              aria-label="Open command palette"
-            >
-              <span class="lucide-icon" data-icon="search"></span>
-              <span>Commands</span>
-              <span class="shortcut-chip">Ctrl+K</span>
-            </button>
-          </div>
-        </footer>
       </main>
+
+      <footer class="statusbar" role="contentinfo">
+        <span id="status" role="status" aria-live="polite"></span>
+        <div class="statusbar__right">
+          <span id="statusbar-count" class="statusbar__count"></span>
+          <span id="statusbar-throughput" class="statusbar__count"></span>
+          <button
+            type="button"
+            id="activity-toggle"
+            class="btn btn--icon statusbar__transfer"
+            title="Activity log"
+            aria-label="Activity log"
+            aria-controls="bottom-drawer"
+            aria-expanded="false"
+          >
+            <span class="lucide-icon" data-icon="clipboard-list"></span
+            ><span
+              id="activity-badge"
+              class="transfer-badge activity-badge"
+              style="display: none"
+            ></span>
+          </button>
+          <button
+            type="button"
+            id="transfer-toggle"
+            class="btn btn--icon statusbar__transfer"
+            title="Transfers"
+            aria-label="Transfers"
+            aria-controls="bottom-drawer"
+            aria-expanded="false"
+          >
+            <span class="lucide-icon" data-icon="download"></span
+            ><span
+              id="transfer-badge"
+              class="transfer-badge"
+              style="display: none"
+            ></span>
+          </button>
+          <span id="version-label"></span>
+          <button
+            type="button"
+            id="palette-hint"
+            class="btn btn--ghost btn--sm statusbar__palette"
+            title="Commands (Ctrl+K)"
+            aria-label="Open command palette"
+          >
+            <span class="lucide-icon" data-icon="search"></span>
+            <span>Commands</span>
+            <span class="shortcut-chip">Ctrl+K</span>
+          </button>
+        </div>
+      </footer>
     </div>
 
     <div
@@ -2773,7 +2779,13 @@
             S3
           </button>
         </div>
-        <div id="info-body" class="modal__body">
+        <div
+          id="info-body"
+          class="modal__body"
+          role="tabpanel"
+          aria-labelledby="info-tab-general"
+          tabindex="0"
+        >
           <div class="metadata-loading">
             <span class="spinner"></span>Loading&#8230;
           </div>

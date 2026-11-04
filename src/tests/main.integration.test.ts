@@ -246,6 +246,7 @@ vi.mock("../connection.ts", () => ({
   disconnect: mockDisconnect,
   saveConnection: mockSaveConnection,
   loadConnection: mockLoadConnection,
+  setConnectionAccessLocked: vi.fn(),
   refreshBuckets: mockRefreshBuckets,
   refreshObjects: mockRefreshObjects,
   loadMoreObjects: mockLoadMoreObjects,
@@ -314,6 +315,7 @@ vi.mock("../browser.ts", () => ({
   pruneStaleSelection: mockPruneStaleSelection,
   readLastBucket: mockReadLastBucket,
   CONNECTION_RESET_EVENT: "s3-sidekick:connection-reset",
+  LOCATION_FLUSH_EVENT: "s3-sidekick:flush-location",
 }));
 
 vi.mock("../updater.ts", () => ({
@@ -349,6 +351,7 @@ vi.mock("../context-menu.ts", () => ({
 }));
 
 vi.mock("../info-panel.ts", () => ({
+  invalidateInfoPanelCaches: vi.fn(),
   INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
   openInfoPanel: mockOpenInfoPanel,
   closeInfoPanel: mockCloseInfoPanel,
@@ -646,14 +649,18 @@ describe("main integration", () => {
       if (cmd === "create_folder") return undefined;
       if (cmd === "download_object") return 128;
       if (cmd === "list_local_files_recursive") {
-        return [
-          {
-            file_path: "C:\\tmp\\folder\\a.txt",
-            relative_path: "a.txt",
-            size: 1,
-            file_token: "grant-file-a",
-          },
-        ];
+        return {
+          entries: [
+            {
+              file_path: "C:\\tmp\\folder\\a.txt",
+              relative_path: "a.txt",
+              size: 1,
+              file_token: "grant-file-a",
+            },
+          ],
+          warnings: [],
+          warning_count: 0,
+        };
       }
       if (cmd === "open_external_url") return undefined;
       return undefined;
@@ -2490,7 +2497,9 @@ describe("main integration", () => {
       }
       if (cmd === "list_local_files_recursive") {
         if (listMode === "throw") throw new Error("scan failed");
-        if (listMode === "empty") return [];
+        if (listMode === "empty") {
+          return { entries: [], warnings: [], warning_count: 0 };
+        }
       }
       if (baseInvoke) return baseInvoke(cmd, payload);
       return undefined;
@@ -3546,7 +3555,9 @@ describe("main integration", () => {
 
     const baseInvoke = mockInvoke.getMockImplementation();
     mockInvoke.mockImplementation(async (cmd, payload) => {
-      if (cmd === "list_local_files_recursive") return [];
+      if (cmd === "list_local_files_recursive") {
+        return { entries: [], warnings: [], warning_count: 0 };
+      }
       if (baseInvoke) return baseInvoke(cmd, payload);
       return undefined;
     });

@@ -121,7 +121,9 @@ describe("context menu", () => {
     const disabled = document.querySelectorAll<HTMLButtonElement>(
       ".context-menu__item",
     )[1];
-    expect(disabled.disabled).toBe(true);
+    // Disabled items stay focusable so their reason is discoverable.
+    expect(disabled.disabled).toBe(false);
+    expect(disabled.getAttribute("aria-disabled")).toBe("true");
     disabled.click();
     expect(onAction).not.toHaveBeenCalled();
 

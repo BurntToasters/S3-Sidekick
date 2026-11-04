@@ -9,6 +9,7 @@ const mockLoadBookmarks = vi.fn<() => Promise<void>>();
 const mockRenderBookmarkList = vi.fn();
 const mockRemoveBookmark = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockGetBookmarks = vi.fn();
+const mockGetBookmarkLoadError = vi.fn<() => string | null>();
 const mockExportBookmarksJson = vi.fn();
 const mockImportBookmarksJson = vi.fn();
 const mockIsUpdaterEnabled = vi.fn();
@@ -44,6 +45,7 @@ vi.mock("../bookmarks.ts", () => ({
   renderBookmarkList: mockRenderBookmarkList,
   removeBookmark: mockRemoveBookmark,
   getBookmarks: mockGetBookmarks,
+  getBookmarkLoadError: mockGetBookmarkLoadError,
   exportBookmarksJson: mockExportBookmarksJson,
   importBookmarksJson: mockImportBookmarksJson,
   updateBookmark: mockUpdateBookmark,
@@ -92,6 +94,8 @@ describe("settings module", () => {
     mockRenderBookmarkList.mockReset();
     mockRemoveBookmark.mockReset();
     mockGetBookmarks.mockReset();
+    mockGetBookmarkLoadError.mockReset();
+    mockGetBookmarkLoadError.mockReturnValue(null);
     mockExportBookmarksJson.mockReset();
     mockImportBookmarksJson.mockReset();
     mockIsUpdaterEnabled.mockReset();
@@ -569,6 +573,55 @@ describe("settings module", () => {
     expect(mockRelaunch).toHaveBeenCalledTimes(1);
   });
 
+  it("resyncs the backend session before a reloaded reset clears credentials", async () => {
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.connectionId = "";
+
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
+    mockRelaunch.mockResolvedValue(undefined);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_connection_id") return "backend-session";
+      return undefined;
+    });
+
+    await settings.resetSettings();
+
+    expect(mockInvoke).toHaveBeenCalledWith("get_connection_id");
+    expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection", {
+      connectionId: "backend-session",
+    });
+    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps a stale reset session to disconnect-and-retry", async () => {
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.connectionId = "old-session";
+
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "clear_saved_connection") {
+        throw new Error("Connection session changed; disconnect and retry.");
+      }
+      return undefined;
+    });
+
+    await settings.resetSettings();
+
+    expect(mockShowAlert).toHaveBeenCalledWith(
+      "Reset Failed",
+      "Your session changed; disconnect and retry.",
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "save_settings",
+      expect.anything(),
+    );
+    expect(mockRelaunch).not.toHaveBeenCalled();
+  });
+
   it("factory reset gets final consent before one backend transaction", async () => {
     const settings = await import("../settings.ts");
     localStorage.setItem("s3-sidekick.transfer-manifest.v1", "plaintext");
@@ -591,6 +644,16 @@ describe("settings module", () => {
     expect(mockInvoke).toHaveBeenCalledWith("factory_reset", {
       settingsJson: expect.stringContaining('"theme": "system"'),
     });
+    const factoryCall = mockInvoke.mock.calls.find(
+      ([command]) => command === "factory_reset",
+    );
+    const factoryPayload = JSON.parse(
+      (factoryCall?.[1] as { settingsJson: string }).settingsJson,
+    ) as Record<string, unknown>;
+    expect(
+      factoryPayload._setupComplete,
+      "factory reset must not be able to skip the setup wizard",
+    ).toBeUndefined();
     expect(localStorage.length).toBe(0);
     expect(mockRelaunch).toHaveBeenCalledTimes(1);
   });
@@ -1215,7 +1278,10 @@ describe("settings module", () => {
     state.settingsExtras = { launchCount: 3 };
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("partial");
-    mockInvoke.mockRejectedValueOnce(new Error("disk full"));
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "save_settings") throw new Error("disk full");
+      return undefined;
+    });
 
     await settings.resetSettings();
 
@@ -1302,7 +1368,7 @@ describe("settings module", () => {
     exportBtn.click();
     await flushMicrotasks(4);
     expect(mockShowConfirmWithCheckbox).toHaveBeenCalledWith(
-      "Export saved connections",
+      "Export saved connections (secrets and session tokens optional)",
       expect.any(String),
       expect.objectContaining({
         okLabel: "Export",

@@ -52,6 +52,7 @@ vi.mock("../bookmarks.ts", () => ({
   addBookmark: addBookmarkMock,
   clearBookmarks: vi.fn(),
   getBookmarks: vi.fn(() => []),
+  getBookmarkLoadError: vi.fn(() => null),
   renderBookmarkBar: renderBookmarkBarMock,
   isEndpointBookmarked: isEndpointBookmarkedMock,
   renderBookmarkList: renderBookmarkListMock,
@@ -75,6 +76,7 @@ vi.mock("../dialogs.ts", () => ({
 }));
 
 vi.mock("../inspector.ts", () => ({
+  refreshInspectorEmptySummary: vi.fn(),
   requestCloseInspector: requestCloseInspectorMock,
   setInspectorOpen: vi.fn(),
 }));

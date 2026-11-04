@@ -139,6 +139,7 @@ jobs:
             test-results/move-safety-e2e/
             test-results/release-assets-e2e/
             test-results/release-preflight-origin-e2e/
+            test-results/release-cleanup-safety/
             test-results/aws-null-runner-e2e/
           if-no-files-found: ignore
           retention-days: 14
@@ -170,6 +171,11 @@ jobs:
         env:
           PLAYWRIGHT_JSON_OUTPUT_FILE: test-results/playwright-report.json
         run: npm run test:ui
+
+      - name: Verify required Playwright spec manifest, counts, and no retries
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_FILE: test-results/playwright-report.json
+        run: npm run test:ui:verify
 
       - name: Run script E2E suites
         run: npm run test:e2e:scripts
@@ -268,12 +274,17 @@ jobs:
       - name: Run MinIO E2E suite
         run: npm run test:e2e:minio
 
+      - name: Run real AWS null-version E2E
+        run: npm run test:e2e:aws-null-version
+
       - name: Upload MinIO E2E report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: minio-e2e-report
-          path: test-results/minio-e2e/
+          path: |
+            test-results/minio-e2e/
+            test-results/aws-null-version-e2e/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -531,11 +542,60 @@ jobs:
       - name: Build unsigned Flatpak bundle
         run: npm run flatpak:bundle
 
+  windows-startup-e2e:
+    name: Windows startup stack E2E
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install pinned npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          cache-targets: false
+          prefix-key: v2-windows-startup
+          key: ${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run real Windows startup E2E
+        run: npm run test:e2e:windows-startup
+
+      - name: Upload Windows startup report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-startup-e2e
+          path: test-results/windows-startup/
+          if-no-files-found: error
+          retention-days: 14
+
   # Exact release gate: a release may only start from a commit where this job
   # is green. It aggregates the native test/format matrix, Playwright browser
-  # suite, MinIO command-layer suite, full-stack WebDriver suite, and the
-  # unsigned Windows/macOS/Flatpak toolchain smokes. `release:ci-status`
-  # reads this check-run name ("Release gate") for the exact HEAD SHA.
+  # suite, MinIO command-layer suite, full-stack WebDriver suite, the real
+  # AWS-null and Windows-startup E2E suites, and the unsigned
+  # Windows/macOS/Flatpak toolchain smokes. `release:ci-status` reads this
+  # check-run name ("Release gate") for the exact HEAD SHA and verifies the
+  # Actions workflow identity behind it.
   release-gate:
     name: Release gate
     if: always()
@@ -544,6 +604,7 @@ jobs:
       - browser-layout
       - minio-e2e
       - fullstack-e2e
+      - windows-startup-e2e
       - windows-arm64-smoke
       - macos-universal-smoke
       - flatpak-smoke
@@ -556,6 +617,7 @@ jobs:
           BROWSER: ${{ needs.browser-layout.result }}
           MINIO: ${{ needs.minio-e2e.result }}
           FULLSTACK: ${{ needs.fullstack-e2e.result }}
+          WINDOWS_STARTUP: ${{ needs.windows-startup-e2e.result }}
           WINDOWS_SMOKE: ${{ needs.windows-arm64-smoke.result }}
           MACOS_SMOKE: ${{ needs.macos-universal-smoke.result }}
           FLATPAK_SMOKE: ${{ needs.flatpak-smoke.result }}
@@ -566,6 +628,7 @@ jobs:
             "browser-layout=$BROWSER" \
             "minio-e2e=$MINIO" \
             "fullstack-e2e=$FULLSTACK" \
+            "windows-startup-e2e=$WINDOWS_STARTUP" \
             "windows-arm64-smoke=$WINDOWS_SMOKE" \
             "macos-universal-smoke=$MACOS_SMOKE" \
             "flatpak-smoke=$FLATPAK_SMOKE"; do

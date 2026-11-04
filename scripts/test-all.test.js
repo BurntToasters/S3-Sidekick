@@ -30,6 +30,7 @@ test("createInitialResults includes cargo quality and frontend build keys", () =
   assert.equal(results.nativeBuild.status, "pending");
   assert.equal(results.tauriBuild.status, "pending");
   assert.equal(results.releaseAssets.status, "pending");
+  assert.equal(results.releaseAssetsE2e.status, "pending");
 });
 
 test("Rust failure summary lists test names, not panic detail lines", () => {
@@ -166,6 +167,8 @@ test("main runs icon validation and release-asset tests before evidence", () => 
       if (name === "icons") assert.deepEqual(args, ["run", "icons:check"]);
       if (name === "releaseAssets")
         assert.deepEqual(args, ["run", "test:release-assets"]);
+      if (name === "releaseAssetsE2e")
+        assert.deepEqual(args, ["run", "test:e2e:release-assets"]);
       results[name].status = "passed";
       return true;
     },
@@ -175,6 +178,15 @@ test("main runs icon validation and release-asset tests before evidence", () => 
   assert.ok(calls.includes("run:releaseAssets"));
   assert.ok(calls.indexOf("run:icons") < calls.indexOf("run:clippy"));
   assert.ok(calls.indexOf("run:releaseAssets") < calls.indexOf("run:test"));
+  if (process.platform !== "win32") {
+    assert.ok(
+      calls.indexOf("run:releaseAssets") <
+        calls.indexOf("run:releaseAssetsE2e"),
+    );
+    assert.ok(
+      calls.indexOf("run:releaseAssetsE2e") < calls.indexOf("run:test"),
+    );
+  }
   assert.equal(exitCode, 0);
 });
 

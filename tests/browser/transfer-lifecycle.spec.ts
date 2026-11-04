@@ -96,10 +96,11 @@ test.describe("transfer lifecycle", () => {
       "Completed",
     );
     const calls = await readMockCallLog(page);
-    expect(countOf(calls, "mock:pending-cancel-consumed")).toBe(1);
-    // Attempt 1 failed (503), the resumed attempt absorbed the pending
-    // cancel, and the requeued attempt completed.
-    expect(countOf(calls, "copy_object_to")).toBe(3);
+    // Resume mints a fresh transfer ID, so the old pending cancel must not
+    // reach the retried attempt.
+    expect(countOf(calls, "mock:pending-cancel-consumed")).toBe(0);
+    // Attempt 1 failed (503); the resumed retry under a new ID completed.
+    expect(countOf(calls, "copy_object_to")).toBe(2);
     await expect(page.locator("#transfer-queue-summary")).not.toContainText(
       /failed/,
     );

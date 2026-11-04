@@ -13,7 +13,10 @@ const {
   isExpectedRelease,
 } = require("./release-draft-metadata.cjs");
 const { releaseTargetMatchesCommit } = require("./release-draft-target.cjs");
-const { assertNoSignatureSkips } = require("./release-signature-gate.cjs");
+const {
+  assertNoSignatureSkips,
+  assertProductionSignatureEnvironment,
+} = require("./release-signature-gate.cjs");
 
 const ROOT = path.resolve(__dirname, "..");
 const packageJson = require("../package.json");
@@ -29,6 +32,21 @@ function currentCommit() {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+}
+
+// Publishing is a release gate, not a convenience upload. It must prove the
+// exact tree and commit that passed test:all and CI, even when run standalone.
+async function assertReleaseAuthority(commit) {
+  const { verifyReleaseSession } = await import("./release-session.js");
+  const session = verifyReleaseSession(ROOT);
+  if (String(session.commit || "").toLowerCase() !== commit.toLowerCase()) {
+    throw new Error(
+      `Release build session is for ${session.commit}, not HEAD ${commit}.`,
+    );
+  }
+  const { runReleaseCiStatus } = await import("./release-ci-status.js");
+  runReleaseCiStatus({ commit });
+  return session;
 }
 
 function verifyDraft(receiptPath) {
@@ -168,11 +186,13 @@ function assertPublishedResponse(published, { commit } = {}) {
   return assertReleaseTagName(published, TAG, "Published release");
 }
 
-function main() {
+async function main() {
+  assertProductionSignatureEnvironment(process.env);
   assertStableReleaseOverridesAllowed(process.env, VERSION);
   assertNoSignatureSkips(process.env);
   assertGitHubCliAuthenticated();
   const commit = currentCommit();
+  await assertReleaseAuthority(commit);
   const draft = findDraft();
   if (
     !releaseTargetMatchesCommit(draft.target_commitish, commit, {
@@ -214,20 +234,19 @@ function main() {
 }
 
 if (require.main === module) {
-  try {
-    main();
-  } catch (error) {
+  main().catch((error) => {
     console.error(
       `release:publish failed: ${error instanceof Error ? error.message : String(error)}`,
     );
     process.exit(1);
-  }
+  });
 }
 
 module.exports = {
   assertLiveAssetsMatchReceipt,
   assertPublishedResponse,
   assertReceiptMatchesRelease,
+  assertReleaseAuthority,
   currentCommit,
   findDraft,
   listReleaseAssets,

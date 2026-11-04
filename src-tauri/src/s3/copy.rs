@@ -424,6 +424,19 @@ pub(super) fn ambiguous_destination_identity(
     })
 }
 
+/// A lost copy-completion response can be partially checked by comparing the
+/// destination HEAD with the source facts the copy carried. The identity is
+/// still marked ambiguous because an identical external write cannot be ruled
+/// out, but a size or metadata mismatch must not be accepted as our commit.
+fn copy_destination_head_matches_source(
+    head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
+    source: &SourceObjectInfo,
+) -> bool {
+    head.content_length() == Some(source.size)
+        && head.content_type() == source.content_type.as_deref()
+        && head.metadata() == source.metadata.as_ref()
+}
+
 pub(super) fn source_info_from_head(
     head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
 ) -> SourceObjectInfo {
@@ -738,29 +751,6 @@ pub(super) async fn resolve_copy_precondition_failure(
     }
 }
 
-/// A create-only CompleteMultipartUpload failed with 412. If the upload ID is
-/// gone, an earlier completion attempt of this upload committed; a real
-/// conflict rejects the request without consuming the upload.
-pub(super) async fn multipart_upload_already_completed(
-    client: &Client,
-    bucket: &str,
-    key: &str,
-    upload_id: &str,
-    cancel: &CancelToken,
-) -> bool {
-    let request = client
-        .list_parts()
-        .bucket(bucket)
-        .key(key)
-        .upload_id(upload_id)
-        .max_parts(1)
-        .send();
-    tokio::select! {
-        _ = cancel.cancelled() => false,
-        result = request => matches!(result, Err(ref err) if is_not_found(err)),
-    }
-}
-
 pub(super) async fn copy_object_multipart(
     client: &Client,
     src_bucket: &str,
@@ -928,6 +918,13 @@ pub(super) async fn copy_object_multipart(
         .set_parts(Some(completed_parts))
         .build();
 
+    // A cancellation observed before the request is constructed is
+    // unambiguous: no completion reached the service, so the upload can be
+    // aborted. Cancellation after the send is handled below as pending.
+    if cancel.is_cancelled() {
+        abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
+        return Err(cancelled_error());
+    }
     let mut complete_request = client
         .complete_multipart_upload()
         .bucket(dst_bucket)
@@ -946,14 +943,14 @@ pub(super) async fn copy_object_multipart(
         _ = cancel.cancelled() => {
             // Completion may already be live. Aborting the upload would race a
             // service that is still publishing the destination, so retain it and
-            // let the caller verify or retry.
+            // report the recorded upload ID instead of a bare cancellation.
             return Err(encode_transfer_error(
                 "completion_pending",
                 true,
                 None,
                 format!(
-                    "Copy to '{}' was cancelled while completion was in flight. The multipart upload was not aborted because it may still complete; retry or verify the destination before copying again.",
-                    dest_key
+                    "Copy to '{}' was cancelled while completion was in flight. The multipart upload ID '{}' was retained because it may still complete; retry or verify the destination before copying again.",
+                    dest_key, upload_id
                 ),
             ));
         }
@@ -963,24 +960,52 @@ pub(super) async fn copy_object_multipart(
     let complete_output = match complete_result {
         Ok(output) => output,
         Err(e) => {
-            if !overwrite
-                && is_destination_occupied(&e)
-                && multipart_upload_already_completed(
-                    client, dst_bucket, dest_key, &upload_id, cancel,
-                )
-                .await
-            {
-                // The upload ID is consumed, so an earlier completion
-                // committed. Bind what is there now, without claiming it.
+            if is_no_such_upload(&e) || is_destination_occupied(&e) {
+                // The upload ID may be consumed because an earlier completion
+                // committed. Accept only a destination whose size and copied
+                // metadata prove it is this copy; otherwise report pending.
                 let head = client.head_object().bucket(dst_bucket).key(dest_key).send();
                 let head = tokio::select! {
-                    _ = cancel.cancelled() => return Err(cancelled_error()),
-                    result = head => result.map_err(|err| format!(
-                        "Copy to '{}' may have committed, but the destination could not be read: {}. The destination was retained.",
-                        dest_key, err
-                    ))?,
+                    _ = cancel.cancelled() => return Err(encode_transfer_error(
+                        "completion_pending",
+                        true,
+                        None,
+                        format!(
+                            "Copy to '{}' may have committed; destination verification was cancelled. The multipart upload ID '{}' was retained.",
+                            dest_key, upload_id
+                        ),
+                    )),
+                    result = head => result,
                 };
-                return ambiguous_destination_identity(&head, dest_key);
+                match head {
+                    Ok(head) if copy_destination_head_matches_source(&head, info) => {
+                        return ambiguous_destination_identity(&head, dest_key);
+                    }
+                    Ok(_) | Err(_) => {
+                        return Err(encode_transfer_error(
+                            "completion_pending",
+                            true,
+                            None,
+                            format!(
+                                "Copy to '{}' may have committed, but the destination does not prove this copy wrote it. The multipart upload ID '{}' was retained; verify the destination before retrying.",
+                                dest_key, upload_id
+                            ),
+                        ));
+                    }
+                }
+            }
+            let ambiguous = completion_outcome_is_ambiguous(&e);
+            if ambiguous {
+                // Never abort a completion that may still be publishing.
+                return Err(encode_transfer_error(
+                    "completion_pending",
+                    true,
+                    None,
+                    format!(
+                        "Completing the copy to '{}' returned an ambiguous result. The multipart upload ID '{}' was retained; retry or verify the destination before copying again.",
+                        dest_key, upload_id
+                    ),
+                ));
             }
             abort_multipart_upload_bounded(client, dst_bucket, dest_key, &upload_id).await;
             if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
@@ -1111,6 +1136,59 @@ pub(super) async fn copy_with_receipt(
     })
 }
 
+/// Secure a rollback copy of an overwrite rename destination.
+///
+/// The caller captures the destination identity first and must revalidate it
+/// after this backup commits, immediately before the replacement copy.
+async fn create_rename_destination_backup(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    original_info: SourceObjectInfo,
+    provider: StorageProviderKind,
+    cancel: &CancelToken,
+) -> Result<(RollbackNamespaceGuard, DestinationBackup), String> {
+    let namespace = RollbackNamespaceGuard::new();
+    let backup_key = format!("{}{}/0", ROLLBACK_BACKUP_PREFIX, namespace.namespace);
+    let backup_receipt = copy_with_receipt(
+        client,
+        bucket,
+        key,
+        bucket,
+        &backup_key,
+        Some(original_info.clone()),
+        false,
+        provider,
+        cancel,
+    )
+    .await
+    .map_err(|err| {
+        format!(
+            "Refusing to overwrite '{}' because its rollback backup could not be secured: {}. A partial backup may exist at '{}'; verify it before retrying.",
+            key, err, backup_key
+        )
+    })?;
+    if backup_receipt.ownership_ambiguous {
+        return Err(format!(
+            "Refusing to overwrite '{}' because the rollback backup's ownership is ambiguous. The destination was not changed.",
+            key
+        ));
+    }
+    let mut backup_source_info = original_info.clone();
+    backup_source_info.etag = Some(backup_receipt.destination_etag);
+    backup_source_info.version_id = backup_receipt.destination_version_id;
+    Ok((
+        namespace,
+        DestinationBackup {
+            destination_key: key.to_string(),
+            backup_key,
+            original_info,
+            source_info: backup_source_info,
+            replacement: None,
+        },
+    ))
+}
+
 #[tauri::command]
 pub(crate) async fn rename_object(
     state: tauri::State<'_, AppState>,
@@ -1152,8 +1230,22 @@ pub(crate) async fn rename_object(
         preflight_optional_move_version(&client, &bucket, &old_key, &cancel).await?;
     require_conditional_delete_support(provider, &old_key)?;
 
-    let destination_exists = destination_object_exists(&client, &bucket, &new_key, &cancel).await?;
-    if !overwrite && destination_exists {
+    let destination_head = client.head_object().bucket(&bucket).key(&new_key).send();
+    let destination_head = tokio::select! {
+        _ = cancel.cancelled() => return Err(cancelled_error()),
+        result = destination_head => result,
+    };
+    let destination_present = match destination_head {
+        Ok(_) => true,
+        Err(err) if is_not_found(&err) => false,
+        Err(err) => {
+            return Err(format!(
+                "Failed to check destination '{}': {}",
+                new_key, err
+            ));
+        }
+    };
+    if !overwrite && destination_present {
         return Err(format!(
             "Destination '{}' already exists. Rename with overwrite to replace it.",
             new_key
@@ -1175,49 +1267,63 @@ pub(crate) async fn rename_object(
 
     // An overwrite rename destroys the current destination. Secure a rollback
     // copy of it before touching that key; the source is never deleted unless
-    // this backup committed.
+    // this backup committed. The captured identity is revalidated after the
+    // backup and immediately before the replacement copy, so a destination
+    // changed by another writer in between is never silently overwritten.
     let mut destination_backup: Option<(RollbackNamespaceGuard, DestinationBackup)> = None;
-    if overwrite && destination_exists {
-        let namespace = RollbackNamespaceGuard::new();
-        let backup_key = format!("{}{}/0", ROLLBACK_BACKUP_PREFIX, namespace.namespace);
+    if overwrite && destination_present {
         let destination_info = describe_source(&client, &bucket, &new_key, &cancel).await?;
-        let backup_receipt = copy_with_receipt(
+        let (namespace, backup) = create_rename_destination_backup(
             &client,
             &bucket,
             &new_key,
-            &bucket,
-            &backup_key,
-            Some(destination_info.clone()),
-            false,
+            destination_info,
             provider,
             &cancel,
         )
-        .await
-        .map_err(|err| {
-            format!(
-                "Refusing to overwrite '{}' because its rollback backup could not be secured: {}. A partial backup may exist at '{}'; verify it before retrying.",
-                new_key, err, backup_key
-            )
-        })?;
-        if backup_receipt.ownership_ambiguous {
-            return Err(format!(
-                "Refusing to overwrite '{}' because the rollback backup's ownership is ambiguous. The destination was not changed.",
-                new_key
-            ));
-        }
-        let mut backup_source_info = destination_info.clone();
-        backup_source_info.etag = Some(backup_receipt.destination_etag);
-        backup_source_info.version_id = backup_receipt.destination_version_id;
-        destination_backup = Some((
-            namespace,
-            DestinationBackup {
-                destination_key: new_key.clone(),
-                backup_key,
-                original_info: destination_info,
-                source_info: backup_source_info,
-                replacement: None,
-            },
-        ));
+        .await?;
+        destination_backup = Some((namespace, backup));
+    }
+    if overwrite {
+        let unchanged = if let Some((_, backup)) = destination_backup.as_ref() {
+            require_destination_unchanged_since_backup(&client, &bucket, backup, &cancel).await
+        } else {
+            // The destination was absent at the first HEAD. Re-check it
+            // right before the copy: if another writer created it in the
+            // meantime, back that object up instead of overwriting blindly.
+            let recheck = client.head_object().bucket(&bucket).key(&new_key).send();
+            let recheck = tokio::select! {
+                _ = cancel.cancelled() => return Err(cancelled_error()),
+                result = recheck => result,
+            };
+            match recheck {
+                Ok(_) => {
+                    let destination_info =
+                        describe_source(&client, &bucket, &new_key, &cancel).await?;
+                    let (namespace, backup) = create_rename_destination_backup(
+                        &client,
+                        &bucket,
+                        &new_key,
+                        destination_info,
+                        provider,
+                        &cancel,
+                    )
+                    .await?;
+                    let result = require_destination_unchanged_since_backup(
+                        &client, &bucket, &backup, &cancel,
+                    )
+                    .await;
+                    destination_backup = Some((namespace, backup));
+                    result
+                }
+                Err(err) if is_not_found(&err) => Ok(()),
+                Err(err) => Err(format!(
+                    "Failed to re-check destination '{}' before overwrite: {}",
+                    new_key, err
+                )),
+            }
+        };
+        unchanged?;
     }
 
     let receipt = match copy_with_receipt(

@@ -306,6 +306,13 @@ function isOwnershipAmbiguous(t: TransferItem): boolean {
   );
 }
 
+function hasReceiptBackedMoveProgress(t: TransferItem): boolean {
+  return (
+    t.operation === "move" &&
+    (t.movePhase === "copied" || (t.receipts?.length ?? 0) > 0)
+  );
+}
+
 function rowControl(
   action: string,
   label: string,
@@ -566,12 +573,22 @@ export function renderTransferRow(
           "transfer-reveal",
         )
       : "";
+  const reselectButton =
+    t.needsReselection && t.status !== "uploading"
+      ? rowControl(
+          "reselect",
+          `Re-select local path for ${t.fileName}`,
+          "folder-open",
+          "transfer-reselect",
+        )
+      : "";
   const removeButton =
     (t.status === "done" ||
       t.status === "error" ||
       t.status === "skipped" ||
       t.status === "cancelled") &&
-    !ambiguous
+    !ambiguous &&
+    !hasReceiptBackedMoveProgress(t)
       ? rowControl(
           "remove",
           `${TRANSFER_TEXT.remove} ${t.fileName} from the list`,
@@ -617,6 +634,7 @@ export function renderTransferRow(
     retryButton +
     copyErrorButton +
     revealButton +
+    reselectButton +
     removeButton +
     `</div>`
   );

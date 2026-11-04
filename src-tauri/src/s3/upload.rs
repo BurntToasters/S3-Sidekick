@@ -57,6 +57,91 @@ fn hex_lower(bytes: &[u8]) -> String {
     hex
 }
 
+/// A multipart completion whose request may have reached the service but whose
+/// outcome could not be proven. The upload ID is retained for every one of
+/// these so a later reconciliation can find it instead of leaking an orphan.
+fn pending_completions() -> &'static Mutex<HashSet<String>> {
+    static PENDING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn record_pending_completion<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    detail: &str,
+) -> String {
+    let id = format!("{}|{}|{}", bucket, key, upload_id);
+    if let Ok(mut pending) = pending_completions().lock() {
+        pending.insert(id);
+    }
+    // Persist the upload ID so a process restart does not lose the only record
+    // of a completion that may still be live. The record deliberately has no
+    // `temp_path`, so checkpoint GC can expire it once it is stale.
+    if let Ok(json) = serde_json::to_string(&serde_json::json!({
+        "kind": "pending_multipart_completion",
+        "bucket": bucket,
+        "key": key,
+        "upload_id": upload_id,
+        "recorded_at_ms": now_ms(),
+        "detail": detail,
+    })) {
+        let _ = crate::save_transfer_checkpoint_json_unchecked(
+            app,
+            &format!("pending-upload-{upload_id}"),
+            &json,
+        );
+    }
+    encode_transfer_error(
+        "completion_pending",
+        true,
+        None,
+        format!(
+            "{} The multipart upload ID '{}' for '{}' was retained; retry or verify the destination before uploading again.",
+            detail, upload_id, key
+        ),
+    )
+}
+
+/// `true` while the upload ID still exists, `false` when the service says it is
+/// gone, and `None` when the probe itself failed. `None` is ambiguous: never
+/// abort based on it.
+async fn multipart_upload_still_exists(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    cancel: &CancelToken,
+) -> Option<bool> {
+    let request = client
+        .list_parts()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .max_parts(1)
+        .send();
+    let result = tokio::select! {
+        _ = cancel.cancelled() => return None,
+        result = request => result,
+    };
+    match result {
+        Ok(_) => Some(true),
+        Err(err) if is_no_such_upload(&err) || is_not_found(&err) => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// A provider-returned ETag is usable as content proof only when it is the
+/// 32-hex-digit MD5 of the bytes (single-part PutObject on most providers).
+fn etag_is_md5_of(etag: Option<&str>, md5_hex: &str) -> Option<bool> {
+    let etag = etag?.trim().trim_matches('"');
+    if etag.len() != 32 || !etag.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(etag.eq_ignore_ascii_case(md5_hex))
+}
+
 #[tauri::command]
 pub(crate) async fn upload_object(
     app: tauri::AppHandle,
@@ -81,9 +166,12 @@ pub(crate) async fn upload_object(
     validate_bucket_name(&bucket)?;
     validate_mutating_key(&key, "Object key")?;
     // The upload source is the exact file the native picker or the native drop
-    // granted. Re-check it now: the file may have been replaced by a symlink,
-    // become unreadable, or changed size since the picker closed.
-    let upload_path = crate::path_authority::revalidate_upload_source(&upload_token)?;
+    // granted. Re-check it now and keep the opened handle: the file may have
+    // been replaced by a symlink, become unreadable, or changed size since the
+    // picker closed, and reopening the path later would race that check.
+    let source = crate::path_authority::revalidate_upload_source(&upload_token)?;
+    let file_size = source.size;
+    let mut file = tokio::fs::File::from_std(source.file);
     let provider = client.provider();
     let cancel = client.token();
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
@@ -91,11 +179,6 @@ pub(crate) async fn upload_object(
         &cancel,
     )
     .await?;
-
-    let file_size = tokio::fs::metadata(&upload_path)
-        .await
-        .map_err(|e| format!("File no longer accessible: {}", e))?
-        .len();
 
     let attempt = normalize_attempt(attempt);
     let overwrite = overwrite.unwrap_or(false);
@@ -125,13 +208,16 @@ pub(crate) async fn upload_object(
             None,
         );
     }
-    // The multipart path re-hashes the bytes it actually reads, so its baseline
-    // digest may come from the path. The single-PUT path hashes and streams from
-    // one opened handle below; hashing the path separately would let a swapped
-    // file be hashed here and a different file uploaded.
+    // Multipart hashing and streaming use the same opened handle. The baseline
+    // digest therefore cannot come from a different file than the one that is
+    // uploaded.
     let mut expected_checksum = if multipart_upload && needs_digest {
-        let digest = sha256_file(&upload_path, &cancel).await?;
-        Some(sha256_checksum_from_digest(&digest))
+        use tokio::io::AsyncSeekExt;
+        let digests = sha256_and_md5_opened_file(&mut file, &cancel).await?;
+        file.seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|e| format!("Failed to rewind upload source: {}", e))?;
+        Some(sha256_checksum_from_digest(&digests.sha256))
     } else {
         None
     };
@@ -169,7 +255,7 @@ pub(crate) async fn upload_object(
             &client,
             &bucket,
             &key,
-            &upload_path,
+            file,
             &content_type,
             transfer_id,
             attempt,
@@ -193,9 +279,6 @@ pub(crate) async fn upload_object(
             require_put_create_only_support(provider, &key)?;
         }
 
-        let mut file = tokio::fs::File::open(&upload_path)
-            .await
-            .map_err(|e| format!("Failed to open upload source: {}", e))?;
         let opened_size = file
             .metadata()
             .await
@@ -234,7 +317,13 @@ pub(crate) async fn upload_object(
         }
         if let Some(checksum) = expected_checksum.as_ref() {
             req = req.metadata(CHECKSUM_METADATA_KEY, &checksum.hex);
-            if checksum_enabled {
+            // A create-only marker is only meaningful if it describes the bytes
+            // actually sent. Sending the S3 checksum header unconditionally for
+            // create-only writes makes the service reject a body that differs
+            // from the handle that produced the marker; leaving it to the
+            // optional verification setting let a rewritten file commit under a
+            // mismatched marker.
+            if checksum_enabled || !overwrite {
                 req = req
                     .checksum_algorithm(ChecksumAlgorithm::Sha256)
                     .checksum_sha256(&checksum.base64);
@@ -257,8 +346,56 @@ pub(crate) async fn upload_object(
         };
         match result {
             Ok(output) => {
-                if let (true, Some(checksum)) = (checksum_enabled, expected_checksum.as_ref()) {
-                    verify_upload_checksum_response(output.checksum_sha256(), checksum, "Upload")?;
+                if let Some(checksum) = expected_checksum.as_ref() {
+                    if checksum_enabled {
+                        verify_upload_checksum_response(
+                            output.checksum_sha256(),
+                            checksum,
+                            "Upload",
+                        )?;
+                    } else if !overwrite {
+                        // The marker describes bytes hashed from the open handle.
+                        // Prove the service received those bytes: prefer its
+                        // echoed checksum, otherwise accept an MD5-shaped ETag
+                        // only when it matches the same handle's MD5.
+                        if output.checksum_sha256().is_some() {
+                            verify_upload_checksum_response(
+                                output.checksum_sha256(),
+                                checksum,
+                                "Upload",
+                            )?;
+                        } else if let Some(md5_hex) = expected_md5_hex.as_deref() {
+                            match etag_is_md5_of(output.e_tag(), md5_hex) {
+                                Some(true) => {}
+                                Some(false) => {
+                                    return Err(encode_transfer_error(
+                                        "checksum_mismatch",
+                                        false,
+                                        None,
+                                        "Upload committed, but the destination ETag does not describe the bytes the checksum marker was computed from. The object was retained and not treated as a verified write."
+                                            .to_string(),
+                                    ));
+                                }
+                                None => {
+                                    return Err(encode_transfer_error(
+                                        "checksum_unverified",
+                                        false,
+                                        None,
+                                        "Upload committed, but the provider returned neither a checksum nor a content-MD5 ETag, so the checksum marker could not be proven to describe the bytes sent. The object was retained."
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            return Err(encode_transfer_error(
+                                "checksum_unverified",
+                                false,
+                                None,
+                                "Upload committed without a checksum proof for its checksum marker. The object was retained."
+                                    .to_string(),
+                            ));
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -396,7 +533,7 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
     client: &Client,
     bucket: &str,
     key: &str,
-    file_path: &Path,
+    mut file: tokio::fs::File,
     content_type: &str,
     transfer_id: u32,
     attempt: u32,
@@ -445,14 +582,6 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
         .upload_id()
         .ok_or("No upload ID returned")?
         .to_string();
-
-    let mut file = match tokio::fs::File::open(file_path).await {
-        Ok(file) => file,
-        Err(err) => {
-            abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
-            return Err(format!("Failed to open file: {}", err));
-        }
-    };
 
     let total_parts = file_size.div_ceil(part_size_bytes as u64) as usize;
     let mut completed_parts: Vec<Option<aws_sdk_s3::types::CompletedPart>> =
@@ -627,7 +756,8 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
     // the parts that happened to be read, publishing a silently truncated object
     // and reporting success.
     let missing_parts = completed_parts.iter().filter(|part| part.is_none()).count();
-    let current_size = tokio::fs::metadata(file_path)
+    let current_size = file
+        .metadata()
         .await
         .map(|meta| meta.len())
         .unwrap_or(file_size);
@@ -673,8 +803,17 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
 
     let mut complete_output = None;
     let mut last_complete_error = String::new();
+    // Once any attempt may have reached the service, a later request must not
+    // abort the upload ID: the earlier completion can still be publishing.
+    let mut ambiguous_history = false;
     const COMPLETE_ATTEMPTS: u32 = 3;
     for attempt in 1..=COMPLETE_ATTEMPTS {
+        // Cancellation before the request is constructed is unambiguous: no
+        // completion reached the service, so the upload can be aborted safely.
+        if cancel.is_cancelled() {
+            abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+            return Err(cancelled_error());
+        }
         let mut complete_request = client
             .complete_multipart_upload()
             .bucket(bucket)
@@ -697,16 +836,14 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
             .send();
         let complete_result = tokio::select! {
             _ = cancel.cancelled() => {
-                // The completion request may already have reached the service.
-                // Aborting here could delete the upload ID while the service is
-                // still assembling and publishing the destination, so retain
-                // the upload and report an outcome the caller can retry safely.
-                return Err(encode_transfer_error(
-                    "completion_pending",
-                    true,
-                    None,
-                    "Upload cancelled while completion was in flight. The multipart upload was not aborted because it may still complete; retry or verify the destination before uploading again."
-                        .to_string(),
+                // The request may already have reached the service. Record the
+                // upload ID instead of aborting a live completion.
+                return Err(record_pending_completion(
+                    app,
+                    bucket,
+                    key,
+                    &upload_id,
+                    "Upload cancelled while completion was in flight.",
                 ));
             }
             result = complete_request => result,
@@ -735,6 +872,20 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
                     return Ok(());
                 }
                 if !overwrite && (is_destination_occupied(&e) || is_concurrent_write_conflict(&e)) {
+                    if ambiguous_history {
+                        return Err(record_pending_completion(
+                            app,
+                            bucket,
+                            key,
+                            &upload_id,
+                            &structured_transfer_sdk_error(
+                                "Failed to complete multipart upload",
+                                &e,
+                                "upload_complete",
+                                true,
+                            ),
+                        ));
+                    }
                     abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
                     return Err(map_create_only_write_error(
                         key,
@@ -743,6 +894,67 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
                         "complete upload",
                     ));
                 }
+                if is_no_such_upload(&e) {
+                    // The upload ID is gone: either an earlier attempt
+                    // committed and its response was lost, or the service
+                    // expired it. Accept only a destination that proves this
+                    // upload wrote it; never report a bare failure that hides a
+                    // committed object.
+                    if destination_is_own_write(
+                        client,
+                        bucket,
+                        key,
+                        &baseline_checksum.hex,
+                        file_size,
+                        None,
+                        cancel,
+                    )
+                    .await
+                    {
+                        return Ok(());
+                    }
+                    return Err(record_pending_completion(
+                        app,
+                        bucket,
+                        key,
+                        &upload_id,
+                        "The multipart upload ID no longer exists, but the destination does not prove this upload committed.",
+                    ));
+                }
+                let ambiguous = completion_outcome_is_ambiguous(&e);
+                if ambiguous {
+                    ambiguous_history = true;
+                    // Probe the upload before deciding anything. A timeout can
+                    // arrive after the service committed; aborting then deletes
+                    // a completion that may still be publishing.
+                    if let Some(false) =
+                        multipart_upload_still_exists(client, bucket, key, &upload_id, cancel).await
+                    {
+                        if destination_is_own_write(
+                            client,
+                            bucket,
+                            key,
+                            &baseline_checksum.hex,
+                            file_size,
+                            None,
+                            cancel,
+                        )
+                        .await
+                        {
+                            return Ok(());
+                        }
+                        return Err(record_pending_completion(
+                            app,
+                            bucket,
+                            key,
+                            &upload_id,
+                            "Completion was ambiguous and the upload ID is gone, but the destination could not be proven to be this upload.",
+                        ));
+                    }
+                    // The upload still exists, or the probe failed. Retry
+                    // below; if that also fails, report completion-pending and
+                    // retain the upload ID instead of aborting.
+                }
                 last_complete_error = structured_transfer_sdk_error(
                     "Failed to complete multipart upload",
                     &e,
@@ -750,11 +962,31 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
                     true,
                 );
                 if !complete_upload_error_is_retryable(&e) || attempt == COMPLETE_ATTEMPTS {
+                    if ambiguous || ambiguous_history {
+                        return Err(record_pending_completion(
+                            app,
+                            bucket,
+                            key,
+                            &upload_id,
+                            &last_complete_error,
+                        ));
+                    }
                     abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
                     return Err(last_complete_error);
                 }
                 let delay = Duration::from_millis(500 * 2u64.pow(attempt - 1));
                 if !cancel.sleep_unless_cancelled(delay).await {
+                    if ambiguous || ambiguous_history {
+                        // The accidental growth of an already-ambiguous attempt
+                        // must not turn into an abort of a possibly-live upload.
+                        return Err(record_pending_completion(
+                            app,
+                            bucket,
+                            key,
+                            &upload_id,
+                            &last_complete_error,
+                        ));
+                    }
                     abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
                     return Err(cancelled_error());
                 }
@@ -763,7 +995,17 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
     }
     let complete_output = match complete_output {
         Some(output) => output,
-        None => return Err(last_complete_error),
+        None => {
+            // Every attempt ended in an error. Without a proven outcome the
+            // upload ID stays recorded and un-aborted.
+            return Err(record_pending_completion(
+                app,
+                bucket,
+                key,
+                &upload_id,
+                &last_complete_error,
+            ));
+        }
     };
     if let Some((_, response_checksum)) = composite_checksum.as_ref() {
         verify_upload_checksum_value(
@@ -961,6 +1203,20 @@ mod e2e_multipart_recovery {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
+
+    #[test]
+    fn only_md5_shaped_etags_are_content_proof_for_a_single_put() {
+        const MD5: &str = "d41d8cd98f00b204e9800998ecf8427e";
+        assert_eq!(
+            super::etag_is_md5_of(Some("\"d41d8cd98f00b204e9800998ecf8427e\""), MD5),
+            Some(true)
+        );
+        assert_eq!(super::etag_is_md5_of(Some("\"deadbeef\""), MD5), None);
+        assert_eq!(
+            super::etag_is_md5_of(Some("\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""), MD5),
+            Some(false)
+        );
+    }
 
     #[test]
     fn upload_retry_ownership_accepts_marker_or_content_md5_but_copy_remains_etag_bound() {
@@ -1238,6 +1494,16 @@ mod e2e_multipart_recovery {
             );
             return Ok(());
         }
+        if request.method == "GET" && query.contains("uploadId=") {
+            // The completion probe asks whether the upload ID still exists.
+            respond(
+                &mut stream,
+                "200 OK",
+                &[("Content-Type", "application/xml".to_string())],
+                b"<ListPartsResult><Bucket>bucket</Bucket><Key>object.bin</Key><UploadId>lost-response-e2e</UploadId><PartNumberMarker>0</PartNumberMarker><NextPartNumberMarker>1</NextPartNumberMarker><MaxParts>1</MaxParts><IsTruncated>false</IsTruncated></ListPartsResult>",
+            );
+            return Ok(());
+        }
         if request.method == "PUT" && query.contains("uploadId=") {
             let mut observed = observed.lock().unwrap();
             observed.part_bytes = request.body;
@@ -1349,12 +1615,13 @@ mod e2e_multipart_recovery {
         let client = Client::from_conf(sdk_config);
         let app = make_mock_app();
         let cancel: CancelToken = Arc::new(CancelFlag::default());
+        let source = tokio::fs::File::from_std(std::fs::File::open(&path).unwrap());
         let result = upload_multipart(
             app.handle(),
             &client,
             "bucket",
             "object.bin",
-            &path,
+            source,
             "application/octet-stream",
             17,
             1,

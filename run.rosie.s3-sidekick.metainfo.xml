@@ -10,17 +10,19 @@
   </description>
   <launchable type="desktop-id">run.rosie.s3-sidekick.desktop</launchable>
   <screenshots>
+    <!-- These files first ship on next-0.12.0. Move this branch segment to main
+         only after the 0.12.0 merge makes docs/screenshots available there. -->
     <screenshot type="default">
       <caption>Browse buckets and objects with a familiar file manager layout</caption>
-      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/main/docs/screenshots/browse-light.png</image>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/next-0.12.0/docs/screenshots/browse-light.png</image>
     </screenshot>
     <screenshot type="additional">
       <caption>Preview object contents and inspect details without leaving the list</caption>
-      <image type="source" width="1440" height="800">https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/main/docs/screenshots/inspector-dark.png</image>
+      <image type="source" width="1440" height="800">https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/next-0.12.0/docs/screenshots/inspector-dark.png</image>
     </screenshot>
     <screenshot type="additional">
       <caption>Tune transfer concurrency, conflict handling, and bandwidth limits</caption>
-      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/main/docs/screenshots/settings-dark.png</image>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/BurntToasters/S3-Sidekick/next-0.12.0/docs/screenshots/settings-dark.png</image>
     </screenshot>
   </screenshots>
   <categories>

@@ -300,7 +300,21 @@ fn refresh_key_persistence(key: &[u8; KEY_LEN]) -> Result<(), String> {
 // prompt, so they run on the blocking pool rather than a Tokio worker thread.
 #[tauri::command]
 pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
-    crate::security::run_blocking(move || enable_biometric_inner(&app)).await
+    crate::security::run_blocking(move || {
+        // Enabling stores the vault key in the OS credential store, exactly as
+        // disabling removes it. A renderer call alone must not be able to
+        // persist that key without a fresh native user decision.
+        if !crate::security::confirm_security_state_change(
+            &app,
+            "Enable Biometric Unlock",
+            "The vault key will be stored in the system credential store so this device can unlock encrypted storage. Continue?",
+            "Enable Biometric Unlock",
+        ) {
+            return Err(crate::security::SECURITY_CONFIRMATION_CANCELLED.to_string());
+        }
+        enable_biometric_inner(&app)
+    })
+    .await
 }
 
 fn enable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, String> {
@@ -798,11 +812,17 @@ mod platform {
                 let msg = match status {
                     -128 => "Authentication was canceled".to_string(),
                     -25293 => "Authentication failed".to_string(),
-                    // errSecItemNotFound, and errSecMissingEntitlement (-34018)
-                    // which an unsigned build hits when the item is unreadable.
-                    -25300 | -34018 => {
+                    // Only a stable item-not-found proves the credential was
+                    // removed. errSecMissingEntitlement (-34018) is a signing /
+                    // access-group configuration error; unenrolling on it would
+                    // delete a perfectly valid key.
+                    -25300 => {
                         format!("{} (OSStatus {})", super::BIOMETRIC_KEY_MISSING, status)
                     }
+                    -34018 => format!(
+                        "Biometric credential store is unavailable (missing entitlement, OSStatus {})",
+                        status
+                    ),
                     _ => format!("Biometric authentication failed (OSStatus {})", status),
                 };
                 return Err(msg);
@@ -1089,31 +1109,46 @@ mod platform {
     /// it fails closed and the cleanup journal is retained for a later retry.
     pub fn has_stored_key() -> Result<bool, String> {
         let target_wide = to_wide(TARGET);
-        unsafe {
-            let mut pcred: *mut CREDENTIALW = ptr::null_mut();
-            match CredReadW(
-                PCWSTR(target_wide.as_ptr()),
-                CRED_TYPE_GENERIC,
-                0,
-                &mut pcred,
-            ) {
-                Ok(()) => {
-                    if !pcred.is_null() {
-                        CredFree(pcred as *const std::ffi::c_void);
+        for attempt in 0..2 {
+            unsafe {
+                let mut pcred: *mut CREDENTIALW = ptr::null_mut();
+                match CredReadW(
+                    PCWSTR(target_wide.as_ptr()),
+                    CRED_TYPE_GENERIC,
+                    0,
+                    &mut pcred,
+                ) {
+                    Ok(()) => {
+                        if !pcred.is_null() {
+                            CredFree(pcred as *const std::ffi::c_void);
+                        }
+                        return Ok(true);
                     }
-                    Ok(true)
+                    Err(err) if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT => {
+                        // A transient not-found immediately after CredDeleteW
+                        // must not be accepted as proof of removal.
+                        if attempt == 0 {
+                            thread::sleep(Duration::from_millis(WINDOWS_CREDREAD_RETRY_DELAY_MS));
+                            continue;
+                        }
+                        return Ok(false);
+                    }
+                    Err(err) if err.code().0 == WINDOWS_NO_SUCH_LOGON_SESSION_HRESULT => {
+                        return Err(format!(
+                            "Cannot verify biometric credential removal because the credential store is unavailable: {}",
+                            err
+                        ));
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "Failed to verify biometric credential removal: {}",
+                            err
+                        ));
+                    }
                 }
-                Err(err) if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT => Ok(false),
-                Err(err) if err.code().0 == WINDOWS_NO_SUCH_LOGON_SESSION_HRESULT => Err(format!(
-                    "Cannot verify biometric credential removal because the credential store is unavailable: {}",
-                    err
-                )),
-                Err(err) => Err(format!(
-                    "Failed to verify biometric credential removal: {}",
-                    err
-                )),
             }
         }
+        Err("Failed to verify biometric credential removal after retry".to_string())
     }
 }
 

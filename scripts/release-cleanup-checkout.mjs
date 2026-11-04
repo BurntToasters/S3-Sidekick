@@ -8,9 +8,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDirectExecution } from "./direct-execution.js";
 
-const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const defaultRoot = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
 
-function git(args, { allowFailure = false } = {}) {
+function runGit(root, args, { allowFailure = false } = {}) {
   const result = spawnSync("git", args, {
     cwd: root,
     encoding: "utf8",
@@ -29,7 +32,11 @@ function isTruthy(value) {
   return /^(1|true|yes|on)$/i.test(String(value || "").trim());
 }
 
-export function cleanupCheckout({ environment = process.env } = {}) {
+export function cleanupCheckout({
+  root = defaultRoot,
+  environment = process.env,
+  git = (args, options) => runGit(root, args, options),
+} = {}) {
   git(["rev-parse", "--is-inside-work-tree"]);
   const dirty = git(["status", "--porcelain=v1", "--untracked-files=all"])
     .stdout.split("\n")
@@ -75,4 +82,4 @@ if (isDirectExecution(import.meta.url)) {
   }
 }
 
-export { root };
+export { defaultRoot as root, runGit };

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-rollback-backups"
+description = "Enables the delete_rollback_backups command without any pre-configured scope."
+commands.allow = ["delete_rollback_backups"]
+
+[[permission]]
+identifier = "deny-delete-rollback-backups"
+description = "Denies the delete_rollback_backups command without any pre-configured scope."
+commands.deny = ["delete_rollback_backups"]

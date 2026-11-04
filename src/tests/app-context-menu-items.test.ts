@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 // so empty factories keep the import graph out of the test.
 vi.mock("../browser.ts", () => ({}));
 vi.mock("../info-panel.ts", () => ({
+  invalidateInfoPanelCaches: vi.fn(),
   INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
 }));
 vi.mock("../preview.ts", () => ({}));

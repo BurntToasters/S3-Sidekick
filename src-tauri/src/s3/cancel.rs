@@ -254,17 +254,59 @@ fn connection_tokens(registry: &TransferRegistryState, connection_id: &str) -> V
         .collect()
 }
 
+/// A retirement fence that removes itself on every unsuccessful exit path.
+///
+/// Registering the fence used to leak it whenever the drain timed out or the
+/// caller was cancelled before installing the replacement, leaving the still
+/// current session unable to register any new transfer. Dropping this guard
+/// unfences the session; a successful replacement calls `release()` so the
+/// fence survives until the new session is installed (or is deliberately kept
+/// when a newer connect has already taken over).
+pub(super) struct RetirementFence {
+    connection_id: String,
+    armed: bool,
+}
+
+impl RetirementFence {
+    fn arm(connection_id: &str) -> Result<Self, String> {
+        lock_transfer_registry()?
+            .retiring_connections
+            .insert(connection_id.to_string());
+        Ok(Self {
+            connection_id: connection_id.to_string(),
+            armed: true,
+        })
+    }
+
+    /// Keep the fence in place after a successful drain. The caller that is
+    /// installing the replacement owns removing it.
+    pub(super) fn release(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RetirementFence {
+    fn drop(&mut self) {
+        if self.armed {
+            finish_connection_retirement(&self.connection_id);
+        }
+    }
+}
+
 /// Stop new registrations for a session being replaced, then cancel everything
 /// that is already registered for it.
+///
+/// The returned fence is disarmed on success so the caller can keep the session
+/// closed while it installs the replacement. Any error (including the drain
+/// timeout) drops the fence and unfences the session, because no replacement was
+/// installed and that session is still current.
 pub(super) async fn retire_connection_transfers(
     connection_id: &str,
     context: &str,
-) -> Result<(), String> {
+) -> Result<RetirementFence, String> {
+    let fence = RetirementFence::arm(connection_id)?;
     let tokens = {
-        let mut registry = lock_transfer_registry()?;
-        registry
-            .retiring_connections
-            .insert(connection_id.to_string());
+        let registry = lock_transfer_registry()?;
         connection_tokens(&registry, connection_id)
     };
     cancel_tokens(tokens);
@@ -276,7 +318,11 @@ pub(super) async fn retire_connection_transfers(
             connection_tokens(&guard, connection_id)
         };
         if tokens.is_empty() {
-            return Ok(());
+            fence.release();
+            return Ok(RetirementFence {
+                connection_id: connection_id.to_string(),
+                armed: true,
+            });
         }
         cancel_tokens(tokens);
         if started.elapsed() >= Duration::from_secs(30) {

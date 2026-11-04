@@ -142,6 +142,45 @@ pub(super) fn format_sdk_error<E: std::fmt::Debug>(
     }
 }
 
+/// True only when the service explicitly answered 403 for this request.
+pub(super) fn is_access_denied<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    matches!(err, SdkError::ServiceError(ctx) if ctx.raw().status().as_u16() == 403)
+}
+
+/// True when CompleteMultipartUpload reports that the upload ID no longer
+/// exists. That can mean an earlier completion attempt committed after its
+/// response was lost.
+pub(super) fn is_no_such_upload<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    let SdkError::ServiceError(ctx) = err else {
+        return false;
+    };
+    if ctx.raw().status().as_u16() != 404 {
+        return false;
+    }
+    let body =
+        String::from_utf8_lossy(ctx.raw().body().bytes().unwrap_or(&[])).to_ascii_lowercase();
+    body.contains("nosuchupload")
+}
+
+/// Completion errors whose outcome is genuinely unknown: a timeout or transport
+/// failure may have delivered the request, and a 5xx can follow a committed
+/// write. Aborting after one of these can delete a live completion.
+pub(super) fn completion_outcome_is_ambiguous<E: std::fmt::Debug>(
+    err: &aws_sdk_s3::error::SdkError<E>,
+) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    match err {
+        SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) => true,
+        SdkError::ServiceError(ctx) => {
+            let status = ctx.raw().status().as_u16();
+            status == 200 || status == 408 || status >= 500
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn structured_transfer_sdk_error<E: std::fmt::Debug>(
     prefix: &str,
     err: &aws_sdk_s3::error::SdkError<E>,

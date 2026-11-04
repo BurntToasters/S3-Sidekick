@@ -309,6 +309,7 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
   return nodes.filter(
     (node) =>
       !node.hasAttribute("disabled") &&
+      node.getAttribute("tabindex") !== "-1" &&
       node.getAttribute("aria-hidden") !== "true" &&
       (node.offsetWidth > 0 ||
         node.offsetHeight > 0 ||

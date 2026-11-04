@@ -134,6 +134,9 @@ test("Touch ID retry is offered on macOS only when biometric is enrolled", async
       biometric_available: true,
       biometric_enrolled: true,
     },
+    // Keep the automatic Touch ID attempt pending long enough to assert the
+    // retry control, rather than racing an immediate successful unlock.
+    holdBiometric: true,
     unlockPasswords: ["correct-horse-1"],
   });
   await page.goto("/");

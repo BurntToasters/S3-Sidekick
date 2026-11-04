@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import {
   clearQualityGateEvidence,
   clearQualityGateProof,
+  sha256WorkingTree,
   writeQualityGateEvidence,
 } from "./release-session.js";
 import { isDirectExecution } from "./direct-execution.js";
@@ -14,7 +15,7 @@ const __dirname = dirname(__filename);
 const packageJsonPath = resolve(__dirname, "..", "package.json");
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 const appVersion = packageJson.version ?? "unknown";
-const scriptVersion = "1.1.1";
+const scriptVersion = "1.2.0";
 
 const colors = {
   reset: "\x1b[0m",
@@ -42,6 +43,7 @@ function createInitialResults() {
     tauriBuild: { status: "pending" },
     scriptTests: { status: "pending" },
     releaseAssets: { status: "pending" },
+    releaseAssetsE2e: { status: "pending" },
     test: { status: "pending", passed: null, failed: null, files: null },
     rust: { status: "pending", passed: null, failed: null },
   };
@@ -181,8 +183,12 @@ function printSummary(results) {
 ╚══════════════════════════════════════╝
 ${colors.reset}`);
 
-  const allPassed = Object.values(results).every(
-    (result) => result.status === "passed",
+  const allPassed = Object.entries(results).every(([name, result]) =>
+    name === "releaseAssetsE2e" &&
+    process.platform === "win32" &&
+    result.status === "skipped"
+      ? true
+      : result.status === "passed",
   );
 
   console.log(
@@ -284,6 +290,15 @@ ${colors.reset}`);
     }${colors.reset}`,
   );
   console.log(
+    `${colors.bold}Release assets E2E:${colors.reset} ${
+      results.releaseAssetsE2e?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : results.releaseAssetsE2e?.status === "skipped"
+          ? `${colors.blue}SKIP`
+          : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
     `${colors.bold}Tests:${colors.reset}      ${
       results.test.status === "passed"
         ? `${colors.green}✓ PASS`
@@ -328,6 +343,17 @@ function main({
   runner = runCommand,
 } = {}) {
   const startedAt = Date.now();
+  let workingTreeSha256Start = null;
+  if (writeEvidence) {
+    try {
+      workingTreeSha256Start = sha256WorkingTree(root);
+    } catch (error) {
+      console.error(
+        `Could not hash the working tree before test:all: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return 1;
+    }
+  }
   clearProof(root);
   if (writeEvidence) clearEvidence(root);
   const results = createInitialResults();
@@ -421,6 +447,22 @@ function main({
     results,
   );
   runner("releaseAssets", npm, ["run", "test:release-assets"], null, results);
+  if (process.platform === "win32") {
+    results.releaseAssetsE2e.status = "skipped";
+    results.releaseAssetsE2e.reason =
+      "The release-assets E2E uses a Unix GPG/Git/GitHub transport fixture; CI runs it on Linux.";
+    console.log(
+      `${colors.blue}Release assets E2E skipped on Windows; CI runs it on Linux.${colors.reset}\n`,
+    );
+  } else {
+    runner(
+      "releaseAssetsE2e",
+      npm,
+      ["run", "test:e2e:release-assets"],
+      null,
+      results,
+    );
+  }
   runner("test", npm, ["run", "test:cov"], parseTest, results);
   runner(
     "rust",
@@ -445,14 +487,32 @@ function main({
       );
       return 1;
     }
+    let workingTreeSha256End;
+    try {
+      workingTreeSha256End = sha256WorkingTree(root);
+    } catch (error) {
+      console.error(
+        `Could not hash the working tree after test:all: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return 1;
+    }
+    const treeStable = workingTreeSha256Start === workingTreeSha256End;
+    if (!treeStable) {
+      console.error(
+        "Working tree changed while test:all ran; the release quality-gate proof will be rejected.",
+      );
+    }
     const evidencePath = writeQualityGateEvidence(root, {
       commit: sha,
       startedAt,
       completedAt: Date.now(),
       checks: results,
-      passed: exitCode === 0,
+      passed: exitCode === 0 && treeStable,
+      workingTreeSha256Start,
+      workingTreeSha256End,
     });
     console.log(`Release quality-gate evidence: ${evidencePath}`);
+    if (!treeStable) return 1;
   }
   return exitCode;
 }

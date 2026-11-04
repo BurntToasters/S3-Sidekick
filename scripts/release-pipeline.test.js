@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { assertSkipCheckAllowed, parseReleaseArgs } from "./run-release.js";
@@ -26,6 +28,10 @@ import {
   assertReceiptMatchesRelease,
 } from "./publish-release.cjs";
 import { DEFAULT_GATE_JOB, selectReleaseGateRun } from "./release-ci-status.js";
+import {
+  verifyBetaManifestAssets,
+  verifyBetaManifestChecksums,
+} from "./gpg-sign.js";
 import { readAppVersion, signerArgs } from "./updater-sign.js";
 import { hasMinisignEnvelope } from "./validate-updater-manifest.js";
 import {
@@ -34,6 +40,7 @@ import {
   runWindowsBuild,
   windowsBuildCommand,
 } from "./tauri-windows-build.js";
+import { stripLicensePaths } from "./generate-cargo-licenses.js";
 
 const packageJson = JSON.parse(
   fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
@@ -454,6 +461,18 @@ test("publish receipt rejects changed release assets", () => {
 
 test("CI release gate requires a successful run for the exact HEAD", () => {
   const sha = "a".repeat(40);
+  const branch = /-beta\.\d+$/.test(packageVersion) ? "beta" : "main";
+  const repository = "BurntToasters/S3-Sidekick";
+  const workflowRun = {
+    id: 9,
+    path: ".github/workflows/ci.yml",
+    event: "push",
+    head_branch: branch,
+    head_sha: sha,
+    status: "completed",
+    conclusion: "success",
+    repository: { full_name: repository },
+  };
   const success = {
     id: 2,
     name: "Release gate",
@@ -461,6 +480,14 @@ test("CI release gate requires a successful run for the exact HEAD", () => {
     status: "completed",
     conclusion: "success",
     completed_at: "2026-01-01T00:00:02Z",
+    app: { slug: "github-actions" },
+    details_url: `https://github.com/${repository}/actions/runs/9/job/2`,
+  };
+  const options = {
+    sha,
+    branch,
+    repository,
+    workflowRunFor: () => workflowRun,
   };
   assert.equal(
     selectReleaseGateRun(
@@ -473,22 +500,70 @@ test("CI release gate requires a successful run for the exact HEAD", () => {
           completed_at: "2026-01-01T00:00:01Z",
         },
       ],
-      { sha },
+      options,
     ),
     success,
   );
-  assert.throws(() => selectReleaseGateRun([], { sha }), /has no run/);
+  assert.throws(() => selectReleaseGateRun([], options), /has no run/);
   assert.throws(
     () =>
-      selectReleaseGateRun([{ ...success, conclusion: "failure" }], { sha }),
+      selectReleaseGateRun([{ ...success, conclusion: "failure" }], options),
     /requires success/,
   );
   assert.throws(
     () =>
-      selectReleaseGateRun([{ ...success, head_sha: "b".repeat(40) }], {
-        sha,
-      }),
+      selectReleaseGateRun([{ ...success, head_sha: "b".repeat(40) }], options),
     /has no run/,
+  );
+  assert.throws(
+    () => selectReleaseGateRun([success], { ...options, workflowRunFor: null }),
+    /workflow identity/,
+  );
+  assert.throws(
+    () =>
+      selectReleaseGateRun([success], {
+        ...options,
+        workflowRunFor: () => ({
+          ...workflowRun,
+          path: ".github/workflows/other.yml",
+        }),
+      }),
+    /workflow is .*other\.yml/,
+  );
+  assert.throws(
+    () =>
+      selectReleaseGateRun([success], {
+        ...options,
+        workflowRunFor: () => ({ ...workflowRun, event: "pull_request" }),
+      }),
+    /event is pull_request/,
+  );
+  assert.throws(
+    () =>
+      selectReleaseGateRun([success], {
+        ...options,
+        workflowRunFor: () => ({ ...workflowRun, head_branch: "main" }),
+      }),
+    /branch is main/,
+  );
+  assert.throws(
+    () =>
+      selectReleaseGateRun([success], {
+        ...options,
+        workflowRunFor: () => ({
+          ...workflowRun,
+          repository: { full_name: "fork/S3-Sidekick" },
+        }),
+      }),
+    /repository is fork\/S3-Sidekick/,
+  );
+  assert.throws(
+    () =>
+      selectReleaseGateRun(
+        [{ ...success, app: { slug: "dependency-updater" } }],
+        options,
+      ),
+    /GitHub Actions app/,
   );
 });
 
@@ -501,6 +576,82 @@ test("workflow defines the check-run name release-ci-status requires", () => {
     workflow,
     new RegExp(`^  release-gate:\\n    name: ${DEFAULT_GATE_JOB}$`, "m"),
   );
+});
+
+test("beta manifest recovery refuses missing integrity metadata", () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3sk-beta-manifest-"),
+  );
+  const manifest = "latest-windows-beta-x86_64.json";
+  try {
+    assert.throws(
+      () =>
+        verifyBetaManifestAssets(
+          [{ name: manifest, id: 1 }],
+          [manifest],
+          directory,
+        ),
+      /no signed checksum manifests/,
+    );
+    assert.throws(
+      () =>
+        verifyBetaManifestAssets(
+          [
+            { name: manifest, id: 1 },
+            { name: manifest, id: 2 },
+          ],
+          [manifest],
+          directory,
+        ),
+      /Duplicate release asset/,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("beta manifest recovery verifies signed checksum bytes before copying", () => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "s3sk-beta-checksum-"),
+  );
+  const manifest = "latest-windows-beta-x86_64.json";
+  const checksum = "SHA256SUMS-windows-beta-x86_64.txt";
+  const manifestPath = path.join(directory, manifest);
+  try {
+    fs.writeFileSync(manifestPath, '{"version":"0.12.0-beta.1"}\n');
+    const digest = crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(manifestPath))
+      .digest("hex");
+    fs.writeFileSync(
+      path.join(directory, checksum),
+      `${digest}  ${manifest}\n`,
+    );
+    assert.doesNotThrow(() =>
+      verifyBetaManifestChecksums([manifest], [checksum], directory),
+    );
+    fs.appendFileSync(manifestPath, "\n");
+    assert.throws(
+      () => verifyBetaManifestChecksums([manifest], [checksum], directory),
+      /does not match its signed checksum/,
+    );
+    assert.throws(
+      () =>
+        verifyBetaManifestChecksums(
+          ["latest-linux-beta-x86_64.json"],
+          [checksum],
+          directory,
+        ),
+      /not covered by a checksum/,
+    );
+    fs.writeFileSync(path.join(directory, checksum), "not a checksum\n");
+    assert.throws(
+      () => verifyBetaManifestChecksums([manifest], [checksum], directory),
+      /Malformed checksum entry/,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("updater signing binds signatures to the package version", () => {
@@ -584,4 +735,48 @@ test("Flatpak staging and clean omit nested builder caches", () => {
   const cleaned = getCleanTargets("clean-flatpak", root);
   assert.equal(cleaned.includes(".flatpak-builder"), true);
   assert.equal(cleaned.includes(".flatpak-source"), true);
+});
+
+test("license feeds omit build-host path and licenseFile", () => {
+  assert.deepEqual(
+    stripLicensePaths({
+      "left-pad@1.0.0": {
+        licenses: "MIT",
+        repository: "https://example.test/left-pad",
+        path: "/Users/builder/S3-Sidekick/node_modules/left-pad",
+        licenseFile: "/Users/builder/S3-Sidekick/node_modules/left-pad/LICENSE",
+      },
+      "cargo:serde@1.0.0": {
+        licenses: "MIT OR Apache-2.0",
+        packageManager: "cargo",
+      },
+    }),
+    {
+      "left-pad@1.0.0": {
+        licenses: "MIT",
+        repository: "https://example.test/left-pad",
+      },
+      "cargo:serde@1.0.0": {
+        licenses: "MIT OR Apache-2.0",
+        packageManager: "cargo",
+      },
+    },
+  );
+});
+
+test("development config cannot use the production updater feed", () => {
+  const root = process.cwd();
+  const base = JSON.parse(
+    fs.readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"),
+  );
+  const dev = JSON.parse(
+    fs.readFileSync(
+      path.join(root, "src-tauri", "tauri.dev.conf.json"),
+      "utf8",
+    ),
+  );
+  assert.ok(base.plugins.updater.endpoints.length > 0);
+  assert.deepEqual(dev.plugins.updater.endpoints, []);
+  assert.equal(dev.bundle.createUpdaterArtifacts, false);
+  assert.equal(dev.identifier, "run.rosie.dev.s3-sidekick");
 });

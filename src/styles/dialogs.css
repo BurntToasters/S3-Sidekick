@@ -208,3 +208,56 @@ body.modal-open .dialog-overlay.active {
 .dialog-extra-action {
   margin-right: auto;
 }
+
+/* Modal shell: the page behind is inert, but Windows/Linux caption buttons
+   must stay clickable above the scrim. */
+body.modal-open #titlebar-win-controls,
+body.modal-open #titlebar-win-controls * {
+  pointer-events: auto;
+}
+
+/* Resizer hit targets: the visible grip stays thin, while an invisible 24px
+   band around it is easy to grab with a pointer. */
+#sidebar-resizer::before,
+#inspector-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  background: transparent;
+}
+
+/* Grow the hit area into the panel being resized, never over the object
+   table: an invisible band over the first table column would swallow clicks. */
+#sidebar-resizer::before {
+  left: auto;
+  right: 0;
+}
+
+#inspector-resizer::before {
+  left: 0;
+  right: auto;
+}
+
+#bottom-drawer .bottom-drawer__resize-handle::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -9px;
+  height: 24px;
+  background: transparent;
+}
+
+/* Toast stack: bounded above an open drawer, scrollable once full. */
+.toast-region {
+  max-height: 520px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
+body.modal-open .toast-region {
+  max-height: min(520px, calc(100vh - var(--titlebar-height) - 24px));
+}

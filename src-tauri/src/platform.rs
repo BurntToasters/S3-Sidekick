@@ -1,6 +1,63 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Resolve a Windows system executable from the OS directory, never from the
+/// current directory or PATH. A malicious `rundll32.exe` beside the app must
+/// not be able to intercept URL/path opening.
+fn windows_system_exe(subdir: &str, name: &str) -> PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    if subdir.is_empty() {
+        root.join(name)
+    } else {
+        root.join(subdir).join(name)
+    }
+}
+
+/// Resolve a Unix launcher to an absolute OS path.
+///
+/// `Command::new("open")` / `Command::new("xdg-open")` search `PATH`, so a
+/// compromised environment can place a same-named binary earlier and intercept
+/// every URL or folder open. Only the standard OS locations are accepted; a
+/// missing launcher is an error rather than a silent PATH fallback.
+fn unix_launcher(name: &str) -> Result<PathBuf, String> {
+    let candidates: &[&str] = match name {
+        "open" => &["/usr/bin/open", "/bin/open"],
+        "xdg-open" => &[
+            "/usr/bin/xdg-open",
+            "/bin/xdg-open",
+            "/usr/local/bin/xdg-open",
+        ],
+        _ => return Err(format!("Unknown system launcher '{}'", name)),
+    };
+    for candidate in candidates {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "Unable to find the system launcher '{}' in the standard OS locations",
+        name
+    ))
+}
+
+/// Build a launcher command from an absolute OS path. Windows launchers come
+/// from `%SystemRoot%`; Unix launchers are resolved by `unix_launcher`.
+fn launcher_command(program: &str) -> Result<Command, String> {
+    if cfg!(target_os = "windows") {
+        let exe = if program == "explorer" {
+            windows_system_exe("", "explorer.exe")
+        } else {
+            windows_system_exe("System32", "rundll32.exe")
+        };
+        Ok(Command::new(exe))
+    } else {
+        Ok(Command::new(unix_launcher(program)?))
+    }
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct UpdaterSupportInfo {
     mode: String,
@@ -110,13 +167,13 @@ pub(crate) fn open_external_url(url: String) -> Result<(), String> {
     }
 
     let status = if cfg!(target_os = "windows") {
-        Command::new("rundll32")
+        launcher_command("rundll32")?
             .args(["url.dll,FileProtocolHandler", &url])
             .status()
     } else if cfg!(target_os = "macos") {
-        Command::new("open").arg(&url).status()
+        launcher_command("open")?.arg(&url).status()
     } else {
-        Command::new("xdg-open").arg(&url).status()
+        launcher_command("xdg-open")?.arg(&url).status()
     }
     .map_err(|e| format!("Failed to launch external URL: {}", e))?;
 
@@ -201,7 +258,7 @@ pub(crate) fn open_local_path(token: String) -> Result<(), String> {
         // `explorer.exe` is widely observed to return a non-zero exit code even
         // when it opened the window successfully, so its status is not a usable
         // signal. Only a spawn failure is treated as an error here.
-        Command::new("explorer")
+        launcher_command("explorer")?
             .arg(&parsed)
             .status()
             .map_err(|e| format!("Failed to open local path: {}", e))?;
@@ -218,9 +275,9 @@ pub(crate) fn open_local_path(token: String) -> Result<(), String> {
     }
 
     let status = if cfg!(target_os = "macos") {
-        Command::new("open").arg(&parsed).status()
+        launcher_command("open")?.arg(&parsed).status()
     } else {
-        Command::new("xdg-open").arg(&parsed).status()
+        launcher_command("xdg-open")?.arg(&parsed).status()
     }
     .map_err(|e| format!("Failed to open local path: {}", e))?;
 
@@ -339,7 +396,7 @@ pub(crate) fn reveal_local_path(token: String, name: Option<String>) -> Result<(
     )?;
     let platform = host_reveal_platform();
     let plan = reveal_plan(platform, &granted.path.to_string_lossy())?;
-    let status = Command::new(plan.program)
+    let status = launcher_command(plan.program)?
         .args(&plan.args)
         .status()
         .map_err(|e| format!("Failed to reveal local path: {}", e))?;

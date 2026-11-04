@@ -475,6 +475,63 @@ fn download_scratch_identity(file: &std::fs::File) -> std::io::Result<DownloadSc
     }
 }
 
+/// Serialize the inode/device identity into checkpoint-safe integers.
+#[cfg(unix)]
+fn download_scratch_stamp(identity: &DownloadScratchIdentity) -> (Option<u64>, Option<u64>) {
+    (Some(identity.device), Some(identity.inode))
+}
+
+#[cfg(windows)]
+fn download_scratch_stamp(identity: &DownloadScratchIdentity) -> (Option<u64>, Option<u64>) {
+    (Some(identity.volume as u64), Some(identity.file_index))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn download_scratch_stamp(_identity: &DownloadScratchIdentity) -> (Option<u64>, Option<u64>) {
+    (None, None)
+}
+
+/// Recomputed digest of one completed scratch range. A checkpoint is trusted
+/// only when every recorded range still hashes to what was written: file length
+/// alone accepts a same-size replaced or preallocated scratch file.
+async fn verify_download_part_digest(
+    path: &Path,
+    identity: &DownloadScratchIdentity,
+    start: u64,
+    end: u64,
+    expected_hex: &str,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let (mut file, _) = open_download_scratch_async(path, false, Some(identity.clone())).await?;
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|error| format!("Failed to seek resumable scratch: {}", error))?;
+    let mut remaining = end.saturating_sub(start) + 1;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let want = std::cmp::min(remaining, buffer.len() as u64) as usize;
+        let count = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = file.read(&mut buffer[..want]) => {
+                result.map_err(|error| format!("Failed to read resumable scratch: {}", error))?
+            }
+        };
+        if count == 0 {
+            return Err("Resumable scratch ended before a checkpointed part".to_string());
+        }
+        hasher.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    let actual = digest_to_hex(&hasher.finalize());
+    if actual != expected_hex {
+        return Err("Resumable scratch digest does not match its checkpoint".to_string());
+    }
+    Ok(())
+}
+
 fn open_download_scratch_file(
     path: &Path,
     create: bool,
@@ -825,7 +882,7 @@ async fn download_parallel_part(
     version_id: Option<String>,
     etag: String,
     cancel: CancelToken,
-) -> Result<u64, String> {
+) -> Result<(u64, String), String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
     if cancel.is_cancelled() {
@@ -869,6 +926,7 @@ async fn download_parallel_part(
         .map_err(|e| format!("Failed to seek temp file: {}", e))?;
 
     let mut written = 0u64;
+    let mut hasher = Sha256::new();
     let mut buf = [0u8; 128 * 1024];
     loop {
         if cancel.is_cancelled() {
@@ -898,6 +956,7 @@ async fn download_parallel_part(
                 result.map_err(|e| format!("Failed to write ranged temp file: {}", e))?;
             }
         }
+        hasher.update(&buf[..count]);
         written += count as u64;
     }
 
@@ -917,7 +976,7 @@ async fn download_parallel_part(
     file.sync_all()
         .await
         .map_err(|e| format!("Failed to sync ranged temp file: {}", e))?;
-    Ok(written)
+    Ok((written, digest_to_hex(&hasher.finalize())))
 }
 
 #[tauri::command]
@@ -1129,8 +1188,10 @@ pub(crate) async fn download_object_parallel(
         .map_err(|error| format!("Failed to inspect opened download scratch: {}", error))
         .map(|metadata| metadata.len())?;
     let temp_usable = temp_len == total_bytes;
+    let (scratch_device, scratch_inode) = download_scratch_stamp(&temp_identity);
 
     let mut completed = vec![false; total_parts as usize];
+    let mut part_digests: Vec<Option<String>> = vec![None; total_parts as usize];
 
     if checkpoint_enabled {
         if let Some(id) = checkpoint_id.as_deref() {
@@ -1157,7 +1218,14 @@ pub(crate) async fn download_object_parallel(
                     &object_etag,
                     object_version_id.as_deref(),
                 );
+                // A recorded scratch identity must exist and match. Without it
+                // a same-size replaced or preallocated file would satisfy the
+                // length check and let stale bytes publish.
+                let identity_matches = scratch_device.is_some()
+                    && payload.scratch_device == scratch_device
+                    && payload.scratch_inode == scratch_inode;
                 if temp_usable
+                    && identity_matches
                     && payload.mode == "download_parallel"
                     && payload.bucket == bucket
                     && payload.key == key
@@ -1167,7 +1235,35 @@ pub(crate) async fn download_object_parallel(
                     && generation_matches
                 {
                     for part in normalize_checkpoint_parts(&payload.completed_parts, total_parts) {
-                        completed[part as usize] = true;
+                        let Some(digest) = payload.part_digests.iter().find(|digest| {
+                            digest.part == part
+                                && digest.sha256.len() == 64
+                                && digest.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        }) else {
+                            // Legacy or malformed checkpoint entry: re-fetch it.
+                            continue;
+                        };
+                        let start = (part as u64) * part_size;
+                        let end = std::cmp::min(start + part_size, total_bytes) - 1;
+                        match verify_download_part_digest(
+                            &temp_path,
+                            &temp_identity,
+                            start,
+                            end,
+                            &digest.sha256,
+                            &cancel,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                completed[part as usize] = true;
+                                part_digests[part as usize] = Some(digest.sha256.clone());
+                            }
+                            Err(err) if cancel.is_cancelled() => return Err(err),
+                            Err(_) => {
+                                // Replaced or preallocated range: re-download it.
+                            }
+                        }
                     }
                 }
             }
@@ -1254,7 +1350,7 @@ pub(crate) async fn download_object_parallel(
             let etag_clone = object_etag.clone();
             let part_cancel = Arc::clone(&cancel);
             join_set.spawn(async move {
-                let size = download_parallel_part(
+                let (size, digest) = download_parallel_part(
                     client_clone,
                     bucket_clone,
                     key_clone,
@@ -1267,7 +1363,7 @@ pub(crate) async fn download_object_parallel(
                     part_cancel,
                 )
                 .await?;
-                Ok::<(u32, u64), String>((index, size))
+                Ok::<(u32, u64, String), String>((index, size, digest))
             });
         }
 
@@ -1284,8 +1380,9 @@ pub(crate) async fn download_object_parallel(
         };
 
         match joined {
-            Some(Ok(Ok((index, written)))) => {
+            Some(Ok(Ok((index, written, digest)))) => {
                 completed[index as usize] = true;
+                part_digests[index as usize] = Some(digest);
                 let sent = bytes_done.fetch_add(written, Ordering::Relaxed) + written;
                 if bandwidth_limit_bps > 0 {
                     let elapsed = started_at.elapsed().as_secs_f64();
@@ -1326,6 +1423,18 @@ pub(crate) async fn download_object_parallel(
                                 updated_at_ms: now_ms(),
                                 etag: object_etag.clone(),
                                 version_id: object_version_id.clone(),
+                                scratch_device,
+                                scratch_inode,
+                                part_digests: part_digests
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(part, digest)| {
+                                        digest.as_ref().map(|sha256| TransferPartDigest {
+                                            part: part as u32,
+                                            sha256: sha256.clone(),
+                                        })
+                                    })
+                                    .collect(),
                             };
                             if let Err(err) = persist_checkpoint_and_advance(
                                 &mut last_checkpoint_saved_at,

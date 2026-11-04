@@ -8,7 +8,7 @@ S3 Sidekick is your buddy for quick GUI S3-compatible storage management! I made
 
 Download the installers for Windows, macOS, and Linux from [GitHub Releases](https://github.com/BurntToasters/S3-Sidekick/releases).
 
-> **Windows:** the `.exe` (NSIS) installer supports in-app updates. The `.msi` package targets managed deployments and updates manually. Machines without WebView2 fetch it with Microsoft's bootstrapper, so that first install needs a network connection.
+> **Windows:** the `.exe` (NSIS) installer is the supported in-app update target. The runtime reports native update mode for every Windows package, so the `.msi` build also shows the in-app update controls; an MSI install is not a supported updater target and should be updated through managed deployment instead. Machines without WebView2 fetch it with Microsoft's bootstrapper, so that first install needs a network connection.
 >
 > **macOS:** requires macOS 13.3 (Ventura) or newer. The universal DMG and ZIP cover Apple silicon and Intel.
 

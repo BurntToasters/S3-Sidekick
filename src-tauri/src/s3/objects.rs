@@ -41,7 +41,7 @@ pub(crate) async fn list_objects(
     }
     .map_err(|e| format!("Failed to list objects: {}", e))?;
 
-    let encoding = listed_encoding(&output);
+    let encoding = listed_encoding_for(&bucket, &output);
     let objects = output
         .contents()
         .iter()
@@ -178,8 +178,12 @@ pub(crate) async fn update_metadata(
     let client = require_client(&state, &connection_id, None)?;
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
-    validate_mutating_key(&key, "Object key")?;
-    validate_copy_source_key(&key, "Object key")?;
+    // Metadata replacement is an in-place CopyObject whose CopySource is
+    // strictly percent-encoded (`encode_copy_source`), so a legal key containing
+    // `.` or empty segments stays addressable here. HEAD, ACL and preview accept
+    // those keys; rejecting them only on update stranded objects the rest of the
+    // app can read. Length, NUL and the reserved rollback namespace still apply.
+    validate_deletable_key(&key, "Object key")?;
     let _mutation_guard = crate::acquire_s3_mutation_cancellable(
         vec![crate::S3MutationScope::key(&connection_id, &bucket, &key)],
         &client.token(),
@@ -424,6 +428,12 @@ pub(crate) async fn delete_objects(
         };
 
         let errors = output.errors();
+        if !errors.is_empty() {
+            // A transport-level 200 with per-key failures is still a failed
+            // delete. Without this flag `finish_delete_result` returned Ok and
+            // the UI reported success for keys that were never removed.
+            result.incomplete = true;
+        }
         result.failed = result.failed.saturating_add(errors.len() as u32);
         result.deleted = result
             .deleted
@@ -523,6 +533,56 @@ pub(crate) async fn set_object_acl(
         other => return Err(format!("Unsupported ACL visibility: {}", other)),
     };
 
+    // A canned ACL replaces the entire grant set. Refuse when the current ACL
+    // carries a grant that neither Private nor PublicRead represents, otherwise
+    // choosing one silently deletes a collaborator/authenticated grant.
+    let current = get_object_acl_output(&client, &bucket, &key, None).await?;
+    if let Some(output) = current.as_ref() {
+        let owner_id = output
+            .owner()
+            .and_then(|owner| owner.id())
+            .unwrap_or_default();
+        let mut unsupported = Vec::new();
+        for grant in output.grants() {
+            let permission = grant
+                .permission()
+                .map(|value| value.as_str())
+                .unwrap_or_default();
+            let grantee = grant.grantee();
+            let grantee_id = grantee.and_then(|value| value.id()).unwrap_or_default();
+            let uri = grantee
+                .and_then(|value| value.uri())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let owner_full_control =
+                grantee_id == owner_id && permission.eq_ignore_ascii_case("FULL_CONTROL");
+            let public_read = uri.ends_with("/allusers") && permission.eq_ignore_ascii_case("READ");
+            let represented = match acl {
+                ObjectCannedAcl::Private => owner_full_control,
+                ObjectCannedAcl::PublicRead => owner_full_control || public_read,
+                _ => false,
+            };
+            if !represented {
+                let label = if grantee_id.is_empty() {
+                    uri
+                } else {
+                    grantee_id.to_string()
+                };
+                unsupported.push(format!("{} {}", permission, label));
+            }
+        }
+        if !unsupported.is_empty() {
+            return Err(format!(
+                "Refusing to set '{}' on '{}': the current ACL has grants that this canned ACL \
+                 would silently remove ({}). Apply those grants with an ACL tool first, or keep \
+                 the existing permissions.",
+                visibility.trim(),
+                key,
+                unsupported.join(", ")
+            ));
+        }
+    }
+
     let request = client
         .put_object_acl()
         .bucket(&bucket)
@@ -589,15 +649,18 @@ pub(crate) async fn create_folder(
     let overwrite = overwrite.unwrap_or(false);
     let marker_nonce = folder_marker_nonce();
 
-    // Inspect the destination before writing. Without overwrite an existing
-    // marker is still a conflict for the caller, but with overwrite only an
-    // empty folder marker may be replaced; a non-empty object at `foo/` must
-    // never be silently truncated to a zero-byte marker.
+    // Inspect the destination before writing when the principal is allowed to.
+    // A PutObject-only principal cannot HEAD, and making that permission failure
+    // abort folder creation prevented the exact write it was authorized to do.
+    // In that case the conditional write below is the only (and sufficient)
+    // guard: it commits only if the destination is still absent.
     let head_request = client.head_object().bucket(&bucket).key(&folder_key).send();
     let head = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
         result = head_request => result,
     };
+    let mut existing_etag: Option<String> = None;
+    let mut destination_absent = false;
     match head {
         Ok(head) => {
             let length = head.content_length().unwrap_or(-1);
@@ -610,8 +673,12 @@ pub(crate) async fn create_folder(
             if !overwrite {
                 return Err(destination_conflict_error(&folder_key));
             }
+            existing_etag = head.e_tag().map(str::to_string).filter(|v| !v.is_empty());
         }
-        Err(err) if is_not_found(&err) => {}
+        Err(err) if is_not_found(&err) => destination_absent = true,
+        Err(err) if is_access_denied(&err) => {
+            // No HeadObject permission: fall through to a conditional PutObject.
+        }
         Err(err) => {
             return Err(format!(
                 "Failed to check folder destination '{}': {}",
@@ -620,10 +687,12 @@ pub(crate) async fn create_folder(
         }
     }
 
-    // A folder marker is a zero-byte PutObject like any other write, so it
-    // goes through the same create-only guard as uploads when overwrite was not
-    // authorized. Providers without create-only support fail closed here and
-    // require an explicit overwrite retry, exactly like Put/Multipart/Copy.
+    // A folder marker is a zero-byte PutObject like any other write. Keep it
+    // conditional in every mode the provider supports: create-only for new
+    // folders, `If-Match` against the inspected marker when overwriting, and
+    // `If-None-Match: *` if the destination was absent at HEAD so a concurrently
+    // appearing marker is never blindly clobbered.
+    let provider_supports_put_guard = CreateOnlyCapabilities::for_provider(provider).put_object;
     if !overwrite {
         require_put_create_only_support(provider, &folder_key)?;
     }
@@ -634,8 +703,18 @@ pub(crate) async fn create_folder(
         .key(&folder_key)
         .metadata(FOLDER_MARKER_NONCE_KEY, &marker_nonce)
         .body(aws_sdk_s3::primitives::ByteStream::from_static(b""));
+    let mut used_condition = false;
     if !overwrite {
         request = apply_put_create_only_guard(request, provider, &folder_key)?;
+        used_condition = true;
+    } else if let Some(etag) = existing_etag.as_deref() {
+        if provider_supports_put_guard {
+            request = request.if_match(etag);
+            used_condition = true;
+        }
+    } else if destination_absent && provider_supports_put_guard {
+        request = request.if_none_match(CREATE_ONLY_IF_NONE_MATCH);
+        used_condition = true;
     }
     let send = request.send();
     let result = tokio::select! {
@@ -646,8 +725,8 @@ pub(crate) async fn create_folder(
         Ok(_) => return Ok(()),
         Err(err) => err,
     };
-    if !overwrite && is_destination_occupied(&err) {
-        // A retried create-only request can meet the zero-byte marker it just
+    if used_condition && is_destination_occupied(&err) {
+        // A retried conditional request can meet the zero-byte marker it just
         // wrote. Accept that only when the marker still carries this request's
         // nonce; an identical marker from another client is not our write.
         let head = client.head_object().bucket(&bucket).key(&folder_key).send();

@@ -38,6 +38,17 @@ pub(super) async fn preflight_prefix_copy_sources(
     require_immutable_versions: bool,
     cancel: &CancelToken,
 ) -> Result<Vec<PrefixCopySource>, String> {
+    // A destination prefix without a trailing slash would concatenate the
+    // suffix onto the last segment (`archive` + `a.jpg` -> `archivea.jpg`).
+    // Normalize at the boundary so direct IPC and resumed transfers cannot
+    // create surprising keys.
+    let normalized_destination;
+    let dst_prefix = if dst_prefix.is_empty() || dst_prefix.ends_with('/') {
+        dst_prefix
+    } else {
+        normalized_destination = format!("{}/", dst_prefix);
+        &normalized_destination
+    };
     let mut sources = Vec::new();
     let mut continuation_token: Option<String> = None;
     let mut seen_tokens = HashSet::new();
@@ -59,7 +70,7 @@ pub(super) async fn preflight_prefix_copy_sources(
             })?,
         };
 
-        let encoding = listed_encoding(&output);
+        let encoding = listed_encoding_for(src_bucket, &output);
         for object in output.contents() {
             let Some(raw_key) = object.key() else {
                 continue;
@@ -144,7 +155,7 @@ pub(super) async fn list_all_keys_under_prefix(
             }
         };
 
-        let encoding = listed_encoding(&output);
+        let encoding = listed_encoding_for(bucket, &output);
         for obj in output.contents() {
             if let Some(k) = obj.key() {
                 if keys.len() >= MAX_PREFIX_TRANSACTION_OBJECTS {
@@ -232,7 +243,7 @@ pub(crate) async fn delete_prefix(
             }
         };
 
-        let encoding = listed_encoding(&output);
+        let encoding = listed_encoding_for(&bucket, &output);
         let keys: Vec<String> = output
             .contents()
             .iter()
@@ -324,6 +335,11 @@ pub(crate) async fn delete_prefix(
             };
 
             let errors = del_output.errors();
+            if !errors.is_empty() {
+                // The batch transport succeeded, but individual keys did not
+                // delete. Report a partial failure instead of an Ok receipt.
+                result.incomplete = true;
+            }
             result.failed = result.failed.saturating_add(errors.len() as u32);
             result.deleted = result
                 .deleted

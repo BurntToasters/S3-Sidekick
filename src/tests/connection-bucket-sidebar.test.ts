@@ -40,6 +40,7 @@ vi.mock("../bookmarks.ts", () => ({
   addBookmark: saveBookmarkMock,
   clearBookmarks: vi.fn(),
   getBookmarks: vi.fn(() => []),
+  getBookmarkLoadError: vi.fn(() => null),
   renderBookmarkBar: renderBookmarkBarMock,
   isEndpointBookmarked: isEndpointBookmarkedMock,
   renderBookmarkList: renderBookmarkListMock,
@@ -60,6 +61,7 @@ vi.mock("../app-layout.ts", () => ({
 }));
 
 vi.mock("../inspector.ts", () => ({
+  refreshInspectorEmptySummary: vi.fn(),
   closeInspectorOnMobile: vi.fn(),
   isInspectorOpen: () => false,
   markInspectorHasContent: vi.fn(),
@@ -102,7 +104,7 @@ function renderFixture(): void {
     <table><tbody id="object-tbody"></tbody></table>
     <span id="statusbar-count"></span>
     <input id="location-omnibar-edit" />
-    <button id="btn-download"></button>
+    <button id="batch-download"></button>
     <button id="nav-back"></button>
     <button id="nav-forward"></button>
     <button id="nav-up"></button>

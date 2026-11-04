@@ -10,6 +10,7 @@ import {
   CONNECTION_MEMORY_STORAGE_KEY,
   connectionMemoryKey,
   forgetConnectionLocation,
+  setConnectionAccessLocked,
 } from "./connection.ts";
 import {
   renderBucketList,
@@ -26,12 +27,14 @@ import {
   addBookmark,
   clearBookmarks,
   getBookmarks,
+  getBookmarkLoadError,
   renderBookmarkList,
   isEndpointBookmarked,
   removeBookmark,
   suggestBookmarkName,
   updateBookmark,
   type Bookmark,
+  type BookmarkPatch,
 } from "./bookmarks.ts";
 import { friendlyError, isLocalEndpoint, plural, escapeHtml } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
@@ -152,6 +155,15 @@ export function setUnlockSavedConnectionsHandler(
   unlockHandler = handler;
 }
 
+/**
+ * Run the registered unlock flow (startup/auto-lock/Settings share it), so
+ * bookmarks reload and the change handler is registered in one place.
+ */
+export async function unlockSavedConnectionsNow(): Promise<boolean> {
+  if (!unlockHandler) return false;
+  return unlockHandler();
+}
+
 /* ==========================================================================
  * Per-connection location memory.
  *
@@ -235,7 +247,17 @@ export function rememberConnectionLocation(
   if (!name || !endpoint) return;
   try {
     const store = readConnectionMemoryStore();
-    store[connectionMemoryKey(name, endpoint)] = {
+    const key = connectionMemoryKey(name, endpoint);
+    if (!bucket) {
+      // A blank location is not knowledge. Keep the last real bucket/prefix
+      // and only refresh the use time, so a teardown or failed restore never
+      // erases where the connection actually was.
+      const existing = sanitizeLocationRecord(store[key]);
+      if (!existing?.bucket) return;
+      bucket = existing.bucket;
+      prefix = existing.prefix;
+    }
+    store[key] = {
       bucket,
       prefix,
       lastUsedAt,
@@ -368,6 +390,9 @@ async function handleSwitcherLockNow(): Promise<void> {
   if (state.connected && !(await handleDisconnect())) return;
   const locked = await handleLockNow(setStatus);
   if (locked) {
+    cancelPendingConnect();
+    cancelPendingTestConnection();
+    setConnectionAccessLocked(true);
     setConnectionInputs("", "", "", "");
     setSavedConnectionsLocked(true);
     clearBookmarks();
@@ -482,6 +507,10 @@ export function wireConnectionSwitcher(): void {
     focusItem(event.key === "ArrowDown" ? "first" : "last");
   });
   menu?.addEventListener("keydown", (event) => {
+    if (event.key === "Tab") {
+      closeSwitcherMenu();
+      return;
+    }
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     event.preventDefault();
     const items = enabledItems();
@@ -500,6 +529,10 @@ export function wireConnectionSwitcher(): void {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !isSwitcherMenuOpen()) return;
+    // Consume the press here; the global shortcut handler would otherwise
+    // close the next layer underneath in the same keypress.
+    event.preventDefault();
+    event.stopPropagation();
     closeSwitcherMenu();
     btn.focus();
   });
@@ -596,6 +629,10 @@ async function renameSavedConnection(bookmark: Bookmark): Promise<void> {
  * with its credentials and Save updates that row instead of adding a new one.
  */
 let inlineEditingBookmark: Bookmark | null = null;
+/** Bumped whenever the inline edit opens, switches, or closes. */
+let inlineEditRevision = 0;
+/** One inline save at a time, even if Save is double-clicked. */
+let inlineEditSaving = false;
 /**
  * True while the form holds a Duplicate of a saved connection. A copy shares
  * the endpoint and access key until one of them changes, and a saved
@@ -608,6 +645,7 @@ function isInlineEditing(): boolean {
 }
 
 function setInlineEditBookmark(bookmark: Bookmark | null): void {
+  inlineEditRevision += 1;
   inlineEditingBookmark = bookmark;
   duplicateDraft = false;
   const saveBtn = document.getElementById("bookmark-save-btn");
@@ -735,6 +773,18 @@ export function refreshSavedConnectionsList(): void {
       },
     },
   );
+  const loadError = getBookmarkLoadError();
+  if (loadError) {
+    // The list may be the readable backup, but it is read-only. Say so where
+    // the user picks connections, not only in a transient status line.
+    savedList.insertAdjacentHTML(
+      "afterbegin",
+      `<li class="conn-saved-empty conn-saved-empty--locked">` +
+        `<p class="conn-saved-empty__title">Saved connections could not be loaded</p>` +
+        `<p class="conn-saved-empty__text">${escapeHtml(loadError)} Changes are disabled so the stored copy is not overwritten.</p>` +
+        `</li>`,
+    );
+  }
 }
 
 export function focusConnectionScreen(): void {
@@ -1416,10 +1466,18 @@ function finishConnectAttempt(
   setConnectButtonBusy(false);
 }
 
-export async function handleDisconnect(): Promise<boolean> {
+export async function handleDisconnect(
+  options: { skipInspectorPrompt?: boolean } = {},
+): Promise<boolean> {
   // Unsaved Properties edits belong to the session being torn down. Ask before
   // the inspector is closed; Cancel keeps both the session and the edits.
-  if (!(await requestCloseInspector())) return false;
+  // Auto-lock skips this: the vault is already locked, so prompting would stall
+  // the teardown behind a dialog whose edits can no longer be saved.
+  if (!options.skipInspectorPrompt) {
+    if (!(await requestCloseInspector())) return false;
+  } else {
+    setInspectorOpen(false);
+  }
   // Snapshot the location under the saved connection's name+endpoint before
   // the teardown clears state, so switching back restores it.
   rememberActiveConnectionLocation();
@@ -1480,6 +1538,13 @@ export async function handleDisconnectRequest(): Promise<void> {
  * ========================================================================== */
 
 let testConnectionInFlight = false;
+/** One test workflow; cancel flips `cancelled` so the flow discards its result. */
+interface TestConnectionAttempt {
+  cancelled: boolean;
+  sessionId: string | null;
+  generation: number;
+}
+let pendingTestAttempt: TestConnectionAttempt | null = null;
 
 function setTestButtonBusy(busy: boolean): void {
   const btn = document.getElementById(
@@ -1505,10 +1570,29 @@ async function endTestSession(
   testSessionId: string | null,
   testGeneration: number,
 ): Promise<void> {
-  if (!testSessionId) return;
+  if (!testSessionId || testGeneration === 0) return;
   if (state.connectionId !== testSessionId) return;
   if (currentConnectionGeneration() !== testGeneration) return;
   await disconnect(testSessionId);
+}
+
+/**
+ * Abandon an in-flight connection test (lock paths). The throwaway session it
+ * may already have published is released; the workflow's own generation guard
+ * stops it from writing a result afterwards.
+ */
+export function cancelPendingTestConnection(): void {
+  const attempt = pendingTestAttempt;
+  if (!attempt && !testConnectionInFlight) return;
+  if (attempt) attempt.cancelled = true;
+  pendingTestAttempt = null;
+  testConnectionInFlight = false;
+  dom.connectBtn.disabled = false;
+  setTestButtonBusy(false);
+  if (!state.connecting && !inlineEditSaving) setConnectionFormDisabled(false);
+  if (attempt?.sessionId) {
+    void endTestSession(attempt.sessionId, attempt.generation);
+  }
 }
 
 /**
@@ -1544,13 +1628,18 @@ export async function handleTestConnection(): Promise<void> {
   dom.connectBtn.disabled = true;
   setTestButtonBusy(true);
   setConnectionFormDisabled(true);
-  let testSessionId: string | null = null;
-  let testGeneration = 0;
+  const attempt: TestConnectionAttempt = {
+    cancelled: false,
+    sessionId: null,
+    generation: 0,
+  };
+  pendingTestAttempt = attempt;
   try {
     if (!(await confirmCleartextEndpoint(endpoint))) {
       setStatus("Connection test cancelled.", 5000);
       return;
     }
+    if (attempt.cancelled) return;
     setStatus("Testing connection...");
     const resolvedRegion = await connect(
       endpoint,
@@ -1559,13 +1648,23 @@ export async function handleTestConnection(): Promise<void> {
       secretKey,
       sessionToken,
     );
-    testSessionId = state.connectionId;
-    testGeneration = currentConnectionGeneration();
-    try {
-      await refreshBuckets();
-    } finally {
-      await endTestSession(testSessionId, testGeneration);
+    attempt.sessionId = state.connectionId;
+    attempt.generation = currentConnectionGeneration();
+    if (attempt.cancelled) return;
+    await refreshBuckets();
+    if (
+      attempt.cancelled ||
+      !attempt.sessionId ||
+      !isGenerationCurrent(attempt.generation, attempt.sessionId)
+    ) {
+      return;
     }
+    // The form may have been switched to another saved connection while the
+    // test ran. Never write this test's resolved region into that form.
+    const current = getConnectionInputs();
+    const formStillMatches =
+      current.endpoint === endpoint && current.accessKey === accessKey;
+    if (!formStillMatches) return;
     const regionInput = document.getElementById(
       "conn-region",
     ) as HTMLInputElement | null;
@@ -1573,6 +1672,7 @@ export async function handleTestConnection(): Promise<void> {
     setStatus("Connection test succeeded.", 5000);
     logActivity(`Connection test to ${endpoint} succeeded.`, "success");
   } catch (err) {
+    if (attempt.cancelled) return;
     const message = `Connection test failed: ${friendlyError(err)}`;
     setStatus(message, 8000);
     logActivity(message, "error");
@@ -1580,14 +1680,15 @@ export async function handleTestConnection(): Promise<void> {
     // Belt and braces: a test never leaves a live session behind, and it
     // never closes a newer real session that replaced its throwaway one.
     try {
-      await endTestSession(testSessionId, testGeneration);
+      await endTestSession(attempt.sessionId, attempt.generation);
     } catch {
       // Already reported through the catch path above when relevant.
     }
-    testSessionId = null;
+    if (pendingTestAttempt === attempt) pendingTestAttempt = null;
     testConnectionInFlight = false;
     dom.connectBtn.disabled = false;
-    setConnectionFormDisabled(false);
+    if (!state.connecting && !inlineEditSaving)
+      setConnectionFormDisabled(false);
     setTestButtonBusy(false);
     refreshConnectionSwitcher();
   }
@@ -1796,6 +1897,7 @@ export function wireConnectionScreenExtras(): void {
 /** Apply an inline edit to the saved connection it was opened from. */
 async function saveInlineBookmarkEdit(
   target: Bookmark,
+  revision: number,
   values: {
     endpoint: string;
     region: string;
@@ -1805,6 +1907,7 @@ async function saveInlineBookmarkEdit(
     providedName: string;
   },
 ): Promise<void> {
+  if (inlineEditSaving) return;
   const name = values.providedName || target.name;
   if (!values.endpoint || !values.accessKey) {
     const invalidField = values.endpoint ? "conn-access-key" : "conn-endpoint";
@@ -1813,18 +1916,39 @@ async function saveInlineBookmarkEdit(
     setStatus(message);
     return;
   }
+  const accessKeyChanged = values.accessKey !== target.access_key;
+  // Same rule as the Settings editor: a changed access key cannot reuse the
+  // old secret, so it must come with a new one.
+  if (accessKeyChanged && !values.secretKey) {
+    const message = "Enter the secret key for the new access key.";
+    setConnectionFormError(message, "conn-secret-key");
+    setStatus(message);
+    return;
+  }
+
+  // A blank secret or session token keeps the stored one. A changed access key
+  // drops the old session token, because it belongs to the old key; a typed
+  // token rotates it for the same key.
+  const patch: BookmarkPatch = {
+    name,
+    endpoint: values.endpoint,
+    region: values.region,
+    access_key: values.accessKey,
+  };
+  if (values.secretKey) patch.secret_key = values.secretKey;
+  if (values.sessionToken) patch.session_token = values.sessionToken;
+  else if (accessKeyChanged) patch.session_token = undefined;
+
+  inlineEditSaving = true;
+  setConnectionFormDisabled(true);
   try {
     const updated = await updateBookmark(
       { endpoint: target.endpoint, access_key: target.access_key },
-      {
-        name,
-        endpoint: values.endpoint,
-        region: values.region,
-        access_key: values.accessKey,
-        secret_key: values.secretKey,
-        ...(values.sessionToken ? { session_token: values.sessionToken } : {}),
-      },
+      patch,
     );
+    const stillEditing =
+      inlineEditRevision === revision && inlineEditingBookmark === target;
+    if (!stillEditing) return;
     if (!updated) {
       setStatus("That saved connection is no longer saved.", 5000);
     } else {
@@ -1843,11 +1967,23 @@ async function saveInlineBookmarkEdit(
     setInlineEditBookmark(null);
     updateBookmarkBtn();
   } catch (err) {
-    setConnectionFormError(`Could not update "${name}": ${friendlyError(err)}`);
+    if (inlineEditRevision === revision && inlineEditingBookmark === target) {
+      setConnectionFormError(
+        `Could not update "${name}": ${friendlyError(err)}`,
+      );
+    }
+  } finally {
+    inlineEditSaving = false;
+    // Leave the form disabled only while a connect/test owns it.
+    if (!state.connecting && !testConnectionInFlight) {
+      setConnectionFormDisabled(false);
+    }
+    refreshBookmarkBar();
   }
 }
 
 export async function handleBookmarkSave(): Promise<void> {
+  if (inlineEditSaving) return;
   const { endpoint, region, accessKey, secretKey, sessionToken } =
     getConnectionInputs();
   const nameInput = document.getElementById(
@@ -1856,7 +1992,7 @@ export async function handleBookmarkSave(): Promise<void> {
   const providedName = nameInput?.value.trim() ?? "";
 
   if (inlineEditingBookmark) {
-    await saveInlineBookmarkEdit(inlineEditingBookmark, {
+    await saveInlineBookmarkEdit(inlineEditingBookmark, inlineEditRevision, {
       endpoint,
       region,
       accessKey,

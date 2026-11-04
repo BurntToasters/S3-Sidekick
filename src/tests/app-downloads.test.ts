@@ -25,16 +25,34 @@ function directoryGrant(path: string): NativePathGrant {
   };
 }
 
-const mockPickFile = vi.fn<() => Promise<NativePathGrant | null>>();
-const mockPickDirectory = vi.fn<() => Promise<NativePathGrant | null>>();
+const mockPickFile =
+  vi.fn<
+    (
+      fileName?: string,
+      title?: string,
+      defaultDirectory?: string,
+    ) => Promise<NativePathGrant | null>
+  >();
+const mockPickDirectory =
+  vi.fn<
+    (
+      title?: string,
+      defaultDirectory?: string,
+    ) => Promise<NativePathGrant | null>
+  >();
 const mockEnqueueDownloads = vi.fn();
 const ENQUEUE_ACCEPTED = { accepted: true, count: 1 };
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockShowConfirm = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 
 vi.mock("../path-grants.ts", () => ({
-  pickDownloadFile: () => mockPickFile(),
-  pickDownloadDirectory: () => mockPickDirectory(),
+  pickDownloadFile: (
+    fileName?: string,
+    title?: string,
+    defaultDirectory?: string,
+  ) => mockPickFile(fileName, title, defaultDirectory),
+  pickDownloadDirectory: (title?: string, defaultDirectory?: string) =>
+    mockPickDirectory(title, defaultDirectory),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -97,6 +115,29 @@ describe("download chooser account binding", () => {
         connectionIdentity: "ident-1",
       },
     );
+  });
+
+  it("forwards the remembered download folder to both pickers", async () => {
+    localStorage.setItem("s3-sidekick.last-download-dir", "/tmp/dl");
+    mockPickFile.mockResolvedValue(fileGrant("/tmp/dl/file.txt"));
+    const { handleDownload } = await import("../app-downloads.ts");
+    await handleDownload();
+    expect(mockPickFile).toHaveBeenCalledWith(
+      "file.txt",
+      "Save file.txt",
+      "/tmp/dl",
+    );
+
+    const { state } = await import("../state.ts");
+    state.selectedKeys.add("docs/other.txt");
+    mockPickDirectory.mockResolvedValue(directoryGrant("/tmp/dl"));
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "path_exists") return false;
+      if (cmd === "head_object") return { content_length: 1 };
+      return undefined;
+    });
+    await handleDownload();
+    expect(mockPickDirectory).toHaveBeenCalledWith(undefined, "/tmp/dl");
   });
 
   it("aborts when the account changes while the save dialog is open", async () => {
@@ -321,6 +362,71 @@ describe("download disk preflight", () => {
     expect(entries[0]?.destinationToken).toBe("grant-dir-/tmp/dest");
     expect(entries[0]?.destinationName).toBe("File.txt");
     expect(entries[1]?.destinationName).toBe("file (2).txt");
+  });
+});
+
+describe("download child names and shell startup destinations", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    mockPickFile.mockReset();
+    mockPickDirectory.mockReset();
+    mockEnqueueDownloads.mockReset();
+    mockEnqueueDownloads.mockImplementation(() => ENQUEUE_ACCEPTED);
+    mockInvoke.mockReset();
+    mockShowConfirm.mockReset();
+    mockShowConfirm.mockResolvedValue(true);
+    mockInvoke.mockResolvedValue(false);
+    localStorage.clear();
+    document.body.innerHTML = `<span id="status"></span>`;
+    const { state } = await import("../state.ts");
+    state.connected = true;
+    state.connectionId = "conn-1";
+    state.connectionIdentity = "ident-1";
+    state.endpoint = "https://s3.example.com";
+    state.currentBucket = "bucket-a";
+    state.currentPrefix = "docs/";
+    state.selectedKeys.clear();
+    state.platformName = "linux";
+    state.objects = [];
+    state.currentSettings.conflictPolicy = "replace";
+  });
+
+  it("trims candidates like the backend and encodes backslashes", async () => {
+    const { state } = await import("../state.ts");
+    state.selectedKeys.add("a/report.txt ");
+    state.selectedKeys.add("b/report.txt");
+    state.selectedKeys.add("c/back\\slash.txt");
+    mockPickDirectory.mockResolvedValue(directoryGrant("/tmp/dest"));
+    const { handleDownload } = await import("../app-downloads.ts");
+    await handleDownload();
+
+    const entries = mockEnqueueDownloads.mock.calls[0]?.[0] as Array<{
+      destinationName: string;
+    }>;
+    expect(entries.map((entry) => entry.destinationName)).toEqual([
+      "report.txt",
+      "report (2).txt",
+      "back%5Cslash.txt",
+    ]);
+  });
+
+  it("requires explicit consent before replacing a shell startup file", async () => {
+    const { state } = await import("../state.ts");
+    state.selectedKeys.add(".bashrc");
+    mockPickFile.mockResolvedValue(fileGrant("/tmp/.bashrc"));
+    mockShowConfirm.mockResolvedValue(false);
+    const { handleDownload } = await import("../app-downloads.ts");
+    await handleDownload();
+
+    expect(mockShowConfirm).toHaveBeenCalledWith(
+      "Replace shell startup file?",
+      expect.stringContaining(".bashrc"),
+      expect.anything(),
+    );
+    expect(mockEnqueueDownloads).not.toHaveBeenCalled();
+    expect(document.getElementById("status")?.textContent).toContain(
+      "shell startup file not replaced",
+    );
   });
 });
 

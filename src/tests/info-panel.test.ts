@@ -81,6 +81,33 @@ describe("info panel", () => {
     state.connectionId = "test-connection";
     state.connectionIdentity = "test-identity";
     state.statusTimeout = undefined;
+    state.objects = [
+      "acl-fail.txt",
+      "alpha.txt",
+      "beta.txt",
+      "broken-save.txt",
+      "broken/file.txt",
+      "close-me.txt",
+      "dirty.txt",
+      "docs/notes.txt",
+      "fast.txt",
+      "new-fast.txt",
+      "no-change.txt",
+      "optional.bin",
+      "perm-error.txt",
+      "perm-success.txt",
+      "single-acl.txt",
+      "single-success.txt",
+      "slow-fail.txt",
+      "slow-success.txt",
+      "status-safe.txt",
+    ].map((key) => ({
+      key,
+      size: 10,
+      last_modified: "2025-01-01T00:00:00Z",
+      is_folder: false,
+    }));
+    state.prefixes = ["docs/", "folder/", "one/", "two/"];
   });
 
   it("opens a single object and renders tabs/permissions/s3", async () => {

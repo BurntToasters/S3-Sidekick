@@ -40,6 +40,8 @@ import {
   setConnectionUI,
   setSavedConnectionsLocked,
   setUnlockSavedConnectionsHandler,
+  cancelPendingConnect,
+  cancelPendingTestConnection,
 } from "./app-connection.ts";
 import { clearSessionAfterAutoLock, wireEvents } from "./app-events.ts";
 import {
@@ -48,6 +50,7 @@ import {
 } from "./transfers.ts";
 import { initializeIcons } from "./icons.ts";
 import { wireTitlebar } from "./titlebar.ts";
+import { showToast } from "./toast.ts";
 import {
   enableWindowSizePersistence,
   restoreWindowSize,
@@ -175,6 +178,9 @@ const SAVED_CONNECTIONS_LOCKED_MESSAGE =
 
 function lockSavedConnectionsAtStartup(): void {
   startupLocked = true;
+  cancelPendingConnect();
+  cancelPendingTestConnection();
+  setConnectionAccessLocked(true);
   setSavedConnectionsLocked(true);
   refreshBookmarkBar();
   setStatus(SAVED_CONNECTIONS_LOCKED_MESSAGE);
@@ -227,9 +233,10 @@ async function loadBookmarksIntoBar(): Promise<void> {
     refreshBookmarkBar();
     const loadError = getBookmarkLoadError();
     if (loadError) {
-      const message = `Saved bookmarks could not be loaded (${loadError}) Bookmark changes are disabled so the stored copy is not overwritten.`;
+      const message = `Saved bookmarks could not be loaded (${loadError}) Bookmark changes and export are disabled so the stored copy is not overwritten.`;
       logActivity(message, "warning");
       setStatus(message, 10000);
+      showToast(message, { type: "warning", duration: 10000 });
     }
   } catch (err) {
     console.warn("Failed to load bookmarks:", err);

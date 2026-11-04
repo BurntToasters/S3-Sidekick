@@ -2122,6 +2122,71 @@ describe("transfer recovery ownership", () => {
     });
   });
 
+  it("rejects a re-selected upload whose name does not match the manifest", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<div id="dialog-overlay"></div>',
+    );
+    mockShowChoiceDialog.mockResolvedValue("resume");
+    const manifest = {
+      version: 6,
+      items: [
+        {
+          operation: "upload",
+          bucket: "bucket-a",
+          fileName: "photo.png",
+          filePath: "/tmp/photo.png",
+          key: "uploads/photo.png",
+          size: 3,
+          totalBytes: 3,
+          attempt: 1,
+          maxAttempts: 1,
+          conflictResolution: "replace",
+          connectionId: "previous-session",
+          connectionIdentity: "test-identity",
+        },
+      ],
+    };
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        return {
+          recovery_session: TEST_RECOVERY_SESSION,
+          manifest_json: JSON.stringify(manifest),
+          legacy_import_allowed: false,
+        };
+      }
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "object_exists") return false;
+      return undefined;
+    });
+    mockPickUploadFiles.mockResolvedValue([
+      {
+        token: "wrong-grant",
+        path: "/tmp/other.png",
+        name: "other.png",
+        isDir: false,
+        directoryToken: null,
+        directoryPath: null,
+      },
+    ]);
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    await vi.waitFor(() => {
+      expect(
+        document.getElementById("transfer-list")?.textContent ?? "",
+      ).toContain("does not match the recovered upload");
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "upload_object",
+      expect.anything(),
+    );
+    expect(document.querySelector('[data-action="reselect"]')).not.toBeNull();
+  });
+
   it("holds queued retries while disconnected instead of failing them", async () => {
     const transfers = await loadTransfersModule();
     const { state } = await import("../state.ts");
@@ -2480,6 +2545,40 @@ describe("transfer recovery ownership", () => {
     });
   });
 
+  it("clears a malformed legacy recovery dead end through an explicit discard", async () => {
+    const transfers = await loadTransfersModule();
+    localStorage.setItem("s3-sidekick.transfer-manifest.v1", "{not valid json");
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") {
+        return {
+          recovery_session: TEST_RECOVERY_SESSION,
+          manifest_json: "",
+          legacy_import_allowed: true,
+        };
+      }
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "object_exists") return false;
+      return undefined;
+    });
+
+    await expect(transfers.recoverPendingTransfers()).rejects.toThrow(
+      /malformed/i,
+    );
+    const refused = transfers.enqueuePaths(
+      [uploadSelection("/tmp/blocked.txt")],
+      "uploads/",
+    );
+    expect(refused.accepted).toBe(false);
+
+    await transfers.discardMalformedRecovery();
+    expect(localStorage.getItem("s3-sidekick.transfer-manifest.v1")).toBeNull();
+    const accepted = transfers.enqueuePaths(
+      [uploadSelection("/tmp/allowed.txt")],
+      "uploads/",
+    );
+    expect(accepted.accepted).toBe(true);
+  });
+
   it("retries hydration after a transient failure", async () => {
     const transfers = await loadTransfersModule();
     let loads = 0;
@@ -2786,6 +2885,13 @@ describe("transfer coverage lift", () => {
         recoverySession: TEST_RECOVERY_SESSION,
       }),
     );
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "transfer_checkpoint_gc",
+      expect.objectContaining({
+        keepCheckpointIds: [],
+        recoverySession: TEST_RECOVERY_SESSION,
+      }),
+    );
   });
 
   it("discards recovery state on removeTransfer after confirmation", async () => {
@@ -2972,6 +3078,61 @@ describe("transfer coverage lift", () => {
     });
     releaseUpload();
     await flushMicrotasks(6);
+  });
+
+  it("re-selects an expired upload grant instead of failing the row", async () => {
+    const transfers = await loadTransfersModule();
+    const { state } = await import("../state.ts");
+    state.currentSettings.maxConcurrentTransfers = 1;
+    let uploadCalls = 0;
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
+      if (cmd === "transfer_checkpoint_gc") return 0;
+      if (cmd === "object_exists") return false;
+      if (cmd === "upload_object") {
+        uploadCalls += 1;
+        if (uploadCalls === 1) {
+          throw new Error(
+            "That local path grant expired; choose the path again.",
+          );
+        }
+        return 3;
+      }
+      if (cmd === "head_object") return { content_length: 3 };
+      return undefined;
+    });
+    mockPickUploadFiles.mockResolvedValue([
+      {
+        token: "fresh-grant",
+        path: "/tmp/photo.png",
+        name: "photo.png",
+        isDir: false,
+        directoryToken: null,
+        directoryPath: null,
+        size: 3,
+      },
+    ]);
+
+    await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
+    transfers.enqueuePaths(
+      [{ path: "/tmp/photo.png", token: "old-grant", size: 3 }],
+      "uploads/",
+    );
+
+    await vi.waitFor(() => {
+      expect(
+        document.getElementById("transfer-list")?.textContent ?? "",
+      ).toContain("Completed");
+    });
+    expect(mockPickUploadFiles).toHaveBeenCalled();
+    expect(uploadCalls).toBe(2);
+    const uploadCallsWithToken = mockInvoke.mock.calls.filter(
+      ([cmd]) => cmd === "upload_object",
+    );
+    expect(uploadCallsWithToken.at(-1)?.[1]).toEqual(
+      expect.objectContaining({ uploadToken: "fresh-grant" }),
+    );
   });
 
   it("retries a transient failure after backoff (fake timers)", async () => {
@@ -3174,6 +3335,19 @@ describe("transfer coverage lift", () => {
       1,
     );
     transfers.disposeTransferQueueUI();
+  });
+
+  it("shares one listener registration across concurrent init calls", async () => {
+    const transfers = await loadTransfersModule();
+    await Promise.all([
+      transfers.initTransferQueueUI(),
+      transfers.initTransferQueueUI(),
+    ]);
+    expect(mockListen).toHaveBeenCalledTimes(2);
+    expect(mockListen.mock.calls.map(([event]) => event).sort()).toEqual([
+      "download-progress",
+      "upload-progress",
+    ]);
   });
 
   it("keeps only the most recent terminal history", async () => {

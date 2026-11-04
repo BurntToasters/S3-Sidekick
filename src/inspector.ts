@@ -15,6 +15,7 @@ import {
   syncPanelWidths,
 } from "./app-layout.ts";
 import { getSelectionEntries, type SelectionEntry } from "./app-selection.ts";
+import { getSelectableEntries, selectedObjectRevisions } from "./browser.ts";
 import { installInspectorHost } from "./inspector-host.ts";
 import { restoreTableSelectionFromInspector } from "./layout-render-bridge.ts";
 import { canPreview, closePreview, openPreview } from "./preview.ts";
@@ -446,6 +447,7 @@ export function setInspectorOpen(
   if (!open) {
     inspectorSyncGeneration += 1;
     lastCompletedSelectionSignature = null;
+    keptEditingRemovedSignature = null;
     releaseMobileInspectorModal(true);
   }
   inspectorOpen = open;
@@ -517,9 +519,12 @@ export function isMobileInspectorMode(): boolean {
 }
 
 export function closeInspectorOnMobile(): void {
-  if (isMobileInspectorMode()) {
-    setInspectorOpen(false);
-  }
+  if (!isMobileInspectorMode()) return;
+  // Going through the normal close path keeps the discard prompt for unsaved
+  // Properties edits instead of silently dropping them.
+  void requestCloseInspector().catch((err) =>
+    reportInspectorFailure("Close inspector", err),
+  );
 }
 
 function typeIconHtml(name: string, kind: "file" | "folder"): string {
@@ -563,9 +568,12 @@ function renderInspectorEmpty(): void {
     return;
   }
   const prefix = state.currentPrefix;
-  const fileCount = state.objects.length;
+  // Same counts as the browser statusbar: folder-prefix entries and file
+  // objects only. Count and size ignore folder marker rows.
+  const fileObjects = state.objects.filter((object) => !object.is_folder);
+  const fileCount = fileObjects.length;
   const folderCount = state.prefixes.length;
-  const loadedBytes = state.objects.reduce((sum, o) => sum + o.size, 0);
+  const loadedBytes = fileObjects.reduce((sum, object) => sum + object.size, 0);
   const location = prefix
     ? `${state.currentBucket}/${prefix}`
     : `${state.currentBucket}/`;
@@ -589,6 +597,16 @@ function renderInspectorEmpty(): void {
         () => undefined,
       );
     });
+}
+
+/**
+ * Recompute the empty inspector summary after the listing changes. Called by
+ * the browser after every render/unload; a no-op unless the empty pane is the
+ * one on screen.
+ */
+export function refreshInspectorEmptySummary(): void {
+  if (!inspectorOpen || !inspectorEmptyActive) return;
+  renderInspectorEmpty();
 }
 
 function previewUnavailableMessage(fileKeys: string[]): string {
@@ -621,31 +639,14 @@ function paneForSelection(singlePreviewable: boolean): InspectorPaneTab {
  * in-place listing refresh sync even when the same keys stay selected.
  */
 function selectionSyncSignature(entries: readonly SelectionEntry[]): string {
-  // One pass over the listing, not one scan per selected key.
-  const objectsByKey = new Map<string, (typeof state.objects)[number]>();
-  for (const object of state.objects) {
-    if (!object.is_folder) objectsByKey.set(object.key, object);
-  }
-  const revisions = entries
-    .map((entry) => {
-      if (entry.kind === "folder") {
-        return JSON.stringify(["folder", entry.key]);
-      }
-      const object = objectsByKey.get(entry.key);
-      return JSON.stringify([
-        "file",
-        entry.key,
-        object?.size ?? null,
-        object?.last_modified ?? null,
-      ]);
-    })
-    .sort();
+  // Reuse the browser's listing-revision index instead of rebuilding a Map of
+  // every object on each selection tick.
   return JSON.stringify([
     state.connectionIdentity,
     state.connectionId,
     state.currentBucket,
     state.currentPrefix,
-    revisions,
+    selectedObjectRevisions([...entries]),
   ]);
 }
 
@@ -664,6 +665,14 @@ function commitCompletedSelection(
   lastCompletedSelectionSignature = signature;
 }
 
+let pendingSelectionSync: number | null = null;
+/**
+ * Signature of an empty selection dismissed with "Keep editing" for an object
+ * the listing no longer has. Further empty ticks must not re-prompt; any new
+ * selection or location changes the signature and re-enables the gate.
+ */
+let keptEditingRemovedSignature: string | null = null;
+
 export async function syncInspectorFromSelection(
   selectedEntries?: readonly SelectionEntry[],
   options?: { reason?: InspectorSyncReason },
@@ -673,19 +682,54 @@ export async function syncInspectorFromSelection(
   const reason: InspectorSyncReason = options?.reason ?? "selection";
   const entries = selectedEntries ?? getSelectionEntries();
   const signature = selectionSyncSignature(entries);
+  // A sync already running may be showing an older object. A new request must
+  // cancel it by taking a newer generation even when its signature matches the
+  // last completed render, so A → B → A cannot leave B painted.
+  const syncWasInFlight = pendingSelectionSync !== null;
+  const syncGen = ++inspectorSyncGeneration;
+  pendingSelectionSync = syncGen;
+  try {
+    await performInspectorSync(
+      entries,
+      signature,
+      reason,
+      syncGen,
+      syncWasInFlight,
+    );
+  } finally {
+    if (pendingSelectionSync === syncGen) pendingSelectionSync = null;
+  }
+}
 
+async function performInspectorSync(
+  entries: readonly SelectionEntry[],
+  signature: string,
+  reason: InspectorSyncReason,
+  syncGen: number,
+  syncWasInFlight: boolean,
+): Promise<void> {
   // Opening the inspector syncs immediately and the browser's following
-  // selection tick repeats it. Skip only that duplicate; an empty selection
-  // must always sync so Deselect All can show the empty inspector.
+  // selection tick repeats it. Skip only that duplicate when nothing else is
+  // in flight; an empty selection must always sync so Deselect All can show
+  // the empty inspector.
   if (
     reason === "selection" &&
-    entries.length > 0 &&
-    signature === lastCompletedSelectionSignature
+    entries.length === 0 &&
+    signature === keptEditingRemovedSignature
   ) {
     return;
   }
-
-  const syncGen = ++inspectorSyncGeneration;
+  if (
+    reason === "selection" &&
+    entries.length > 0 &&
+    signature === lastCompletedSelectionSignature &&
+    !syncWasInFlight
+  ) {
+    return;
+  }
+  if (reason === "selection" && entries.length > 0) {
+    keptEditingRemovedSignature = null;
+  }
 
   // A selection change replaces the object that the info pane edits.
   // Unsaved edits must be confirmed first. If the user keeps editing, the
@@ -694,8 +738,22 @@ export async function syncInspectorFromSelection(
     const discard = await confirmDiscardInfoProperties();
     if (syncGen !== inspectorSyncGeneration) return;
     if (!discard) {
-      // Keep editing: the table goes back to the object the pane still shows.
-      restoreTableSelectionFromInspector(getInfoPanelEntries());
+      // Keep editing: restore the table selection only when those rows still
+      // exist. Re-adding a pruned row would recreate the same removal loop.
+      const edited = getInfoPanelEntries();
+      const selectable = new Set(
+        getSelectableEntries().map((entry) => `${entry.kind}:${entry.key}`),
+      );
+      if (
+        edited.length > 0 &&
+        edited.every((entry) => selectable.has(`${entry.kind}:${entry.key}`))
+      ) {
+        restoreTableSelectionFromInspector(edited);
+      } else if (entries.length === 0) {
+        // The edited row is gone and cannot be re-added. Remember this empty
+        // selection so the prune does not ask again on every render tick.
+        keptEditingRemovedSignature = signature;
+      }
       return;
     }
   }
@@ -893,7 +951,9 @@ export function wireInspectorChrome(): void {
       inspectorOpenByDefault &&
       contentContainerWidth() < INSPECTOR_DEFAULT_OPEN_CONTAINER
     ) {
-      setInspectorOpen(false, { persist: false });
+      void requestCloseInspector().catch((err) =>
+        reportInspectorFailure("Close inspector", err),
+      );
       return;
     }
     layout.classList.toggle("main-layout--inspector-open", mobile);

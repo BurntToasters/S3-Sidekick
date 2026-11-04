@@ -15,6 +15,7 @@ import {
   validateQualityGate,
   verifyQualityGate,
 } from "./release-session.js";
+import { finalizeQualityGate } from "./finalize-quality-gate.js";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -87,6 +88,23 @@ test("parsePorcelainPaths preserves leading XY status spaces", () => {
   );
 });
 
+test("parsePorcelainPaths only strips a rename arrow for R/C statuses", () => {
+  assert.deepEqual(parsePorcelainPaths(" M plain -> file.txt"), [
+    "plain -> file.txt",
+  ]);
+  assert.deepEqual(parsePorcelainPaths("?? dir/name -> kept.txt"), [
+    "dir/name -> kept.txt",
+  ]);
+  assert.deepEqual(parsePorcelainPaths("R  old.txt -> new.txt"), ["new.txt"]);
+  assert.deepEqual(
+    parsePorcelainPaths('R  "old -> name.txt" -> "new -> name.txt"'),
+    ["new -> name.txt"],
+  );
+  assert.deepEqual(parsePorcelainPaths("C  source.txt -> copy.txt"), [
+    "copy.txt",
+  ]);
+});
+
 test("createReleaseSession rejects when quality gate proof is missing", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "s3sk-release-"));
   try {
@@ -141,7 +159,10 @@ function initTempGitRepo(root) {
   );
 }
 
-function seedQualityEvidence(root, { now = Date.now() } = {}) {
+function seedQualityEvidence(
+  root,
+  { now = Date.now(), treeStart, treeEnd, commitOverride } = {},
+) {
   const coverage = path.join(root, "coverage");
   const reportDir = path.join(root, "test-results", "release-assets-e2e");
   fs.mkdirSync(coverage, { recursive: true });
@@ -150,14 +171,17 @@ function seedQualityEvidence(root, { now = Date.now() } = {}) {
     cwd: root,
     encoding: "utf8",
   }).trim();
+  const workingTreeSha256 = sha256WorkingTree(root);
   fs.writeFileSync(
     path.join(coverage, ".release-tests.json"),
     `${JSON.stringify({
       suite: "release-quality-evidence",
-      commit,
+      commit: commitOverride ?? commit,
       startedAt: now - 60_000,
       completedAt: now - 30_000,
       passed: true,
+      workingTreeSha256Start: treeStart ?? workingTreeSha256,
+      workingTreeSha256End: treeEnd ?? workingTreeSha256,
       checks: Object.fromEntries(
         REQUIRED_QUALITY_CHECK_NAMES.map((name) => [
           name,
@@ -302,6 +326,43 @@ test("quality-gate proof refuses evidence changed after recording", () => {
     assert.equal(recordSuccessfulQualityGate(root), true);
     fs.appendFileSync(coveragePath, "\n");
     assert.throws(() => verifyQualityGate(root), /evidence|changed/i);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quality-gate proof refuses a tree that changed during test:all", () => {
+  const root = createEvidenceRepo();
+  try {
+    seedQualityEvidence(root, {
+      treeStart: "a".repeat(64),
+      treeEnd: "b".repeat(64),
+    });
+    assert.equal(recordSuccessfulQualityGate(root), false);
+    assert.equal(finalizeQualityGate(root).ok, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quality-gate proof refuses evidence for another commit", () => {
+  const root = createEvidenceRepo();
+  try {
+    seedQualityEvidence(root, { commitOverride: "b".repeat(40) });
+    assert.equal(recordSuccessfulQualityGate(root), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("standalone finalize refuses a tree changed after test:all", () => {
+  const root = createEvidenceRepo();
+  try {
+    seedQualityEvidence(root);
+    fs.appendFileSync(path.join(root, "package.json"), "\n");
+    const result = finalizeQualityGate(root);
+    assert.equal(result.ok, false);
+    assert.match(result.evidenceProblems.join(" "), /different working tree/i);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -36,6 +36,7 @@ const REQUIRED_QUALITY_CHECK_NAMES = Object.freeze([
   "tauriBuild",
   "scriptTests",
   "releaseAssets",
+  "releaseAssetsE2e",
   "test",
   "rust",
 ]);
@@ -43,8 +44,29 @@ const QUALITY_GATE_REPORT_SPECS = Object.freeze([
   Object.freeze({
     path: "coverage/coverage-summary.json",
     kind: "vitest-coverage",
+    platforms: null,
+  }),
+  Object.freeze({
+    path: "test-results/release-assets-e2e/report.json",
+    kind: "release-assets",
+    // The release-assets E2E drives Unix GPG and fake Git/GitHub CLIs. CI runs
+    // it on Linux; Windows release hosts still run the node release-asset
+    // suite and the full CI gate.
+    platforms: Object.freeze(["linux", "darwin"]),
   }),
 ]);
+
+function activeQualityGateReportSpecs(platform = process.platform) {
+  return QUALITY_GATE_REPORT_SPECS.filter(
+    (spec) => !spec.platforms || spec.platforms.includes(platform),
+  );
+}
+
+function requiredQualityCheckNames(platform = process.platform) {
+  return REQUIRED_QUALITY_CHECK_NAMES.filter(
+    (name) => name !== "releaseAssetsE2e" || platform !== "win32",
+  );
+}
 
 function command(commandName, args, root) {
   return execFileSync(commandName, args, {
@@ -192,7 +214,7 @@ function validateQualityGate(
   }
   if (
     !Array.isArray(qualityGate.evidence) ||
-    qualityGate.evidence.length !== QUALITY_GATE_REPORT_SPECS.length + 1
+    qualityGate.evidence.length !== activeQualityGateReportSpecs().length + 1
   ) {
     throw new Error(
       "Release quality-gate proof has no complete report evidence list.",
@@ -216,7 +238,7 @@ function validateQualityGate(
   }
   for (const expectedPath of [
     QUALITY_GATE_EVIDENCE_RELATIVE_PATH.replace(/\\/g, "/"),
-    ...QUALITY_GATE_REPORT_SPECS.map((spec) => spec.path),
+    ...activeQualityGateReportSpecs().map((spec) => spec.path),
   ]) {
     if (!evidencePaths.has(expectedPath)) {
       throw new Error(
@@ -254,11 +276,22 @@ function parsePorcelainPaths(status) {
       // callers must not trim() the porcelain blob before parsing.
       const match = line.match(/^(.{2}) (.*)$/);
       if (!match) return "";
+      const xy = match[1];
       const rest = match[2];
-      const renameArrow = rest.indexOf(" -> ");
-      return normalizePorcelainPath(
-        renameArrow >= 0 ? rest.slice(renameArrow + 4) : rest,
-      );
+      // Only R (rename) and C (copy) carry the "old -> new" separator. A path
+      // containing " -> " must remain a single path.
+      if (!/[RC]/.test(xy)) return normalizePorcelainPath(rest);
+      let target = rest;
+      const quotedSeparator = rest.lastIndexOf('" -> "');
+      const plainSeparator = rest.lastIndexOf(" -> ");
+      if (quotedSeparator >= 0) {
+        // The separator's trailing quote belongs to the new path; keep it so
+        // normalizePorcelainPath can strip the matching pair.
+        target = rest.slice(quotedSeparator + 5);
+      } else if (plainSeparator >= 0) {
+        target = rest.slice(plainSeparator + " -> ".length);
+      }
+      return normalizePorcelainPath(target);
     })
     .filter(Boolean);
 }
@@ -309,7 +342,15 @@ function clearQualityGateEvidence(root = defaultRoot) {
 
 function writeQualityGateEvidence(
   root,
-  { commit, startedAt, completedAt, checks, passed },
+  {
+    commit,
+    startedAt,
+    completedAt,
+    checks,
+    passed,
+    workingTreeSha256Start,
+    workingTreeSha256End,
+  },
 ) {
   const evidencePath = path.join(root, QUALITY_GATE_EVIDENCE_RELATIVE_PATH);
   fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
@@ -322,6 +363,8 @@ function writeQualityGateEvidence(
         startedAt,
         completedAt,
         passed,
+        workingTreeSha256Start,
+        workingTreeSha256End,
         checks,
       },
       null,
@@ -383,14 +426,55 @@ function qualityGateEvidenceProblems(
   if (evidence.passed !== true) {
     problems.push("Release quality-gate test evidence did not pass.");
   }
-  for (const name of REQUIRED_QUALITY_CHECK_NAMES) {
+  const workingTreeStart = String(evidence.workingTreeSha256Start || "");
+  const workingTreeEnd = String(evidence.workingTreeSha256End || "");
+  if (
+    !/^[0-9a-f]{64}$/i.test(workingTreeStart) ||
+    !/^[0-9a-f]{64}$/i.test(workingTreeEnd)
+  ) {
+    problems.push(
+      "Release quality-gate test evidence has no working-tree hashes for suite start and end.",
+    );
+  } else if (workingTreeStart.toLowerCase() !== workingTreeEnd.toLowerCase()) {
+    problems.push(
+      "Release quality-gate working tree changed while test:all ran; rerun test:all on a stable tree.",
+    );
+  } else {
+    let currentTree;
+    try {
+      currentTree = sha256WorkingTree(root);
+    } catch (error) {
+      problems.push(
+        `Could not hash the current working tree: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      currentTree = null;
+    }
+    if (
+      currentTree &&
+      currentTree.toLowerCase() !== workingTreeStart.toLowerCase()
+    ) {
+      problems.push(
+        "Release quality-gate test evidence is for a different working tree; rerun test:all on this checkout.",
+      );
+    }
+  }
+  for (const name of requiredQualityCheckNames()) {
     if (evidence.checks?.[name]?.status !== "passed") {
       problems.push(`Release quality-gate check "${name}" did not pass.`);
     }
   }
+  if (process.platform === "win32") {
+    const windowsStatus = evidence.checks?.releaseAssetsE2e?.status;
+    if (windowsStatus !== "skipped" && windowsStatus !== "passed") {
+      problems.push(
+        'Release quality-gate check "releaseAssetsE2e" must record skipped or passed on Windows.',
+      );
+    }
+  }
 
   const reports = [];
-  for (const spec of QUALITY_GATE_REPORT_SPECS) {
+  const reportSpecs = activeQualityGateReportSpecs();
+  for (const spec of reportSpecs) {
     const reportPath = resolveRootRelative(root, spec.path);
     let stat;
     try {
@@ -442,17 +526,25 @@ function qualityGateEvidenceProblems(
         );
       } else {
         if (
-          Number.isFinite(evidence.completedAt) &&
-          report.completedAt < evidence.completedAt - EVIDENCE_CLOCK_SKEW_MS
+          Number.isFinite(evidence.startedAt) &&
+          report.completedAt < evidence.startedAt - EVIDENCE_CLOCK_SKEW_MS
         ) {
           problems.push(
-            `Release quality-gate release-assets report predates test:all: ${spec.path}.`,
+            `Release quality-gate release-assets report predates test:all: ${spec.path}`,
+          );
+        }
+        if (
+          Number.isFinite(evidence.completedAt) &&
+          report.completedAt > evidence.completedAt + EVIDENCE_CLOCK_SKEW_MS
+        ) {
+          problems.push(
+            `Release quality-gate release-assets report postdates test:all: ${spec.path}`,
           );
         }
         const reportAge = now - report.completedAt;
         if (reportAge < -EVIDENCE_CLOCK_SKEW_MS || reportAge > maxAgeMs) {
           problems.push(
-            `Release quality-gate release-assets report is expired: ${spec.path}.`,
+            `Release quality-gate release-assets report is expired: ${spec.path}`,
           );
         }
       }
@@ -511,6 +603,21 @@ function proofEvidenceProblems(proof, root, options = {}) {
     problems.push(
       "Release quality-gate proof does not match its test evidence.",
     );
+  }
+  if (collection.evidence) {
+    const evidenceTree = String(
+      collection.evidence.workingTreeSha256Start || "",
+    ).toLowerCase();
+    if (
+      !/^[0-9a-f]{64}$/.test(evidenceTree) ||
+      evidenceTree !==
+        String(collection.evidence.workingTreeSha256End || "").toLowerCase() ||
+      evidenceTree !== String(proof.sourceTreeSha256 || "").toLowerCase()
+    ) {
+      problems.push(
+        "Release quality-gate proof is not bound to the working tree the tests ran on.",
+      );
+    }
   }
   return problems;
 }
@@ -684,6 +791,7 @@ export {
   RELEASE_BOOTSTRAP_PATHS,
   RELEASE_SESSION_RELATIVE_PATH,
   REQUIRED_QUALITY_CHECK_NAMES,
+  activeQualityGateReportSpecs,
   blockingReleaseWorkingTreePaths,
   clearQualityGateEvidence,
   clearQualityGateProof,
@@ -694,6 +802,7 @@ export {
   parsePorcelainPaths,
   qualityGateEvidenceProblems,
   recordSuccessfulQualityGate,
+  requiredQualityCheckNames,
   sha256WorkingTree,
   startReleaseSession,
   validateQualityGate,

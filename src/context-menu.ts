@@ -130,6 +130,16 @@ export function showContextMenu(
       });
       btn.appendChild(icon);
     }
+    const isDisabled = !!item.disabled;
+    if (isDisabled) {
+      // Keep the item focusable so keyboard and screen-reader users can reach
+      // the reason text; aria-disabled carries the state without removing it
+      // from the arrow-key order.
+      btn.setAttribute("aria-disabled", "true");
+      btn.classList.add("context-menu__item--disabled");
+      btn.style.opacity = "0.55";
+      btn.style.cursor = "not-allowed";
+    }
     const label = document.createElement("span");
     label.className = "context-menu__label";
     label.textContent = item.label;
@@ -141,9 +151,14 @@ export function showContextMenu(
       hint.textContent = item.shortcut;
       btn.appendChild(hint);
     }
-    btn.disabled = !!item.disabled;
+    btn.disabled = false;
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
+      if (isDisabled) {
+        // A disabled item explains itself instead of firing.
+        btn.focus();
+        return;
+      }
       closeContextMenu("action");
       onAction(item.action);
     });

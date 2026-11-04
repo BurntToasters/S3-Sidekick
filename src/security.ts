@@ -2,7 +2,7 @@ import { invoke } from "./ipc.ts";
 import { showConfirm, showPrompt, showAlert } from "./dialogs.ts";
 import { state } from "./state.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
-import { friendlyError, plural } from "./utils.ts";
+import { codePointLength, friendlyError, plural } from "./utils.ts";
 import { getIconHtml } from "./icons.ts";
 
 /**
@@ -33,11 +33,17 @@ export interface SecurityStatus {
   lock_timeout_minutes: number;
   biometric_available: boolean;
   biometric_enrolled: boolean;
+  /** A legacy zero/missing auto-lock was migrated to the 15-minute default. */
+  lock_timeout_defaulted?: boolean;
+  /** The operation succeeded but secondary cleanup still needs a retry. */
+  cleanup_warning?: string | null;
 }
 
 type StatusSetter = (text: string) => void;
 const WINDOWS_STARTUP_BIOMETRIC_DELAY_MS = 800;
 const WINDOWS_STARTUP_FOCUS_WAIT_MS = 2500;
+/** Show the legacy auto-lock migration notice once per app run. */
+let legacyLockTimeoutNoticeShown = false;
 
 async function getSecurityStatus(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>("get_security_status");
@@ -46,6 +52,12 @@ async function getSecurityStatus(): Promise<SecurityStatus> {
 function announceSecurityReady(status: SecurityStatus): void {
   if (!status.encryption_enabled || status.unlocked) {
     window.dispatchEvent(new Event("s3-sidekick:security-ready"));
+  }
+}
+
+async function surfaceCleanupWarning(status: SecurityStatus): Promise<void> {
+  if (status.cleanup_warning) {
+    await showAlert("Security Cleanup Pending", status.cleanup_warning);
   }
 }
 
@@ -67,6 +79,7 @@ async function unlockSecurity(
 ): Promise<SecurityStatus> {
   const status = await invoke<SecurityStatus>("unlock_security", { password });
   if (announce) announceSecurityReady(status);
+  await surfaceCleanupWarning(status);
   return status;
 }
 
@@ -81,6 +94,7 @@ async function setSecurityEncryption(
     newPassword,
   });
   announceSecurityReady(status);
+  await surfaceCleanupWarning(status);
   return status;
 }
 
@@ -93,6 +107,7 @@ async function changeSecurityPassword(
     newPassword,
   });
   announceSecurityReady(status);
+  await surfaceCleanupWarning(status);
   return status;
 }
 
@@ -242,7 +257,7 @@ async function promptForNewPassword(): Promise<string | null> {
     inputType: "password",
     inputPlaceholder: "Password (12+ characters)",
     validationMessage: "Password must be at least 12 characters.",
-    validate: async (value) => value.length >= 12,
+    validate: async (value) => codePointLength(value) >= 12,
   });
   if (first === null) return null;
 
@@ -781,6 +796,14 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
     setHidden(lockNeverWarning, !unlocked || status.lock_timeout_minutes > 0);
     if (status.encryption_enabled && lockTimeoutSelect) {
       lockTimeoutSelect.value = String(status.lock_timeout_minutes);
+    }
+    if (status.lock_timeout_defaulted && !legacyLockTimeoutNoticeShown) {
+      legacyLockTimeoutNoticeShown = true;
+      const lockStatus = document.getElementById("security-lock-status");
+      if (lockStatus) {
+        lockStatus.textContent =
+          "Auto-lock was defaulted to 15 minutes for this vault. Choose a different value if needed.";
+      }
     }
 
     const biometricShown = unlocked && status.biometric_available;

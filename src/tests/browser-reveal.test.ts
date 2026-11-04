@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../inspector.ts", () => ({
+  refreshInspectorEmptySummary: vi.fn(),
   closeInspectorOnMobile: vi.fn(),
   isInspectorOpen: () => false,
   markInspectorHasContent: vi.fn(),
@@ -13,6 +14,7 @@ vi.mock("../connection.ts", () => ({
 }));
 
 vi.mock("../info-panel.ts", () => ({
+  invalidateInfoPanelCaches: vi.fn(),
   INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
   hasUnsavedInfoChanges: () => false,
   confirmDiscardInfoProperties: async () => true,
@@ -40,7 +42,6 @@ function renderFixture(): void {
     <div id="batch-toolbar">
       <span id="batch-count"></span>
       <div id="batch-toolbar-actions" hidden>
-        <button id="batch-properties"></button>
         <button id="batch-download"></button>
         <button id="batch-delete"></button>
         <button id="batch-copy-urls"></button>
@@ -55,7 +56,6 @@ function renderFixture(): void {
     <button id="nav-forward"></button>
     <button id="nav-up"></button>
     <input id="location-omnibar-edit" type="text" hidden />
-    <button id="btn-download" disabled></button>
     <span id="status"></span>
   `;
 }

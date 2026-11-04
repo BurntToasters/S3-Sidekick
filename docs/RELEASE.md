@@ -79,19 +79,35 @@ stable artifacts when configured, and cleans checkout.
 `release:prepare` runs two gates. The local `test:all` gate covers typecheck,
 lint, formatting (including `scripts/*.mjs`), Cargo update policy, Tauri
 alignment, icon validation, Clippy, `cargo fmt`, both builds, script and
-release-asset tests, Vitest, and Rust tests. It does not run the Ubuntu
-Playwright, MinIO, or full-stack jobs. `release:ci-status` then requires a
-completed, successful check run named `Release gate` for the exact HEAD
-through the GitHub API. `.github/workflows/ci.yml` defines that aggregate job
-over the browser, MinIO, WebDriver, and platform smoke jobs. `release:prepare`
-and every `*:continue` chain call `release:ci-status`, so a release cannot
-skip the CI gate.
+release-asset tests, the release-assets E2E (Linux/macOS; Windows records it as
+skipped because the fixture is Unix-only), Vitest, and Rust tests. Evidence
+records the working-tree SHA-256 at suite start and end; a tree that changes
+during `test:all` cannot produce a proof. It does not run the Ubuntu Playwright,
+MinIO, or full-stack jobs. `release:ci-status` then requires a completed,
+successful check run named `Release gate` for the exact HEAD through the GitHub
+API, and verifies that the run belongs to the `github-actions` app, the
+`.github/workflows/ci.yml` workflow, the expected release branch, and a `push`
+event. `.github/workflows/ci.yml` defines that aggregate job over the browser,
+MinIO, AWS-null, full-stack, Windows-startup, and platform smoke jobs.
+`release:prepare` and every `*:continue` chain call `release:ci-status`, so a
+release cannot skip the CI gate.
+
+`release:publish` and `release:mirror` also require the current build session and
+quality-gate proof plus the exact-SHA CI status when run standalone; they fail
+closed instead of skipping those gates. Run them on the host that completed
+`release:prepare`.
 
 `release:cleanup:checkout` fast-forwards to the configured upstream and
 refuses a dirty tree. Set `ALLOW_RELEASE_CLEANUP_STASH=1` only to stash local
 work first (restore it with `git stash pop`); the cleanup never runs
 `reset --hard` or `clean -fd`. The continue chains call it through
-`release:finalize`, so they cannot bypass the dirty-tree guard.
+`release:finalize`, so they cannot bypass the dirty-tree guard. The guard is
+covered by an executed disposable-Git test, not only source inspection.
+
+The browser job verifies `test-results/playwright-report.json` against
+`tests/browser/required-specs.json`. Update that manifest when adding or
+removing a spec or changing its test count; skipped, retried, flaky, or
+unlisted specs fail the release gate.
 
 Linux release contains the x64 AppImage and Flatpak. DEB and RPM packages are
 retired: they are not built, signed, or uploaded, and a stale `.deb` or `.rpm`
@@ -101,7 +117,10 @@ available for local packaging, but public release matrix is x64-only.
 Beta signing copies `latest-*-beta-*.json` onto the latest _stable_ GitHub
 release so native beta clients can fetch
 `/releases/latest/download/latest-{{target}}-{{arch}}.json`. If that copy is
-interrupted, recover with `npm run release:sync-beta-manifests`.
+interrupted, recover with `npm run release:sync-beta-manifests`. Recovery
+re-downloads each manifest and its detached signature, verifies the approved
+GPG key and signed checksum coverage, and aborts before touching the stable
+feed if any byte or signature does not match.
 
 ## Updater signature version binding
 
@@ -125,8 +144,10 @@ npm run release:verify:published
 
 `release:verify:draft` checks draft identity, required S3 package matrix,
 checksums, detached signatures, updater manifests, and updater signatures.
-`release:publish` refuses a stale or incomplete draft.
-`release:verify:published` checks the tagged release matrix, then the public
+`release:publish` refuses a stale or incomplete draft and requires the verified
+build session, quality-gate proof, and exact-SHA CI status.
+`release:verify:published` checks the tagged release matrix, that
+`target_commitish` matches the verified commit, then the public
 `/releases/latest` updater feed and signatures after publication.
 
 Perform clean-machine checks before publishing:

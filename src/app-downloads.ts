@@ -25,6 +25,7 @@ import {
   friendlyError,
   plural,
   safeFileName,
+  basename,
 } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
@@ -56,6 +57,62 @@ function parentDirectory(path: string): string {
   const idx = normalized.lastIndexOf("/");
   if (idx <= 0) return "";
   return normalized.slice(0, idx);
+}
+
+function pathLeaf(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+const SHELL_STARTUP_NAMES = new Set([
+  ".zshenv",
+  ".zprofile",
+  ".zshrc",
+  ".zlogin",
+  ".zlogout",
+  ".bashrc",
+  ".bash_profile",
+  ".bash_login",
+  ".bash_logout",
+  ".profile",
+  ".login",
+  ".logout",
+  ".cshrc",
+  ".tcshrc",
+  ".kshrc",
+  "config.fish",
+  "profile.ps1",
+  "microsoft.powershell_profile.ps1",
+]);
+
+function isShellStartupOrDotfile(name: string): boolean {
+  const normalized = name.normalize("NFC").trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.startsWith(".") || SHELL_STARTUP_NAMES.has(normalized);
+}
+
+function encodeDotName(name: string): string {
+  return name.replace(
+    /[.]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/**
+ * Match the backend's child-name rules before deduplication.
+ *
+ * `path_authority::validate_child_name` trims the name and rejects path
+ * separators on every platform, including backslashes that Unix filesystems
+ * would otherwise accept. Trim first so a key like `"notes.txt "` cannot
+ * dedupe separately from `"notes.txt"` and then collide after the backend
+ * trims it. Encode a backslash rather than ever sending a name the backend
+ * must reject.
+ */
+function downloadChildName(key: string, platform: string): string {
+  let name = safeFileName(key, platform).normalize("NFC").trim();
+  if (!name) name = "unnamed";
+  if (name === "." || name === "..") name = encodeDotName(name);
+  return name.replace(/\\/g, "%5C");
 }
 
 function readRecentDownloadDirs(): string[] {
@@ -160,7 +217,7 @@ async function uniqueDownloadEntries(
     caseInsensitive ? name.normalize("NFC").toLowerCase() : name;
 
   for (const key of keys) {
-    const base = safeFileName(key, state.platformName);
+    const base = downloadChildName(key, state.platformName);
     const { stem, ext } = splitNameExt(base);
     let candidate = base;
     let n = 2;
@@ -328,7 +385,11 @@ export async function handleDownload(): Promise<void> {
     const fileName = safeFileName(capturedKeys[0], state.platformName);
     let grant: NativePathGrant | null;
     try {
-      grant = await pickDownloadFile(fileName, `Save ${fileName}`);
+      grant = await pickDownloadFile(
+        fileName,
+        `Save ${fileName}`,
+        getRememberedDownloadDir(),
+      );
     } catch (err) {
       setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
       return;
@@ -343,6 +404,22 @@ export async function handleDownload(): Promise<void> {
     }
     saveRememberedDownloadDir(grant.path);
     rememberDirectoryGrant(grant);
+    const destinationName = grant.name || pathLeaf(grant.path);
+    if (isShellStartupOrDotfile(destinationName)) {
+      const replace = await showConfirm(
+        "Replace shell startup file?",
+        `${destinationName} is a shell startup file or dotfile. Replacing it can change how your shell or tools start. Download over it?`,
+        {
+          okLabel: "Download and replace",
+          cancelLabel: "Cancel",
+          okDanger: true,
+        },
+      );
+      if (!replace) {
+        setStatus("Download cancelled: shell startup file not replaced.", 5000);
+        return;
+      }
+    }
     // The save dialog already asked the user about replacing an existing file,
     // so that answer is the confirmed replace; no second prompt follows.
     entries.push({
@@ -355,7 +432,10 @@ export async function handleDownload(): Promise<void> {
   } else {
     let grant: NativePathGrant | null;
     try {
-      grant = await pickDownloadDirectory();
+      grant = await pickDownloadDirectory(
+        undefined,
+        getRememberedDownloadDir(),
+      );
     } catch (err) {
       setStatus(`Failed to open folder picker: ${friendlyError(err)}`);
       return;
@@ -388,7 +468,7 @@ export async function handleDownload(): Promise<void> {
     );
     return;
   }
-  const resolvedEntries =
+  let resolvedEntries =
     capturedKeys.length === 1
       ? entries
       : await resolveDownloadEntriesWithConflicts(entries);
@@ -398,6 +478,47 @@ export async function handleDownload(): Promise<void> {
       5000,
     );
     return;
+  }
+  const sensitiveEntries = resolvedEntries.filter((entry) =>
+    isShellStartupOrDotfile(
+      entry.destinationName ?? pathLeaf(entry.destination),
+    ),
+  );
+  if (sensitiveEntries.length > 0) {
+    const names = sensitiveEntries
+      .slice(0, 3)
+      .map((entry) => entry.destinationName ?? pathLeaf(entry.destination))
+      .join(", ");
+    const extra =
+      sensitiveEntries.length > 3
+        ? ` and ${sensitiveEntries.length - 3} more`
+        : "";
+    const replace = await showConfirm(
+      "Replace shell startup files?",
+      `${names}${extra} ${sensitiveEntries.length === 1 ? "is a shell startup file or dotfile" : "are shell startup files or dotfiles"}. Replacing them can change how your shell or tools start. Download them?`,
+      {
+        okLabel: "Download selected",
+        cancelLabel: "Skip them",
+        okDanger: true,
+      },
+    );
+    if (!replace) {
+      const skipped = new Set(sensitiveEntries);
+      resolvedEntries = resolvedEntries.filter((entry) => !skipped.has(entry));
+      for (const entry of sensitiveEntries) {
+        logActivity(
+          `Skipped download for ${basename(entry.key)}: shell startup or dotfile destination was not replaced.`,
+          "warning",
+        );
+      }
+      if (resolvedEntries.length === 0) {
+        setStatus(
+          "No downloads queued: shell startup files were skipped.",
+          5000,
+        );
+        return;
+      }
+    }
   }
   if (resolvedEntries.length === 0) {
     setStatus("No downloads queued (all conflicts were skipped).", 5000);
@@ -441,7 +562,7 @@ export async function handleOpenLastDownloadFolder(): Promise<void> {
     if (!token) {
       // Grants end with the session. Ask the user to confirm the remembered
       // folder in a native picker instead of trusting the stored path.
-      const grant = await pickDownloadDirectory("Open download folder");
+      const grant = await pickDownloadDirectory("Open download folder", dir);
       if (!grant) return;
       rememberDirectoryGrant(grant);
       token = grant.directoryToken ?? grant.token;

@@ -78,6 +78,7 @@ vi.mock("../settings.ts", () => ({
 vi.mock("../connection.ts", () => ({
   loadConnection: mockLoadConnection,
   getConnectionLoadError: mockGetConnectionLoadError,
+  setConnectionAccessLocked: vi.fn(),
 }));
 
 vi.mock("../bookmarks.ts", () => ({
@@ -131,6 +132,8 @@ vi.mock("../app-connection.ts", () => ({
   setConnectionUI: mockSetConnectionUI,
   setSavedConnectionsLocked: vi.fn(),
   setUnlockSavedConnectionsHandler: vi.fn(),
+  cancelPendingConnect: vi.fn(),
+  cancelPendingTestConnection: vi.fn(),
 }));
 
 vi.mock("../app-events.ts", () => ({

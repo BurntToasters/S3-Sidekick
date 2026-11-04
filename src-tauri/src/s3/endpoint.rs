@@ -1,5 +1,10 @@
 //! Endpoint parsing, region inference and listing key decoding.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+use aws_sdk_s3::types::EncodingType;
+
 #[derive(serde::Serialize)]
 pub(crate) struct PreviewResponse {
     pub(super) content_type: String,
@@ -68,7 +73,10 @@ pub(super) fn parse_endpoint_host(endpoint: &str) -> Option<String> {
         Some((_, rest)) => rest,
         None => trimmed,
     };
-    let authority = after_scheme.split('/').next()?.trim();
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = after_scheme[..authority_end].trim();
     if authority.is_empty() {
         return None;
     }
@@ -203,6 +211,7 @@ fn is_blocked_metadata_host(host: &str) -> bool {
 fn blocked_ip_kind(ip: std::net::IpAddr) -> Option<&'static str> {
     match ip {
         std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
             if v4.is_link_local() {
                 Some("IPv4 link-local")
             } else if v4.is_unspecified() {
@@ -211,17 +220,33 @@ fn blocked_ip_kind(ip: std::net::IpAddr) -> Option<&'static str> {
                 Some("broadcast")
             } else if v4.is_multicast() {
                 Some("IPv4 multicast")
+            } else if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                // 100.64.0.0/10 is carrier-grade NAT, and several clouds host
+                // instance metadata there (for example 100.100.100.200).
+                Some("IPv4 carrier-grade NAT")
+            } else if octets == [168, 63, 129, 16] {
+                // Azure's wire-server / instance metadata address.
+                Some("cloud instance metadata")
+            } else if octets == [192, 0, 0, 192] {
+                Some("cloud instance metadata")
             } else {
                 None
             }
         }
         std::net::IpAddr::V6(v6) => {
+            let segments = v6.segments();
             if v6.is_unspecified() {
                 Some("unspecified")
             } else if v6.is_multicast() {
                 Some("IPv6 multicast")
-            } else if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+            } else if (segments[0] & 0xffc0) == 0xfe80 {
                 Some("IPv6 link-local")
+            } else if segments[0] == 0xfd00 && segments[1] == 0x0ec2 {
+                // AWS IPv6 instance metadata lives in `fd00:ec2::/32`.
+                Some("IPv6 instance metadata")
+            } else if segments[0] == 0xfd20 && segments[1] == 0x00ce {
+                // Google Cloud IPv6 metadata (`fd20:ce::254`).
+                Some("IPv6 instance metadata")
             } else {
                 // Also catch IPv4-mapped/compatible forms such as
                 // `::ffff:169.254.169.254`, which embed a blocked v4 address.
@@ -230,6 +255,28 @@ fn blocked_ip_kind(ip: std::net::IpAddr) -> Option<&'static str> {
             }
         }
     }
+}
+
+/// Reject numeric hosts that only *look* like an IPv4 literal.
+///
+/// Some resolvers accept `127.1`, `0177.0.0.1`, or `2852039166` and map them to
+/// an address. Parsing only the canonical dotted-quad form keeps the address
+/// classification below authoritative for every numeric host, instead of letting
+/// a non-canonical spelling reach the resolver unclassified.
+fn is_non_canonical_ipv4(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return false;
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_err() {
+        return true;
+    }
+    host.split('.')
+        .any(|segment| segment.len() > 1 && segment.starts_with('0'))
 }
 
 fn validate_endpoint_host(host: &str, endpoint: &str) -> Result<(), String> {
@@ -252,8 +299,75 @@ fn validate_endpoint_host(host: &str, endpoint: &str) -> Result<(), String> {
                 "Endpoint '{endpoint}' uses an unsafe {kind} address, which is not allowed."
             ));
         }
+    } else if is_non_canonical_ipv4(ip_literal) {
+        return Err(format!(
+            "Endpoint '{endpoint}' uses a non-canonical IPv4 literal, which is not allowed; use the dotted-quad form."
+        ));
     }
     Ok(())
+}
+
+/// Resolve a hostname and reject every address that names a metadata service.
+///
+/// Checking only the literal endpoint string misses a hostname whose DNS answer
+/// points at `169.254.169.254`, `fd00:ec2::254`, or another metadata service.
+/// All returned addresses are classified, not just the first, so a mixed or
+/// rebinding answer cannot hide one unsafe target behind a safe one.
+pub(super) async fn validate_endpoint_resolution(endpoint: &str) -> Result<(), String> {
+    let host = parse_endpoint_host(endpoint).ok_or_else(|| {
+        "Endpoint URL has no host; enter a full endpoint such as https://s3.amazonaws.com."
+            .to_string()
+    })?;
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if is_non_canonical_ipv4(&host) {
+        return Err(format!(
+            "Endpoint '{endpoint}' uses a non-canonical IPv4 literal, which is not allowed; use the dotted-quad form."
+        ));
+    }
+
+    let port = parse_endpoint_port(endpoint).unwrap_or_else(|| {
+        if endpoint.trim().starts_with("http://") {
+            80
+        } else {
+            443
+        }
+    });
+    let resolved: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|err| format!("Endpoint '{endpoint}' could not be resolved: {err}"))?
+        .collect();
+    if resolved.is_empty() {
+        return Err(format!(
+            "Endpoint '{endpoint}' did not resolve to any address."
+        ));
+    }
+    for address in resolved {
+        if let Some(kind) = blocked_ip_kind(address.ip()) {
+            return Err(format!(
+                "Endpoint '{endpoint}' resolves to an unsafe {kind} address ({}), which is not allowed.",
+                address.ip()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_endpoint_port(endpoint: &str) -> Option<u16> {
+    let trimmed = endpoint.trim();
+    let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = after_scheme[..authority_end].trim();
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let port = if host_port.starts_with('[') {
+        host_port.split_once("]:")?.1
+    } else {
+        host_port.rsplit_once(':')?.1
+    };
+    port.parse().ok()
 }
 
 /// Normalize an endpoint string into a full URL suitable for the AWS SDK.
@@ -272,11 +386,16 @@ pub(super) fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), 
     let (scheme, after_scheme) = with_scheme.split_once("://").ok_or_else(|| {
         "Endpoint URL is malformed; include a scheme such as https://.".to_string()
     })?;
-    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let path = after_scheme
-        .strip_prefix(authority)
-        .unwrap_or("")
-        .trim_matches('/');
+    // Split authority, path, query, and fragment explicitly. Treating a query
+    // or fragment as part of the host produced endpoints such as
+    // `https://host?x=1`, which the SDK then failed to resolve.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    let remainder = after_scheme[authority_end..].trim_start_matches('/');
+    let path_end = remainder.find(['?', '#']).unwrap_or(remainder.len());
+    let path = remainder[..path_end].trim_matches('/');
 
     // Userinfo is not part of a host. Drop it before parsing so a value like
     // `user@169.254.169.254` cannot smuggle a blocked address past validation.
@@ -315,17 +434,30 @@ pub(super) fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), 
 
     let do_suffix = ".digitaloceanspaces.com";
     let normalized_host = if let Some((endpoint, bucket)) = strip_aws_virtual_host(&host_lower) {
-        if bucket_hint.is_none() {
-            bucket_hint = Some(bucket);
+        if let Some(path_bucket) = bucket_hint.as_ref() {
+            if path_bucket != &bucket {
+                return Err(format!(
+                    "Endpoint names bucket '{}' in its host and '{}' in its path; remove one of them.",
+                    bucket, path_bucket
+                ));
+            }
         }
+        bucket_hint = Some(bucket);
         endpoint
     } else if host_lower.ends_with(do_suffix) {
         let prefix = host_lower.trim_end_matches(do_suffix);
         let parts: Vec<&str> = prefix.split('.').collect();
         if parts.len() >= 2 {
-            if bucket_hint.is_none() {
-                bucket_hint = Some(parts[0].to_string());
+            let host_bucket = parts[0].to_string();
+            if let Some(path_bucket) = bucket_hint.as_ref() {
+                if path_bucket != &host_bucket {
+                    return Err(format!(
+                        "Endpoint names bucket '{}' in its host and '{}' in its path; remove one of them.",
+                        host_bucket, path_bucket
+                    ));
+                }
             }
+            bucket_hint = Some(host_bucket);
             format!("{}{}", parts[parts.len() - 1], do_suffix)
         } else {
             host_lower
@@ -365,17 +497,31 @@ pub(super) fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ListedEncoding {
     pub(super) plus_is_space: bool,
+    decode_percent: bool,
 }
 
 impl ListedEncoding {
+    /// A response that did not echo `encoding-type=url` carries raw keys.
+    /// Decoding those would corrupt every key containing `%` or `+`.
+    pub(super) fn raw() -> Self {
+        Self {
+            plus_is_space: false,
+            decode_percent: false,
+        }
+    }
+
     pub(super) fn detect<'a>(values: impl IntoIterator<Item = &'a str>) -> Self {
         let percent_encoder = values.into_iter().any(|value| value.contains("%20"));
         Self {
             plus_is_space: !percent_encoder,
+            decode_percent: true,
         }
     }
 
     pub(super) fn decode(self, value: &str) -> String {
+        if !self.decode_percent {
+            return value.to_string();
+        }
         let value = if self.plus_is_space {
             value.replace('+', " ")
         } else {
@@ -388,18 +534,64 @@ impl ListedEncoding {
     }
 }
 
+/// Encoding style is a property of the server, learned from every listed value
+/// the connection has returned. Judging each page independently made a page
+/// without a `%20` fall back to form decoding, turning `a+b` into `a b` on the
+/// next request even though the server had already shown itself to be a
+/// percent encoder. The cache is keyed by endpoint URL so one connection's
+/// behaviour cannot leak into another.
+fn listed_encoding_cache() -> &'static Mutex<HashMap<String, bool>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn listed_values(
+    output: &aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output,
+) -> impl Iterator<Item = &str> {
+    output
+        .contents()
+        .iter()
+        .filter_map(|object| object.key())
+        .chain(output.common_prefixes().iter().filter_map(|p| p.prefix()))
+        .chain(output.prefix())
+        .chain(output.start_after())
+}
+
 /// Judge one listing response by every encoded value it carries: keys,
 /// common prefixes, and the echoed request prefix and start-after.
 pub(super) fn listed_encoding(
     output: &aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output,
 ) -> ListedEncoding {
-    ListedEncoding::detect(
-        output
-            .contents()
-            .iter()
-            .filter_map(|object| object.key())
-            .chain(output.common_prefixes().iter().filter_map(|p| p.prefix()))
-            .chain(output.prefix())
-            .chain(output.start_after()),
-    )
+    if output.encoding_type() != Some(&EncodingType::Url) {
+        return ListedEncoding::raw();
+    }
+    ListedEncoding::detect(listed_values(output))
+}
+
+/// Same decision, but remembers the encoding style observed for this bucket
+/// across pages. The server's encoding behaviour does not change page to page,
+/// so a page without `%20` must not flip the `+` interpretation established by
+/// an earlier page.
+pub(super) fn listed_encoding_for(
+    bucket: &str,
+    output: &aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output,
+) -> ListedEncoding {
+    if output.encoding_type() != Some(&EncodingType::Url) {
+        return ListedEncoding::raw();
+    }
+    let mut page = listed_encoding(output);
+    let key = bucket.to_string();
+    if let Ok(mut cache) = listed_encoding_cache().lock() {
+        match cache.get(&key) {
+            Some(true) => page.plus_is_space = false,
+            Some(false) => {}
+            None => {
+                cache.insert(key.clone(), !page.plus_is_space);
+            }
+        }
+        if !page.plus_is_space {
+            cache.insert(key, true);
+        }
+    }
+    page
 }

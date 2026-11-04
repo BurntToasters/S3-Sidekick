@@ -18,6 +18,7 @@
 //! invalidates every token, so recovery re-asks through a native dialog.
 
 use std::collections::{HashMap, VecDeque};
+use std::fs::{File, Metadata, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -93,10 +94,13 @@ struct Grant {
     purpose: GrantPurpose,
     is_dir: bool,
     expected_len: Option<u64>,
-    /// Canonical identity at mint time, when the item already existed. A
-    /// re-pointed parent directory changes it even though the path string is
-    /// unchanged.
+    /// Canonical identity at mint time. For an existing item this is the
+    /// item's canonical path; for a new download/export destination it is the
+    /// canonical parent directory. A re-pointed ancestor changes it even
+    /// though the path string is unchanged.
     canonical_identity: Option<PathBuf>,
+    /// Path whose canonical form must still equal `canonical_identity`.
+    identity_path: PathBuf,
     expires_at: Instant,
 }
 
@@ -107,25 +111,87 @@ pub(crate) struct GrantedPath {
     pub is_dir: bool,
     pub expected_len: Option<u64>,
     pub canonical_identity: Option<PathBuf>,
+    pub identity_path: PathBuf,
 }
 
 impl GrantedPath {
-    /// Reject a symbolic link at the granted path. Dialog picks resolve to the
-    /// selected item; a link that replaced it afterwards is not the item the
-    /// user chose.
-    pub(crate) fn reject_symlink(&self) -> Result<(), String> {
-        if self
-            .path
-            .symlink_metadata()
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(false)
-        {
+    /// Confirm the canonical identity minted with the grant still matches.
+    ///
+    /// Re-pointing a parent directory (for example replacing it with a symlink)
+    /// leaves the path string unchanged but changes the canonical identity.
+    pub(crate) fn verify_identity(&self) -> Result<(), String> {
+        let Some(expected) = &self.canonical_identity else {
+            return Ok(());
+        };
+        let now = std::fs::canonicalize(&self.identity_path).map_err(|err| {
+            format!(
+                "Granted path is no longer accessible: {} ({})",
+                self.identity_path.display(),
+                err
+            )
+        })?;
+        if &now != expected {
             return Err(format!(
-                "Refusing to use a symbolic link for the granted path: {}",
+                "Granted path now resolves elsewhere: {}",
                 self.path.display()
             ));
         }
         Ok(())
+    }
+
+    /// Reject a symbolic link or Windows reparse point at the granted path.
+    /// Dialog picks resolve to the selected item; a link that replaced it
+    /// afterwards is not the item the user chose.
+    pub(crate) fn reject_symlink(&self) -> Result<(), String> {
+        let metadata = match self.path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            // A missing final component has no link to reject. Every other
+            // metadata failure is treated as unsafe rather than "not a link".
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(format!(
+                    "Cannot inspect granted path '{}': {}",
+                    self.path.display(),
+                    err
+                ));
+            }
+        };
+        if metadata_is_link_or_reparse(&metadata) {
+            return Err(format!(
+                "Refusing to use a symbolic link or reparse point for the granted path: {}",
+                self.path.display()
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn metadata_is_link_or_reparse(metadata: &Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn grant_identity(path: &Path) -> (PathBuf, Option<PathBuf>) {
+    match std::fs::canonicalize(path) {
+        Ok(identity) => (path.to_path_buf(), Some(identity)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let Some(parent) = path.parent() else {
+                return (path.to_path_buf(), None);
+            };
+            (parent.to_path_buf(), std::fs::canonicalize(parent).ok())
+        }
+        // An unreadable canonical identity is not replaced with a weaker one.
+        Err(_) => (path.to_path_buf(), None),
     }
 }
 
@@ -156,13 +222,14 @@ fn insert_grant(
     // Normalize once at mint so later equality checks do not trip over
     // Windows extended prefixes or a relative form the callback returned.
     let normalized = PathBuf::from(crate::files::absolute_path_string_no_follow(path));
-    let canonical_identity = std::fs::canonicalize(path).ok();
+    let (identity_path, canonical_identity) = grant_identity(&normalized);
     let grant = Grant {
         path: normalized,
         purpose,
         is_dir,
         expected_len,
         canonical_identity,
+        identity_path,
         expires_at: Instant::now() + ttl,
     };
     if let Ok(mut table) = grants().lock() {
@@ -218,12 +285,15 @@ pub(crate) fn authorize(token: &str, use_: GrantUse) -> Result<GrantedPath, Stri
             grant.purpose.label()
         ));
     }
-    Ok(GrantedPath {
+    let granted = GrantedPath {
         path: grant.path,
         is_dir: grant.is_dir,
         expected_len: grant.expected_len,
         canonical_identity: grant.canonical_identity,
-    })
+        identity_path: grant.identity_path,
+    };
+    granted.verify_identity()?;
+    Ok(granted)
 }
 
 /// Reject a renderer-supplied child name.
@@ -280,74 +350,136 @@ pub(crate) fn resolve(
         );
     }
     let child = validate_child_name(name)?;
-    Ok(GrantedPath {
+    let resolved = GrantedPath {
         path: granted.path.join(child),
         is_dir: false,
         expected_len: None,
-        canonical_identity: None,
-    })
+        canonical_identity: granted.canonical_identity,
+        // Keep the directory identity: a child path may not exist yet, but a
+        // swapped parent still has to be caught before it is used.
+        identity_path: granted.identity_path,
+    };
+    resolved.verify_identity()?;
+    Ok(resolved)
+}
+
+/// An upload source opened from the validated grant.
+///
+/// The handle, not the path string, is the authority from this point on: a
+/// rename or symlink swap after this call cannot redirect the bytes that are
+/// hashed and streamed.
+#[derive(Debug)]
+pub(crate) struct OpenedUploadSource {
+    pub file: File,
+    pub size: u64,
+}
+
+#[cfg(unix)]
+fn open_upload_source_no_follow(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const O_NOFOLLOW: i32 = 0o400000;
+    #[cfg(target_os = "macos")]
+    const O_NOFOLLOW: i32 = 0x0100;
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    const O_NOFOLLOW: i32 = 0;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_upload_source_no_follow(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().read(true).open(path)
+}
+
+#[cfg(unix)]
+fn same_file_handle(handle: &Metadata, path: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    handle.dev() == path.dev() && handle.ino() == path.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_handle(handle: &Metadata, path: &Metadata) -> bool {
+    // Windows stable file ids need a separate handle query; the canonical
+    // identity check below still pins the path. Windows remains the manual
+    // residual for handle-level identity.
+    handle.len() == path.len()
 }
 
 /// Re-check an `upload-file` grant immediately before the bytes are read.
 ///
 /// The picker resolved the file once; this second look catches a file that was
 /// replaced by a symbolic link, became unreadable, or changed size while the
-/// transfer sat in the queue.
-pub(crate) fn revalidate_upload_source(token: &str) -> Result<PathBuf, String> {
+/// transfer sat in the queue. The returned handle is the one the upload must
+/// stream: reopening the path here would reintroduce the swap window.
+pub(crate) fn revalidate_upload_source(token: &str) -> Result<OpenedUploadSource, String> {
     let granted = authorize(token, GrantUse::ReadUploadFile)?;
+    // Reject a link/reparse point on the final component before opening it.
     granted.reject_symlink()?;
-    let metadata = std::fs::metadata(&granted.path).map_err(|err| {
-        format!(
-            "Local file is no longer accessible: {} ({})",
-            granted.path.display(),
-            err
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(format!(
-            "Granted upload path is not a file: {}",
-            granted.path.display()
-        ));
-    }
-    if let Some(expected) = granted.expected_len {
-        if metadata.len() != expected {
-            return Err(format!(
-                "Local file changed since it was selected (expected {} bytes, found {}); re-select the file.",
-                expected,
-                metadata.len()
-            ));
-        }
-    }
-    let current = crate::files::absolute_path_string_no_follow(&granted.path);
-    if current != granted.path.to_string_lossy() {
-        return Err(format!(
-            "Granted upload path now resolves elsewhere: {}",
-            granted.path.display()
-        ));
-    }
-    if let Some(identity) = &granted.canonical_identity {
-        let now = std::fs::canonicalize(&granted.path).map_err(|err| {
-            format!(
-                "Local file is no longer accessible: {} ({})",
-                granted.path.display(),
-                err
-            )
-        })?;
-        if &now != identity {
-            return Err(format!(
-                "Granted upload path now resolves elsewhere: {}",
-                granted.path.display()
-            ));
-        }
-    }
-    std::fs::File::open(&granted.path).map_err(|err| {
+    let file = open_upload_source_no_follow(&granted.path).map_err(|err| {
         format!(
             "Local file is no longer readable: {} ({})",
             granted.path.display(),
             err
         )
     })?;
-    Ok(granted.path)
+    let handle_metadata = file.metadata().map_err(|err| {
+        format!(
+            "Cannot inspect upload source '{}': {}",
+            granted.path.display(),
+            err
+        )
+    })?;
+    if !handle_metadata.is_file() {
+        return Err(format!(
+            "Granted upload path is not a file: {}",
+            granted.path.display()
+        ));
+    }
+    let current = std::fs::metadata(&granted.path).map_err(|err| {
+        format!(
+            "Local file is no longer accessible: {} ({})",
+            granted.path.display(),
+            err
+        )
+    })?;
+    if !current.is_file() || !same_file_handle(&handle_metadata, &current) {
+        return Err(format!(
+            "Granted upload path changed before it could be read: {}",
+            granted.path.display()
+        ));
+    }
+    if handle_metadata.len() != current.len() {
+        return Err(format!(
+            "Granted upload path changed before it could be read: {}",
+            granted.path.display()
+        ));
+    }
+    if let Some(expected) = granted.expected_len {
+        if handle_metadata.len() != expected {
+            return Err(format!(
+                "Local file changed since it was selected (expected {} bytes, found {}); re-select the file.",
+                expected,
+                handle_metadata.len()
+            ));
+        }
+    }
+    let current_path = crate::files::absolute_path_string_no_follow(&granted.path);
+    if current_path != granted.path.to_string_lossy() {
+        return Err(format!(
+            "Granted upload path now resolves elsewhere: {}",
+            granted.path.display()
+        ));
+    }
+    granted.verify_identity()?;
+    Ok(OpenedUploadSource {
+        file,
+        size: handle_metadata.len(),
+    })
 }
 
 /// Remember paths delivered by the operating system's drag-drop event.
@@ -530,6 +662,110 @@ mod tests {
         let file = dir.join("picked.bin");
         let file_token = mint(GrantPurpose::DownloadDestination, &file, false, None);
         assert!(resolve(&file_token, GrantUse::WriteDownload, Some("other.bin")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_swapped_parent_directory_invalidates_a_grant() {
+        let base = scratch_dir("swap-parent");
+        let parent = base.join("picked");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let file = parent.join("a.txt");
+        std::fs::write(&file, b"original").unwrap();
+        std::fs::write(outside.join("a.txt"), b"outside").unwrap();
+        let token = mint(GrantPurpose::UploadFile, &file, false, Some(8));
+
+        std::fs::rename(&parent, base.join("picked-old")).unwrap();
+        std::os::unix::fs::symlink(&outside, &parent).unwrap();
+
+        let err = authorize(&token, GrantUse::ReadUploadFile)
+            .expect_err("a re-pointed parent must invalidate the grant");
+        assert!(
+            err.contains("resolves elsewhere") || err.contains("no longer accessible"),
+            "unexpected error: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_joined_child_keeps_the_directory_identity() {
+        let dir = scratch_dir("child-identity");
+        let token = mint(GrantPurpose::DownloadDestination, &dir, true, None);
+        let resolved = resolve(&token, GrantUse::WriteDownload, Some("out.bin")).unwrap();
+        assert_eq!(resolved.identity_path, dir);
+        assert!(resolved.canonical_identity.is_some());
+        assert_eq!(
+            resolved.canonical_identity,
+            std::fs::canonicalize(&dir).ok()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_joined_child_rejects_a_swapped_root_directory() {
+        let base = scratch_dir("child-swap");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let token = mint(GrantPurpose::DownloadDestination, &root, true, None);
+
+        std::fs::rename(&root, base.join("root-old")).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+
+        let err = resolve(&token, GrantUse::WriteDownload, Some("out.bin"))
+            .expect_err("a joined child must verify the root identity");
+        assert!(
+            err.contains("resolves elsewhere") || err.contains("no longer accessible"),
+            "unexpected error: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_revalidation_returns_the_checked_handle() {
+        use std::io::Read;
+
+        let dir = scratch_dir("opened-handle");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"original").unwrap();
+        let token = mint(GrantPurpose::UploadFile, &file, false, Some(8));
+        let mut source = revalidate_upload_source(&token).unwrap();
+
+        // Replace the path after validation. The returned handle must still
+        // read the bytes that were checked, not the replacement file.
+        std::fs::rename(&file, dir.join("old.txt")).unwrap();
+        std::fs::write(&file, b"replaced").unwrap();
+        let mut bytes = Vec::new();
+        source.file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"original");
+        assert_eq!(source.size, 8);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_revalidation_rejects_a_final_symlink() {
+        let dir = scratch_dir("upload-link");
+        let target = dir.join("target.txt");
+        std::fs::write(&target, b"target").unwrap();
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let token = mint(GrantPurpose::UploadFile, &link, false, Some(6));
+        let err = revalidate_upload_source(&token)
+            .expect_err("a final symlink must be rejected before reading");
+        assert!(
+            err.contains("symbolic link") || err.contains("reparse point"),
+            "unexpected error: {}",
+            err
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

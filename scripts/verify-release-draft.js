@@ -29,6 +29,7 @@ const {
 } = require("./release-asset-verification.cjs");
 const {
   assertNoSignatureSkips,
+  assertProductionSignatureEnvironment,
   verifyDownloadedArtifactSignature,
 } = require("./release-signature-gate.cjs");
 
@@ -343,6 +344,7 @@ function writeVerificationReceipt(receiptPath, release, assets, fingerprint) {
 }
 
 async function main() {
+  assertProductionSignatureEnvironment(process.env);
   assertNoSignatureSkips(process.env);
   assertGitHubCliAuthenticated();
   const release = loadDraft();

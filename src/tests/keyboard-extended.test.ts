@@ -42,6 +42,7 @@ vi.mock("../preview.ts", () => ({
 }));
 
 vi.mock("../info-panel.ts", () => ({
+  invalidateInfoPanelCaches: vi.fn(),
   INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
   closeInfoPanel: mockCloseInfoPanel,
   requestCloseInfoPanel: mockRequestCloseInfoPanel,
@@ -83,6 +84,7 @@ vi.mock("../browser.ts", () => ({
   navigateBack: mockNavigateBack,
   navigateForward: mockNavigateForward,
   getSelectableEntries: mockGetSelectableKeys,
+  selectedObjectRevisions: vi.fn(() => []),
   handleSelectAll: mockHandleSelectAll,
   updateSelectionUI: mockUpdateSelectionUI,
   clearSelection: mockClearSelection,

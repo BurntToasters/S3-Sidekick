@@ -19,11 +19,13 @@ import {
   closeInspectorOnMobile,
   isInspectorOpen,
   markInspectorHasContent,
+  refreshInspectorEmptySummary,
   syncInspectorFromSelection,
 } from "./inspector.ts";
 import {
   confirmDiscardInfoProperties,
   hasUnsavedInfoChanges,
+  invalidateInfoPanelCaches,
 } from "./info-panel.ts";
 import {
   addSelection,
@@ -54,6 +56,11 @@ const TYPE_AHEAD_STATUS_RESET_MS = 1500;
 const NAV_HISTORY_LIMIT = 200;
 /** UI reset event for dialogs that captured a connection-bound action. */
 export const CONNECTION_RESET_EVENT = "s3-sidekick:connection-reset";
+/**
+ * Fired before a navigation changes bucket/prefix. The connection layer
+ * snapshots the view being left so per-connection location memory is current.
+ */
+export const LOCATION_FLUSH_EVENT = "s3-sidekick:flush-location";
 let typeAheadAnnounceTimer: ReturnType<typeof setTimeout> | undefined;
 const ROW_NAV_KEYS: readonly string[] = [
   "ArrowDown",
@@ -137,7 +144,9 @@ function listingContentRevision(): string {
   return (hash >>> 0).toString(16);
 }
 
-function selectedObjectRevisions(entries: SelectionEntry[]): string[] {
+export function selectedObjectRevisions(
+  entries: readonly SelectionEntry[],
+): string[] {
   const sizes = `${state.objects.length}:${state.prefixes.length}:${listingContentRevision()}`;
   if (
     objectRevisionIndex === null ||
@@ -265,12 +274,17 @@ function syncInspectorForSemanticSelectionChange(): void {
   if (signature === lastInspectorSelectionSignature) return;
   lastInspectorSelectionSignature = signature;
   void syncInspectorFromSelection(getSelectionEntries()).catch((err) => {
+    // A failed sync must not stay cached: the next refresh retries it.
+    lastInspectorSelectionSignature = null;
     setStatus(`Inspector sync failed: ${friendlyError(err)}`, 5000);
   });
 }
 
 export function invalidateInspectorSelectionSync(): void {
   lastInspectorSelectionSignature = null;
+  // Manual Refresh must re-read object metadata, not replay the cached HEAD
+  // and ACL responses from before the refresh.
+  invalidateInfoPanelCaches();
 }
 
 function hasAccelModifier(e: MouseEvent | KeyboardEvent): boolean {
@@ -804,9 +818,6 @@ export function updateSelectionUI(): void {
     const batchDelete = document.getElementById(
       "batch-delete",
     ) as HTMLButtonElement | null;
-    const batchProperties = document.getElementById(
-      "batch-properties",
-    ) as HTMLButtonElement | null;
     const batchCopyUrls = document.getElementById(
       "batch-copy-urls",
     ) as HTMLButtonElement | null;
@@ -835,14 +846,6 @@ export function updateSelectionUI(): void {
             ? `Delete ${totalSelected} selected item${totalSelected === 1 ? "" : "s"}`
             : "Select items to delete";
     }
-    if (batchProperties) {
-      batchProperties.disabled = totalSelected === 0 || listingLoading;
-      batchProperties.title = listingLoading
-        ? "Properties unavailable while listing loads"
-        : totalSelected > 0
-          ? `Properties for ${totalSelected} selected`
-          : "Select items for properties";
-    }
     if (batchCopyUrls) {
       batchCopyUrls.disabled = !canDownloadFiles || listingLoading;
       batchCopyUrls.title = canDownloadFiles
@@ -868,18 +871,6 @@ export function updateSelectionUI(): void {
       batchMore.setAttribute("aria-label", "More selection actions");
       batchMore.title = "More selection actions";
     }
-  }
-
-  const downloadBtn = document.getElementById(
-    "btn-download",
-  ) as HTMLButtonElement | null;
-  if (downloadBtn) {
-    downloadBtn.disabled = selectedFileCount === 0 || listingLoading;
-    downloadBtn.title = listingLoading
-      ? "Download unavailable while listing loads"
-      : selectedFileCount > 0
-        ? `Download ${selectedFileCount} selected file${selectedFileCount === 1 ? "" : "s"}`
-        : "Select files to download";
   }
 
   if (totalSelected > 0) {
@@ -1182,6 +1173,8 @@ export function renderBucketListSkeleton(rowCount = 6): void {
 // after this delay; until then the previous rows stay in place.
 const SKELETON_DELAY_MS = 150;
 let skeletonTimer: ReturnType<typeof setTimeout> | undefined;
+/** A navigation listing request owns the table until its render commits. */
+let objectLoadInFlight = false;
 
 function cancelPendingSkeleton(): void {
   if (skeletonTimer === undefined) return;
@@ -1206,6 +1199,10 @@ function paintObjectTableSkeleton(rowCount: number): void {
 
 export function renderObjectTableSkeleton(rowCount = 8): void {
   cancelTypeAheadAnnouncement();
+  // The previous listing must not answer a scroll or keyboard render while
+  // the next one loads. Keep aria-busy set until renderObjectTable commits.
+  objectLoadInFlight = true;
+  renderedTableEntries = [];
   dom.objectPanel.style.display = "";
   dom.objectPanel.setAttribute("aria-busy", "true");
   dom.emptyState.style.display = "none";
@@ -1498,6 +1495,8 @@ function renderCurrentObjectWindow(
 
 function scheduleVirtualWindowRender(): void {
   if (
+    objectLoadInFlight ||
+    dom.objectPanel.getAttribute("aria-busy") === "true" ||
     renderedTableEntries.length < OBJECT_VIRTUALIZE_THRESHOLD ||
     virtualRenderScheduled
   ) {
@@ -1695,6 +1694,7 @@ export function scrollTopToReveal(
  * focus, so only the virtual window needs an explicit scroll and render.
  */
 function revealLogicalIndex(index: number): void {
+  if (objectLoadInFlight) return;
   if (renderedTableEntries.length < OBJECT_VIRTUALIZE_THRESHOLD) return;
   const panel = dom.objectPanel;
   const viewportHeight =
@@ -1808,6 +1808,7 @@ function ensureObjectPanelListeners(): void {
 export function renderObjectTable(): void {
   cancelPendingSkeleton();
   cancelTypeAheadAnnouncement();
+  objectLoadInFlight = false;
   const tbody = dom.objectTbody;
   const filter = state.filterText.trim().toLowerCase();
   // Reuse the exact filtered order used by getVisibleSelectableEntries so a
@@ -1841,6 +1842,9 @@ export function renderObjectTable(): void {
     "aria-rowcount",
     String(Math.max(renderedTableEntries.length + 1, 2)),
   );
+  dom.emptyState.style.display = "none";
+  dom.objectPanel.setAttribute("aria-busy", "false");
+
   if (renderedTableEntries.length === 0) {
     tbody.innerHTML =
       filter.length > 0
@@ -1852,13 +1856,12 @@ export function renderObjectTable(): void {
   }
 
   dom.objectPanel.style.display = "";
-  dom.objectPanel.setAttribute("aria-busy", "false");
-  dom.emptyState.style.display = "none";
 
   updateSelectionUI();
   updateObjectCount();
   updateLoadMore();
   updateSortIndicators();
+  refreshInspectorEmptySummary();
   committedListingSnapshot = captureListingSnapshot();
 }
 
@@ -2086,6 +2089,8 @@ async function navigateToLocationFolder(parsed: {
     return false;
   }
 
+  flushConnectionLocation();
+  rememberCurrentView();
   const request = ++navigationGeneration;
   const snapshot = captureNavigationSnapshot();
   const bucketChanged = parsed.bucket !== snapshot.currentBucket;
@@ -2110,7 +2115,10 @@ async function navigateToLocationFolder(parsed: {
     }
     resetSelectionForListingChange();
     pushNav(parsed.bucket, parsed.prefix, request);
-    if (bucketChanged) renderBucketList();
+    if (bucketChanged) {
+      writeLastBucket(parsed.bucket);
+      renderBucketList();
+    }
     renderObjectTable();
     renderBreadcrumb();
     return true;
@@ -2158,6 +2166,11 @@ function rememberCurrentView(): void {
   current.scrollTop = dom.objectPanel.scrollTop;
   const focused = focusedObjectEntry();
   if (focused) current.focusEntry = focused;
+}
+
+/** Let the connection layer remember the bucket/prefix before it changes. */
+function flushConnectionLocation(): void {
+  document.dispatchEvent(new Event(LOCATION_FLUSH_EVENT));
 }
 
 /**
@@ -2291,6 +2304,7 @@ export async function navigateBack(): Promise<void> {
   ) {
     return;
   }
+  flushConnectionLocation();
   rememberCurrentView();
   const hadTableFocus = dom.objectTbody.contains(document.activeElement);
   const request = ++navigationGeneration;
@@ -2350,6 +2364,7 @@ export async function navigateForward(): Promise<void> {
   ) {
     return;
   }
+  flushConnectionLocation();
   rememberCurrentView();
   const hadTableFocus = dom.objectTbody.contains(document.activeElement);
   const request = ++navigationGeneration;
@@ -2407,6 +2422,7 @@ export async function navigateToFolder(
   options: NavigateToFolderOptions = {},
 ): Promise<void> {
   if (!(await confirmDiscardThenNavigate())) return;
+  flushConnectionLocation();
   rememberCurrentView();
   const hadTableFocus = dom.objectTbody.contains(document.activeElement);
   const request = ++navigationGeneration;
@@ -2468,6 +2484,7 @@ export async function navigateUp(): Promise<void> {
 
 export async function selectBucket(name: string): Promise<void> {
   if (!(await confirmDiscardThenNavigate())) return;
+  flushConnectionLocation();
   rememberCurrentView();
   const request = ++navigationGeneration;
   const snapshot = captureNavigationSnapshot();
@@ -2518,6 +2535,8 @@ export function showEmptyState(): void {
   lastInspectorSelectionSignature = null;
   renderedTableEntries = [];
   committedListingSnapshot = null;
+  objectLoadInFlight = false;
+  lowerBasenameCache.clear();
   clearNavHistory();
   dom.objectPanel.style.display = "none";
   dom.objectPanel.setAttribute("aria-busy", "false");
@@ -2531,12 +2550,9 @@ export function showEmptyState(): void {
     "location-omnibar-edit",
   ) as HTMLInputElement | null;
   if (pathInput) pathInput.value = "";
-  const downloadBtn = document.getElementById(
-    "btn-download",
-  ) as HTMLButtonElement | null;
-  if (downloadBtn) downloadBtn.disabled = true;
   updateSelectionUI();
   updateNavButtons();
+  refreshInspectorEmptySummary();
   // Close dialogs whose action was bound to the session that just ended.
   document.dispatchEvent(new Event(CONNECTION_RESET_EVENT));
 }

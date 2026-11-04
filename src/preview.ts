@@ -14,6 +14,7 @@ import {
   focusInspectorPreviewPane,
   markInspectorHasContent,
 } from "./inspector-host.ts";
+import { handleDownload } from "./app-downloads.ts";
 
 interface PreviewResponse {
   content_type: string;
@@ -178,6 +179,9 @@ function wirePreviewFallbacks(body: HTMLElement): void {
         detailsTab.focus();
         return;
       }
+      // The standalone overlay has no Details tab: open the inspector first,
+      // then put focus on its Details pane.
+      ensureInspectorOpenForPane("details");
       focusInspectorInfoPane("details");
     });
 }
@@ -186,9 +190,9 @@ function wireDownloadAction(body: HTMLElement): void {
   body
     .querySelector<HTMLButtonElement>("[data-preview-download]")
     ?.addEventListener("click", () => {
-      // The preview always belongs to the single selected file, so the toolbar
-      // download acts on the object being shown.
-      document.getElementById("btn-download")?.click();
+      // The preview always belongs to the single selected file, so the shared
+      // download action acts on the object being shown.
+      void handleDownload();
     });
 }
 

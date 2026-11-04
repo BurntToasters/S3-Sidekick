@@ -12,7 +12,10 @@ export default defineConfig({
   testMatch: "**/*.spec.ts",
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 2 : 0,
+  // The release gate must see every test pass once. Retries would hide flakes;
+  // scripts/verify-playwright-report.mjs rejects any retried result as well.
+  retries: 0,
+  failOnFlakyTests: Boolean(process.env.CI),
   workers: process.env.CI ? 1 : undefined,
   // The JSON file is the machine-checked evidence artifact. Configure it here
   // instead of relying on an environment variable Playwright does not read.

@@ -218,4 +218,9 @@ function verifyReleaseAssetIntegrity({
   }
 }
 
-module.exports = { verifyReleaseAssetIntegrity };
+module.exports = {
+  approvedFingerprint,
+  sha256,
+  verifyGpgSignature,
+  verifyReleaseAssetIntegrity,
+};

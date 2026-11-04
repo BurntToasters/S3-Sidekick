@@ -194,6 +194,19 @@ function resetEditorState(): void {
   updateInspectorFooter();
 }
 
+/**
+ * Forget fetched HEAD and ACL responses so the next render re-reads them.
+ * Manual Refresh calls this; unsaved edits stay intact.
+ */
+export function invalidateInfoPanelCaches(): void {
+  headData = null;
+  aclData = null;
+  // Invalidate an in-flight HEAD/ACL read so it cannot repopulate the cache
+  // with the pre-refresh response.
+  panelRequestToken += 1;
+  urlBuildToken += 1;
+}
+
 function fileKeysOf(entries: readonly SelectionEntry[]): string[] {
   return entries
     .filter((entry) => entry.kind === "file")
@@ -464,6 +477,13 @@ function updateTabUI(): void {
     tab.classList.toggle("info-tab--active", isActive);
     tab.setAttribute("aria-selected", String(isActive));
     tab.setAttribute("tabindex", isActive ? "0" : "-1");
+  }
+  if (!shouldUseInspectorMount()) {
+    // The legacy overlay has one panel that all four tabs control. Point its
+    // aria-labelledby at whichever tab is active so the relationship is valid.
+    document
+      .getElementById("info-body")
+      ?.setAttribute("aria-labelledby", `info-tab-${activeTab}`);
   }
 }
 
@@ -1063,6 +1083,29 @@ export async function saveInfoPanel(): Promise<void> {
   await saveSingleChanges();
 }
 
+/**
+ * Removed keys: the pane may still edit an object the listing no longer has.
+ * Pass the same discard gate as navigation, then close instead of saving into
+ * a dangling row or re-adding it.
+ */
+async function confirmEditedObjectsStillListed(
+  keys: string[],
+): Promise<boolean> {
+  if (keys.length === 0) return true;
+  const listed = new Set(
+    state.objects.filter((object) => !object.is_folder).map((o) => o.key),
+  );
+  if (keys.every((key) => listed.has(key))) return true;
+  const discard = await confirmDiscardInfoProperties();
+  if (!discard) return false;
+  closeInfoPanel();
+  setStatus(
+    "The edited object is no longer in the listing. Properties were closed.",
+    5000,
+  );
+  return false;
+}
+
 async function saveSingleChanges(): Promise<void> {
   const selectedKey = currentKey;
   let target: ConnectionSnapshot;
@@ -1074,6 +1117,8 @@ async function saveSingleChanges(): Promise<void> {
   }
   const requestToken = panelRequestToken;
   if (!selectedKey) return;
+  if (!(await confirmEditedObjectsStillListed([selectedKey]))) return;
+  if (requestToken !== panelRequestToken) return;
 
   const isCurrentRequest = () =>
     requestToken === panelRequestToken &&
@@ -1190,6 +1235,8 @@ async function saveBatchChanges(): Promise<void> {
   const targetKeys = [...batchKeys];
   const isCurrentRequest = () =>
     requestToken === panelRequestToken && !connectionIdentityChanged(target);
+  if (!(await confirmEditedObjectsStillListed(targetKeys))) return;
+  if (requestToken !== panelRequestToken) return;
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl = aclDirty && requestedVisibility !== null;
 
@@ -1292,7 +1339,9 @@ async function saveBatchChanges(): Promise<void> {
 
       for (const result of results) {
         processed++;
-        saveBtn.textContent = `Saving ${processed}/${targetKeys.length}\u2026`;
+        if (requestToken === panelRequestToken) {
+          saveBtn.textContent = `Saving ${processed}/${targetKeys.length}\u2026`;
+        }
         if (result.status === "rejected") {
           failed++;
           firstError ??= errorText(result.reason);
@@ -1339,9 +1388,11 @@ async function saveBatchChanges(): Promise<void> {
   }
 
   if (failed === 0) {
+    if (requestToken !== panelRequestToken) return;
     finishSaveBatch();
     setStatus(`${capitalized} updated on ${plural(succeeded, "file")}.`, 5000);
   } else {
+    if (requestToken !== panelRequestToken) return;
     const partialSuffix =
       shouldApplyMetadata && shouldApplyAcl && partial > 0
         ? ` (${partial} partial)`

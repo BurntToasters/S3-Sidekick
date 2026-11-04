@@ -23,6 +23,7 @@ import {
   exportBookmarksJson,
   importBookmarksJson,
   updateBookmark,
+  getBookmarkLoadError,
   MAX_IMPORT_BYTES,
   type Bookmark,
   type BookmarkImportResult,
@@ -48,6 +49,12 @@ import { renderObjectTableFromLayout } from "./layout-render-bridge.ts";
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
 let settingsSaveTail: Promise<void> = Promise.resolve();
 let settingsModalSaveOperation: Promise<void> | null = null;
+/**
+ * Set once a reset is confirmed and stays set through the destructive write and
+ * relaunch. New settings saves are refused so a late save can never overwrite
+ * the reset payload or resurrect cleared state.
+ */
+let resetInProgress = false;
 
 /**
  * Tabs with no explicit-save settings: their controls apply at once or carry
@@ -279,6 +286,11 @@ function enqueueSettingsSnapshot(
   settingsSnapshot: UserSettings,
   extrasSnapshot: typeof state.settingsExtras,
 ): Promise<void> {
+  if (resetInProgress) {
+    return Promise.reject(
+      new Error("A reset is in progress; settings cannot be saved."),
+    );
+  }
   clampWindowSize(settingsSnapshot);
   const payload = mergeSettingsPayload(settingsSnapshot, extrasSnapshot);
   const persistSnapshot = async () => {
@@ -1243,13 +1255,22 @@ export async function resetSettings(): Promise<void> {
 
   // A Settings save that was already running must land before the reset does,
   // otherwise it can overwrite the reset payload or resurrect a cleared state.
+  // Once the reset is confirmed, new saves are refused until relaunch.
   if (scope === "factory") {
     if (!(await confirmFactoryReset())) return;
+    resetInProgress = true;
     await joinPendingSettingsSaves();
-    if (!(await runFactoryReset())) return;
+    if (!(await runFactoryReset())) {
+      resetInProgress = false;
+      return;
+    }
   } else {
+    resetInProgress = true;
     await joinPendingSettingsSaves();
-    if (!(await runPartialReset())) return;
+    if (!(await runPartialReset())) {
+      resetInProgress = false;
+      return;
+    }
   }
 
   await relaunchApp();
@@ -1268,7 +1289,13 @@ export async function resetAfterForgottenPassword(): Promise<void> {
   );
   if (!confirmed) return;
   if (!(await confirmFactoryReset())) return;
-  if (!(await runFactoryReset())) return;
+  // Join any save already queued, then keep new saves out until relaunch.
+  resetInProgress = true;
+  await joinPendingSettingsSaves();
+  if (!(await runFactoryReset())) {
+    resetInProgress = false;
+    return;
+  }
   await relaunchApp();
 }
 
@@ -1310,6 +1337,37 @@ async function runFactoryReset(): Promise<boolean> {
 }
 
 /**
+ * Recover the live backend session before a reset clears credentials.
+ *
+ * A webview reload loses `state.connectionId` while the native session keeps
+ * running. Passing a blank id then looks like a stale caller; ask the backend
+ * for the current id first so the reset can name the session it is replacing.
+ */
+async function resetConnectionId(): Promise<string | null> {
+  if (state.connectionId) return state.connectionId;
+  try {
+    const current = await invoke<string | null>("get_connection_id");
+    if (typeof current !== "string") return null;
+    const trimmed = current.trim();
+    return trimmed || null;
+  } catch {
+    // No readable session (locked storage, or no session at all) is not a
+    // reason to block clearing credentials; the backend still rejects a live
+    // session that was not named.
+    return null;
+  }
+}
+
+/** Map the backend's stale-session refusal to the action the user can take. */
+function resetErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (raw.includes("Connection session changed")) {
+    return "Your session changed; disconnect and retry.";
+  }
+  return friendlyError(err);
+}
+
+/**
  * Settings go to defaults but engagement extras survive so launchCount and
  * support prompts do not re-fire after a routine reset. Returns false after
  * alerting.
@@ -1335,12 +1393,11 @@ async function runPartialReset(): Promise<boolean> {
     // user is not left with default settings but surviving credentials. The
     // active session id lets the backend reject a stale reset; a disconnected
     // reset passes none and still removes the stored credentials.
-    await invoke("clear_saved_connection", {
-      connectionId: state.connectionId || null,
-    });
+    const connectionId = await resetConnectionId();
+    await invoke("clear_saved_connection", { connectionId });
     await invoke("save_settings", { json: defaults });
   } catch (err) {
-    await showAlert("Reset Failed", friendlyError(err));
+    await showAlert("Reset Failed", resetErrorMessage(err));
     return false;
   }
   return true;
@@ -1395,6 +1452,12 @@ async function refreshBookmarkListUI(): Promise<void> {
   await loadBookmarks();
   const listEl = document.getElementById("bookmark-list");
   if (!listEl) return;
+  const loadError = getBookmarkLoadError();
+  if (loadError) {
+    setBookmarkStatus(
+      `Saved connections could not be loaded (${loadError}) Changes and export stay disabled so the stored copy is not overwritten.`,
+    );
+  }
 
   renderBookmarkList(
     listEl,
@@ -1496,13 +1559,22 @@ function wireBookmarkImportExport(): void {
 /// file (possibly with plaintext secrets) in the default Downloads folder
 /// without letting the user choose where it goes.
 async function exportBookmarksToFile(): Promise<void> {
+  const loadError = getBookmarkLoadError();
+  if (loadError) {
+    await showAlert(
+      "Export unavailable",
+      `Saved connections could not be loaded (${loadError}) Export is disabled so an incomplete list is never mistaken for the stored one.`,
+    );
+    return;
+  }
   const choice = await showConfirmWithCheckbox(
-    "Export saved connections",
-    "Save your saved connections to a JSON file. Secret keys are left out unless you tick the box below.",
+    "Export saved connections (secrets and session tokens optional)",
+    "Save your saved connections to a JSON file. Secret keys and session tokens are left out unless you tick the box below. Names, endpoints, regions, and access keys are always included.",
     {
       okLabel: "Export",
       cancelLabel: "Cancel",
-      checkboxLabel: "Include secret keys (written as plain text)",
+      checkboxLabel:
+        "Include secret keys and session tokens (written as plain text)",
     },
   );
   if (!choice.confirmed) return;
@@ -1510,7 +1582,7 @@ async function exportBookmarksToFile(): Promise<void> {
   const grant = await pickTextExport(
     "s3-sidekick-bookmarks.json",
     includeSecrets
-      ? "Save saved connections (includes secret keys)"
+      ? "Save saved connections (includes secret keys and session tokens)"
       : "Save saved connections",
   );
   if (!grant) return;
@@ -1520,7 +1592,7 @@ async function exportBookmarksToFile(): Promise<void> {
   });
   const statusEl = document.getElementById("bookmarks-status");
   if (statusEl) {
-    statusEl.textContent = `Exported saved connections${includeSecrets ? " with secret keys" : ""}.`;
+    statusEl.textContent = `Exported saved connections${includeSecrets ? " with secret keys and session tokens" : ""}.`;
   }
 }
 

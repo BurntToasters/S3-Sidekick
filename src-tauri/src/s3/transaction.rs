@@ -56,12 +56,15 @@ async fn copy_prefix_objects_inner(
         cancel,
     )
     .await?;
-    // CopySource is a URL path. A dot segment or interior empty segment can be
-    // folded by an endpoint into a different key, so refuse the whole plan
-    // before any destination is touched.
-    for source in &source_plan {
-        validate_copy_source_key(&source.source_key, "Source key")
-            .map_err(|err| format!("{} No destination was changed.", err))?;
+    // CopySource is strictly percent-encoded per source key, so dot and empty
+    // segments no longer need a separate pre-mutation refusal here.
+    if source_plan.is_empty() {
+        // An empty plan used to return an empty receipt list, which the
+        // copy/move commands reported as success even though nothing matched.
+        return Err(format!(
+            "No objects matched source prefix '{}'. No destination was changed.",
+            src_prefix
+        ));
     }
 
     preflight_prefix_overwrite_rollback(
@@ -490,7 +493,7 @@ async fn require_versioned_prefix_rollback(
 /// exact generation that was copied into the rollback backup. A concurrent
 /// external write after the backup would otherwise be overwritten and the
 /// backup (its only surviving copy) then deleted during cleanup.
-async fn require_destination_unchanged_since_backup(
+pub(super) async fn require_destination_unchanged_since_backup(
     client: &Client,
     bucket: &str,
     backup: &DestinationBackup,
@@ -942,12 +945,21 @@ pub(super) async fn delete_receipts_checked(
             _ = cancel.cancelled() => return Err(cancelled_error()),
             result = request => result,
         };
-        result.map_err(|err| {
-            format!(
-                "Copied successfully but conditional deletion of source '{}' failed: {}",
-                receipt.source_key, err
-            )
-        })?;
+        match result {
+            Ok(_) => {}
+            Err(err) if is_not_found(&err) => {
+                // A versioned source removed between the identity recheck and
+                // this DELETE is already the completed outcome, exactly like
+                // the unversioned path. Treat it as success, not a conflict.
+                continue;
+            }
+            Err(err) => {
+                return Err(format!(
+                    "Copied successfully but conditional deletion of source '{}' failed: {}",
+                    receipt.source_key, err
+                ));
+            }
+        }
         deleted += 1;
     }
 

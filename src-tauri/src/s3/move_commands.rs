@@ -186,7 +186,9 @@ pub(crate) async fn copy_object_to(
     validate_bucket_name(&src_bucket)?;
     validate_bucket_name(&dst_bucket)?;
     validate_readable_key(&src_key, "Source key")?;
-    validate_copy_source_key(&src_key, "Source key")?;
+    // CopySource is a strictly percent-encoded path (`encode_copy_source`), so
+    // dot and empty segments stay literal at the endpoint. Reads elsewhere
+    // accept them; rejecting them only here stranded readable objects.
     // Copying out of the backup namespace is how a user restores data from an
     // interrupted operation, so only the destination is restricted.
     validate_mutating_key(&dst_key, "Destination key")?;

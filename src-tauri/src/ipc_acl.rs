@@ -57,6 +57,61 @@ fn build_manifest_lists_exactly_the_registered_commands() {
 }
 
 #[test]
+fn capability_grants_only_the_plugin_and_core_commands_the_ui_calls() {
+    // Over-granting is easy to miss because the app still works. Pin the
+    // exact core/plugin surface: app.ts calls getVersion, event.ts uses
+    // listen/unlisten, titlebar.ts and window-size.ts call the window methods
+    // below, updater.ts uses dialog message/ask, notification, updater
+    // check/download/install, and process relaunch.
+    let source = include_str!("../capabilities/default.json");
+    let parsed: serde_json::Value = serde_json::from_str(source).expect("capability is valid JSON");
+    let permissions: Vec<&str> = parsed["permissions"]
+        .as_array()
+        .expect("permissions is an array")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+
+    let mut plugin_and_core: Vec<&str> = permissions
+        .iter()
+        .copied()
+        .filter(|permission| permission.contains(':'))
+        .collect();
+    plugin_and_core.sort_unstable();
+    let expected = [
+        "core:app:allow-version",
+        "core:event:allow-listen",
+        "core:event:allow-unlisten",
+        "core:window:allow-close",
+        "core:window:allow-inner-size",
+        "core:window:allow-is-maximized",
+        "core:window:allow-maximize",
+        "core:window:allow-minimize",
+        "core:window:allow-scale-factor",
+        "core:window:allow-set-size",
+        "core:window:allow-start-dragging",
+        "core:window:allow-toggle-maximize",
+        "core:window:allow-unmaximize",
+        "dialog:allow-message",
+        "notification:allow-is-permission-granted",
+        "process:allow-restart",
+        "updater:allow-check",
+        "updater:allow-download",
+        "updater:allow-install",
+    ];
+    assert_eq!(
+        plugin_and_core, expected,
+        "capabilities/default.json must grant only the core/plugin commands the UI calls"
+    );
+    assert!(
+        !permissions
+            .iter()
+            .any(|permission| permission.ends_with(":default")),
+        "prefer an explicit allow list over a plugin :default set"
+    );
+}
+
+#[test]
 fn capabilities_grant_the_main_window_only_registered_commands() {
     // A stub handler answers every command, so any error below comes from
     // the access check, never from the command itself.

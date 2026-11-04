@@ -1,0 +1,42 @@
+{
+  "projects": [
+    "chromium",
+    "webkit"
+  ],
+  "testCount": 806,
+  "specs": {
+    "a01-lock-security.spec.ts": 6,
+    "first-run.spec.ts": 4,
+    "frontend-safety.spec.ts": 22,
+    "layout.spec.ts": 24,
+    "transfer-lifecycle.spec.ts": 14,
+    "ui-security-regressions.spec.ts": 8,
+    "unguarded-write.spec.ts": 2,
+    "ux-browse-keyboard.spec.ts": 32,
+    "ux-browse.spec.ts": 48,
+    "ux-connection.spec.ts": 86,
+    "ux-deferred-location.spec.ts": 14,
+    "ux-deferred-modal-a11y.spec.ts": 4,
+    "ux-deferred-reveal.spec.ts": 8,
+    "ux-deferred-settings.spec.ts": 16,
+    "ux-deferred-shortcuts.spec.ts": 12,
+    "ux-drawer.spec.ts": 22,
+    "ux-final-integration.spec.ts": 34,
+    "ux-inspector-edits.spec.ts": 34,
+    "ux-inspector-palette.spec.ts": 12,
+    "ux-inspector-preview.spec.ts": 20,
+    "ux-lock-view.spec.ts": 20,
+    "ux-modal-infra.spec.ts": 28,
+    "ux-objects.spec.ts": 24,
+    "ux-polish.spec.ts": 28,
+    "ux-security-panel.spec.ts": 12,
+    "ux-selection-safety.spec.ts": 8,
+    "ux-settings-p3a.spec.ts": 32,
+    "ux-settings.spec.ts": 36,
+    "ux-setup-wizard.spec.ts": 10,
+    "ux-theme-tokens.spec.ts": 54,
+    "ux-toolbar-actions.spec.ts": 16,
+    "ux-transfer-engine.spec.ts": 16,
+    "ux-visual-tour.spec.ts": 100
+  }
+}

@@ -8,6 +8,7 @@ import {
   type SecurityStatus,
 } from "./security.ts";
 import { focusConnectionScreen } from "./app-connection.ts";
+import { codePointLength } from "./utils.ts";
 
 /** Welcome + theme, security, then updates + done. */
 const STEP_COUNT = 3;
@@ -448,7 +449,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
           } else {
             const pw = encPassword.value;
             const confirm = encConfirm.value;
-            if (pw.length < 12) {
+            if (codePointLength(pw) < 12) {
               setFieldError(
                 encPassword,
                 encPasswordError,

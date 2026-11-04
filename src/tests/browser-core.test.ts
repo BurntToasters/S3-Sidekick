@@ -9,6 +9,7 @@ const { syncInspectorMock, markInspectorHasContentMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("../inspector.ts", () => ({
+  refreshInspectorEmptySummary: vi.fn(),
   closeInspectorOnMobile: vi.fn(),
   isInspectorOpen: () => true,
   markInspectorHasContent: markInspectorHasContentMock,
@@ -30,6 +31,7 @@ vi.mock("../connection.ts", () => ({
 }));
 
 vi.mock("../info-panel.ts", () => ({
+  invalidateInfoPanelCaches: vi.fn(),
   INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
   hasUnsavedInfoChanges: () => false,
   confirmDiscardInfoProperties: async () => true,
@@ -57,7 +59,6 @@ function renderFixture(): void {
     <div id="batch-toolbar">
       <span id="batch-count"></span>
       <div id="batch-toolbar-actions" hidden>
-        <button id="batch-properties"></button>
         <button id="batch-download"></button>
         <button id="batch-delete"></button>
         <button id="batch-copy-urls"></button>
@@ -72,7 +73,6 @@ function renderFixture(): void {
     <button id="nav-forward"></button>
     <button id="nav-up"></button>
     <input id="location-omnibar-edit" type="text" hidden />
-    <button id="btn-download" disabled></button>
     <span id="status"></span>
   `;
 }
@@ -204,7 +204,7 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("batch-count") as HTMLSpanElement).textContent,
     ).toContain("2 files selected");
     expect(
-      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+      (document.getElementById("batch-download") as HTMLButtonElement).disabled,
     ).toBe(false);
 
     const objectPanel = document.getElementById("object-panel") as HTMLElement;
@@ -229,7 +229,7 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("batch-count") as HTMLSpanElement).textContent,
     ).toBe("1 file selected");
     expect(
-      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+      (document.getElementById("batch-download") as HTMLButtonElement).disabled,
     ).toBe(false);
 
     state.selectedKeys.clear();
@@ -241,13 +241,13 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("batch-count") as HTMLSpanElement).textContent,
     ).toContain("1 folder, 2 files loaded");
     expect(
-      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+      (document.getElementById("batch-download") as HTMLButtonElement).disabled,
     ).toBe(true);
 
     state.selectedPrefixes.add("folder/");
     browser.updateSelectionUI();
     expect(
-      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+      (document.getElementById("batch-download") as HTMLButtonElement).disabled,
     ).toBe(true);
 
     // The skeleton waits 150 ms so warm navigations never flash it.

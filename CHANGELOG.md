@@ -152,7 +152,7 @@ v0.10.0 introduces a comprehensive UI/UX modernization, window size memory on re
 ## ℹ️ Release Info
 
 > [!IMPORTANT]
-> **Note:** Beta releases publish the same Windows x64 and arm64 NSIS `.exe` and `.msi` installers as stable releases. The `.exe` supports in-app updates; the `.msi` targets managed deployment and updates manually.
+> **Note:** Beta releases publish the same Windows x64 and arm64 NSIS `.exe` and `.msi` installers as stable releases. The `.exe` is the supported in-app update target. The runtime reports native update mode for both Windows packages, so the `.msi` build also shows the update controls; an MSI install is not a supported updater target and should be updated through managed deployment instead.
 
 - **GPG Signed:** My public key is attached to every release to ensure authenticity.
 - **GPG Key:** You can get my public GPG key here: https://tuxedo.rosie.run/GPG/BurntToasters_0xF2FBC20F_public.asc

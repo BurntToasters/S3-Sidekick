@@ -44,6 +44,25 @@ pub(crate) fn connection_identity(endpoint: &str, access_key: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Owns the plaintext credentials handed to `connect` and zeroizes them on
+/// every exit path, including the early endpoint/region errors that return
+/// before the AWS credentials object is built.
+struct ConnectSecrets {
+    access_key: String,
+    secret_key: String,
+    session_token: Option<String>,
+}
+
+impl Drop for ConnectSecrets {
+    fn drop(&mut self) {
+        self.access_key.zeroize();
+        self.secret_key.zeroize();
+        if let Some(token) = self.session_token.as_mut() {
+            token.zeroize();
+        }
+    }
+}
+
 /// Identity of a credential payload the webview is about to persist.
 ///
 /// The persisted endpoint is normalized the same way `connect` normalizes it,
@@ -62,6 +81,13 @@ pub(crate) fn persisted_connection_identity(json: &str) -> Result<String, String
     Ok(connection_identity(&normalized, &persisted.access_key))
 }
 
+/// Refusal for a reset whose caller still holds an older connection id.
+///
+/// The webview maps this to "your session changed; disconnect and retry"
+/// instead of presenting it as a generic backend failure.
+pub(crate) const STALE_CONNECTION_SESSION: &str =
+    "Connection session changed; disconnect and retry.";
+
 pub(crate) fn require_connection_session(
     s3: &crate::S3State,
     connection_id: &str,
@@ -74,6 +100,20 @@ pub(crate) fn require_connection_session(
         Some(_) => Err("Connection changed".to_string()),
         None => Err("Not connected".to_string()),
     }
+}
+
+/// Read the backend's current connection id.
+///
+/// The id is not authority: every S3 command still validates it against the
+/// live session. A reloaded webview uses this to recover the active id before
+/// asking to disconnect or clear the saved connection, rather than passing a
+/// blank id and being refused as stale.
+#[tauri::command(async)]
+pub(crate) fn get_connection_id(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let s3 = lock_s3_state(&state)?;
+    Ok(s3.connection_id.clone())
 }
 
 pub(crate) fn invalidate_connection_session(s3: &mut crate::S3State) {
@@ -228,10 +268,17 @@ pub(crate) async fn connect(
     state: tauri::State<'_, AppState>,
     endpoint: String,
     region: String,
-    mut access_key: String,
-    mut secret_key: String,
-    mut session_token: Option<String>,
+    access_key: String,
+    secret_key: String,
+    session_token: Option<String>,
 ) -> Result<ConnectResult, String> {
+    // Own the plaintext credentials before the first validation step so every
+    // error path below zeroizes them.
+    let secrets = ConnectSecrets {
+        access_key,
+        secret_key,
+        session_token,
+    };
     let endpoint = endpoint.trim().to_string();
     if endpoint.is_empty() {
         return Err("Endpoint is required".to_string());
@@ -253,29 +300,30 @@ pub(crate) async fn connect(
     };
     let resolved_region = resolve_region(&endpoint, &region)?;
     let (normalized, bucket_hint) = normalize_endpoint(&endpoint)?;
-    let identity = connection_identity(&normalized, &access_key);
+    // Normalisation only classifies an IP literal. A hostname can still resolve
+    // to a cloud metadata address, so resolve it now and reject if any answer
+    // names one.
+    validate_endpoint_resolution(&normalized).await?;
+    if connect_guard.is_cancelled() {
+        return Err(cancelled_error());
+    }
+    let identity = connection_identity(&normalized, &secrets.access_key);
 
     // Temporary STS credentials (SSO, AssumeRole) carry a session token that
     // must be signed with every request; without it those keys fail closed.
-    let session = session_token
+    let session = secrets
+        .session_token
         .as_deref()
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(str::to_string);
     let creds = aws_sdk_s3::config::Credentials::new(
-        &access_key,
-        &secret_key,
+        &secrets.access_key,
+        &secrets.secret_key,
         session,
         None,
         "s3-sidekick",
     );
-
-    // Zeroize the plaintext credential strings now that they've been consumed
-    access_key.zeroize();
-    secret_key.zeroize();
-    if let Some(token) = session_token.as_mut() {
-        token.zeroize();
-    }
 
     // Bound hung connections: without timeouts a stalled TCP connect or an
     // idle response body blocks forever, since the cancel token only fires on
@@ -337,6 +385,7 @@ pub(crate) async fn connect(
     // new credentials are installed. The previous session ID is pinned before
     // the network work: a connect that has since been superseded returns here
     // without touching the newer session's registrations.
+    let mut retirement_fence = None;
     if let Some(previous_id) = previous_connection_id.as_deref() {
         {
             let s3 = lock_s3_state(&state)?;
@@ -346,10 +395,13 @@ pub(crate) async fn connect(
                 return Err("Connection attempt superseded".to_string());
             }
         }
-        retire_connection_transfers(previous_id, "connection replacement").await?;
+        // On a drain timeout this returns Err and drops the fence, leaving the
+        // still current session able to register transfers again.
+        let fence = retire_connection_transfers(previous_id, "connection replacement").await?;
         if connect_guard.is_cancelled() {
             return Err(cancelled_error());
         }
+        retirement_fence = Some(fence);
     }
 
     let connection_id = mint_connection_id();
@@ -370,23 +422,25 @@ pub(crate) async fn connect(
         Ok(())
     });
     if let Err(err) = install_result {
-        // A failed replacement must not leave the still-active previous session
-        // permanently unable to register new work. Keep the retirement fence
-        // when a newer connect has already taken over that generation.
-        if let Some(previous_id) = previous_connection_id.as_deref() {
+        if let Some(fence) = retirement_fence {
+            // A failed replacement must not leave the still-active previous
+            // session permanently unable to register new work. Keep the fence
+            // when a newer connect has already taken over that generation.
             let still_previous = lock_s3_state(&state).is_ok_and(|s3| {
                 s3.connection_generation == connection_generation
-                    && s3.connection_id.as_deref() == Some(previous_id)
+                    && s3.connection_id.as_deref() == previous_connection_id.as_deref()
             });
             if still_previous {
-                finish_connection_retirement(previous_id);
+                drop(fence);
+            } else {
+                std::mem::forget(fence);
             }
         }
         return Err(err);
     }
-    if let Some(previous_id) = previous_connection_id.as_deref() {
-        finish_connection_retirement(previous_id);
-    }
+    // The replacement is installed, so the retired session can never become
+    // current again. Dropping the fence removes its retirement entry.
+    drop(retirement_fence);
 
     Ok(build_connect_result(
         resolved_region,
