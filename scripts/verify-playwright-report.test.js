@@ -37,6 +37,27 @@ test("Playwright gate accepts the complete required matrix", () => {
   assert.deepEqual(verifyPlaywrightReport(fixtureReport(), manifest), []);
 });
 
+test("Playwright gate rejects a report from a different commit", () => {
+  const report = fixtureReport();
+  report.config = { metadata: { commit: "other-commit" } };
+  const problems = verifyPlaywrightReport(report, {
+    ...manifest,
+    commit: "expected-commit",
+  });
+  assert.ok(
+    problems.some((problem) => /does not belong to this tree/.test(problem)),
+  );
+});
+
+test("Playwright gate rejects a stale report", () => {
+  const report = fixtureReport();
+  report.stats.startTime = new Date(
+    Date.now() - 8 * 24 * 3600 * 1000,
+  ).toISOString();
+  const problems = verifyPlaywrightReport(report, manifest);
+  assert.ok(problems.some((problem) => /stale/.test(problem)));
+});
+
 test("Playwright gate rejects retries that hide flakes", () => {
   const report = fixtureReport();
   report.suites[0].specs[0].tests[0].results.push({

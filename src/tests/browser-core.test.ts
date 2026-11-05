@@ -935,7 +935,9 @@ describe("browser core rendering and selection", () => {
     ];
     browser.renderObjectTable();
     browser.renderObjectTableSkeleton(1);
-    const row = document.querySelector<HTMLElement>("#object-tbody .object-row");
+    const row = document.querySelector<HTMLElement>(
+      "#object-tbody .object-row",
+    );
     expect(row).toBeTruthy();
     expect(() =>
       row!.dispatchEvent(

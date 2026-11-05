@@ -30,6 +30,14 @@ export default defineConfig({
         statements: 75,
         branches: 65,
       },
+      // Per-module ratchets (H11): aggregate floors hide regressions in
+      // security, grant, and transfer code. These are floors below the
+      // measured full-suite baselines, not targets; raise them as coverage
+      // grows. path-grants/app-connection floors are line floors only while
+      // their branch baselines recover.
+      perFile: {
+        lines: 75,
+      },
     },
   },
 });

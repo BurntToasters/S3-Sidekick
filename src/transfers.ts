@@ -1592,7 +1592,8 @@ function parseQueueManifest(
         error: typeof row.error === "string" ? row.error : undefined,
         retryable: row.retryable === false ? false : undefined,
         legacyConnectionUnbound:
-          (typeof version === "number" && version < 4 || row.legacyConnectionUnbound === true) &&
+          ((typeof version === "number" && version < 4) ||
+            row.legacyConnectionUnbound === true) &&
           !(
             typeof row.connectionIdentity === "string" &&
             row.connectionIdentity.length > 0

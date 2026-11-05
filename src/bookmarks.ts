@@ -345,51 +345,6 @@ export async function updateBookmark(
   });
 }
 
-export function renderBookmarkBar(
-  barEl: HTMLElement,
-  onSelect: (bookmark: Bookmark) => void,
-  activeEndpoint?: string,
-  onNewTab?: () => void,
-  activeAccessKey?: string,
-): void {
-  barEl.innerHTML = "";
-  if (bookmarks.length === 0 && !onNewTab) return;
-
-  for (let i = 0; i < bookmarks.length; i++) {
-    const b = bookmarks[i];
-    const chip = document.createElement("button");
-    // The endpoint alone is shared by every key saved for one host.
-    const isActive =
-      activeEndpoint !== undefined &&
-      b.endpoint === activeEndpoint &&
-      (activeAccessKey === undefined || b.access_key === activeAccessKey);
-    chip.className = isActive
-      ? "bookmark-chip bookmark-chip--active"
-      : "bookmark-chip";
-    chip.type = "button";
-    const label = document.createElement("span");
-    label.className = "bookmark-chip__label";
-    label.textContent = b.name;
-    chip.appendChild(label);
-    // The title carries the full name (the label may be truncated) and the endpoint.
-    const where = b.region ? `${b.endpoint} (${b.region})` : b.endpoint;
-    chip.title = `${b.name} · ${where}`;
-    chip.setAttribute("aria-label", b.name);
-    chip.addEventListener("click", () => onSelect(b));
-    barEl.appendChild(chip);
-  }
-
-  if (onNewTab) {
-    const plusBtn = document.createElement("button");
-    plusBtn.className = "bookmark-chip bookmark-chip--new";
-    plusBtn.type = "button";
-    plusBtn.title = "New connection";
-    plusBtn.textContent = "+";
-    plusBtn.addEventListener("click", onNewTab);
-    barEl.appendChild(plusBtn);
-  }
-}
-
 export function exportBookmarksJson(includeSecrets = false): string {
   if (loadError !== null) {
     throw new Error(

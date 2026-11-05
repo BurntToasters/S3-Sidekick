@@ -2268,9 +2268,7 @@ function rememberCurrentView(): void {
 function flushConnectionLocation(): void {
   // The listener is on window; a non-bubbling document event never reaches
   // it. Location memory only updated on unload/lock/disconnect before (M1).
-  document.dispatchEvent(
-    new Event(LOCATION_FLUSH_EVENT, { bubbles: true }),
-  );
+  document.dispatchEvent(new Event(LOCATION_FLUSH_EVENT, { bubbles: true }));
 }
 
 /**

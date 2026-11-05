@@ -170,6 +170,63 @@ Perform clean-machine checks before publishing:
 Record results in release checklist or issue. Release scripts do not treat
 self-attested local JSON reports as publication authority.
 
+## Rollback, yank, and repoint
+
+A published release that must not be downloaded after publication is handled
+in this order. Never edit a published release in place: the published bytes
+and the signed updater manifests are the evidence the verification gates
+re-checked.
+
+1. **Repoint the updater feed.** Republish the previous good version's
+   updater manifests (`latest-{{target}}.json` and
+   `latest-{{target}}-beta-*.json` per platform) so new installs of the
+   affected version stop receiving the bad build. Verify each repointed
+   manifest against its detached GPG signature and signed checksum coverage
+   before uploading, mirroring the beta-manifest recovery procedure above.
+2. **Yank the release.** Mark the GitHub release as a draft again
+   (`gh release edit <tag> --draft`) so the tag and its artifacts are no
+   longer served at the public release URL. If the release is already on the
+   updater feed, complete step 1 first: drafting alone does not change the
+   feed.
+3. **Publish a fix.** Cut a new version that contains the fix; never
+   re-upload different bytes under an existing version number. Users who
+   installed the bad version update normally onto the fix.
+4. Record what happened in the release checklist or issue: which step was
+   taken, when, and which manifest hashes were verified.
+
+`npm run release:verify:published` re-checks the published matrix, so a
+repointed feed that does not match the verified manifests fails
+verification rather than silently serving a mixed state.
+
+## Signing-key rotation
+
+Signing secrets live outside this repository (host `.env` files), so rotation
+is a host operation recorded here rather than a script in this tree:
+
+1. Generate the new key pair on a dedicated key host; never reuse a retired
+   key for another purpose.
+2. Publish the new public key to the approved GPG keyring on every host that
+   runs draft or published verification. Verification prefers the full
+   primary fingerprint and accepts its signing subkeys.
+3. Re-sign every not-yet-published artifact with the new key and re-run
+   `release:verify:draft` before publishing. Published releases are never
+   re-signed after the fact.
+4. Delete the retired private key from every host and rotate the
+   `TAURI_SIGNING_PRIVATE_KEY` and `GPG_PASSPHRASE` values in each host's
+   `.env`. Azure Artifact Signing and Apple Developer certificates follow
+   their publishers' rotation procedures and are re-issued, never copied
+   between hosts.
+
+## Reproducible builds
+
+Release scripts set `SOURCE_DATE_EPOCH` from the release commit timestamp so
+two builds of the same commit embed identical metadata. Reproducibility is
+checked by rebuilding the same commit on a second host and comparing the
+artifact hashes to the published bytes byte-for-byte; any mismatch is
+reported before publication trust is established. CI smoke-builds the
+unsigned no-bundle artifacts so toolchain breaks are found before a release
+VM is spent.
+
 ## Stable mirror
 
 Stable release requires absolute `AFTER_PACK_LOC` outside repository. Beta

@@ -198,78 +198,6 @@ function standardMock(initial: unknown[] = []) {
   });
 }
 
-describe("renderBookmarkBar", () => {
-  it("creates bookmark chip buttons for loaded bookmarks", async () => {
-    standardMock([alphaBookmark, betaBookmark]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const container = document.createElement("div");
-    bookmarks.renderBookmarkBar(container, () => {});
-
-    const chips = container.querySelectorAll("button.bookmark-chip");
-    expect(chips).toHaveLength(2);
-  });
-
-  it("shows the bookmark name on each chip", async () => {
-    standardMock([alphaBookmark, betaBookmark]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const container = document.createElement("div");
-    bookmarks.renderBookmarkBar(container, () => {});
-
-    const chips = container.querySelectorAll("button.bookmark-chip");
-    expect(chips[0].textContent).toBe("alpha");
-    expect(chips[1].textContent).toBe("beta");
-  });
-
-  it("sets tooltip to endpoint and region without region label in chip text", async () => {
-    standardMock([alphaBookmark]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const container = document.createElement("div");
-    bookmarks.renderBookmarkBar(container, () => {});
-
-    const chip = container.querySelector(
-      "button.bookmark-chip",
-    ) as HTMLButtonElement;
-    expect(chip.querySelector(".bookmark-chip__region")).toBeNull();
-    expect(chip.textContent).toBe("alpha");
-    expect(chip.title).toBe("alpha · https://alpha.example.com (us-east-1)");
-  });
-
-  it("calls onSelect with the correct bookmark when a chip is clicked", async () => {
-    standardMock([alphaBookmark, betaBookmark]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const onSelect = vi.fn();
-    const container = document.createElement("div");
-    bookmarks.renderBookmarkBar(container, onSelect);
-
-    const chips = container.querySelectorAll("button.bookmark-chip");
-    (chips[1] as HTMLButtonElement).click();
-
-    expect(onSelect).toHaveBeenCalledTimes(1);
-    expect(onSelect).toHaveBeenCalledWith(betaBookmark);
-  });
-
-  it("renders nothing when the bookmarks array is empty", async () => {
-    standardMock([]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const container = document.createElement("div");
-    container.innerHTML = "<span>placeholder</span>";
-    bookmarks.renderBookmarkBar(container, () => {});
-
-    expect(container.innerHTML).toBe("");
-    expect(container.children).toHaveLength(0);
-  });
-});
-
 describe("setBookmarkChangeHandler", () => {
   it("invokes the handler when addBookmark is called", async () => {
     standardMock([]);
@@ -558,14 +486,6 @@ describe("bookmark import/export/list rendering", () => {
     const bookmarks = await loadBookmarksModule();
     await bookmarks.loadBookmarks();
 
-    const bar = document.createElement("div");
-    bookmarks.renderBookmarkBar(bar, () => {});
-    const chip = bar.querySelector("button.bookmark-chip") as HTMLButtonElement;
-    expect(chip.querySelector(".bookmark-chip__region")).toBeNull();
-    expect(chip.title).toBe(
-      `${alphaBookmark.name} · ${alphaBookmark.endpoint}`,
-    );
-
     const list = document.createElement("ul");
     bookmarks.renderBookmarkList(
       list,
@@ -632,30 +552,6 @@ describe("saved connection naming, identity, and editing", () => {
         "DO00ABC",
       ),
     ).toBe("Spaces · nyc3");
-  });
-
-  it("marks only the chip whose endpoint and access key match as active", async () => {
-    const sameEndpointOtherKey = {
-      ...alphaBookmark,
-      name: "alpha-2",
-      access_key: "AKIAOTHER",
-    };
-    standardMock([alphaBookmark, sameEndpointOtherKey]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const container = document.createElement("div");
-    bookmarks.renderBookmarkBar(
-      container,
-      () => {},
-      alphaBookmark.endpoint,
-      undefined,
-      alphaBookmark.access_key,
-    );
-
-    const chips = container.querySelectorAll("button.bookmark-chip");
-    expect(chips[0].classList.contains("bookmark-chip--active")).toBe(true);
-    expect(chips[1].classList.contains("bookmark-chip--active")).toBe(false);
   });
 
   it("reports invalid and duplicate imports as separate counts", async () => {

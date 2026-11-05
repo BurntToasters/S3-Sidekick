@@ -183,13 +183,22 @@ function printSummary(results) {
 ╚══════════════════════════════════════╝
 ${colors.reset}`);
 
-  const allPassed = Object.entries(results).every(([name, result]) =>
-    name === "releaseAssetsE2e" &&
-    process.platform === "win32" &&
-    result.status === "skipped"
-      ? true
-      : result.status === "passed",
-  );
+  // A skipped check counts as passed only when it carries the explicit
+  // waiver reason it was given by the runner (H11). Blank reasons fail the
+  // gate: a skip without a recorded waiver cannot read as green.
+  const allPassed = Object.entries(results).every(([name, result]) => {
+    if (result.status === "passed") return true;
+    if (
+      name === "releaseAssetsE2e" &&
+      process.platform === "win32" &&
+      result.status === "skipped" &&
+      typeof result.reason === "string" &&
+      result.reason.trim().length > 0
+    ) {
+      return true;
+    }
+    return false;
+  });
 
   console.log(
     `${colors.bold}TypeCheck:${colors.reset}  ${

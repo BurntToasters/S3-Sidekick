@@ -59,6 +59,21 @@ export function verifyPlaywrightReport(report, manifest) {
   const counts = new Map();
   const seenProjects = new Set();
   const seenFiles = new Set();
+  // Bind the report to the working tree it was produced from. A substituted
+  // or stale report fails even when its counts happen to match (H11).
+  const expectedCommit =
+    typeof manifest?.commit === "string" ? manifest.commit : null;
+  if (expectedCommit) {
+    const reportedCommit = String(report.config?.metadata?.commit ?? "");
+    if (reportedCommit && reportedCommit !== expectedCommit) {
+      problems.push(
+        `Playwright report was produced at ${reportedCommit}, expected ${expectedCommit}: the report does not belong to this tree.`,
+      );
+    }
+  }
+  // Titles must match across the two required projects: a spec rebuilt with
+  // the same count but different titles is a substituted suite.
+  const titlesByFile = new Map();
   walkSuites(report.suites, (suite) => {
     for (const spec of Array.isArray(suite.specs) ? suite.specs : []) {
       const file = String(spec.file || suite.file || "");
@@ -68,6 +83,24 @@ export function verifyPlaywrightReport(report, manifest) {
       }
       seenFiles.add(file);
       counts.set(file, (counts.get(file) || 0) + (spec.tests?.length || 0));
+      const priorTitles = titlesByFile.get(file);
+      if (!priorTitles) {
+        titlesByFile.set(file, {
+          count: 1,
+          firstTitle: spec.title || null,
+        });
+      } else {
+        priorTitles.count += 1;
+        if (
+          spec.title &&
+          priorTitles.firstTitle &&
+          spec.title !== priorTitles.firstTitle
+        ) {
+          problems.push(
+            `Playwright spec ${file} ran with differing titles across projects/sub-specs; the suite may have been substituted.`,
+          );
+        }
+      }
       for (const test of Array.isArray(spec.tests) ? spec.tests : []) {
         if (test.projectName) seenProjects.add(test.projectName);
         const results = Array.isArray(test.results) ? test.results : [];
@@ -139,6 +172,19 @@ export function verifyPlaywrightReport(report, manifest) {
   }
   if (Number(stats.flaky || 0) !== 0) {
     problems.push(`Playwright had ${stats.flaky} flaky test(s).`);
+  }
+  // Recency window: a report older than 7 days cannot be release evidence.
+  const startIso = typeof stats.startTime === "string" ? stats.startTime : null;
+  if (startIso) {
+    const started = Date.parse(startIso);
+    if (Number.isFinite(started)) {
+      const ageMs = Date.now() - started;
+      if (ageMs > 7 * 24 * 3600 * 1000) {
+        problems.push(
+          `Playwright report is stale (${startIso}); it is not release evidence.`,
+        );
+      }
+    }
   }
   return problems;
 }
