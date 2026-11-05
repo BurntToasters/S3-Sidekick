@@ -69,6 +69,11 @@ const EXPECTED_CHECKS = Object.freeze([
   "MinIO refuses create-only CopyObject against an absent destination before mutation",
   "MinIO refuses create-only CopyObject against an different destination before mutation",
   "MinIO refuses create-only CopyObject against an identical destination before mutation",
+  "ambiguous multipart recovery survives JSON receipt round trip and cannot delete the source",
+  "JSON-null source version claim cannot retire a live suspended-bucket null version",
+  "missing HEAD version header triggers a live bucket-versioning check and refuses suspended-bucket deletion",
+  "denied bucket-versioning lookup names the needed permission and refuses source deletion",
+  "normal unversioned copy receipt still permits a matching move and retains the copied destination",
 ]);
 
 function run(cmd, args, options = {}) {

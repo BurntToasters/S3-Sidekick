@@ -616,7 +616,7 @@ mod tests {
     fn reveal_local_plan_macos_selects_the_file_with_open_r() {
         let dir = reveal_scratch("macos-file");
         let file = reveal_file(&dir, "report.csv");
-        let expected = std::fs::canonicalize(&file).unwrap();
+        let expected = resolve_launch_target(&file).unwrap();
         let result = reveal_plan(RevealPlatform::MacOs, &file.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         let plan = result.expect("a file is revealable on macOS");
@@ -642,7 +642,7 @@ mod tests {
     fn reveal_local_plan_windows_uses_explorer_select() {
         let dir = reveal_scratch("windows-file");
         let file = reveal_file(&dir, "report.csv");
-        let expected = std::fs::canonicalize(&file).unwrap();
+        let expected = resolve_launch_target(&file).unwrap();
         let result = reveal_plan(RevealPlatform::Windows, &file.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         let plan = result.expect("a file is revealable on Windows");
@@ -660,7 +660,7 @@ mod tests {
     fn reveal_local_plan_linux_opens_the_parent_folder_never_the_file() {
         let dir = reveal_scratch("linux-parent");
         let file = reveal_file(&dir, "report.csv");
-        let expected = std::fs::canonicalize(&dir).unwrap();
+        let expected = resolve_launch_target(&dir).unwrap();
         let result = reveal_plan(RevealPlatform::Linux, &file.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         let plan = result.expect("a file's parent folder is revealable on Linux");
@@ -680,7 +680,7 @@ mod tests {
         reveal_file(&real, "report.csv");
         let link = dir.join("link");
         std::os::unix::fs::symlink(&real, &link).expect("create folder symlink");
-        let expected = std::fs::canonicalize(&real).unwrap();
+        let expected = resolve_launch_target(&real).unwrap();
         let plan = reveal_plan(
             RevealPlatform::Linux,
             &link.join("report.csv").to_string_lossy(),

@@ -580,6 +580,10 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Run real Windows startup E2E
+        env:
+          # Cold WebView2 startup on a fresh runner can exceed 20 s; the check
+          # still requires the app to stay alive and finish recovery.
+          S3_SIDEKICK_STARTUP_ALIVE_MS: "60000"
         run: npm run test:e2e:windows-startup
 
       - name: Upload Windows startup report

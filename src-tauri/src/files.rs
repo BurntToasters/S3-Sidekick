@@ -4290,9 +4290,12 @@ mod tests {
             "{err}"
         );
 
-        // A different real directory at the same path is also refused.
+        // A different real directory at the same path is also refused. The
+        // replacement is created (and its inode allocated) while the original
+        // still exists, so a Linux filesystem cannot hand the freed inode back.
+        let replacement = scan_scratch("identity-swap-replacement");
         let _ = std::fs::remove_file(&sub);
-        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::rename(&replacement, &sub).unwrap();
         let err = open_scanned_dir(&sub, &expected)
             .expect_err("a replaced real directory must be refused");
         assert!(err.contains("changed"), "{err}");

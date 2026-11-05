@@ -1318,6 +1318,20 @@ fn download_temp_lock_path(temp_path: &Path) -> PathBuf {
     PathBuf::from(lock)
 }
 
+/// `LockFileEx` reports a held byte range as ERROR_LOCK_VIOLATION (33).
+/// Rust maps it to `WouldBlock` on most versions, but treat the raw code as
+/// contention as well so a platform mapping change cannot turn a locked
+/// scratch into a hard failure.
+#[cfg(windows)]
+fn is_lock_violation(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(33)
+}
+
+#[cfg(not(windows))]
+fn is_lock_violation(_err: &std::io::Error) -> bool {
+    false
+}
+
 pub(crate) fn claim_download_temp(
     temp_path: &Path,
     destination: &Path,
@@ -1356,7 +1370,7 @@ pub(crate) fn claim_download_temp(
         })?;
     match fs2::FileExt::try_lock_exclusive(&lock_file) {
         Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock || is_lock_violation(&err) => {
             return Err(format!(
                 "Download scratch already in use: {}",
                 temp_path.display()
