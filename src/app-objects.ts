@@ -369,7 +369,10 @@ async function performDelete(): Promise<void> {
       );
       logActivity(`Deleted ${plural(totalDeleted, "object")}.`, "success");
       if (marker) {
-        showToast([...versioningWarnings].join(" "), { type: "warning", duration: 0 });
+        showToast([...versioningWarnings].join(" "), {
+          type: "warning",
+          duration: 0,
+        });
       }
     } else {
       logActivity(

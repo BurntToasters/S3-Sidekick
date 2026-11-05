@@ -4284,9 +4284,7 @@ mod tests {
         let other = scan_scratch("identity-swap-target");
         std::fs::remove_dir_all(&sub).unwrap();
         std::os::unix::fs::symlink(&other, &sub).unwrap();
-        let err = open_scanned_dir(&sub, &expected)
-            .err()
-            .expect("a symlink swap must be refused");
+        let err = open_scanned_dir(&sub, &expected).expect_err("a symlink swap must be refused");
         assert!(
             err.contains("without following links") || err.contains("changed"),
             "{err}"
@@ -4296,8 +4294,7 @@ mod tests {
         let _ = std::fs::remove_file(&sub);
         std::fs::create_dir_all(&sub).unwrap();
         let err = open_scanned_dir(&sub, &expected)
-            .err()
-            .expect("a replaced real directory must be refused");
+            .expect_err("a replaced real directory must be refused");
         assert!(err.contains("changed"), "{err}");
 
         let _ = std::fs::remove_dir_all(&dir);

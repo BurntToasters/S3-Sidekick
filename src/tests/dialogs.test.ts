@@ -391,9 +391,9 @@ describe("dialogs", () => {
     await expect(choice).resolves.toBe("keep");
     expect(dialogs.isDialogActive()).toBe(false);
     expect(
-      (document.getElementById("dialog-overlay") as HTMLDivElement).classList.contains(
-        "active",
-      ),
+      (
+        document.getElementById("dialog-overlay") as HTMLDivElement
+      ).classList.contains("active"),
     ).toBe(false);
   });
 });

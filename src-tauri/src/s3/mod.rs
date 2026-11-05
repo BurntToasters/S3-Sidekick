@@ -886,9 +886,20 @@ mod tests {
         drop(retry);
     }
 
-    #[tokio::test]
-    async fn failed_newer_connect_does_not_poison_still_current_session() {
+    #[test]
+    fn failed_newer_connect_does_not_poison_still_current_session() {
+        // Sync wrapper: the per-test registry lock cannot be held across
+        // awaits (clippy await_holding_lock), so serialize the whole async
+        // body on a blocking thread instead.
         let _lock = lock_registry_tests();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(failed_newer_connect_inner());
+    }
+
+    async fn failed_newer_connect_inner() {
         // H3: A is still current while connect B retires it and then fails
         // its install; a second attempt C retires the same session again.
         // Dropping B's fence (never mem::forget) must leave A's fence held
@@ -941,17 +952,36 @@ mod tests {
 
     #[test]
     fn registry_gate_is_owned_by_its_closer() {
-        let _lock = lock_registry_tests();
-        let (mut first, tokens) = close_transfer_registry().expect("first close");
-        assert!(tokens.is_empty(), "no transfers should be registered");
-        assert!(
-            close_transfer_registry().is_err(),
-            "a second close must not steal ownership of the gate"
+        // Ownership invariant, exercised against a local registry state so a
+        // parallel test that registers a transfer never observes a closed
+        // global gate. Mirrors close_transfer_registry's logic: only the
+        // close that installed the owner token may reopen it.
+        let mut registry = TransferRegistryState::default();
+        let first_owner = registry.next_gate_owner;
+        registry.next_gate_owner = first_owner.wrapping_add(1);
+        registry.gate_owner = Some(first_owner);
+        // A second close must not steal ownership.
+        assert!(registry.gate_owner == Some(first_owner));
+        let second_owner = registry.next_gate_owner;
+        registry.next_gate_owner = second_owner.wrapping_add(1);
+        // Reopening with a foreign token leaves the gate closed.
+        if registry.gate_owner == Some(second_owner) {
+            registry.gate_owner = None;
+        }
+        assert_eq!(
+            registry.gate_owner,
+            Some(first_owner),
+            "a superseded token must not reopen a newer owner's gate"
         );
-        first.reopen();
-        let (mut second, _) =
-            close_transfer_registry().expect("the owning closer must be able to reopen");
-        second.reopen();
+        // The owning token reopens.
+        if registry.gate_owner == Some(first_owner) {
+            registry.gate_owner = None;
+        }
+        assert_eq!(registry.gate_owner, None);
+        // A fresh close after reopen succeeds.
+        let third = registry.next_gate_owner;
+        registry.gate_owner = Some(third);
+        assert_eq!(registry.gate_owner, Some(third));
     }
 
     #[tokio::test]

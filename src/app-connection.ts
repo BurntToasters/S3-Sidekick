@@ -669,7 +669,9 @@ export function resetSecretRevealState(): void {
     ["secret-key-toggle", "conn-secret-key"],
     ["session-token-toggle", "conn-session-token"],
   ] as const) {
-    const toggle = document.getElementById(toggleId) as HTMLButtonElement | null;
+    const toggle = document.getElementById(
+      toggleId,
+    ) as HTMLButtonElement | null;
     const input = document.getElementById(inputId) as HTMLInputElement | null;
     if (!toggle || !input) continue;
     input.type = "password";
