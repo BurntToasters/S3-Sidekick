@@ -55,6 +55,7 @@ security-framework-sys = "=2.17.0"
 windows = { version = "=0.58.0", features = [
     "Security_Credentials_UI",
     "Foundation",
+    "Win32_Security_Authorization",
     "Win32_Security_Credentials",
     "Win32_Security",
     "Win32_Foundation",

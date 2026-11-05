@@ -37,6 +37,8 @@ const EXPECTED_CHECKS = Object.freeze([
   "another loopback port is a generic provider with no create-only guarantees",
   "listing returns 'a b.txt' and 'a+b.txt' as two distinct keys",
   "folder prefixes 'x y/' and 'x+y/' are listed as written",
+  "UploadPartCopy accepts a matching copy-source-if-match",
+  "UploadPartCopy refuses a stale copy-source-if-match",
   "delete of 'a b.txt' removes it and leaves 'a+b.txt' untouched",
   "delete_prefix('x y/') removes that folder and keeps 'x+y/'",
   "copy_prefix_to writes 'report final.txt', not 'report+final.txt'",

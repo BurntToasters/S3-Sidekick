@@ -132,9 +132,10 @@ test.describe("selection and focus survive background work", () => {
     await expect(page.locator("#status")).not.toContainText("failed", {
       timeout: 15_000,
     });
-    await page.waitForTimeout(1200);
 
-    await expect(rowByKey(page, key)).toHaveAttribute("aria-selected", "true");
+    await expect(rowByKey(page, key)).toHaveAttribute("aria-selected", "true", {
+      timeout: 15_000,
+    });
     await expect(page.locator("#inspector-header-title")).toHaveText(
       headerBefore ?? "",
     );

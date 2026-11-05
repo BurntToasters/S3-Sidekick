@@ -2900,6 +2900,66 @@ fn directory_sync_failure_is_unsupported(err: &std::io::Error) -> bool {
     )
 }
 
+/// Restrict a private file to its owner on Windows.
+///
+/// App data is user-profile-scoped, but files written to a shared or synced
+/// volume can inherit a DACL that lets other principals read the vault,
+/// checkpoints, or marked-up manifests. Set a protected DACL granting full
+/// access only to the owner (the `OW` owner-rights SID, no token query),
+/// LOCAL SYSTEM, and Builtin Administrators (M10).
+#[cfg(windows)]
+pub(crate) fn harden_private_file(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows::Win32::Security::{
+        SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+
+    const SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)";
+    let sddl: Vec<u16> = SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            1,
+            &mut descriptor,
+            None,
+        )
+        .map_err(|err| format!("Failed to build a private file DACL: {}", err))?;
+    }
+    let wide: Vec<u16> = to_extended_windows_path(path)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let applied = unsafe {
+        SetFileSecurityW(
+            PCWSTR(wide.as_ptr()),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    };
+    unsafe {
+        LocalFree(HLOCAL(descriptor.0));
+    }
+    if !applied.as_bool() {
+        return Err(format!(
+            "Failed to restrict '{}' to its owner: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn harden_private_file(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 /// Flush directory metadata after creating, replacing, or removing an entry.
 ///
 /// This is the strict form used for vault, checkpoint, and journal
@@ -3427,6 +3487,10 @@ fn atomic_write_with_overwrite(
         options.mode(0o600);
     }
     let mut tmp_file = options.open(&tmp_path).map_err(|e| e.to_string())?;
+    // Vault, checkpoint, settings, and bookmark payloads must never inherit a
+    // shared-volume DACL (M10). Fail closed: a private policy is part of the
+    // write, not an optional hardening step.
+    harden_private_file(&tmp_path)?;
     let write_result = tmp_file
         .write_all(data.as_bytes())
         .and_then(|()| tmp_file.sync_all());
@@ -4106,6 +4170,55 @@ mod tests {
         assert!(download_lease_age_exceeds(stale, now, max_age));
         // A clock that moved backwards must retain the lease, not reap it.
         assert!(!download_lease_age_exceeds(now, fresh, max_age));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_file_dacl_is_protected() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            SE_DACL_PROTECTED,
+        };
+
+        let path = scratch_dir("windows-dacl").join("vault.tmp");
+        std::fs::write(&path, b"secret").unwrap();
+        harden_private_file(&path).unwrap();
+
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+        let mut dacl = std::ptr::null_mut();
+        unsafe {
+            GetNamedSecurityInfoW(
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut dacl),
+                None,
+                &mut descriptor,
+            )
+            .ok()
+            .unwrap();
+            let mut control = 0u16;
+            let mut revision = 0u32;
+            GetSecurityDescriptorControl(descriptor, &mut control, &mut revision).unwrap();
+            LocalFree(HLOCAL(descriptor.0));
+            assert_ne!(
+                control & SE_DACL_PROTECTED.0,
+                0,
+                "the private DACL must not inherit shared-volume ACEs"
+            );
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[cfg(unix)]

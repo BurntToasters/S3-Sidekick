@@ -466,8 +466,9 @@ test.describe("browse table, keyboard and location bar", () => {
     await expect(current).toBeVisible();
 
     const before = commandCalls(await readMockCallLog(page), "list_objects");
+    await page.clock.install();
     await current.click();
-    await page.waitForTimeout(150);
+    await page.clock.fastForward(150);
     const after = commandCalls(await readMockCallLog(page), "list_objects");
     expect(after.length).toBe(before.length);
   });

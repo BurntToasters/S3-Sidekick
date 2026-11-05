@@ -617,6 +617,17 @@ fn open_download_scratch_file(
         // older build or created under a laxer umask as well.
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
+    // Scratch may contain object bytes and can live on a shared volume. Set an
+    // owner-only DACL where the filesystem supports one, but keep downloads
+    // working on FAT/exFAT where ACLs are unavailable (best-effort, unlike the
+    // fail-closed vault/checkpoint write in main.rs).
+    if let Err(err) = crate::harden_private_file(path) {
+        eprintln!(
+            "Download scratch '{}' could not be restricted to its owner: {}",
+            path.display(),
+            err
+        );
+    }
     let identity = download_scratch_identity(&file)?;
     if expected_identity.is_some_and(|expected| expected != &identity) {
         return Err(std::io::Error::new(

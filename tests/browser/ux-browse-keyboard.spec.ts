@@ -126,6 +126,7 @@ test.describe("browse table sorting, filter and live announcements", () => {
 
     // A filter update still pending when the filter is cleared must not
     // re-apply the stale text after the clear.
+    await page.clock.install();
     await page.evaluate(async () => {
       const url =
         performance
@@ -141,7 +142,7 @@ test.describe("browse table sorting, filter and live announcements", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
       mod.clearFilter();
     });
-    await page.waitForTimeout(250);
+    await page.clock.fastForward(250);
     await expect(page.locator("#filter-input")).toHaveValue("");
     await expect(page.locator("#object-tbody .object-row")).toHaveCount(6);
 
@@ -433,18 +434,19 @@ test.describe("keyboard selection, roving focus and menus", () => {
   }, testInfo) => {
     await openMockListing(page, THREE_FOLDERS);
     await rowAt(page, 0).focus();
+    await page.clock.install();
 
     await page.keyboard.press("b");
     await expect(folderRow(page, "bravo/")).toBeFocused();
 
-    await page.waitForTimeout(1100);
+    await page.clock.fastForward(1100);
     await page.keyboard.press("C");
     await expect(folderRow(page, "charlie/")).toBeFocused();
 
     await page.keyboard.press("Control+b");
     await expect(folderRow(page, "charlie/")).toBeFocused();
 
-    await page.waitForTimeout(1100);
+    await page.clock.fastForward(1100);
     await page.keyboard.press("b");
     await expect(folderRow(page, "bravo/")).toBeFocused();
 

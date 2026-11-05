@@ -232,12 +232,13 @@ test.describe("copy and move dialog", () => {
     await page.keyboard.press("Escape");
     await expect(page.locator("#copy-move-overlay")).not.toHaveClass(/active/);
 
+    await page.clock.install();
     await page.evaluate(() =>
       (
         window as unknown as { __releaseExistenceChecks: () => void }
       ).__releaseExistenceChecks(),
     );
-    await page.waitForTimeout(500);
+    await page.clock.fastForward(500);
     const calls = await readMockCallLog(page);
     expect(countOf(calls, "copy_object_to")).toBe(0);
     expect(countOf(calls, "copy_prefix_to")).toBe(0);
@@ -311,12 +312,13 @@ test.describe("copy and move dialog", () => {
     const sourceKey = (description ?? "").replace(/^File:\s*/, "");
     expect(sourceKey.length).toBeGreaterThan(0);
     await page.locator("#copy-move-path").fill(sourceKey);
+    await page.clock.install();
     await page.locator("#copy-move-copy-btn").click();
     await expect(page.locator("#copy-move-error")).toBeVisible();
     await expect(page.locator("#copy-move-error")).toContainText(
       "source and destination",
     );
-    await page.waitForTimeout(300);
+    await page.clock.fastForward(300);
     const calls = await readMockCallLog(page);
     expect(countOf(calls, "copy_object_to")).toBe(0);
   });

@@ -142,12 +142,13 @@ test.describe("delete outcomes and confirmation wording", () => {
         fileRow(page, `${String(i).padStart(3, "0")}-sample-object.txt`),
       ),
     );
+    await page.clock.install();
     await openDeleteDialog(page);
     await page.locator("#dialog-ok").click();
 
     const toast = page.locator("#toast-region .toast--error");
     await expect(toast).toContainText("Couldn't delete 2 of 5 items");
-    await page.waitForTimeout(8_500);
+    await page.clock.fastForward(8_500);
     await expect(toast).toBeVisible();
 
     await toast.getByRole("button", { name: "Details" }).click();

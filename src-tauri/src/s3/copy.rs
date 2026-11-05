@@ -987,7 +987,7 @@ pub(super) async fn copy_object_multipart(
                             true,
                             None,
                             format!(
-                                "Copy to '{}' may have committed, but the destination does not prove this copy wrote it. The multipart upload ID '{}' was retained; verify the destination before retrying.",
+                                "Copy to '{}' returned an ambiguous ownership result: the destination may have committed, but it does not prove this copy wrote it. The multipart upload ID '{}' was retained; verify the destination before retrying.",
                                 dest_key, upload_id
                             ),
                         ));

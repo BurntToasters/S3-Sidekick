@@ -285,8 +285,9 @@ test.describe("transfer engine UX", () => {
       /failed/,
     );
 
+    await page.clock.install();
     await openTransferMenu(page, "Retry failed");
-    await page.waitForTimeout(300);
+    await page.clock.fastForward(300);
     const calls = await readMockCallLog(page);
     expect(countOf(calls, "copy_object_to")).toBe(1);
     await saveSuiteArtifact(
