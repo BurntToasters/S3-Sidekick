@@ -1,6 +1,7 @@
 import { state, dom, type ObjectInfo } from "./state.ts";
 import {
   cancelPendingFilterRender,
+  registerObjectTableBusyProbe,
   registerObjectTableRenderer,
   registerSelectionRestorer,
 } from "./layout-render-bridge.ts";
@@ -1893,15 +1894,6 @@ function ensureObjectPanelListeners(): void {
 }
 
 export function renderObjectTable(): void {
-  // A filter render inside the skeleton window is a render against the
-  // previous listing: it must not clear the load guard or aria-busy while the
-  // new listing is still loading (H7).
-  if (
-    objectLoadInFlight ||
-    dom.objectPanel.getAttribute("aria-busy") === "true"
-  ) {
-    return;
-  }
   cancelPendingSkeleton();
   cancelTypeAheadAnnouncement();
   objectLoadInFlight = false;
@@ -2656,6 +2648,10 @@ export function showEmptyState(): void {
 }
 
 registerObjectTableRenderer(renderObjectTable);
+registerObjectTableBusyProbe(
+  () =>
+    objectLoadInFlight || dom.objectPanel.getAttribute("aria-busy") === "true",
+);
 
 /**
  * Make `entries` the table selection again without re-syncing the inspector.

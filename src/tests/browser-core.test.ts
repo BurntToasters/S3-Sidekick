@@ -917,9 +917,14 @@ describe("browser core rendering and selection", () => {
     browser.renderObjectTableSkeleton(1);
     const panel = document.getElementById("object-panel") as HTMLElement;
     expect(panel.getAttribute("aria-busy")).toBe("true");
+    // The debounced filter path must not clear the loading guard.
+    const bridge = await import("../layout-render-bridge.ts");
     state.filterText = "old";
-    browser.renderObjectTable();
+    bridge.renderObjectTableFromLayout();
     expect(panel.getAttribute("aria-busy")).toBe("true");
+    // A listing commit still renders and clears it.
+    browser.renderObjectTable();
+    expect(panel.getAttribute("aria-busy")).toBe("false");
   });
 
   it("does not act on stale rows while loading (H8)", async () => {

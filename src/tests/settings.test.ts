@@ -688,6 +688,26 @@ describe("settings module", () => {
     ).toBe(false);
   });
 
+  it("discards a settings draft without a prompt when the vault is locking (H5)", async () => {
+    document.body.innerHTML = `<div id="settings-overlay" class="modal-overlay active"></div>`;
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.lastPersistedSettings = { ...SETTING_DEFAULTS, theme: "dark" };
+    state.currentSettings = { ...SETTING_DEFAULTS, theme: "light" };
+    mockShowChoiceDialog.mockClear();
+
+    await settings.closeSettingsModalForLock();
+
+    expect(mockShowChoiceDialog).not.toHaveBeenCalled();
+    expect(state.currentSettings).toEqual(state.lastPersistedSettings);
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(
+      (
+        document.getElementById("settings-overlay") as HTMLDivElement
+      ).classList.contains("active"),
+    ).toBe(false);
+  });
+
   it("skips bookmark rendering when bookmark list element is missing", async () => {
     document.body.innerHTML = `
       <div id="settings-overlay" class="modal-overlay"></div>

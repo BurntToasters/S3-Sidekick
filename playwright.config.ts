@@ -22,9 +22,11 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   // The JSON file is the machine-checked evidence artifact. Configure it here
   // instead of relying on an environment variable Playwright does not read.
+  // Always write the machine-checked JSON report so `npm run test:ui` followed
+  // by `npm run test:ui:verify` works locally, not just in CI.
   reporter: process.env.CI
     ? [["github"], ["json", { outputFile: jsonReportPath }]]
-    : "list",
+    : [["list"], ["json", { outputFile: jsonReportPath }]],
   use: {
     baseURL: "http://127.0.0.1:5173",
     trace: "retain-on-failure",

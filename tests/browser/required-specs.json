@@ -1,8 +1,5 @@
 {
-  "projects": [
-    "chromium",
-    "webkit"
-  ],
+  "projects": ["chromium", "webkit"],
   "testCount": 806,
   "specs": {
     "a01-lock-security.spec.ts": 6,
@@ -38,5 +35,6 @@
     "ux-toolbar-actions.spec.ts": 16,
     "ux-transfer-engine.spec.ts": 16,
     "ux-visual-tour.spec.ts": 100
-  }
+  },
+  "titlesSha256": "9dad88798be3441ab9fcb094a9574a0b8704e9dffcc7b77366db5a2593aee5ee"
 }

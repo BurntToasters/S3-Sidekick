@@ -1183,10 +1183,32 @@ async function discardSettingsDraft(): Promise<void> {
     }
     if (choice !== "discard") return;
   }
+  closeSettingsWithoutPrompt();
+}
+
+/** Reset the draft and hide Settings without asking the user anything. */
+function closeSettingsWithoutPrompt(): void {
   applyAppearance(state.lastPersistedSettings);
   state.currentSettings = { ...state.lastPersistedSettings };
   setUpdateChannel(state.lastPersistedSettings.updateChannel);
   document.getElementById("settings-overlay")?.classList.remove("active");
+}
+
+/**
+ * Close Settings during a lock teardown.
+ *
+ * The vault is already locking, so an unsaved draft can no longer be saved and
+ * a discard prompt would stall the teardown behind a dialog (H5). An in-flight
+ * save is awaited, then the draft is discarded without prompting.
+ */
+export function closeSettingsModalForLock(): Promise<void> {
+  if (settingsModalSaveOperation) {
+    return settingsModalSaveOperation
+      .catch(() => undefined)
+      .then(closeSettingsWithoutPrompt);
+  }
+  closeSettingsWithoutPrompt();
+  return Promise.resolve();
 }
 
 export function closeSettingsModal(save: boolean): Promise<void> {

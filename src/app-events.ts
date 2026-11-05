@@ -4,6 +4,7 @@ import { state, dom } from "./state.ts";
 import {
   openSettingsModal,
   closeSettingsModal,
+  closeSettingsModalForLock,
   resetSettings,
   resetAfterForgottenPassword,
   setBookmarkSelectHandler,
@@ -198,7 +199,7 @@ function reportAsyncActionFailure(label: string, err: unknown): void {
  */
 export async function teardownLockedSession(): Promise<void> {
   closeAllDialogs();
-  await closeSettingsModal(false);
+  await closeSettingsModalForLock();
   closePreview();
   setInspectorOpen(false);
   cancelInlineSavedConnectionEdit();
