@@ -76,6 +76,139 @@ fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+/// Identity of a directory the scan has found but not yet opened.
+///
+/// Captured when the parent enumerates the child and re-verified with a
+/// no-follow open when the child is popped from the stack, closing the
+/// window where a subdirectory can be swapped for a symlink or a different
+/// real directory after the parent rejected it as a link. The canonical path
+/// catches the symlink swap; the device/inode pair catches a different real
+/// directory mounted at the same path on Unix. Windows stable directory ids
+/// need a separate handle query and remain the documented residual.
+#[derive(Clone, Debug)]
+struct ScannedDirIdentity {
+    canonical: std::path::PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+fn scanned_dir_identity(path: &std::path::Path) -> Result<ScannedDirIdentity, String> {
+    let canonical = std::fs::canonicalize(path).map_err(|err| {
+        format!(
+            "Failed to resolve scanned directory '{}': {}",
+            path.display(),
+            err
+        )
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|err| {
+        format!(
+            "Failed to inspect scanned directory '{}': {}",
+            canonical.display(),
+            err
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Scanned path is not a directory: {}",
+            canonical.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(ScannedDirIdentity {
+            canonical,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(ScannedDirIdentity { canonical })
+    }
+}
+
+/// Open a directory without following a final-component symlink, then confirm
+/// it is still the directory the parent enumerated.
+#[cfg(unix)]
+fn open_scanned_dir(
+    path: &std::path::Path,
+    expected: &ScannedDirIdentity,
+) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const O_NOFOLLOW: i32 = 0o400000;
+    #[cfg(target_os = "macos")]
+    const O_NOFOLLOW: i32 = 0x0100;
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    const O_NOFOLLOW: i32 = 0;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .map_err(|err| {
+            format!(
+                "Failed to open scanned directory '{}' without following links: {}",
+                path.display(),
+                err
+            )
+        })?;
+    let handle = file.metadata().map_err(|err| {
+        format!(
+            "Failed to inspect opened scanned directory '{}': {}",
+            path.display(),
+            err
+        )
+    })?;
+    if !handle.is_dir() {
+        return Err(format!(
+            "Scanned path is not a directory: {}",
+            path.display()
+        ));
+    }
+    if handle.dev() != expected.device
+        || handle.ino() != expected.inode
+        || std::fs::canonicalize(path).map_err(|err| err.to_string())? != expected.canonical
+    {
+        return Err(format!(
+            "Scanned directory changed while the folder scan was running; skipping it: {}",
+            path.display()
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_scanned_dir(path: &std::path::Path, expected: &ScannedDirIdentity) -> Result<(), String> {
+    // No O_NOFOLLOW on this platform; the symlink check plus canonical
+    // identity match below is the available fence. Windows directory file-id
+    // verification remains the documented residual.
+    let meta = std::fs::symlink_metadata(path).map_err(|err| {
+        format!(
+            "Failed to inspect scanned directory '{}': {}",
+            path.display(),
+            err
+        )
+    })?;
+    if metadata_is_link_or_reparse(&meta) {
+        return Err(format!(
+            "Scanned directory is a symbolic link or reparse point: {}",
+            path.display()
+        ));
+    }
+    if std::fs::canonicalize(path).map_err(|err| err.to_string())? != expected.canonical {
+        return Err(format!(
+            "Scanned directory changed while the folder scan was running; skipping it: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn absolute_path_string(path: &std::path::Path) -> String {
     if let Ok(canonical) = std::fs::canonicalize(path) {
         return strip_extended_windows_prefix(&canonical.to_string_lossy());
@@ -167,8 +300,22 @@ fn collect_local_files_from_root(
         return;
     }
 
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
-    while let Some((dir, depth)) = stack.pop() {
+    let mut stack = Vec::new();
+    match scanned_dir_identity(root) {
+        Ok(identity) => stack.push((root.to_path_buf(), 0usize, identity)),
+        Err(err) => {
+            warnings.push(err);
+            return;
+        }
+    }
+    while let Some((dir, depth, identity)) = stack.pop() {
+        // Re-verify the directory identity at use time, not only at enqueue
+        // time: anything swapped between the parent `read_dir` and this read
+        // must be skipped, never enumerated.
+        if let Err(err) = open_scanned_dir(&dir, &identity) {
+            warnings.push(err);
+            continue;
+        }
         let iter = match std::fs::read_dir(&dir) {
             Ok(iter) => iter,
             Err(err) => {
@@ -235,7 +382,10 @@ fn collect_local_files_from_root(
                     ));
                     continue;
                 }
-                stack.push((path, depth + 1));
+                match scanned_dir_identity(&path) {
+                    Ok(child_identity) => stack.push((path, depth + 1, child_identity)),
+                    Err(err) => warnings.push(err),
+                }
                 continue;
             }
             if !file_type.is_file() {
@@ -4119,6 +4269,39 @@ mod tests {
             format!("{}/caf\u{e9}.txt", root_label(&dir))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanned_dir_identity_refuses_a_swapped_subdirectory() {
+        let dir = scan_scratch("identity-swap");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let expected = scanned_dir_identity(&sub).unwrap();
+        open_scanned_dir(&sub, &expected).expect("unchanged directory must verify");
+
+        // Swap the subdirectory for a symlink to a different directory.
+        let other = scan_scratch("identity-swap-target");
+        std::fs::remove_dir_all(&sub).unwrap();
+        std::os::unix::fs::symlink(&other, &sub).unwrap();
+        let err = open_scanned_dir(&sub, &expected)
+            .err()
+            .expect("a symlink swap must be refused");
+        assert!(
+            err.contains("without following links") || err.contains("changed"),
+            "{err}"
+        );
+
+        // A different real directory at the same path is also refused.
+        let _ = std::fs::remove_file(&sub);
+        std::fs::create_dir_all(&sub).unwrap();
+        let err = open_scanned_dir(&sub, &expected)
+            .err()
+            .expect("a replaced real directory must be refused");
+        assert!(err.contains("changed"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     #[cfg(unix)]

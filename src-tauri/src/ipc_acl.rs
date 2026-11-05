@@ -94,6 +94,8 @@ fn capability_grants_only_the_plugin_and_core_commands_the_ui_calls() {
         "core:window:allow-unmaximize",
         "dialog:allow-message",
         "notification:allow-is-permission-granted",
+        "notification:allow-notify",
+        "notification:allow-request-permission",
         "process:allow-restart",
         "updater:allow-check",
         "updater:allow-download",

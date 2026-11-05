@@ -125,6 +125,7 @@ pub(crate) fn invalidate_connection_session(s3: &mut crate::S3State) {
     s3.connection_id = None;
     s3.connection_identity = None;
     s3.storage_provider = StorageProviderKind::default();
+    super::clear_listed_encoding_cache();
 }
 
 pub(super) fn require_connected_client(
@@ -422,25 +423,19 @@ pub(crate) async fn connect(
         Ok(())
     });
     if let Err(err) = install_result {
-        if let Some(fence) = retirement_fence {
-            // A failed replacement must not leave the still-active previous
-            // session permanently unable to register new work. Keep the fence
-            // when a newer connect has already taken over that generation.
-            let still_previous = lock_s3_state(&state).is_ok_and(|s3| {
-                s3.connection_generation == connection_generation
-                    && s3.connection_id.as_deref() == previous_connection_id.as_deref()
-            });
-            if still_previous {
-                drop(fence);
-            } else {
-                std::mem::forget(fence);
-            }
-        }
+        // A failed replacement must not leave the still-active previous session
+        // permanently unable to register new work. The fence is refcounted, so
+        // dropping this attempt's hold leaves the entry armed for any newer
+        // attempt that is still retiring the same session.
+        drop(retirement_fence);
         return Err(err);
     }
     // The replacement is installed, so the retired session can never become
     // current again. Dropping the fence removes its retirement entry.
     drop(retirement_fence);
+    // A different endpoint may reuse the same bucket names with a different
+    // URL-encoding style; learned styles must not cross sessions.
+    clear_listed_encoding_cache();
 
     Ok(build_connect_result(
         resolved_region,
@@ -455,32 +450,29 @@ pub(crate) async fn disconnect(
     state: tauri::State<'_, AppState>,
     connection_id: String,
 ) -> Result<(), String> {
-    // Close registration before checking S3State. Every command registers before
-    // it takes that state lock, so once this succeeds no untracked client clone
-    // from the session can appear behind the drain.
-    let tokens = close_transfer_registry()?;
-    let (current_connection, lock_error) = match lock_s3_state(&state) {
-        Ok(s3) => (s3.connection_id.clone(), None),
-        Err(err) => (None, Some(err)),
-    };
-    if let Some(err) = lock_error {
-        let _ = reopen_transfer_registry();
-        return Err(err);
-    }
+    // Validate the caller before closing the registry. A stale webview must not
+    // disable the live session's registry even briefly. The check is repeated
+    // after the close: every connect installs under the same S3State lock, so a
+    // connection that landed between the two reads is caught here, while one
+    // that lands after the close fails its own registry check.
+    let current_connection = lock_s3_state(&state)?.connection_id.clone();
     let should_invalidate = match current_connection.as_deref() {
         Some(current) if current == connection_id => true,
-        Some(_) => {
-            let _ = reopen_transfer_registry();
-            return Err("Connection changed".to_string());
-        }
+        Some(_) => return Err("Connection changed".to_string()),
         None => false,
     };
+
+    let (mut gate, tokens) = close_transfer_registry()?;
+    if lock_s3_state(&state)?.connection_id != current_connection {
+        gate.reopen();
+        return Err("Connection changed".to_string());
+    }
 
     cancel_tokens(tokens);
     if let Err(err) = cancel_all_registered_transfers("disconnect").await {
         // No backend state was committed yet, so a timeout leaves the UI and
         // backend consistently connected and allows the user to retry.
-        let _ = reopen_transfer_registry();
+        gate.reopen();
         return Err(err);
     }
 
@@ -495,9 +487,8 @@ pub(crate) async fn disconnect(
     } else {
         Ok(())
     };
-    let reopening = reopen_transfer_registry();
+    gate.reopen();
     invalidation?;
-    reopening?;
     crate::security::clear_s3_retirement_required();
     Ok(())
 }

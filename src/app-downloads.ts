@@ -279,13 +279,18 @@ async function preflightDownloadDiskSpace(
     entries.map((entry) => estimateDownloadEntryBytes(entry, connectionId)),
   );
   if (estimatedBytes.some((bytes) => bytes === null)) {
-    // Fail open and say so: proceeding without a preflight is honest, while a
-    // zero estimate would pretend small downloads need no disk check.
+    // Fail closed (M3): an unknown size is not proof of free space. The old
+    // fail-open behaviour let a long queue exhaust the destination mid-way
+    // with no warning at all.
     logActivity(
-      "Disk preflight skipped: could not determine every download size.",
-      "warning",
+      "Disk preflight refused the queue: could not determine every download size.",
+      "error",
     );
-    return true;
+    setStatus(
+      "Download queue refused: object sizes could not be confirmed, so free space was not verified.",
+      8000,
+    );
+    return false;
   }
   const knownBytes = estimatedBytes as number[];
   const totalEstimatedBytes = knownBytes.reduce((sum, bytes) => sum + bytes, 0);
@@ -324,10 +329,16 @@ async function preflightDownloadDiskSpace(
         shortages.push({ dir, required, available });
       }
     } catch (err) {
+      // A failed probe is not evidence of free space (M3). Fail closed.
       logActivity(
-        `Disk preflight warning for ${dir}: ${friendlyError(err)}`,
-        "warning",
+        `Disk preflight failed for ${dir}: ${friendlyError(err)}`,
+        "error",
       );
+      setStatus(
+        `Download queue refused: free space for ${dir} could not be verified.`,
+        8000,
+      );
+      return false;
     }
   }
   if (shortages.length === 0) return true;

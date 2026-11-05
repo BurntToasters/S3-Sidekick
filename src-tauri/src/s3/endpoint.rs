@@ -279,6 +279,30 @@ fn is_non_canonical_ipv4(host: &str) -> bool {
         .any(|segment| segment.len() > 1 && segment.starts_with('0'))
 }
 
+/// True for addresses that are plausibly a local development endpoint.
+/// Plaintext HTTP is still refused for every public address.
+fn is_private_or_loopback_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local()
+        }
+    }
+}
+
+fn host_is_private_or_loopback(host: &str) -> bool {
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host)
+        .trim_end_matches('.');
+    let literal = unbracketed.split('%').next().unwrap_or(unbracketed);
+    if let Ok(ip) = literal.parse::<std::net::IpAddr>() {
+        return is_private_or_loopback_ip(ip);
+    }
+    unbracketed.eq_ignore_ascii_case("localhost") || unbracketed.ends_with(".localhost")
+}
+
 fn validate_endpoint_host(host: &str, endpoint: &str) -> Result<(), String> {
     let unbracketed = host
         .strip_prefix('[')
@@ -343,10 +367,21 @@ pub(super) async fn validate_endpoint_resolution(endpoint: &str) -> Result<(), S
             "Endpoint '{endpoint}' did not resolve to any address."
         ));
     }
+    let plaintext_http = endpoint
+        .trim_start()
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"));
     for address in resolved {
         if let Some(kind) = blocked_ip_kind(address.ip()) {
             return Err(format!(
                 "Endpoint '{endpoint}' resolves to an unsafe {kind} address ({}), which is not allowed.",
+                address.ip()
+            ));
+        }
+        if plaintext_http && !is_private_or_loopback_ip(address.ip()) {
+            return Err(format!(
+                "Endpoint '{endpoint}' resolves to public address {} over plaintext HTTP. Use \
+                 https:// so credentials and object data are not sent in the clear.",
                 address.ip()
             ));
         }
@@ -413,6 +448,15 @@ pub(super) fn normalize_endpoint(raw: &str) -> Result<(String, Option<String>), 
     };
 
     let host_lower = host.to_ascii_lowercase();
+    // SigV4 credentials, presigned URLs, and object bodies are all readable on
+    // the wire. HTTPS is required for every public host; plaintext HTTP is kept
+    // only for loopback/private development endpoints (MinIO on a LAN, etc.).
+    if scheme.eq_ignore_ascii_case("http") && !host_is_private_or_loopback(&host_lower) {
+        return Err(format!(
+            "Endpoint '{trimmed}' uses plaintext HTTP to a non-local host. Use https:// so \
+             credentials and object data are not sent in the clear."
+        ));
+    }
     validate_endpoint_host(&host_lower, trimmed)?;
 
     // A single trailing path segment is accepted as a bucket hint (pasting a
@@ -545,6 +589,15 @@ fn listed_encoding_cache() -> &'static Mutex<HashMap<String, bool>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Drop every learned encoding style. Called when the live S3 session changes
+/// so two endpoints that both use a bucket name such as `media` cannot poison
+/// each other's `+`/`%20` interpretation.
+pub(super) fn clear_listed_encoding_cache() {
+    if let Ok(mut cache) = listed_encoding_cache().lock() {
+        cache.clear();
+    }
+}
+
 fn listed_values(
     output: &aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output,
 ) -> impl Iterator<Item = &str> {
@@ -572,6 +625,13 @@ pub(super) fn listed_encoding(
 /// across pages. The server's encoding behaviour does not change page to page,
 /// so a page without `%20` must not flip the `+` interpretation established by
 /// an earlier page.
+///
+/// The process holds at most one live S3 session, and the cache is cleared
+/// whenever that session is installed or invalidated. Bucket-only keys are
+/// therefore safe: a new endpoint with the same bucket name cannot inherit the
+/// previous endpoint's decoding style. (`clear_listed_encoding_cache` is called
+/// from both paths; do not remove those calls without adding the endpoint to
+/// this key.)
 pub(super) fn listed_encoding_for(
     bucket: &str,
     output: &aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output,

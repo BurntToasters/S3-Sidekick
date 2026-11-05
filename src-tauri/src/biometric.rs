@@ -4,7 +4,7 @@ use zeroize::Zeroizing;
 use crate::security::{
     constant_time_eq, ensure_migration_recovered, key_verifier, load_security_config,
     refresh_policy_mac_for_config, require_unlocked_key, save_security_config, security_status,
-    set_unlocked_key, verify_policy_integrity, SecurityStatus, KEY_LEN, PBKDF2_ITERATIONS,
+    set_unlocked_key, verify_policy_integrity, KdfAlgorithm, SecurityStatus, KEY_LEN,
 };
 use crate::{
     atomic_write, fsync_parent, lock_storage_ops, security_journal_path, try_lock_storage_ops,
@@ -409,9 +409,13 @@ fn check_biometric_unlock_config(config: &crate::security::SecurityConfig) -> Re
     if !config.encryption_enabled || !config.biometric_enrolled {
         return Err("Biometric unlock is not configured".to_string());
     }
-    if config.pbkdf2_iterations < PBKDF2_ITERATIONS {
+    // Argon2id rekeying needs the password, which a biometric unlock does not
+    // have. Refusing here (instead of deriving a new key from the biometric
+    // key) keeps the stored verifier honest: the vault is upgraded by one
+    // password unlock, after which biometric works normally again.
+    if config.kdf != KdfAlgorithm::Argon2id {
         return Err(
-            "A one-time password unlock is required to upgrade encrypted storage after updating S3 Sidekick."
+            "Biometric unlock requires a one-time password unlock to upgrade encrypted storage after updating S3 Sidekick. Unlock with your password once, then biometric unlock will work again."
                 .to_string(),
         );
     }
@@ -1175,5 +1179,47 @@ mod platform {
 
     pub fn has_stored_key() -> Result<bool, String> {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_biometric_unlock_config;
+    use crate::security::{KdfAlgorithm, SecurityConfig};
+
+    fn biometric_config(kdf: KdfAlgorithm) -> SecurityConfig {
+        SecurityConfig {
+            initialized: true,
+            encryption_enabled: true,
+            salt: "c2FsdA==".to_string(),
+            verifier: "dmVyaWZpZXI=".to_string(),
+            lock_timeout_minutes: 15,
+            pbkdf2_iterations: 600_000,
+            kdf,
+            argon2_memory_kib: 65_536,
+            argon2_iterations: 3,
+            argon2_parallelism: 4,
+            policy_schema: 3,
+            biometric_enrolled: true,
+            legacy_plaintext_adopted: true,
+            legacy_plaintext_adoption_proof: String::new(),
+            policy_mac: "dGFn".to_string(),
+        }
+    }
+
+    #[test]
+    fn biometric_refuses_a_pbkdf2_vault_until_password_unlock() {
+        let err = check_biometric_unlock_config(&biometric_config(KdfAlgorithm::Pbkdf2))
+            .expect_err("a PBKDF2 vault cannot be rekeyed without the password");
+        assert!(
+            err.contains("one-time password unlock"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn biometric_accepts_an_argon2id_vault() {
+        check_biometric_unlock_config(&biometric_config(KdfAlgorithm::Argon2id))
+            .expect("an Argon2id vault needs no key-only migration");
     }
 }

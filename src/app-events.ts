@@ -86,7 +86,7 @@ import {
   openDrawer,
   setTransferFilter,
 } from "./bottom-drawer.ts";
-import { showConfirm } from "./dialogs.ts";
+import { showConfirm, closeAllDialogs } from "./dialogs.ts";
 import {
   handleSecurityChangePassword,
   handleSecurityToggle,
@@ -135,6 +135,8 @@ import {
   rememberActiveConnectionLocation,
   cancelPendingConnect,
   cancelPendingTestConnection,
+  cancelInlineSavedConnectionEdit,
+  resetSecretRevealState,
   unlockSavedConnectionsNow,
 } from "./app-connection.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
@@ -187,6 +189,24 @@ function reportAsyncActionFailure(label: string, err: unknown): void {
 }
 
 /**
+ * Shared lock teardown for both the auto-lock watcher and the manual
+ * "Lock now" button. A lock is only complete once nothing from the previous
+ * session can be seen or edited afterwards (H5): dialogs (including queued
+ * ones, which resolve cancelled), Settings (draft discarded, in-flight save
+ * awaited), the preview (with its fetch generation bumped), the inspector,
+ * inline saved-connection edits and duplicate drafts, and re-masked secrets.
+ */
+export async function teardownLockedSession(): Promise<void> {
+  closeAllDialogs();
+  await closeSettingsModal(false);
+  closePreview();
+  setInspectorOpen(false);
+  cancelInlineSavedConnectionEdit();
+  setConnectionInputs("", "", "", "");
+  resetSecretRevealState();
+}
+
+/**
  * After an inactivity auto-lock: end the S3 session and drop decrypted
  * credentials and bookmarks from memory, as the manual lock button does.
  */
@@ -203,12 +223,9 @@ export async function clearSessionAfterAutoLock(): Promise<boolean> {
   setConnectionAccessLocked(true);
   setSavedConnectionsLocked(true);
   setConnectionUI(false);
-  closePreview();
-  // Drop the inspector without a discard prompt: the vault is already locked,
-  // so unsaved property edits can no longer be saved and asking would stall
-  // the teardown behind a dialog.
-  setInspectorOpen(false);
-  setConnectionInputs("", "", "", "");
+  // Single teardown covers Settings, dialogs, preview, inspector, inline
+  // edits, and secret masking for both lock paths.
+  await teardownLockedSession();
   clearBookmarks();
   refreshBookmarkBar();
   if (hadSession && !(await handleDisconnect({ skipInspectorPrompt: true }))) {
@@ -714,12 +731,12 @@ function wireSecuritySettings(): void {
           cancelPendingConnect();
           cancelPendingTestConnection();
           setConnectionAccessLocked(true);
-          setConnectionInputs("", "", "", "");
-          // Mirror clearSessionAfterAutoLock: show the locked saved list, not an empty one.
+          // Same single teardown as auto-lock (H5), then show the locked
+          // saved list rather than an empty one.
+          await teardownLockedSession();
           setSavedConnectionsLocked(true);
           clearBookmarks();
           refreshBookmarkBar();
-          await closeSettingsModal(false);
         }
       })().catch((err) => reportAsyncActionFailure("Lock now", err));
     });

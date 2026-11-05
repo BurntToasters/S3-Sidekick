@@ -20,6 +20,7 @@ import {
   isInspectorOpen,
   markInspectorHasContent,
   refreshInspectorEmptySummary,
+  resetInspectorSelectionSync,
   syncInspectorFromSelection,
 } from "./inspector.ts";
 import {
@@ -48,6 +49,14 @@ type SortColumn = "name" | "size" | "modified";
 // default 36px row and is used whenever the token is not set.
 const OBJECT_ROW_HEIGHT_FALLBACK = 36;
 const OBJECT_VIRTUALIZE_THRESHOLD = 250;
+/** Bucket sidebar windows past this many buckets; beyond it only the visible
+ * rows are mounted so thousands of buckets cannot make filter keystrokes O(n)
+ * DOM rewrites (H12). */
+const BUCKET_VIRTUALIZE_THRESHOLD = 250;
+const BUCKET_WINDOW_SIZE = 60;
+/** First row index of the mounted bucket window. */
+let bucketWindowStart = 0;
+let bucketListListenerTarget: HTMLElement | null = null;
 const OBJECT_VIRTUAL_OVERSCAN = 8;
 const OBJECT_VIRTUAL_FALLBACK_VIEWPORT = 600;
 const TYPE_AHEAD_IDLE_MS = 1000;
@@ -282,6 +291,10 @@ function syncInspectorForSemanticSelectionChange(): void {
 
 export function invalidateInspectorSelectionSync(): void {
   lastInspectorSelectionSignature = null;
+  // The inspector's private render signature must go too (H6): without it a
+  // same-signature re-selection after Refresh skips the sync and the panel
+  // keeps pre-refresh state beside dirty edits.
+  resetInspectorSelectionSync();
   // Manual Refresh must re-read object metadata, not replay the cached HEAD
   // and ACL responses from before the refresh.
   invalidateInfoPanelCaches();
@@ -1047,6 +1060,35 @@ function updateSortIndicators(): void {
   }
 }
 
+function ensureBucketListListeners(): void {
+  // One scroll listener on the scroll parent. It re-renders only when the
+  // window of mounted buckets changes, so scrolling a 5,000-bucket list
+  // stays a small DOM rewrite instead of a full rebuild per keystroke.
+  if (bucketListListenerTarget) return;
+  const scrollParent =
+    dom.bucketList.parentElement ?? (dom.bucketList as HTMLElement);
+  bucketListListenerTarget = scrollParent;
+  scrollParent.addEventListener("scroll", () => {
+    const filter = state.bucketFilterText.trim().toLowerCase();
+    const visible = filter
+      ? state.buckets.filter((bucket) =>
+          bucket.name.toLowerCase().includes(filter),
+        )
+      : state.buckets;
+    if (visible.length <= BUCKET_VIRTUALIZE_THRESHOLD) return;
+    const next = Math.max(
+      0,
+      Math.min(
+        visible.length - BUCKET_WINDOW_SIZE,
+        Math.floor((scrollParent.scrollTop || 0) / 32),
+      ),
+    );
+    if (next === bucketWindowStart) return;
+    bucketWindowStart = next;
+    renderBucketList();
+  });
+}
+
 export function renderBucketList(): void {
   const el = dom.bucketList;
   // Preserve focus + scroll across the innerHTML rebuild (same pattern as the
@@ -1099,17 +1141,45 @@ export function renderBucketList(): void {
   const rovingBucket = activeBucketIsVisible
     ? state.currentBucket
     : visibleBuckets[0].name;
-  el.innerHTML = visibleBuckets
-    .map(
-      (b) =>
-        `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}" role="presentation">` +
-        `<button type="button" class="list__item-btn" role="option" aria-selected="${b.name === state.currentBucket ? "true" : "false"}" tabindex="${b.name === rovingBucket ? "0" : "-1"}" data-bucket="${escapeHtml(b.name)}" title="${escapeHtml(b.name)}" aria-label="Open bucket ${escapeHtml(b.name)}"${b.name === state.currentBucket ? ' aria-current="true"' : ""}>` +
-        bucketIcon +
-        `<span class="list__item-label">${escapeHtml(b.name)}</span>` +
-        `</button>` +
-        `</li>`,
-    )
-    .join("");
+  const renderBucketRows = (rows: typeof visibleBuckets): string =>
+    rows
+      .map(
+        (b) =>
+          `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}" role="presentation">` +
+          `<button type="button" class="list__item-btn" role="option" aria-selected="${b.name === state.currentBucket ? "true" : "false"}" tabindex="${b.name === rovingBucket ? "0" : "-1"}" data-bucket="${escapeHtml(b.name)}" title="${escapeHtml(b.name)}" aria-label="Open bucket ${escapeHtml(b.name)}"${b.name === state.currentBucket ? ' aria-current="true"' : ""}>` +
+          bucketIcon +
+          `<span class="list__item-label">${escapeHtml(b.name)}</span>` +
+          `</button>` +
+          `</li>`,
+      )
+      .join("");
+  const windowed = visibleBuckets.length > BUCKET_VIRTUALIZE_THRESHOLD;
+  if (windowed) {
+    const start = Math.max(
+      0,
+      Math.min(
+        visibleBuckets.length - BUCKET_WINDOW_SIZE,
+        Math.floor(parentScrollTop / 32),
+      ),
+    );
+    bucketWindowStart = start;
+    el.innerHTML = renderBucketRows(
+      visibleBuckets.slice(start, start + BUCKET_WINDOW_SIZE),
+    );
+  } else {
+    bucketWindowStart = 0;
+    el.innerHTML = renderBucketRows(visibleBuckets);
+  }
+  if (windowed) {
+    // Visible-window notice so a filtered list under the mountain never
+    // reads as "only N buckets exist".
+    const note = document.createElement("li");
+    note.className = "list__empty";
+    note.setAttribute("aria-hidden", "true");
+    note.textContent = `Showing a window of ${BUCKET_WINDOW_SIZE} of ${visibleBuckets.length.toLocaleString()} buckets. Scroll or filter to reach the rest.`;
+    el.prepend(note);
+    ensureBucketListListeners();
+  }
   if (scrollParent) scrollParent.scrollTop = parentScrollTop;
   (el as HTMLElement).scrollTop = scrollTop;
   // Only restore focus when it was inside the list before the rebuild.
@@ -1198,6 +1268,9 @@ function paintObjectTableSkeleton(rowCount: number): void {
 }
 
 export function renderObjectTableSkeleton(rowCount = 8): void {
+  // Navigation owns the debounce now: a filter timer queued before this
+  // request fires later against the loading listing (H7).
+  cancelPendingFilterRender();
   cancelTypeAheadAnnouncement();
   // The previous listing must not answer a scroll or keyboard render while
   // the next one loads. Keep aria-busy set until renderObjectTable commits.
@@ -1521,6 +1594,8 @@ function scheduleVirtualWindowRender(): void {
  * repeated Shift+Arrow grows and shrinks the same range.
  */
 function extendSelectionTo(index: number): void {
+  // Empty entry list (skeleton window): same guard as selectRowOnly (H8).
+  if (renderedTableEntries.length === 0) return;
   const anchor = lastClickedEntry;
   const anchorIndex = anchor
     ? renderedTableEntries.findIndex((candidate) =>
@@ -1537,6 +1612,9 @@ function extendSelectionTo(index: number): void {
 /** Select only the rendered row at `index` and make it the anchor. */
 function selectRowOnly(index: number): void {
   const target = renderedTableEntries[index];
+  // The skeleton window empties renderedTableEntries while old rows are
+  // still mounted. Never dereference a missing entry (H8).
+  if (!target) return;
   clearAllSelection();
   addSelection(target);
   setAnchor(target);
@@ -1627,6 +1705,15 @@ function openFocusedRowContextMenu(event: KeyboardEvent): void {
 // Plain arrows move focus and select that row; Shift extends a range from the
 // anchor; Ctrl/Cmd moves focus only. A focused row checkbox does not opt out.
 function handleObjectTableKeydown(event: KeyboardEvent): void {
+  // While the skeleton shows, old rows are still mounted but the entry list
+  // is empty and the listing has not committed. Keyboard must not act on
+  // stale rows (H8).
+  if (
+    objectLoadInFlight ||
+    dom.objectPanel.getAttribute("aria-busy") === "true"
+  ) {
+    return;
+  }
   if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
     openFocusedRowContextMenu(event);
     return;
@@ -1806,6 +1893,15 @@ function ensureObjectPanelListeners(): void {
 }
 
 export function renderObjectTable(): void {
+  // A filter render inside the skeleton window is a render against the
+  // previous listing: it must not clear the load guard or aria-busy while the
+  // new listing is still loading (H7).
+  if (
+    objectLoadInFlight ||
+    dom.objectPanel.getAttribute("aria-busy") === "true"
+  ) {
+    return;
+  }
   cancelPendingSkeleton();
   cancelTypeAheadAnnouncement();
   objectLoadInFlight = false;
@@ -2170,7 +2266,11 @@ function rememberCurrentView(): void {
 
 /** Let the connection layer remember the bucket/prefix before it changes. */
 function flushConnectionLocation(): void {
-  document.dispatchEvent(new Event(LOCATION_FLUSH_EVENT));
+  // The listener is on window; a non-bubbling document event never reaches
+  // it. Location memory only updated on unload/lock/disconnect before (M1).
+  document.dispatchEvent(
+    new Event(LOCATION_FLUSH_EVENT, { bubbles: true }),
+  );
 }
 
 /**

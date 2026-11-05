@@ -5,6 +5,7 @@ vi.mock("../inspector.ts", () => ({
   closeInspectorOnMobile: vi.fn(),
   isInspectorOpen: () => false,
   markInspectorHasContent: vi.fn(),
+  resetInspectorSelectionSync: vi.fn(),
   syncInspectorFromSelection: vi.fn(async () => {}),
 }));
 

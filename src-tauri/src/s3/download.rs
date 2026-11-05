@@ -42,6 +42,7 @@ pub(crate) async fn download_object(
     }
     let cancel = client.token();
     let _temp_guard = claim_download_temp_async(&temp_path, &destination_path).await?;
+    let parent_identity = _temp_guard.parent_identity();
     let download_lease_nonce =
         issue_download_lease_async(&app, &destination_path, &temp_path).await?;
     if tokio::fs::try_exists(&temp_path).await.unwrap_or(false) {
@@ -218,6 +219,7 @@ pub(crate) async fn download_object(
         &destination_path,
         overwrite,
         false,
+        parent_identity,
     )
     .await
     {
@@ -713,6 +715,7 @@ async fn publish_verified_download_file(
     destination_path: &Path,
     overwrite: bool,
     keep_temp_on_failure: bool,
+    parent_identity: crate::DestinationParentIdentity,
 ) -> Result<(), String> {
     let temp_path = temp_path.to_path_buf();
     let identity = identity.clone();
@@ -725,7 +728,11 @@ async fn publish_verified_download_file(
                 error
             )
         })?;
-        crate::publish_temp_file(
+        // Reject a destination parent swapped for a symlink since the
+        // scratch claim pinned it. The rename below must never run against
+        // a different directory than the user granted.
+        crate::verify_destination_parent_identity(&destination_path, &parent_identity)?;
+        crate::publish_download_temp_file(
             &temp_path,
             &destination_path,
             overwrite,
@@ -744,13 +751,16 @@ pub(super) async fn publish_completed_download_file(
     overwrite: bool,
     keep_temp_on_failure: bool,
 ) -> Result<(), String> {
-    // publish_temp_file performs rename/hard_link/fsync — blocking syscalls
-    // on potentially large files — so run it on the blocking pool following
-    // the files.rs::list_local_files_recursive pattern.
+    // publish_download_temp_file performs rename/hard_link/fsync — blocking
+    // syscalls on potentially large files — so run it on the blocking pool
+    // following the files.rs::list_local_files_recursive pattern. Tests run
+    // without a scratch guard, so the parent identity is captured here.
     let temp_path = temp_path.to_path_buf();
     let destination_path = destination_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        crate::publish_temp_file(
+        let parent_identity = crate::destination_parent_identity(&destination_path)?;
+        crate::verify_destination_parent_identity(&destination_path, &parent_identity)?;
+        crate::publish_download_temp_file(
             &temp_path,
             &destination_path,
             overwrite,
@@ -1035,6 +1045,7 @@ pub(crate) async fn download_object_parallel(
     }
     let cancel = client.token();
     let _temp_guard = claim_download_temp_async(&temp_path, &destination_path).await?;
+    let parent_identity = _temp_guard.parent_identity();
     let download_lease_nonce =
         issue_download_lease_async(&app, &destination_path, &temp_path).await?;
     let attempt = normalize_attempt(attempt);
@@ -1621,6 +1632,7 @@ pub(crate) async fn download_object_parallel(
         &destination_path,
         overwrite,
         checkpoint_enabled,
+        parent_identity,
     )
     .await?;
     release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;

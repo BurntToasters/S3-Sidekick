@@ -66,6 +66,7 @@ vi.mock("../inspector.ts", () => ({
   isInspectorOpen: () => false,
   markInspectorHasContent: vi.fn(),
   setInspectorOpen: setInspectorOpenMock,
+  resetInspectorSelectionSync: vi.fn(),
   syncInspectorFromSelection: vi.fn(async () => {}),
 }));
 

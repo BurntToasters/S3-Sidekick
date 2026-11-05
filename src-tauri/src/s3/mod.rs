@@ -871,6 +871,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_newer_connect_does_not_poison_still_current_session() {
+        // H3: A is still current while connect B retires it and then fails
+        // its install; a second attempt C retires the same session again.
+        // Dropping B's fence (never mem::forget) must leave A's fence held
+        // by C, and once C also fails, A must be registrable again instead
+        // of staying retired forever.
+        let id = "failed-newer-connect-current";
+        let fence_b = retire_connection_transfers(id, "test connect b")
+            .await
+            .expect("retirement by B should drain (no active transfers)");
+        let fence_c = retire_connection_transfers(id, "test connect c")
+            .await
+            .expect("retirement by C should drain (no active transfers)");
+        // B's install fails (superseded by C): dropping its fence must not
+        // unfence the session while C is still retiring it.
+        drop(fence_b);
+        assert!(
+            TransferGuard::register_optional(Some(id), Some(990_201)).is_err(),
+            "session must stay fenced while a newer attempt is still retiring it"
+        );
+        // C also fails: dropping the last fence must unfence A so a command
+        // on the still-current session succeeds again.
+        drop(fence_c);
+        let guard = TransferGuard::register_optional(Some(id), Some(990_201))
+            .expect("a failed newer connect must not poison the still-current session");
+        drop(guard);
+    }
+
+    #[test]
+    fn plaintext_http_is_limited_to_private_endpoints() {
+        for allowed in [
+            "http://127.0.0.1:9000",
+            "http://localhost:9000",
+            "http://192.168.1.10:9000",
+            "http://10.0.0.5",
+            "http://[::1]:9000",
+        ] {
+            normalize_endpoint(allowed).unwrap_or_else(|err| panic!("{allowed}: {err}"));
+        }
+        for refused in [
+            "http://s3.example.com",
+            "http://203.0.113.10:9000",
+            "http://[2001:db8::1]",
+        ] {
+            let err =
+                normalize_endpoint(refused).expect_err("public plaintext HTTP must be refused");
+            assert!(err.contains("https://"), "{refused}: {err}");
+        }
+        normalize_endpoint("https://s3.example.com").expect("HTTPS stays allowed");
+    }
+
+    #[test]
+    fn registry_gate_is_owned_by_its_closer() {
+        let (mut first, tokens) = close_transfer_registry().expect("first close");
+        assert!(tokens.is_empty(), "no transfers should be registered");
+        assert!(
+            close_transfer_registry().is_err(),
+            "a second close must not steal ownership of the gate"
+        );
+        first.reopen();
+        let (mut second, _) =
+            close_transfer_registry().expect("the owning closer must be able to reopen");
+        second.reopen();
+    }
+
+    #[tokio::test]
     async fn sleep_unless_cancelled_returns_early_on_cancel() {
         let flag: CancelToken = Arc::new(CancelFlag::default());
         let cloned = Arc::clone(&flag);

@@ -72,8 +72,13 @@ interface DialogConfig {
   extraAction?: DialogExtraAction;
 }
 
-const queue: (() => void)[] = [];
+const queue: {
+  run: () => void;
+  cancel: () => void;
+}[] = [];
 let active = false;
+/** Present dialog's cancel handler, so session teardown can force-close it. */
+let presentCancel: (() => void) | null = null;
 
 function els() {
   return {
@@ -252,6 +257,7 @@ function present(
 
     el.overlay.classList.add("active");
     active = true;
+    presentCancel = onCancelForTeardown;
 
     const previouslyFocused =
       document.activeElement instanceof HTMLElement
@@ -330,6 +336,7 @@ function present(
     }
 
     function cleanup() {
+      presentCancel = null;
       el.overlay.classList.remove("active");
       el.cancel.removeEventListener("click", onCancel);
       extraButton?.removeEventListener("click", onExtra);
@@ -363,7 +370,7 @@ function present(
         // user consent.
         active = true;
         const next = queue.shift();
-        if (next) setTimeout(next, 0);
+        if (next) setTimeout(next.run, 0);
       } else {
         active = false;
         if (previouslyFocused?.isConnected) previouslyFocused.focus();
@@ -376,6 +383,13 @@ function present(
     function onChoice(value: string) {
       cleanup();
       resolve(value);
+    }
+
+    // Teardown cancels exactly like the visible Cancel button. Choice
+    // dialogs resolve with their cancel value; alerts acknowledge downwards
+    // (never confirm a destructive action).
+    function onCancelForTeardown() {
+      onCancel();
     }
 
     function onCancel() {
@@ -493,12 +507,21 @@ function present(
   });
 }
 
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+interface QueuedDialog {
+  run: () => void;
+  cancel: () => void;
+}
+
+function enqueue<T>(fn: () => Promise<T>, cancelValue: () => T): Promise<T> {
   if (!active) return fn();
   return new Promise<T>((resolve, reject) => {
-    queue.push(() => {
-      fn().then(resolve, reject);
-    });
+    const entry: QueuedDialog = {
+      run: () => {
+        fn().then(resolve, reject);
+      },
+      cancel: () => resolve(cancelValue()),
+    };
+    queue.push(entry);
   });
 }
 
@@ -521,6 +544,7 @@ export function showConfirm(
         inputPlaceholder: "",
         inputDefault: "",
       }) as Promise<boolean>,
+    () => false,
   );
 }
 
@@ -548,6 +572,7 @@ export function showConfirmWithCheckbox(
         inputDefault: "",
         checkboxLabel: options.checkboxLabel,
       }) as Promise<CheckboxConfirmResult>,
+    () => ({ confirmed: false, checked: false }),
   );
 }
 
@@ -573,6 +598,7 @@ export function showPrompt(
         validate: options?.validate,
         extraAction: options?.extraAction,
       }) as Promise<string | null>,
+    () => null,
   );
 }
 
@@ -581,20 +607,23 @@ export function showAlert(
   message: string,
   options?: AlertOptions,
 ): Promise<void> {
-  return enqueue(async () => {
-    await present({
-      title,
-      message,
-      showInput: false,
-      showCancel: false,
-      okLabel: options?.okLabel ?? "OK",
-      cancelLabel: "Cancel",
-      okDanger: false,
-      inputType: "text",
-      inputPlaceholder: "",
-      inputDefault: "",
-    });
-  });
+  return enqueue(
+    async () => {
+      await present({
+        title,
+        message,
+        showInput: false,
+        showCancel: false,
+        okLabel: options?.okLabel ?? "OK",
+        cancelLabel: "Cancel",
+        okDanger: false,
+        inputType: "text",
+        inputPlaceholder: "",
+        inputDefault: "",
+      });
+    },
+    () => undefined,
+  );
 }
 
 /**
@@ -625,9 +654,26 @@ export function showChoiceDialog<T extends string>(
         cancelValue: options.cancelValue,
         initialFocus: options.initialFocus,
       }) as Promise<T>,
+    () => options.cancelValue,
   );
 }
 
 export function isDialogActive(): boolean {
   return active;
+}
+
+/**
+ * Force-close every dialog without asking. A present dialog resolves as
+ * cancelled; queued dialogs are dropped and also resolve as cancelled, so a
+ * queued dialog can never outlive the session that queued it (H5).
+ */
+export function closeAllDialogs(): void {
+  for (const entry of queue.splice(0)) {
+    entry.cancel();
+  }
+  if (presentCancel) {
+    const cancel = presentCancel;
+    presentCancel = null;
+    cancel();
+  }
 }

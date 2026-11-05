@@ -155,7 +155,7 @@ pub(super) async fn list_all_keys_under_prefix(
             }
         };
 
-        let encoding = listed_encoding_for(bucket, &output);
+        let encoding = listed_encoding_for(&bucket, &output);
         for obj in output.contents() {
             if let Some(k) = obj.key() {
                 if keys.len() >= MAX_PREFIX_TRANSACTION_OBJECTS {
@@ -206,6 +206,8 @@ pub(crate) async fn delete_prefix(
     let cancel = client.token();
 
     let mut result = DeleteResult::default();
+    let versioned = bucket_creates_delete_markers(&client, &bucket, &cancel).await;
+    apply_versioning_warning(&mut result, versioned);
     let mut continuation_token: Option<String> = None;
     let mut seen_tokens = HashSet::new();
 
@@ -341,9 +343,11 @@ pub(crate) async fn delete_prefix(
                 result.incomplete = true;
             }
             result.failed = result.failed.saturating_add(errors.len() as u32);
-            result.deleted = result
-                .deleted
-                .saturating_add(chunk.len().saturating_sub(errors.len()) as u32);
+            let accepted = chunk.len().saturating_sub(errors.len()) as u32;
+            result.deleted = result.deleted.saturating_add(accepted);
+            if versioned == Some(true) {
+                result.delete_markers = result.delete_markers.saturating_add(accepted);
+            }
             for err in errors {
                 record_delete_error(
                     &mut result,

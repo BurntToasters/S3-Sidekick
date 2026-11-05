@@ -298,10 +298,61 @@ pub(super) const MAX_DELETE_ERROR_DETAILS: usize = 20;
 
 #[derive(Debug, Default, serde::Serialize)]
 pub(crate) struct DeleteResult {
+    /// Keys for which the service accepted a delete request.
     pub(super) deleted: u32,
+    /// Of `deleted`, how many became delete markers because the bucket is
+    /// versioned. The previous versions remain recoverable.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) delete_markers: u32,
     pub(super) failed: u32,
     pub(super) incomplete: bool,
     pub(super) errors: Vec<String>,
+    /// Set when deletion semantics differ from permanent removal or could not
+    /// be determined, so the UI does not silently claim an irreversible delete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) warning: Option<String>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// Whether a key delete will create a recoverable delete marker.
+///
+/// `Some(true)` means versioning is enabled or suspended; `Some(false)` means
+/// the bucket is unversioned; `None` means the service did not answer, so the
+/// caller must not claim permanent deletion.
+pub(super) async fn bucket_creates_delete_markers(
+    client: &Client,
+    bucket: &str,
+    cancel: &CancelToken,
+) -> Option<bool> {
+    let request = client.get_bucket_versioning().bucket(bucket).send();
+    let output = tokio::select! {
+        _ = cancel.cancelled() => return None,
+        result = request => result.ok()?,
+    };
+    match output.status() {
+        Some(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+        | Some(aws_sdk_s3::types::BucketVersioningStatus::Suspended) => Some(true),
+        _ => Some(false),
+    }
+}
+
+pub(super) fn apply_versioning_warning(result: &mut DeleteResult, versioned: Option<bool>) {
+    result.warning = match versioned {
+        Some(true) => Some(
+            "Bucket versioning is enabled. Deleted objects are now delete markers; their previous \
+             versions remain recoverable in the bucket."
+                .to_string(),
+        ),
+        None => Some(
+            "Bucket versioning could not be determined. Deletions may have created delete markers \
+             instead of permanently removing object versions."
+                .to_string(),
+        ),
+        Some(false) => None,
+    };
 }
 
 pub(super) fn record_delete_error(result: &mut DeleteResult, detail: String) {
@@ -362,6 +413,8 @@ pub(crate) async fn delete_objects(
     let cancel = client.token();
 
     let mut result = DeleteResult::default();
+    let versioned = bucket_creates_delete_markers(&client, &bucket, &cancel).await;
+    apply_versioning_warning(&mut result, versioned);
     for chunk in keys.chunks(1000) {
         let objects = chunk
             .iter()
@@ -435,9 +488,11 @@ pub(crate) async fn delete_objects(
             result.incomplete = true;
         }
         result.failed = result.failed.saturating_add(errors.len() as u32);
-        result.deleted = result
-            .deleted
-            .saturating_add(chunk.len().saturating_sub(errors.len()) as u32);
+        let accepted = chunk.len().saturating_sub(errors.len()) as u32;
+        result.deleted = result.deleted.saturating_add(accepted);
+        if versioned == Some(true) {
+            result.delete_markers = result.delete_markers.saturating_add(accepted);
+        }
         for err in errors {
             record_delete_error(
                 &mut result,

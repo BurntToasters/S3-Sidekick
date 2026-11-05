@@ -151,6 +151,24 @@ pub(super) fn is_access_denied<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkE
 /// True when CompleteMultipartUpload reports that the upload ID no longer
 /// exists. That can mean an earlier completion attempt committed after its
 /// response was lost.
+/// True only when the service explicitly says the *key* is gone.
+///
+/// The shared `is_not_found` helper accepts any 404, including `NoSuchBucket`
+/// and unknown provider bodies. Treating those as "source already deleted"
+/// would report a completed move while the bucket itself is missing.
+pub(super) fn is_no_such_key<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    let SdkError::ServiceError(ctx) = err else {
+        return false;
+    };
+    if ctx.raw().status().as_u16() != 404 {
+        return false;
+    }
+    let body =
+        String::from_utf8_lossy(ctx.raw().body().bytes().unwrap_or(&[])).to_ascii_lowercase();
+    body.contains("nosuchkey")
+}
+
 pub(super) fn is_no_such_upload<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
     use aws_sdk_s3::error::SdkError;
     let SdkError::ServiceError(ctx) = err else {

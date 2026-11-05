@@ -316,26 +316,41 @@ const RECOVERY_DAMAGED_MESSAGE =
 /// outlives the page, so a fresh transfer could otherwise be handed an id that
 /// still has meaning to the backend. Persisting the sequence keeps ids unique for
 /// as long as the backend can remember any of them.
+/** True when the persisted sequence was read successfully at startup. */
+let storageBackedSequence = false;
+
 let nextId = readPersistedTransferIdSequence();
 
 function readPersistedTransferIdSequence(): number {
+  storageBackedSequence = false;
   try {
     const raw = localStorage.getItem(TRANSFER_ID_SEQUENCE_KEY);
     const parsed = raw === null ? NaN : Number.parseInt(raw, 10);
     if (Number.isSafeInteger(parsed) && parsed > 0) {
+      storageBackedSequence = true;
       return parsed;
     }
   } catch {
-    // Storage unavailable; fall back to a fresh sequence.
+    // Storage unavailable; fall back below.
+  }
+  // Deterministic 1 collides with any id the backend still remembers from a
+  // previous page. Seed from time+random so a storage-less reload mints an id
+  // that is practically unique, then warn once.
+  if (!storageBackedSequence) {
+    const seeded =
+      (Math.floor(Date.now() / 1000) % 0x7fffffff) ^
+      Math.floor(Math.random() * 0x7fffffff);
+    return Math.abs(seeded) || 1;
   }
   return 1;
 }
 
 function allocateTransferId(): number {
-  // The backend stores ids as u32, so wrap well below that ceiling rather than
-  // overflowing into an id it would reject.
-  if (nextId >= 0xffffffff) {
-    nextId = 1;
+  // The backend stores ids as u32. Never reuse an id still within a
+  // plausible lifetime of use: wrap to a high start that leaves the entire
+  // u32 range practically uncollidable for the lifetime of the process (M2).
+  if (nextId >= 0xfffffff0) {
+    nextId = 0x80000000;
   }
   const id = nextId++;
   try {
@@ -991,10 +1006,29 @@ function parkRowsForReplacedSession(newConnectionId: string): void {
   for (const item of queue) {
     if (item.status !== "queued" && item.status !== "uploading") continue;
     if (!item.connectionId || item.connectionId === newConnectionId) continue;
-    if (item.status === "uploading") pause(item);
+    if (item.status === "uploading") {
+      // pause() only flips the local flag and sets pauseCancelInFlight. The
+      // old backend command keeps running until it is told to stop, and a
+      // late markDone/markFailed would then land on a row that belongs to a
+      // new session. Cancel first, against the OLD connection id.
+      pause(item);
+      const oldConnectionId = item.connectionId;
+      const transferId = item.id;
+      void invoke("cancel_transfer", {
+        connectionId: oldConnectionId,
+        transferId,
+      }).catch((err) => {
+        logActivity(
+          `Cancelling replaced-session transfer ${transferId}: ${normalizeError(err)}`,
+          "warning",
+        );
+      });
+    }
     park(item, "session-replaced");
     item.paused = true;
-    item.pauseCancelInFlight = false;
+    // Keep pauseCancelInFlight true until the backend cancellation is
+    // observed: clearing it here let the in-flight attempt complete against
+    // the wrong session (H9).
     parked += 1;
   }
   if (parked > 0) {
@@ -1123,17 +1157,23 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
 
 function buildQueueManifestJson(): string | null {
   // Uploads are not resumable, so an in-flight upload that survives an app kill
-  // would restart from byte 0. We drop active uploads from the manifest; queued
-  // uploads that never started are still safe to persist. Terminal failures stay
-  // durable so a transient connection or provider error cannot erase recovery
-  // ownership before the user retries or explicitly clears the row.
-  const pending = queue.filter(
-    (item) =>
-      (item.status === "queued" ||
+  // would restart from byte 0. It is persisted as queued+paused so the user
+  // sees it and can retry explicitly instead of the row silently vanishing
+  // (M2). Terminal failures stay durable so a transient connection or provider
+  // error cannot erase recovery ownership before the user retries or
+  // explicitly clears the row.
+  const pending = queue
+    .filter(
+      (item) =>
+        item.status === "queued" ||
         item.status === "uploading" ||
-        item.status === "error") &&
-      !(item.operation === "upload" && item.status === "uploading"),
-  );
+        item.status === "error",
+    )
+    .map((item) =>
+      item.operation === "upload" && item.status === "uploading"
+        ? { ...item, status: "queued" as const, paused: true }
+        : item,
+    );
   if (pending.length === 0) return null;
   const payload: PersistedTransferManifest = {
     version: 6,
@@ -1256,6 +1296,39 @@ function writeQueueManifest(): void {
   scheduleQueueManifestWrite();
 }
 
+/**
+ * Maximum queued rows. Terminal error rows are retained for review, but a
+ * multi-day session must not retain them indefinitely: manifest writes
+ * serialize every pending row and progress ticks become O(n) rewrites (H12).
+ */
+export const MAX_TRANSFER_QUEUE_ROWS = 1000;
+const MAX_TERMINAL_ERROR_ROWS = 200;
+
+/** Drop the oldest terminal error rows beyond the bound; returns removed. */
+function pruneTerminalErrors(): number {
+  const terminal: number[] = [];
+  queue.forEach((item, index) => {
+    if (item.status === "error") terminal.push(index);
+  });
+  const overflow = terminal.length - MAX_TERMINAL_ERROR_ROWS;
+  if (overflow <= 0) return 0;
+  const removed = new Set(terminal.slice(0, overflow));
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (removed.has(i)) queue.splice(i, 1);
+  }
+  return overflow;
+}
+
+/** Refusal for enqueue calls beyond the queue cap; null when allowed. */
+function refuseIfQueueFull(additional: number): EnqueueResult | null {
+  pruneTerminalErrors();
+  if (queue.length + additional <= MAX_TRANSFER_QUEUE_ROWS) return null;
+  const reason = `Transfer queue is full (${queue.length} of ${MAX_TRANSFER_QUEUE_ROWS}). Remove or clear completed rows before queueing more.`;
+  logActivity(reason, "warning");
+  showToast(reason, { type: "warning", duration: 0 });
+  return { accepted: false, count: 0, reason };
+}
+
 /** Refusal for enqueue calls while stored recovery is unresolved; null when allowed. */
 function refuseIfRecoveryUnresolved(): EnqueueResult | null {
   if (!manifestRecoveryUnresolved) return null;
@@ -1374,6 +1447,14 @@ function validateFreshCopyReceipts(value: unknown): CopyReceipt[] {
   return receipts;
 }
 
+/**
+ * Highest manifest version this build can read. A newer manifest (written by a
+ * newer build before this one downgraded the app) is kept on disk rather than
+ * discarded: returning null without a trace would silently lose the whole
+ * queue (M2).
+ */
+const MAX_MANIFEST_VERSION = 6;
+
 function parseQueueManifest(
   raw: string | null,
 ): PersistedTransferManifest | null {
@@ -1384,14 +1465,23 @@ function parseQueueManifest(
     const version = (parsed as { version?: unknown }).version;
     const items = (parsed as { items?: unknown }).items;
     if (
-      (version !== 1 &&
-        version !== 2 &&
-        version !== 3 &&
-        version !== 4 &&
-        version !== 5 &&
-        version !== 6) ||
+      !Number.isInteger(version) ||
+      (version as number) < 1 ||
       !Array.isArray(items)
     ) {
+      return null;
+    }
+    if ((version as number) > MAX_MANIFEST_VERSION) {
+      // Future manifest: retain the raw bytes for a newer build and surface
+      // the fact, instead of wholesale rejection.
+      logActivity(
+        `Transfer manifest is from a newer app version (v${version}); it was kept on disk and this version did not overwrite it.`,
+        "warning",
+      );
+      showToast(
+        `Transfer manifest is from a newer app version (v${version}); it was kept on disk, not discarded.`,
+        { type: "warning", duration: 0 },
+      );
       return null;
     }
 
@@ -1502,7 +1592,7 @@ function parseQueueManifest(
         error: typeof row.error === "string" ? row.error : undefined,
         retryable: row.retryable === false ? false : undefined,
         legacyConnectionUnbound:
-          (version < 4 || row.legacyConnectionUnbound === true) &&
+          (typeof version === "number" && version < 4 || row.legacyConnectionUnbound === true) &&
           !(
             typeof row.connectionIdentity === "string" &&
             row.connectionIdentity.length > 0
@@ -3088,6 +3178,8 @@ export function enqueueFiles(
   const enqueueTarget = resolveEnqueueTarget(target);
   const bucket = enqueueTarget.bucket;
   const allFiles = Array.from(files);
+  const queueRefusal = refuseIfQueueFull(allFiles.length);
+  if (queueRefusal) return queueRefusal;
   const maxAttempts = maxAttemptsFromSettings();
   for (const file of allFiles) {
     // A `File` object may carry a `.path` from the platform webview. That is a
@@ -3153,6 +3245,8 @@ export function enqueuePaths(
   const enqueueTarget = resolveEnqueueTarget(target);
   const bucket = enqueueTarget.bucket;
   const maxAttempts = maxAttemptsFromSettings();
+  const queueRefusal = refuseIfQueueFull(files.length);
+  if (queueRefusal) return queueRefusal;
   for (const file of files) {
     const normalizedPath = file.path.trim();
     const parts = normalizedPath.replace(/\\/g, "/").split("/");
@@ -3218,6 +3312,8 @@ export function enqueueFolderEntries(
   const enqueueTarget = resolveEnqueueTarget(target);
   const bucket = enqueueTarget.bucket;
   const maxAttempts = maxAttemptsFromSettings();
+  const queueRefusal = refuseIfQueueFull(entries.length);
+  if (queueRefusal) return queueRefusal;
   for (const entry of entries) {
     const rel = (
       state.platformName === "windows"
@@ -3288,6 +3384,8 @@ export function enqueueDownloads(
   const enqueueTarget = resolveEnqueueTarget(target);
   const maxAttempts = maxAttemptsFromSettings();
   const effective = getEffectiveTransferSettings();
+  const queueRefusal = refuseIfQueueFull(entries.length);
+  if (queueRefusal) return queueRefusal;
   for (const entry of entries) {
     const parts = entry.key.split("/");
     const fileName = parts[parts.length - 1] || entry.key;
@@ -3356,6 +3454,8 @@ export function enqueueCopyMoveEntries(
   const queuedBefore = queue.length;
   const enqueueTarget = resolveEnqueueTarget(target);
   const maxAttempts = maxAttemptsFromSettings();
+  const queueRefusal = refuseIfQueueFull(entries.length);
+  if (queueRefusal) return queueRefusal;
   for (const entry of entries) {
     const keyLike = entry.sourceKey ?? entry.sourcePrefix ?? "";
     const destinationLike =

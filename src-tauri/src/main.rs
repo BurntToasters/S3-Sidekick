@@ -1268,9 +1268,20 @@ fn owned_download_temps() -> &'static Mutex<std::collections::HashMap<PathBuf, P
 #[derive(Debug)]
 pub(crate) struct DownloadTempGuard {
     temp_path: PathBuf,
+    /// Destination-parent identity pinned by the claim. Publication calls
+    /// [`DownloadTempGuard::verify_parent_unchanged`] immediately before the
+    /// rename so a parent swapped for a symlink cannot redirect the write.
+    parent_identity: DestinationParentIdentity,
     // Dropping this handle releases the OS lock. The lock file itself stays
     // behind (zero bytes) because unlinking it could race a new owner.
     _lock_file: std::fs::File,
+}
+
+impl DownloadTempGuard {
+    /// Destination-parent identity pinned at claim time, for publication.
+    pub(crate) fn parent_identity(&self) -> DestinationParentIdentity {
+        self.parent_identity.clone()
+    }
 }
 
 impl Drop for DownloadTempGuard {
@@ -1344,9 +1355,11 @@ pub(crate) fn claim_download_temp(
             ));
         }
     }
+    let parent_identity = destination_parent_identity(destination)?;
     owned.insert(temp_identity.clone(), destination_identity);
     Ok(DownloadTempGuard {
         temp_path: temp_identity,
+        parent_identity,
         _lock_file: lock_file,
     })
 }
@@ -2308,6 +2321,69 @@ fn transfer_checkpoint_gc_blocking(
     Ok(removed)
 }
 
+/// Hard ceiling for a checkpoint-less download lease, independent of the
+/// caller-configured checkpoint retention. A lease with no surviving
+/// checkpoint is orphaned scratch; the user-facing TTL can be raised to 30
+/// days, so the startup sweep uses the larger of the two. The checkpoint GC
+/// path passes the user TTL; the startup path uses this constant.
+pub(crate) const DOWNLOAD_LEASE_STARTUP_MAX_AGE_SECS: u64 = 30 * 24 * 3600;
+
+fn download_lease_age_exceeds(
+    modified: std::time::SystemTime,
+    now: std::time::SystemTime,
+    max_age: std::time::Duration,
+) -> bool {
+    now.duration_since(modified).is_ok_and(|age| age > max_age)
+}
+
+/// Startup reaping of lease-tracked download scratch.
+///
+/// Runs once at launch (not on every webview navigation): the same
+/// [`sweep_unreferenced_download_leases`] the checkpoint GC uses, with the
+/// keep-set built from every checkpoint still on disk. A lease whose scratch
+/// another live process holds survives the sweep via the OS lock check.
+/// Leases older than [`DOWNLOAD_LEASE_STARTUP_MAX_AGE_SECS`] are reaped even
+/// when a checkpoint of unknown age happens to reference them — no resumable
+/// download is kept that long. Locked vaults keep every lease: checkpoint
+/// payloads cannot be read without the key, so the reference set is unknown
+/// and deleting on a guess could orphan a resumable download.
+pub(crate) fn sweep_orphaned_download_leases_at_startup<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) {
+    let app_handle = app.app_handle();
+    let Ok(security) = load_security_config(app_handle) else {
+        return;
+    };
+    if security.encryption_enabled && crate::security::require_unlocked_key().is_err() {
+        return;
+    }
+    let mut kept_destinations: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let now = std::time::SystemTime::now();
+    let max_age = std::time::Duration::from_secs(DOWNLOAD_LEASE_STARTUP_MAX_AGE_SECS);
+    // Collect surviving checkpoints first; the sweep below needs only their
+    // destinations, and a fresh checkpoint protects its lease regardless of
+    // the lease file's own age.
+    if let Ok(paths) = transfer_checkpoint_files(app_handle) {
+        for path in paths {
+            let modified = path
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok());
+            let expired =
+                modified.is_some_and(|time| download_lease_age_exceeds(time, now, max_age));
+            if expired {
+                continue;
+            }
+            if let Ok(json) = read_checkpoint_json(&path, &security) {
+                if let Ok(Some(scratch)) = checkpoint_scratch_path(&json) {
+                    kept_destinations.insert(scratch.destination);
+                }
+            }
+        }
+    }
+    let _ = sweep_unreferenced_download_leases(app, &kept_destinations);
+}
+
 // Runs on the blocking pool: plain sync commands run on the main thread,
 // where waiting for the storage lock (held through PBKDF2 during a password
 // change) or disk I/O would freeze the window.
@@ -2648,35 +2724,34 @@ async fn clear_saved_connection(
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(str::to_string);
-    let tokens = s3::close_transfer_registry()?;
+    let (mut gate, tokens) = s3::close_transfer_registry()?;
     let current = {
         let state = app.state::<AppState>();
         let current = match lock_s3_state(&state) {
             Ok(s3) => s3.connection_id.clone(),
             Err(err) => {
-                let _ = s3::reopen_transfer_registry();
+                gate.reopen();
                 return Err(err);
             }
         };
         current
     };
     if let Err(err) = require_reset_session(requested.as_deref(), current.as_deref()) {
-        let _ = s3::reopen_transfer_registry();
+        gate.reopen();
         return Err(err);
     }
     s3::cancel_tokens(tokens);
     if let Err(err) = s3::cancel_all_registered_transfers("saved connection reset").await {
         // Nothing has been removed yet, so a timeout leaves the session and
         // settings intact and the user can retry the reset.
-        let _ = s3::reopen_transfer_registry();
+        gate.reopen();
         return Err(err);
     }
 
     let expected = current.clone();
     let result = security::run_blocking(move || clear_saved_connection_file(app, expected)).await;
-    let reopening = s3::reopen_transfer_registry();
+    gate.reopen();
     result?;
-    reopening?;
     Ok(())
 }
 
@@ -2801,24 +2876,51 @@ pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
     path.with_extension(extension)
 }
 
+/// Filesystems that do not implement directory fsync report one of these.
+#[cfg(unix)]
+fn directory_sync_failure_is_unsupported(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+    )
+}
+
 /// Flush directory metadata after creating, replacing, or removing an entry.
+///
+/// This is the strict form used for vault, checkpoint, and journal
+/// publication: a directory entry that cannot be flushed is not durable, and
+/// reporting success would lose the vault after a power failure on vFAT,
+/// exFAT, FUSE, or SMB. Only the download path may downgrade this to a
+/// warning.
 #[cfg(unix)]
 fn fsync_directory(dir: &std::path::Path) -> Result<(), String> {
     let file = std::fs::File::open(dir).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
+}
+
+/// Download-only variant: an unsupported directory fsync must not turn a
+/// successfully published file into a reported failure.
+#[cfg(unix)]
+fn fsync_directory_best_effort(dir: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::File::open(dir).map_err(|e| e.to_string())?;
     match file.sync_all() {
         Ok(()) => Ok(()),
-        // vfat/exFAT/FUSE/SMB reject directory fsync with EINVAL/ENOTSUP.
-        // The rename is already visible to readers; reporting failure here
-        // would mark a successful download as failed.
-        Err(err)
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
-            ) =>
-        {
+        Err(err) if directory_sync_failure_is_unsupported(&err) => {
+            eprintln!(
+                "Directory '{}' does not support fsync; the published download may not survive a power loss: {}",
+                dir.display(),
+                err
+            );
             Ok(())
         }
-        Err(err) => Err(err.to_string()),
+        Err(err) => {
+            eprintln!(
+                "Directory '{}' could not be flushed after publishing a download; the file is visible but may not survive a power loss: {}",
+                dir.display(),
+                err
+            );
+            Ok(())
+        }
     }
 }
 
@@ -2892,6 +2994,142 @@ pub(crate) fn fsync_parent(path: &std::path::Path) -> Result<(), String> {
             Err(e) => Err(e.to_string()),
         }
     }
+}
+
+/// Download-destination variant of [`fsync_parent`].
+///
+/// The file is already published; an unsupported or failing directory flush
+/// must not be reported as a failed download. It is logged so a power-loss
+/// risk remains visible.
+pub(crate) fn fsync_parent_best_effort(path: &std::path::Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    #[cfg(unix)]
+    {
+        fsync_directory_best_effort(parent)
+    }
+
+    #[cfg(windows)]
+    {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(file) => {
+                if let Err(err) = file.sync_all() {
+                    eprintln!(
+                        "Published download '{}' could not be flushed; it may not survive a power loss: {}",
+                        path.display(),
+                        err
+                    );
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(err) = fsync_directory(parent) {
+                    eprintln!(
+                        "Download directory '{}' could not be flushed; the removal may not survive a power loss: {}",
+                        parent.display(),
+                        err
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!(
+                    "Published download '{}' could not be opened for flushing; it may not survive a power loss: {}",
+                    path.display(),
+                    e
+                );
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = parent;
+        Ok(())
+    }
+}
+
+/// Identity of the directory that will receive a published download.
+///
+/// Captured when the download claims its scratch file and re-checked
+/// immediately before publication. The canonical path catches a parent
+/// swapped for a symlink; the device/inode pair catches a different real
+/// directory mounted at the same path on Unix. Windows stable directory ids
+/// need a separate handle query and remain the documented residual.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DestinationParentIdentity {
+    canonical: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+pub(crate) fn destination_parent_identity(
+    destination: &std::path::Path,
+) -> Result<DestinationParentIdentity, String> {
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "Destination must include a parent directory: {}",
+            destination.display()
+        )
+    })?;
+    let canonical = std::fs::canonicalize(parent).map_err(|err| {
+        format!(
+            "Failed to resolve destination parent '{}': {}",
+            parent.display(),
+            err
+        )
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|err| {
+        format!(
+            "Failed to inspect destination parent '{}': {}",
+            canonical.display(),
+            err
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Destination parent is not a directory: {}",
+            canonical.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(DestinationParentIdentity {
+            canonical,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(DestinationParentIdentity { canonical })
+    }
+}
+
+/// Re-check the destination parent immediately before a rename.
+pub(crate) fn verify_destination_parent_identity(
+    destination: &std::path::Path,
+    expected: &DestinationParentIdentity,
+) -> Result<(), String> {
+    let current = destination_parent_identity(destination)?;
+    if &current != expected {
+        return Err(format!(
+            "Destination parent directory changed while the download was running; publication was \
+             refused: {}",
+            destination.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Create-only move for Windows volumes where hard links are unavailable.
@@ -3077,6 +3315,51 @@ fn publish_temp_file_create_only_with(
 /// `keep_temp_on_failure` disables the consuming Windows move fallback for a
 /// checkpointed download. Ambiguous create-only publication failures retain the
 /// scratch regardless, because deleting its pathname cannot be made ownership-safe.
+/// Download publication: same rename, but the destination parent was pinned
+/// at scratch-claim time and the directory flush is best-effort.
+///
+/// `fsync_parent` is strict because vault/checkpoint callers must not lose a
+/// published file silently. A download destination the user picked can live on
+/// vFAT, FUSE, or SMB, and a failed directory flush there must not turn a
+/// completed file into a reported failure. Callers verify the destination
+/// parent identity immediately before invoking this.
+pub(crate) fn publish_download_temp_file(
+    temp_path: &std::path::Path,
+    destination_path: &std::path::Path,
+    overwrite: bool,
+    keep_temp_on_failure: bool,
+) -> Result<(), String> {
+    let discard_temp = || {
+        if !keep_temp_on_failure {
+            let _ = std::fs::remove_file(temp_path);
+        }
+    };
+    if overwrite {
+        let mut last_err = String::new();
+        for attempt in 0..3 {
+            match std::fs::rename(temp_path, destination_path) {
+                Ok(()) => return fsync_parent_best_effort(destination_path),
+                Err(err) => {
+                    last_err = err.to_string();
+                    if attempt < 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
+        }
+        discard_temp();
+        return Err(last_err);
+    }
+
+    publish_temp_file_create_only_with(
+        temp_path,
+        destination_path,
+        keep_temp_on_failure,
+        publish_exclusive,
+        fsync_parent_best_effort,
+    )
+}
+
 pub(crate) fn publish_temp_file(
     temp_path: &std::path::Path,
     destination_path: &std::path::Path,
@@ -3283,6 +3566,11 @@ fn main() {
                         }
                     }
                 }
+                // Reap lease-tracked download scratch with no surviving
+                // checkpoint. Lease files live beside the user destination;
+                // without this sweep a crashed or abandoned download leaks a
+                // full-size scratch file forever.
+                sweep_orphaned_download_leases_at_startup(app.handle());
             }
             Ok(())
         });
@@ -3740,6 +4028,69 @@ mod tests {
         fsync_parent(&temp).unwrap();
         assert!(!temp.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_unsupported_directory_sync_errors_are_downgraded() {
+        // Vault and checkpoint publication must fail closed. Only the two
+        // error kinds filesystems use to say "directory fsync is not
+        // implemented" may be treated as success, and only on the
+        // best-effort download path.
+        for kind in [
+            std::io::ErrorKind::Unsupported,
+            std::io::ErrorKind::InvalidInput,
+        ] {
+            assert!(
+                directory_sync_failure_is_unsupported(&std::io::Error::from(kind)),
+                "{kind:?} must be recognised as an unsupported filesystem"
+            );
+        }
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(
+                !directory_sync_failure_is_unsupported(&std::io::Error::from(kind)),
+                "{kind:?} must not be downgraded to success"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_parent_identity_refuses_a_swapped_parent() {
+        let dir = scratch_dir("parent-swap");
+        let destination = dir.join("out.bin");
+        let expected = destination_parent_identity(&destination).unwrap();
+        verify_destination_parent_identity(&destination, &expected)
+            .expect("an unchanged parent must verify");
+
+        // Replace the validated parent with a symlink to another directory.
+        let moved = dir.with_extension("moved");
+        std::fs::rename(&dir, &moved).unwrap();
+        let other = scratch_dir("parent-swap-target");
+        std::os::unix::fs::symlink(&other, &dir).unwrap();
+        let err = verify_destination_parent_identity(&destination, &expected)
+            .expect_err("a parent swapped for a symlink must be refused");
+        assert!(err.contains("changed"), "unexpected error: {err}");
+
+        let _ = std::fs::remove_file(&dir);
+        let _ = std::fs::remove_dir_all(&moved);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn startup_lease_sweep_age_is_bounded_by_max_retention() {
+        let now = std::time::SystemTime::now();
+        let max_age = std::time::Duration::from_secs(DOWNLOAD_LEASE_STARTUP_MAX_AGE_SECS);
+        let fresh = now - std::time::Duration::from_secs(24 * 3600);
+        let stale = now - (max_age + std::time::Duration::from_secs(1));
+        assert!(!download_lease_age_exceeds(fresh, now, max_age));
+        assert!(download_lease_age_exceeds(stale, now, max_age));
+        // A clock that moved backwards must retain the lease, not reap it.
+        assert!(!download_lease_age_exceeds(now, fresh, max_age));
     }
 
     #[cfg(unix)]

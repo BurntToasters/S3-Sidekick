@@ -211,6 +211,54 @@ describe("auto-lock watcher", () => {
     expect(onLocked).toHaveBeenCalledTimes(1);
   });
 
+  it("clears a pending cleanup when the vault is seen unlocked again (H2)", async () => {
+    mockState.connected = true;
+    mockState.connectionId = "conn-1";
+    let unlocked = true;
+    let lockCalls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_security_status") return makeStatus({ unlocked });
+      if (command === "lock_security") {
+        lockCalls += 1;
+        return makeStatus({ unlocked: false });
+      }
+      return undefined;
+    });
+    const security = await loadAutoLockWatcher();
+    stopWatcher = security.stopAutoLockWatcher;
+    const onLocked = vi.fn(async () => false);
+
+    security.startAutoLockWatcher(onLocked);
+    // First poll: still unlocked; watcher observes it, no forced lock.
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lockCalls).toBe(0);
+    expect(onLocked).not.toHaveBeenCalled();
+
+    // Backend expires the vault key; the next poll locks and runs cleanup.
+    // onLocked declines (false), so pendingAutoLockCleanup stays set.
+    unlocked = false;
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(onLocked).toHaveBeenCalledTimes(1);
+    expect(lockCalls).toBeGreaterThan(0);
+    const lockCallsAfterLock = lockCalls;
+
+    // The user unlocks again. The vault is now unlocked while the watcher
+    // would run its pending-retry path: a forced lock here relocks the vault
+    // underneath the active session. The watcher must observe the unlocked
+    // status and stop without touching the backend lock.
+    unlocked = true;
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(onLocked).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(onLocked).toHaveBeenCalledTimes(1);
+    // Pre-fix the pending retry calls verifyNativeLock, which unconditionally
+    // calls lock_security first: a freshly unlocked vault gets re-locked
+    // underneath the user and onLocked runs again. Post-fix the unlocked
+    // observation clears the pending flag and no lock call happens.
+    expect(lockCalls).toBe(lockCallsAfterLock);
+  });
+
   it("does not stack checks on repeated focus and detaches on stop", async () => {
     let resolveStatus: (value: unknown) => void = () => undefined;
     const statusReady = new Promise<unknown>((resolve) => {

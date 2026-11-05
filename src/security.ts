@@ -1222,6 +1222,12 @@ export function startAutoLockWatcher(onLocked: () => Promise<boolean>): void {
       const wasUnlocked = lastSeenUnlocked;
       if (unlocked) {
         lastSeenUnlocked = true;
+        // A fresh unlock means no lock cleanup is due. Without this, the
+        // retry below re-forces an access lock on an already-unlocked vault
+        // and the UI stays locked until the next successful cleanup.
+        pendingAutoLockCleanup = false;
+        await retryLockedCleanup();
+        return;
       } else if (
         wasUnlocked === true ||
         (wasUnlocked === null &&

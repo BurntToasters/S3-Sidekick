@@ -947,10 +947,12 @@ pub(super) async fn delete_receipts_checked(
         };
         match result {
             Ok(_) => {}
-            Err(err) if is_not_found(&err) => {
+            Err(err) if is_no_such_key(&err) => {
                 // A versioned source removed between the identity recheck and
                 // this DELETE is already the completed outcome, exactly like
                 // the unversioned path. Treat it as success, not a conflict.
+                // A bare 404 (NoSuchBucket, unknown provider body) is not
+                // proof that the key disappeared.
                 continue;
             }
             Err(err) => {
@@ -1161,9 +1163,10 @@ pub(super) async fn delete_unversioned_receipts_checked(
         };
         match result {
             Ok(_) => deleted += 1,
-            Err(err) if is_not_found(&err) => {
+            Err(err) if is_no_such_key(&err) => {
                 // Lost a race with an external deleter after the checks above;
-                // the source is gone, so the move is complete.
+                // the source is gone, so the move is complete. Only an explicit
+                // NoSuchKey counts; NoSuchBucket/unknown 404s stay failures.
             }
             Err(err) => {
                 use aws_sdk_s3::error::SdkError;

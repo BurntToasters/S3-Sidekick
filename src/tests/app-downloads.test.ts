@@ -97,6 +97,12 @@ describe("download chooser account binding", () => {
 
   it("queues against the snapshot identity captured before the save dialog", async () => {
     mockPickFile.mockResolvedValue(fileGrant("/tmp/file.txt"));
+    // Unknown sizes fail the disk preflight closed (M3); provide a size.
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "head_object") return { content_length: 5 };
+      if (cmd === "path_exists") return false;
+      return undefined;
+    });
     const { handleDownload } = await import("../app-downloads.ts");
     await handleDownload();
 
@@ -194,7 +200,7 @@ describe("download disk preflight", () => {
     });
   }
 
-  it("fails open when head_object throws (unknown size skips disk check)", async () => {
+  it("refuses the queue when head_object throws (unknown size fails closed, M3)", async () => {
     await setupSingle();
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "path_exists") return false;
@@ -204,14 +210,14 @@ describe("download disk preflight", () => {
     });
     const { handleDownload } = await import("../app-downloads.ts");
     await handleDownload();
-    expect(mockEnqueueDownloads).toHaveBeenCalledTimes(1);
+    expect(mockEnqueueDownloads).not.toHaveBeenCalled();
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "get_available_disk_bytes",
       expect.anything(),
     );
   });
 
-  it("treats invalid content_length as unknown and fails open", async () => {
+  it("treats invalid content_length as unknown and refuses the queue (M3)", async () => {
     await setupSingle();
     mockInvoke.mockImplementation(async (cmd) => {
       if (cmd === "path_exists") return false;
@@ -221,7 +227,7 @@ describe("download disk preflight", () => {
     });
     const { handleDownload } = await import("../app-downloads.ts");
     await handleDownload();
-    expect(mockEnqueueDownloads).toHaveBeenCalledTimes(1);
+    expect(mockEnqueueDownloads).not.toHaveBeenCalled();
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "get_available_disk_bytes",
       expect.anything(),
@@ -314,7 +320,7 @@ describe("download disk preflight", () => {
     );
   });
 
-  it("warns but proceeds when the disk probe throws", async () => {
+  it("refuses the queue when the disk probe throws (M3)", async () => {
     const { state } = await import("../state.ts");
     const big = 200 * 1024 * 1024;
     state.selectedKeys.clear();
@@ -331,7 +337,7 @@ describe("download disk preflight", () => {
     });
     const { handleDownload } = await import("../app-downloads.ts");
     await handleDownload();
-    expect(mockEnqueueDownloads).toHaveBeenCalledTimes(1);
+    expect(mockEnqueueDownloads).not.toHaveBeenCalled();
     expect(mockShowConfirm).not.toHaveBeenCalled();
   });
 
@@ -396,6 +402,12 @@ describe("download child names and shell startup destinations", () => {
     state.selectedKeys.add("a/report.txt ");
     state.selectedKeys.add("b/report.txt");
     state.selectedKeys.add("c/back\\slash.txt");
+    // Unknown sizes fail the disk preflight closed (M3); provide sizes.
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "head_object") return { content_length: 5 };
+      if (cmd === "path_exists") return false;
+      return undefined;
+    });
     mockPickDirectory.mockResolvedValue(directoryGrant("/tmp/dest"));
     const { handleDownload } = await import("../app-downloads.ts");
     await handleDownload();

@@ -52,7 +52,13 @@ const MIN_ARGON2_PARALLELISM: u32 = 1;
 const MAX_ARGON2_PARALLELISM: u32 = 16;
 /// Current policy schema. Schema 2 requires a keyed policy tag.
 const POLICY_SCHEMA_LEGACY: u8 = 1;
-const POLICY_SCHEMA_CURRENT: u8 = 2;
+/// Schema 2 signed only the mutable policy fields below the salt/verifier
+/// pair. It remains readable so a vault written by an earlier 0.12 build can
+/// upgrade in place instead of failing closed.
+const POLICY_SCHEMA_PREVIOUS: u8 = 2;
+/// Schema 3 additionally binds the fields that select encrypted mode, the
+/// initialization flag, and the salt/verifier pair.
+const POLICY_SCHEMA_CURRENT: u8 = 3;
 pub(crate) const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
@@ -307,14 +313,17 @@ pub(crate) struct SecurityConfig {
     /// migration.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub legacy_plaintext_adoption_proof: String,
-    /// Keyed tag over the mutable policy fields below the salt/verifier pair.
+    /// Keyed tag over the security policy fields.
     ///
     /// `lock_timeout_minutes`, `biometric_enrolled`, `legacy_plaintext_adopted`
     /// and `legacy_plaintext_adoption_proof` do not affect the key derivation,
     /// so nothing else authenticates them: a local edit could disable auto-lock
-    /// or re-arm plaintext adoption. This tag is derived from the vault key and
-    /// verified after the password is proven. Schema 1 configurations may omit
-    /// the tag and are upgraded to schema 2 on their next successful unlock.
+    /// or re-arm plaintext adoption. Schema 3 also binds `encryption_enabled`,
+    /// `initialized`, `salt`, and `verifier` so a keyed verification refuses a
+    /// payload whose encrypted-mode claim disagrees with the signed state. This
+    /// tag is derived from the vault key and verified after the password is
+    /// proven. Schema 1 configurations may omit the tag and are upgraded to the
+    /// current schema on their next successful unlock.
     ///
     /// Residual: an attacker with write access to `security.json` can still
     /// delete the tag *and* downgrade `policy_schema` to 1, which is
@@ -997,15 +1006,22 @@ pub(crate) fn load_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
             {
                 LEGACY_LOCK_TIMEOUT_DEFAULTED.store(true, Ordering::Release);
             }
-            // A plaintext configuration must never retain the policy tag that
-            // only an encrypted vault can produce. Leaving the tag while
-            // flipping `encryption_enabled` is the obvious way to try to make
-            // ciphertext look like a legitimate plaintext install.
-            if !config.encryption_enabled && !config.policy_mac.is_empty() {
+            // A plaintext configuration must never retain material that only an
+            // encrypted vault can produce. Leaving the tag, salt, or verifier
+            // behind while flipping `encryption_enabled` is the obvious way to
+            // try to make ciphertext look like a legitimate plaintext install.
+            // (A deliberate attacker can still clear all of them; that is the
+            // documented schema-1 rollback residual, indistinguishable from a
+            // genuinely plaintext install without an external anchor.)
+            if !config.encryption_enabled
+                && (!config.policy_mac.is_empty()
+                    || !config.salt.is_empty()
+                    || !config.verifier.is_empty())
+            {
                 return Err(
-                    "Security configuration claims plaintext while carrying an encrypted policy \
-                     tag; refusing to trust it. Restore 'security.json' from a backup or reset \
-                     security."
+                    "Security configuration claims plaintext while carrying encrypted policy \
+                     material; refusing to trust it. Restore 'security.json' from a backup or \
+                     reset security."
                         .to_string(),
                 );
             }
@@ -1112,10 +1128,10 @@ fn validate_loaded_policy(config: &SecurityConfig) -> Result<(), String> {
             config.policy_schema
         ));
     }
-    if config.policy_schema >= POLICY_SCHEMA_CURRENT && config.policy_mac.is_empty() {
+    if config.policy_schema >= POLICY_SCHEMA_PREVIOUS && config.policy_mac.is_empty() {
         return Err(
-            "Security configuration uses policy schema 2 but has no policy authentication tag; \
-             refusing to unlock. Restore 'security.json' from a backup or reset security."
+            "Security configuration uses policy schema 2 or newer but has no policy authentication \
+             tag; refusing to unlock. Restore 'security.json' from a backup or reset security."
                 .to_string(),
         );
     }
@@ -1335,10 +1351,22 @@ fn policy_kdf_label(kdf: KdfAlgorithm) -> &'static str {
 fn policy_mac_tag(config: &SecurityConfig, key: &[u8; KEY_LEN]) -> [u8; 32] {
     let mac_key = policy_mac_key(key);
     // Schema 1 tags were produced by older releases over the original v1
-    // payload. They must keep verifying so an existing vault can be upgraded;
-    // schema 2 tags bind the KDF choice and parameters as well.
-    let (domain, payload) = if config.policy_schema >= POLICY_SCHEMA_CURRENT {
-        (
+    // payload. Schema 2 added the KDF choice and parameters but still left the
+    // encrypted-mode selector outside the tag. Both must keep verifying so an
+    // existing vault can be upgraded; schema 3 binds every security-relevant
+    // field except the tag itself.
+    let (domain, payload) = match config.policy_schema {
+        POLICY_SCHEMA_LEGACY => (
+            b"s3-sidekick-security-policy".as_slice(),
+            format!(
+                "v1\n{}\n{}\n{}\n{}",
+                config.lock_timeout_minutes,
+                u8::from(config.biometric_enrolled),
+                u8::from(config.legacy_plaintext_adopted),
+                config.legacy_plaintext_adoption_proof,
+            ),
+        ),
+        POLICY_SCHEMA_PREVIOUS => (
             b"s3-sidekick-security-policy-v2".as_slice(),
             format!(
                 "v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
@@ -1353,18 +1381,27 @@ fn policy_mac_tag(config: &SecurityConfig, key: &[u8; KEY_LEN]) -> [u8; 32] {
                 u8::from(config.legacy_plaintext_adopted),
                 config.legacy_plaintext_adoption_proof,
             ),
-        )
-    } else {
-        (
-            b"s3-sidekick-security-policy".as_slice(),
+        ),
+        _ => (
+            b"s3-sidekick-security-policy-v3".as_slice(),
             format!(
-                "v1\n{}\n{}\n{}\n{}",
+                "v3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                config.policy_schema,
+                u8::from(config.initialized),
+                u8::from(config.encryption_enabled),
+                config.salt,
+                config.verifier,
+                policy_kdf_label(config.kdf),
+                config.argon2_memory_kib,
+                config.argon2_iterations,
+                config.argon2_parallelism,
+                config.pbkdf2_iterations,
                 config.lock_timeout_minutes,
                 u8::from(config.biometric_enrolled),
                 u8::from(config.legacy_plaintext_adopted),
                 config.legacy_plaintext_adoption_proof,
             ),
-        )
+        ),
     };
     let mut tag = hmac_sha256(mac_key.as_slice(), &[domain, payload.as_bytes()]);
     let out = tag;
@@ -1409,10 +1446,11 @@ pub(crate) fn verify_policy_integrity(
         );
     }
     if config.policy_mac.is_empty() {
-        if config.policy_schema >= POLICY_SCHEMA_CURRENT {
+        if config.policy_schema >= POLICY_SCHEMA_PREVIOUS {
             return Err(
-                "Security configuration uses policy schema 2 but has no policy authentication tag; \
-                 refusing to unlock. Restore 'security.json' from a backup or reset security."
+                "Security configuration uses policy schema 2 or newer but has no policy \
+                 authentication tag; refusing to unlock. Restore 'security.json' from a backup or \
+                 reset security."
                     .to_string(),
             );
         }
@@ -3301,8 +3339,10 @@ pub(crate) async fn lock_security(
     // key is cleared even when the drain times out; security wins over
     // transfer cleanup.
     let mut registry_error = None;
+    let mut gate = None;
     let drain_result = match crate::s3::close_transfer_registry() {
-        Ok(tokens) => {
+        Ok((registry_gate, tokens)) => {
+            gate = Some(registry_gate);
             crate::s3::cancel_tokens(tokens);
             crate::s3::cancel_all_registered_transfers("lock").await
         }
@@ -3316,12 +3356,15 @@ pub(crate) async fn lock_security(
     });
     let lock_result = run_blocking(move || lock_security_inner(&app)).await;
     // Reopening is safe only after a successful drain: the vault stays locked
-    // and `require_s3_access` still gates every new registration.
-    let reopen_result = if drain_result.is_ok() {
-        crate::s3::reopen_transfer_registry()
-    } else {
-        Ok(())
-    };
+    // and `require_s3_access` still gates every new registration. A failed
+    // drain keeps the gate closed (security wins over cleanup).
+    if let Some(registry_gate) = gate.as_mut() {
+        if drain_result.is_ok() {
+            registry_gate.reopen();
+        } else {
+            registry_gate.keep_closed();
+        }
+    }
     let status = lock_result?;
     invalidation?;
     if let Some(err) = registry_error {
@@ -3331,7 +3374,6 @@ pub(crate) async fn lock_security(
         ));
     }
     drain_result?;
-    reopen_result?;
     Ok(status)
 }
 
@@ -3717,10 +3759,10 @@ pub(crate) async fn factory_reset(
         return Err(SECURITY_CONFIRMATION_CANCELLED.to_string());
     }
 
-    if let Err(err) = crate::s3::stop_all_transfers_for_reset().await {
-        crate::s3::resume_transfers_after_failed_reset();
-        return Err(err);
-    }
+    let mut reset_gate = match crate::s3::stop_all_transfers_for_reset().await {
+        Ok(gate) => gate,
+        Err(err) => return Err(err),
+    };
 
     let reset_app = app.clone();
     let result = run_blocking(move || factory_reset_inner(&reset_app, &settings_json)).await;
@@ -3731,8 +3773,10 @@ pub(crate) async fn factory_reset(
         let reset_pending = factory_reset_journal_path(&app)
             .map(|path| path.exists())
             .unwrap_or(true);
-        if !reset_pending {
-            crate::s3::resume_transfers_after_failed_reset();
+        if reset_pending {
+            reset_gate.keep_closed();
+        } else {
+            reset_gate.reopen();
         }
         return result;
     }
@@ -3744,7 +3788,7 @@ pub(crate) async fn factory_reset(
     let invalidation = crate::lock_s3_state(&state).map(|mut s3| {
         crate::s3::invalidate_connection_session(&mut s3);
     });
-    crate::s3::resume_transfers_after_failed_reset();
+    reset_gate.reopen();
     invalidation?;
     result
 }

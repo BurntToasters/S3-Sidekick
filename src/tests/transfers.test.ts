@@ -151,6 +151,9 @@ beforeEach(() => {
   // Default: "Decide later" on the recovery prompt, which keeps the manifest.
   mockShowChoiceDialog.mockResolvedValue("later");
   localStorage.clear();
+  // Concrete ids make progress-event fixtures deterministic. The production
+  // fallback for storage-less sequences is entropy-seeded (M2); tests pin it.
+  localStorage.setItem("s3-sidekick.transfer-id-sequence.v1", "1");
   renderFixture();
 });
 
@@ -515,10 +518,16 @@ describe("transfers queue UI", () => {
     );
     await flushMicrotasks(8);
 
-    // The upload is now in-flight ("uploading"); it must be excluded from the
-    // persisted manifest so an app kill does not offer a misleading resume.
+    // The upload is now in-flight ("uploading"). It is persisted as queued +
+    // paused so an app kill surfaces the row for explicit retry instead of
+    // silently vanishing (M2); it is never offered as an automatic resume.
     const raw = localStorage.getItem("s3-sidekick.transfer-manifest.v1");
-    expect(raw).toBeFalsy();
+    const parsed = JSON.parse(raw ?? "{}") as {
+      items?: Array<{ status?: string; paused?: boolean; operation?: string }>;
+    };
+    expect(parsed.items?.some(
+      (item) => item.operation === "upload" && item.paused === true,
+    )).toBe(true);
 
     resolveUpload();
     await flushMicrotasks(8);

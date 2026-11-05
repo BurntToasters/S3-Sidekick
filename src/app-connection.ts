@@ -644,6 +644,40 @@ function isInlineEditing(): boolean {
   return inlineEditingBookmark !== null;
 }
 
+/**
+ * Discard any in-progress inline saved-connection edit and duplicate draft.
+ * Used by session teardown: the session being torn down owns the form, so
+ * stale credentials must not survive it (H5).
+ */
+export function cancelInlineSavedConnectionEdit(): void {
+  if (!isInlineEditing() && !duplicateDraft) return;
+  setInlineEditBookmark(null);
+  setConnectionInputs("", "", "", "");
+  const nameInput = document.getElementById(
+    "conn-name",
+  ) as HTMLInputElement | null;
+  if (nameInput) nameInput.value = "";
+}
+
+/**
+ * Force the secret/session inputs back to masked with their reveal toggles
+ * reset. Teardown clears the input values; leaving a revealed secret visible
+ * on the lock screen would defeat the mask.
+ */
+export function resetSecretRevealState(): void {
+  for (const [toggleId, inputId] of [
+    ["secret-key-toggle", "conn-secret-key"],
+    ["session-token-toggle", "conn-session-token"],
+  ] as const) {
+    const toggle = document.getElementById(toggleId) as HTMLButtonElement | null;
+    const input = document.getElementById(inputId) as HTMLInputElement | null;
+    if (!toggle || !input) continue;
+    input.type = "password";
+    toggle.textContent = "Show";
+    toggle.setAttribute("aria-pressed", "false");
+  }
+}
+
 function setInlineEditBookmark(bookmark: Bookmark | null): void {
   inlineEditRevision += 1;
   inlineEditingBookmark = bookmark;

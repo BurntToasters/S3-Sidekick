@@ -13,6 +13,7 @@ vi.mock("../inspector.ts", () => ({
   closeInspectorOnMobile: vi.fn(),
   isInspectorOpen: () => true,
   markInspectorHasContent: markInspectorHasContentMock,
+  resetInspectorSelectionSync: vi.fn(),
   syncInspectorFromSelection: syncInspectorMock,
 }));
 
@@ -877,5 +878,87 @@ describe("browser core rendering and selection", () => {
         "object-row",
       ),
     ).toBe(true);
+  });
+
+  it("resets the inspector selection sync on invalidation (H6)", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    const inspector = await import("../inspector.ts");
+    state.objects = [
+      {
+        key: "same.txt",
+        size: 1,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    state.selectedKeys.add("same.txt");
+    browser.renderObjectTable();
+    expect(syncInspectorMock).toHaveBeenCalled();
+    expect(inspector.resetInspectorSelectionSync).toHaveBeenCalledTimes(0);
+    browser.invalidateInspectorSelectionSync();
+    expect(inspector.resetInspectorSelectionSync).toHaveBeenCalledTimes(1);
+    browser.renderObjectTable();
+    expect(syncInspectorMock.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("ignores filter renders while the skeleton is loading (H7)", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.objects = [
+      {
+        key: "old.txt",
+        size: 1,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    browser.renderObjectTable();
+    browser.renderObjectTableSkeleton(1);
+    const panel = document.getElementById("object-panel") as HTMLElement;
+    expect(panel.getAttribute("aria-busy")).toBe("true");
+    state.filterText = "old";
+    browser.renderObjectTable();
+    expect(panel.getAttribute("aria-busy")).toBe("true");
+  });
+
+  it("does not act on stale rows while loading (H8)", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.objects = [
+      {
+        key: "a.txt",
+        size: 1,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    browser.renderObjectTable();
+    browser.renderObjectTableSkeleton(1);
+    const row = document.querySelector<HTMLElement>("#object-tbody .object-row");
+    expect(row).toBeTruthy();
+    expect(() =>
+      row!.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowDown",
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    ).not.toThrow();
+    expect(state.selectedKeys.size).toBe(0);
+  });
+
+  it("flushes location through a bubbling event (M1)", async () => {
+    const browser = await import("../browser.ts");
+    const seen: string[] = [];
+    window.addEventListener(browser.LOCATION_FLUSH_EVENT, () =>
+      seen.push("flushed"),
+    );
+    // Any real navigation dispatches the flush before the bucket changes.
+    await browser
+      .navigateToLocationPath("other-bucket/")
+      .catch(() => undefined);
+    expect(seen.length).toBeGreaterThan(0);
   });
 });

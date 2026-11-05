@@ -53,9 +53,13 @@ import {
 
 interface DeleteResult {
   deleted: number;
+  /** Subset of `deleted` that became delete markers on a versioned bucket. */
+  delete_markers?: number;
   failed: number;
   incomplete: boolean;
   errors: string[];
+  /** Backend warning: deletion semantics differ from permanent removal. */
+  warning?: string | null;
 }
 
 function normalizeDeleteResult(value: unknown): DeleteResult {
@@ -79,7 +83,22 @@ function normalizeDeleteResult(value: unknown): DeleteResult {
   ) {
     throw new Error("Delete command returned an invalid result");
   }
-  return row as DeleteResult;
+  // The backend adds delete_markers/warning without changing the legacy
+  // shape; older backends omit both. Anything non-conforming is ignored —
+  // the warning UI must never fail an otherwise valid delete result.
+  const normalized: DeleteResult = {
+    deleted: row.deleted as number,
+    failed: row.failed as number,
+    incomplete: row.incomplete as boolean,
+    errors: row.errors as string[],
+  };
+  if (Number.isInteger(row.delete_markers) && (row.delete_markers ?? -1) >= 0) {
+    normalized.delete_markers = row.delete_markers as number;
+  }
+  if (typeof row.warning === "string" && row.warning.length > 0) {
+    normalized.warning = row.warning;
+  }
+  return normalized;
 }
 
 function deleteFailureSummary(result: DeleteResult): string | null {
@@ -279,6 +298,7 @@ async function performDelete(): Promise<void> {
   // deleted row's place, so the next Space or Enter acts on what the user saw.
   const focusIndex = renderedIndexOfSelection();
   let totalDeleted = 0;
+  const versioningWarnings = new Set<string>();
   const failures: string[] = [];
   // Targets whose delete did not confirm. A failed batch does not say which
   // key failed, so each member stays a candidate until the listing settles it.
@@ -298,6 +318,7 @@ async function performDelete(): Promise<void> {
             }),
           );
           totalDeleted += result.deleted;
+          if (result.warning) versioningWarnings.add(result.warning);
           const failure = deleteFailureSummary(result);
           if (failure) {
             failures.push(`${keys.join(", ")}: ${failure}`);
@@ -323,6 +344,7 @@ async function performDelete(): Promise<void> {
           }),
         );
         totalDeleted += result.deleted;
+        if (result.warning) versioningWarnings.add(result.warning);
         const failure = deleteFailureSummary(result);
         if (failure) {
           failures.push(`${prefix}: ${failure}`);
@@ -333,10 +355,22 @@ async function performDelete(): Promise<void> {
         unresolved.push(folderEntry(prefix));
       }
     }
+    // A versioned-bucket delete succeeds but is not a permanent removal; it
+    // creates delete markers. Never let the success message claim otherwise.
+    for (const warning of versioningWarnings) {
+      logActivity(warning, "warning");
+    }
     const succeeded = failures.length === 0;
     if (succeeded) {
-      setStatus(`Deleted ${plural(totalDeleted, "item")}.`, 5000);
+      const marker = versioningWarnings.size > 0;
+      setStatus(
+        `Deleted ${plural(totalDeleted, "item")}${marker ? "; delete markers created (see notice)" : ""}.`,
+        8000,
+      );
       logActivity(`Deleted ${plural(totalDeleted, "object")}.`, "success");
+      if (marker) {
+        showToast([...versioningWarnings].join(" "), { type: "warning", duration: 0 });
+      }
     } else {
       logActivity(
         `Delete partially failed after ${plural(totalDeleted, "object")}: ${failures.join("; ")}`,

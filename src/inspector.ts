@@ -71,6 +71,20 @@ let lastCompletedSelectionSignature: string | null = null;
 document.addEventListener(INFO_PANEL_CLOSED_EVENT, () => {
   lastCompletedSelectionSignature = null;
 });
+
+/**
+ * Forget the last completed selection render (H6).
+ *
+ * Manual Refresh re-reads object metadata, but the inspector used to keep its
+ * signature through the refresh, so a same-signature re-selection skipped the
+ * sync and left the panel carrying pre-refresh state — a later tab click then
+ * dropped dirty edits without the discard prompt. Browser invalidation routes
+ * through this reset; lock teardown keeps its own explicit reset as well.
+ */
+export function resetInspectorSelectionSync(): void {
+  lastCompletedSelectionSignature = null;
+  keptEditingRemovedSignature = null;
+}
 /**
  * True while the open state came from the wide-container default rather than
  * a stored or explicit choice, so a later shrink can undo it.
