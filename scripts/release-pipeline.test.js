@@ -140,7 +140,13 @@ test("macOS release uses Tauri signing and notarization like Zinnia", () => {
     fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
   );
   const scripts = packageJson.scripts;
-  assert.match(scripts["build:mac:universal:prepared"], /^dotenv -e \.env -- /);
+  // Release builds run through the SOURCE_DATE_EPOCH wrapper so two builds of
+  // one commit embed identical timestamps; the underlying command still loads
+  // the host .env and uses Tauri signing/notarization.
+  assert.match(
+    scripts["build:mac:universal:prepared"],
+    /^(?:node scripts\/with-source-date-epoch\.mjs )?dotenv -e \.env -- tauri build/,
+  );
   assert.doesNotMatch(scripts["build:mac:universal:prepared"], /--no-sign/);
   assert.doesNotMatch(scripts["release:mac:continue"], /build:mac:trust/);
   assert.equal("build:mac:trust" in scripts, false);
