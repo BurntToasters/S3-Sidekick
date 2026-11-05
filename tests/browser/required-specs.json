@@ -1,5 +1,8 @@
 {
-  "projects": ["chromium", "webkit"],
+  "projects": [
+    "chromium",
+    "webkit"
+  ],
   "testCount": 806,
   "specs": {
     "a01-lock-security.spec.ts": 6,
