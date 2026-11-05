@@ -83,26 +83,23 @@ export function verifyPlaywrightReport(report, manifest) {
       }
       seenFiles.add(file);
       counts.set(file, (counts.get(file) || 0) + (spec.tests?.length || 0));
-      const priorTitles = titlesByFile.get(file);
-      if (!priorTitles) {
-        titlesByFile.set(file, {
-          count: 1,
-          firstTitle: spec.title || null,
-        });
-      } else {
-        priorTitles.count += 1;
-        if (
-          spec.title &&
-          priorTitles.firstTitle &&
-          spec.title !== priorTitles.firstTitle
-        ) {
-          problems.push(
-            `Playwright spec ${file} ran with differing titles across projects/sub-specs; the suite may have been substituted.`,
-          );
-        }
-      }
+      // Structural binding: a (file, title) pair may appear once per required
+      // project, never twice for the same project. A duplicated tuple means
+      // the report was assembled or merged from more than one run, so counts
+      // alone cannot certify this suite.
+      const titleKey = `${file}\u0000${spec.title ?? ""}`;
+      const projectsForTitle = titlesByFile.get(titleKey) ?? new Set();
+      titlesByFile.set(titleKey, projectsForTitle);
       for (const test of Array.isArray(spec.tests) ? spec.tests : []) {
-        if (test.projectName) seenProjects.add(test.projectName);
+        if (test.projectName) {
+          seenProjects.add(test.projectName);
+          if (projectsForTitle.has(test.projectName)) {
+            problems.push(
+              `Playwright ran ${spec.title || "untitled"} twice for project ${test.projectName} in ${file}; the report is duplicated or merged.`,
+            );
+          }
+          projectsForTitle.add(test.projectName);
+        }
         const results = Array.isArray(test.results) ? test.results : [];
         const label = `${file} :: ${spec.title || test.title || "untitled"}`;
         if (results.length !== 1) {
