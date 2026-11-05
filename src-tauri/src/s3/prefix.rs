@@ -155,7 +155,7 @@ pub(super) async fn list_all_keys_under_prefix(
             }
         };
 
-        let encoding = listed_encoding_for(&bucket, &output);
+        let encoding = listed_encoding_for(bucket, &output);
         for obj in output.contents() {
             if let Some(k) = obj.key() {
                 if keys.len() >= MAX_PREFIX_TRANSACTION_OBJECTS {

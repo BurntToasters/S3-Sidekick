@@ -525,9 +525,11 @@ describe("transfers queue UI", () => {
     const parsed = JSON.parse(raw ?? "{}") as {
       items?: Array<{ status?: string; paused?: boolean; operation?: string }>;
     };
-    expect(parsed.items?.some(
-      (item) => item.operation === "upload" && item.paused === true,
-    )).toBe(true);
+    expect(
+      parsed.items?.some(
+        (item) => item.operation === "upload" && item.paused === true,
+      ),
+    ).toBe(true);
 
     resolveUpload();
     await flushMicrotasks(8);

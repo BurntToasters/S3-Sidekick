@@ -112,6 +112,18 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// Process-global gate state is shared by every test in this binary.
+    /// Tests that close the transfer-registry gate or register transfers
+    /// must hold this lock for their whole body, or parallel tests observe
+    /// a closed gate and fail with "Transfer cancelled".
+    static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_registry_tests() -> std::sync::MutexGuard<'static, ()> {
+        REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn make_test_dir(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -224,8 +236,10 @@ mod tests {
 
     #[test]
     fn normalize_endpoint_preserves_port() {
-        let (url, _) = normalize_endpoint("http://minio.local:9000").expect("valid test endpoint");
-        assert_eq!(url, "http://minio.local:9000");
+        // `minio.local` is not loopback; plaintext HTTP to it is refused
+        // (H17). Use a loopback alias where plaintext is allowed.
+        let (url, _) = normalize_endpoint("http://localhost:9000").expect("valid test endpoint");
+        assert_eq!(url, "http://localhost:9000");
     }
 
     #[test]
@@ -781,6 +795,7 @@ mod tests {
 
     #[test]
     fn transfer_registration_is_dropped_on_completion() {
+        let _lock = lock_registry_tests();
         let id = 990_003;
         {
             let _guard = TransferGuard::register(id).expect("registration should succeed");
@@ -794,6 +809,7 @@ mod tests {
 
     #[test]
     fn reusing_an_id_keeps_every_registration_cancellable() {
+        let _lock = lock_registry_tests();
         let id = 990_004;
         let first = TransferGuard::register(id).expect("first registration should succeed");
         let second = TransferGuard::register(id).expect("second registration should succeed");
@@ -872,6 +888,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_newer_connect_does_not_poison_still_current_session() {
+        let _lock = lock_registry_tests();
         // H3: A is still current while connect B retires it and then fails
         // its install; a second attempt C retires the same session again.
         // Dropping B's fence (never mem::forget) must leave A's fence held
@@ -924,6 +941,7 @@ mod tests {
 
     #[test]
     fn registry_gate_is_owned_by_its_closer() {
+        let _lock = lock_registry_tests();
         let (mut first, tokens) = close_transfer_registry().expect("first close");
         assert!(tokens.is_empty(), "no transfers should be registered");
         assert!(

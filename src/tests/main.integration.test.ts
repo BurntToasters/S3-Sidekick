@@ -644,6 +644,7 @@ describe("main integration", () => {
         return `https://signed/${(payload as { key?: string }).key ?? ""}`;
       }
       if (cmd === "rename_object") return undefined;
+      if (cmd === "head_object") return { content_length: 128 };
       if (cmd === "object_exists") return false;
       if (cmd === "path_exists") return false;
       if (cmd === "create_folder") return undefined;
