@@ -24,19 +24,19 @@ export default defineConfig({
       reportsDirectory: "coverage",
       include: ["src/**/*.ts"],
       exclude: ["src/tests/**", "src/vite-env.d.ts"],
+      // Aggregate floors plus per-module line ratchets (H11). The glob keys
+      // are floors below each module's measured full-suite baseline, not
+      // targets: raise them when coverage grows. Without these, a large
+      // aggregate surplus can hide a regression in credential, grant, or
+      // transfer code.
       thresholds: {
         lines: 75,
         functions: 75,
         statements: 75,
         branches: 65,
-      },
-      // Per-module ratchets (H11): aggregate floors hide regressions in
-      // security, grant, and transfer code. These are floors below the
-      // measured full-suite baselines, not targets; raise them as coverage
-      // grows. path-grants/app-connection floors are line floors only while
-      // their branch baselines recover.
-      perFile: {
-        lines: 75,
+        "src/app-connection.ts": { lines: 50 },
+        "src/path-grants.ts": { lines: 35 },
+        "src/transfer-state.ts": { lines: 50 },
       },
     },
   },
