@@ -186,12 +186,11 @@ function percentEncodeAscii(value: string): string {
  * traverse out of the destination directory (`%` itself is encoded). Unicode
  * is folded to NFC because APFS treats NFC/NFD spellings as one file.
  */
-export function safeFileName(key: string, platform: string): string {
+export function safeFileName(key: string, _platform: string): string {
   const normalized = basename(key).normalize("NFC");
   const base = normalized.length > 0 ? normalized : "unnamed";
-  if (platform !== "windows") {
-    return base === "." || base === ".." ? percentEncodeAscii(base) : base;
-  }
+  // Apply Windows-portable rules on every host: a download made on macOS or
+  // Linux must still open if the folder is later used from Windows (M10).
   let name = base.replace(WINDOWS_ILLEGAL_NAME_CHARS, percentEncodeAscii);
   const stem = name.split(".")[0] ?? "";
   if (WINDOWS_RESERVED_NAME.test(stem)) {

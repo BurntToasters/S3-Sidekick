@@ -74,20 +74,25 @@ pub(crate) async fn download_object(
         .e_tag()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            encode_transfer_error(
-                "generation_unavailable",
-                false,
-                None,
-                "Sequential download is unsafe because the provider returned no ETag.".to_string(),
-            )
-        })?
+        .unwrap_or_default()
         .to_string();
     let object_version_id = generation_head
         .version_id()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    // An immutable version ID pins the bytes even when a provider omits ETag
+    // (some S3-compatible gateways do). Without either, a sequential read has
+    // no generation identity to verify before publication (M6).
+    if object_etag.is_empty() && object_version_id.is_none() {
+        return Err(encode_transfer_error(
+            "generation_unavailable",
+            false,
+            None,
+            "Sequential download is unsafe because the provider returned neither an ETag nor a version ID."
+                .to_string(),
+        ));
+    }
     let expected_checksum = if checksum_enabled {
         Some(expected_download_checksum(&client, &bucket, &key, &generation_head, &cancel).await?)
     } else {
@@ -1326,8 +1331,11 @@ pub(crate) async fn download_object_parallel(
     let bytes_done = Arc::new(AtomicU64::new(completed_bytes));
     let mut join_set = tokio::task::JoinSet::new();
     let mut next_part = 0u32;
+    // Maintained incrementally: a full rescan per completed part is O(parts²)
+    // on a long download (M4).
+    let mut completed_count = completed.iter().filter(|v| **v).count() as u32;
     let mut last_checkpoint_saved_at = Instant::now();
-    let mut last_checkpoint_saved_parts = completed.iter().filter(|v| **v).count() as u32;
+    let mut last_checkpoint_saved_parts = completed_count;
 
     while next_part < total_parts || !join_set.is_empty() {
         if cancel.is_cancelled() {
@@ -1392,7 +1400,10 @@ pub(crate) async fn download_object_parallel(
 
         match joined {
             Some(Ok(Ok((index, written, digest)))) => {
-                completed[index as usize] = true;
+                if !completed[index as usize] {
+                    completed[index as usize] = true;
+                    completed_count = completed_count.saturating_add(1);
+                }
                 part_digests[index as usize] = Some(digest);
                 let sent = bytes_done.fetch_add(written, Ordering::Relaxed) + written;
                 if bandwidth_limit_bps > 0 {
@@ -1406,14 +1417,17 @@ pub(crate) async fn download_object_parallel(
                         continue;
                     }
                 }
-                let completed_count = completed.iter().filter(|v| **v).count() as u32;
-
                 if checkpoint_enabled {
                     if let Some(id) = checkpoint_id.as_deref() {
                         let elapsed_ms = last_checkpoint_saved_at.elapsed().as_millis() as u64;
+                        // Checkpoint writes serialize every completed part and
+                        // fsync, so writing every 8 parts or 1.5 s was churn on
+                        // a fast link. Still save the final part and resume
+                        // promptly: at most 16 parts or 3 s of progress is at
+                        // risk on a crash (M4).
                         if completed_count == total_parts
-                            || completed_count.saturating_sub(last_checkpoint_saved_parts) >= 8
-                            || elapsed_ms >= 1500
+                            || completed_count.saturating_sub(last_checkpoint_saved_parts) >= 16
+                            || elapsed_ms >= 3000
                         {
                             let payload = TransferCheckpoint {
                                 version: 1,
@@ -1455,7 +1469,7 @@ pub(crate) async fn download_object_parallel(
                                     let save_app = app.clone();
                                     let save_id = id.to_string();
                                     let save_session = recovery_session.clone();
-                                    let save_payload = payload.clone();
+                                    let save_payload = payload;
                                     move || async move {
                                         tokio::task::spawn_blocking(move || {
                                             save_checkpoint_payload(

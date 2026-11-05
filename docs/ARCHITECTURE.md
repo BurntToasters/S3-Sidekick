@@ -1,5 +1,22 @@
 # Architecture and Security
 
+## Decision index
+
+This document is the durable record for the decisions the tests enforce. Read
+the section for the area you are changing; each one states the failure mode it
+closes.
+
+| Decision                                                 | Section                                                                                                         |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Backend-minted session IDs and typed IPC                 | [IPC contract and access control](#ipc-contract-and-access-control)                                             |
+| Receipts and transfer identity fail closed               | [Transfer integrity](#transfer-integrity)                                                                       |
+| Single live session, cancellation, and retirement fences | [Cancellation and transfer state](#cancellation-and-transfer-state)                                             |
+| Path grants, child names, and reveal/open authority      | [Generated files](#generated-files), [Preview policy](#preview-policy)                                          |
+| Create-only recovery and move capability matrix          | [Create-only retries](#create-only-retries), [Move capability exposure](#move-capability-exposure)              |
+| Vault, biometric, and lock ordering                      | [Vault and biometric storage](#vault-and-biometric-storage), [Lock order](#lock-order), [Auto-lock](#auto-lock) |
+| Queue bounds, disk preflight, and reconciliation         | [Transfer integrity](#transfer-integrity)                                                                       |
+| Update modes and release trust                           | [Update modes](#update-modes)                                                                                   |
+
 ## Versioning
 
 S3 Sidekick follows semantic versioning. Stable releases use `X.Y.Z`; pre-releases use `X.Y.Z-beta.N` or another explicit pre-release identifier. Release proof binds the tested working tree, commit, lockfiles, platform, and toolchain.

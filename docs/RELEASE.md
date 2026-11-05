@@ -43,7 +43,7 @@ npm run setup:win:release
 Linux:
 
 ```sh
-npm run setup:deb
+npm run setup:linux
 npm run setup:flatpak
 ```
 
@@ -83,7 +83,9 @@ release-asset tests, the release-assets E2E (Linux/macOS; Windows records it as
 skipped because the fixture is Unix-only), Vitest, and Rust tests. Evidence
 records the working-tree SHA-256 at suite start and end; a tree that changes
 during `test:all` cannot produce a proof. It does not run the Ubuntu Playwright,
-MinIO, or full-stack jobs. `release:ci-status` then requires a completed,
+MinIO, or full-stack jobs; `npm run test:all:full` chains those (Playwright plus
+verifier, Docker-backed MinIO, and the WebDriver full-stack suite) for a
+developer or release host that has the full toolchain. `release:ci-status` then requires a completed,
 successful check run named `Release gate` for the exact HEAD through the GitHub
 API, and verifies that the run belongs to the `github-actions` app, the
 `.github/workflows/ci.yml` workflow, the expected release branch, and a `push`
@@ -219,13 +221,55 @@ is a host operation recorded here rather than a script in this tree:
 
 ## Reproducible builds
 
-Release scripts set `SOURCE_DATE_EPOCH` from the release commit timestamp so
-two builds of the same commit embed identical metadata. Reproducibility is
-checked by rebuilding the same commit on a second host and comparing the
-artifact hashes to the published bytes byte-for-byte; any mismatch is
-reported before publication trust is established. CI smoke-builds the
-unsigned no-bundle artifacts so toolchain breaks are found before a release
-VM is spent.
+Every prepared release build runs through
+`scripts/with-source-date-epoch.mjs`, which pins `SOURCE_DATE_EPOCH` to the
+release commit timestamp (an explicit environment value wins). Two builds of
+one commit must therefore embed the same metadata.
+
+To verify a rebuild, download the published artifacts for a version into one
+directory, build the same commit on a second host, and compare:
+
+```sh
+npm run release:verify:reproducible -- ./published ./rebuilt
+```
+
+The command hashes every file by relative path with SHA-256 and fails on any
+byte difference, missing file, or extra file. Record the result in the release
+checklist. CI smoke-builds the unsigned no-bundle artifacts so toolchain
+breaks are found before a release VM is spent.
+
+## Updater signing-key rotation
+
+The updater Minisign public key lives in `src-tauri/tauri.conf.json`
+(`plugins.updater.pubkey`); the private key is the host-only
+`TAURI_SIGNING_PRIVATE_KEY` secret.
+
+1. Generate the new Minisign key pair on a dedicated key host and store the
+   private key in the secret manager used by every release host.
+2. Update `plugins.updater.pubkey` in a normal commit; the next release signs
+   every updater artifact with the new key. Clients older than that release
+   still trust the old key and cannot verify the new manifests, so publish one
+   transition release signed with the old key only after deciding how users on
+   older versions update; do not rotate silently mid-stream.
+3. Re-run `release:sign:updater` for the draft after the key change and verify
+   with `release:verify:draft`. Published releases are never re-signed.
+4. Remove the retired private key from every host and rotate the
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` value. Record the rotation date and the
+   first release signed with the new key in the release checklist.
+
+## Flatpak signing
+
+Release hosts must set `GPG_KEY_ID`; `scripts/flatpak-bundle.js` signs the
+repository refs with `flatpak build-sign` before creating the offline bundle.
+Without the variable the bundle is created unsigned and the build log says so,
+which is acceptable only for local testing, never for a release host.
+
+## Dependency license policy
+
+`npm run licenses` now fails when a bundled dependency's license is `UNKNOWN`,
+`UNLICENSED`, or not on the explicit allowlist in
+`scripts/license-policy.mjs`. Adding a dependency with a new license requires a
+deliberate allowlist update in the same change.
 
 ## Stable mirror
 

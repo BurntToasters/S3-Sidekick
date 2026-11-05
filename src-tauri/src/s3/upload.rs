@@ -132,6 +132,41 @@ async fn multipart_upload_still_exists(
     }
 }
 
+/// Verify the checksum a provider returned from CompleteMultipartUpload.
+///
+/// AWS returns the composite digest, but some S3-compatible providers return a
+/// full-object digest instead (`FULL_OBJECT`) or omit the type. Both are
+/// locally computed from the exact bytes read through the upload handle, so
+/// either proves the completion. A missing value is still a failure (M6).
+fn verify_multipart_completion_checksum(
+    actual: Option<&str>,
+    actual_type: Option<&ChecksumType>,
+    composite_expected: &str,
+    full_object_expected: &str,
+) -> Result<(), String> {
+    match actual_type {
+        Some(ChecksumType::Composite) => {
+            verify_upload_checksum_value(actual, composite_expected, "Multipart upload")
+        }
+        Some(ChecksumType::FullObject) => {
+            verify_upload_checksum_value(actual, full_object_expected, "Multipart upload")
+        }
+        _ => {
+            // Type omitted (or a newer variant): the value must still match one
+            // of the two digests this client computed. Try the AWS shape first
+            // so a provider that does label its value gets the same error
+            // message it would have before.
+            match verify_upload_checksum_value(actual, composite_expected, "Multipart upload") {
+                Ok(()) => Ok(()),
+                Err(composite_error) => {
+                    verify_upload_checksum_value(actual, full_object_expected, "Multipart upload")
+                        .map_err(|_| composite_error)
+                }
+            }
+        }
+    }
+}
+
 /// A provider-returned ETag is usable as content proof only when it is the
 /// 32-hex-digit MD5 of the bytes (single-part PutObject on most providers).
 fn etag_is_md5_of(etag: Option<&str>, md5_hex: &str) -> Option<bool> {
@@ -1008,19 +1043,12 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
         }
     };
     if let Some((_, response_checksum)) = composite_checksum.as_ref() {
-        verify_upload_checksum_value(
+        verify_multipart_completion_checksum(
             complete_output.checksum_sha256(),
+            complete_output.checksum_type(),
             response_checksum,
-            "Multipart upload",
+            &baseline_checksum.hex,
         )?;
-        if complete_output.checksum_type() != Some(&ChecksumType::Composite) {
-            return Err(encode_transfer_error(
-                "checksum_mismatch",
-                false,
-                None,
-                "Multipart upload returned an unexpected checksum type.".to_string(),
-            ));
-        }
     }
 
     Ok(())
@@ -1203,6 +1231,59 @@ mod e2e_multipart_recovery {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
+
+    #[test]
+    fn multipart_completion_accepts_composite_full_object_and_untyped_checksums() {
+        const COMPOSITE: &str = "composite";
+        const FULL: &str = "full-object";
+
+        // AWS shape.
+        assert!(super::verify_multipart_completion_checksum(
+            Some(COMPOSITE),
+            Some(&ChecksumType::Composite),
+            COMPOSITE,
+            FULL,
+        )
+        .is_ok());
+        // Providers that return a full-object digest (M6).
+        assert!(super::verify_multipart_completion_checksum(
+            Some(FULL),
+            Some(&ChecksumType::FullObject),
+            COMPOSITE,
+            FULL,
+        )
+        .is_ok());
+        // Type omitted: either locally computed digest is proof.
+        assert!(super::verify_multipart_completion_checksum(
+            Some(COMPOSITE),
+            None,
+            COMPOSITE,
+            FULL,
+        )
+        .is_ok());
+        assert!(
+            super::verify_multipart_completion_checksum(Some(FULL), None, COMPOSITE, FULL,).is_ok()
+        );
+        // A value matching neither digest, or no value at all, still fails.
+        assert!(
+            super::verify_multipart_completion_checksum(Some("other"), None, COMPOSITE, FULL,)
+                .is_err()
+        );
+        assert!(super::verify_multipart_completion_checksum(
+            Some(FULL),
+            Some(&ChecksumType::Composite),
+            COMPOSITE,
+            FULL,
+        )
+        .is_err());
+        assert!(super::verify_multipart_completion_checksum(
+            None,
+            Some(&ChecksumType::FullObject),
+            COMPOSITE,
+            FULL,
+        )
+        .is_err());
+    }
 
     #[test]
     fn only_md5_shaped_etags_are_content_proof_for_a_single_put() {

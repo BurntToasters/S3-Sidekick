@@ -1019,6 +1019,28 @@ pub(super) async fn copy_object_multipart(
             return Err(format!("Failed to complete multipart copy: {}", e));
         }
     };
+    // A provider can ignore `copy_source_if_match` on UploadPartCopy. Re-HEAD
+    // the source after completion: a changed generation means the destination
+    // may mix bytes from two versions, even though completion succeeded (M6).
+    let source_still_matches = current_identity_matches(
+        client,
+        src_bucket,
+        source_key,
+        info.etag.as_deref().unwrap_or(""),
+        info.version_id.as_deref(),
+        info.version_id.as_deref(),
+        None,
+        cancel,
+    )
+    .await?;
+    if source_still_matches != Some(true) {
+        return Err(format!(
+            "Source '{}' changed while the multipart copy was running, so the copy may contain \
+             bytes from more than one generation and was not reported as safe. Destination '{}' \
+             was retained; verify it before retrying.",
+            source_key, dest_key
+        ));
+    }
     if let Some(etag) = complete_output.e_tag().filter(|value| !value.is_empty()) {
         return Ok(DestinationIdentity {
             etag: etag.to_string(),

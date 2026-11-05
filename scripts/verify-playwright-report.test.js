@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { verifyPlaywrightReport } from "./verify-playwright-report.mjs";
+import {
+  playwrightTitlesDigest,
+  verifyPlaywrightReport,
+} from "./verify-playwright-report.mjs";
 
 function fixtureReport() {
   const spec = (file, title) => ({
@@ -47,6 +50,23 @@ test("Playwright gate rejects a report from a different commit", () => {
   assert.ok(
     problems.some((problem) => /does not belong to this tree/.test(problem)),
   );
+});
+
+test("Playwright gate binds the exact suite titles", () => {
+  const report = fixtureReport();
+  const digest = playwrightTitlesDigest(report);
+  assert.deepEqual(
+    verifyPlaywrightReport(report, { ...manifest, titlesSha256: digest }),
+    [],
+  );
+
+  const renamed = fixtureReport();
+  renamed.suites[0].specs[0].title = "renamed test";
+  const problems = verifyPlaywrightReport(renamed, {
+    ...manifest,
+    titlesSha256: digest,
+  });
+  assert.ok(problems.some((problem) => /titles digest/.test(problem)));
 });
 
 test("Playwright gate rejects a stale report", () => {

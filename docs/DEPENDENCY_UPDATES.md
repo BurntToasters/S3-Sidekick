@@ -36,3 +36,13 @@ No RustSec ignore list is added. The existing informational warnings for `proc-m
 Run `npm run test:e2e:cargo-security` to resolve all target dependencies with `--locked`, confirm patched TLS and removal of zip, verify updater features/artifact configuration, and run the real RustSec scanner with no ignored advisories. This executes no dependency build scripts or procedural macros. The repeatable evidence is `test-results/cargo-security/report.json`, including the lockfile SHA-256, plus full Cargo metadata and audit JSON. CI runs this on Linux, Windows, and macOS and uploads the reports. Native builds and signed updater installation still need CI/platform validation; this security check does not certify those flows.
 
 `scripts/cargo-safe-update.mjs` and `scripts/check-cargo-update-policy.mjs` are a temporary stand-in for a minimum publish age in Cargo itself. Remove both (and restore direct `cargo update` call sites) once the supported stable Cargo ships a global minimum publish age.
+
+## CI tool installation
+
+CI installs Rust helper binaries (`cargo-audit`, `cargo-llvm-cov`,
+`tauri-driver`) with a pinned `--version` and `--locked`. Cargo verifies each
+crate against the checksums in the crates.io index; there is no separate
+signature layer for crates outside the index. npm tooling is installed with a
+pinned version and the workflow runs `npm audit signatures` for the project
+dependencies. Rotate a pinned tool by changing its version here and in
+`.github/workflows/ci.yml` in the same change, then re-run the gate.

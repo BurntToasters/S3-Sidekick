@@ -451,7 +451,12 @@ function main({
   runner(
     "scriptTests",
     "node",
-    ["--test", "scripts/github-cli.test.cjs", "scripts/test-all.test.js"],
+    [
+      "--test",
+      "scripts/github-cli.test.cjs",
+      "scripts/test-all.test.js",
+      "scripts/license-policy.test.mjs",
+    ],
     null,
     results,
   );

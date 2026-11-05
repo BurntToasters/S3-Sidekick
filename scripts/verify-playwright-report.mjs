@@ -2,6 +2,7 @@
 // Release gate for the Playwright suite. A green run is not enough: every spec
 // in tests/browser/required-specs.json must run on every required project with
 // its expected test count, and no test may be skipped or retried.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,22 @@ function walkSuites(suites, visit) {
     visit(suite);
     walkSuites(suite.suites, visit);
   }
+}
+
+/** Stable digest over every (file, title) pair in a Playwright report. */
+export function playwrightTitlesDigest(report) {
+  const titles = new Set();
+  walkSuites(report?.suites, (suite) => {
+    for (const spec of Array.isArray(suite.specs) ? suite.specs : []) {
+      const file = String(spec.file || suite.file || "");
+      if (!file) continue;
+      titles.add(`${file}\u0000${spec.title ?? ""}`);
+    }
+  });
+  return crypto
+    .createHash("sha256")
+    .update([...titles].sort().join("\n"))
+    .digest("hex");
 }
 
 export function verifyPlaywrightReport(report, manifest) {
@@ -62,7 +79,9 @@ export function verifyPlaywrightReport(report, manifest) {
   // Bind the report to the working tree it was produced from. A substituted
   // or stale report fails even when its counts happen to match (H11).
   const expectedCommit =
-    typeof manifest?.commit === "string" ? manifest.commit : null;
+    typeof manifest?.commit === "string" && manifest.commit
+      ? manifest.commit
+      : process.env.GITHUB_SHA || null;
   if (expectedCommit) {
     const reportedCommit = String(report.config?.metadata?.commit ?? "");
     if (reportedCommit && reportedCommit !== expectedCommit) {
@@ -169,6 +188,16 @@ export function verifyPlaywrightReport(report, manifest) {
   }
   if (Number(stats.flaky || 0) !== 0) {
     problems.push(`Playwright had ${stats.flaky} flaky test(s).`);
+  }
+  // Bind the exact titles, not just per-file counts: a same-count suite with
+  // renamed or replaced tests must not pass the release gate (H11/M13).
+  if (typeof manifest.titlesSha256 === "string" && manifest.titlesSha256) {
+    const digest = playwrightTitlesDigest(report);
+    if (digest !== manifest.titlesSha256) {
+      problems.push(
+        `Playwright titles digest is ${digest}, expected ${manifest.titlesSha256}; the suite titles changed or the report was substituted. Run npm run test:ui:titles to update the manifest intentionally.`,
+      );
+    }
   }
   // Recency window: a report older than 7 days cannot be release evidence.
   const startIso = typeof stats.startTime === "string" ? stats.startTime : null;

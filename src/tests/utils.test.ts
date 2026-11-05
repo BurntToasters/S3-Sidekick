@@ -234,6 +234,14 @@ describe("safeFileName", () => {
     expect(safeFileName("lpt9", "windows")).toBe("%6Cpt9");
   });
 
+  it("keeps names portable when the folder is later used from Windows (M10)", () => {
+    expect(safeFileName("a:b.txt", "macos")).toBe("a%3Ab.txt");
+    expect(safeFileName("what?.txt", "linux")).toBe("what%3F.txt");
+    expect(safeFileName("report.", "macos")).toBe("report%2E");
+    expect(safeFileName("NUL.txt", "linux")).toBe("%4EUL.txt");
+    expect(safeFileName("100%.txt", "macos")).toBe("100%25.txt");
+  });
+
   it("folds Unicode to NFC", () => {
     expect(safeFileName("cafe\u0301.txt", "macos")).toBe("caf\u00e9.txt");
   });

@@ -223,6 +223,33 @@ fn is_macos_bundle(path: &std::path::Path) -> bool {
 /// `explorer` / `open` / `xdg-open` means the shell's default handler runs it,
 /// which turned this command into a local code-execution primitive reachable
 /// from the webview. The only caller ever needed to open a folder.
+/// Resolve the path handed to the OS launcher.
+///
+/// The grant already checked its canonical identity at use time, but an
+/// ancestor swapped for a symlink between that check and the spawn can still
+/// redirect the launcher. Re-resolve immediately before building argv and
+/// launch the canonical path, which has no symlink components at this point
+/// (M9). A final-component symlink is refused rather than resolved.
+fn resolve_launch_target(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|err| format!("Failed to resolve local path '{}': {}", path.display(), err))?;
+    if canonical
+        .symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Refusing to launch a symbolic link: {}",
+            canonical.display()
+        ));
+    }
+    #[cfg(windows)]
+    let canonical = std::path::PathBuf::from(crate::strip_extended_windows_prefix(
+        &canonical.to_string_lossy(),
+    ));
+    Ok(canonical)
+}
+
 #[tauri::command]
 pub(crate) fn open_local_path(token: String) -> Result<(), String> {
     // Only a path the user chose in a native picker (or a completed download's
@@ -250,6 +277,14 @@ pub(crate) fn open_local_path(token: String) -> Result<(), String> {
     {
         return Err(format!(
             "Refusing to open a symbolic link: {}",
+            parsed.display()
+        ));
+    }
+    // Resolve ancestors at the last moment and launch the canonical path.
+    let parsed = resolve_launch_target(&parsed)?;
+    if !parsed.is_dir() {
+        return Err(format!(
+            "Only folders can be opened, not individual files: {}",
             parsed.display()
         ));
     }
@@ -338,6 +373,7 @@ fn reveal_plan(platform: RevealPlatform, raw: &str) -> Result<RevealPlan, String
             target.display()
         ));
     }
+    let target = resolve_launch_target(&target)?;
 
     match platform {
         RevealPlatform::MacOs => {
@@ -580,16 +616,14 @@ mod tests {
     fn reveal_local_plan_macos_selects_the_file_with_open_r() {
         let dir = reveal_scratch("macos-file");
         let file = reveal_file(&dir, "report.csv");
+        let expected = std::fs::canonicalize(&file).unwrap();
         let result = reveal_plan(RevealPlatform::MacOs, &file.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         let plan = result.expect("a file is revealable on macOS");
         assert_eq!(plan.program, "open");
         assert_eq!(
             plan.args,
-            vec![
-                std::ffi::OsString::from("-R"),
-                file.clone().into_os_string()
-            ]
+            vec![std::ffi::OsString::from("-R"), expected.into_os_string()]
         );
     }
 
@@ -608,6 +642,7 @@ mod tests {
     fn reveal_local_plan_windows_uses_explorer_select() {
         let dir = reveal_scratch("windows-file");
         let file = reveal_file(&dir, "report.csv");
+        let expected = std::fs::canonicalize(&file).unwrap();
         let result = reveal_plan(RevealPlatform::Windows, &file.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         let plan = result.expect("a file is revealable on Windows");
@@ -616,7 +651,7 @@ mod tests {
             plan.args,
             vec![std::ffi::OsString::from(format!(
                 "/select,{}",
-                file.display()
+                expected.display()
             ))]
         );
     }
@@ -625,28 +660,34 @@ mod tests {
     fn reveal_local_plan_linux_opens_the_parent_folder_never_the_file() {
         let dir = reveal_scratch("linux-parent");
         let file = reveal_file(&dir, "report.csv");
+        let expected = std::fs::canonicalize(&dir).unwrap();
         let result = reveal_plan(RevealPlatform::Linux, &file.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         let plan = result.expect("a file's parent folder is revealable on Linux");
         assert_eq!(plan.program, "xdg-open");
-        assert_eq!(plan.args, vec![dir.clone().into_os_string()]);
+        assert_eq!(plan.args, vec![expected.into_os_string()]);
     }
 
     #[cfg(unix)]
     #[test]
-    fn reveal_local_plan_linux_refuses_a_symlinked_parent() {
+    fn reveal_local_plan_linux_opens_the_resolved_parent_for_a_symlinked_ancestor() {
+        // A symlinked ancestor is resolved to the canonical folder the grant
+        // already pinned. Launching the canonical path cannot be redirected by
+        // swapping the link name afterwards (M9).
         let dir = reveal_scratch("linux-symlink-parent");
         let real = dir.join("real");
         std::fs::create_dir_all(&real).expect("create real folder");
         reveal_file(&real, "report.csv");
         let link = dir.join("link");
         std::os::unix::fs::symlink(&real, &link).expect("create folder symlink");
-        let result = reveal_plan(
+        let expected = std::fs::canonicalize(&real).unwrap();
+        let plan = reveal_plan(
             RevealPlatform::Linux,
             &link.join("report.csv").to_string_lossy(),
-        );
+        )
+        .expect("a symlinked ancestor resolves to the real folder");
         let _ = std::fs::remove_dir_all(&dir);
-        let err = result.expect_err("a symlinked parent folder must be refused");
-        assert!(err.contains("symbolic link"), "unexpected error: {}", err);
+        assert_eq!(plan.program, "xdg-open");
+        assert_eq!(plan.args, vec![expected.into_os_string()]);
     }
 }

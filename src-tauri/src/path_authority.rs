@@ -66,9 +66,11 @@ pub(crate) enum GrantUse {
 impl GrantPurpose {
     pub(crate) fn allows(self, use_: GrantUse) -> bool {
         match use_ {
-            // Existence and free-space probes reveal nothing beyond the path
-            // the user already chose and never mutate it.
-            GrantUse::QueryPath => true,
+            // Free-space probes are only meaningful for a download destination
+            // (the preflight asks whether that volume can hold the queued
+            // files). Reusing an upload or reveal token as a path-existence
+            // oracle is not a capability the picker offered (M8).
+            GrantUse::QueryPath => self == GrantPurpose::DownloadDestination,
             GrantUse::Reveal => !matches!(self, GrantPurpose::ExportText),
             GrantUse::ReadUploadFile => self == GrantPurpose::UploadFile,
             GrantUse::ScanUploadRoot => self == GrantPurpose::UploadRoot,
@@ -318,9 +320,10 @@ fn validate_child_name(name: &str) -> Result<&str, String> {
     let mut components = Path::new(trimmed).components();
     match (components.next(), components.next()) {
         (Some(Component::Normal(_)), None) => {
-            // Reuse the platform name rules so a download name cannot become a
-            // Windows device name, trailing-dot alias, or ADS path.
-            crate::validate_windows_file_name(Path::new(trimmed))?;
+            // Enforce Windows-portable rules on every host so a download
+            // name cannot become an unopenable device name, trailing-dot
+            // alias, or ADS path if the folder is later used from Windows.
+            crate::validate_portable_child_name(trimmed)?;
             Ok(trimmed)
         }
         _ => Err(format!(
@@ -593,12 +596,12 @@ mod tests {
         std::fs::write(&file, b"a").unwrap();
         let token = mint(GrantPurpose::UploadFile, &file, false, Some(1));
         assert!(authorize(&token, GrantUse::ReadUploadFile).is_ok());
-        assert!(authorize(&token, GrantUse::QueryPath).is_ok());
         assert!(authorize(&token, GrantUse::Reveal).is_ok());
         for denied in [
             GrantUse::ScanUploadRoot,
             GrantUse::WriteDownload,
             GrantUse::ExportText,
+            GrantUse::QueryPath,
         ] {
             let err = authorize(&token, denied).expect_err("purpose must bind the grant");
             assert!(err.contains("cannot be used"), "unexpected error: {}", err);
@@ -649,6 +652,22 @@ mod tests {
             );
         }
         assert_eq!(validate_child_name("photo 1.png").unwrap(), "photo 1.png");
+    }
+
+    #[test]
+    fn child_names_are_windows_portable_on_every_host() {
+        // A download saved on macOS/Linux must still open from Windows (M10).
+        for name in ["CON.txt", "lpt9", "report.", "a:b.txt", "a?.txt"] {
+            assert!(
+                validate_child_name(name).is_err(),
+                "non-portable name must be rejected: {:?}",
+                name
+            );
+        }
+        // The boundary trims surrounding whitespace before validating, so a
+        // trailing space is normalized away rather than saved verbatim.
+        assert_eq!(validate_child_name("report ").unwrap(), "report");
+        assert_eq!(validate_child_name("report.txt").unwrap(), "report.txt");
     }
 
     #[test]

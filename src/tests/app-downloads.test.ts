@@ -415,9 +415,11 @@ describe("download child names and shell startup destinations", () => {
     const entries = mockEnqueueDownloads.mock.calls[0]?.[0] as Array<{
       destinationName: string;
     }>;
+    // A trailing space is encoded rather than silently trimmed, so the two
+    // source keys stay distinct and both names remain Windows-portable (M10).
     expect(entries.map((entry) => entry.destinationName)).toEqual([
+      "report.txt%20",
       "report.txt",
-      "report (2).txt",
       "back%5Cslash.txt",
     ]);
   });

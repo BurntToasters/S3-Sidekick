@@ -408,10 +408,12 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # Report only: no threshold yet. Establish a baseline before gating.
+      # Floor ratchet (H11). Baseline at the first gated run: 46.61% regions,
+      # 46.13% functions, 42.82% lines. Gate lines at 40% so ordinary changes
+      # cannot regress silently while the number is raised over time.
       - name: Measure Rust coverage
         run: |
-          cargo llvm-cov --locked --manifest-path src-tauri/Cargo.toml --summary-only | tee rust-coverage.txt
+          cargo llvm-cov --locked --manifest-path src-tauri/Cargo.toml --summary-only --fail-under-lines 40 | tee rust-coverage.txt
           cargo llvm-cov report --manifest-path src-tauri/Cargo.toml --lcov --output-path rust-coverage.lcov
           tail -n 3 rust-coverage.txt >> "$GITHUB_STEP_SUMMARY"
 

@@ -450,6 +450,14 @@ pub(super) async fn expected_download_checksum(
         .filter(|value| !value.is_empty())
     {
         request = request.if_match(etag);
+    } else if let Some(version_id) = initial_head
+        .version_id()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        // Version-pinned provider without an ETag (M6): read the checksum for
+        // the same immutable generation instead of an unpinned current object.
+        request = request.version_id(version_id);
     }
     let request = request.send();
     let checksum_head = tokio::select! {

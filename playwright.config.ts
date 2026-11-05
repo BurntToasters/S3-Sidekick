@@ -5,6 +5,9 @@ const jsonReportPath =
   "test-results/playwright-report.json";
 
 export default defineConfig({
+  // Bind the JSON evidence to the CI commit. Local runs may omit it; the
+  // verifier compares whatever the report carries to GITHUB_SHA (H11).
+  metadata: process.env.GITHUB_SHA ? { commit: process.env.GITHUB_SHA } : {},
   testDir: "./tests/browser",
   // Keep Playwright's automatic cleanup away from repeatable MinIO and script
   // E2E artifacts stored directly under test-results/.

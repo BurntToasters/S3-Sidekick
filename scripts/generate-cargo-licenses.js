@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDirectExecution } from "./direct-execution.js";
+import { licenseProblems, ownPackagePrefix } from "./license-policy.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(scriptDir);
@@ -148,6 +149,34 @@ function stripNpmLicensePaths() {
   return Object.keys(sanitized).length;
 }
 
+function enforceLicensePolicy() {
+  const packageJson = JSON.parse(
+    readFileSync(join(repoRoot, "package.json"), "utf8"),
+  );
+  const prefix = ownPackagePrefix(packageJson);
+  const problems = [];
+  if (existsSync(npmOutputPath)) {
+    problems.push(
+      ...licenseProblems(JSON.parse(readFileSync(npmOutputPath, "utf8")), {
+        ownPackagePrefix: prefix,
+      }),
+    );
+  }
+  problems.push(
+    ...licenseProblems(JSON.parse(readFileSync(outputPath, "utf8")), {
+      ownPackagePrefix: prefix,
+    }),
+  );
+  if (problems.length > 0) {
+    console.error("Dependency license policy failed:");
+    for (const problem of problems) console.error(`  - ${problem}`);
+    process.exitCode = 1;
+    return false;
+  }
+  console.log("[licenses] Dependency license policy: ok");
+  return true;
+}
+
 function main() {
   const metadata = runCargoMetadata();
   const licenses = stripLicensePaths(buildCargoLicenses(metadata));
@@ -163,6 +192,7 @@ function main() {
       `[licenses:cargo] Removed build-host paths from ${npmEntries} npm entries`,
     );
   }
+  enforceLicensePolicy();
 }
 
 if (isDirectExecution(import.meta.url)) {

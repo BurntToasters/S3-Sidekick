@@ -914,63 +914,78 @@ pub(crate) fn validate_windows_file_name(path: &Path) -> Result<(), String> {
             std::path::Component::Normal(os) => os.to_string_lossy().to_string(),
             _ => continue,
         };
-        if name.ends_with(' ') || name.ends_with('.') {
-            return Err(format!(
-                "Path must not end a file or directory name with a space or dot: {}",
-                path.display()
-            ));
-        }
-        if name
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
-        {
-            return Err(format!(
-                "Path contains characters Windows does not allow: {}",
-                path.display()
-            ));
-        }
-        let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-        let reserved = matches!(
-            stem.as_str(),
-            "CON"
-                | "PRN"
-                | "AUX"
-                | "NUL"
-                | "COM1"
-                | "COM2"
-                | "COM3"
-                | "COM4"
-                | "COM5"
-                | "COM6"
-                | "COM7"
-                | "COM8"
-                | "COM9"
-                | "LPT1"
-                | "LPT2"
-                | "LPT3"
-                | "LPT4"
-                | "LPT5"
-                | "LPT6"
-                | "LPT7"
-                | "LPT8"
-                | "LPT9"
-        );
-        if reserved {
-            return Err(format!(
-                "Path uses a Windows reserved device name: {}",
-                path.display()
-            ));
-        }
-        // Check every path segment, not just the file name: a colon in a
-        // parent directory (`dir:stream\file.txt`) is the same ADS syntax.
-        // The drive prefix (`C:`) is a Prefix component, not Normal, so it
-        // is unaffected by this check.
-        if name.contains(':') {
-            return Err(format!(
-                "Path must not contain ':' (Alternate Data Stream syntax): {}",
-                path.display()
-            ));
-        }
+        validate_portable_component(&name, path)?;
+    }
+    Ok(())
+}
+
+/// Windows-portable rules for a renderer-supplied child name.
+///
+/// A name saved on macOS/Linux must still be openable if the folder is later
+/// used from Windows, so download child names enforce these rules on every
+/// host. The full user path check above stays Windows-only: `:` and a trailing
+/// dot are legitimate on other platforms and the user explicitly picked that
+/// path (M10).
+pub(crate) fn validate_portable_child_name(name: &str) -> Result<(), String> {
+    validate_portable_component(name, Path::new(name))
+}
+
+fn validate_portable_component(name: &str, display: &Path) -> Result<(), String> {
+    if name.ends_with(' ') || name.ends_with('.') {
+        return Err(format!(
+            "Path must not end a file or directory name with a space or dot: {}",
+            display.display()
+        ));
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+    {
+        return Err(format!(
+            "Path contains characters Windows does not allow: {}",
+            display.display()
+        ));
+    }
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if reserved {
+        return Err(format!(
+            "Path uses a Windows reserved device name: {}",
+            display.display()
+        ));
+    }
+    // Check every path segment, not just the file name: a colon in a parent
+    // directory (`dir:stream\file.txt`) is the same ADS syntax. The drive
+    // prefix (`C:`) is a Prefix component, not Normal, so it is unaffected.
+    if name.contains(':') {
+        return Err(format!(
+            "Path must not contain ':' (Alternate Data Stream syntax): {}",
+            display.display()
+        ));
     }
     Ok(())
 }
@@ -4187,10 +4202,10 @@ mod tests {
 
         let upload_root =
             path_authority::mint(path_authority::GrantPurpose::UploadRoot, &dir, true, None);
-        assert!(
-            path_exists(upload_root.clone(), None).unwrap(),
-            "the exact granted path stays queryable"
-        );
+        // An upload grant is not a free-space or child-existence oracle (M8).
+        let err = path_exists(upload_root.clone(), None)
+            .expect_err("an upload-root grant must not answer a path query");
+        assert!(err.contains("cannot be used"), "unexpected error: {}", err);
         let err = path_exists(upload_root, Some("probe.txt".to_string()))
             .expect_err("an upload-root grant must not become a child oracle");
         assert!(err.contains("cannot be used"), "unexpected error: {}", err);

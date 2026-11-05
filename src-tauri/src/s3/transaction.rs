@@ -594,6 +594,28 @@ pub(crate) async fn e2e_delete_move_receipts_checked(
     delete_move_receipts_checked(client, src_bucket, dst_bucket, receipts, provider, cancel).await
 }
 
+/// Whether a HEAD response still describes the expected generation.
+///
+/// An empty expected ETag is acceptable only when an immutable version ID
+/// pins the object (M6). Without a version, an empty ETag would match any
+/// object and is treated as a mismatch.
+fn generation_matches(
+    expected_etag: &str,
+    expected_version_id: Option<&str>,
+    head_etag: Option<&str>,
+    head_version_id: Option<&str>,
+) -> bool {
+    let etag_matches = if expected_etag.is_empty() {
+        expected_version_id.is_some()
+    } else {
+        head_etag == Some(expected_etag)
+    };
+    let version_matches = expected_version_id
+        .map(|expected| head_version_id == Some(expected))
+        .unwrap_or(true);
+    etag_matches && version_matches
+}
+
 pub(super) async fn current_identity_matches(
     client: &Client,
     bucket: &str,
@@ -616,14 +638,16 @@ pub(super) async fn current_identity_matches(
 
     match result {
         Ok(head) => {
-            let etag_matches = head.e_tag() == Some(expected_etag);
-            let version_matches = expected_version_id
-                .map(|expected| head.version_id() == Some(expected))
-                .unwrap_or(true);
+            let generation_matches = generation_matches(
+                expected_etag,
+                expected_version_id,
+                head.e_tag(),
+                head.version_id(),
+            );
             let fingerprint_matches = expected_fingerprint
                 .map(|expected| head_generation_fingerprint(&head) == expected)
                 .unwrap_or(true);
-            Ok(Some(etag_matches && version_matches && fingerprint_matches))
+            Ok(Some(generation_matches && fingerprint_matches))
         }
         Err(err) if is_not_found(&err) => Ok(None),
         Err(err) => Err(format!("Failed to verify '{}': {}", key, err)),
@@ -657,11 +681,12 @@ pub(super) async fn current_source_identity_matches(
         Err(err) if is_not_found(&err) => return Ok(None),
         Err(err) => return Err(format!("Failed to verify '{}': {}", key, err)),
     };
-    let head_matches = head.e_tag() == Some(expected_etag)
-        && expected_version_id
-            .map(|expected| head.version_id() == Some(expected))
-            .unwrap_or(true)
-        && head_generation_fingerprint(&head) == expected_head_fingerprint;
+    let head_matches = generation_matches(
+        expected_etag,
+        expected_version_id,
+        head.e_tag(),
+        head.version_id(),
+    ) && head_generation_fingerprint(&head) == expected_head_fingerprint;
     if !head_matches {
         return Ok(Some(false));
     }
@@ -1225,5 +1250,22 @@ pub(super) async fn delete_move_receipts_checked(
             "Move receipts mix versioned and unversioned sources; source deletion was refused."
                 .to_string(),
         )
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::generation_matches;
+
+    #[test]
+    fn generation_matching_accepts_version_without_etag_but_never_etag_alone() {
+        assert!(generation_matches("etag-1", None, Some("etag-1"), None));
+        assert!(!generation_matches("etag-1", None, Some("etag-2"), None));
+        // Version-only providers: the immutable version pins the bytes (M6).
+        assert!(generation_matches("", Some("v1"), None, Some("v1")));
+        assert!(!generation_matches("", Some("v1"), None, Some("v2")));
+        // An empty ETag without a version must never match anything.
+        assert!(!generation_matches("", None, None, None));
+        assert!(!generation_matches("", None, Some("etag"), None));
     }
 }
