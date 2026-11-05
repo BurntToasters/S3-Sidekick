@@ -6,7 +6,7 @@ authors = ["BurntToasters <code@rosie.run>"]
 license = "MPL-2.0"
 edition = "2021"
 # MSRV floor tracks the pinned release toolchain below (npm run rust:update).
-rust-version = "1.99.1"
+rust-version = "1.98.0"
 
 [build-dependencies]
 tauri-build = { version = "=2.7.4", features = [] }

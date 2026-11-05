@@ -672,6 +672,13 @@ async function click(webDriver, id) {
     STEP_TIMEOUT_MS,
   );
   await webDriver.wait(until.elementIsVisible(element), STEP_TIMEOUT_MS);
+  // Center the target first: the fixed status bar can overlap an action row
+  // that WebDriver scrolled only to the viewport edge, which makes click()
+  // retry until the step timeout.
+  await webDriver.executeScript(
+    "arguments[0].scrollIntoView({block: 'center', inline: 'center'});",
+    element,
+  );
   await element.click();
 }
 
