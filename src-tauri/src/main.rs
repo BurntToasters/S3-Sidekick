@@ -412,8 +412,26 @@ pub(crate) fn ensure_private_dir(path: &std::path::Path) -> Result<(), String> {
 pub(crate) fn resolved_app_data_dir<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
-    #[cfg(test)]
-    if let Some(dir) = std::env::var_os("S3_SIDEKICK_TEST_APP_DATA") {
+    // Test-only app-data override. Unit tests use it directly; the Windows
+    // startup E2E runs a release exe, so honour it only when the E2E trace flag
+    // is also set. Both variables are process-local environment values, and a
+    // local process that can set them can already write as this user.
+    let test_app_data = {
+        let configured = std::env::var_os("S3_SIDEKICK_TEST_APP_DATA");
+        #[cfg(test)]
+        {
+            configured
+        }
+        #[cfg(not(test))]
+        {
+            if std::env::var("S3_SIDEKICK_E2E_STARTUP_TRACE").as_deref() == Ok("1") {
+                configured
+            } else {
+                None
+            }
+        }
+    };
+    if let Some(dir) = test_app_data {
         let path = std::path::PathBuf::from(dir);
         ensure_private_dir(&path)?;
         return Ok(path);
