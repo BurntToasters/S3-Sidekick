@@ -18,9 +18,9 @@ See [architecture and security notes](docs/ARCHITECTURE.md), [release runbook](d
 
 ## Quickstart (development)
 
-Requirements: Node 24+ (26.13.0 is the tested CI line), Rust 1.98.0, and the
-platform Tauri prerequisites. On Linux, `npm run setup:linux` installs the
-GTK/WebKit and Flatpak toolchain.
+Requirements: Node 24+ (26.13.0 is the tested CI line), the Rust version
+pinned in `rust-toolchain.toml`, and the platform Tauri prerequisites. On
+Linux, `npm run setup:linux` installs the GTK/WebKit and Flatpak toolchain.
 
 ```sh
 npm ci                 # install dependencies
