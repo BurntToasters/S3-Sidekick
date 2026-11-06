@@ -36,8 +36,10 @@ modules:
       build-args:
         - --share=network
       # Prepend so the extension Node wins over any older SDK /usr/bin/node.
-      prepend-path: /run/build/s3-sidekick/npm-global/bin:/usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
+      prepend-path: /run/build/s3-sidekick/cargo/bin:/run/build/s3-sidekick/npm-global/bin:/usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
       env:
+        CARGO_HOME: /run/build/s3-sidekick/cargo
+        RUSTUP_HOME: /run/build/s3-sidekick/rustup
         CARGO_NET_OFFLINE: "true"
         HUSKY: "0"
         npm_config_ignore_scripts: "true"
@@ -52,7 +54,10 @@ modules:
       # is required here or the CLI uses only-if-cached and fails with ENOTCACHED.
       - npm install --global npm@12.2.1 --no-offline --ignore-scripts --engine-strict=false --no-audit --no-fund --prefix /run/build/s3-sidekick/npm-global
       - test "$(npm --version)" = "12.2.1"
-      - rustc --version
+      # The Flathub rust-stable SDK extension lags the pinned toolchain, so
+      # install rustup and the exact pinned compiler inside the sandbox.
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.1 --profile minimal
+      - test "$(rustc --version | cut -d' ' -f2)" = 1.99.1
       - test ! -e .env && test ! -e .env.local && test ! -e .env.production
       - npm run sync-version
       - npm run licenses
