@@ -34,15 +34,16 @@ import {
 } from "./cargo-safe-update.mjs";
 import {
   MINIMUM_NPM_VERSION,
-  STABLE_RUST_CHANNEL,
   commandRequiresShell,
-  hasStableRustToolchain,
+  hasRustToolchain,
   isSupportedNodeVersion,
   isVersionAtLeast,
   npmUpdateArguments,
   parseVersion,
+  readPinnedRustToolchain,
   restoreSnapshot,
 } from "./npm-safe-update.mjs";
+import { readRustToolchainConfig } from "./rust-toolchain.mjs";
 
 // Skip real Cargo integration tests if SKIP_CARGO_INTEGRATION=1
 const SKIP_CARGO_INTEGRATION = process.env.SKIP_CARGO_INTEGRATION === "1";
@@ -1576,13 +1577,24 @@ test("45. update environment versions fail closed at exact boundaries", () => {
   assert.equal(isSupportedNodeVersion("26.13.0"), true);
   assert.equal(isSupportedNodeVersion("27.0.0"), true);
   assert.throws(() => parseVersion("latest"), /Invalid semantic version/);
+  const pinnedRust = readPinnedRustToolchain();
+  assert.match(pinnedRust, /^\d+\.\d+\.\d+$/u);
   assert.equal(
-    hasStableRustToolchain(
-      `${STABLE_RUST_CHANNEL}-aarch64-apple-darwin (default)\n`,
+    hasRustToolchain(
+      `${pinnedRust}-aarch64-apple-darwin (default)\n`,
+      pinnedRust,
     ),
     true,
   );
-  assert.equal(hasStableRustToolchain("1.97.1-aarch64-apple-darwin\n"), false);
+  assert.equal(hasRustToolchain(`${pinnedRust} (default)\n`, pinnedRust), true);
+  assert.equal(
+    hasRustToolchain("1.97.1-aarch64-apple-darwin\n", pinnedRust),
+    false,
+  );
+  assert.equal(
+    hasRustToolchain(`${pinnedRust}-aarch64-apple-darwin\n`, "stable"),
+    false,
+  );
 });
 
 test("46. npm lock update cannot install packages or run lifecycle scripts", () => {
@@ -1684,7 +1696,7 @@ test(
           env: {
             ...process.env,
             CARGO_HOME: userCargoHome,
-            RUSTUP_TOOLCHAIN: STABLE_RUST_CHANNEL,
+            RUSTUP_TOOLCHAIN: readPinnedRustToolchain(),
           },
           encoding: "utf8",
           timeout: 120_000,
@@ -1772,4 +1784,89 @@ test("51. npm rollback refuses to overwrite a concurrent package-lock edit", () 
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("52. rust toolchain pin: parses CRLF, comments, profile, and components", () => {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "rust-pin-parse-"));
+  try {
+    writeFileSync(
+      path.join(tempRoot, "rust-toolchain.toml"),
+      '[toolchain]\r\nchannel = "9.8.7" # exact pin\r\nprofile = "minimal"\r\ncomponents = [\r\n  "cargo", # compiler\r\n  "clippy",\r\n  "rustfmt",\r\n]\r\n',
+    );
+    assert.deepEqual(readRustToolchainConfig(tempRoot), {
+      channel: "9.8.7",
+      profile: "minimal",
+      components: ["cargo", "clippy", "rustfmt"],
+    });
+    assert.equal(readPinnedRustToolchain(tempRoot), "9.8.7");
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("53. rust toolchain pin: fails closed for missing, floating, and malformed pins", () => {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "rust-pin-invalid-"));
+  const pinPath = path.join(tempRoot, "rust-toolchain.toml");
+  try {
+    assert.throws(
+      () => readRustToolchainConfig(tempRoot),
+      /Rust toolchain pin is missing/,
+    );
+
+    writeFileSync(pinPath, '[toolchain]\nchannel = "stable"\n');
+    assert.throws(
+      () => readRustToolchainConfig(tempRoot),
+      /must pin an exact Rust version/,
+    );
+
+    writeFileSync(pinPath, '[toolchain]\nchannel = "1.99"\n');
+    assert.throws(
+      () => readRustToolchainConfig(tempRoot),
+      /must pin an exact Rust version/,
+    );
+
+    writeFileSync(pinPath, '[toolchain]\nprofile = "minimal"\n');
+    assert.throws(
+      () => readRustToolchainConfig(tempRoot),
+      /must pin an exact Rust version/,
+    );
+
+    writeFileSync(
+      pinPath,
+      '[toolchain]\nchannel = "1.2.3"\nchannel = "1.2.4"\n',
+    );
+    assert.throws(
+      () => readRustToolchainConfig(tempRoot),
+      /defines channel more than once/,
+    );
+
+    writeFileSync(
+      pinPath,
+      '[toolchain]\nchannel = "1.2.3"\ncomponents = ["cargo", bare]\n',
+    );
+    assert.throws(() => readRustToolchainConfig(tempRoot), /components/);
+
+    writeFileSync(
+      pinPath,
+      '[toolchain]\nchannel = "1.2.3"\ncomponents = ["cargo"\n',
+    );
+    assert.throws(
+      () => readRustToolchainConfig(tempRoot),
+      /unterminated components array/,
+    );
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("54. src-tauri rust-version equals the rust-toolchain.toml channel", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const channel = readPinnedRustToolchain(root);
+  const manifest = readFileSync(
+    path.join(root, "src-tauri", "Cargo.toml"),
+    "utf8",
+  );
+  const match = manifest.match(/^rust-version\s*=\s*"([^"]+)"/mu);
+  assert.ok(match, "src-tauri/Cargo.toml must declare rust-version");
+  assert.equal(match[1], channel);
 });

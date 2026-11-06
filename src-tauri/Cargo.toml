@@ -5,7 +5,7 @@ description = "Cross-platform desktop client for S3-compatible object storage."
 authors = ["BurntToasters <code@rosie.run>"]
 license = "MPL-2.0"
 edition = "2021"
-# MSRV floor tracks the pinned release toolchain below (npm run rust:update).
+# MSRV floor must equal the rust-toolchain.toml channel; the pin test enforces it.
 rust-version = "1.99.1"
 
 [build-dependencies]

@@ -18,7 +18,6 @@ concurrency:
 env:
   NODE_VERSION: "26.13.0"
   NPM_VERSION: "12.2.1"
-  RUST_VERSION: "1.99.1"
 
 jobs:
   verify:
@@ -42,10 +41,19 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
 
+      - name: Resolve pinned Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/rust-toolchain.mjs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.version }}
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
@@ -238,10 +246,19 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
 
+      - name: Resolve pinned Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/rust-toolchain.mjs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.version }}
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -305,10 +322,19 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
 
+      - name: Resolve pinned Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/rust-toolchain.mjs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.version }}
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -380,10 +406,19 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
 
+      - name: Resolve pinned Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/rust-toolchain.mjs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.version }}
           components: llvm-tools-preview
 
       - name: Install Linux dependencies
@@ -443,10 +478,19 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
 
+      - name: Resolve pinned Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/rust-toolchain.mjs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.version }}
           targets: aarch64-pc-windows-msvc
 
       - name: Cache Rust dependencies
@@ -481,10 +525,19 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
 
+      - name: Resolve pinned Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/rust-toolchain.mjs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.version }}
           targets: x86_64-apple-darwin,aarch64-apple-darwin
 
       - name: Cache Rust dependencies
@@ -522,10 +575,19 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
 
+      - name: Resolve pinned Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/rust-toolchain.mjs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.version }}
 
       - name: Install Flatpak toolchain and runtime
         run: |
@@ -562,10 +624,19 @@ jobs:
       - name: Install pinned npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
 
+      - name: Resolve pinned Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/rust-toolchain.mjs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.version }}
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2

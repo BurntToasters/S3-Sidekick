@@ -55,9 +55,14 @@ modules:
       - npm install --global npm@12.2.1 --no-offline --ignore-scripts --engine-strict=false --no-audit --no-fund --prefix /run/build/s3-sidekick/npm-global
       - test "$(npm --version)" = "12.2.1"
       # The Flathub rust-stable SDK extension lags the pinned toolchain, so
-      # install rustup and the exact pinned compiler inside the sandbox.
-      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.1 --profile minimal
-      - test "$(rustc --version | cut -d' ' -f2)" = 1.99.1
+      # install rustup and the exact compiler pinned in rust-toolchain.toml.
+      # One shell keeps the extracted pin alive through the assertion.
+      - |
+        set -eu
+        PINNED="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"[[:space:]]*$/\1/p' rust-toolchain.toml | tr -d '\r' | head -n 1)"
+        test -n "$PINNED"
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$PINNED" --profile minimal
+        test "$(rustc --version | cut -d' ' -f2)" = "$PINNED"
       - test ! -e .env && test ! -e .env.local && test ! -e .env.production
       - npm run sync-version
       - npm run licenses

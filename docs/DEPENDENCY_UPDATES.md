@@ -2,9 +2,9 @@
 
 `npm run u` is a lockfile-only dependency proposal. It does not install npm packages, run npm lifecycle scripts, compile Rust, execute Cargo build scripts or procedural macros, format source files, or run tests.
 
-The command requires Node.js `^24.22.1 || >=26.13.0`, npm 12.2.1 or newer, and an already-installed Rust stable toolchain.
+The command requires Node.js `^24.22.1 || >=26.13.0`, npm 12.2.1 or newer, and the Rust toolchain pinned in `rust-toolchain.toml` to already be installed.
 
-Toolchain pins have one canonical value each. Node's supported floor is `engines.node` in `package.json`; CI's `NODE_VERSION=26.13.0` is the tested release line, and the Node 24 floor is not exercised in CI. The Flatpak sandbox is a documented build-only exception at Node 24.18 (the version in `org.freedesktop.Sdk.Extension.node24//26.08`), not a supported local floor. Rust is pinned by `rust-version` in `src-tauri/Cargo.toml` and installed by `npm run rust:update`; CI's `RUST_VERSION` must match. Update the canonical value first, then the duplicate pins.
+Toolchain pins have one canonical value each. Node's supported floor is `engines.node` in `package.json`; CI's `NODE_VERSION=26.13.0` is the tested release line, and the Node 24 floor is not exercised in CI. The Flatpak sandbox is a documented build-only exception at Node 24.18 (the version in `org.freedesktop.Sdk.Extension.node24//26.08`), not a supported local floor. Rust is pinned by `channel` in `rust-toolchain.toml`, which also carries the profile and components; `npm run rust:update`, the target scripts, CI, and the Flatpak build read that value at runtime, so do not add a Rust version literal elsewhere. `rust-version` in `src-tauri/Cargo.toml` is the MSRV and an intentional duplicate that must equal the channel; the pin test fails when they diverge. To bump Rust, edit `rust-toolchain.toml` and set the guarded MSRV to the same value, then run `npm run test:cargo-safe-update`. Update the canonical value first, then the duplicate pins.
 
 It performs these steps:
 

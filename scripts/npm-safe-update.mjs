@@ -17,11 +17,13 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { isDirectExecution } from "./direct-execution.js";
+import { readPinnedRustToolchain } from "./rust-toolchain.mjs";
+
+export { readPinnedRustToolchain };
 
 export const MINIMUM_NPM_VERSION = "12.2.1";
 export const NPM_UPDATE_QUARANTINE_DAYS = 3;
 export const SUPPORTED_NODE_VERSIONS = "^24.22.1 || >=26.13.0";
-export const STABLE_RUST_CHANNEL = "stable";
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 
 export function parseVersion(value) {
@@ -49,14 +51,15 @@ export function isSupportedNodeVersion(value) {
   return major > 26;
 }
 
-export function hasStableRustToolchain(output, channel = STABLE_RUST_CHANNEL) {
+export function hasRustToolchain(output, toolchain) {
+  if (!/^\d+\.\d+\.\d+$/u.test(String(toolchain))) return false;
   return String(output)
     .split(/\r?\n/u)
     .some(
       (line) =>
-        line === channel ||
-        line.startsWith(`${channel}-`) ||
-        line.startsWith(`${channel} `),
+        line === toolchain ||
+        line.startsWith(`${toolchain}-`) ||
+        line.startsWith(`${toolchain} `),
     );
 }
 
@@ -181,9 +184,10 @@ export function assertUpdateEnvironment() {
   const rustToolchains = run("rustup", ["toolchain", "list"], {
     capture: true,
   });
-  if (!hasStableRustToolchain(rustToolchains)) {
+  const rustToolchain = readPinnedRustToolchain();
+  if (!hasRustToolchain(rustToolchains, rustToolchain)) {
     throw new Error(
-      `Rust ${STABLE_RUST_CHANNEL} must already be installed before updating dependencies`,
+      `Rust ${rustToolchain} must already be installed before updating dependencies`,
     );
   }
 }
