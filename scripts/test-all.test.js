@@ -59,7 +59,7 @@ test("package.json scripts define cargo safe update test and policy check", () =
   const scripts = readPackageJsonScripts();
   assert.equal(
     scripts["test:cargo-safe-update"],
-    "node --test scripts/cargo-safe-update.test.mjs scripts/check-cargo-update-policy.test.mjs",
+    "node --test scripts/cargo-safe-update.test.mjs scripts/check-cargo-update-policy.test.mjs scripts/deps-majors.test.mjs",
   );
   assert.equal(
     scripts["check:cargo-update-policy"],
