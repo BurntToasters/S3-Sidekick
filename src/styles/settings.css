@@ -209,6 +209,50 @@
   background: var(--bg-hover);
 }
 
+/* Security status banner card on the Security tab. */
+.security-status-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+}
+
+.security-status-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--accent-fg);
+  flex-shrink: 0;
+}
+
+.security-status-card__svg {
+  width: 20px;
+  height: 20px;
+}
+
+.security-status-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.security-status-card__title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text);
+}
+
 /* Inline recovery when the Security status request fails. */
 .security-status-card__retry {
   align-self: flex-start;

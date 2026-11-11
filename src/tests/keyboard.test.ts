@@ -153,6 +153,48 @@ describe("keyboard shortcuts", () => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "F5" }));
     expect(handlers.handleRefresh).not.toHaveBeenCalled();
   });
+
+  it("ignores connected-only shortcuts when disconnected and routes Ctrl+F to saved connection filter", async () => {
+    document.body.innerHTML += `
+      <div id="location-omnibar" data-editing="false">
+        <button id="location-edit-btn" type="button">Edit</button>
+        <input id="location-input" hidden />
+      </div>
+      <input id="conn-saved-filter" />
+    `;
+    const { state } = await import("../state.ts");
+    state.platformName = "windows";
+    state.connected = false;
+
+    const browser = await import("../browser.ts");
+    const enterLocationSpy = vi.spyOn(browser, "enterLocationEditMode");
+
+    const handlers = defaultHandlers();
+    await wireKeyboard(handlers);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "l", ctrlKey: true }),
+    );
+    expect(enterLocationSpy).not.toHaveBeenCalled();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "F5" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "F2" }));
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "u", ctrlKey: true }),
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "n", ctrlKey: true }),
+    );
+    expect(handlers.handleRefresh).not.toHaveBeenCalled();
+    expect(handlers.handleRename).not.toHaveBeenCalled();
+    expect(handlers.handleUploadButton).not.toHaveBeenCalled();
+    expect(handlers.handleCreateFolder).not.toHaveBeenCalled();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "f", ctrlKey: true }),
+    );
+    expect(document.activeElement?.id).toBe("conn-saved-filter");
+  });
 });
 
 describe("shortcut catalog", () => {

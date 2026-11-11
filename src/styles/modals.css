@@ -34,9 +34,7 @@ body.titlebar-custom #context-menu {
 }
 
 .modal {
-  background: var(--glass-bg-heavy);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
+  background: var(--bg-elevated);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   width: min(420px, 92vw);
@@ -135,7 +133,7 @@ body.titlebar-custom #context-menu {
   align-items: center;
 }
 
-.settings-panel .setting-item > :last-child {
+.settings-panel .setting-item:not(.security-status-card) > :last-child {
   margin-left: auto;
 }
 

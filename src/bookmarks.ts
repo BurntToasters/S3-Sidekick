@@ -547,9 +547,17 @@ export function renderBookmarkList(
     .map((b, i) => {
       const regionPart = b.region ? ` (${escapeHtml(b.region)})` : "";
       if (layout === "connection") {
-        const provider = escapeHtml(
-          deriveProviderLabelFromEndpoint(b.endpoint),
-        );
+        const rawProvider = deriveProviderLabelFromEndpoint(b.endpoint);
+        const isNamedProvider =
+          rawProvider === "AWS" ||
+          rawProvider === "Spaces" ||
+          rawProvider === "B2" ||
+          rawProvider === "R2" ||
+          rawProvider === "Wasabi" ||
+          rawProvider === "Local";
+        const providerBadge = isNamedProvider
+          ? `<span class="bookmark__provider">${escapeHtml(rawProvider)}</span>`
+          : "";
         const used = lastUsed(b);
         const usedMarker = used
           ? `<span class="bookmark__last-used">${escapeHtml(used)}</span>`
@@ -559,7 +567,7 @@ export function renderBookmarkList(
             <span class="bookmark-item__connect-body">
               <span class="bookmark-item__top">
                 <span class="bookmark__name">${escapeHtml(b.name)}</span>
-                <span class="bookmark__provider">${provider}</span>
+                ${providerBadge}
               </span>
               <span class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</span>
             </span>

@@ -15,6 +15,19 @@
 // - The transfer indeterminate bar freezes at 35% under reduced motion and
 //   reads as real progress.
 // - The settings sidebar landmark has no accessible name.
+// - .form-row[hidden] (#conn-r2-account-row) stays visible with display: grid
+//   because .form-row overrides the UA [hidden] attribute on initial load.
+// - Connecting to an unsaved endpoint renders the hostname twice inside
+//   #conn-switcher-btn (#conn-switcher-name and #conn-switcher-host).
+// - #batch-toolbar uses --bg-active even when data-selection-state="idle".
+// - The docked inspector header squeezes #inspector-header-title, 4 tabs, and
+//   #inspector-close onto one row instead of wrapping .inspector-tabs onto row 2.
+// - #settings-panel-about displays a redundant .settings-instant-note banner
+//   even though About has no settings controls.
+// - Dynamically mounted #share-link-overlay does not trigger body.modal-open
+//   or inert background roots.
+// - Inspector preview [data-preview-copy] and empty-state [data-copy-path] do
+//   not announce clipboard copy in #status.
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import {
   countOf,
@@ -682,5 +695,106 @@ test.describe("theme previews, help tips, header and selects", () => {
         4.5,
       );
     }
+  });
+
+  test("deep UI audit: [hidden] rows, ad-hoc switcher host, idle selection bar, docked inspector header, About note, and share-link modal layer", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await installLayoutTauriMock(page, {
+      objectCount: 2,
+      prefixes: [],
+    });
+    await page.goto("/");
+    await expect(page.locator("#connection-screen")).toBeVisible();
+
+    // 1. #conn-r2-account-row is [hidden] until Cloudflare R2 preset is selected.
+    await expect(page.locator("#conn-r2-account-row")).toBeHidden();
+
+    // 2. Settings About tab has no .settings-instant-note banner, and Security status card is horizontal flex.
+    await openSettingsTab(page, "about");
+    await expect(
+      page.locator("#settings-panel-about .settings-instant-note"),
+    ).toHaveCount(0);
+    await page.locator("#settings-tab-security").click();
+    const cardDisplay = await page
+      .locator("#security-status-card")
+      .evaluate((el) => getComputedStyle(el).display);
+    expect(cardDisplay).toBe("flex");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#settings-overlay")).not.toHaveClass(/active/);
+
+    // 3. Connect to an ad-hoc (unsaved) endpoint: #conn-switcher-host is hidden so the hostname is not duplicated.
+    await connectMockListing(page);
+    await expect(page.locator("#conn-switcher-name")).toHaveText(
+      "layout-test.invalid",
+    );
+    await expect(page.locator("#conn-switcher-host")).toBeHidden();
+
+    // 4. #batch-toolbar uses --bg-surface when idle and --bg-active when selected.
+    const idleBgMatchesActive = await page.evaluate(() => {
+      const bar = document.getElementById("batch-toolbar")!;
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--bg-active)";
+      document.body.appendChild(probe);
+      const activeColor = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return getComputedStyle(bar).backgroundColor === activeColor;
+    });
+    expect(idleBgMatchesActive).toBe(false);
+
+    const firstRow = page.locator(".object-row--file").first();
+    await firstRow.locator(".row-check").check();
+    const selectedBgMatchesActive = await page.evaluate(() => {
+      const bar = document.getElementById("batch-toolbar")!;
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--bg-active)";
+      document.body.appendChild(probe);
+      const activeColor = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return getComputedStyle(bar).backgroundColor === activeColor;
+    });
+    expect(selectedBgMatchesActive).toBe(true);
+
+    // 5. Docked inspector header places title on row 1 and tabs on row 2.
+    await firstRow.locator(".object-name").click();
+    if (await page.locator("#inspector-panel").isHidden()) {
+      await page.locator("#btn-inspector").click();
+    }
+    await expect(page.locator("#inspector-panel")).toBeVisible();
+    const headerLayout = await page.evaluate(() => {
+      const title = document
+        .getElementById("inspector-header-title")!
+        .getBoundingClientRect();
+      const tabs = document
+        .querySelector(".inspector-tabs")!
+        .getBoundingClientRect();
+      return {
+        titleWidth: title.width,
+        tabsBelowTitle: tabs.top >= title.bottom - 2,
+      };
+    });
+    expect(headerLayout.titleWidth).toBeGreaterThan(180);
+    expect(headerLayout.tabsBelowTitle).toBe(true);
+
+    // 6. Dynamically mounted #share-link-overlay sets body.modal-open and inerts #main-layout.
+    await firstRow.click({ button: "right" });
+    await page
+      .locator('.context-menu [role="menuitem"]', {
+        hasText: "Share link\u2026",
+      })
+      .click();
+    await expect(page.locator("#share-link-overlay")).toBeVisible();
+    await expect(page.locator("body")).toHaveClass(/modal-open/);
+    const mainInertWhileOpen = await page
+      .locator("#main-layout")
+      .evaluate((el) => el.closest("[inert]") !== null);
+    expect(mainInertWhileOpen).toBe(true);
+    await page.locator("#share-link-cancel").click();
+    await expect(page.locator("#share-link-overlay")).toHaveCount(0);
+    const mainInertAfterClose = await page
+      .locator("#main-layout")
+      .evaluate((el) => el.closest("[inert]") !== null);
+    expect(mainInertAfterClose).toBe(false);
   });
 });

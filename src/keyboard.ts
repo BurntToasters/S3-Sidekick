@@ -201,14 +201,14 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
 
     if (e.key === "F5" || (accel && key === "r")) {
       e.preventDefault();
-      if (modalOpen) return;
+      if (modalOpen || !state.connected) return;
       void handlers.handleRefresh();
       return;
     }
 
     if (modalOpen) return;
 
-    if (!inInput) {
+    if (!inInput && state.connected) {
       if (e.key === "F2" && selectionCount() === 1) {
         e.preventDefault();
         void handlers.handleRename();
@@ -236,6 +236,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
     // Ctrl+L / Cmd+L opens the location editor (Ctrl also works on macOS, where
     // the browser convention is Cmd+L; both are accepted).
     if (key === "l" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+      if (!state.connected) return;
       e.preventDefault();
       enterLocationEditMode();
       return;
@@ -264,12 +265,12 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
         return;
       }
 
-      if (key === "a" && !inInput) {
+      if (key === "a" && !inInput && state.connected) {
         e.preventDefault();
         handleSelectAll(true);
       }
 
-      if (key === "u" && !inInput) {
+      if (key === "u" && !inInput && state.connected) {
         e.preventDefault();
         if (e.shiftKey) {
           void handlers.handleUploadFolderButton();
@@ -278,7 +279,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
         }
       }
 
-      if (key === "n" && !inInput) {
+      if (key === "n" && !inInput && state.connected) {
         e.preventDefault();
         void handlers.handleCreateFolder();
       }
@@ -291,10 +292,11 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
 
       if (key === "f") {
         e.preventDefault();
+        const targetId = state.connected ? "filter-input" : "conn-saved-filter";
         const filterEl = document.getElementById(
-          "filter-input",
+          targetId,
         ) as HTMLInputElement | null;
-        if (filterEl) {
+        if (filterEl && !filterEl.hidden) {
           filterEl.focus();
           filterEl.select();
         }

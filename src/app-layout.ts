@@ -413,7 +413,7 @@ function focusFirstInOverlay(overlay: HTMLElement): void {
   target.focus();
 }
 
-function syncModalLayerState(): void {
+export function syncModalLayerState(): void {
   const overlay = getActiveModalOverlay();
   const hasActiveOverlay = !!overlay;
 

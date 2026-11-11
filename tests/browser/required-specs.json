@@ -3,7 +3,7 @@
     "chromium",
     "webkit"
   ],
-  "testCount": 806,
+  "testCount": 808,
   "specs": {
     "a01-lock-security.spec.ts": 6,
     "first-run.spec.ts": 4,
@@ -28,7 +28,7 @@
     "ux-lock-view.spec.ts": 20,
     "ux-modal-infra.spec.ts": 28,
     "ux-objects.spec.ts": 24,
-    "ux-polish.spec.ts": 28,
+    "ux-polish.spec.ts": 30,
     "ux-security-panel.spec.ts": 12,
     "ux-selection-safety.spec.ts": 8,
     "ux-settings-p3a.spec.ts": 32,
@@ -39,5 +39,5 @@
     "ux-transfer-engine.spec.ts": 16,
     "ux-visual-tour.spec.ts": 100
   },
-  "titlesSha256": "9dad88798be3441ab9fcb094a9574a0b8704e9dffcc7b77366db5a2593aee5ee"
+  "titlesSha256": "1aa8a69e205b6260b869f4b57001ebbb07fdca8cbc4719abbd3600e78fabe34f"
 }

@@ -1,4 +1,5 @@
 import { state } from "./state.ts";
+import { syncModalLayerState } from "./app-layout.ts";
 import {
   getSelectedFileKeys,
   getSelectedPrefixes,
@@ -418,6 +419,7 @@ function closeShareLinkDialog(
   opener: HTMLElement | null,
 ): void {
   overlay.remove();
+  syncModalLayerState();
   if (opener && document.contains(opener)) opener.focus();
 }
 
@@ -564,6 +566,7 @@ export function openShareLinkDialog(): void {
   });
 
   document.body.appendChild(overlay);
+  syncModalLayerState();
   select.focus();
 }
 

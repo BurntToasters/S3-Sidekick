@@ -48,7 +48,8 @@
 .inspector-panel__header {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  column-gap: var(--space-2);
+  row-gap: var(--space-1-5);
   padding: var(--space-2) 10px;
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
@@ -57,9 +58,10 @@
 }
 
 .inspector-panel__title {
+  order: 1;
   font-size: var(--text-sm);
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--text);
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -67,7 +69,15 @@
   white-space: nowrap;
 }
 
+#inspector-close {
+  order: 2;
+  margin-left: auto;
+}
+
 .inspector-tabs {
+  order: 3;
+  flex-basis: 100%;
+  width: 100%;
   display: flex;
   gap: 2px;
   flex-shrink: 0;

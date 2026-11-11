@@ -1,5 +1,9 @@
 /* Main layout, sidebar, content area, sidebar resizer */
 
+[hidden] {
+  display: none !important;
+}
+
 .main-layout {
   display: flex;
   flex: 1;
@@ -319,11 +323,16 @@
 }
 
 .conn-saved-list .bookmark-item__top .bookmark__name {
+  flex: 1;
   min-width: 0;
 }
 
 .conn-saved-list .bookmark__provider {
   flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-xs);
   font-weight: 600;
   color: var(--text-muted);
@@ -657,6 +666,7 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
 .conn-saved-list .bookmark-item__connect-body {
   display: flex;
   flex-direction: column;
+  flex: 1;
   gap: 2px;
   min-width: 0;
 }

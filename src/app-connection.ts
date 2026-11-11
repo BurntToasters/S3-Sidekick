@@ -413,13 +413,17 @@ export function refreshConnectionSwitcher(): void {
   let host = "";
   if (state.connected) {
     const active = activeSavedConnection();
-    host = endpointHost(state.endpoint);
-    name = active?.name ?? host;
+    const rawHost = endpointHost(state.endpoint);
+    name = active?.name ?? rawHost;
+    host = active && active.name !== rawHost ? rawHost : "";
   } else if (state.connecting) {
     name = "Connecting…";
   }
   if (nameEl) nameEl.textContent = name;
-  if (hostEl) hostEl.textContent = host;
+  if (hostEl) {
+    hostEl.textContent = host;
+    hostEl.hidden = host === "";
+  }
   if (isSwitcherMenuOpen()) renderSwitcherMenu();
 }
 

@@ -1,4 +1,5 @@
 import { invokeS3 } from "./connection.ts";
+import { setStatus } from "./app-status.ts";
 import { escapeHtml, formatSize, basename, friendlyError } from "./utils.ts";
 import { state } from "./state.ts";
 import {
@@ -387,7 +388,9 @@ function wireCopyButton(root: ParentNode, raw: string): void {
     .querySelector<HTMLButtonElement>("[data-preview-copy]")
     ?.addEventListener("click", () => {
       void navigator.clipboard.writeText(raw).then(
-        () => undefined,
+        () => {
+          setStatus("Preview copied to clipboard.", 3000);
+        },
         () => undefined,
       );
     });

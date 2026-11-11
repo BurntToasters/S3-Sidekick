@@ -139,6 +139,7 @@ describe("macOS delete keys and modal Escape routing", () => {
     mockCloseCopyMoveDialog.mockReset();
     renderFixture();
     const { state } = await import("../state.ts");
+    state.connected = true;
     state.platformName = "windows";
     state.selectedKeys.clear();
   });
@@ -375,6 +376,7 @@ describe("keyboard shortcuts extended", () => {
 
     renderFixture();
     const { state } = await import("../state.ts");
+    state.connected = true;
     state.platformName = "windows";
     state.selectedKeys.clear();
   });

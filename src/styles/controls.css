@@ -54,6 +54,12 @@
   background: var(--bg-hover);
 }
 
+.btn--ghost[aria-pressed="true"]:not(:disabled) {
+  background: var(--bg-active);
+  color: var(--accent-fg);
+  border-color: var(--border);
+}
+
 .btn--disconnect {
   background: var(--disconnect-bg);
   color: var(--disconnect-text);
@@ -156,11 +162,15 @@ select.field {
   appearance: none;
   -webkit-appearance: none;
   background-image:
-    linear-gradient(-45deg, transparent 50%, currentColor 50%),
-    linear-gradient(45deg, transparent 50%, currentColor 50%);
-  background-size: var(--space-2) var(--space-2);
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(-45deg, transparent 50%, currentColor 50%);
+  background-size:
+    5px 5px,
+    5px 5px;
   background-repeat: no-repeat;
-  background-position: right var(--space-2-5) center;
+  background-position:
+    calc(100% - 15px) center,
+    calc(100% - 10px) center;
   padding-right: var(--space-6);
   cursor: pointer;
 }
@@ -170,15 +180,11 @@ select.field option {
   color: var(--text);
 }
 
-.field:focus {
-  border-color: var(--focus-ring-color);
-  box-shadow: 0 0 0 3px var(--glow-accent);
-}
-
-/* Keyboard focus adds the shared ring; the glow stays on every focus state. */
+.field:focus,
 .field:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring-color);
-  outline-offset: var(--focus-ring-offset);
+  border-color: var(--focus-ring-color);
+  box-shadow: 0 0 0 2px var(--glow-accent);
+  outline: none;
 }
 
 .field--sm {

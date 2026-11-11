@@ -36,6 +36,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-3);
   padding: var(--space-2) var(--space-4);
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
@@ -49,6 +50,7 @@
   font-size: var(--text-lg);
   font-weight: 600;
   flex-shrink: 0;
+  margin-right: var(--space-3);
 }
 
 .titlebar__main {

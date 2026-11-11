@@ -2035,14 +2035,14 @@
                 <button
                   type="button"
                   id="bookmarks-export-btn"
-                  class="btn btn--ghost btn--sm"
+                  class="btn btn--sm"
                 >
                   Export
                 </button>
                 <button
                   type="button"
                   id="bookmarks-import-btn"
-                  class="btn btn--ghost btn--sm"
+                  class="btn btn--sm"
                 >
                   Import
                 </button>
@@ -2205,8 +2205,8 @@
                   </div>
                 </div>
                 <div id="security-warning" class="security-warning" hidden>
-                  Warning: saved credentials are stored unencrypted on this
-                  device.
+                  Warning: any process running under your user account can read
+                  unencrypted credentials on disk.
                 </div>
                 <div class="security-controls__actions">
                   <button
@@ -2311,9 +2311,6 @@
               aria-labelledby="settings-tab-about"
               hidden
             >
-              <p class="setting-note settings-instant-note">
-                Changes apply immediately. Save and Cancel do not apply them.
-              </p>
               <div class="setting-item">
                 <span class="setting-label">Version</span>
                 <span id="settings-version" class="text-secondary"></span>
@@ -2339,7 +2336,8 @@
               hidden
             >
               <p class="setting-note settings-instant-note">
-                Changes apply immediately. Save and Cancel do not apply them.
+                Resetting takes effect immediately after confirmation and does
+                not use the Save button.
               </p>
               <section class="settings-group" aria-labelledby="reset-heading">
                 <h3 id="reset-heading" class="setting-section">Reset</h3>
@@ -2595,7 +2593,7 @@
             <button
               type="button"
               id="lock-view-reveal"
-              class="btn btn--ghost field-toggle-btn"
+              class="field-toggle-btn field-toggle-btn--text"
               aria-label="Show password"
               aria-pressed="false"
             >
@@ -3089,7 +3087,7 @@
               <button
                 type="button"
                 id="setup-enc-password-reveal"
-                class="btn btn--ghost field-toggle-btn"
+                class="field-toggle-btn field-toggle-btn--text"
                 aria-label="Show password"
                 aria-pressed="false"
               >
@@ -3117,7 +3115,7 @@
               <button
                 type="button"
                 id="setup-enc-confirm-reveal"
-                class="btn btn--ghost field-toggle-btn"
+                class="field-toggle-btn field-toggle-btn--text"
                 aria-label="Show password"
                 aria-pressed="false"
               >

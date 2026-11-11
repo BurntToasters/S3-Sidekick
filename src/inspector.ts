@@ -607,7 +607,9 @@ function renderInspectorEmpty(): void {
     .querySelector<HTMLButtonElement>("[data-copy-path]")
     ?.addEventListener("click", () => {
       void navigator.clipboard.writeText(location).then(
-        () => undefined,
+        () => {
+          setStatus("Path copied to clipboard.", 3000);
+        },
         () => undefined,
       );
     });

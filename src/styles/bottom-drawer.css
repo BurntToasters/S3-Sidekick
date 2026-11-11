@@ -47,7 +47,7 @@
 }
 
 .bottom-drawer__resize-handle {
-  height: 6px;
+  height: 8px;
   cursor: ns-resize;
   position: relative;
   flex-shrink: 0;
@@ -57,7 +57,7 @@
   content: "";
   position: absolute;
   left: 50%;
-  top: 2px;
+  top: 4px;
   transform: translateX(-50%);
   width: 32px;
   height: 3px;

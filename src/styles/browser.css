@@ -289,7 +289,7 @@
 }
 
 .object-modified {
-  width: 180px;
+  width: 200px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }

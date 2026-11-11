@@ -45,7 +45,7 @@
   min-height: 36px;
   min-width: 0;
   padding: 0 14px;
-  background: var(--bg-active);
+  background: var(--bg-surface);
   border-bottom: 1px solid var(--glass-border);
   font-size: var(--text-sm);
   font-weight: 500;
@@ -62,7 +62,7 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--text);
+  color: var(--text-secondary);
   white-space: nowrap;
   flex: 1 1 auto;
 }
@@ -74,6 +74,7 @@
 /* Accent marks the bar only while a selection is active; the idle row is a
    neutral info strip. */
 .batch-toolbar[data-selection-state="selected"] {
+  background: var(--bg-active);
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
