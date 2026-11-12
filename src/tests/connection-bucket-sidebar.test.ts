@@ -82,7 +82,7 @@ vi.mock("../transfers.ts", () => ({
 
 function renderFixture(): void {
   document.body.innerHTML = `
-    <span id="connection-status" class="connection-badge"></span>
+    <span id="connection-status"></span>
     <button id="connect-btn">Connect</button>
     <button id="disconnect-btn" style="display:none">Disconnect</button>
     <div id="main-layout" style="display:none"></div>

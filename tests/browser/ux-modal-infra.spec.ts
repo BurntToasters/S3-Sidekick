@@ -295,7 +295,7 @@ test.describe("copy and move dialog", () => {
     await openCopyMoveFromRow(page, page.locator(".object-row--file").first());
     await expect(page.locator("#copy-move-move-btn")).toBeDisabled();
     await expect(page.locator("#copy-move-overlay")).toContainText(
-      "This provider can't safely delete the source. Use Copy, then Delete.",
+      "This provider can't safely delete the source. Use copy, then delete.",
     );
     await expect(page.locator("#copy-move-copy-btn")).toBeEnabled();
   });

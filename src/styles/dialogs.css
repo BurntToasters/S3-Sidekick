@@ -88,7 +88,7 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-input-icon {
   position: absolute;
-  left: 10px;
+  left: var(--space-2-5);
   top: 50%;
   transform: translateY(-50%);
   width: 16px;
@@ -112,7 +112,7 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-input-reveal {
   position: absolute;
-  right: 8px;
+  right: var(--space-2);
   top: 50%;
   transform: translateY(-50%);
   background: none;
@@ -121,7 +121,7 @@ body.modal-open .dialog-overlay.active {
      too faint on the dialog surface. */
   min-width: 24px;
   min-height: 24px;
-  padding: 2px 6px;
+  padding: var(--space-0-5) var(--space-1-5);
   cursor: pointer;
   font-size: var(--text-xs);
   color: var(--text-secondary);
@@ -193,7 +193,7 @@ body.modal-open .dialog-overlay.active {
 }
 
 .dialog-validation-error {
-  margin: -12px 0 var(--space-5);
+  margin: calc(-1 * var(--space-3)) 0 var(--space-5);
   color: var(--danger-text);
   font-size: var(--text-sm);
   line-height: 1.4;

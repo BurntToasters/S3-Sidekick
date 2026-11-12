@@ -1166,7 +1166,7 @@ async function discardSettingsDraft(): Promise<void> {
     try {
       choice = await showChoiceDialog<"save" | "discard" | "keep">(
         "Discard changes?",
-        "Your Settings changes have not been saved.",
+        "Your settings changes have not been saved.",
         [
           { value: "save", label: "Save" },
           { value: "discard", label: "Discard changes", danger: true },
@@ -1255,7 +1255,7 @@ async function joinPendingSettingsSaves(): Promise<void> {
 
 export async function resetSettings(): Promise<void> {
   const confirmed = await showConfirm(
-    "Reset Settings",
+    "Reset settings",
     "This will reset settings to defaults and restart the app.\nChoose how much to reset on the next step.",
     { okLabel: "Continue", okDanger: true },
   );
@@ -1264,7 +1264,7 @@ export async function resetSettings(): Promise<void> {
   // Escape and the default focus both mean Cancel: only an explicit choice
   // runs a reset.
   const scope = await showChoiceDialog<"partial" | "factory" | "cancel">(
-    "Reset Scope",
+    "Reset scope",
     "Choose what to reset. The app restarts afterwards.\n\nKeep saved connections: resets settings, clears the last-used connection, and interrupts running transfers. Saved connections and encryption stay.\n\nFactory reset: also deletes saved connections, transfer recovery data, and encryption.",
     [
       { value: "partial", label: "Keep saved connections" },
@@ -1305,7 +1305,7 @@ export async function resetSettings(): Promise<void> {
  */
 export async function resetAfterForgottenPassword(): Promise<void> {
   const confirmed = await showConfirm(
-    "Erase the Encrypted Vault?",
+    "Erase the encrypted vault?",
     "A forgotten password can't be recovered. Continuing erases the encrypted vault and all saved connections inside it, including their saved secret keys. The last-used connection, transfer checkpoints and partial downloads are erased too. Running transfers are stopped. Settings return to their starting values and the app restarts.",
     { okLabel: "Continue", okDanger: true },
   );
@@ -1323,11 +1323,11 @@ export async function resetAfterForgottenPassword(): Promise<void> {
 
 async function confirmFactoryReset(): Promise<boolean> {
   return showConfirm(
-    "Permanently Delete All App Data?",
+    "Permanently delete all app data?",
     "This permanently deletes saved connections, the last-used connection, encrypted storage, transfer checkpoints, and partial download files. Running transfers will be stopped. This cannot be undone.",
     {
-      okLabel: "Delete Everything",
-      cancelLabel: "Cancel Reset",
+      okLabel: "Delete everything",
+      cancelLabel: "Cancel reset",
       okDanger: true,
     },
   );
@@ -1342,7 +1342,7 @@ async function runFactoryReset(): Promise<boolean> {
     // Declining the native confirmation is a no-op; the caller then does not
     // relaunch or clear local state.
     if (isCancellationError(err)) return false;
-    await showAlert("Factory Reset Failed", friendlyError(err));
+    await showAlert("Factory reset failed", friendlyError(err));
     return false;
   }
 
@@ -1419,7 +1419,7 @@ async function runPartialReset(): Promise<boolean> {
     await invoke("clear_saved_connection", { connectionId });
     await invoke("save_settings", { json: defaults });
   } catch (err) {
-    await showAlert("Reset Failed", resetErrorMessage(err));
+    await showAlert("Reset failed", resetErrorMessage(err));
     return false;
   }
   return true;
@@ -1501,7 +1501,7 @@ async function refreshBookmarkListUI(): Promise<void> {
         await removeBookmark(bookmark);
         forgetConnectionLocation(bookmark.name, bookmark.endpoint);
       } catch (err) {
-        void showAlert("Delete Failed", friendlyError(err));
+        void showAlert("Delete failed", friendlyError(err));
         return;
       }
       void refreshBookmarkListUI();
@@ -1524,7 +1524,7 @@ function wireBookmarkImportExport(): void {
 
   exportBtn?.addEventListener("click", () => {
     void exportBookmarksToFile().catch((err: unknown) => {
-      void showAlert("Export Failed", friendlyError(err));
+      void showAlert("Export failed", friendlyError(err));
     });
   });
 
@@ -1539,7 +1539,7 @@ function wireBookmarkImportExport(): void {
     importInput.value = "";
     if (file.size > MAX_IMPORT_BYTES) {
       void showAlert(
-        "Import Failed",
+        "Import failed",
         "The saved connections file is too large.",
       );
       return;
@@ -1547,30 +1547,30 @@ function wireBookmarkImportExport(): void {
     const reader = new FileReader();
     reader.onerror = () => {
       void showAlert(
-        "Import Failed",
+        "Import failed",
         `Could not read "${file.name}": ${reader.error?.message ?? "unknown error"}`,
       );
     };
     reader.onabort = () => {
-      void showAlert("Import Failed", `Reading "${file.name}" was aborted.`);
+      void showAlert("Import failed", `Reading "${file.name}" was aborted.`);
     };
     reader.onload = () => {
       const text = typeof reader.result === "string" ? reader.result : "";
       void importBookmarksJson(text)
         .then((result) => {
           if (result.error) {
-            void showAlert("Import Failed", result.error);
+            void showAlert("Import failed", result.error);
             return;
           }
           const msg =
             `Imported ${plural(result.imported, "saved connection")}` +
             importSkippedClause(result) +
             ".";
-          void showAlert("Import Complete", msg);
+          void showAlert("Import complete", msg);
           void refreshBookmarkListUI();
         })
         .catch((err: unknown) => {
-          void showAlert("Import Failed", friendlyError(err));
+          void showAlert("Import failed", friendlyError(err));
         });
     };
     reader.readAsText(file);

@@ -309,7 +309,7 @@ async function performDelete(): Promise<void> {
         failures.push(`${keys.join(", ")}: connection changed`);
         unresolved.push(...keys.map((key) => fileEntry(key)));
       } else {
-        setStatus(`Deleting ${plural(keys.length, "file")}...`);
+        setStatus(`Deleting ${plural(keys.length, "file")}…`);
         try {
           const result = normalizeDeleteResult(
             await invokeS3For<unknown>(target.connectionId, "delete_objects", {
@@ -335,7 +335,7 @@ async function performDelete(): Promise<void> {
         failures.push(`${prefix}: connection changed`);
         break;
       }
-      setStatus(`Deleting folder "${basename(prefix.replace(/\/$/, ""))}"...`);
+      setStatus(`Deleting folder "${basename(prefix.replace(/\/$/, ""))}"…`);
       try {
         const result = normalizeDeleteResult(
           await invokeS3For<unknown>(target.connectionId, "delete_prefix", {
@@ -623,7 +623,7 @@ export async function handleRename(): Promise<void> {
     }
 
     try {
-      setStatus("Renaming...");
+      setStatus("Renaming…");
       await invokeS3For(target.connectionId, "rename_object", {
         bucket: targetBucket,
         oldKey,
@@ -666,7 +666,7 @@ export async function handleRename(): Promise<void> {
     );
 
     const enteredName = await showPrompt(
-      "Rename Folder",
+      "Rename folder",
       "Enter new folder name:",
       {
         inputDefault: folderName,
@@ -770,7 +770,7 @@ export async function handleRename(): Promise<void> {
     }
 
     try {
-      setStatus(`Renaming folder "${folderName}"...`);
+      setStatus(`Renaming folder "${folderName}"…`);
       const renamePrefix = (withOverwrite: boolean): Promise<unknown> =>
         invokeS3For(target.connectionId, "rename_prefix", {
           bucket: targetBucket,
@@ -842,7 +842,7 @@ export async function handleCreateFolder(): Promise<void> {
     state.currentBucket !== targetBucket ||
     state.currentPrefix !== targetPrefix;
 
-  const name = await showPrompt("New Folder", "Enter folder name:", {
+  const name = await showPrompt("New folder", "Enter folder name:", {
     inputPlaceholder: "Folder name",
   });
   if (!name) return;
@@ -899,7 +899,7 @@ export async function handleCreateFolder(): Promise<void> {
     });
 
   try {
-    setStatus("Creating folder...");
+    setStatus("Creating folder…");
     await createWithOverwrite(intent.overwrite);
     if (targetLocationChanged()) return;
     setStatus(`Created folder "${trimmed}".`, 5000);
@@ -926,7 +926,7 @@ export async function handleCreateFolder(): Promise<void> {
       const replace = unsupported
         ? (await promptUnguardedWrite()).proceed
         : await showConfirm(
-            "Folder Exists",
+            "Folder exists",
             `${targetBucket}/${folderKey} already exists. Replace it?`,
             { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
           );
@@ -941,7 +941,7 @@ export async function handleCreateFolder(): Promise<void> {
         return;
       }
       try {
-        setStatus("Creating folder...");
+        setStatus("Creating folder…");
         await createWithOverwrite(true);
         if (targetLocationChanged()) return;
         setStatus(`Created folder "${trimmed}".`, 5000);
@@ -976,7 +976,7 @@ export async function handleRefresh(): Promise<void> {
   } catch {
     return;
   }
-  setStatus("Refreshing...");
+  setStatus("Refreshing…");
   try {
     // Manual refresh must not cancel a navigation the user just started.
     const committed = await refreshObjects(target.bucket, target.prefix, {
@@ -1057,7 +1057,7 @@ export async function handleRefreshBuckets(): Promise<void> {
   const bucketList = document.getElementById("bucket-list");
   bucketRefreshInFlight = true;
   try {
-    setStatus("Refreshing buckets...");
+    setStatus("Refreshing buckets…");
     bucketList?.setAttribute("aria-busy", "true");
     await refreshBuckets();
     // Ignore stale completions after disconnect/reconnect.
@@ -1092,7 +1092,7 @@ export async function handleExportActivityLog(): Promise<void> {
   try {
     grant = await pickTextExport(
       `s3-sidekick-activity-${stamp}.txt`,
-      "Export Activity Log",
+      "Export activity log",
     );
   } catch (err) {
     setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
@@ -1126,12 +1126,12 @@ export async function handleGoToKeyOrPrefix(): Promise<void> {
   } catch {
     return;
   }
-  const raw = await showPrompt("Go To", "Enter key or prefix:", {
+  const raw = await showPrompt("Go to", "Enter key or prefix:", {
     inputPlaceholder: "e.g. folder/file.txt or folder/subfolder/",
   });
   if (!raw) return;
   if (connectionIdentityChanged(target)) {
-    setStatus("Go To cancelled because connection changed.", 5000);
+    setStatus("Go to cancelled because connection changed.", 5000);
     return;
   }
 

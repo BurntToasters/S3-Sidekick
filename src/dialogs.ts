@@ -70,6 +70,8 @@ interface DialogConfig {
   cancelValue?: string;
   initialFocus?: string;
   extraAction?: DialogExtraAction;
+  /** Replaces the text message with a node, such as a scrolling list. */
+  body?: HTMLElement;
 }
 
 const queue: {
@@ -156,7 +158,15 @@ function present(
     const el = els();
 
     el.title.textContent = config.title;
-    el.message.textContent = config.message;
+    if (config.body) {
+      // A content dialog scrolls its own body, so the message region takes
+      // keyboard focus and the box gets the wider content size.
+      el.message.replaceChildren(config.body);
+      el.message.tabIndex = 0;
+      el.box.classList.add("dialog-box--content");
+    } else {
+      el.message.textContent = config.message;
+    }
 
     el.inputWrapper.style.display = config.showInput ? "" : "none";
 
@@ -290,6 +300,7 @@ function present(
         choices !== null
           ? choiceButtons
           : [
+              config.body ? el.message : null,
               config.showInput ? el.input : null,
               config.showInput && isPassword ? el.reveal : null,
               showCheckbox ? el.checkbox : null,
@@ -338,6 +349,11 @@ function present(
     function cleanup() {
       presentCancel = null;
       el.overlay.classList.remove("active");
+      if (config.body) {
+        el.message.replaceChildren();
+        el.message.removeAttribute("tabindex");
+        el.box.classList.remove("dialog-box--content");
+      }
       el.cancel.removeEventListener("click", onCancel);
       extraButton?.removeEventListener("click", onExtra);
       extraButton?.remove();
@@ -602,9 +618,10 @@ export function showPrompt(
   );
 }
 
-export function showAlert(
+function presentAlert(
   title: string,
   message: string,
+  body: HTMLElement | undefined,
   options?: AlertOptions,
 ): Promise<void> {
   return enqueue(
@@ -612,6 +629,7 @@ export function showAlert(
       await present({
         title,
         message,
+        body,
         showInput: false,
         showCancel: false,
         okLabel: options?.okLabel ?? "OK",
@@ -624,6 +642,26 @@ export function showAlert(
     },
     () => undefined,
   );
+}
+
+export function showAlert(
+  title: string,
+  message: string,
+  options?: AlertOptions,
+): Promise<void> {
+  return presentAlert(title, message, undefined, options);
+}
+
+/**
+ * Alert whose body is a DOM node instead of text. The node is shown in a
+ * wider dialog whose body scrolls, and Escape or the OK button closes it.
+ */
+export function showContentDialog(
+  title: string,
+  body: HTMLElement,
+  options?: AlertOptions,
+): Promise<void> {
+  return presentAlert(title, "", body, options);
 }
 
 /**

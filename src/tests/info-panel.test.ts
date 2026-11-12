@@ -152,7 +152,7 @@ describe("info panel", () => {
     ).toBe("notes.txt");
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
-    ).toContain("Content Type");
+    ).toContain("Content type");
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
     ).toContain("https://example.com/notes.txt");
@@ -178,7 +178,7 @@ describe("info panel", () => {
     info.switchTab("s3");
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
-    ).toContain("Storage Class");
+    ).toContain("Storage class");
   });
 
   it("handles single-file load errors and single-file save failures", async () => {
@@ -743,7 +743,7 @@ describe("info panel", () => {
     ).toBe("fast.txt");
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
-    ).toContain("Content Type");
+    ).toContain("Content type");
 
     const secondOpen = info.openInfoPanel([fileEntry("slow-fail.txt")]);
     await flushMicrotasks();

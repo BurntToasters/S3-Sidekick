@@ -199,7 +199,7 @@ function parseReleaseVersion(value: unknown): string {
  * anything on a later restart. The copy says what actually happens next.
  */
 function notInstalledText(version: string): string {
-  return `Version ${version} was not installed. Choose Check now in Settings to install it.`;
+  return `Version ${version} was not installed. Choose check now in settings to install it.`;
 }
 
 async function promptInstallAndRestart(
@@ -236,7 +236,7 @@ Restart anyway?`,
     }
   }
   if (restart) {
-    setStatus("Installing update...");
+    setStatus("Installing update…");
     await install();
     await relaunch();
   } else {
@@ -384,7 +384,7 @@ async function fetchLatestReleaseInfo(
 
 async function checkFlatpakUpdates(channel: UpdateChannel): Promise<void> {
   try {
-    setStatus("Checking for updates...");
+    setStatus("Checking for updates…");
     const currentVersion = await getVersion();
     const latest = await fetchLatestReleaseInfo(channel);
     if (!isNewerVersion(latest.version, currentVersion)) {
@@ -438,7 +438,7 @@ async function promptOpenReleasePage(
   if (settingsOpen()) {
     // The Settings panel shows the release-page button for these installs.
     setInlineUpdateStatus(
-      `Version ${latest.version} is available. Use Open release page to download it.`,
+      `Version ${latest.version} is available. Use open release page to download it.`,
       false,
     );
     return;
@@ -466,7 +466,7 @@ async function checkReleasePageUpdate(
   channel: UpdateChannel,
   mode: UpdaterMode,
 ): Promise<void> {
-  setStatus("Checking for updates...");
+  setStatus("Checking for updates…");
   const currentVersion = await getVersion();
   const latest = await fetchLatestReleaseInfo(channel);
   if (!isNewerVersion(latest.version, currentVersion)) {
@@ -514,7 +514,7 @@ async function checkUpdatesImpl(): Promise<void> {
   }
 
   try {
-    setStatus("Checking for updates...");
+    setStatus("Checking for updates…");
     const update = await checkNativeUpdate(channel);
     if (!update) {
       if (channel === "beta") {
@@ -528,7 +528,7 @@ async function checkUpdatesImpl(): Promise<void> {
       }
       return;
     }
-    setStatus(`Downloading update v${update.version}...`);
+    setStatus(`Downloading update v${update.version}…`);
     await update.download();
     await promptInstallAndRestart(update.version, () => update.install());
   } catch (err) {
@@ -577,9 +577,9 @@ async function autoCheckUpdatesImpl(): Promise<void> {
     if (update) {
       await notify(
         "S3 Sidekick",
-        `Version ${update.version} is available. Downloading...`,
+        `Version ${update.version} is available. Downloading…`,
       );
-      setStatus(`Downloading update v${update.version}...`);
+      setStatus(`Downloading update v${update.version}…`);
       await update.download();
       await promptInstallAndRestart(update.version, () => update.install());
       return;

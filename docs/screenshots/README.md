@@ -1,7 +1,7 @@
 # AppStream screenshots
 
-Capture version: 0.12.0-beta.1
-Captured: 2026-11-03
+Capture version: 0.12.0-beta.2
+Captured: 2026-11-12
 
 | File                 | Viewport | Source state                     |
 | -------------------- | -------- | -------------------------------- |

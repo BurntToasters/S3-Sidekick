@@ -612,7 +612,7 @@ describe("settings module", () => {
     await settings.resetSettings();
 
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Reset Failed",
+      "Reset failed",
       "Your session changed; disconnect and retry.",
     );
     expect(mockInvoke).not.toHaveBeenCalledWith(
@@ -836,7 +836,7 @@ describe("settings module", () => {
     await onDelete(0);
     await flushMicrotasks();
 
-    expect(mockShowAlert).toHaveBeenCalledWith("Delete Failed", "disk full");
+    expect(mockShowAlert).toHaveBeenCalledWith("Delete failed", "disk full");
     expect(mockRenderBookmarkList).toHaveBeenCalledTimes(1);
   });
 
@@ -998,7 +998,7 @@ describe("settings module", () => {
     });
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
-    expect(mockShowAlert).toHaveBeenCalledWith("Import Failed", "bad file");
+    expect(mockShowAlert).toHaveBeenCalledWith("Import failed", "bad file");
 
     Object.defineProperty(importInput, "files", {
       value: [
@@ -1009,11 +1009,11 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       expect.stringContaining("Imported 2 saved connections"),
     );
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       expect.stringContaining("skipped 1 duplicate"),
     );
 
@@ -1026,7 +1026,7 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       "Imported 1 saved connection.",
     );
 
@@ -1046,7 +1046,7 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       "Imported 3 saved connections, skipped 1 duplicate and 2 invalid entries.",
     );
 
@@ -1065,7 +1065,7 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       "Imported 0 saved connections, skipped 1 invalid entry.",
     );
 
@@ -1081,7 +1081,7 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Failed",
+      "Import failed",
       "The saved connections file is too large.",
     );
     expect(mockImportBookmarksJson.mock.calls.length).toBe(importCalls);
@@ -1306,7 +1306,7 @@ describe("settings module", () => {
     await settings.resetSettings();
 
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Reset Failed",
+      "Reset failed",
       expect.stringContaining("disk full"),
     );
     expect(mockRelaunch).not.toHaveBeenCalled();
@@ -1322,7 +1322,7 @@ describe("settings module", () => {
     await settings.resetSettings();
 
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Factory Reset Failed",
+      "Factory reset failed",
       expect.stringContaining("factory boom"),
     );
     expect(localStorage.getItem("s3-sidekick.keep")).toBe("1");
@@ -1932,7 +1932,7 @@ describe("settings module", () => {
     await settings.resetAfterForgottenPassword();
 
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Factory Reset Failed",
+      "Factory reset failed",
       expect.any(String),
     );
     expect(mockRelaunch).not.toHaveBeenCalled();

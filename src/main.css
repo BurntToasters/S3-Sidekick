@@ -10,6 +10,7 @@
 @import "./styles/controls.css";
 @import "./styles/modals.css";
 @import "./styles/dialogs.css";
+@import "./styles/shortcuts.css";
 @import "./styles/copy-move.css";
 @import "./styles/licenses.css";
 @import "./styles/table-sorting.css";

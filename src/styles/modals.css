@@ -84,14 +84,14 @@ body.titlebar-custom #context-menu {
 .settings-panel {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-2-5);
 }
 
 #updater-section,
 #updater-unsupported {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-2-5);
 }
 
 .modal__footer {
@@ -114,7 +114,7 @@ body.titlebar-custom #context-menu {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
-  padding: 2px 0;
+  padding: var(--space-0-5) 0;
 }
 
 .setting-item--stacked {
@@ -133,28 +133,13 @@ body.titlebar-custom #context-menu {
   align-items: center;
 }
 
-.settings-panel .setting-item:not(.security-status-card) > :last-child {
+.settings-panel .setting-item:not(.setting-item--stacked) > :last-child {
   margin-left: auto;
 }
 
 .setting-item label {
   font-size: var(--text-md);
   line-height: 1.35;
-}
-
-.security-biometric-note {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--text-xs);
-  line-height: 1.35;
-}
-
-.security-controls {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
 }
 
 .security-controls__actions {
@@ -182,7 +167,7 @@ body.titlebar-custom #context-menu {
 
 .bookmark-list-toolbar {
   display: flex;
-  gap: 6px;
+  gap: var(--space-1-5);
   padding: var(--space-2) 0;
   border-bottom: 1px solid var(--border);
   margin-bottom: var(--space-2);
@@ -199,7 +184,7 @@ body.titlebar-custom #context-menu {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: 6px 10px;
+  padding: var(--space-1-5) var(--space-2-5);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg);
@@ -231,7 +216,7 @@ body.titlebar-custom #context-menu {
 .bookmark__delete {
   min-width: 24px;
   min-height: 24px;
-  padding: 2px 6px;
+  padding: var(--space-0-5) var(--space-1-5);
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -257,7 +242,7 @@ body.titlebar-custom #context-menu {
 }
 
 .bookmark__edit {
-  padding: 2px var(--space-2);
+  padding: var(--space-0-5) var(--space-2);
   min-height: 24px;
   border: none;
   background: transparent;

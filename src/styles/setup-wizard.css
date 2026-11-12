@@ -10,7 +10,7 @@
   background: var(--setup-scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  animation: setup-overlay-in 0.3s ease;
+  animation: setup-overlay-in var(--duration-slow) ease;
 }
 
 .setup-wizard-overlay[hidden] {
@@ -95,7 +95,7 @@
 }
 
 .setup-wizard-step__title {
-  font-size: 20px;
+  font-size: var(--text-xl);
   font-weight: 600;
   color: var(--text);
   margin: 0;
@@ -112,7 +112,7 @@
 
 .setup-wizard-step__actions {
   display: flex;
-  gap: 10px;
+  gap: var(--space-2-5);
   margin-top: var(--space-3);
   width: 100%;
   justify-content: center;
@@ -205,10 +205,15 @@
   min-height: 58px;
 }
 
+/* Boolean options: the text leads and the switch sits on the right edge of the
+   row, which spans the same width as the select beneath it. */
 .setup-wizard-checkbox-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  width: 100%;
   gap: var(--space-2);
+  text-align: left;
   font-size: var(--text-md);
   color: var(--text);
   cursor: pointer;
@@ -265,7 +270,7 @@
 .setup-wizard-updates-form {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-3-5);
   width: 100%;
   max-width: 300px;
   margin-top: var(--space-2);
@@ -275,7 +280,7 @@
 .setup-wizard-channel-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2-5);
   width: 100%;
 }
 
@@ -307,6 +312,6 @@
   .setup-wizard-channel-row {
     align-items: stretch;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-1-5);
   }
 }

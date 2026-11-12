@@ -18,7 +18,7 @@
   display: none;
 }
 .bottom-drawer:not([hidden]) {
-  animation: drawer-slide-up 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  animation: drawer-slide-up 0.25s var(--ease-standard);
   flex-shrink: 0;
 }
 
@@ -57,7 +57,7 @@
   content: "";
   position: absolute;
   left: 50%;
-  top: 4px;
+  top: var(--space-1);
   transform: translateX(-50%);
   width: 32px;
   height: 3px;
@@ -98,9 +98,9 @@
 .bottom-drawer__tab {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
   min-height: 32px;
-  padding: 10px var(--space-4);
+  padding: var(--space-2-5) var(--space-4);
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -179,7 +179,7 @@
   }
 
   .bottom-drawer__tab {
-    padding: 8px var(--space-2);
+    padding: var(--space-2) var(--space-2);
   }
 
   .bottom-drawer__actions .btn--ghost {

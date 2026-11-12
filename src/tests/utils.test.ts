@@ -439,7 +439,7 @@ describe("isEditableElement text-entry controls", () => {
 
 describe("friendlyError internal failures", () => {
   const generic =
-    "Something went wrong talking to the app backend. Try again; details are in the Activity log.";
+    "Something went wrong talking to the app backend. Try again; details are in the activity log.";
 
   it("replaces JavaScript runtime errors with a generic sentence", () => {
     expect(

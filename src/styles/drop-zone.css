@@ -13,7 +13,7 @@
   /* Uses the focus colour, which clears 3:1 against dark glass; --accent does not. */
   border: 2px dashed var(--focus-ring-color);
   border-radius: var(--radius);
-  animation: drop-zone-in 0.2s ease;
+  animation: drop-zone-in var(--duration-base) ease;
 }
 .drop-zone-overlay[hidden] {
   display: none;

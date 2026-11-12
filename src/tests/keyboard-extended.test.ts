@@ -28,13 +28,13 @@ vi.mock("../context-menu.ts", () => ({
   isContextMenuOpen: () => false,
 }));
 
-const mockShowAlert = vi.fn<(title: string, message: string) => Promise<void>>(
-  async () => {},
-);
+const mockShowContentDialog = vi.fn<
+  (title: string, body: HTMLElement) => Promise<void>
+>(async () => {});
 
 vi.mock("../dialogs.ts", () => ({
   isDialogActive: mockIsDialogActive,
-  showAlert: mockShowAlert,
+  showContentDialog: mockShowContentDialog,
 }));
 
 vi.mock("../preview.ts", () => ({
@@ -254,7 +254,7 @@ describe("keyboard shortcuts dialog chord", () => {
     mockIsDialogActive.mockReturnValue(false);
     mockIsPaletteOpen.mockReset();
     mockIsPaletteOpen.mockReturnValue(false);
-    mockShowAlert.mockClear();
+    mockShowContentDialog.mockClear();
     renderFixture();
     document.body.insertAdjacentHTML(
       "beforeend",
@@ -265,7 +265,9 @@ describe("keyboard shortcuts dialog chord", () => {
     state.selectedKeys.clear();
   });
 
-  it("Ctrl+/ opens the shortcut list as an alert", async () => {
+  // Failure modes: the list opens as a plain-text alert, its title drifts
+  // from the catalog wording, or the rows lose their key chips.
+  it("Ctrl+/ opens the shortcut list as a titled content dialog", async () => {
     const keyboard = await import("../keyboard.ts");
     unwires.push(keyboard.wireKeyboardShortcuts(createHandlers()));
 
@@ -277,11 +279,18 @@ describe("keyboard shortcuts dialog chord", () => {
       }),
     );
 
-    expect(mockShowAlert).toHaveBeenCalledTimes(1);
-    const [title, message] = mockShowAlert.mock.calls[0];
-    expect(title).toBe("Keyboard Shortcuts");
-    expect(message).toContain("Ctrl+K");
-    expect(message).toContain("F5");
+    expect(mockShowContentDialog).toHaveBeenCalledTimes(1);
+    const [title, body] = mockShowContentDialog.mock.calls[0];
+    expect(title).toBe("Keyboard shortcuts");
+    expect(
+      body.querySelectorAll(".shortcut-row").length,
+    ).toBeGreaterThanOrEqual(20);
+    const chips = Array.from(body.querySelectorAll("kbd")).map(
+      (chip) => chip.textContent,
+    );
+    expect(chips).toContain("Ctrl");
+    expect(chips).toContain("K");
+    expect(chips).toContain("F5");
   });
 
   it("Cmd+/ opens the list on macOS, labelled with Command", async () => {
@@ -294,8 +303,13 @@ describe("keyboard shortcuts dialog chord", () => {
       new KeyboardEvent("keydown", { key: "/", metaKey: true }),
     );
 
-    expect(mockShowAlert).toHaveBeenCalledTimes(1);
-    expect(mockShowAlert.mock.calls[0][1]).toContain("⌘K");
+    expect(mockShowContentDialog).toHaveBeenCalledTimes(1);
+    const body = mockShowContentDialog.mock.calls[0][1];
+    const chips = Array.from(body.querySelectorAll("kbd")).map(
+      (chip) => chip.textContent,
+    );
+    expect(chips).toContain("⌘");
+    expect(chips).not.toContain("Ctrl");
   });
 
   it("is ignored while an editable field has focus", async () => {
@@ -308,7 +322,7 @@ describe("keyboard shortcuts dialog chord", () => {
       new KeyboardEvent("keydown", { key: "/", ctrlKey: true }),
     );
 
-    expect(mockShowAlert).not.toHaveBeenCalled();
+    expect(mockShowContentDialog).not.toHaveBeenCalled();
   });
 
   it("is ignored while a modal layer is open", async () => {
@@ -323,7 +337,7 @@ describe("keyboard shortcuts dialog chord", () => {
       new KeyboardEvent("keydown", { key: "/", ctrlKey: true }),
     );
 
-    expect(mockShowAlert).not.toHaveBeenCalled();
+    expect(mockShowContentDialog).not.toHaveBeenCalled();
   });
 
   it("is a no-op while the command palette owns the keyboard", async () => {
@@ -335,7 +349,7 @@ describe("keyboard shortcuts dialog chord", () => {
       new KeyboardEvent("keydown", { key: "/", ctrlKey: true }),
     );
 
-    expect(mockShowAlert).not.toHaveBeenCalled();
+    expect(mockShowContentDialog).not.toHaveBeenCalled();
   });
 });
 

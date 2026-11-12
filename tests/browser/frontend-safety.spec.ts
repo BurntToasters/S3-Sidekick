@@ -370,7 +370,7 @@ test.describe("frontend mutation and recovery safety", () => {
     });
 
     await page.locator("#btn-new-folder").click();
-    await expect(page.locator("#dialog-title")).toHaveText("New Folder");
+    await expect(page.locator("#dialog-title")).toHaveText("New folder");
     await page.locator("#dialog-input").fill("error-500-logs");
     await page.locator("#dialog-ok").click();
 
@@ -457,7 +457,7 @@ test.describe("frontend mutation and recovery safety", () => {
       mimeType: "application/json",
       buffer: Buffer.from(JSON.stringify([BOOKMARK_A])),
     });
-    await expect(page.locator("#dialog-title")).toHaveText("Import Failed");
+    await expect(page.locator("#dialog-title")).toHaveText("Import failed");
     await expect(page.locator("#dialog-message")).toContainText(
       "Saved bookmarks could not be loaded",
     );

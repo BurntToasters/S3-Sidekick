@@ -587,9 +587,9 @@ test.describe("command palette", () => {
     ).length;
     await page.locator("#palette-hint").click();
     await expect(page.locator("#palette-overlay")).toBeVisible();
-    await page.locator("#palette-input").fill("Refresh Buckets");
+    await page.locator("#palette-input").fill("Refresh buckets");
     const item = page.locator("#palette-results .palette__item", {
-      hasText: "Refresh Buckets",
+      hasText: "Refresh buckets",
     });
     await expect(item).toBeVisible();
     await page.keyboard.press("Enter");

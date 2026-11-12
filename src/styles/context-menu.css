@@ -4,12 +4,10 @@
   position: fixed;
   z-index: var(--z-context-menu);
   min-width: 180px;
-  background: var(--glass-bg-heavy);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
+  background: var(--bg-elevated);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius);
-  box-shadow: var(--glass-shadow-elevated);
+  box-shadow: var(--shadow-2);
   padding: var(--space-1) 0;
   animation: modal-in 0.1s ease;
 }
@@ -91,7 +89,7 @@
 }
 
 .context-menu__item:hover {
-  background: var(--bg-active);
+  background: var(--bg-hover);
 }
 
 .context-menu__item:disabled {

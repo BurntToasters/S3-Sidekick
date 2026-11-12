@@ -80,3 +80,34 @@ test("Escape and the close button still close Settings and release the page", as
     false,
   );
 });
+
+// Failure mode: the shortcuts dialog loses its accessible name or modal
+// semantics, or Tab leaves the dialog and reaches controls on the page behind.
+test("the shortcuts dialog is a named modal dialog that keeps Tab focus inside", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, { objectCount: 0, prefixes: [] });
+  await page.goto("/");
+  await page.keyboard.press("Control+/");
+
+  const dialog = page.getByRole("dialog", {
+    name: "Keyboard shortcuts",
+    exact: true,
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveAttribute("aria-modal", "true");
+
+  for (let i = 0; i < 4; i += 1) {
+    await page.keyboard.press("Tab");
+    const insideDialog = await page.evaluate(() => {
+      const active = document.activeElement;
+      return active instanceof HTMLElement
+        ? active.closest("#dialog-overlay") !== null
+        : false;
+    });
+    expect(insideDialog).toBe(true);
+  }
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+});

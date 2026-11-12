@@ -17,9 +17,13 @@
   }
 
   /* With motion off, the indeterminate bar would freeze at 35% and read as
-     real progress. A full-width striped track says "working" without a value. */
-  .transfer-progress-wrap--indeterminate .transfer-progress__bar {
+     real progress. A full-width striped track says "working" without a value.
+     The bare .transfer-progress--indeterminate selector covers a bar rendered
+     without its wrapper. */
+  .transfer-progress-wrap--indeterminate .transfer-progress__bar,
+  .transfer-progress--indeterminate .transfer-progress__bar {
     width: 100% !important;
+    animation: none;
     opacity: 0.6;
     background-image: repeating-linear-gradient(
       45deg,

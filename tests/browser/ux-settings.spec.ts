@@ -232,11 +232,11 @@ test("Forgot password? opens the erase explanation, and Escape on the final conf
 
   // The lock view stays up underneath while the erase explanation opens.
   await expect(page.locator("#dialog-title")).toHaveText(
-    "Erase the Encrypted Vault?",
+    "Erase the encrypted vault?",
   );
   await page.locator("#dialog-ok").click(); // "Continue"
   await expect(page.locator("#dialog-title")).toHaveText(
-    "Permanently Delete All App Data?",
+    "Permanently delete all app data?",
   );
 
   const before = (await callNames(page)).length;
@@ -336,7 +336,7 @@ test("Security tab marks changes as immediate and explains transfer and lock beh
 
   await expect(page.locator("#settings-save")).toBeHidden();
   await expect(page.locator("#settings-panel-security")).toContainText(
-    "Changes apply immediately",
+    "Changes on this tab apply immediately.",
   );
   await expect(page.locator("#settings-panel-security")).toContainText(
     /running\s+transfers\s+keep\s+the\s+vault\s+unlocked/i,
@@ -521,4 +521,201 @@ test("Escape on a clean Settings view still closes without a prompt", async ({
   await page.keyboard.press("Escape");
   await expect(page.locator("#settings-overlay")).not.toHaveClass(/active/);
   await expect(dialog(page)).not.toHaveClass(/active/);
+});
+
+// Failure modes checked before implementation:
+// - A stacked setting item (label above control) gets margin-left:auto from the
+//   generic "last child" rule, so the theme picker is pushed ~40-48px right of
+//   its "Theme" label instead of sitting under it.
+test("Appearance theme picker starts at the left edge of its Theme label", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, {
+    objectCount: 0,
+    prefixes: [],
+    settings: { _setupComplete: true, theme: "light" },
+  });
+  await page.goto("/");
+  await openSettings(page);
+  await page.locator("#settings-tab-appearance").click();
+
+  const label = await page.locator("#settings-theme-label").boundingBox();
+  const picker = await page
+    .locator("#settings-panel-appearance .theme-picker")
+    .boundingBox();
+  expect(label).not.toBeNull();
+  expect(picker).not.toBeNull();
+  const offset = Math.abs((picker?.x ?? 0) - (label?.x ?? 0));
+  expect(offset).toBeLessThanOrEqual(1);
+});
+
+// Failure modes checked before implementation:
+// - #settings-search keeps its own border and background rules, so its border
+//   colour drifts from the shared --border-control token used by every .field.
+// - The search box falls back to the browser default border when the .field
+//   class is missing from the markup.
+// - Light and dark themes resolve the token differently; a hard-coded colour
+//   passes in one theme and fails in the other.
+test("Settings search border uses the shared control border token in light and dark", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, {
+    objectCount: 0,
+    prefixes: [],
+    settings: { _setupComplete: true, theme: "light" },
+  });
+  await page.goto("/");
+  await openSettings(page);
+  // Settings opens with the search box focused, and a focused .field shows the
+  // focus ring colour. Move focus to a tab so the resting border is measured.
+  await page.locator("#settings-tab-appearance").click();
+
+  const readBorders = () =>
+    page.evaluate(() => {
+      const raw = getComputedStyle(document.documentElement)
+        .getPropertyValue("--border-control")
+        .trim();
+      // Normalise the token to the rgb() form that computed styles report.
+      const probe = document.createElement("span");
+      probe.style.color = raw;
+      document.body.appendChild(probe);
+      const expected = getComputedStyle(probe).color;
+      probe.remove();
+      const search = document.getElementById("settings-search");
+      return {
+        raw,
+        expected,
+        actual: search ? getComputedStyle(search).borderTopColor : "",
+      };
+    });
+
+  // The border transitions back to rest after focus leaves, so poll.
+  const light = await readBorders();
+  expect(light.raw).not.toBe("");
+  await expect
+    .poll(async () => (await readBorders()).actual)
+    .toBe(light.expected);
+
+  await page
+    .locator("#settings-panel-appearance")
+    .locator('[data-theme-card="dark"]')
+    .click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  const dark = await readBorders();
+  expect(dark.raw).not.toBe(light.raw);
+  await expect
+    .poll(async () => (await readBorders()).actual)
+    .toBe(dark.expected);
+});
+
+// Failure mode: a Settings boolean stays a left-aligned checkbox, so its row
+// does not line up with the selects in the same panel. Checked in light and
+// dark, with the Transfers advanced group opened so every select lays out.
+for (const theme of ["light", "dark"] as const) {
+  test(`Settings booleans are switches aligned with the selects in their panel (${theme})`, async ({
+    page,
+  }) => {
+    await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
+    await installLayoutTauriMock(page, { objectCount: 0, prefixes: [] });
+    await page.goto("/");
+    await page.evaluate(
+      (value) => document.documentElement.setAttribute("data-theme", value),
+      theme,
+    );
+    await openSettings(page);
+
+    const everyBoolean = await page
+      .locator('#settings-overlay .settings-panel input[type="checkbox"]')
+      .evaluateAll((boxes) =>
+        boxes.map((box) => ({
+          id: box.id,
+          isSwitch: box.classList.contains("switch"),
+        })),
+      );
+    expect(everyBoolean.length).toBeGreaterThan(0);
+    for (const box of everyBoolean) {
+      expect(box.isSwitch, `${box.id} is a switch`).toBe(true);
+    }
+
+    for (const panel of ["updates", "transfers"] as const) {
+      await page.locator(`#settings-tab-${panel}`).click();
+      if (panel === "transfers") {
+        await page.locator('[aria-controls="transfers-advanced"]').click();
+      }
+      const measured = await page.evaluate((panelId) => {
+        const root = document.getElementById(panelId);
+        const visible = (el: Element) => el.getClientRects().length > 0;
+        const switches = [
+          ...(root?.querySelectorAll<HTMLInputElement>(
+            'input[type="checkbox"].switch',
+          ) ?? []),
+        ].filter(visible);
+        const selects = [...(root?.querySelectorAll("select") ?? [])].filter(
+          visible,
+        );
+        return {
+          switchRights: switches.map((el) => ({
+            id: el.id,
+            right: el.getBoundingClientRect().right,
+          })),
+          selectRights: selects.map((el) => ({
+            id: el.id,
+            right: el.getBoundingClientRect().right,
+          })),
+        };
+      }, `settings-panel-${panel}`);
+      expect(measured.switchRights.length, `${panel} switches`).toBeGreaterThan(
+        0,
+      );
+      for (const sw of measured.switchRights) {
+        const aligned = measured.selectRights.some(
+          (sel) => Math.abs(sel.right - sw.right) <= 1,
+        );
+        expect(aligned, `${sw.id} right edge in ${panel}`).toBe(true);
+      }
+    }
+  });
+}
+
+// Failure modes: clicking a boolean's label text does nothing; Space stops
+// toggling a focused switch; or a Tab-focused switch shows no ring thinner
+// than 2px. Each check follows a fresh open of the Updates tab.
+test("Settings boolean labels toggle their switch, Space toggles it, and a Tab-focused switch shows a 2px ring", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, { objectCount: 0, prefixes: [] });
+  await page.goto("/");
+  await openSettings(page);
+  await page.locator("#settings-tab-updates").click();
+
+  const toggle = page.locator("#setting-updates");
+  await expect(toggle).toHaveClass(/\bswitch\b/);
+  const start = await toggle.isChecked();
+
+  await page.locator("label:has(#setting-updates) > span").click();
+  expect(await toggle.isChecked()).toBe(!start);
+
+  await toggle.focus();
+  await page.keyboard.press("Space");
+  expect(await toggle.isChecked()).toBe(start);
+
+  await page.locator("#settings-tab-updates").focus();
+  for (
+    let presses = 0;
+    presses < 8 &&
+    !(await toggle.evaluate((el) => el === document.activeElement));
+    presses++
+  ) {
+    await page.keyboard.press("Tab");
+  }
+  await expect(toggle).toBeFocused();
+  const ring = await toggle.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return {
+      style: cs.outlineStyle,
+      width: parseFloat(cs.outlineWidth),
+    };
+  });
+  expect(ring.style).not.toBe("none");
+  expect(ring.width).toBeGreaterThanOrEqual(2);
 });

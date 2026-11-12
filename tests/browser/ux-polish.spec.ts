@@ -200,13 +200,6 @@ test.describe("text tokens and target sizes", () => {
         token: "--accent-fg",
       },
       {
-        name: "active bookmark chip (dark)",
-        theme: "dark",
-        html: '<span class="bookmark-chip bookmark-chip--active">x</span>',
-        selector: ".bookmark-chip--active",
-        token: "--accent-fg",
-      },
-      {
         name: "license tag (dark)",
         theme: "dark",
         html: '<span class="license-card__tag">x</span>',
@@ -796,5 +789,156 @@ test.describe("theme previews, help tips, header and selects", () => {
       .locator("#main-layout")
       .evaluate((el) => el.closest("[inert]") !== null);
     expect(mainInertAfterClose).toBe(false);
+  });
+});
+
+test.describe("controls: keyboard focus and disabled ghost buttons", () => {
+  // Failure mode: .field:focus-visible drops the outline and keeps only the
+  // 10-12% alpha glow, so a text field reached by Tab has no visible focus
+  // ring in light or dark. The shared --focus-ring-width/--focus-ring-color
+  // solid outline must apply to keyboard focus in both themes.
+  test("a text field reached by Tab shows a solid focus outline in both themes", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    await expect(page.locator("#connection-screen")).toBeVisible();
+
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((mode) => {
+        document.documentElement.setAttribute("data-theme", mode);
+      }, theme);
+      await page.locator("#conn-provider-preset").focus();
+      await page.keyboard.press("Tab");
+      const endpoint = page.locator("#conn-endpoint");
+      await expect(endpoint).toBeFocused();
+      const outline = await endpoint.evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return {
+          style: cs.outlineStyle,
+          width: parseFloat(cs.outlineWidth),
+        };
+      });
+      expect(outline.style, `outline style, ${theme}`).toBe("solid");
+      expect(outline.width, `outline width, ${theme}`).toBeGreaterThanOrEqual(
+        2,
+      );
+    }
+  });
+
+  // Failure mode: .btn:disabled paints a filled --bg-hover tile, so the
+  // toolbar Back/Forward/Up buttons (ghost-style icon buttons) look like
+  // filled grey tiles on every fresh listing. Disabled ghost and icon buttons
+  // must stay transparent in both themes.
+  test("disabled toolbar Back, Forward and Up buttons stay transparent in both themes", async ({
+    page,
+  }) => {
+    await openMockListing(page, {});
+    const navIds = ["#nav-back", "#nav-forward", "#nav-up"] as const;
+    for (const id of navIds) {
+      await expect(page.locator(id)).toBeDisabled();
+    }
+
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((mode) => {
+        document.documentElement.setAttribute("data-theme", mode);
+      }, theme);
+      for (const id of navIds) {
+        const bg = await page
+          .locator(id)
+          .evaluate((el) => getComputedStyle(el).backgroundColor);
+        expect(bg, `${id} background, ${theme}`).toBe("rgba(0, 0, 0, 0)");
+      }
+    }
+  });
+});
+
+test.describe("label casing and ellipses", () => {
+  // Failure modes covered before implementation (batch D2, one label casing):
+  // - A palette command keeps Title Case ("Upload Files", "Select All") while
+  //   the action registry and the rest of the UI use sentence case, so one
+  //   menu mixes two casings.
+  // - The sentence-case pass lowercases a proper noun or acronym ("S3", "URL",
+  //   "ARN"); the allowlist below keeps them capitalized.
+  // - A visible placeholder keeps the ASCII "..." instead of the single
+  //   character "…", so the hint punctuation differs from the rest of the UI.
+  const CAPITALIZED_ALLOWLIST = new Set([
+    "S3",
+    "URL",
+    "URLs",
+    "URI",
+    "ARN",
+    "ARNs",
+    "ID",
+    "AWS",
+    "R2",
+    "B2",
+    "ACL",
+    "ETag",
+    "TLS",
+    "JSON",
+    "CSV",
+    "TSV",
+    "MB",
+    "KB",
+    "GitHub",
+    "Cloudflare",
+    "DigitalOcean",
+    "Spaces",
+    "MinIO",
+    "Backblaze",
+    "Wasabi",
+    "Touch",
+    "Windows",
+    "Hello",
+    "Linux",
+    "macOS",
+    "Flatpak",
+    "AppImage",
+    "HTTP",
+    "HTTPS",
+  ]);
+
+  function isSentenceCase(label: string): boolean {
+    const words = label.split(/[\s()/]+/).filter((word) => word.length > 0);
+    if (words.length === 0 || !/^[A-Z0-9]/.test(words[0])) return false;
+    return words
+      .slice(1)
+      .every((word) => !/^[A-Z]/.test(word) || CAPITALIZED_ALLOWLIST.has(word));
+  }
+
+  async function visibleAsciiEllipsisPlaceholders(
+    page: Page,
+  ): Promise<string[]> {
+    return page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>("[placeholder]"))
+        .filter((el) => el.getClientRects().length > 0)
+        .map((el) => el.getAttribute("placeholder") ?? "")
+        .filter((text) => text.includes("...")),
+    );
+  }
+
+  test("palette commands are sentence case and visible placeholders use the single-character ellipsis", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    expect(await visibleAsciiEllipsisPlaceholders(page)).toEqual([]);
+
+    await connectMockListing(page);
+    expect(await visibleAsciiEllipsisPlaceholders(page)).toEqual([]);
+
+    await page.locator("#palette-hint").click();
+    await expect(page.locator("#palette-overlay")).toBeVisible();
+    await page.locator("#palette-input").fill("");
+    const labels = (
+      await page
+        .locator("#palette-results .palette__item-label")
+        .allInnerTexts()
+    ).map((text) => text.trim());
+    expect(labels.length).toBeGreaterThan(0);
+    expect(labels.filter((label) => !isSentenceCase(label))).toEqual([]);
+    expect(await visibleAsciiEllipsisPlaceholders(page)).toEqual([]);
   });
 });

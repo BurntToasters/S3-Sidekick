@@ -177,6 +177,7 @@ import {
   getObjectAction,
   resolveActionLabel,
   runObjectAction,
+  shortcutLabelFor,
   syncSelectionBar,
 } from "./object-actions.ts";
 
@@ -243,7 +244,9 @@ function wireConnectionForm(): void {
   dom.connectBtn.addEventListener("click", handleConnectButton);
 
   const connectionFieldIds = [
+    "conn-name",
     "conn-endpoint",
+    "conn-r2-account",
     "conn-region",
     "conn-access-key",
     "conn-secret-key",
@@ -903,7 +906,7 @@ function wireLocationAndFilters(): void {
     const prefix = state.currentPrefix;
     loadMoreBtn.disabled = true;
     loadMoreBtn.textContent = "Loading\u2026";
-    setStatus("Loading more...");
+    setStatus("Loading more…");
     try {
       await loadMoreObjects();
       // A navigation or reconnect that finished during the request owns the
@@ -1280,7 +1283,7 @@ function wireDropUpload(): void {
           );
         } else {
           setStatus(
-            "No dropped files detected. Try Upload Files instead.",
+            "No dropped files detected. Try upload files instead.",
             5000,
           );
         }
@@ -1416,7 +1419,7 @@ function wireCommandPalette(): void {
   registerCommands([
     {
       id: "upload-files",
-      label: "Upload Files",
+      label: "Upload files",
       icon: "upload",
       shortcut: `${accelLabel}U`,
       action: () => {
@@ -1428,9 +1431,9 @@ function wireCommandPalette(): void {
     },
     {
       id: "upload-folder",
-      label: "Upload Folder",
+      label: "Upload folder",
       icon: "folder-up",
-      shortcut: `${accelLabel}⇧U`,
+      shortcut: shortcutLabelFor("Upload folder"),
       action: () => {
         void handleUploadFolderButton().catch((err) =>
           reportAsyncActionFailure("Upload folder", err),
@@ -1466,7 +1469,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "refresh-buckets",
-      label: "Refresh Buckets",
+      label: "Refresh buckets",
       icon: "refresh-cw",
       keywords: ["bucket list", "reload buckets"],
       action: () => {
@@ -1492,7 +1495,7 @@ function wireCommandPalette(): void {
     paletteCommandForAction("preview"),
     {
       id: "select-all",
-      label: "Select All",
+      label: "Select all",
       icon: "check-square",
       shortcut: `${accelLabel}A`,
       action: () => {
@@ -1502,7 +1505,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "filter",
-      label: "Filter Objects",
+      label: "Filter objects",
       icon: "search",
       shortcut: `${accelLabel}F`,
       action: () => {
@@ -1515,7 +1518,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "go-to-key-prefix",
-      label: "Go to Key/Prefix",
+      label: "Go to key/prefix",
       icon: "compass",
       keywords: ["jump", "path", "prefix"],
       action: () => {
@@ -1527,7 +1530,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "open-last-download-folder",
-      label: "Open Last Download Folder",
+      label: "Open last download folder",
       icon: "folder",
       action: () => {
         void handleOpenLastDownloadFolder().catch((err) =>
@@ -1540,7 +1543,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "export-activity-log",
-      label: "Export Activity Log",
+      label: "Export activity log",
       icon: "save",
       action: () => {
         void handleExportActivityLog().catch((err) =>
@@ -1550,13 +1553,13 @@ function wireCommandPalette(): void {
     },
     {
       id: "activity",
-      label: "Toggle Activity Log",
+      label: "Toggle activity log",
       icon: "clipboard-list",
       action: () => toggleActivityLog(),
     },
     {
       id: "settings",
-      label: "Open Settings",
+      label: "Open settings",
       icon: "settings",
       action: () => {
         document.getElementById("settings-btn")?.click();
@@ -1564,15 +1567,15 @@ function wireCommandPalette(): void {
     },
     {
       id: "toggle-inspector",
-      label: "Toggle Inspector",
+      label: "Toggle inspector",
       icon: "sidebar",
-      shortcut: `${accelLabel}⇧I`,
+      shortcut: shortcutLabelFor("Toggle inspector (connected only)"),
       action: () => toggleInspector(),
       available: () => state.connected,
     },
     {
       id: "go-up",
-      label: "Go Up (Parent Folder)",
+      label: "Go up (parent folder)",
       icon: "arrow-up",
       action: () => {
         void navigateUp().catch((err) =>
@@ -1607,7 +1610,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "clear-filter",
-      label: "Clear Filter",
+      label: "Clear filter",
       icon: "x-square",
       keywords: ["reset filter"],
       action: () => clearFilter(),
@@ -1620,7 +1623,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "edit-location",
-      label: "Edit Location",
+      label: "Edit location",
       icon: "compass",
       keywords: ["address bar", "path", "url"],
       action: () => enterLocationEditMode(),
@@ -1628,7 +1631,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "keyboard-shortcuts",
-      label: "Keyboard Shortcuts",
+      label: "Keyboard shortcuts",
       icon: "info",
       shortcut: `${accelLabel}/`,
       keywords: ["keys", "hotkeys", "bindings"],

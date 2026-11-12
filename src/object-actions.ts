@@ -74,7 +74,7 @@ export interface ObjectAction {
 }
 
 const MOVE_UNSUPPORTED_REASON =
-  "This provider can't safely delete the source. Use Copy, then Delete.";
+  "This provider can't safely delete the source. Use copy, then delete.";
 
 export function currentActionContext(): ObjectActionContext {
   const fileKeys = getSelectedFileKeys();
@@ -156,7 +156,7 @@ function propertiesLabel(context: ObjectActionContext): string {
 function deleteLabel(context: ObjectActionContext): string {
   const { fileKeys, folderPrefixes, total } = context;
   if (total === 1) {
-    return folderPrefixes.length === 1 ? "Delete Folder" : "Delete";
+    return folderPrefixes.length === 1 ? "Delete folder" : "Delete";
   }
   if (fileKeys.length > 0 && folderPrefixes.length > 0) {
     return `Delete ${plural(fileKeys.length, "file")} and ${plural(folderPrefixes.length, "folder")}`;
@@ -250,7 +250,7 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
   {
     id: "copy-move",
     label: (context) =>
-      context.moveSupported ? "Copy / Move\u2026" : "Copy to\u2026",
+      context.moveSupported ? "Copy / move\u2026" : "Copy to\u2026",
     icon: "folder",
     group: "transfer",
     keywords: ["duplicate", "destination"],
@@ -335,7 +335,7 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
   },
   {
     id: "deselect-all",
-    label: "Deselect All",
+    label: "Deselect all",
     icon: "x-square",
     group: "selection",
     isAvailable: (context) => context.total > 0,

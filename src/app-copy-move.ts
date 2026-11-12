@@ -42,7 +42,7 @@ function destinationLocation(path: string): string {
 }
 
 const MOVE_UNSUPPORTED_REASON =
-  "This provider can't safely delete the source. Use Copy, then Delete.";
+  "This provider can't safely delete the source. Use copy, then delete.";
 const SELF_COPY_MESSAGE =
   "Can't copy onto itself: the source and destination are the same. Choose a different destination.";
 const INTO_ITSELF_MESSAGE =
@@ -809,7 +809,7 @@ export function openCopyMoveDialog(): void {
           ? ` Cancelled ${cancelledWrites} unconditional write${cancelledWrites === 1 ? "" : "s"}.`
           : "";
       setStatus(
-        `Queued ${plural(queueResult.count, "item")}….${skippedLabel}${cancelledLabel}`,
+        `Queued ${plural(queueResult.count, "item")}.${skippedLabel}${cancelledLabel}`,
         5000,
       );
       logActivity(

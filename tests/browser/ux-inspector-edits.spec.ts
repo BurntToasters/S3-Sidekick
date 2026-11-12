@@ -328,11 +328,11 @@ test.describe("inspector tab behaviour", () => {
     const labels = await body
       .locator(".metadata-label")
       .evaluateAll((elements) => elements.map((el) => el.textContent ?? ""));
-    for (const label of ["Path", "Size", "Last Modified", "ETag"]) {
+    for (const label of ["Path", "Size", "Last modified", "ETag"]) {
       expect(labels.filter((text) => text === label)).toHaveLength(1);
     }
     // Storage Class and Encryption existed in both old tabs; exactly once now.
-    expect(labels.filter((text) => text === "Storage Class")).toHaveLength(1);
+    expect(labels.filter((text) => text === "Storage class")).toHaveLength(1);
     expect(labels.filter((text) => text === "Encryption")).toHaveLength(1);
   });
 
@@ -416,7 +416,7 @@ test.describe("inspector empty state and footer", () => {
     } else {
       await page.locator("#batch-more").click();
       await page
-        .locator('.context-menu [role="menuitem"]', { hasText: "Deselect All" })
+        .locator('.context-menu [role="menuitem"]', { hasText: "Deselect all" })
         .click();
     }
 

@@ -342,7 +342,7 @@ describe("app-init startup waterfall", () => {
     await flushMicrotasks();
 
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Settings Corrupted",
+      "Settings corrupted",
       expect.stringContaining("saved connections"),
     );
     expect(mockInvoke).toHaveBeenCalledWith("save_settings", {

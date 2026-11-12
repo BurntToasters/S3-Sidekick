@@ -2929,7 +2929,7 @@ describe("main integration", () => {
     await flushMicrotasks();
 
     expect(mockShowConfirm).toHaveBeenCalledWith(
-      "Unconditional Write",
+      "Unconditional write",
       expect.stringContaining("cannot enforce create-only writes"),
       expect.anything(),
     );
@@ -3275,7 +3275,7 @@ describe("main integration", () => {
     const supportBtn = document.getElementById(
       "settings-support-me",
     ) as HTMLButtonElement;
-    expect(supportBtn.textContent).toMatch(/Support Me/);
+    expect(supportBtn.textContent).toMatch(/Support me/);
     mockInvoke.mockClear();
     supportBtn.click();
     await flushMicrotasks(4);

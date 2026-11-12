@@ -146,7 +146,7 @@
 
 .preview-table th,
 .preview-table td {
-  padding: var(--space-1) 10px;
+  padding: var(--space-1) var(--space-2-5);
   border-bottom: 1px solid var(--border);
   text-align: left;
   white-space: nowrap;

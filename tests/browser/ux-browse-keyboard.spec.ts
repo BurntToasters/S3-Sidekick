@@ -85,9 +85,9 @@ test.describe("browse table sorting, filter and live announcements", () => {
     await expect(page.locator("#object-tbody .object-row")).toHaveCount(1);
 
     await page.locator("#palette-hint").click();
-    await page.locator("#palette-input").fill("Clear Filter");
+    await page.locator("#palette-input").fill("Clear filter");
     await page
-      .locator("#palette-results .palette__item", { hasText: "Clear Filter" })
+      .locator("#palette-results .palette__item", { hasText: "Clear filter" })
       .click();
 
     await expect(page.locator("#filter-input")).toHaveValue("");

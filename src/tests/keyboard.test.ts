@@ -197,6 +197,50 @@ describe("keyboard shortcuts", () => {
   });
 });
 
+describe("shortcut key chips and groups", () => {
+  // Failure modes checked before implementation:
+  // - A combo label such as "⌘⇧U" is kept as one chip instead of one per key.
+  // - A key name with a space (Page Up, Type letters) is split on the space.
+  // - A "+" separator is left inside a chip, such as "Ctrl+Shift".
+  // - An entry with no group disappears from the grouped dialog list.
+  it("splits a key label into one chip per key", async () => {
+    const catalog = await import("../shortcut-catalog.ts");
+
+    expect(catalog.shortcutKeyChips("⌘⇧U")).toEqual(["⌘", "⇧", "U"]);
+    expect(catalog.shortcutKeyChips("⌘⌫")).toEqual(["⌘", "⌫"]);
+    expect(catalog.shortcutKeyChips("⌥↑")).toEqual(["⌥", "↑"]);
+    expect(catalog.shortcutKeyChips("⇧F10")).toEqual(["⇧", "F10"]);
+    expect(catalog.shortcutKeyChips("Ctrl+Shift+U")).toEqual([
+      "Ctrl",
+      "Shift",
+      "U",
+    ]);
+    expect(catalog.shortcutKeyChips("Ctrl+/")).toEqual(["Ctrl", "/"]);
+    expect(catalog.shortcutKeyChips("Page Up")).toEqual(["Page Up"]);
+    expect(catalog.shortcutKeyChips("Type letters")).toEqual(["Type letters"]);
+    expect(catalog.shortcutKeyChips("Escape")).toEqual(["Escape"]);
+  });
+
+  it("groups every shortcut once, under a heading, in a stable order", async () => {
+    const catalog = await import("../shortcut-catalog.ts");
+
+    const groups = catalog.shortcutGroups();
+    const grouped = groups.flatMap((group) => group.entries);
+    expect(grouped.length).toBe(catalog.SHORTCUTS.length);
+    expect(new Set(grouped.map((entry) => entry.action)).size).toBe(
+      catalog.SHORTCUTS.length,
+    );
+    for (const group of groups) {
+      expect(group.entries.length).toBeGreaterThan(0);
+    }
+    expect(groups.map((group) => group.title)).toEqual(
+      catalog.SHORTCUT_GROUPS.filter((title) =>
+        groups.some((group) => group.title === title),
+      ),
+    );
+  });
+});
+
 describe("shortcut catalog", () => {
   it("shows Command labels on macOS and Ctrl labels elsewhere", async () => {
     const catalog = await import("../shortcut-catalog.ts");

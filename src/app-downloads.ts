@@ -353,7 +353,7 @@ async function preflightDownloadDiskSpace(
     lines.push(`+${shortages.length - 3} more destination(s)`);
   }
   const proceed = await showConfirm(
-    "Low Disk Space",
+    "Low disk space",
     `Destination free space may be insufficient:\n${lines.join("\n")}\n\nQueue downloads anyway?`,
     { okLabel: "Queue anyway", cancelLabel: "Cancel queue", okDanger: true },
   );

@@ -1,6 +1,8 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { commandCalls, saveArtifact } from "./helpers";
 import {
+  connectMockListing,
+  installLayoutTauriMock,
   openMockListing,
   readMockCallLog,
   releaseMockListing,
@@ -511,4 +513,214 @@ test.describe("browse table, keyboard and location bar", () => {
       "layout-test-bucket",
     );
   });
+});
+
+/**
+ * Resolve a CSS value through the page's own cascade (tokens included) on a
+ * throwaway probe, so the assertions never hard-code theme colours.
+ */
+async function cascadeValue(
+  page: Page,
+  property: string,
+  value: string,
+): Promise<string> {
+  return page.evaluate(
+    ([prop, val]) => {
+      const probe = document.createElement("div");
+      probe.style.position = "fixed";
+      probe.style.visibility = "hidden";
+      probe.style.setProperty(prop, val);
+      document.body.appendChild(probe);
+      const out = getComputedStyle(probe).getPropertyValue(prop);
+      probe.remove();
+      return out;
+    },
+    [property, value] as const,
+  );
+}
+
+const SAVED_PRODUCTION = {
+  name: "Production",
+  endpoint: "https://layout-test.invalid",
+  region: "us-east-1",
+  access_key: "layout-access-key",
+  secret_key: "stored-secret",
+};
+
+// Failure modes: the three popovers paint separate surfaces. The row context
+// menu keeps a translucent glass background and blur, the header switcher menu
+// uses --bg-surface with a 10px radius, and the saved-row menu uses a 6px
+// radius. In dark, a translucent or differently tinted surface shows the
+// listing through it and the three menus look like three components. Checked
+// in dark, where the difference is most visible.
+test("row context menu, switcher menu and saved-row menu share one opaque popover surface", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, {
+    bookmarks: [SAVED_PRODUCTION],
+    settings: { theme: "dark" },
+  });
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+
+  const surfaceOf = (locator: Locator) =>
+    locator.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return {
+        background: cs.backgroundColor,
+        radius: cs.borderTopLeftRadius,
+        shadow: cs.boxShadow,
+        borderColor: cs.borderTopColor,
+      };
+    });
+
+  // Saved-row menu on the connection screen.
+  await page
+    .locator(
+      '#conn-saved-list .bookmark__menu[aria-label="More actions for Production"]',
+    )
+    .click();
+  const savedMenu = page
+    .locator("#conn-saved-list .bookmark-item")
+    .first()
+    .locator(".bookmark-row-menu");
+  await expect(savedMenu).toBeVisible();
+  const saved = await surfaceOf(savedMenu);
+  // A pointerdown outside the menu closes it; Escape needs focus inside it,
+  // which WebKit does not give a button on click.
+  await page.locator("#conn-endpoint").click();
+  await expect(savedMenu).toBeHidden();
+
+  await connectMockListing(page);
+
+  // Header connection switcher menu.
+  await page.locator("#conn-switcher-btn").click();
+  const switcherMenu = page.locator("#conn-switcher-menu");
+  await expect(switcherMenu).toBeVisible();
+  const switcher = await surfaceOf(switcherMenu);
+  await page.keyboard.press("Escape");
+  await expect(switcherMenu).toBeHidden();
+
+  // Row context menu on a file row.
+  await page.locator(".object-row--file").first().click({ button: "right" });
+  const contextMenu = page.locator(".context-menu");
+  await expect(contextMenu).toBeVisible();
+  const context = await surfaceOf(contextMenu);
+
+  const expected = {
+    background: await cascadeValue(
+      page,
+      "background-color",
+      "var(--bg-elevated)",
+    ),
+    radius: await cascadeValue(page, "border-top-left-radius", "var(--radius)"),
+    shadow: await cascadeValue(page, "box-shadow", "var(--shadow-2)"),
+    borderColor: await cascadeValue(
+      page,
+      "border-top-color",
+      "var(--glass-border)",
+    ),
+  };
+  expect(expected.background, "bg-elevated is opaque").not.toMatch(/rgba\(/);
+  expect(saved, "saved-row menu").toEqual(expected);
+  expect(switcher, "switcher menu").toEqual(expected);
+  expect(context, "row context menu").toEqual(expected);
+});
+
+// Failure modes: the sidebar resizer paints a permanent grey grip band and a
+// visible 2px divider at rest, so the sidebar edge looks heavy. The accent line
+// on hover or focus is either missing or sits off-centre in the 8px track.
+// Checked at rest and after hover.
+test("the sidebar resizer is transparent at rest and shows a centred 2px accent line on hover", async ({
+  page,
+}) => {
+  await openMockListing(page, { objectCount: 1, prefixes: [] });
+  const resizer = page.locator("#sidebar-resizer");
+  await expect(resizer).toBeVisible();
+
+  const readResizer = () =>
+    resizer.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      const after = getComputedStyle(el, "::after");
+      return {
+        backgroundImage: cs.backgroundImage,
+        backgroundColor: cs.backgroundColor,
+        afterBackground: after.backgroundColor,
+        afterOpacity: after.opacity,
+        afterLeft: after.left,
+        afterWidth: after.width,
+      };
+    });
+
+  await page.mouse.move(0, 0);
+  const rest = await readResizer();
+  expect(rest.backgroundImage, "no grip gradient at rest").toBe("none");
+  expect(rest.backgroundColor, "no band at rest").toBe("rgba(0, 0, 0, 0)");
+  expect(
+    rest.afterBackground === "rgba(0, 0, 0, 0)" || rest.afterOpacity === "0",
+    `divider invisible at rest: ${JSON.stringify(rest)}`,
+  ).toBe(true);
+
+  const accent = await cascadeValue(page, "background-color", "var(--accent)");
+  await resizer.hover();
+  await expect
+    .poll(() =>
+      resizer.evaluate((el) => getComputedStyle(el, "::after").backgroundColor),
+    )
+    .toBe(accent);
+  const hovered = await readResizer();
+  expect(hovered.afterOpacity).toBe("1");
+  expect(hovered.afterLeft, "line starts 3px into the 8px track").toBe("3px");
+  expect(hovered.afterWidth, "line is 2px wide").toBe("2px");
+});
+
+// Failure modes: the header switcher is the app's main identity control, but
+// its label stays at the 11px --text-xs size, so the connection name reads as
+// a caption. A font-size change must not shrink the 28px tap target or let the
+// name or host wrap; both must keep truncating with an ellipsis.
+test("the header switcher uses the 12px text token, stays 28px tall and truncates one line", async ({
+  page,
+}) => {
+  await openMockListing(page, {
+    objectCount: 1,
+    prefixes: [],
+    endpoint: `https://${"a".repeat(120)}.invalid`,
+  });
+  const switcher = page.locator("#conn-switcher-btn");
+  await expect(switcher).toBeVisible();
+
+  const fontSize = await switcher.evaluate(
+    (el) => getComputedStyle(el).fontSize,
+  );
+  expect(fontSize).toBe(
+    await cascadeValue(page, "font-size", "var(--text-sm)"),
+  );
+
+  const box = await switcher.boundingBox();
+  expect(box?.height ?? 0).toBeGreaterThanOrEqual(28);
+
+  for (const id of ["conn-switcher-name", "conn-switcher-host"]) {
+    const label = page.locator(`#${id}`);
+    const style = await label.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return {
+        whiteSpace: cs.whiteSpace,
+        textOverflow: cs.textOverflow,
+        overflow: cs.overflow,
+        fontSize: parseFloat(cs.fontSize),
+        height: el.getBoundingClientRect().height,
+      };
+    });
+    expect(style.whiteSpace, `${id} does not wrap`).toBe("nowrap");
+    expect(style.textOverflow, `${id} truncates`).toBe("ellipsis");
+    expect(style.overflow, `${id} clips`).toBe("hidden");
+    // Two wrapped lines would exceed twice the font size; one line stays under it.
+    expect(style.height, `${id} is one line tall`).toBeLessThanOrEqual(
+      style.fontSize * 2,
+    );
+  }
+  const nameTruncated = await page
+    .locator("#conn-switcher-name")
+    .evaluate((el) => el.scrollWidth > el.clientWidth);
+  expect(nameTruncated, "long connection name is truncated").toBe(true);
 });

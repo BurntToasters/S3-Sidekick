@@ -10,7 +10,7 @@
   background: var(--support-scrim);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  animation: support-overlay-in 0.2s ease;
+  animation: support-overlay-in var(--duration-base) ease;
 }
 .support-overlay[hidden] {
   display: none;
@@ -34,9 +34,7 @@ body.titlebar-custom .support-overlay {
 
 .support-card {
   width: min(400px, 90vw);
-  background: var(--glass-bg-heavy);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
+  background: var(--bg-elevated);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
@@ -91,7 +89,7 @@ body.titlebar-custom .support-overlay {
 
 .support-card__actions {
   display: flex;
-  gap: 10px;
+  gap: var(--space-2-5);
   margin-top: var(--space-2);
   width: 100%;
   justify-content: center;
@@ -101,5 +99,5 @@ body.titlebar-custom .support-overlay {
   flex: 1;
   max-width: 160px;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-1-5);
 }

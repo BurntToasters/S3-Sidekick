@@ -306,7 +306,7 @@ describe("download disk preflight", () => {
     const first = await import("../app-downloads.ts");
     await first.handleDownload();
     expect(mockShowConfirm).toHaveBeenCalledTimes(1);
-    expect(mockShowConfirm.mock.calls[0]?.[0]).toBe("Low Disk Space");
+    expect(mockShowConfirm.mock.calls[0]?.[0]).toBe("Low disk space");
     expect(mockEnqueueDownloads).toHaveBeenCalledTimes(1);
 
     mockEnqueueDownloads.mockClear();

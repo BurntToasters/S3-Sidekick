@@ -13,6 +13,9 @@
   --bg-hover: #eeeef1;
   --bg-active: #dbeafe;
   --border: #e4e4e7;
+  /* Divider edge on elevated surfaces (modals, dialogs, menus). The dark value
+     is one step lighter than --border so it still shows on --bg-elevated. */
+  --border-elevated: #e4e4e7;
   --border-strong: #8e8e96;
   /* Interactive control edges clear 3:1 on both the resting and hover
      surfaces. Decorative separators keep the lighter --border. */
@@ -52,16 +55,11 @@
   --titlebar-close-hover: #e81123;
 
   --disconnect-bg: rgba(239, 68, 68, 0.08);
-  --disconnect-border: rgba(239, 68, 68, 0.25);
   /* Red-700 keeps the error text at 4.5:1 on the --disconnect-bg tint. */
   --disconnect-text: #b91c1c;
-  --disconnect-bg-hover: rgba(239, 68, 68, 0.15);
-  --disconnect-border-hover: rgba(239, 68, 68, 0.45);
-  --disconnect-text-hover: #991b1b;
 
   --badge-off-bg: #e4e4e7;
   --badge-off-text: #5c5c64;
-  --badge-on-bg: #dcfce7;
   --badge-on-text: #15803d;
 
   /* Skeleton shimmer base and highlight stay at least 1.3:1 apart. */
@@ -229,6 +227,7 @@
     --bg-hover: #32323a;
     --bg-active: #1e1b4b;
     --border: #27272a;
+    --border-elevated: #3f3f46;
     --border-strong: #71717a;
     --border-control: #7d7d85;
     --border-focus: #6366f1;
@@ -257,15 +256,10 @@
     --tooltip-text: #fafafa;
 
     --disconnect-bg: rgba(248, 113, 113, 0.12);
-    --disconnect-border: rgba(248, 113, 113, 0.3);
     --disconnect-text: #fca5a5;
-    --disconnect-bg-hover: rgba(248, 113, 113, 0.22);
-    --disconnect-border-hover: rgba(248, 113, 113, 0.5);
-    --disconnect-text-hover: #fecaca;
 
     --badge-off-bg: #27272a;
     --badge-off-text: #a1a1aa;
-    --badge-on-bg: #064e3b;
     --badge-on-text: #a7f3d0;
 
     --skeleton-base: #32323a;
@@ -326,6 +320,7 @@
   --bg-hover: #32323a;
   --bg-active: #1e1b4b;
   --border: #27272a;
+  --border-elevated: #3f3f46;
   --border-strong: #71717a;
   --border-control: #7d7d85;
   --border-focus: #6366f1;
@@ -353,15 +348,10 @@
   --tooltip-text: #fafafa;
 
   --disconnect-bg: rgba(248, 113, 113, 0.12);
-  --disconnect-border: rgba(248, 113, 113, 0.3);
   --disconnect-text: #fca5a5;
-  --disconnect-bg-hover: rgba(248, 113, 113, 0.22);
-  --disconnect-border-hover: rgba(248, 113, 113, 0.5);
-  --disconnect-text-hover: #fecaca;
 
   --badge-off-bg: #27272a;
   --badge-off-text: #a1a1aa;
-  --badge-on-bg: #064e3b;
   --badge-on-text: #a7f3d0;
 
   --skeleton-base: #32323a;
@@ -407,6 +397,19 @@
   --settings-preview-system-edge: #71717a;
   --settings-preview-system-light-row: #d4d4d8;
   --settings-preview-system-dark-row: #3f3f46;
+}
+
+/* Elevated surfaces re-scope the divider token to --border-elevated, so rules,
+   footers and search edges stay visible on the opaque --bg-elevated surface. */
+.modal,
+.dialog-box,
+.palette,
+.setup-wizard-card,
+.support-card,
+.context-menu,
+.conn-switcher__menu,
+.bookmark-row-menu {
+  --border: var(--border-elevated);
 }
 
 *,

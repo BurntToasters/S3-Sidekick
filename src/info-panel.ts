@@ -536,7 +536,7 @@ function renderDetails(body: HTMLElement): void {
   if (!headData) return;
 
   const httpHeaderRows = [
-    infoRow("Content Type", headData.content_type),
+    infoRow("Content type", headData.content_type),
     headData.cache_control
       ? infoRow("Cache-Control", headData.cache_control)
       : "",
@@ -553,8 +553,8 @@ function renderDetails(body: HTMLElement): void {
     infoRowCopyable("Path", currentKey, true) +
     infoSection("Size & dates") +
     infoRow("Size", formatSize(headData.content_length)) +
-    infoRow("Last Modified", formatDate(headData.last_modified)) +
-    infoRow("Storage Class", headData.storage_class || "STANDARD") +
+    infoRow("Last modified", formatDate(headData.last_modified)) +
+    infoRow("Storage class", headData.storage_class || "STANDARD") +
     infoRow("Encryption", headData.server_side_encryption || "None") +
     infoRowCopyable("ETag", headData.etag, true) +
     (httpHeaderRows.length > 0
@@ -571,7 +571,7 @@ function renderGeneral(body: HTMLElement): void {
   const storageClass = headData.storage_class || "STANDARD";
   const encryption = headData.server_side_encryption || "None";
   const httpHeaderRows = [
-    infoRow("Content Type", headData.content_type),
+    infoRow("Content type", headData.content_type),
     headData.cache_control
       ? infoRow("Cache-Control", headData.cache_control)
       : "",
@@ -589,8 +589,8 @@ function renderGeneral(body: HTMLElement): void {
     infoRowCopyable("Path", currentKey, true) +
     infoSection("Size & dates") +
     infoRow("Size", formatSize(headData.content_length)) +
-    infoRow("Last Modified", formatDate(headData.last_modified)) +
-    infoRow("Storage Class", storageClass) +
+    infoRow("Last modified", formatDate(headData.last_modified)) +
+    infoRow("Storage class", storageClass) +
     infoRow("Encryption", encryption) +
     infoRowCopyable("ETag", headData.etag, true) +
     (httpHeaderRows.length > 0
@@ -775,8 +775,8 @@ function renderBatchView(
     `<label for="batch-visibility" class="metadata-label">Access</label>` +
     `<select id="batch-visibility" class="field metadata-visibility-select">` +
     `<option value="unchanged">Keep unchanged</option>` +
-    `<option value="private">Set Private</option>` +
-    `<option value="public-read">Set Public (read-only)</option>` +
+    `<option value="private">Set private</option>` +
+    `<option value="public-read">Set public (read-only)</option>` +
     `</select>` +
     `<p class="metadata-batch-hint">Use this to set all selected files to private or publicly readable.</p>` +
     `</div>` +
@@ -955,9 +955,9 @@ function renderEntryRows(): void {
 function renderS3(body: HTMLElement): void {
   if (!headData) return;
   body.innerHTML = [
-    infoRow("Storage Class", headData.storage_class || "STANDARD"),
+    infoRow("Storage class", headData.storage_class || "STANDARD"),
     infoRow(
-      "Server-Side Encryption",
+      "Server-side encryption",
       headData.server_side_encryption || "None",
     ),
     infoRow("ETag", headData.etag, true),

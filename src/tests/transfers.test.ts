@@ -2510,7 +2510,7 @@ describe("transfer recovery ownership", () => {
     });
     expect(mockShowChoiceDialog).toHaveBeenCalledTimes(1);
     expect(mockShowConfirm).toHaveBeenCalledTimes(1);
-    expect(mockShowConfirm.mock.calls[0]?.[0]).toBe("Bind Recovered Transfers");
+    expect(mockShowConfirm.mock.calls[0]?.[0]).toBe("Bind recovered transfers");
     const bindingSaveIndex = mockInvoke.mock.calls.findIndex(
       ([cmd, payload]) =>
         cmd === "save_transfer_manifest" &&

@@ -71,7 +71,7 @@
   justify-content: center;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-3-5);
-  border-top: 1px solid var(--border-control);
+  border-top: 1px solid var(--border);
 }
 
 .object-count {

@@ -11,6 +11,9 @@
 // - The transfer list has no way to show only failed or completed rows.
 // - Reduced motion still animates the indeterminate progress bar.
 // - The resize handle is not exposed as a separator.
+// - Hovering a selected transfer row swaps its selected fill for the hover fill.
+// - The load-more separator uses the strong control border instead of the
+//   decorative divider token.
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { saveArtifact as saveSuiteArtifact } from "./helpers";
 import {
@@ -47,6 +50,28 @@ async function showToast(
       mod.showToast(message, options);
     },
     { message, options },
+  );
+}
+
+/**
+ * Resolve a design token to the computed colour string the browser reports for
+ * `property`, so assertions compare like with like (rgb/rgba formatting).
+ */
+async function resolvedColor(
+  page: Page,
+  token: string,
+  property: "backgroundColor" | "borderTopColor",
+): Promise<string> {
+  return page.evaluate(
+    ({ token, property }) => {
+      const probe = document.createElement("div");
+      probe.style[property] = `var(${token})`;
+      document.body.appendChild(probe);
+      const color = getComputedStyle(probe)[property];
+      probe.remove();
+      return color;
+    },
+    { token, property },
   );
 }
 
@@ -412,6 +437,67 @@ test.describe("drawer, toasts, activity log and drop zone", () => {
     await expect(page.locator("#transfer-filter-empty")).toBeHidden();
     const calls = await readMockCallLog(page);
     await saveSuiteArtifact(page, testInfo, SUITE, "transfer-filters", calls);
+  });
+
+  // Failure mode: `.transfer-item:hover` (specificity 0,2,0) outranks
+  // `.transfer-item--selected` (0,1,0), so hovering the selected transfer row
+  // swaps the --bg-active fill for --bg-hover and the selection vanishes under
+  // the pointer. Object rows keep their selected fill on hover; transfer rows
+  // must match.
+  test("a selected transfer row keeps its selected fill while hovered", async ({
+    page,
+  }, testInfo) => {
+    await openMockListing(page);
+    await enqueueBrowserFile(page, "select-hover.txt");
+    await openTransfers(page);
+    const row = page.locator("#transfer-list .transfer-item").first();
+    await expect(row).toBeVisible({ timeout: 20_000 });
+
+    await row.locator(".transfer-name").click();
+    await expect(row).toHaveClass(/transfer-item--selected/);
+    const selectedFill = await resolvedColor(
+      page,
+      "--bg-active",
+      "backgroundColor",
+    );
+
+    await row.hover();
+    await expect(row).toHaveClass(/transfer-item--selected/);
+    await expect(row).toHaveCSS("background-color", selectedFill);
+    const calls = await readMockCallLog(page);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      SUITE,
+      "selected-transfer-hover",
+      calls,
+    );
+  });
+
+  // Failure mode: `.load-more-row` draws its divider with the strong
+  // --border-control token, so the separator above "Load more..." reads as a
+  // control outline. A divider is decorative and must use --border.
+  test("the load-more separator uses the decorative border token", async ({
+    page,
+  }, testInfo) => {
+    await openMockListing(page);
+    // The mock listing is never truncated, so the real row stays hidden. Show
+    // it in place and measure its own separator rather than a copy.
+    await page.locator("#load-more-row").evaluate((row) => {
+      (row as HTMLElement).style.display = "";
+    });
+    const row = page.locator("#load-more-row");
+    const expected = await resolvedColor(page, "--border", "borderTopColor");
+
+    await expect(row).toHaveCSS("border-top-color", expected);
+    const calls = await readMockCallLog(page);
+    await saveSuiteArtifact(
+      page,
+      testInfo,
+      SUITE,
+      "load-more-separator",
+      calls,
+    );
   });
 
   test("reduced motion holds the indeterminate bar still at full width", async ({

@@ -147,7 +147,7 @@ describe("updater", () => {
     expect(mockRelaunch).not.toHaveBeenCalled();
     expect(mockSendNotification).toHaveBeenCalledWith({
       title: "S3 Sidekick",
-      body: "Version 0.7.0 was not installed. Choose Check now in Settings to install it.",
+      body: "Version 0.7.0 was not installed. Choose check now in settings to install it.",
     });
   });
 
@@ -376,7 +376,7 @@ describe("updater", () => {
 
     expect(mockSendNotification).toHaveBeenCalledWith({
       title: "S3 Sidekick",
-      body: "Version 0.8.1 is available. Downloading...",
+      body: "Version 0.8.1 is available. Downloading…",
     });
     expect(download).toHaveBeenCalledTimes(1);
     expect(install).toHaveBeenCalledTimes(1);

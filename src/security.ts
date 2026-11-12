@@ -57,7 +57,7 @@ function announceSecurityReady(status: SecurityStatus): void {
 
 async function surfaceCleanupWarning(status: SecurityStatus): Promise<void> {
   if (status.cleanup_warning) {
-    await showAlert("Security Cleanup Pending", status.cleanup_warning);
+    await showAlert("Security cleanup pending", status.cleanup_warning);
   }
 }
 
@@ -253,7 +253,7 @@ async function waitForWindowFocus(timeoutMs: number): Promise<void> {
  * inline by the dialog, so the user corrects the field instead of restarting.
  */
 async function promptForNewPassword(): Promise<string | null> {
-  const first = await showPrompt("Set Password", NEW_PASSWORD_WARNING, {
+  const first = await showPrompt("Set password", NEW_PASSWORD_WARNING, {
     inputType: "password",
     inputPlaceholder: "Password (12+ characters)",
     validationMessage: "Password must be at least 12 characters.",
@@ -262,7 +262,7 @@ async function promptForNewPassword(): Promise<string | null> {
   if (first === null) return null;
 
   const confirmed = await showPrompt(
-    "Confirm Password",
+    "Confirm password",
     "Type the same password again.",
     {
       inputType: "password",
@@ -303,7 +303,7 @@ export async function ensureSecurityReady(): Promise<boolean> {
 
   if (!status.initialized) {
     const enableEncryption = await showConfirm(
-      "Credential Encryption",
+      "Credential encryption",
       "Enable credential encryption?\n\nRecommended: Yes.\nSaved connections and your last-used connection will be encrypted with AES-256 and protected by your password.",
       { okLabel: "Enable", cancelLabel: "Skip" },
     );
@@ -376,7 +376,7 @@ function biometricFailureNotice(err: unknown, label: string): string {
     return "A one-time password unlock is required to upgrade encrypted credentials after updating S3 Sidekick.";
   }
   if (isCredentialRemovedError(err)) {
-    return `${label} credential was removed from the system. Please unlock with your password, then re-enable ${label} in Settings.`;
+    return `${label} credential was removed from the system. Please unlock with your password, then re-enable ${label} in settings.`;
   }
   if (isCancellationError(err)) {
     return "Biometric authentication was canceled. Enter your password to unlock encrypted credentials.";
@@ -764,7 +764,7 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
     retryBtn.addEventListener("click", () => {
       retryBtn.hidden = true;
       retryBtn.disabled = true;
-      statusText.textContent = "Loading...";
+      statusText.textContent = "Loading…";
       void refreshSecuritySettingsUI().finally(() => {
         retryBtn.disabled = false;
       });
@@ -880,7 +880,7 @@ export async function handleSecurityToggle(
   try {
     if (action === "setup" && !status.initialized) {
       const enable = await showConfirm(
-        "Initialize Security",
+        "Initialize security",
         "Security is not initialized yet. Enable encryption now?",
         { okLabel: "Enable", cancelLabel: "Skip" },
       );
@@ -912,14 +912,14 @@ export async function handleSecurityToggle(
       setStatus("Credentials unlocked.");
     } else {
       const shouldDisable = await showConfirm(
-        "Disable Encryption",
+        "Disable encryption",
         "Disable encryption?\n\nSaved connections and your last-used connection will be stored unencrypted.",
         { okLabel: "Disable", okDanger: true },
       );
       if (!shouldDisable) return false;
 
       const currentPassword = await showPrompt(
-        "Current Password",
+        "Current password",
         "Enter your current password to decrypt stored credentials:",
         {
           inputType: "password",
@@ -968,7 +968,7 @@ export async function handleSecurityChangePassword(
   try {
     // The current password is verified inline, before the new one is typed.
     const currentPassword = await showPrompt(
-      "Current Password",
+      "Current password",
       "Enter your current password:",
       {
         inputType: "password",

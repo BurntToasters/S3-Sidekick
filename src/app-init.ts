@@ -315,7 +315,7 @@ export async function init(): Promise<void> {
 
   if (!settingsValid) {
     await showAlert(
-      "Settings Corrupted",
+      "Settings corrupted",
       "The settings file could not be read (it may be from an incompatible version). Settings will be reset to defaults. Your saved connections and last-used connection are unaffected.",
     );
     try {

@@ -196,7 +196,7 @@
               </button>
             </div>
             <div class="connection-screen__form-card">
-              <h2 class="connection-screen__title">Connect to S3 Storage</h2>
+              <h2 class="connection-screen__title">Connect to S3 storage</h2>
               <p class="connection-screen__subtitle">
                 Enter credentials, or pick a saved connection to connect
                 instantly.
@@ -224,14 +224,14 @@
                 <div class="form-row">
                   <div class="form-group">
                     <label for="conn-provider-preset"
-                      >Provider Preset (Optional)</label
+                      >Provider preset (optional)</label
                     >
                     <select
                       id="conn-provider-preset"
                       class="field field--full"
                       title="Choose a storage provider to prefill endpoint"
                     >
-                      <option value="">Choose provider (optional)...</option>
+                      <option value="">Choose provider (optional)…</option>
                       <option value="aws">AWS S3</option>
                       <option value="do">DigitalOcean Spaces</option>
                       <option value="backblaze">Backblaze B2</option>
@@ -295,12 +295,12 @@
 
                 <div class="form-row">
                   <div class="form-group">
-                    <label for="conn-access-key">Access Key</label>
+                    <label for="conn-access-key">Access key</label>
                     <input
                       id="conn-access-key"
                       class="field field--full"
                       type="text"
-                      placeholder="Access Key"
+                      placeholder="Access key"
                       aria-label="Access key"
                       spellcheck="false"
                       autocapitalize="off"
@@ -313,13 +313,13 @@
 
                 <div class="form-row">
                   <div class="form-group">
-                    <label for="conn-secret-key">Secret Key</label>
+                    <label for="conn-secret-key">Secret key</label>
                     <div class="field-with-toggle field-with-toggle--full">
                       <input
                         id="conn-secret-key"
                         class="field field--full"
                         type="password"
-                        placeholder="Secret Key"
+                        placeholder="Secret key"
                         aria-label="Secret key"
                         spellcheck="false"
                         autocapitalize="off"
@@ -344,7 +344,7 @@
                 <div class="form-row">
                   <div class="form-group">
                     <label for="conn-session-token"
-                      >Session Token
+                      >Session token
                       <span class="field-optional">(optional)</span></label
                     >
                     <div class="field-with-toggle field-with-toggle--full">
@@ -352,7 +352,7 @@
                         id="conn-session-token"
                         class="field field--full"
                         type="password"
-                        placeholder="Session Token"
+                        placeholder="Session token"
                         spellcheck="false"
                         autocapitalize="off"
                         autocorrect="off"
@@ -436,7 +436,7 @@
                 id="bucket-filter-input"
                 class="field sidebar__filter"
                 type="text"
-                placeholder="Filter buckets..."
+                placeholder="Filter buckets…"
                 aria-label="Filter buckets"
               />
             </div>
@@ -642,11 +642,11 @@
                       id="batch-copy-move"
                       type="button"
                       class="btn btn--sm btn--ghost"
-                      title="Copy / Move…"
-                      aria-label="Copy / Move…"
+                      title="Copy / move…"
+                      aria-label="Copy / move…"
                     >
                       <span class="lucide-icon" data-icon="folder"></span>
-                      <span class="batch-toolbar__label">Copy / Move…</span>
+                      <span class="batch-toolbar__label">Copy / move…</span>
                     </button>
                     <button
                       id="batch-rename"
@@ -817,7 +817,7 @@
                             class="sort-trigger"
                             aria-label="Sort by last modified"
                           >
-                            Last Modified
+                            Last modified
                             <span
                               class="sort-indicator"
                               id="sort-modified"
@@ -838,7 +838,7 @@
                       type="button"
                       class="btn btn--ghost"
                     >
-                      Load more...
+                      Load more…
                     </button>
                     <span
                       id="listing-cap-notice"
@@ -971,7 +971,7 @@
                     class="inspector-info__title"
                     hidden
                   >
-                    File Info
+                    File info
                   </h3>
                   <!-- Details, Permissions and Metadata each own a panel. The
                        title, body and footer above are shared; inspector.ts
@@ -1314,9 +1314,9 @@
             <div class="settings-search-wrap">
               <input
                 id="settings-search"
-                class="settings-search"
+                class="field settings-search"
                 type="search"
-                placeholder="Search settings..."
+                placeholder="Search settings…"
                 aria-label="Search settings"
                 autocomplete="off"
               />
@@ -1429,7 +1429,7 @@
               class="settings-support-btn"
             >
               <span class="lucide-icon" data-icon="heart"></span>
-              Support Me
+              Support me
             </button>
           </aside>
           <div class="settings-content">
@@ -1565,8 +1565,12 @@
               <div id="updater-section">
                 <div class="setting-item">
                   <label class="toggle-row">
-                    <input id="setting-updates" type="checkbox" />
                     <span>Automatically check for and download updates</span>
+                    <input
+                      class="switch"
+                      id="setting-updates"
+                      type="checkbox"
+                    />
                   </label>
                 </div>
                 <div class="setting-item">
@@ -1647,7 +1651,7 @@
                   <p id="help-transfer-performance" class="setting-description">
                     Safe uses less memory and runs slower. Balanced suits most
                     transfers. Max gives the highest throughput, using more
-                    memory and CPU. Custom appears once an Advanced value no
+                    memory and CPU. Custom appears once an advanced value no
                     longer matches the preset.
                   </p>
                 </div>
@@ -1683,12 +1687,13 @@
                 </div>
                 <div class="setting-item">
                   <label class="toggle-row">
+                    <span>Warn before unconditional writes</span>
                     <input
+                      class="switch"
                       id="setting-confirm-unguarded-writes"
                       type="checkbox"
                       aria-describedby="help-unguarded-writes"
                     />
-                    <span>Warn before unconditional writes</span>
                   </label>
                   <p id="help-unguarded-writes" class="setting-description">
                     Some providers cannot enforce create-only writes, so another
@@ -1698,12 +1703,13 @@
                 </div>
                 <div class="setting-item">
                   <label class="toggle-row">
+                    <span>Desktop notifications</span>
                     <input
+                      class="switch"
                       id="setting-desktop-notifications"
                       type="checkbox"
                       aria-describedby="help-desktop-notifications"
                     />
-                    <span>Desktop notifications</span>
                   </label>
                   <p
                     id="help-desktop-notifications"
@@ -1802,20 +1808,22 @@
                 <div class="advanced-group" id="transfers-advanced" hidden>
                   <div class="setting-item">
                     <label class="toggle-row">
+                      <span>Remember last download folder</span>
                       <input
+                        class="switch"
                         id="setting-remember-download-path"
                         type="checkbox"
                       />
-                      <span>Remember last download folder</span>
                     </label>
                   </div>
                   <div class="setting-item">
                     <label class="toggle-row">
+                      <span>Open transfer drawer when a transfer starts</span>
                       <input
+                        class="switch"
                         id="setting-open-transfer-drawer"
                         type="checkbox"
                       />
-                      <span>Open transfer drawer when a transfer starts</span>
                     </label>
                   </div>
                   <div class="setting-item">
@@ -1936,12 +1944,13 @@
                   </div>
                   <div class="setting-item">
                     <label class="toggle-row">
+                      <span>Enable resumable large downloads</span>
                       <input
+                        class="switch"
                         id="setting-enable-transfer-resume"
                         type="checkbox"
                         aria-describedby="help-resume-downloads"
                       />
-                      <span>Enable resumable large downloads</span>
                     </label>
                     <p id="help-resume-downloads" class="setting-description">
                       Save progress for large multipart downloads so an
@@ -1950,12 +1959,13 @@
                   </div>
                   <div class="setting-item">
                     <label class="toggle-row">
+                      <span>Verify transfer checksums when available</span>
                       <input
+                        class="switch"
                         id="setting-enable-transfer-checksum-verification"
                         type="checkbox"
                         aria-describedby="help-verify-checksums"
                       />
-                      <span>Verify transfer checksums when available</span>
                     </label>
                     <p id="help-verify-checksums" class="setting-description">
                       Compare an integrity checksum after each transfer when the
@@ -2029,7 +2039,7 @@
               hidden
             >
               <p class="setting-note settings-instant-note">
-                Changes apply immediately. Save and Cancel do not apply them.
+                Changes on this tab apply immediately.
               </p>
               <div class="bookmark-list-toolbar">
                 <button
@@ -2166,11 +2176,11 @@
               hidden
             >
               <p class="setting-note settings-instant-note">
-                Changes apply immediately. Save and Cancel do not apply them.
+                Changes on this tab apply immediately.
               </p>
               <div class="setting-item setting-item--stacked">
                 <span id="settings-encryption-label" class="setting-label"
-                  >Credential Encryption</span
+                  >Credential encryption</span
                 >
                 <div
                   id="security-status-card"
@@ -2188,7 +2198,7 @@
                       id="security-status-text"
                       class="security-status-card__title"
                     >
-                      <span class="spinner"></span> Loading...
+                      <span class="spinner"></span> Loading…
                     </p>
                     <p
                       id="security-status-detail"
@@ -2285,7 +2295,7 @@
               </div>
               <div id="security-biometric-settings" class="setting-item" hidden>
                 <span id="biometric-label" class="setting-label"
-                  >Biometric Unlock</span
+                  >Biometric unlock</span
                 >
                 <span id="biometric-security-note" class="setting-description">
                   Biometric prompt is a convenience gate, not hardware-bound. A
@@ -2337,7 +2347,7 @@
             >
               <p class="setting-note settings-instant-note">
                 Resetting takes effect immediately after confirmation and does
-                not use the Save button.
+                not use the save button.
               </p>
               <section class="settings-group" aria-labelledby="reset-heading">
                 <h3 id="reset-heading" class="setting-section">Reset</h3>
@@ -2465,7 +2475,7 @@
     >
       <div class="modal">
         <div class="modal__header">
-          <h2 id="copy-move-heading">Copy / Move</h2>
+          <h2 id="copy-move-heading">Copy / move</h2>
           <button
             type="button"
             id="copy-move-close"
@@ -2672,7 +2682,7 @@
     >
       <div class="modal modal--wide">
         <div class="modal__header">
-          <h2 id="licenses-heading">Open-Source Licenses</h2>
+          <h2 id="licenses-heading">Open-source licenses</h2>
           <button
             type="button"
             id="close-licenses"
@@ -2696,7 +2706,7 @@
               href="https://github.com/lucide-icons/lucide/blob/main/LICENSE"
               data-external-url
               rel="noopener"
-              >MIT License</a
+              >MIT license</a
             >.
           </div>
           <div id="licenses-list" class="licenses-list">
@@ -2717,7 +2727,7 @@
     >
       <div class="modal modal--wide">
         <div class="modal__header">
-          <h2 id="info-title">File Info</h2>
+          <h2 id="info-title">File info</h2>
           <button
             type="button"
             id="info-close"
@@ -2840,7 +2850,7 @@
             id="palette-input"
             class="palette__input"
             type="text"
-            placeholder="Type a command..."
+            placeholder="Type a command…"
             autocomplete="off"
             spellcheck="false"
             role="combobox"
@@ -2889,7 +2899,7 @@
         </p>
         <div class="support-card__actions">
           <button type="button" id="support-no" class="btn btn--ghost">
-            No Thanks
+            No thanks
           </button>
           <button type="button" id="support-yes" class="btn btn--primary">
             <span class="lucide-icon" data-icon="heart"></span>
@@ -2947,7 +2957,7 @@
                 id="setup-welcome-next"
                 class="btn btn--primary setup-wizard-btn-wide"
               >
-                Get Started
+                Get started
               </button>
             </div>
           </div>
@@ -2964,10 +2974,10 @@
               class="setup-wizard-step__title"
               tabindex="-1"
             >
-              Choose Your Theme
+              Choose your theme
             </h2>
             <p class="setup-wizard-step__desc">
-              Pick how S3 Sidekick looks. You can change this later in Settings.
+              Pick how S3 Sidekick looks. You can change this later in settings.
             </p>
             <div
               class="theme-picker setup-wizard-theme-picker"
@@ -3066,7 +3076,7 @@
             class="setup-wizard-step__title"
             tabindex="-1"
           >
-            Encrypt Your Credentials On-Disk
+            Encrypt your credentials on-disk
           </h2>
           <p class="setup-wizard-step__desc">
             Encrypt saved connections and your last-used connection with
@@ -3150,8 +3160,12 @@
                 class="setup-wizard-checkbox-row"
                 hidden
               >
-                <input id="setup-enc-biometric" type="checkbox" />
                 <span id="setup-biometric-text">Enable biometric unlock</span>
+                <input
+                  class="switch"
+                  id="setup-enc-biometric"
+                  type="checkbox"
+                />
               </label>
               <p
                 id="setup-biometric-unavailable"
@@ -3170,7 +3184,7 @@
           </div>
           <p id="setup-enc-skip-note" class="setting-description">
             Continuing without encryption stores saved connections unencrypted
-            (not recommended). You can turn on encryption later in Settings.
+            (not recommended). You can turn on encryption later in settings.
           </p>
           <div class="setup-wizard-step__actions">
             <button type="button" id="setup-enc-back" class="btn btn--ghost">
@@ -3184,7 +3198,7 @@
               Continue without encryption
             </button>
             <button type="button" id="setup-enc-next" class="btn btn--primary">
-              Enable Encryption
+              Enable encryption
             </button>
           </div>
         </div>
@@ -3214,8 +3228,13 @@
             </p>
             <div class="setup-wizard-updates-form">
               <label class="setup-wizard-checkbox-row">
-                <input id="setup-auto-updates" type="checkbox" checked />
                 <span>Automatically check for and download updates</span>
+                <input
+                  class="switch"
+                  id="setup-auto-updates"
+                  type="checkbox"
+                  checked
+                />
               </label>
               <div class="setup-wizard-channel-row">
                 <label
@@ -3245,7 +3264,7 @@
                 id="setup-updates-next"
                 class="btn btn--primary"
               >
-                Finish Setup
+                Finish setup
               </button>
             </div>
           </div>
@@ -3262,12 +3281,12 @@
               class="setup-wizard-step__title"
               tabindex="-1"
             >
-              You're All Set!
+              You're all set!
             </h2>
             <p class="setup-wizard-step__desc">
               Connect to your first S3-compatible storage. Saved connections
               appear in the connection switcher for one-click access later. You
-              can change any setup choices in Settings.
+              can change any setup choices in settings.
             </p>
             <div class="setup-wizard-step__actions">
               <button

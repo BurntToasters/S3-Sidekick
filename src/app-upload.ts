@@ -335,7 +335,7 @@ export async function handleUploadFolderButton(): Promise<void> {
   }
 
   try {
-    setStatus("Scanning folder(s)...");
+    setStatus("Scanning folder(s)…");
     const scan = await invoke<LocalFolderScanResult>(
       "list_local_files_recursive",
       { rootTokens },
@@ -421,7 +421,7 @@ export async function queueDroppedPaths(
       grants = filterGrantsToDrop(grants, dropPaths);
     }
     if (grants.length === 0) {
-      setStatus("No dropped files detected. Try Upload Files instead.", 5000);
+      setStatus("No dropped files detected. Try upload files instead.", 5000);
       return;
     }
 
@@ -430,7 +430,7 @@ export async function queueDroppedPaths(
     const firstFile = grants.find((grant) => !grant.isDir);
     if (firstFile) rememberUploadRoot(firstFile.path, false);
 
-    setStatus(`Dropped ${grants.length} item(s). Preparing upload...`, 3000);
+    setStatus(`Dropped ${grants.length} item(s). Preparing upload…`, 3000);
 
     const rootTokens = grants
       .filter((grant) => grant.isDir)

@@ -300,7 +300,7 @@ const LEGACY_QUEUE_MANIFEST_KEY = "s3-sidekick.transfer-manifest.v1";
 const TRANSFER_ID_SEQUENCE_KEY = "s3-sidekick.transfer-id-sequence.v1";
 const TRANSFER_ERROR_PREFIX = "__S3_SIDEKICK_TRANSFER_ERROR__";
 const PROVIDER_CANNOT_DELETE_MESSAGE =
-  "This provider can't safely delete the source. Use Copy, then Delete.";
+  "This provider can't safely delete the source. Use copy, then delete.";
 const RECOVERY_UNRESOLVED_MESSAGE =
   "Pending transfers from the last session are not resolved yet. Resume or discard them before starting new transfers.";
 // Backend refusal from create_only.rs require_conditional_delete_support.
@@ -2312,7 +2312,7 @@ async function resumeRecoveredTransfersOnce(): Promise<void> {
       ? " Some recovered moves may delete their source objects after verifying the copied destination."
       : "";
     const confirmed = await showConfirm(
-      "Bind Recovered Transfers",
+      "Bind recovered transfers",
       `Beta.4 did not record which account owned these ${legacyItems.length} transfer(s). Bind them to the currently connected endpoint ${state.endpoint} for bucket(s) ${buckets || "unknown"}?${warning}`,
       {
         okLabel: "Bind to this account",
@@ -3100,7 +3100,7 @@ function maybeShowTransfersHintToast(): void {
   // The in-memory dismissal is already set before the save; a failed save must
   // not turn into an unhandled rejection or re-show the hint this session.
   void markTransfersHintDismissed().catch(() => undefined);
-  showToast("View progress in Transfers (status bar icon).", {
+  showToast("View progress in transfers (status bar icon).", {
     type: "info",
     duration: 6000,
   });
@@ -3711,7 +3711,7 @@ async function processQueue(): Promise<void> {
       void notifyIfUnfocused(
         "Transfers finished",
         errorCount > 0
-          ? `${plural(errorCount, "transfer")} failed. Open Transfers to review.`
+          ? `${plural(errorCount, "transfer")} failed. Open transfers to review.`
           : `${plural(finished, "transfer")} finished.`,
       );
     }

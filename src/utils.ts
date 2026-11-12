@@ -265,7 +265,7 @@ function statusToken(code: number): RegExp {
 }
 
 const INTERNAL_FAILURE_MESSAGE =
-  "Something went wrong talking to the app backend. Try again; details are in the Activity log.";
+  "Something went wrong talking to the app backend. Try again; details are in the activity log.";
 
 export function friendlyError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);

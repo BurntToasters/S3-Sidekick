@@ -60,18 +60,6 @@
   border-color: var(--border);
 }
 
-.btn--disconnect {
-  background: var(--disconnect-bg);
-  color: var(--disconnect-text);
-  border-color: var(--disconnect-border);
-}
-
-.btn--disconnect:hover:not(:disabled) {
-  background: var(--disconnect-bg-hover);
-  border-color: var(--disconnect-border-hover);
-  color: var(--disconnect-text-hover);
-}
-
 /* Destructive outline; the filled hover keeps white text above 4.5:1. */
 .btn--danger {
   background: transparent;
@@ -120,6 +108,14 @@
   opacity: 0.55;
   box-shadow: none;
   transform: none;
+}
+
+/* Disabled ghost and icon buttons are unfilled, as they are when enabled.
+   Same specificity as .btn:disabled and later in the file, so this wins. */
+.btn--ghost:disabled,
+.btn--icon:disabled {
+  background: transparent;
+  border-color: transparent;
 }
 
 /* One focus ring for buttons and checkboxes: colour, width and offset come from tokens. */
@@ -180,11 +176,17 @@ select.field option {
   color: var(--text);
 }
 
-.field:focus,
-.field:focus-visible {
+.field:focus {
   border-color: var(--focus-ring-color);
   box-shadow: 0 0 0 2px var(--glow-accent);
   outline: none;
+}
+
+/* Keyboard focus gets the shared ring; the faint glow alone is not visible enough. */
+.field:focus-visible {
+  border-color: var(--focus-ring-color);
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 0;
 }
 
 .field--sm {
@@ -303,11 +305,11 @@ input[type="checkbox"].switch:checked::after {
   transform: translateX(var(--switch-thumb-travel));
 }
 
-/* Dense rows can clip an outside ring, so draw the switch focus ring just
-   inside the pill. The width and colour still come from the shared tokens. */
+/* The ring sits just outside the pill. An inset ring, or a surface-coloured gap
+   inside the pill, merged with the white thumb in the light theme. */
 input[type="checkbox"].switch:focus-visible {
-  outline-offset: calc(-1 * var(--focus-ring-width));
-  box-shadow: inset 0 0 0 var(--space-1) var(--bg-surface);
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
 }
 
 input[type="checkbox"].switch:disabled {

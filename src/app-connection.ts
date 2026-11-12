@@ -776,7 +776,7 @@ export function refreshSavedConnectionsList(): void {
     (bookmark) => {
       void (async () => {
         const confirmed = await showConfirm(
-          "Delete Saved Connection",
+          "Delete saved connection",
           `Delete saved connection "${bookmark.name}"? Its stored credentials are removed.`,
           { okLabel: "Delete", okDanger: true },
         );
@@ -796,7 +796,7 @@ export function refreshSavedConnectionsList(): void {
       layout: "connection",
       emptyTitle: "No saved connections yet",
       emptyMessage:
-        "Enter credentials and choose Save connection to keep them here.",
+        "Enter credentials and choose save connection to keep them here.",
       filterText: filterInput?.value ?? "",
       lastUsedLabel: (bookmark) => {
         const memory = readConnectionLocation(bookmark.name, bookmark.endpoint);
@@ -999,7 +999,7 @@ export async function switchToBookmark(
   // Supersede instead of dropping: a rapid second click updates inputs and
   // starts a newer connect generation that wins via generation guards.
   setConnectionInputs(endpoint, region, accessKey, secret, sessionToken);
-  setStatus(`Connecting to "${name}"...`, 5000);
+  setStatus(`Connecting to "${name}"…`, 5000);
   await handleConnect();
   if (
     secretWasPrompted &&
@@ -1346,7 +1346,7 @@ export async function handleConnect(): Promise<void> {
     }
     if (attempt.cancelled) return;
 
-    setStatus("Connecting...");
+    setStatus("Connecting…");
     const connectionAttempt = connect(
       endpoint,
       region,
@@ -1680,7 +1680,7 @@ export async function handleTestConnection(): Promise<void> {
       return;
     }
     if (attempt.cancelled) return;
-    setStatus("Testing connection...");
+    setStatus("Testing connection…");
     const resolvedRegion = await connect(
       endpoint,
       region,
