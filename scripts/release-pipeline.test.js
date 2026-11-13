@@ -27,7 +27,6 @@ import {
   assertPublishedResponse,
   assertReceiptMatchesRelease,
 } from "./publish-release.cjs";
-import { DEFAULT_GATE_JOB, selectReleaseGateRun } from "./release-ci-status.js";
 import {
   verifyBetaManifestAssets,
   verifyBetaManifestChecksums,
@@ -46,6 +45,27 @@ const packageJson = JSON.parse(
   fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
 );
 const packageVersion = packageJson.version;
+
+test("release entry points require local proof without querying CI status", () => {
+  for (const [name, command] of Object.entries(packageJson.scripts)) {
+    if (name.startsWith("release:")) {
+      assert.doesNotMatch(command, /release-ci-status|release:ci-status/, name);
+    }
+  }
+  assert.equal(packageJson.scripts["release:ci-status"], undefined);
+  assert.match(packageJson.scripts["release:prepare"], /npm run test:all/);
+  for (const name of ["win", "mac", "linux:x64"]) {
+    assert.match(
+      packageJson.scripts[`release:${name}:continue`],
+      /npm run release:session:verify/,
+    );
+  }
+  for (const file of ["publish-release.cjs", "finalize-release-assets.js"]) {
+    const source = fs.readFileSync(path.join("scripts", file), "utf8");
+    assert.doesNotMatch(source, /release-ci-status|runReleaseCiStatus/);
+    assert.match(source, /verifyReleaseSession\(/);
+  }
+});
 const packageTag = `v${packageVersion}`;
 
 test("run-release accepts only canonical host commands", () => {
@@ -352,7 +372,7 @@ test("release cleanup is non-destructive and guarded", () => {
     "release:mac:continue",
     "release:linux:x64:continue",
   ]) {
-    assert.match(scripts[name], /npm run release:ci-status/);
+    assert.match(scripts[name], /npm run release:session:verify/);
     assert.match(scripts[name], /npm run release:finalize/);
     assert.doesNotMatch(scripts[name], /ALLOW_RELEASE_CLEANUP_STASH/);
   }
@@ -360,7 +380,7 @@ test("release cleanup is non-destructive and guarded", () => {
     scripts["release:linux:continue"],
     "npm run release:linux:x64:continue",
   );
-  assert.match(scripts["release:prepare"], /npm run release:ci-status/);
+  assert.match(scripts["release:prepare"], /npm run test:all/);
 });
 
 test("retired Linux package formats are never mirrored", () => {
@@ -462,125 +482,6 @@ test("publish receipt rejects changed release assets", () => {
         receipt,
       ),
     /changed after verification/,
-  );
-});
-
-test("CI release gate requires a successful run for the exact HEAD", () => {
-  const sha = "a".repeat(40);
-  const branch = /-beta\.\d+$/.test(packageVersion) ? "beta" : "main";
-  const repository = "BurntToasters/S3-Sidekick";
-  const workflowRun = {
-    id: 9,
-    path: ".github/workflows/ci.yml",
-    event: "push",
-    head_branch: branch,
-    head_sha: sha,
-    status: "completed",
-    conclusion: "success",
-    repository: { full_name: repository },
-  };
-  const success = {
-    id: 2,
-    name: "Release gate",
-    head_sha: sha,
-    status: "completed",
-    conclusion: "success",
-    completed_at: "2026-01-01T00:00:02Z",
-    app: { slug: "github-actions" },
-    details_url: `https://github.com/${repository}/actions/runs/9/job/2`,
-  };
-  const options = {
-    sha,
-    branch,
-    repository,
-    workflowRunFor: () => workflowRun,
-  };
-  assert.equal(
-    selectReleaseGateRun(
-      [
-        success,
-        {
-          ...success,
-          id: 1,
-          conclusion: "failure",
-          completed_at: "2026-01-01T00:00:01Z",
-        },
-      ],
-      options,
-    ),
-    success,
-  );
-  assert.throws(() => selectReleaseGateRun([], options), /has no run/);
-  assert.throws(
-    () =>
-      selectReleaseGateRun([{ ...success, conclusion: "failure" }], options),
-    /requires success/,
-  );
-  assert.throws(
-    () =>
-      selectReleaseGateRun([{ ...success, head_sha: "b".repeat(40) }], options),
-    /has no run/,
-  );
-  assert.throws(
-    () => selectReleaseGateRun([success], { ...options, workflowRunFor: null }),
-    /workflow identity/,
-  );
-  assert.throws(
-    () =>
-      selectReleaseGateRun([success], {
-        ...options,
-        workflowRunFor: () => ({
-          ...workflowRun,
-          path: ".github/workflows/other.yml",
-        }),
-      }),
-    /workflow is .*other\.yml/,
-  );
-  assert.throws(
-    () =>
-      selectReleaseGateRun([success], {
-        ...options,
-        workflowRunFor: () => ({ ...workflowRun, event: "pull_request" }),
-      }),
-    /event is pull_request/,
-  );
-  assert.throws(
-    () =>
-      selectReleaseGateRun([success], {
-        ...options,
-        workflowRunFor: () => ({ ...workflowRun, head_branch: "main" }),
-      }),
-    /branch is main/,
-  );
-  assert.throws(
-    () =>
-      selectReleaseGateRun([success], {
-        ...options,
-        workflowRunFor: () => ({
-          ...workflowRun,
-          repository: { full_name: "fork/S3-Sidekick" },
-        }),
-      }),
-    /repository is fork\/S3-Sidekick/,
-  );
-  assert.throws(
-    () =>
-      selectReleaseGateRun(
-        [{ ...success, app: { slug: "dependency-updater" } }],
-        options,
-      ),
-    /GitHub Actions app/,
-  );
-});
-
-test("workflow defines the check-run name release-ci-status requires", () => {
-  const workflow = fs.readFileSync(
-    path.join(process.cwd(), ".github", "workflows", "ci.yml"),
-    "utf8",
-  );
-  assert.match(
-    workflow,
-    new RegExp(`^  release-gate:\\n    name: ${DEFAULT_GATE_JOB}$`, "m"),
   );
 });
 

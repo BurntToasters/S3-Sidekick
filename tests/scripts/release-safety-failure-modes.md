@@ -47,12 +47,11 @@ ran on. Test evidence records the working-tree SHA-256 at suite start and end;
 finalize and every release-session verification reject a tree that changed
 during the suite, a tree that differs from the evidence, or evidence whose
 commit is not HEAD. `release:publish` and `release:mirror` require the verified
-build session, the quality-gate proof, and an exact-SHA CI gate even when run
+build session and the local quality-gate proof even when run
 standalone.
 
-The CI gate is bound to Actions workflow identity (`github-actions` app,
-`.github/workflows/ci.yml`, expected release branch, `push` event, exact SHA),
-not only the check-run name. Published-release verification requires
+Release commands must not query GitHub Actions status.
+Published-release verification requires
 `target_commitish` to match the verified commit. Beta-manifest recovery verifies
 the detached GPG signatures and signed checksum coverage of every manifest
 before copying it onto the stable feed; any mismatch aborts.

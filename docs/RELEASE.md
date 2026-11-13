@@ -76,7 +76,7 @@ creates or waits for the draft, builds current artifacts, signs updater
 payloads, creates checksums and GPG signatures, uploads to the draft, mirrors
 stable artifacts when configured, and cleans checkout.
 
-`release:prepare` runs two gates. The local `test:all` gate covers typecheck,
+`release:prepare` runs local quality and supply-chain gates. The local `test:all` gate covers typecheck,
 lint, formatting (including `scripts/*.mjs`), Cargo update policy, Tauri
 alignment, icon validation, Clippy, `cargo fmt`, both builds, script and
 release-asset tests, the release-assets E2E (Linux/macOS; Windows records it as
@@ -85,19 +85,14 @@ records the working-tree SHA-256 at suite start and end; a tree that changes
 during `test:all` cannot produce a proof. It does not run the Ubuntu Playwright,
 MinIO, or full-stack jobs; `npm run test:all:full` chains those (Playwright plus
 verifier, Docker-backed MinIO, and the WebDriver full-stack suite) for a
-developer or release host that has the full toolchain. `release:ci-status` then requires a completed,
-successful check run named `Release gate` for the exact HEAD through the GitHub
-API, and verifies that the run belongs to the `github-actions` app, the
-`.github/workflows/ci.yml` workflow, the expected release branch, and a `push`
-event. `.github/workflows/ci.yml` defines that aggregate job over the browser,
-MinIO, AWS-null, full-stack, Windows-startup, and platform smoke jobs.
-`release:prepare` and every `*:continue` chain call `release:ci-status`, so a
-release cannot skip the CI gate.
+developer or release host that has the full toolchain. Release commands do not
+query GitHub Actions status or require a completed CI run. CI remains an
+independent quality gate.
 
 `release:publish` and `release:mirror` also require the current build session and
-quality-gate proof plus the exact-SHA CI status when run standalone; they fail
-closed instead of skipping those gates. Run them on the host that completed
-`release:prepare`.
+local quality-gate proof when run standalone. Run them on the host that completed
+`release:prepare`. Draft and published verification still re-check uploaded bytes
+and signatures.
 
 `release:cleanup:checkout` fast-forwards to the configured upstream and
 refuses a dirty tree. Set `ALLOW_RELEASE_CLEANUP_STASH=1` only to stash local
@@ -147,7 +142,7 @@ npm run release:verify:published
 `release:verify:draft` checks draft identity, required S3 package matrix,
 checksums, detached signatures, updater manifests, and updater signatures.
 `release:publish` refuses a stale or incomplete draft and requires the verified
-build session, quality-gate proof, and exact-SHA CI status.
+build session and local quality-gate proof.
 `release:verify:published` checks the tagged release matrix, that
 `target_commitish` matches the verified commit, then the public
 `/releases/latest` updater feed and signatures after publication.

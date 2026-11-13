@@ -666,13 +666,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # Exact release gate: a release may only start from a commit where this job
-  # is green. It aggregates the native test/format matrix, Playwright browser
-  # suite, MinIO command-layer suite, full-stack WebDriver suite, the real
-  # AWS-null and Windows-startup E2E suites, and the unsigned
-  # Windows/macOS/Flatpak toolchain smokes. `release:ci-status` reads this
-  # check-run name ("Release gate") for the exact HEAD SHA and verifies the
-  # Actions workflow identity behind it.
+  # Aggregate CI result across native tests, browser and provider E2E suites,
+  # and platform build smokes. Release commands use local quality-gate proof.
   release-gate:
     name: Release gate
     if: always()

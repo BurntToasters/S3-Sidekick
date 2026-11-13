@@ -19,7 +19,7 @@ closes.
 
 ## Versioning
 
-S3 Sidekick follows semantic versioning. Stable releases use `X.Y.Z`; pre-releases use `X.Y.Z-beta.N` or another explicit pre-release identifier. Release proof binds the tested working tree, commit, lockfiles, platform, and toolchain.
+S3 Sidekick follows semantic versioning. Stable releases use `X.Y.Z`; pre-releases use `X.Y.Z-beta.N` or another explicit pre-release identifier. Release proof binds the tested working tree, commit, lockfiles, platform, and toolchain. Release commands require local quality-gate and build-session proof; GitHub Actions run status is not release authority. Uploaded artifact and signature verification remains mandatory.
 
 ## Platform and frontend baseline
 
