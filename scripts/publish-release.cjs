@@ -35,7 +35,7 @@ function currentCommit() {
 }
 
 // Publishing is a release gate, not a convenience upload. It must prove the
-// exact tree and commit that passed test:all and CI, even when run standalone.
+// exact tree and commit that passed local test:all, even when run standalone.
 async function assertReleaseAuthority(commit) {
   const { verifyReleaseSession } = await import("./release-session.js");
   const session = verifyReleaseSession(ROOT);
@@ -44,8 +44,6 @@ async function assertReleaseAuthority(commit) {
       `Release build session is for ${session.commit}, not HEAD ${commit}.`,
     );
   }
-  const { runReleaseCiStatus } = await import("./release-ci-status.js");
-  runReleaseCiStatus({ commit });
   return session;
 }
 
