@@ -1,6 +1,5 @@
 import { invoke } from "./ipc.ts";
 import { getVersion } from "@tauri-apps/api/app";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { pickTextExport } from "./path-grants.ts";
 import { state } from "./state.ts";
 import {
@@ -1427,7 +1426,7 @@ async function runPartialReset(): Promise<boolean> {
 
 async function relaunchApp(): Promise<void> {
   try {
-    await relaunch();
+    await invoke("relaunch_app");
   } catch {
     window.location.assign(window.location.href);
   }

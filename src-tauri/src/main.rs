@@ -3784,6 +3784,7 @@ fn main() {
             platform::open_external_url,
             platform::open_local_path,
             platform::reveal_local_path,
+            platform::relaunch_app,
         ])
         .run(tauri::generate_context!())
     {

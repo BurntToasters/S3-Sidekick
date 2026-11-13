@@ -3,7 +3,6 @@ import { SETTING_DEFAULTS } from "../settings-model.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
-const mockRelaunch = vi.fn<() => Promise<void>>();
 const mockSetSize = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockGetCurrentWindow = vi.fn();
 
@@ -46,10 +45,6 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: mockGetVersion,
-}));
-
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: mockRelaunch,
 }));
 
 vi.mock("@tauri-apps/api/dpi", () => ({
@@ -165,7 +160,6 @@ describe("app-init startup waterfall", () => {
     vi.resetModules();
     mockInvoke.mockReset();
     mockGetVersion.mockReset();
-    mockRelaunch.mockReset();
     mockSetSize.mockReset();
     mockGetCurrentWindow.mockReset();
     mockLoadSettings.mockReset();
@@ -231,7 +225,6 @@ describe("app-init startup waterfall", () => {
     mockShouldShowSetupWizard.mockReturnValue(false);
     mockShowSetupWizard.mockResolvedValue(null);
     mockMarkSetupComplete.mockResolvedValue(undefined);
-    mockRelaunch.mockResolvedValue(undefined);
     const idle = window as unknown as {
       requestIdleCallback?: unknown;
     };
@@ -348,13 +341,17 @@ describe("app-init startup waterfall", () => {
     expect(mockInvoke).toHaveBeenCalledWith("save_settings", {
       json: "{}",
     });
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
     expect(mockEnsureSecurityReady).not.toHaveBeenCalled();
   });
 
   it("falls back to location reload when corrupt-recovery relaunch fails", async () => {
     mockLoadSettings.mockResolvedValue(false);
-    mockRelaunch.mockRejectedValue(new Error("no relaunch"));
+    const baseInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (...args) => {
+      if (args[0] === "relaunch_app") throw new Error("no relaunch");
+      return baseInvoke ? baseInvoke(...args) : undefined;
+    });
     const assignMock = vi.fn();
     const locationValue = window.location;
     Object.defineProperty(window, "location", {

@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCheck = vi.fn<() => Promise<unknown>>();
-const mockRelaunch = vi.fn<() => Promise<void>>();
 const mockMessage = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockAsk = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
@@ -13,10 +12,6 @@ const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 
 vi.mock("@tauri-apps/plugin-updater", () => ({
   check: mockCheck,
-}));
-
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: mockRelaunch,
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -44,7 +39,6 @@ describe("updater", () => {
     vi.unstubAllGlobals();
     document.body.innerHTML = `<div id="status"></div>`;
     mockCheck.mockReset();
-    mockRelaunch.mockReset();
     mockMessage.mockReset();
     mockAsk.mockReset();
     mockGetVersion.mockReset();
@@ -144,7 +138,7 @@ describe("updater", () => {
 
     expect(download).toHaveBeenCalledTimes(1);
     expect(install).not.toHaveBeenCalled();
-    expect(mockRelaunch).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith("relaunch_app");
     expect(mockSendNotification).toHaveBeenCalledWith({
       title: "S3 Sidekick",
       body: "Version 0.7.0 was not installed. Choose check now in settings to install it.",
@@ -259,7 +253,7 @@ describe("updater", () => {
 
     expect(download).toHaveBeenCalledTimes(1);
     expect(install).toHaveBeenCalledTimes(1);
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("shows update error in manual mode when release API fails", async () => {
@@ -380,7 +374,7 @@ describe("updater", () => {
     });
     expect(download).toHaveBeenCalledTimes(1);
     expect(install).toHaveBeenCalledTimes(1);
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("swallows beta auto-check fallback failures after native check throws", async () => {

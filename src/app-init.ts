@@ -1,6 +1,5 @@
 import { invoke } from "./ipc.ts";
 import { getVersion } from "@tauri-apps/api/app";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { state, dom } from "./state.ts";
 import {
   loadSettings,
@@ -324,7 +323,7 @@ export async function init(): Promise<void> {
       /* best effort */
     }
     try {
-      await relaunch();
+      await invoke("relaunch_app");
     } catch {
       window.location.assign(window.location.href);
     }

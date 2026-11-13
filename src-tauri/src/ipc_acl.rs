@@ -62,7 +62,7 @@ fn capability_grants_only_the_plugin_and_core_commands_the_ui_calls() {
     // exact core/plugin surface: app.ts calls getVersion, event.ts uses
     // listen/unlisten, titlebar.ts and window-size.ts call the window methods
     // below, updater.ts uses dialog message/ask, notification, updater
-    // check/download/install, and process relaunch.
+    // check/download/install.
     let source = include_str!("../capabilities/default.json");
     let parsed: serde_json::Value = serde_json::from_str(source).expect("capability is valid JSON");
     let permissions: Vec<&str> = parsed["permissions"]
@@ -96,7 +96,6 @@ fn capability_grants_only_the_plugin_and_core_commands_the_ui_calls() {
         "notification:allow-is-permission-granted",
         "notification:allow-notify",
         "notification:allow-request-permission",
-        "process:allow-restart",
         "updater:allow-check",
         "updater:allow-download",
         "updater:allow-install",
