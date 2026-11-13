@@ -18,6 +18,12 @@ let bookmarks: Bookmark[] = [];
  * backend deliberately refused to read.
  */
 let loadError: string | null = null;
+/**
+ * True while the in-memory list came from the backup because the primary copy
+ * could not be read. Writes stay refused until a later load verifies the
+ * primary again, so the unreadable primary is preserved byte-for-byte.
+ */
+let loadedFromBackup = false;
 let persistPromise: Promise<void> = Promise.resolve();
 let onChangeCallback: (() => void) | null = null;
 export const MAX_IMPORT_BYTES = 1_048_576;
@@ -41,6 +47,7 @@ export function clearBookmarks(): void {
   bookmarks = [];
   // Cleared on lock: nothing is loaded, so nothing may be saved over storage.
   loadError = "Encrypted storage is locked.";
+  loadedFromBackup = false;
 }
 
 export function getBookmarkLoadError(): string | null {
@@ -49,8 +56,11 @@ export function getBookmarkLoadError(): string | null {
 
 function requireBookmarksLoaded(): void {
   if (loadError !== null) {
+    const fallbackNote = loadedFromBackup
+      ? " The loaded backup is read-only until the primary file can be read again."
+      : "";
     throw new Error(
-      `Saved bookmarks could not be loaded (${loadError}) Resolve that before changing bookmarks.`,
+      `Saved bookmarks could not be loaded (${loadError}) Resolve that before changing bookmarks.${fallbackNote}`,
     );
   }
 }
@@ -112,12 +122,82 @@ function parseBookmarksArray(raw: string): Bookmark[] | null {
   return valid;
 }
 
-async function loadBackupBookmarks(): Promise<Bookmark[] | null> {
+interface BookmarkFileState {
+  present: boolean;
+  contents: string;
+  error?: string | null;
+}
+
+interface BookmarksState {
+  primary: BookmarkFileState;
+  backup: BookmarkFileState;
+}
+
+function bookmarkFileError(file: BookmarkFileState): string | null {
+  return file.error ?? null;
+}
+
+export async function loadBookmarks(): Promise<void> {
+  let state: BookmarksState;
   try {
-    const raw = await invoke<string>("load_bookmarks_backup");
-    return parseBookmarksArray(raw);
-  } catch {
-    return null;
+    state = await invoke<BookmarksState>("load_bookmarks_state");
+  } catch (err) {
+    bookmarks = [];
+    loadError = err instanceof Error ? err.message : String(err);
+    loadedFromBackup = false;
+    return;
+  }
+
+  let primaryError = bookmarkFileError(state.primary);
+  if (state.primary.present && primaryError === null) {
+    const primary = parseBookmarksArray(state.primary.contents);
+    if (primary !== null) {
+      bookmarks = primary;
+      loadError = null;
+      loadedFromBackup = false;
+      // Loading never writes the backup: a bad primary must not replace the
+      // only good copy with an empty in-memory list.
+      return;
+    }
+    primaryError = "the bookmark file is corrupt.";
+  }
+
+  if (state.backup.present && !state.backup.error) {
+    const backup = parseBookmarksArray(state.backup.contents);
+    if (backup !== null) {
+      bookmarks = backup;
+      if (state.primary.present) {
+        // The backup is readable, but the primary is not. Keep the failure
+        // sticky so no save replaces the unreadable primary with this fallback
+        // list; only a later load that reads the primary clears it.
+        loadedFromBackup = true;
+        loadError =
+          primaryError ??
+          "the primary bookmark file could not be read. The saved backup was loaded instead.";
+        console.warn(
+          "Primary bookmarks were unavailable; loaded the saved backup instead. Bookmark changes stay disabled until the primary is readable again.",
+        );
+      } else {
+        loadedFromBackup = false;
+        loadError = null;
+        console.warn(
+          "Primary bookmarks were missing; loaded the saved backup instead.",
+        );
+      }
+      return;
+    }
+  }
+
+  bookmarks = [];
+  loadedFromBackup = false;
+  if (state.primary.present) {
+    loadError = primaryError ?? "the bookmark file is corrupt.";
+  } else if (state.backup.present) {
+    loadError = state.backup.error ?? "the bookmark backup is corrupt.";
+  } else {
+    // Fresh install: both files are absent, which is an empty list, not an
+    // unreadable one.
+    loadError = null;
   }
 }
 
@@ -129,32 +209,6 @@ async function saveBookmarksBackupSafe(next: Bookmark[]): Promise<void> {
   } catch (err) {
     console.warn("Failed to update bookmark backup:", err);
   }
-}
-
-export async function loadBookmarks(): Promise<void> {
-  let primaryError: string | null = null;
-  try {
-    const raw = await invoke<string>("load_bookmarks");
-    const primary = parseBookmarksArray(raw);
-    if (primary !== null) {
-      bookmarks = primary;
-      loadError = null;
-      await saveBookmarksBackupSafe(bookmarks);
-      return;
-    }
-    if (raw.trim().length > 0) primaryError = "the bookmark file is corrupt.";
-  } catch (err) {
-    // Primary unavailable (vault locked or IO error): fall through to backup.
-    primaryError = `${err instanceof Error ? err.message : String(err)}`;
-  }
-  const backup = await loadBackupBookmarks();
-  if (backup !== null) {
-    bookmarks = backup;
-    loadError = null;
-    return;
-  }
-  bookmarks = [];
-  loadError = primaryError;
 }
 
 async function persistBookmarksSnapshot(next: Bookmark[]): Promise<void> {
@@ -183,6 +237,13 @@ function enqueueBookmarkMutation<T>(work: () => Promise<T>): Promise<T> {
 export async function addBookmark(bookmark: Bookmark): Promise<boolean> {
   return enqueueBookmarkMutation(async () => {
     requireBookmarksLoaded();
+    // Every field the loader would reject is refused here too, so a save can
+    // never write a row that the next launch silently drops as invalid.
+    if (!isBookmark(bookmark)) {
+      throw new Error(
+        "Those details are not valid for a saved connection. Check the name length, endpoint, region, and access key.",
+      );
+    }
     const exists = bookmarks.some(
       (b) =>
         b.endpoint === bookmark.endpoint &&
@@ -284,58 +345,27 @@ export async function updateBookmark(
   });
 }
 
-export function renderBookmarkBar(
-  barEl: HTMLElement,
-  onSelect: (bookmark: Bookmark) => void,
-  activeEndpoint?: string,
-  onNewTab?: () => void,
-  activeAccessKey?: string,
-): void {
-  barEl.innerHTML = "";
-  if (bookmarks.length === 0 && !onNewTab) return;
-
-  for (let i = 0; i < bookmarks.length; i++) {
-    const b = bookmarks[i];
-    const chip = document.createElement("button");
-    // The endpoint alone is shared by every key saved for one host.
-    const isActive =
-      activeEndpoint !== undefined &&
-      b.endpoint === activeEndpoint &&
-      (activeAccessKey === undefined || b.access_key === activeAccessKey);
-    chip.className = isActive
-      ? "bookmark-chip bookmark-chip--active"
-      : "bookmark-chip";
-    chip.type = "button";
-    const label = document.createElement("span");
-    label.className = "bookmark-chip__label";
-    label.textContent = b.name;
-    chip.appendChild(label);
-    // The title carries the full name (the label may be truncated) and the endpoint.
-    const where = b.region ? `${b.endpoint} (${b.region})` : b.endpoint;
-    chip.title = `${b.name} · ${where}`;
-    chip.setAttribute("aria-label", b.name);
-    chip.addEventListener("click", () => onSelect(b));
-    barEl.appendChild(chip);
-  }
-
-  if (onNewTab) {
-    const plusBtn = document.createElement("button");
-    plusBtn.className = "bookmark-chip bookmark-chip--new";
-    plusBtn.type = "button";
-    plusBtn.title = "New connection";
-    plusBtn.textContent = "+";
-    plusBtn.addEventListener("click", onNewTab);
-    barEl.appendChild(plusBtn);
-  }
-}
-
 export function exportBookmarksJson(includeSecrets = false): string {
-  const exported = includeSecrets
-    ? bookmarks
-    : bookmarks.map(({ secret_key: _secretKey, ...bookmark }) => ({
-        ...bookmark,
-        secret_key: "",
-      }));
+  if (loadError !== null) {
+    throw new Error(
+      `Saved connections could not be loaded (${loadError}) Export is disabled so an incomplete list is never mistaken for the stored one.`,
+    );
+  }
+  // Explicit field whitelist: a future bookmark field must be added here (and
+  // considered for secret disclosure) instead of being exported by default.
+  const exported = bookmarks.map((bookmark) => {
+    const row: Bookmark = {
+      name: bookmark.name,
+      endpoint: bookmark.endpoint,
+      region: bookmark.region,
+      access_key: bookmark.access_key,
+      secret_key: includeSecrets ? bookmark.secret_key : "",
+    };
+    if (includeSecrets && bookmark.session_token !== undefined) {
+      row.session_token = bookmark.session_token;
+    }
+    return row;
+  });
   return JSON.stringify(exported, null, 2);
 }
 
@@ -517,9 +547,17 @@ export function renderBookmarkList(
     .map((b, i) => {
       const regionPart = b.region ? ` (${escapeHtml(b.region)})` : "";
       if (layout === "connection") {
-        const provider = escapeHtml(
-          deriveProviderLabelFromEndpoint(b.endpoint),
-        );
+        const rawProvider = deriveProviderLabelFromEndpoint(b.endpoint);
+        const isNamedProvider =
+          rawProvider === "AWS" ||
+          rawProvider === "Spaces" ||
+          rawProvider === "B2" ||
+          rawProvider === "R2" ||
+          rawProvider === "Wasabi" ||
+          rawProvider === "Local";
+        const providerBadge = isNamedProvider
+          ? `<span class="bookmark__provider">${escapeHtml(rawProvider)}</span>`
+          : "";
         const used = lastUsed(b);
         const usedMarker = used
           ? `<span class="bookmark__last-used">${escapeHtml(used)}</span>`
@@ -529,7 +567,7 @@ export function renderBookmarkList(
             <span class="bookmark-item__connect-body">
               <span class="bookmark-item__top">
                 <span class="bookmark__name">${escapeHtml(b.name)}</span>
-                <span class="bookmark__provider">${provider}</span>
+                ${providerBadge}
               </span>
               <span class="bookmark__endpoint">${escapeHtml(b.endpoint)}${regionPart}</span>
             </span>

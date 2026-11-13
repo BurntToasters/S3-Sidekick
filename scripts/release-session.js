@@ -15,7 +15,58 @@ const QUALITY_GATE_RELATIVE_PATH = path.join(
   "coverage",
   ".release-quality.json",
 );
+const QUALITY_GATE_EVIDENCE_RELATIVE_PATH = path.join(
+  "coverage",
+  ".release-tests.json",
+);
 const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const EVIDENCE_CLOCK_SKEW_MS = 120_000;
+const REQUIRED_QUALITY_CHECK_NAMES = Object.freeze([
+  "typecheck",
+  "lint",
+  "format",
+  "cargoSafeUpdate",
+  "cargoUpdatePolicy",
+  "tauriAlignment",
+  "icons",
+  "clippy",
+  "cargoFmt",
+  "frontendBuild",
+  "nativeBuild",
+  "tauriBuild",
+  "scriptTests",
+  "releaseAssets",
+  "releaseAssetsE2e",
+  "test",
+  "rust",
+]);
+const QUALITY_GATE_REPORT_SPECS = Object.freeze([
+  Object.freeze({
+    path: "coverage/coverage-summary.json",
+    kind: "vitest-coverage",
+    platforms: null,
+  }),
+  Object.freeze({
+    path: "test-results/release-assets-e2e/report.json",
+    kind: "release-assets",
+    // The release-assets E2E drives Unix GPG and fake Git/GitHub CLIs. CI runs
+    // it on Linux; Windows release hosts still run the node release-asset
+    // suite and the full CI gate.
+    platforms: Object.freeze(["linux", "darwin"]),
+  }),
+]);
+
+function activeQualityGateReportSpecs(platform = process.platform) {
+  return QUALITY_GATE_REPORT_SPECS.filter(
+    (spec) => !spec.platforms || spec.platforms.includes(platform),
+  );
+}
+
+function requiredQualityCheckNames(platform = process.platform) {
+  return REQUIRED_QUALITY_CHECK_NAMES.filter(
+    (name) => name !== "releaseAssetsE2e" || platform !== "win32",
+  );
+}
 
 function command(commandName, args, root) {
   return execFileSync(commandName, args, {
@@ -156,16 +207,51 @@ function validateQualityGate(
     );
   }
   validateIdentity(qualityGate, expected, "Release quality-gate proof");
+  if (!Number.isFinite(qualityGate.evidenceCompletedAt)) {
+    throw new Error(
+      "Release quality-gate proof has no valid test-evidence completion time.",
+    );
+  }
+  if (
+    !Array.isArray(qualityGate.evidence) ||
+    qualityGate.evidence.length !== activeQualityGateReportSpecs().length + 1
+  ) {
+    throw new Error(
+      "Release quality-gate proof has no complete report evidence list.",
+    );
+  }
+  const evidencePaths = new Set();
+  for (const entry of qualityGate.evidence) {
+    if (
+      !entry ||
+      typeof entry.path !== "string" ||
+      !/^[0-9a-f]{64}$/i.test(String(entry.sha256 || ""))
+    ) {
+      throw new Error("Release quality-gate proof has malformed evidence.");
+    }
+    if (evidencePaths.has(entry.path)) {
+      throw new Error(
+        `Release quality-gate proof repeats evidence ${entry.path}.`,
+      );
+    }
+    evidencePaths.add(entry.path);
+  }
+  for (const expectedPath of [
+    QUALITY_GATE_EVIDENCE_RELATIVE_PATH.replace(/\\/g, "/"),
+    ...activeQualityGateReportSpecs().map((spec) => spec.path),
+  ]) {
+    if (!evidencePaths.has(expectedPath)) {
+      throw new Error(
+        `Release quality-gate proof is missing evidence ${expectedPath}.`,
+      );
+    }
+  }
   return qualityGate;
 }
 
-const RELEASE_BOOTSTRAP_PATHS = new Set([
-  "run.rosie.s3-sidekick.metainfo.xml",
-  "src-tauri/tauri.conf.json",
-  "src-tauri/Cargo.toml",
-  "src-tauri/Cargo.lock",
-  "package-lock.json",
-]);
+// Only generated bootstrap metadata may differ from HEAD. Source manifests,
+// lockfiles, and Tauri config must remain exactly the committed release source.
+const RELEASE_BOOTSTRAP_PATHS = new Set(["run.rosie.s3-sidekick.metainfo.xml"]);
 const RELEASE_BOOTSTRAP_PREFIXES = ["src-tauri/gen/schemas/"];
 
 function normalizePorcelainPath(value) {
@@ -190,11 +276,22 @@ function parsePorcelainPaths(status) {
       // callers must not trim() the porcelain blob before parsing.
       const match = line.match(/^(.{2}) (.*)$/);
       if (!match) return "";
+      const xy = match[1];
       const rest = match[2];
-      const renameArrow = rest.indexOf(" -> ");
-      return normalizePorcelainPath(
-        renameArrow >= 0 ? rest.slice(renameArrow + 4) : rest,
-      );
+      // Only R (rename) and C (copy) carry the "old -> new" separator. A path
+      // containing " -> " must remain a single path.
+      if (!/[RC]/.test(xy)) return normalizePorcelainPath(rest);
+      let target = rest;
+      const quotedSeparator = rest.lastIndexOf('" -> "');
+      const plainSeparator = rest.lastIndexOf(" -> ");
+      if (quotedSeparator >= 0) {
+        // The separator's trailing quote belongs to the new path; keep it so
+        // normalizePorcelainPath can strip the matching pair.
+        target = rest.slice(quotedSeparator + 5);
+      } else if (plainSeparator >= 0) {
+        target = rest.slice(plainSeparator + " -> ".length);
+      }
+      return normalizePorcelainPath(target);
     })
     .filter(Boolean);
 }
@@ -233,6 +330,298 @@ function blockingReleaseWorkingTreePaths(root = defaultRoot) {
   );
 }
 
+function resolveRootRelative(root, relativePath) {
+  return path.join(root, ...relativePath.split("/"));
+}
+
+function clearQualityGateEvidence(root = defaultRoot) {
+  fs.rmSync(path.join(root, QUALITY_GATE_EVIDENCE_RELATIVE_PATH), {
+    force: true,
+  });
+}
+
+function writeQualityGateEvidence(
+  root,
+  {
+    commit,
+    startedAt,
+    completedAt,
+    checks,
+    passed,
+    workingTreeSha256Start,
+    workingTreeSha256End,
+  },
+) {
+  const evidencePath = path.join(root, QUALITY_GATE_EVIDENCE_RELATIVE_PATH);
+  fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+  fs.writeFileSync(
+    evidencePath,
+    `${JSON.stringify(
+      {
+        suite: "release-quality-evidence",
+        commit,
+        startedAt,
+        completedAt,
+        passed,
+        workingTreeSha256Start,
+        workingTreeSha256End,
+        checks,
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  return evidencePath;
+}
+
+function readJsonFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function qualityGateEvidenceProblems(
+  root = defaultRoot,
+  { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS, commit } = {},
+) {
+  const problems = [];
+  const evidencePath = path.join(root, QUALITY_GATE_EVIDENCE_RELATIVE_PATH);
+  let evidence;
+  try {
+    evidence = readJsonFile(evidencePath);
+  } catch (error) {
+    return {
+      problems: [
+        `Release quality-gate test evidence is missing or invalid (${evidencePath}): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      ],
+      evidence: null,
+      evidenceSha256: null,
+      reports: [],
+    };
+  }
+  if (!/^[0-9a-f]{40}$/i.test(String(evidence.commit || ""))) {
+    problems.push("Release quality-gate test evidence has no exact commit.");
+  } else if (commit && evidence.commit.toLowerCase() !== commit.toLowerCase()) {
+    problems.push(
+      `Release quality-gate test evidence is for ${evidence.commit}, not ${commit}.`,
+    );
+  }
+  if (
+    !Number.isFinite(evidence.startedAt) ||
+    !Number.isFinite(evidence.completedAt) ||
+    evidence.completedAt < evidence.startedAt
+  ) {
+    problems.push(
+      "Release quality-gate test evidence has no valid start/completion time.",
+    );
+  } else {
+    const age = now - evidence.completedAt;
+    if (age < -EVIDENCE_CLOCK_SKEW_MS || age > maxAgeMs) {
+      problems.push(
+        "Release quality-gate test evidence is expired; run test:all again.",
+      );
+    }
+  }
+  if (evidence.passed !== true) {
+    problems.push("Release quality-gate test evidence did not pass.");
+  }
+  const workingTreeStart = String(evidence.workingTreeSha256Start || "");
+  const workingTreeEnd = String(evidence.workingTreeSha256End || "");
+  if (
+    !/^[0-9a-f]{64}$/i.test(workingTreeStart) ||
+    !/^[0-9a-f]{64}$/i.test(workingTreeEnd)
+  ) {
+    problems.push(
+      "Release quality-gate test evidence has no working-tree hashes for suite start and end.",
+    );
+  } else if (workingTreeStart.toLowerCase() !== workingTreeEnd.toLowerCase()) {
+    problems.push(
+      "Release quality-gate working tree changed while test:all ran; rerun test:all on a stable tree.",
+    );
+  } else {
+    let currentTree;
+    try {
+      currentTree = sha256WorkingTree(root);
+    } catch (error) {
+      problems.push(
+        `Could not hash the current working tree: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      currentTree = null;
+    }
+    if (
+      currentTree &&
+      currentTree.toLowerCase() !== workingTreeStart.toLowerCase()
+    ) {
+      problems.push(
+        "Release quality-gate test evidence is for a different working tree; rerun test:all on this checkout.",
+      );
+    }
+  }
+  for (const name of requiredQualityCheckNames()) {
+    if (evidence.checks?.[name]?.status !== "passed") {
+      problems.push(`Release quality-gate check "${name}" did not pass.`);
+    }
+  }
+  if (process.platform === "win32") {
+    const windowsStatus = evidence.checks?.releaseAssetsE2e?.status;
+    if (windowsStatus !== "skipped" && windowsStatus !== "passed") {
+      problems.push(
+        'Release quality-gate check "releaseAssetsE2e" must record skipped or passed on Windows.',
+      );
+    }
+  }
+
+  const reports = [];
+  const reportSpecs = activeQualityGateReportSpecs();
+  for (const spec of reportSpecs) {
+    const reportPath = resolveRootRelative(root, spec.path);
+    let stat;
+    try {
+      stat = fs.statSync(reportPath);
+    } catch {
+      problems.push(`Release quality-gate report is missing: ${spec.path}`);
+      continue;
+    }
+    if (
+      Number.isFinite(evidence.startedAt) &&
+      stat.mtimeMs < evidence.startedAt - EVIDENCE_CLOCK_SKEW_MS
+    ) {
+      problems.push(
+        `Release quality-gate report is stale: ${spec.path} predates test:all.`,
+      );
+    }
+    if (stat.mtimeMs > now + EVIDENCE_CLOCK_SKEW_MS) {
+      problems.push(
+        `Release quality-gate report has a future timestamp: ${spec.path}.`,
+      );
+    }
+    let report;
+    try {
+      report = readJsonFile(reportPath);
+    } catch (error) {
+      problems.push(
+        `Release quality-gate report is invalid: ${spec.path} (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
+      continue;
+    }
+    if (spec.kind === "vitest-coverage") {
+      if (!report.total || typeof report.total !== "object") {
+        problems.push(
+          `Release quality-gate coverage summary is incomplete: ${spec.path}.`,
+        );
+      }
+    }
+    if (spec.kind === "release-assets") {
+      if (
+        report.passed !== true ||
+        report.exitStatus !== "passed" ||
+        report.checkCount !== report.expectedCheckCount ||
+        !Number.isFinite(report.completedAt)
+      ) {
+        problems.push(
+          `Release quality-gate release-assets report did not pass: ${spec.path}.`,
+        );
+      } else {
+        if (
+          Number.isFinite(evidence.startedAt) &&
+          report.completedAt < evidence.startedAt - EVIDENCE_CLOCK_SKEW_MS
+        ) {
+          problems.push(
+            `Release quality-gate release-assets report predates test:all: ${spec.path}`,
+          );
+        }
+        if (
+          Number.isFinite(evidence.completedAt) &&
+          report.completedAt > evidence.completedAt + EVIDENCE_CLOCK_SKEW_MS
+        ) {
+          problems.push(
+            `Release quality-gate release-assets report postdates test:all: ${spec.path}`,
+          );
+        }
+        const reportAge = now - report.completedAt;
+        if (reportAge < -EVIDENCE_CLOCK_SKEW_MS || reportAge > maxAgeMs) {
+          problems.push(
+            `Release quality-gate release-assets report is expired: ${spec.path}`,
+          );
+        }
+      }
+    }
+    reports.push({
+      path: spec.path,
+      sha256: sha256File(reportPath),
+      completedAt:
+        typeof report.completedAt === "number"
+          ? report.completedAt
+          : stat.mtimeMs,
+    });
+  }
+
+  return {
+    problems,
+    evidence,
+    evidenceSha256: sha256File(evidencePath),
+    reports,
+  };
+}
+
+function proofEvidenceProblems(proof, root, options = {}) {
+  const collection = qualityGateEvidenceProblems(root, {
+    ...options,
+    commit: proof.commit,
+  });
+  const problems = [...collection.problems];
+  const expected = new Map(
+    collection.evidence
+      ? [
+          [
+            QUALITY_GATE_EVIDENCE_RELATIVE_PATH.replace(/\\/g, "/"),
+            collection.evidenceSha256,
+          ],
+          ...collection.reports.map((report) => [report.path, report.sha256]),
+        ]
+      : [],
+  );
+  for (const entry of proof.evidence ?? []) {
+    const expectedHash = expected.get(entry.path);
+    if (!expectedHash) {
+      problems.push(
+        `Release quality-gate proof references unknown evidence ${entry.path}.`,
+      );
+    } else if (expectedHash !== String(entry.sha256).toLowerCase()) {
+      problems.push(
+        `Release quality-gate evidence changed after proof: ${entry.path}.`,
+      );
+    }
+  }
+  if (
+    collection.evidence &&
+    proof.evidenceCompletedAt !== collection.evidence.completedAt
+  ) {
+    problems.push(
+      "Release quality-gate proof does not match its test evidence.",
+    );
+  }
+  if (collection.evidence) {
+    const evidenceTree = String(
+      collection.evidence.workingTreeSha256Start || "",
+    ).toLowerCase();
+    if (
+      !/^[0-9a-f]{64}$/.test(evidenceTree) ||
+      evidenceTree !==
+        String(collection.evidence.workingTreeSha256End || "").toLowerCase() ||
+      evidenceTree !== String(proof.sourceTreeSha256 || "").toLowerCase()
+    ) {
+      problems.push(
+        "Release quality-gate proof is not bound to the working tree the tests ran on.",
+      );
+    }
+  }
+  return problems;
+}
+
 function recordSuccessfulQualityGate(root = defaultRoot) {
   let status;
   try {
@@ -243,11 +632,41 @@ function recordSuccessfulQualityGate(root = defaultRoot) {
   if (!isAcceptableReleaseWorkingTree(status)) {
     return false;
   }
+  let identity;
+  try {
+    identity = currentReleaseIdentity(root);
+  } catch {
+    return false;
+  }
+  const completedAt = Date.now();
+  const collection = qualityGateEvidenceProblems(root, {
+    commit: identity.commit,
+    now: completedAt,
+  });
+  if (collection.problems.length > 0) return false;
   const proofPath = path.join(root, QUALITY_GATE_RELATIVE_PATH);
   fs.mkdirSync(path.dirname(proofPath), { recursive: true });
   fs.writeFileSync(
     proofPath,
-    `${JSON.stringify({ ...currentReleaseIdentity(root), completedAt: Date.now() })}\n`,
+    `${JSON.stringify(
+      {
+        ...identity,
+        completedAt,
+        evidenceCompletedAt: collection.evidence.completedAt,
+        evidence: [
+          {
+            path: QUALITY_GATE_EVIDENCE_RELATIVE_PATH.replace(/\\/g, "/"),
+            sha256: collection.evidenceSha256,
+          },
+          ...collection.reports.map((report) => ({
+            path: report.path,
+            sha256: report.sha256,
+          })),
+        ],
+      },
+      null,
+      2,
+    )}\n`,
     { mode: 0o600 },
   );
   return true;
@@ -257,7 +676,7 @@ function verifyQualityGate(root = defaultRoot, options) {
   const proofPath = path.join(root, QUALITY_GATE_RELATIVE_PATH);
   let proof;
   try {
-    proof = JSON.parse(fs.readFileSync(proofPath, "utf8"));
+    proof = readJsonFile(proofPath);
   } catch (error) {
     throw new Error(
       `Release quality-gate proof is missing or invalid. On a clean checkout, run "npm run test:all" (or "npm run workspace:prepare") before release:prepare. ${error instanceof Error ? error.message : String(error)}`,
@@ -269,7 +688,15 @@ function verifyQualityGate(root = defaultRoot, options) {
       `Release quality-gate verification requires a clean working tree or bootstrap-only drift: ${blockers.join(", ")}`,
     );
   }
-  return validateQualityGate(proof, currentReleaseIdentity(root), options);
+  const identity = currentReleaseIdentity(root);
+  const validated = validateQualityGate(proof, identity, options);
+  const problems = proofEvidenceProblems(validated, root, options);
+  if (problems.length > 0) {
+    throw new Error(
+      `Release quality-gate evidence is not valid: ${problems.join(" ")}`,
+    );
+  }
+  return validated;
 }
 
 function writeReleaseSession(session, root = defaultRoot) {
@@ -306,13 +733,24 @@ function verifyReleaseSession(root = defaultRoot, options) {
   const sessionPath = path.join(root, RELEASE_SESSION_RELATIVE_PATH);
   let session;
   try {
-    session = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+    session = readJsonFile(sessionPath);
   } catch (error) {
     throw new Error(
       `Release build session is missing or invalid. On this machine run "npm run release:prepare" (or the full "npm run release:win" / "release:mac" / "release:linux:*" script), not *:continue alone. ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  return validateReleaseSession(session, currentReleaseIdentity(root), options);
+  const proof = verifyQualityGate(root, options);
+  const validated = validateReleaseSession(
+    session,
+    currentReleaseIdentity(root),
+    options,
+  );
+  if (validated.qualityGateCompletedAt !== proof.completedAt) {
+    throw new Error(
+      "Release build session does not reference the current quality-gate proof; run release:prepare again.",
+    );
+  }
+  return validated;
 }
 
 if (isDirectExecution(import.meta.url)) {
@@ -347,21 +785,29 @@ if (isDirectExecution(import.meta.url)) {
 
 export {
   DEFAULT_MAX_AGE_MS,
+  QUALITY_GATE_EVIDENCE_RELATIVE_PATH,
   QUALITY_GATE_RELATIVE_PATH,
+  QUALITY_GATE_REPORT_SPECS,
   RELEASE_BOOTSTRAP_PATHS,
   RELEASE_SESSION_RELATIVE_PATH,
+  REQUIRED_QUALITY_CHECK_NAMES,
+  activeQualityGateReportSpecs,
   blockingReleaseWorkingTreePaths,
+  clearQualityGateEvidence,
   clearQualityGateProof,
   createReleaseSession,
   currentReleaseIdentity,
   gitPorcelainStatus,
   isAcceptableReleaseWorkingTree,
   parsePorcelainPaths,
+  qualityGateEvidenceProblems,
   recordSuccessfulQualityGate,
+  requiredQualityCheckNames,
+  sha256WorkingTree,
   startReleaseSession,
   validateQualityGate,
   validateReleaseSession,
   verifyQualityGate,
   verifyReleaseSession,
-  sha256WorkingTree,
+  writeQualityGateEvidence,
 };

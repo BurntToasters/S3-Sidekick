@@ -9,9 +9,11 @@ const { syncInspectorMock, markInspectorHasContentMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("../inspector.ts", () => ({
+  refreshInspectorEmptySummary: vi.fn(),
   closeInspectorOnMobile: vi.fn(),
   isInspectorOpen: () => true,
   markInspectorHasContent: markInspectorHasContentMock,
+  resetInspectorSelectionSync: vi.fn(),
   syncInspectorFromSelection: syncInspectorMock,
 }));
 
@@ -30,6 +32,8 @@ vi.mock("../connection.ts", () => ({
 }));
 
 vi.mock("../info-panel.ts", () => ({
+  invalidateInfoPanelCaches: vi.fn(),
+  INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
   hasUnsavedInfoChanges: () => false,
   confirmDiscardInfoProperties: async () => true,
 }));
@@ -56,7 +60,6 @@ function renderFixture(): void {
     <div id="batch-toolbar">
       <span id="batch-count"></span>
       <div id="batch-toolbar-actions" hidden>
-        <button id="batch-properties"></button>
         <button id="batch-download"></button>
         <button id="batch-delete"></button>
         <button id="batch-copy-urls"></button>
@@ -71,7 +74,6 @@ function renderFixture(): void {
     <button id="nav-forward"></button>
     <button id="nav-up"></button>
     <input id="location-omnibar-edit" type="text" hidden />
-    <button id="btn-download" disabled></button>
     <span id="status"></span>
   `;
 }
@@ -203,7 +205,7 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("batch-count") as HTMLSpanElement).textContent,
     ).toContain("2 files selected");
     expect(
-      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+      (document.getElementById("batch-download") as HTMLButtonElement).disabled,
     ).toBe(false);
 
     const objectPanel = document.getElementById("object-panel") as HTMLElement;
@@ -228,7 +230,7 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("batch-count") as HTMLSpanElement).textContent,
     ).toBe("1 file selected");
     expect(
-      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+      (document.getElementById("batch-download") as HTMLButtonElement).disabled,
     ).toBe(false);
 
     state.selectedKeys.clear();
@@ -240,13 +242,13 @@ describe("browser core rendering and selection", () => {
       (document.getElementById("batch-count") as HTMLSpanElement).textContent,
     ).toContain("1 folder, 2 files loaded");
     expect(
-      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+      (document.getElementById("batch-download") as HTMLButtonElement).disabled,
     ).toBe(true);
 
     state.selectedPrefixes.add("folder/");
     browser.updateSelectionUI();
     expect(
-      (document.getElementById("btn-download") as HTMLButtonElement).disabled,
+      (document.getElementById("batch-download") as HTMLButtonElement).disabled,
     ).toBe(true);
 
     // The skeleton waits 150 ms so warm navigations never flash it.
@@ -876,5 +878,94 @@ describe("browser core rendering and selection", () => {
         "object-row",
       ),
     ).toBe(true);
+  });
+
+  it("resets the inspector selection sync on invalidation (H6)", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    const inspector = await import("../inspector.ts");
+    state.objects = [
+      {
+        key: "same.txt",
+        size: 1,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    state.selectedKeys.add("same.txt");
+    browser.renderObjectTable();
+    expect(syncInspectorMock).toHaveBeenCalled();
+    expect(inspector.resetInspectorSelectionSync).toHaveBeenCalledTimes(0);
+    browser.invalidateInspectorSelectionSync();
+    expect(inspector.resetInspectorSelectionSync).toHaveBeenCalledTimes(1);
+    browser.renderObjectTable();
+    expect(syncInspectorMock.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("ignores filter renders while the skeleton is loading (H7)", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.objects = [
+      {
+        key: "old.txt",
+        size: 1,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    browser.renderObjectTable();
+    browser.renderObjectTableSkeleton(1);
+    const panel = document.getElementById("object-panel") as HTMLElement;
+    expect(panel.getAttribute("aria-busy")).toBe("true");
+    // The debounced filter path must not clear the loading guard.
+    const bridge = await import("../layout-render-bridge.ts");
+    state.filterText = "old";
+    bridge.renderObjectTableFromLayout();
+    expect(panel.getAttribute("aria-busy")).toBe("true");
+    // A listing commit still renders and clears it.
+    browser.renderObjectTable();
+    expect(panel.getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("does not act on stale rows while loading (H8)", async () => {
+    const browser = await import("../browser.ts");
+    const { state } = await import("../state.ts");
+    state.objects = [
+      {
+        key: "a.txt",
+        size: 1,
+        last_modified: "2024-01-01T00:00:00Z",
+        is_folder: false,
+      },
+    ];
+    browser.renderObjectTable();
+    browser.renderObjectTableSkeleton(1);
+    const row = document.querySelector<HTMLElement>(
+      "#object-tbody .object-row",
+    );
+    expect(row).toBeTruthy();
+    expect(() =>
+      row!.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowDown",
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    ).not.toThrow();
+    expect(state.selectedKeys.size).toBe(0);
+  });
+
+  it("flushes location through a bubbling event (M1)", async () => {
+    const browser = await import("../browser.ts");
+    const seen: string[] = [];
+    window.addEventListener(browser.LOCATION_FLUSH_EVENT, () =>
+      seen.push("flushed"),
+    );
+    // Any real navigation dispatches the flush before the bucket changes.
+    await browser
+      .navigateToLocationPath("other-bucket/")
+      .catch(() => undefined);
+    expect(seen.length).toBeGreaterThan(0);
   });
 });

@@ -36,7 +36,7 @@
 
 .lock-view__icon {
   display: inline-flex;
-  color: var(--accent);
+  color: var(--accent-fg);
 }
 
 .lock-view__icon .lucide-icon,
@@ -55,7 +55,8 @@
 
 .lock-view__title {
   margin: 0;
-  font-size: var(--text-lg);
+  font-size: var(--text-xl);
+  font-weight: 600;
   color: var(--text-primary);
 }
 
@@ -63,6 +64,13 @@
 .lock-view__notice {
   margin: 0;
   font-size: var(--text-md);
+  color: var(--text-secondary);
+}
+
+.lock-view__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
   color: var(--text-secondary);
 }
 
@@ -105,11 +113,23 @@
   padding: var(--space-1) 0;
   border: none;
   background: none;
-  color: var(--accent);
+  color: var(--accent-fg);
   font: inherit;
   font-size: var(--text-sm);
   text-decoration: underline;
   cursor: pointer;
+}
+
+/* No accent-fg hover token exists, so hover thickens the underline instead of recolouring it. */
+.lock-view__link:hover {
+  text-decoration-thickness: 2px;
+}
+
+/* The shared focus ring: colour, width and offset come from tokens. */
+.lock-view__link:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--radius-sm);
 }
 
 .lock-view__link:disabled {
@@ -148,7 +168,8 @@
 
 .biometric-overlay__title {
   margin: 0;
-  font-size: var(--text-lg);
+  font-size: var(--text-xl);
+  font-weight: 600;
 }
 
 /* The Security tab, the lock view and the setup wizard hide controls with the

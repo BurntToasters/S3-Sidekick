@@ -317,4 +317,114 @@ describe("syncInspectorFromSelection", () => {
       vi.useRealTimers();
     }
   });
+
+  it("re-renders after the info panel closes instead of reusing the old signature", async () => {
+    appendInfoFixture();
+
+    const { state } = await import("../state.ts");
+    state.currentBucket = "bucket-a";
+    state.connectionId = "test-connection";
+    state.connectionIdentity = "test-identity";
+    state.selectedKeys.clear();
+    state.selectedPrefixes.clear();
+    state.selectedPrefixes.add("folder/");
+
+    const inspector = await import("../inspector.ts");
+    const info = await import("../info-panel.ts");
+    inspector.setInspectorOpen(true);
+    inspector.focusInspectorInfoPane("details");
+    await inspector.syncInspectorFromSelection(undefined, {
+      reason: "selection",
+    });
+
+    expect(document.getElementById("inspector-info-body")?.textContent).toMatch(
+      /folder/i,
+    );
+
+    info.closeInfoPanel();
+    expect(
+      document.getElementById("inspector-info-body")?.childElementCount,
+    ).toBe(0);
+
+    // The explicit resync after Cancel must render again; the previous
+    // completed-selection signature cannot suppress it.
+    await inspector.syncInspectorFromSelection();
+    expect(document.getElementById("inspector-info-body")?.textContent).toMatch(
+      /folder/i,
+    );
+  });
+
+  it("keeps A visible when selection goes A → B → A during preview debounce", async () => {
+    vi.useFakeTimers();
+    try {
+      mockInvoke.mockImplementation(async (command, args) => {
+        if (command !== "preview_object") return undefined;
+        const key = String((args as { key?: string }).key ?? "");
+        return {
+          content_type: "application/json",
+          data: JSON.stringify({ key }),
+          is_text: true,
+          truncated: false,
+          total_size: 10,
+        };
+      });
+
+      const { state } = await import("../state.ts");
+      state.currentBucket = "bucket-a";
+      state.connectionId = "test-connection";
+      state.connectionIdentity = "test-identity";
+      state.objects = [
+        {
+          key: "a.json",
+          size: 10,
+          last_modified: "2025-01-01T00:00:00Z",
+          is_folder: false,
+        },
+        {
+          key: "b.json",
+          size: 10,
+          last_modified: "2025-01-01T00:00:00Z",
+          is_folder: false,
+        },
+      ];
+      state.selectedKeys.clear();
+      state.selectedKeys.add("a.json");
+
+      const inspector = await import("../inspector.ts");
+      const selection = await import("../app-selection.ts");
+      inspector.setInspectorOpen(true);
+      inspector.focusInspectorPreviewPane();
+      const initialSync = inspector.syncInspectorFromSelection(
+        selection.getSelectionEntries(),
+      );
+      await vi.advanceTimersByTimeAsync(400);
+      await initialSync;
+      expect(
+        document.getElementById("inspector-preview-body")?.textContent,
+      ).toContain("a.json");
+
+      // B starts loading, then A is selected again before B's debounce fires.
+      state.selectedKeys.clear();
+      state.selectedKeys.add("b.json");
+      const pendingB = inspector.syncInspectorFromSelection(
+        selection.getSelectionEntries(),
+      );
+      state.selectedKeys.clear();
+      state.selectedKeys.add("a.json");
+      const pendingA = inspector.syncInspectorFromSelection(
+        selection.getSelectionEntries(),
+      );
+      await vi.advanceTimersByTimeAsync(400);
+      await Promise.all([pendingB, pendingA]);
+
+      expect(
+        document.getElementById("inspector-preview-body")?.textContent,
+      ).toContain("a.json");
+      expect(
+        document.getElementById("inspector-preview-title")?.textContent,
+      ).toBe("a.json");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

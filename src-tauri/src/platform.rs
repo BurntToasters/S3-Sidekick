@@ -1,6 +1,63 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Resolve a Windows system executable from the OS directory, never from the
+/// current directory or PATH. A malicious `rundll32.exe` beside the app must
+/// not be able to intercept URL/path opening.
+fn windows_system_exe(subdir: &str, name: &str) -> PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    if subdir.is_empty() {
+        root.join(name)
+    } else {
+        root.join(subdir).join(name)
+    }
+}
+
+/// Resolve a Unix launcher to an absolute OS path.
+///
+/// `Command::new("open")` / `Command::new("xdg-open")` search `PATH`, so a
+/// compromised environment can place a same-named binary earlier and intercept
+/// every URL or folder open. Only the standard OS locations are accepted; a
+/// missing launcher is an error rather than a silent PATH fallback.
+fn unix_launcher(name: &str) -> Result<PathBuf, String> {
+    let candidates: &[&str] = match name {
+        "open" => &["/usr/bin/open", "/bin/open"],
+        "xdg-open" => &[
+            "/usr/bin/xdg-open",
+            "/bin/xdg-open",
+            "/usr/local/bin/xdg-open",
+        ],
+        _ => return Err(format!("Unknown system launcher '{}'", name)),
+    };
+    for candidate in candidates {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "Unable to find the system launcher '{}' in the standard OS locations",
+        name
+    ))
+}
+
+/// Build a launcher command from an absolute OS path. Windows launchers come
+/// from `%SystemRoot%`; Unix launchers are resolved by `unix_launcher`.
+fn launcher_command(program: &str) -> Result<Command, String> {
+    if cfg!(target_os = "windows") {
+        let exe = if program == "explorer" {
+            windows_system_exe("", "explorer.exe")
+        } else {
+            windows_system_exe("System32", "rundll32.exe")
+        };
+        Ok(Command::new(exe))
+    } else {
+        Ok(Command::new(unix_launcher(program)?))
+    }
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct UpdaterSupportInfo {
     mode: String,
@@ -110,13 +167,13 @@ pub(crate) fn open_external_url(url: String) -> Result<(), String> {
     }
 
     let status = if cfg!(target_os = "windows") {
-        Command::new("rundll32")
+        launcher_command("rundll32")?
             .args(["url.dll,FileProtocolHandler", &url])
             .status()
     } else if cfg!(target_os = "macos") {
-        Command::new("open").arg(&url).status()
+        launcher_command("open")?.arg(&url).status()
     } else {
-        Command::new("xdg-open").arg(&url).status()
+        launcher_command("xdg-open")?.arg(&url).status()
     }
     .map_err(|e| format!("Failed to launch external URL: {}", e))?;
 
@@ -166,15 +223,43 @@ fn is_macos_bundle(path: &std::path::Path) -> bool {
 /// `explorer` / `open` / `xdg-open` means the shell's default handler runs it,
 /// which turned this command into a local code-execution primitive reachable
 /// from the webview. The only caller ever needed to open a folder.
-#[tauri::command]
-pub(crate) fn open_local_path(path: String) -> Result<(), String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err("Path is required".to_string());
+/// Resolve the path handed to the OS launcher.
+///
+/// The grant already checked its canonical identity at use time, but an
+/// ancestor swapped for a symlink between that check and the spawn can still
+/// redirect the launcher. Re-resolve immediately before building argv and
+/// launch the canonical path, which has no symlink components at this point
+/// (M9). A final-component symlink is refused rather than resolved.
+fn resolve_launch_target(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|err| format!("Failed to resolve local path '{}': {}", path.display(), err))?;
+    if canonical
+        .symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Refusing to launch a symbolic link: {}",
+            canonical.display()
+        ));
     }
-    let parsed = PathBuf::from(trimmed);
+    #[cfg(windows)]
+    let canonical = std::path::PathBuf::from(crate::strip_extended_windows_prefix(
+        &canonical.to_string_lossy(),
+    ));
+    Ok(canonical)
+}
+
+#[tauri::command]
+pub(crate) fn open_local_path(token: String) -> Result<(), String> {
+    // Only a path the user chose in a native picker (or a completed download's
+    // destination grant) may be opened. A raw renderer path has no grant and
+    // fails closed.
+    let granted =
+        crate::path_authority::authorize(&token, crate::path_authority::GrantUse::Reveal)?;
+    let parsed = granted.path;
     if !parsed.is_absolute() {
-        return Err(format!("Path must be absolute: {}", trimmed));
+        return Err(format!("Path must be absolute: {}", parsed.display()));
     }
     if !parsed.exists() {
         return Err(format!("Path does not exist: {}", parsed.display()));
@@ -195,12 +280,20 @@ pub(crate) fn open_local_path(path: String) -> Result<(), String> {
             parsed.display()
         ));
     }
+    // Resolve ancestors at the last moment and launch the canonical path.
+    let parsed = resolve_launch_target(&parsed)?;
+    if !parsed.is_dir() {
+        return Err(format!(
+            "Only folders can be opened, not individual files: {}",
+            parsed.display()
+        ));
+    }
 
     if cfg!(target_os = "windows") {
         // `explorer.exe` is widely observed to return a non-zero exit code even
         // when it opened the window successfully, so its status is not a usable
         // signal. Only a spawn failure is treated as an error here.
-        Command::new("explorer")
+        launcher_command("explorer")?
             .arg(&parsed)
             .status()
             .map_err(|e| format!("Failed to open local path: {}", e))?;
@@ -217,9 +310,9 @@ pub(crate) fn open_local_path(path: String) -> Result<(), String> {
     }
 
     let status = if cfg!(target_os = "macos") {
-        Command::new("open").arg(&parsed).status()
+        launcher_command("open")?.arg(&parsed).status()
     } else {
-        Command::new("xdg-open").arg(&parsed).status()
+        launcher_command("xdg-open")?.arg(&parsed).status()
     }
     .map_err(|e| format!("Failed to open local path: {}", e))?;
 
@@ -280,6 +373,7 @@ fn reveal_plan(platform: RevealPlatform, raw: &str) -> Result<RevealPlan, String
             target.display()
         ));
     }
+    let target = resolve_launch_target(&target)?;
 
     match platform {
         RevealPlatform::MacOs => {
@@ -330,10 +424,15 @@ fn reveal_plan(platform: RevealPlatform, raw: &str) -> Result<RevealPlan, String
 /// Show a completed download in the system file manager, selecting the file
 /// where the platform supports it. The file is never run.
 #[tauri::command]
-pub(crate) fn reveal_local_path(path: String) -> Result<(), String> {
+pub(crate) fn reveal_local_path(token: String, name: Option<String>) -> Result<(), String> {
+    let granted = crate::path_authority::resolve(
+        &token,
+        crate::path_authority::GrantUse::Reveal,
+        name.as_deref(),
+    )?;
     let platform = host_reveal_platform();
-    let plan = reveal_plan(platform, &path)?;
-    let status = Command::new(plan.program)
+    let plan = reveal_plan(platform, &granted.path.to_string_lossy())?;
+    let status = launcher_command(plan.program)?
         .args(&plan.args)
         .status()
         .map_err(|e| format!("Failed to reveal local path: {}", e))?;
@@ -382,10 +481,12 @@ mod tests {
     }
 
     #[test]
-    fn open_local_path_rejects_relative() {
+    fn open_local_path_rejects_a_raw_path_without_a_grant() {
+        // The pre-authority signature was `open_local_path(path)`. That form
+        // must now fail even when the path exists and is a folder.
         let result = open_local_path("relative/path".to_string());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("absolute"));
+        let err = result.expect_err("a bare path must not authorize an open");
+        assert!(err.contains("grant"), "unexpected error: {}", err);
     }
 
     #[test]
@@ -408,7 +509,13 @@ mod tests {
         file.push(format!("s3-sidekick-open-guard-{}.txt", std::process::id()));
         std::fs::write(&file, b"x").unwrap();
 
-        let result = open_local_path(file.to_string_lossy().to_string());
+        let token = crate::path_authority::mint(
+            crate::path_authority::GrantPurpose::UploadFile,
+            &file,
+            false,
+            Some(1),
+        );
+        let result = open_local_path(token);
         let _ = std::fs::remove_file(&file);
 
         let err = result.expect_err("a file must be rejected");
@@ -419,7 +526,13 @@ mod tests {
     fn open_local_path_rejects_nonexistent() {
         let mut missing = std::env::temp_dir();
         missing.push(format!("s3-sidekick-absent-{}", std::process::id()));
-        let result = open_local_path(missing.to_string_lossy().to_string());
+        let token = crate::path_authority::mint(
+            crate::path_authority::GrantPurpose::Reveal,
+            &missing,
+            true,
+            None,
+        );
+        let result = open_local_path(token);
         assert!(result.is_err());
     }
 
@@ -444,17 +557,23 @@ mod tests {
     }
 
     #[test]
-    fn reveal_local_path_rejects_relative() {
-        let err = reveal_local_path("downloads/report.csv".to_string())
-            .expect_err("a relative path must be rejected");
-        assert!(err.contains("absolute"), "unexpected error: {}", err);
+    fn reveal_local_path_rejects_a_raw_path_without_a_grant() {
+        let err = reveal_local_path("downloads/report.csv".to_string(), None)
+            .expect_err("a raw path must be rejected");
+        assert!(err.contains("grant"), "unexpected error: {}", err);
     }
 
     #[test]
     fn reveal_local_path_rejects_missing_file() {
         let dir = reveal_scratch("missing");
         let missing = dir.join("never-written.csv");
-        let result = reveal_local_path(missing.to_string_lossy().to_string());
+        let token = crate::path_authority::mint(
+            crate::path_authority::GrantPurpose::Reveal,
+            &missing,
+            false,
+            None,
+        );
+        let result = reveal_local_path(token, None);
         let _ = std::fs::remove_dir_all(&dir);
         let err = result.expect_err("a missing file must be rejected");
         assert!(err.contains("does not exist"), "unexpected error: {}", err);
@@ -469,7 +588,13 @@ mod tests {
         let target = reveal_file(&dir, "real.csv");
         let link = dir.join("link.csv");
         std::os::unix::fs::symlink(&target, &link).expect("create symlink");
-        let result = reveal_local_path(link.to_string_lossy().to_string());
+        let token = crate::path_authority::mint(
+            crate::path_authority::GrantPurpose::Reveal,
+            &link,
+            false,
+            None,
+        );
+        let result = reveal_local_path(token, None);
         let _ = std::fs::remove_dir_all(&dir);
         let err = result.expect_err("a symlink must be rejected");
         assert!(err.contains("symbolic link"), "unexpected error: {}", err);
@@ -491,16 +616,14 @@ mod tests {
     fn reveal_local_plan_macos_selects_the_file_with_open_r() {
         let dir = reveal_scratch("macos-file");
         let file = reveal_file(&dir, "report.csv");
+        let expected = resolve_launch_target(&file).unwrap();
         let result = reveal_plan(RevealPlatform::MacOs, &file.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         let plan = result.expect("a file is revealable on macOS");
         assert_eq!(plan.program, "open");
         assert_eq!(
             plan.args,
-            vec![
-                std::ffi::OsString::from("-R"),
-                file.clone().into_os_string()
-            ]
+            vec![std::ffi::OsString::from("-R"), expected.into_os_string()]
         );
     }
 
@@ -519,6 +642,7 @@ mod tests {
     fn reveal_local_plan_windows_uses_explorer_select() {
         let dir = reveal_scratch("windows-file");
         let file = reveal_file(&dir, "report.csv");
+        let expected = resolve_launch_target(&file).unwrap();
         let result = reveal_plan(RevealPlatform::Windows, &file.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         let plan = result.expect("a file is revealable on Windows");
@@ -527,7 +651,7 @@ mod tests {
             plan.args,
             vec![std::ffi::OsString::from(format!(
                 "/select,{}",
-                file.display()
+                expected.display()
             ))]
         );
     }
@@ -536,28 +660,34 @@ mod tests {
     fn reveal_local_plan_linux_opens_the_parent_folder_never_the_file() {
         let dir = reveal_scratch("linux-parent");
         let file = reveal_file(&dir, "report.csv");
+        let expected = resolve_launch_target(&dir).unwrap();
         let result = reveal_plan(RevealPlatform::Linux, &file.to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
         let plan = result.expect("a file's parent folder is revealable on Linux");
         assert_eq!(plan.program, "xdg-open");
-        assert_eq!(plan.args, vec![dir.clone().into_os_string()]);
+        assert_eq!(plan.args, vec![expected.into_os_string()]);
     }
 
     #[cfg(unix)]
     #[test]
-    fn reveal_local_plan_linux_refuses_a_symlinked_parent() {
+    fn reveal_local_plan_linux_opens_the_resolved_parent_for_a_symlinked_ancestor() {
+        // A symlinked ancestor is resolved to the canonical folder the grant
+        // already pinned. Launching the canonical path cannot be redirected by
+        // swapping the link name afterwards (M9).
         let dir = reveal_scratch("linux-symlink-parent");
         let real = dir.join("real");
         std::fs::create_dir_all(&real).expect("create real folder");
         reveal_file(&real, "report.csv");
         let link = dir.join("link");
         std::os::unix::fs::symlink(&real, &link).expect("create folder symlink");
-        let result = reveal_plan(
+        let expected = resolve_launch_target(&real).unwrap();
+        let plan = reveal_plan(
             RevealPlatform::Linux,
             &link.join("report.csv").to_string_lossy(),
-        );
+        )
+        .expect("a symlinked ancestor resolves to the real folder");
         let _ = std::fs::remove_dir_all(&dir);
-        let err = result.expect_err("a symlinked parent folder must be refused");
-        assert!(err.contains("symbolic link"), "unexpected error: {}", err);
+        assert_eq!(plan.program, "xdg-open");
+        assert_eq!(plan.args, vec![expected.into_os_string()]);
     }
 }

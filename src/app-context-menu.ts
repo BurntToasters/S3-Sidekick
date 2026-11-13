@@ -160,8 +160,8 @@ export function handleContextMenu(e: MouseEvent): void {
         e.clientY,
         [
           { label: "New folder", action: "new-folder" },
-          { label: "Upload Files", action: "upload-files" },
-          { label: "Upload Folder", action: "upload-folder" },
+          { label: "Upload files", action: "upload-files" },
+          { label: "Upload folder", action: "upload-folder" },
           { separator: true },
           { label: "Refresh", action: "refresh" },
         ],
@@ -207,14 +207,14 @@ export function handleBucketContextMenu(e: MouseEvent): void {
   if (bucketButton?.dataset.bucket) {
     const bucket = bucketButton.dataset.bucket;
     const menuItems: MenuItem[] = [
-      { label: "Open Bucket", action: "open-bucket" },
-      { label: "Copy Bucket Name", action: "copy-bucket-name" },
+      { label: "Open bucket", action: "open-bucket" },
+      { label: "Copy bucket name", action: "copy-bucket-name" },
     ];
     if (isAwsEndpoint(state.endpoint)) {
-      menuItems.push({ label: "Copy Bucket ARN", action: "copy-bucket-arn" });
+      menuItems.push({ label: "Copy bucket ARN", action: "copy-bucket-arn" });
     }
     menuItems.push({ separator: true });
-    menuItems.push({ label: "Refresh Buckets", action: "refresh-buckets" });
+    menuItems.push({ label: "Refresh buckets", action: "refresh-buckets" });
 
     showContextMenu(e.clientX, e.clientY, menuItems, (action) => {
       if (action === "open-bucket") {
@@ -250,7 +250,7 @@ export function handleBucketContextMenu(e: MouseEvent): void {
   showContextMenu(
     e.clientX,
     e.clientY,
-    [{ label: "Refresh Buckets", action: "refresh-buckets" }],
+    [{ label: "Refresh buckets", action: "refresh-buckets" }],
     () => {
       void handleRefreshBuckets();
     },

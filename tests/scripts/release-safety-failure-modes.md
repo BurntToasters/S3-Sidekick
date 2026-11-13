@@ -41,3 +41,28 @@ positive fixture. A stalled command must never turn into a successful report.
 The script E2E fixtures use disposable files, generated signing keys, fake GitHub/Git
 processes, and a copied production runner. They do not publish releases or modify
 the real repository configuration. Their JSON reports record the fixture boundary.
+
+The quality-gate proof binds the exact commit and working tree that `test:all`
+ran on. Test evidence records the working-tree SHA-256 at suite start and end;
+finalize and every release-session verification reject a tree that changed
+during the suite, a tree that differs from the evidence, or evidence whose
+commit is not HEAD. `release:publish` and `release:mirror` require the verified
+build session, the quality-gate proof, and an exact-SHA CI gate even when run
+standalone.
+
+The CI gate is bound to Actions workflow identity (`github-actions` app,
+`.github/workflows/ci.yml`, expected release branch, `push` event, exact SHA),
+not only the check-run name. Published-release verification requires
+`target_commitish` to match the verified commit. Beta-manifest recovery verifies
+the detached GPG signatures and signed checksum coverage of every manifest
+before copying it onto the stable feed; any mismatch aborts.
+
+The Playwright gate requires the manifest in `tests/browser/required-specs.json`:
+every spec and project must run with its expected count, and skipped, retried,
+flaky, or unexpected results fail the release gate. AWS-null, multipart, and
+release-cleanup suites require exact check names and counts.
+
+Release cleanup safety is executed against disposable real Git repositories:
+dirty refusal must preserve bytes and HEAD, the explicit stash path must
+fast-forward to upstream and leave the stash recoverable, and no call may issue
+`reset --hard`, `checkout`, or `clean -fd`.

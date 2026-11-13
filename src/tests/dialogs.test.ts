@@ -366,4 +366,34 @@ describe("dialogs", () => {
     await expect(confirm).resolves.toBe(false);
     vi.useRealTimers();
   });
+
+  it("closeAllDialogs resolves the present dialog cancelled and settles queued ones (H5)", async () => {
+    const dialogs = await import("../dialogs.ts");
+    const first = dialogs.showConfirm("First", "First?");
+    const queued = dialogs.showConfirm("Second", "Second?");
+    const prompt = dialogs.showPrompt("Name", "Prompt?");
+    const choice = dialogs.showChoiceDialog(
+      "Pick",
+      "Pick one",
+      [
+        { value: "keep", label: "Keep editing" },
+        { value: "discard", label: "Discard changes", danger: true },
+      ],
+      { cancelValue: "keep" },
+    );
+    expect(dialogs.isDialogActive()).toBe(true);
+
+    dialogs.closeAllDialogs();
+
+    await expect(first).resolves.toBe(false);
+    await expect(queued).resolves.toBe(false);
+    await expect(prompt).resolves.toBeNull();
+    await expect(choice).resolves.toBe("keep");
+    expect(dialogs.isDialogActive()).toBe(false);
+    expect(
+      (
+        document.getElementById("dialog-overlay") as HTMLDivElement
+      ).classList.contains("active"),
+    ).toBe(false);
+  });
 });

@@ -6,6 +6,13 @@ pub(super) fn normalize_attempt(attempt: Option<u32>) -> u32 {
     attempt.unwrap_or(1).max(1)
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(super) struct TransferPartDigest {
+    pub(super) part: u32,
+    /// SHA-256 of exactly this part's bytes, hex-encoded.
+    pub(super) sha256: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub(super) struct TransferCheckpoint {
     pub(super) version: u8,
@@ -29,6 +36,18 @@ pub(super) struct TransferCheckpoint {
     // a versioned object: an ETag can be reused by distinct versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) version_id: Option<String>,
+    // Stable identity of the scratch inode/device that produced the completed
+    // ranges. File length alone cannot distinguish the original scratch from a
+    // same-size replacement or a preallocated file, so a checkpoint without a
+    // matching identity is restarted rather than trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) scratch_device: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) scratch_inode: Option<u64>,
+    // Digest of each completed part. Old checkpoints have none, so none of
+    // their ranges can be trusted on resume.
+    #[serde(default)]
+    pub(super) part_digests: Vec<TransferPartDigest>,
 }
 
 pub(super) fn clamp_part_size_mb(value: Option<u32>, fallback: u32) -> u32 {
@@ -123,17 +142,22 @@ pub(super) fn choose_upload_part_size_bytes(
     let mut part_size = (part_mb as u64) * 1024 * 1024;
     let mut parts = file_size.div_ceil(part_size);
     if parts > 10_000 {
-        // Grow the part size toward the 5 GiB provider maximum rather than
-        // refusing objects above ~1.25 TiB at the default preset. Every part
-        // except the last must be equal, which `div_ceil` preserves.
-        const MAX_UPLOAD_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
-        part_size = file_size.div_ceil(10_000).min(MAX_UPLOAD_PART_SIZE);
-        parts = file_size.div_ceil(part_size);
-        if parts > 10_000 {
-            return Err(
-                "Object is too large to upload within the 10,000-part multipart limit.".to_string(),
-            );
-        }
+        // Grow the part size rather than refusing objects above ~1.25 TiB at
+        // the default preset. Every part except the last must be equal, which
+        // `div_ceil` preserves.
+        part_size = file_size.div_ceil(10_000);
+    }
+    // The upload path buffers one whole part per worker before handing it to
+    // the SDK. A part larger than the whole in-flight budget would exceed
+    // `MAX_UPLOAD_INFLIGHT_BYTES` even at concurrency 1, so cap it here and
+    // reject only the sizes that then cannot fit inside the 10,000-part limit.
+    part_size = part_size.min(MAX_UPLOAD_INFLIGHT_BYTES);
+    parts = file_size.div_ceil(part_size);
+    if parts > 10_000 {
+        return Err(format!(
+            "Object is too large to upload within the 10,000-part multipart limit and the {} MiB in-flight buffer limit.",
+            MAX_UPLOAD_INFLIGHT_BYTES / (1024 * 1024)
+        ));
     }
     Ok(part_size as usize)
 }
@@ -349,12 +373,12 @@ pub(super) fn sha256_composite_checksum(
     Ok((base64, response_value))
 }
 
-pub(super) async fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<Vec<u8>, String> {
+pub(super) async fn sha256_opened_file(
+    file: &mut tokio::fs::File,
+    cancel: &CancelToken,
+) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncReadExt;
     let mut hasher = Sha256::new();
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| format!("Failed to open file for checksum: {}", e))?;
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         let read = tokio::select! {
@@ -369,6 +393,13 @@ pub(super) async fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<Vec
         hasher.update(&buf[..read]);
     }
     Ok(hasher.finalize().to_vec())
+}
+
+pub(super) async fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<Vec<u8>, String> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("Failed to open file for checksum: {}", e))?;
+    sha256_opened_file(&mut file, cancel).await
 }
 
 pub(super) fn expected_checksum_from_head(
@@ -419,19 +450,26 @@ pub(super) async fn expected_download_checksum(
         .filter(|value| !value.is_empty())
     {
         request = request.if_match(etag);
+    } else if let Some(version_id) = initial_head
+        .version_id()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        // Version-pinned provider without an ETag (M6): read the checksum for
+        // the same immutable generation instead of an unpinned current object.
+        request = request.version_id(version_id);
     }
     let request = request.send();
     let checksum_head = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
         result = request => result.map_err(|err| {
-            encode_transfer_error(
-                "checksum_unsupported",
-                false,
-                None,
-                format!(
-                    "Checksum verification was requested, but the provider could not return object checksums: {}",
-                    err
-                ),
+            // A failed checksum-mode HEAD says nothing about whether the object
+            // supports checksums: preserve the HTTP/network classification so a
+            // transient outage stays retryable and a 403 stays an authorization
+            // failure instead of becoming a permanent "unsupported" verdict.
+            generation_pinned_download_error(
+                "Checksum verification was requested, but the provider could not read object metadata",
+                &err,
             )
         })?,
     };

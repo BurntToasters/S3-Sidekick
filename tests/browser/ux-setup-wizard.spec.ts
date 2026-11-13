@@ -76,7 +76,9 @@ test("skipping says that saved connections are stored unencrypted", async ({
   await expect(page.locator("#setup-enc-skip-note")).toContainText(
     /unencrypted.*not recommended/is,
   );
-  await expect(page.locator("#setup-enc-skip")).toHaveText("Skip setup");
+  await expect(page.locator("#setup-enc-skip")).toHaveText(
+    "Continue without encryption",
+  );
 });
 
 test("the theme choices form one radio group that arrow keys move through", async ({
@@ -103,4 +105,39 @@ test("Home and End move between theme cards", async ({ page }) => {
   await page.keyboard.press("Home");
   await expect(page.locator("#setup-theme-system")).toBeChecked();
   await expect(page.locator("#setup-theme-system")).toBeFocused();
+});
+
+// Failure modes: a wizard boolean stays a left-aligned checkbox, so it does not
+// line up with the update channel select beneath it; or clicking its label text
+// or pressing Space no longer toggles it.
+test("the wizard's boolean options are switches that toggle from their label text", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, FIRST_RUN);
+  await page.goto("/");
+  await page.locator("#setup-welcome-next").click();
+  await page.locator("#setup-theme-next").click();
+  await expect(page.locator("#setup-enc-biometric")).toHaveClass(/\bswitch\b/);
+  await page.locator("#setup-enc-skip").click();
+
+  const auto = page.locator("#setup-auto-updates");
+  await expect(auto).toHaveClass(/\bswitch\b/);
+  await expect(auto).toBeChecked();
+  const rights = await page.evaluate(() => ({
+    switch: document
+      .getElementById("setup-auto-updates")
+      ?.getBoundingClientRect().right,
+    select: document
+      .getElementById("setup-update-channel")
+      ?.getBoundingClientRect().right,
+  }));
+  expect(
+    Math.abs((rights.switch ?? 0) - (rights.select ?? 1)),
+  ).toBeLessThanOrEqual(1);
+
+  await page.locator("label:has(#setup-auto-updates) > span").click();
+  await expect(auto).not.toBeChecked();
+  await auto.focus();
+  await page.keyboard.press("Space");
+  await expect(auto).toBeChecked();
 });

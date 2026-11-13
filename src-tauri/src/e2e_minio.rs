@@ -112,9 +112,15 @@ fn save_plaintext_e2e_security_config(app: &tauri::App<tauri::test::MockRuntime>
             verifier: String::new(),
             lock_timeout_minutes: 0,
             pbkdf2_iterations: 0,
+            kdf: crate::security::KdfAlgorithm::Pbkdf2,
+            argon2_memory_kib: 0,
+            argon2_iterations: 1,
+            argon2_parallelism: 1,
+            policy_schema: 2,
             biometric_enrolled: false,
             legacy_plaintext_adopted: true,
             legacy_plaintext_adoption_proof: String::new(),
+            policy_mac: String::new(),
         },
     )
     .expect("save explicit plaintext test security configuration");
@@ -344,6 +350,99 @@ async fn e2e_keys_with_space_and_plus_stay_distinct() {
 
 #[tokio::test]
 #[ignore = "needs the MinIO E2E runner (npm run test:e2e:minio)"]
+async fn e2e_conditional_upload_part_copy_contract() {
+    let test = "conditional_part_copy";
+    let env = env();
+    let client = raw_client(&env.endpoint_minio, &env);
+    let bucket = fresh_bucket(&client, "conditional-part-copy").await;
+    let body = vec![b'a'; 5 * 1024 * 1024 + 1];
+    client
+        .put_object()
+        .bucket(&bucket)
+        .key("source.bin")
+        .body(ByteStream::from(body.clone()))
+        .send()
+        .await
+        .expect("seed conditional-part source");
+    let head = client
+        .head_object()
+        .bucket(&bucket)
+        .key("source.bin")
+        .send()
+        .await
+        .expect("head conditional-part source");
+    let etag = head.e_tag().expect("source ETag").to_string();
+    let size = body.len() as u64;
+    let upload = client
+        .create_multipart_upload()
+        .bucket(&bucket)
+        .key("destination.bin")
+        .send()
+        .await
+        .expect("initiate multipart copy");
+    let upload_id = upload.upload_id().expect("upload id").to_string();
+    let range = format!("bytes=0-{}", size - 1);
+
+    // The provider must honour a matching condition.
+    let matched = client
+        .upload_part_copy()
+        .bucket(&bucket)
+        .key("destination.bin")
+        .upload_id(&upload_id)
+        .copy_source(format!("{bucket}/source.bin"))
+        .copy_source_range(&range)
+        .copy_source_if_match(&etag)
+        .part_number(1)
+        .send()
+        .await;
+    record(
+        test,
+        "UploadPartCopy accepts a matching copy-source-if-match",
+        matched.is_ok(),
+        serde_json::json!({"result": format!("{:?}", matched.as_ref().err())}),
+    );
+
+    // A stale condition must be refused, not silently ignored. This is the
+    // provider behaviour the post-completion source recheck compensates for.
+    let stale = client
+        .upload_part_copy()
+        .bucket(&bucket)
+        .key("destination.bin")
+        .upload_id(&upload_id)
+        .copy_source(format!("{bucket}/source.bin"))
+        .copy_source_range(&range)
+        .copy_source_if_match("\"00000000000000000000000000000000\"")
+        .part_number(2)
+        .send()
+        .await;
+    let stale_refused = stale
+        .as_ref()
+        .err()
+        .is_some_and(|err| format!("{:?}", err).contains("PreconditionFailed"));
+    record(
+        test,
+        "UploadPartCopy refuses a stale copy-source-if-match",
+        stale_refused,
+        serde_json::json!({"result": format!("{:?}", stale.as_ref().err())}),
+    );
+
+    let _ = client
+        .abort_multipart_upload()
+        .bucket(&bucket)
+        .key("destination.bin")
+        .upload_id(&upload_id)
+        .send()
+        .await;
+    let _ = client
+        .delete_object()
+        .bucket(&bucket)
+        .key("source.bin")
+        .send()
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "needs the MinIO E2E runner (npm run test:e2e:minio)"]
 async fn e2e_create_only_contract_matches_frontend() {
     let test = "create_only_contract";
     let env = env();
@@ -506,8 +605,7 @@ async fn e2e_scratch_discard_tolerates_missing_destination_folder() {
     let missing = std::env::temp_dir()
         .join(format!("s3sk-e2e-unplugged-{}", std::process::id()))
         .join("download.bin");
-    let result =
-        crate::discard_download_scratch_for_destination(app.handle(), &missing.to_string_lossy());
+    let result = crate::discard_download_scratch_for_destination(app.handle(), &missing);
     record(
         test,
         "discarding scratch for a destination whose folder is gone succeeds (recovery is not blocked)",
@@ -531,7 +629,7 @@ async fn e2e_cancel_before_backend_registration_prevents_write() {
 
     // This ordering reproduces two IPC handlers being scheduled in the wrong
     // order: cancellation reaches Rust before the transfer command registers.
-    s3::cancel_transfer(transfer_id);
+    s3::cancel_transfer_in_registry(&session.connection_id, transfer_id);
     let result = s3::copy_object_to(
         app.state::<AppState>(),
         session.connection_id,

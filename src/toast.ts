@@ -34,11 +34,18 @@ const TYPE_ICON: Record<ToastType, string> = {
 };
 
 const MAX_VISIBLE = 4;
+/**
+ * A burst of identical errors must not keep resetting its own auto-dismiss
+ * timer forever. The badge still counts every repeat, but only the first few
+ * repeats refresh the countdown.
+ */
+const MAX_DEDUP_REFRESHES = 5;
 
 interface ActiveToast {
   el: HTMLElement;
   key: string;
   count: number;
+  refreshCount: number;
   countEl: HTMLElement;
   /** 0 = sticky (persistent): exempt from auto-eviction so errors survive. */
   duration: number;
@@ -139,8 +146,14 @@ export function dismissToast(el: HTMLElement): void {
   setTimeout(finish, 240);
 }
 
-export function clearToasts(): void {
+export interface ClearToastOptions {
+  /** Keep sticky (duration 0) toasts mounted; transient toasts still leave. */
+  preserveSticky?: boolean;
+}
+
+export function clearToasts(options: ClearToastOptions = {}): void {
   for (const toast of active.slice()) {
+    if (options.preserveSticky && toast.duration <= 0) continue;
     dismissToast(toast.el);
   }
 }
@@ -169,7 +182,11 @@ export function showToast(message: string, options: ToastOptions = {}): void {
   const duration = Number.isFinite(requestedDuration)
     ? Math.max(0, requestedDuration)
     : DEFAULT_DURATION[type];
-  const key = `${type}:${message}`;
+  const actions = actionList(options);
+  // Actions are part of the identity: "Retry" and "Show failed" on the same
+  // message are different user choices and must not be merged.
+  const actionSignature = JSON.stringify(actions.map((action) => action.label));
+  const key = `${type}:${message}:${actionSignature}`;
 
   // Collapse repeats of the same message instead of stacking duplicates.
   const existing = active.find((t) => t.key === key);
@@ -177,10 +194,13 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     existing.count += 1;
     existing.countEl.textContent = `\u00d7${existing.count}`;
     existing.countEl.hidden = false;
-    existing.duration = duration;
-    existing.remaining = duration;
     region.appendChild(existing.el);
-    armTimer(existing);
+    if (existing.refreshCount < MAX_DEDUP_REFRESHES) {
+      existing.refreshCount += 1;
+      existing.duration = duration;
+      existing.remaining = duration;
+      armTimer(existing);
+    }
     return;
   }
 
@@ -193,7 +213,6 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     el.setAttribute("role", "status");
   }
 
-  const actions = actionList(options);
   const actionButtons = actions
     .map(
       (action) =>
@@ -229,6 +248,7 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     el,
     key,
     count: 1,
+    refreshCount: 0,
     countEl,
     duration,
     remaining: duration,
@@ -259,10 +279,11 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     }
   };
 
+  // One pointer family only. Registering both mouseenter and pointerenter
+  // made a leave from one family resume the timer while the other still held
+  // the toast hovered.
   el.addEventListener("mouseenter", () => pause("hover"));
   el.addEventListener("mouseleave", () => resume("hover"));
-  el.addEventListener("pointerenter", () => pause("hover"));
-  el.addEventListener("pointerleave", () => resume("hover"));
   el.addEventListener("focusin", () => pause("focus"));
   el.addEventListener("focusout", (event) => {
     const related = event.relatedTarget;

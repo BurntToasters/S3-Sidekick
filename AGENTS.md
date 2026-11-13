@@ -1,7 +1,12 @@
 # Critical Information - Do not modify
-- NEVER write unit tests after you write code. 
-- Highly prefer E2E tests as the sole testing mechanism. Use them to verify complex features work. At the end of E2E tests, produce a verifiable and repeatable artifact. 
-- If you must test a system in isolation, FIRST write all the ways it could fail, THEN write the code. 
+
+- Prefer E2E tests as the primary proof for user-visible behavior. Produce a
+  verifiable, repeatable artifact under `test-results/` at the end.
+- Write the failure-mode inventory first. If a system must be tested in
+  isolation, list the ways it can fail before writing the code.
+- Unit tests are for pure logic, parsers, and failure paths the E2E layers
+  cannot reach. Author them before the implementation, not as a retrospective
+  substitute for E2E coverage.
 
 # Repository working agreement
 

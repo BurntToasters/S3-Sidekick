@@ -81,6 +81,33 @@ describe("info panel", () => {
     state.connectionId = "test-connection";
     state.connectionIdentity = "test-identity";
     state.statusTimeout = undefined;
+    state.objects = [
+      "acl-fail.txt",
+      "alpha.txt",
+      "beta.txt",
+      "broken-save.txt",
+      "broken/file.txt",
+      "close-me.txt",
+      "dirty.txt",
+      "docs/notes.txt",
+      "fast.txt",
+      "new-fast.txt",
+      "no-change.txt",
+      "optional.bin",
+      "perm-error.txt",
+      "perm-success.txt",
+      "single-acl.txt",
+      "single-success.txt",
+      "slow-fail.txt",
+      "slow-success.txt",
+      "status-safe.txt",
+    ].map((key) => ({
+      key,
+      size: 10,
+      last_modified: "2025-01-01T00:00:00Z",
+      is_folder: false,
+    }));
+    state.prefixes = ["docs/", "folder/", "one/", "two/"];
   });
 
   it("opens a single object and renders tabs/permissions/s3", async () => {
@@ -125,7 +152,7 @@ describe("info panel", () => {
     ).toBe("notes.txt");
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
-    ).toContain("Content Type");
+    ).toContain("Content type");
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
     ).toContain("https://example.com/notes.txt");
@@ -151,7 +178,7 @@ describe("info panel", () => {
     info.switchTab("s3");
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
-    ).toContain("Storage Class");
+    ).toContain("Storage class");
   });
 
   it("handles single-file load errors and single-file save failures", async () => {
@@ -482,6 +509,12 @@ describe("info panel", () => {
     expect(
       (document.getElementById("status") as HTMLDivElement).textContent,
     ).toContain("1 failed");
+    const batchStatus = document.getElementById("status") as HTMLDivElement;
+    expect(batchStatus.textContent).toContain("saved on 1 of 2 files");
+    expect(batchStatus.textContent).toContain("head failed");
+    const saveBtn = document.getElementById("info-save") as HTMLButtonElement;
+    expect(saveBtn.disabled).toBe(false);
+    expect(saveBtn.textContent).toBe("Save");
   });
 
   it("resets panel state on close", async () => {
@@ -710,7 +743,7 @@ describe("info panel", () => {
     ).toBe("fast.txt");
     expect(
       (document.getElementById("info-body") as HTMLDivElement).textContent,
-    ).toContain("Content Type");
+    ).toContain("Content type");
 
     const secondOpen = info.openInfoPanel([fileEntry("slow-fail.txt")]);
     await flushMicrotasks();

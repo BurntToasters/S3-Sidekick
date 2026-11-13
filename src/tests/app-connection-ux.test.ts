@@ -19,16 +19,23 @@ const logActivityMock = vi.fn();
 const setStatusMock = vi.fn();
 const clearFilterInputDebounceMock = vi.fn();
 const showConfirmMock = vi.fn<(...args: unknown[]) => Promise<boolean>>();
+const requestCloseInspectorMock = vi.fn<() => Promise<boolean>>(
+  async () => true,
+);
 const readLastBucketMock = vi.fn((): string | null => null);
 
-vi.mock("../connection.ts", () => ({
-  connect: connectMock,
-  disconnect: disconnectMock,
-  saveConnection: saveConnectionMock,
-  refreshBuckets: refreshBucketsMock,
-  currentConnectionGeneration: () => 1,
-  finishConnecting: vi.fn(),
-}));
+vi.mock("../connection.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../connection.ts")>();
+  return {
+    ...actual,
+    connect: connectMock,
+    disconnect: disconnectMock,
+    saveConnection: saveConnectionMock,
+    refreshBuckets: refreshBucketsMock,
+    currentConnectionGeneration: () => 1,
+    finishConnecting: vi.fn(),
+  };
+});
 
 vi.mock("../browser.ts", () => ({
   renderBucketList: renderBucketListMock,
@@ -45,6 +52,7 @@ vi.mock("../bookmarks.ts", () => ({
   addBookmark: addBookmarkMock,
   clearBookmarks: vi.fn(),
   getBookmarks: vi.fn(() => []),
+  getBookmarkLoadError: vi.fn(() => null),
   renderBookmarkBar: renderBookmarkBarMock,
   isEndpointBookmarked: isEndpointBookmarkedMock,
   renderBookmarkList: renderBookmarkListMock,
@@ -67,9 +75,15 @@ vi.mock("../dialogs.ts", () => ({
   showConfirm: showConfirmMock,
 }));
 
+vi.mock("../inspector.ts", () => ({
+  refreshInspectorEmptySummary: vi.fn(),
+  requestCloseInspector: requestCloseInspectorMock,
+  setInspectorOpen: vi.fn(),
+}));
+
 function renderFixture(): void {
   document.body.innerHTML = `
-    <span id="connection-status" class="connection-badge"></span>
+    <span id="connection-status"></span>
     <button id="connect-btn">Connect</button>
     <button id="disconnect-btn" style="display:none">Disconnect</button>
     <div id="main-layout" style="display:none"></div>
@@ -105,6 +119,7 @@ describe("connection UX polish", () => {
     setStatusMock.mockReset();
     clearFilterInputDebounceMock.mockReset();
     showConfirmMock.mockReset().mockResolvedValue(true);
+    requestCloseInspectorMock.mockReset().mockResolvedValue(true);
     readLastBucketMock.mockReset().mockReturnValue(null);
     renderFixture();
 
@@ -334,6 +349,93 @@ describe("connection UX polish", () => {
     expect(document.getElementById("connection-screen")!.style.display).toBe(
       "flex",
     );
+    state.connectionId = "";
+  });
+
+  it("cancelling during credential save tears down the unpublished session", async () => {
+    let resolveSave: (() => void) | null = null;
+    saveConnectionMock.mockImplementation(
+      () =>
+        new Promise<undefined>((resolve) => {
+          resolveSave = () => resolve(undefined);
+        }),
+    );
+    const app = await import("../app-connection.ts");
+    const { state } = await import("../state.ts");
+    connectMock.mockImplementation(async () => {
+      state.connected = true;
+      state.connectionId = "conn-live";
+      return "us-east-1";
+    });
+    (document.getElementById("conn-endpoint") as HTMLInputElement).value =
+      "https://alpha.example.com";
+    (document.getElementById("conn-access-key") as HTMLInputElement).value =
+      "AKIA";
+    (document.getElementById("conn-secret-key") as HTMLInputElement).value =
+      "secret";
+
+    const pending = app.handleConnect();
+    await vi.waitFor(() => expect(saveConnectionMock).toHaveBeenCalledTimes(1));
+    app.handleConnectButton();
+    resolveSave!();
+    await pending;
+
+    expect(disconnectMock).toHaveBeenCalledWith("conn-live");
+    expect(refreshBucketsMock).not.toHaveBeenCalled();
+    expect(document.getElementById("main-layout")!.style.display).toBe("none");
+    expect(state.connecting).toBe(false);
+    state.connected = false;
+    state.connectionId = "";
+  });
+
+  it("keeps the session when unsaved Properties edits are not discarded", async () => {
+    const app = await import("../app-connection.ts");
+    const { state } = await import("../state.ts");
+    state.connected = true;
+    state.connectionId = "conn-live";
+    requestCloseInspectorMock.mockResolvedValueOnce(false);
+
+    await expect(app.handleDisconnect()).resolves.toBe(false);
+
+    expect(disconnectMock).not.toHaveBeenCalled();
+    expect(state.connected).toBe(true);
+    state.connected = false;
+    state.connectionId = "";
+  });
+
+  it("does not start a real connect while a test connection is in flight", async () => {
+    let resolveTest!: (value: string) => void;
+    const { state } = await import("../state.ts");
+    connectMock.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveTest = (value) => {
+            state.connectionId = "conn-test";
+            resolve(value);
+          };
+        }),
+    );
+    const app = await import("../app-connection.ts");
+    (document.getElementById("conn-endpoint") as HTMLInputElement).value =
+      "https://alpha.example.com";
+    (document.getElementById("conn-access-key") as HTMLInputElement).value =
+      "AKIA";
+    (document.getElementById("conn-secret-key") as HTMLInputElement).value =
+      "secret";
+
+    const testing = app.handleTestConnection();
+    await vi.waitFor(() => expect(connectMock).toHaveBeenCalledTimes(1));
+    await app.handleConnect();
+
+    expect(connectMock).toHaveBeenCalledTimes(1);
+    expect(setStatusMock).toHaveBeenCalledWith(
+      expect.stringContaining("connection test"),
+      5000,
+    );
+
+    resolveTest("us-east-1");
+    await testing;
+    expect(disconnectMock).toHaveBeenCalledWith("conn-test");
     state.connectionId = "";
   });
 });

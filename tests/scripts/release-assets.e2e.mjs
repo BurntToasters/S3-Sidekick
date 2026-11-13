@@ -5,9 +5,10 @@
 // disposable local fixtures. No release is published.
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   requiredDraftAssetNames,
@@ -31,12 +32,16 @@ const pkg = JSON.parse(
 );
 const checks = [];
 let error = null;
+let liveBaseline = "";
+let liveServer = null;
 const environment = {
   ...process.env,
   GNUPGHOME: home,
   GPG_PASSPHRASE: "",
   GH_REPO_OWNER: "BurntToasters",
   GH_REPO_NAME: "S3-Sidekick",
+  S3_SIDEKICK_RELEASE_FIXTURE: "1",
+  S3_SIDEKICK_RELEASE_E2E: "1",
   PATH: `${bin}${path.delimiter}${process.env.PATH}`,
 };
 const digest = (bytes) =>
@@ -97,7 +102,12 @@ function makeKey(name, usage = "sign") {
     .find((line) => line.startsWith("fpr:"))
     .split(":")[9];
 }
-function cliCase(name, mutate = () => {}, expectedError = undefined, env = {}) {
+async function cliCase(
+  name,
+  mutate = () => {},
+  expectedError = undefined,
+  env = {},
+) {
   const assets = path.join(scratch, name);
   fs.cpSync(baseline, assets, { recursive: true });
   mutate(assets);
@@ -107,14 +117,12 @@ function cliCase(name, mutate = () => {}, expectedError = undefined, env = {}) {
         .readdirSync(os.tmpdir())
         .filter((name) => name.startsWith("s3-sidekick-integrity-")),
     );
-    const result = spawnSync(
+    const result = await runChild(
       process.execPath,
       [path.join(fixture, "scripts", `verify-release-${mode}.js`)],
       {
-        encoding: "utf8",
         cwd: fixture,
-        timeout: 60_000,
-        killSignal: "SIGKILL",
+        timeoutMs: 120_000,
         env: {
           ...environment,
           FIXTURE_ASSETS: assets,
@@ -136,6 +144,7 @@ function cliCase(name, mutate = () => {}, expectedError = undefined, env = {}) {
       `${mode}: ${name}`,
       temporaryDownloadsRemoved &&
         !result.error &&
+        !result.timedOut &&
         (expectedError
           ? result.status !== 0 && expectedError.test(output)
           : result.status === 0),
@@ -147,6 +156,129 @@ function cliCase(name, mutate = () => {}, expectedError = undefined, env = {}) {
       },
     );
   }
+}
+
+function startFileServer(directory) {
+  const server = http.createServer((request, response) => {
+    const requested = decodeURIComponent(
+      new URL(request.url, "http://127.0.0.1").pathname.slice(1),
+    );
+    if (
+      !requested ||
+      requested !== path.posix.basename(requested) ||
+      requested !== path.win32.basename(requested)
+    ) {
+      response.writeHead(400);
+      response.end("unsafe path");
+      return;
+    }
+    const file = path.join(directory, requested);
+    if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+      response.writeHead(404);
+      response.end("missing");
+      return;
+    }
+    response.writeHead(200, {
+      "content-type": "application/octet-stream",
+      "content-length": fs.statSync(file).size,
+    });
+    response.end(fs.readFileSync(file));
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve({
+        url: `http://127.0.0.1:${address.port}`,
+        close: () =>
+          new Promise((done) => {
+            server.close(done);
+            server.closeAllConnections?.();
+          }),
+      });
+    });
+  });
+}
+
+const betaTargets = [
+  "windows-beta-x86_64",
+  "windows-beta-aarch64",
+  "darwin-beta-x86_64",
+  "darwin-beta-aarch64",
+  "linux-beta-x86_64",
+];
+
+function runChild(command, args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, options.timeoutMs ?? 120_000);
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ status: null, stdout, stderr, error, timedOut });
+    });
+    child.on("close", (status, signal) => {
+      clearTimeout(timer);
+      resolve({ status, signal, stdout, stderr, error: null, timedOut });
+    });
+  });
+}
+
+async function liveCase(name, mutate = () => {}, expectedError = undefined) {
+  const directory = path.join(scratch, `live-${name}`);
+  fs.cpSync(liveBaseline, directory, { recursive: true });
+  mutate(directory);
+  const server = await startFileServer(directory);
+  let result;
+  try {
+    result = await runChild(
+      process.execPath,
+      [
+        path.join(fixture, "scripts", "validate-updater-live.js"),
+        "--expected-version=current",
+      ],
+      {
+        cwd: fixture,
+        timeoutMs: 120_000,
+        env: {
+          ...environment,
+          UPDATER_LIVE_BASE_URL: server.url,
+          UPDATER_LIVE_ARTIFACT_BASE_URL: server.url,
+          EXPECTED_UPDATER_VERSION: "current",
+          REQUIRED_UPDATER_TARGETS: betaTargets.join(","),
+        },
+      },
+    );
+  } finally {
+    await server.close();
+  }
+  const output = `${result.stdout || ""}${result.stderr || ""}`;
+  fs.writeFileSync(path.join(out, `${name}-live.log`), output);
+  record(
+    `live: ${name}`,
+    (expectedError
+      ? result.status !== 0 && expectedError.test(output)
+      : result.status === 0) &&
+      !result.error &&
+      !result.timedOut,
+    {
+      exitCode: result.status,
+      error: result.error?.message || null,
+      timedOut: result.timedOut,
+      diagnostic: output.trim().slice(-900),
+    },
+  );
 }
 
 try {
@@ -163,12 +295,6 @@ try {
   });
   fs.mkdirSync(path.join(fixture, "src-tauri"), { recursive: true });
   fs.writeFileSync(path.join(fixture, "package.json"), JSON.stringify(pkg));
-  // Only the final public /releases/latest network gate is stubbed in the copied
-  // checkout. All preceding asset, updater and GPG verification remains real.
-  fs.writeFileSync(
-    path.join(fixture, "scripts", "validate-updater-live.js"),
-    'console.log("fixture live-feed boundary");\n',
-  );
   const head = "a".repeat(40);
   fs.writeFileSync(
     path.join(bin, "git"),
@@ -190,6 +316,7 @@ try {
   ]);
   const foreign = makeKey("foreign");
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  const wrongKeyPair = crypto.generateKeyPairSync("ed25519");
   const keyId = Buffer.alloc(8, 7);
   const rawPublic = publicKey
     .export({ type: "spki", format: "der" })
@@ -231,12 +358,14 @@ try {
     );
   }
   for (const name of requiredDraftManifestNames()) {
-    const target = name.slice(7, -5).replace("-beta-", "-");
-    const artifact = updaterByTarget[target];
+    const target = name.slice(7, -5);
+    const artifactTarget = target.replace("-beta-", "-");
+    const artifact = updaterByTarget[artifactTarget];
     fs.writeFileSync(
       path.join(baseline, name),
       JSON.stringify({
         version: pkg.version,
+        pub_date: new Date().toISOString(),
         platforms: {
           [target]: {
             url: `https://github.com/BurntToasters/S3-Sidekick/releases/download/v${pkg.version}/${artifact}`,
@@ -268,6 +397,11 @@ try {
     .readdirSync(baseline)
     .filter((name) => !name.endsWith(".sig")))
     sign(path.join(baseline, name));
+  liveBaseline = path.join(scratch, "live-baseline");
+  fs.cpSync(baseline, liveBaseline, { recursive: true });
+  liveServer = await startFileServer(liveBaseline);
+  environment.UPDATER_LIVE_BASE_URL = liveServer.url;
+  environment.UPDATER_LIVE_ARTIFACT_BASE_URL = liveServer.url;
   const names = requiredDraftAssetNames();
   const ghSource = `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path';
@@ -280,8 +414,8 @@ else if (endpoint.includes('/assets?')) { const assets = names.map((name,i) => (
 else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON.stringify(`v${pkg.version}`)},draft:process.env.FIXTURE_PUBLISHED !== '1',prerelease:${JSON.stringify(/-beta\.\d+$/.test(pkg.version))},target_commitish:${JSON.stringify(head)}}; console.log(JSON.stringify(endpoint.includes('/tags/') ? release : [release])); }
 `;
   fs.writeFileSync(path.join(bin, "gh"), ghSource, { mode: 0o755 });
-  cliCase("valid-approved-signing-subkey");
-  cliCase(
+  await cliCase("valid-approved-signing-subkey");
+  await cliCase(
     "altered-non-updater-installer",
     (assets) =>
       fs.appendFileSync(
@@ -290,7 +424,7 @@ else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON
       ),
     /GPG|signature|checksum/i,
   );
-  cliCase(
+  await cliCase(
     "invalid-installer-signature",
     (assets) =>
       fs.writeFileSync(
@@ -299,15 +433,15 @@ else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON
       ),
     /GPG|signature/i,
   );
-  cliCase(
+  await cliCase(
     "foreign-key-signature",
     (assets) =>
       sign(path.join(assets, "S3-Sidekick-Linux-x64.flatpak"), foreign),
     /approved|fingerprint|signing key/i,
   );
   const checksum = "SHA256SUMS-windows-x86_64.txt";
-  const signedChecksumCase = (name, transform, expected) =>
-    cliCase(
+  const signedChecksumCase = async (name, transform, expected) =>
+    await cliCase(
       name,
       (assets) => {
         const file = path.join(assets, checksum);
@@ -316,33 +450,33 @@ else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON
       },
       expected,
     );
-  signedChecksumCase(
+  await signedChecksumCase(
     "signed-wrong-digest",
     (text) => text.replace(/^[a-f0-9]{64}/, "0".repeat(64)),
     /checksum|digest/i,
   );
-  signedChecksumCase("empty-checksums", () => "", /empty|checksum/i);
-  signedChecksumCase(
+  await signedChecksumCase("empty-checksums", () => "", /empty|checksum/i);
+  await signedChecksumCase(
     "malformed-checksums",
     () => "invalid checksum\n",
     /malformed|checksum/i,
   );
-  signedChecksumCase(
+  await signedChecksumCase(
     "duplicate-checksum-entry",
     (text) => text + text.split("\n")[0] + "\n",
     /duplicate|checksum/i,
   );
-  signedChecksumCase(
+  await signedChecksumCase(
     "unsafe-checksum-name",
     (text) => text.replace(/ {2}[^\n]+/, "  ../outside"),
     /unsafe|checksum/i,
   );
-  signedChecksumCase(
+  await signedChecksumCase(
     "unknown-checksum-name",
     (text) => text.replace(/ {2}[^\n]+/, "  unknown.bin"),
     /unknown|checksum/i,
   );
-  cliCase(
+  await cliCase(
     "missing-installer-coverage",
     (assets) => {
       for (const name of names.filter((name) =>
@@ -362,7 +496,7 @@ else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON
     },
     /checksum|coverage|covered/i,
   );
-  cliCase(
+  await cliCase(
     "missing-updater-signature-coverage",
     (assets) => {
       for (const name of names.filter((name) =>
@@ -384,10 +518,10 @@ else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON
     },
     /checksum|coverage|covered/i,
   );
-  cliCase("duplicate-assets", () => {}, /duplicate/i, {
+  await cliCase("duplicate-assets", () => {}, /duplicate/i, {
     FIXTURE_DUPLICATE: "1",
   });
-  cliCase(
+  await cliCase(
     "empty-installer",
     (assets) => {
       const file = path.join(assets, "S3-Sidekick-macOS.zip");
@@ -395,6 +529,24 @@ else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON
       sign(file);
     },
     /empty|checksum/i,
+  );
+  await cliCase(
+    "invalid-manifest-signature",
+    (assets) =>
+      fs.writeFileSync(
+        path.join(assets, "latest-windows-x86_64.json.asc"),
+        "not a signature",
+      ),
+    /GPG|signature/i,
+  );
+  await cliCase(
+    "altered-manifest-checksum",
+    (assets) => {
+      const file = path.join(assets, "latest-windows-x86_64.json");
+      fs.appendFileSync(file, "\n");
+      sign(file);
+    },
+    /checksum|digest/i,
   );
   const past = Math.floor(Date.now() / 1000) - 14 * 86400;
   run("gpg", [
@@ -420,7 +572,7 @@ else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON
     .split(/\r?\n/)
     .find((line) => line.startsWith("fpr:"))
     .split(":")[9];
-  cliCase(
+  await cliCase(
     "expired-approved-key",
     (assets) => {
       const file = path.join(assets, "S3-Sidekick-macOS.zip");
@@ -457,14 +609,54 @@ else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON
   const revocationPath = path.join(scratch, "revocation.asc");
   fs.writeFileSync(revocationPath, revocation);
   run("gpg", ["--batch", "--import", revocationPath]);
-  cliCase("revoked-approved-key", () => {}, /revoked|GPG|signing key/i);
-  cliCase("missing-approved-key", () => {}, /GPG_KEY_ID|approved/i, {
+  await cliCase("revoked-approved-key", () => {}, /revoked|GPG|signing key/i);
+  await cliCase("missing-approved-key", () => {}, /GPG_KEY_ID|approved/i, {
     GPG_KEY_ID: "",
   });
+
+  await liveCase("valid-minisign");
+  await liveCase(
+    "rejects-wrong-minisign-key",
+    (directory) => {
+      const manifestPath = path.join(
+        directory,
+        "latest-windows-beta-x86_64.json",
+      );
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      const artifactPath = path.join(directory, "S3-Sidekick-Windows-x64.exe");
+      const hash = crypto
+        .createHash("blake2b512")
+        .update(fs.readFileSync(artifactPath))
+        .digest();
+      const signature = crypto.sign(null, hash, wrongKeyPair.privateKey);
+      const comment = "timestamp:1 file:S3-Sidekick-Windows-x64.exe";
+      const global = crypto.sign(
+        null,
+        Buffer.concat([signature, Buffer.from(comment)]),
+        wrongKeyPair.privateKey,
+      );
+      const envelope = `untrusted comment: wrong key\n${Buffer.concat([Buffer.from("ED"), keyId, signature]).toString("base64")}\ntrusted comment: ${comment}\n${global.toString("base64")}\n`;
+      for (const entry of Object.values(manifest.platforms)) {
+        entry.signature = Buffer.from(envelope).toString("base64");
+      }
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    },
+    /signature|key mismatch|verification failed/i,
+  );
+  await liveCase(
+    "rejects-tampered-artifact",
+    (directory) =>
+      fs.appendFileSync(
+        path.join(directory, "S3-Sidekick-Windows-x64.exe"),
+        "tampered",
+      ),
+    /signature|verification failed/i,
+  );
 } catch (err) {
   error = err instanceof Error ? err.message : String(err);
   record("fixture completes", false, error);
 } finally {
+  if (liveServer) await liveServer.close();
   spawnSync("gpgconf", ["--homedir", home, "--kill", "gpg-agent"], {
     encoding: "utf8",
     timeout: 5000,
@@ -472,10 +664,25 @@ else { const release = {id:1,name:${JSON.stringify(pkg.version)},tag_name:${JSON
   fs.rmSync(scratch, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true });
   const passed =
-    !error && checks.length === 34 && checks.every((check) => check.passed);
+    !error && checks.length === 41 && checks.every((check) => check.passed);
   fs.writeFileSync(
     path.join(out, "report.json"),
-    `${JSON.stringify({ suite: "release-assets-integrity", passed, fixture: "copied production CLIs; real GPG signing-subkey and Minisign verification; fake GitHub transport; final live-feed gate stubbed", checkCount: checks.length, expectedCheckCount: 34, error, checks }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        suite: "release-assets-integrity",
+        passed,
+        exitStatus: passed ? "passed" : "failed",
+        completedAt: Date.now(),
+        fixture:
+          "copied production CLIs; real GPG signing-subkey and Minisign verification; fake GitHub transport; local HTTP live-feed fixture",
+        checkCount: checks.length,
+        expectedCheckCount: 41,
+        error,
+        checks,
+      },
+      null,
+      2,
+    )}\n`,
   );
   process.exitCode = passed ? 0 : 1;
 }

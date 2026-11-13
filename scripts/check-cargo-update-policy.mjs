@@ -3,68 +3,71 @@
 /* Temporary regression scanner. Remove together with cargo-safe-update.mjs
  * when stable Cargo minimum-publish-age replaces the wrapper. */
 
-import console from 'node:console';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import path from 'node:path';
-import process from 'node:process';
-import { fileURLToPath } from 'node:url';
-import { isDirectExecution } from './direct-execution.js';
+import console from "node:console";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+import { isDirectExecution } from "./direct-execution.js";
 
 export const CARGO_UPDATE_POLICY_SCANNER_VERSION = 5;
 export const CARGO_UPDATE_SCANNER_VERSION = 5;
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const repoRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
 
 export const EXECUTABLE_EXTENSIONS = new Set([
-  '.js',
-  '.mjs',
-  '.cjs',
-  '.ts',
-  '.mts',
-  '.cts',
-  '.sh',
-  '.bash',
-  '.zsh',
-  '.ps1',
-  '.psm1',
-  '.cmd',
-  '.bat',
-  '.yml',
-  '.yaml',
-  '.py',
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".ts",
+  ".mts",
+  ".cts",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".ps1",
+  ".psm1",
+  ".cmd",
+  ".bat",
+  ".yml",
+  ".yaml",
+  ".py",
 ]);
 
 export const EXACT_AUTOMATION_FILES = new Set([
-  'Makefile',
-  'makefile',
-  'GNUmakefile',
-  'justfile',
-  'Justfile',
-  'Taskfile',
-  'Taskfile.yml',
-  'Taskfile.yaml',
+  "Makefile",
+  "makefile",
+  "GNUmakefile",
+  "justfile",
+  "Justfile",
+  "Taskfile",
+  "Taskfile.yml",
+  "Taskfile.yaml",
 ]);
 
 export const IGNORED_DIRECTORIES = new Set([
-  '.git',
-  'node_modules',
-  'target',
-  'dist',
-  'release',
-  'coverage',
-  'vendor',
-  '.vite',
-  '.next',
-  'build',
-  'out',
+  ".git",
+  "node_modules",
+  "target",
+  "dist",
+  "release",
+  "coverage",
+  "vendor",
+  ".vite",
+  ".next",
+  "build",
+  "out",
 ]);
 
 export const EXCLUDED_FILES = new Set([
-  'scripts/cargo-safe-update.mjs',
-  'scripts/npm-safe-update.mjs',
-  'scripts/cargo-safe-update.test.mjs',
-  'scripts/check-cargo-update-policy.mjs',
-  'scripts/check-cargo-update-policy.test.mjs',
+  "scripts/cargo-safe-update.mjs",
+  "scripts/npm-safe-update.mjs",
+  "scripts/cargo-safe-update.test.mjs",
+  "scripts/check-cargo-update-policy.mjs",
+  "scripts/check-cargo-update-policy.test.mjs",
 ]);
 
 // P0: raw shell-level Cargo mutation command
@@ -86,9 +89,8 @@ const LOCKFILE_TRUNCATE_OVERWRITE_REGEX =
 // Also catches execSync("cargo update") style calls.
 // Uses conservative regex — false positives in docs are reviewable.
 const PROGRAMMATIC_CARGO_MUTATION_REGEX =
-  /\b(?:spawn(?:Sync)?|execFile(?:Sync)?|execa(?:Sync)?)\s*\(\s*['"]cargo['"]\s*,\s*\[\s*(?:['"]\+[A-Za-z0-9._-]+['"]\s*,\s*)?['"](?:update|upgrade|add|generate-lockfile)['"]/
-  // Also catch execSync("cargo update") / exec("cargo update") forms
-  ;
+  /\b(?:spawn(?:Sync)?|execFile(?:Sync)?|execa(?:Sync)?)\s*\(\s*['"]cargo['"]\s*,\s*\[\s*(?:['"]\+[A-Za-z0-9._-]+['"]\s*,\s*)?['"](?:update|upgrade|add|generate-lockfile)['"]/;
+// Also catch execSync("cargo update") / exec("cargo update") forms
 const EXEC_SYNC_CARGO_MUTATION_REGEX =
   /\b(?:execSync|exec)\s*\(\s*['"]cargo(?:\s+\+[A-Za-z0-9._-]+)?\s+(?:update|upgrade|add|generate-lockfile)\b/;
 const PYTHON_CARGO_MUTATION_REGEX =
@@ -97,7 +99,7 @@ const PROGRAMMATIC_NPM_MUTATION_REGEX =
   /\b(?:spawn(?:Sync)?|execFile(?:Sync)?|execa(?:Sync)?)\s*\(\s*['"]npm(?:\.cmd)?['"]\s*,\s*\[\s*['"](?:update|upgrade)['"]/;
 
 export function normalizeRelPath(relPath) {
-  return relPath.split(path.sep).join('/');
+  return relPath.split(path.sep).join("/");
 }
 
 export function commandSegments(command) {
@@ -105,7 +107,7 @@ export function commandSegments(command) {
 }
 
 export function collapseLineContinuations(text) {
-  return text.replace(/\\\r?\n[\t ]*/gu, ' ');
+  return text.replace(/\\\r?\n[\t ]*/gu, " ");
 }
 
 export function stripCommentLines(text) {
@@ -114,19 +116,19 @@ export function stripCommentLines(text) {
     .map((line) => {
       const trimmed = line.trim();
       if (
-        trimmed.startsWith('//') ||
-        trimmed.startsWith('#') ||
-        trimmed.startsWith('*') ||
-        trimmed.startsWith('/*') ||
-        trimmed.startsWith('REM ') ||
-        trimmed.startsWith('rem ') ||
-        trimmed.startsWith('::')
+        trimmed.startsWith("//") ||
+        trimmed.startsWith("#") ||
+        trimmed.startsWith("*") ||
+        trimmed.startsWith("/*") ||
+        trimmed.startsWith("REM ") ||
+        trimmed.startsWith("rem ") ||
+        trimmed.startsWith("::")
       ) {
-        return '';
+        return "";
       }
       return line;
     })
-    .join('\n');
+    .join("\n");
 }
 
 // P0: No line-wide segmentIsGuarded short-circuit.
@@ -135,28 +137,28 @@ export function classifyLine(line) {
   for (const segment of commandSegments(line)) {
     if (RAW_NPM_MUTATION_REGEX.test(segment)) {
       return {
-        kind: 'raw npm dependency mutation',
+        kind: "raw npm dependency mutation",
         text: segment.trim(),
       };
     }
 
     if (RAW_CARGO_MUTATION_REGEX.test(segment)) {
       return {
-        kind: 'raw Cargo mutation',
+        kind: "raw Cargo mutation",
         text: segment.trim(),
       };
     }
 
     if (LOCKFILE_DELETE_REGEX.test(segment)) {
       return {
-        kind: 'Cargo.lock deletion',
+        kind: "Cargo.lock deletion",
         text: segment.trim(),
       };
     }
 
     if (LOCKFILE_TRUNCATE_OVERWRITE_REGEX.test(segment)) {
       return {
-        kind: 'Cargo.lock overwrite/truncate',
+        kind: "Cargo.lock overwrite/truncate",
         text: segment.trim(),
       };
     }
@@ -171,8 +173,8 @@ export function classifyLine(line) {
     ) {
       return {
         kind: PROGRAMMATIC_NPM_MUTATION_REGEX.test(segment)
-          ? 'programmatic npm dependency mutation'
-          : 'programmatic Cargo mutation',
+          ? "programmatic npm dependency mutation"
+          : "programmatic Cargo mutation",
         text: segment.trim(),
       };
     }
@@ -198,7 +200,10 @@ export function walkExecutableFiles(root, currentDir = root, results = []) {
       walkExecutableFiles(root, fullPath, results);
     } else if (entry.isFile()) {
       const ext = path.extname(entry.name).toLowerCase();
-      if (EXECUTABLE_EXTENSIONS.has(ext) || EXACT_AUTOMATION_FILES.has(entry.name)) {
+      if (
+        EXECUTABLE_EXTENSIONS.has(ext) ||
+        EXACT_AUTOMATION_FILES.has(entry.name)
+      ) {
         results.push({ relPath, fullPath, ext, name: entry.name });
       }
     }
@@ -213,7 +218,7 @@ export function scanFile(relPath, fullPath, violations) {
 
   let content;
   try {
-    content = readFileSync(fullPath, 'utf8');
+    content = readFileSync(fullPath, "utf8");
   } catch {
     return;
   }
@@ -224,7 +229,7 @@ export function scanFile(relPath, fullPath, violations) {
   const dynamicCargoVariables = new Set();
   const dynamicNpmVariables = new Set();
   for (const match of stripped.matchAll(
-    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)/gu
+    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)/gu,
   )) {
     const expression = match[2];
     if (
@@ -258,14 +263,14 @@ export function scanFile(relPath, fullPath, violations) {
 
     for (const variable of dynamicCargoVariables) {
       const dynamicExecution = new RegExp(
-        `\\b(?:execSync|exec)\\s*\\(\\s*${variable.replace(/[$]/gu, '\\$&')}\\s*[),]`,
-        'u'
+        `\\b(?:execSync|exec)\\s*\\(\\s*${variable.replace(/[$]/gu, "\\$&")}\\s*[),]`,
+        "u",
       );
       if (dynamicExecution.test(line)) {
         violations.push({
           file: normalizedRel,
           line: i + 1,
-          kind: 'dynamic Cargo mutation',
+          kind: "dynamic Cargo mutation",
           text: line.trim(),
         });
         break;
@@ -274,14 +279,14 @@ export function scanFile(relPath, fullPath, violations) {
 
     for (const variable of dynamicNpmVariables) {
       const dynamicExecution = new RegExp(
-        `\\b(?:execSync|exec)\\s*\\(\\s*${variable.replace(/[$]/gu, '\\$&')}\\s*[),]`,
-        'u'
+        `\\b(?:execSync|exec)\\s*\\(\\s*${variable.replace(/[$]/gu, "\\$&")}\\s*[),]`,
+        "u",
       );
       if (dynamicExecution.test(line)) {
         violations.push({
           file: normalizedRel,
           line: i + 1,
-          kind: 'dynamic npm dependency mutation',
+          kind: "dynamic npm dependency mutation",
           text: line.trim(),
         });
         break;
@@ -291,21 +296,21 @@ export function scanFile(relPath, fullPath, violations) {
 }
 
 export function scanPackageJson(root, violations) {
-  const manifestPath = path.join(root, 'package.json');
+  const manifestPath = path.join(root, "package.json");
   let scripts;
   try {
-    scripts = JSON.parse(readFileSync(manifestPath, 'utf8')).scripts ?? {};
+    scripts = JSON.parse(readFileSync(manifestPath, "utf8")).scripts ?? {};
   } catch {
     return;
   }
 
   for (const [name, command] of Object.entries(scripts)) {
-    if (typeof command !== 'string') continue;
+    if (typeof command !== "string") continue;
     for (const segment of commandSegments(collapseLineContinuations(command))) {
       const finding = classifyLine(segment);
       if (finding) {
         violations.push({
-          file: 'package.json',
+          file: "package.json",
           script: name,
           kind: finding.kind,
           text: finding.text,
@@ -320,8 +325,8 @@ export function scanPackageJson(root, violations) {
 // Disallow aliases whose expansion begins with or invokes update/upgrade/add/generate-lockfile.
 export function scanCargoConfig(root, violations) {
   const configPaths = [
-    path.join(root, '.cargo', 'config.toml'),
-    path.join(root, '.cargo', 'config'),
+    path.join(root, ".cargo", "config.toml"),
+    path.join(root, ".cargo", "config"),
   ];
 
   const MUTATION_ALIAS_REGEX = /^\s*(?:update|upgrade|add|generate-lockfile)\b/;
@@ -329,7 +334,7 @@ export function scanCargoConfig(root, violations) {
   for (const configPath of configPaths) {
     let content;
     try {
-      content = readFileSync(configPath, 'utf8');
+      content = readFileSync(configPath, "utf8");
     } catch {
       continue;
     }
@@ -339,30 +344,33 @@ export function scanCargoConfig(root, violations) {
     for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i];
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
+      if (!trimmed || trimmed.startsWith("#")) continue;
 
       // Detect section headers
-      if (trimmed.startsWith('[')) {
-        inAliasSection = trimmed === '[alias]';
+      if (trimmed.startsWith("[")) {
+        inAliasSection = trimmed === "[alias]";
         continue;
       }
 
       if (!inAliasSection) continue;
 
       // Key = "value" or Key = ["value", ...]
-      const eqIdx = trimmed.indexOf('=');
+      const eqIdx = trimmed.indexOf("=");
       if (eqIdx < 0) continue;
       const aliasValue = trimmed.slice(eqIdx + 1).trim();
 
       // Extract the first word from the alias expansion (strip quotes, brackets)
-      const stripped = aliasValue.replace(/^\[?\s*['"]?/, '').replace(/['"\]].*/u, '').trim();
+      const stripped = aliasValue
+        .replace(/^\[?\s*['"]?/, "")
+        .replace(/['"\]].*/u, "")
+        .trim();
 
       if (MUTATION_ALIAS_REGEX.test(stripped)) {
         const relConfig = normalizeRelPath(path.relative(root, configPath));
         violations.push({
           file: relConfig,
           line: i + 1,
-          kind: 'Cargo alias dependency mutation',
+          kind: "Cargo alias dependency mutation",
           text: line.trim(),
         });
       }
@@ -370,7 +378,11 @@ export function scanCargoConfig(root, violations) {
   }
 }
 
-export function runPolicyCheck({ root = repoRoot, log = console.log, error = console.error } = {}) {
+export function runPolicyCheck({
+  root = repoRoot,
+  log = console.log,
+  error = console.error,
+} = {}) {
   const violations = [];
   scanPackageJson(root, violations);
 
@@ -391,15 +403,15 @@ export function runPolicyCheck({ root = repoRoot, log = console.log, error = con
 
   // Scan automation directories recursively
   const candidateDirs = [
-    'scripts',
-    'tools',
-    'bin',
-    'dev',
-    'ops',
-    'ci',
-    'automation',
-    'build-scripts',
-    path.join('.github', 'workflows'),
+    "scripts",
+    "tools",
+    "bin",
+    "dev",
+    "ops",
+    "ci",
+    "automation",
+    "build-scripts",
+    path.join(".github", "workflows"),
   ];
 
   for (const dir of candidateDirs) {
@@ -418,12 +430,20 @@ export function runPolicyCheck({ root = repoRoot, log = console.log, error = con
 
   // P2: Scan root-level shell, PowerShell, cmd, AND JS/TS automation files
   const ROOT_SCRIPT_EXTENSIONS = new Set([
-    '.sh', '.bash', '.zsh',
-    '.ps1', '.psm1',
-    '.cmd', '.bat',
-    '.js', '.mjs', '.cjs',
-    '.ts', '.mts', '.cts',
-    '.py',
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".psm1",
+    ".cmd",
+    ".bat",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".mts",
+    ".cts",
+    ".py",
   ]);
   try {
     const rootEntries = readdirSync(root, { withFileTypes: true });
@@ -440,21 +460,25 @@ export function runPolicyCheck({ root = repoRoot, log = console.log, error = con
   }
 
   if (violations.length > 0) {
-    error('cargo-update-policy: unguarded dependency mutation found:\n');
+    error("cargo-update-policy: unguarded dependency mutation found:\n");
     for (const v of violations) {
       if (v.script) {
-        error(`  file: ${v.file} (script "${v.script}")\n  kind: ${v.kind}\n  text: ${v.text}\n`);
+        error(
+          `  file: ${v.file} (script "${v.script}")\n  kind: ${v.kind}\n  text: ${v.text}\n`,
+        );
       } else {
-        error(`  file: ${v.file}:${v.line}\n  kind: ${v.kind}\n  text: ${v.text}\n`);
+        error(
+          `  file: ${v.file}:${v.line}\n  kind: ${v.kind}\n  text: ${v.text}\n`,
+        );
       }
     }
     error(
-      'Dependency-changing workflows must route through scripts/npm-safe-update.mjs and scripts/cargo-safe-update.mjs.'
+      "Dependency-changing workflows must route through scripts/npm-safe-update.mjs and scripts/cargo-safe-update.mjs.",
     );
     return false;
   }
 
-  log('cargo-update-policy: no unguarded dependency mutation found.');
+  log("cargo-update-policy: no unguarded dependency mutation found.");
   return true;
 }
 

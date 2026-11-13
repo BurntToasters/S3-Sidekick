@@ -240,8 +240,10 @@ test.describe("transfer engine UX", () => {
       )
       .toBe(1);
     const calls = await readMockCallLog(page);
-    // One scratch discard per recovered row (resumable + failed).
-    expect(countOf(calls, "discard_download_scratch")).toBe(2);
+    // Path grants end with the process. A recovered row has no live
+    // destination grant, so the renderer must not ask the backend to delete a
+    // scratch path; the lease-backed GC reclaims it instead.
+    expect(countOf(calls, "discard_download_scratch")).toBe(0);
     expect(countOf(calls, "download_object")).toBe(0);
     await saveSuiteArtifact(
       page,
@@ -283,8 +285,9 @@ test.describe("transfer engine UX", () => {
       /failed/,
     );
 
+    await page.clock.install();
     await openTransferMenu(page, "Retry failed");
-    await page.waitForTimeout(300);
+    await page.clock.fastForward(300);
     const calls = await readMockCallLog(page);
     expect(countOf(calls, "copy_object_to")).toBe(1);
     await saveSuiteArtifact(

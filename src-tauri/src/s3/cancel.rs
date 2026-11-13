@@ -53,16 +53,28 @@ impl CancelFlag {
 pub(crate) type CancelToken = Arc<CancelFlag>;
 
 pub(super) struct ActiveTransfer {
+    pub(super) connection_id: Option<String>,
     pub(super) transfer_id: Option<u32>,
     pub(super) token: CancelToken,
 }
 
 #[derive(Default)]
 pub(super) struct TransferRegistryState {
-    pub(super) disabled: bool,
+    /// Owner of the closed gate. Only the close that installed this token may
+    /// reopen it, so a concurrent disconnect/lock/reset cannot reopen a gate
+    /// another operation is still draining.
+    pub(super) gate_owner: Option<u64>,
+    pub(super) next_gate_owner: u64,
     pub(super) next_registration_id: u64,
     pub(super) registrations: HashMap<u64, ActiveTransfer>,
-    pub(super) pending_cancels: HashMap<u32, Instant>,
+    /// Keyed by (connection id, transfer id): a reloaded webview reuses IDs, so
+    /// a pending cancel must never reach the same ID in a newer session.
+    pub(super) pending_cancels: HashMap<(String, u32), Instant>,
+    /// Sessions being replaced by a successful connect, with the number of
+    /// armed fences. New registrations for these IDs fail so the old client
+    /// cannot escape the drain. Refcounting keeps a failed newer connect from
+    /// unfencing a session another attempt is still retiring.
+    pub(super) retiring_connections: HashMap<String, usize>,
 }
 
 pub(super) static TRANSFER_REGISTRY: OnceLock<Mutex<TransferRegistryState>> = OnceLock::new();
@@ -92,21 +104,32 @@ pub(super) struct TransferGuard {
 impl TransferGuard {
     #[cfg(test)]
     pub(super) fn register(transfer_id: u32) -> Result<Self, String> {
-        Self::register_optional(Some(transfer_id))
+        Self::register_optional(Some("test-connection"), Some(transfer_id))
     }
 
-    pub(super) fn register_optional(transfer_id: Option<u32>) -> Result<Self, String> {
+    pub(super) fn register_optional(
+        connection_id: Option<&str>,
+        transfer_id: Option<u32>,
+    ) -> Result<Self, String> {
         let token: CancelToken = Arc::new(CancelFlag::default());
         let mut registry = lock_transfer_registry()?;
-        if registry.disabled {
+        if registry.gate_owner.is_some() {
             return Err(cancelled_error());
+        }
+        if connection_id.is_some_and(|id| registry.retiring_connections.contains_key(id)) {
+            return Err("Connection changed".to_string());
         }
         let now = Instant::now();
         registry
             .pending_cancels
             .retain(|_, created| now.duration_since(*created) <= PENDING_CANCEL_TTL);
-        let cancelled_before_registration = transfer_id
-            .and_then(|id| registry.pending_cancels.remove(&id))
+        let cancelled_before_registration = connection_id
+            .zip(transfer_id)
+            .and_then(|(connection_id, transfer_id)| {
+                registry
+                    .pending_cancels
+                    .remove(&(connection_id.to_string(), transfer_id))
+            })
             .is_some();
         if cancelled_before_registration {
             token.cancel();
@@ -126,6 +149,7 @@ impl TransferGuard {
         registry.registrations.insert(
             registration_id,
             ActiveTransfer {
+                connection_id: connection_id.map(str::to_string),
                 transfer_id,
                 token: Arc::clone(&token),
             },
@@ -151,7 +175,7 @@ impl TransferGuard {
         action: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         let registry = lock_transfer_registry()?;
-        if registry.disabled
+        if registry.gate_owner.is_some()
             || self.is_cancelled()
             || !registry.registrations.contains_key(&self.registration_id)
         {
@@ -170,14 +194,34 @@ impl Drop for TransferGuard {
 }
 
 #[tauri::command]
-pub(crate) fn cancel_transfer(transfer_id: u32) {
+pub(crate) fn cancel_transfer(
+    state: tauri::State<'_, AppState>,
+    connection_id: String,
+    transfer_id: u32,
+) -> Result<(), String> {
+    {
+        let s3 = crate::lock_s3_state(&state)?;
+        require_connection_session(&s3, &connection_id)?;
+    }
+    cancel_transfer_in_registry(&connection_id, transfer_id);
+    Ok(())
+}
+
+/// Cancel only registrations owned by the named connection.
+///
+/// The pending-cancel bridge is session-scoped too: a stale webview cannot
+/// cancel a new transfer that happens to reuse the same numeric ID.
+pub(crate) fn cancel_transfer_in_registry(connection_id: &str, transfer_id: u32) {
     let tokens = transfer_registry()
         .lock()
         .map(|mut registry| {
             let tokens = registry
                 .registrations
                 .values()
-                .filter(|active| active.transfer_id == Some(transfer_id))
+                .filter(|active| {
+                    active.connection_id.as_deref() == Some(connection_id)
+                        && active.transfer_id == Some(transfer_id)
+                })
                 .map(|active| Arc::clone(&active.token))
                 .collect::<Vec<_>>();
             if tokens.is_empty() {
@@ -190,18 +234,149 @@ pub(crate) fn cancel_transfer(transfer_id: u32) {
                         .pending_cancels
                         .iter()
                         .min_by_key(|(_, created)| *created)
-                        .map(|(id, _)| *id)
+                        .map(|(key, _)| key.clone())
                     {
                         registry.pending_cancels.remove(&oldest);
                     }
                 }
-                registry.pending_cancels.insert(transfer_id, now);
+                registry
+                    .pending_cancels
+                    .insert((connection_id.to_string(), transfer_id), now);
             }
             tokens
         })
         .unwrap_or_default();
     for token in tokens {
         token.cancel();
+    }
+}
+
+fn connection_tokens(registry: &TransferRegistryState, connection_id: &str) -> Vec<CancelToken> {
+    registry
+        .registrations
+        .values()
+        .filter(|active| active.connection_id.as_deref() == Some(connection_id))
+        .map(|active| Arc::clone(&active.token))
+        .collect()
+}
+
+/// A retirement fence that removes itself on every unsuccessful exit path.
+///
+/// Registering the fence used to leak it whenever the drain timed out or the
+/// caller was cancelled before installing the replacement, leaving the still
+/// current session unable to register any new transfer. Dropping this guard
+/// unfences the session; a successful replacement calls `release()` so the
+/// fence survives until the new session is installed (or is deliberately kept
+/// when a newer connect has already taken over).
+pub(super) struct RetirementFence {
+    connection_id: String,
+    armed: bool,
+}
+
+impl RetirementFence {
+    fn arm(connection_id: &str) -> Result<Self, String> {
+        let mut registry = lock_transfer_registry()?;
+        *registry
+            .retiring_connections
+            .entry(connection_id.to_string())
+            .or_insert(0) += 1;
+        Ok(Self {
+            connection_id: connection_id.to_string(),
+            armed: true,
+        })
+    }
+}
+
+impl Drop for RetirementFence {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut registry) = transfer_registry().lock() {
+            if let Some(count) = registry.retiring_connections.get_mut(&self.connection_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    registry.retiring_connections.remove(&self.connection_id);
+                }
+            }
+        }
+    }
+}
+
+/// Stop new registrations for a session being replaced, then cancel everything
+/// that is already registered for it.
+///
+/// The returned fence is disarmed on success so the caller can keep the session
+/// closed while it installs the replacement. Any error (including the drain
+/// timeout) drops the fence and unfences the session, because no replacement was
+/// installed and that session is still current.
+pub(super) async fn retire_connection_transfers(
+    connection_id: &str,
+    context: &str,
+) -> Result<RetirementFence, String> {
+    let fence = RetirementFence::arm(connection_id)?;
+    let tokens = {
+        let registry = lock_transfer_registry()?;
+        connection_tokens(&registry, connection_id)
+    };
+    cancel_tokens(tokens);
+
+    let started = Instant::now();
+    loop {
+        let tokens = {
+            let guard = lock_transfer_registry()?;
+            connection_tokens(&guard, connection_id)
+        };
+        if tokens.is_empty() {
+            // Keep the same armed fence. Its refcount stays held until the
+            // caller installing the replacement drops it (or a failed install
+            // does), so another attempt retiring the same session cannot be
+            // unfenced early.
+            return Ok(fence);
+        }
+        cancel_tokens(tokens);
+        if started.elapsed() >= Duration::from_secs(30) {
+            return Err(format!(
+                "Timed out while stopping active transfers for {}",
+                context
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// A closed transfer registry. The gate can only be reopened by the operation
+/// that closed it; dropping the token reopens it unless `keep_closed` was
+/// called (drain failure or factory reset in progress).
+pub(crate) struct TransferRegistryGate {
+    owner: Option<u64>,
+}
+
+impl TransferRegistryGate {
+    /// Reopen only if this token still owns the gate. A superseded token must
+    /// not clear a newer operation's closure.
+    pub(crate) fn reopen(&mut self) {
+        let Some(owner) = self.owner.take() else {
+            return;
+        };
+        if let Ok(mut registry) = lock_transfer_registry() {
+            if registry.gate_owner == Some(owner) {
+                registry.gate_owner = None;
+            }
+        }
+    }
+
+    /// Leave the registry closed after this token is dropped. Used when a
+    /// drain failed (security wins over cleanup) or a factory reset is in
+    /// progress and the process may not get to reopen.
+    pub(crate) fn keep_closed(&mut self) {
+        self.owner = None;
+    }
+}
+
+impl Drop for TransferRegistryGate {
+    fn drop(&mut self) {
+        self.reopen();
     }
 }
 
@@ -214,34 +389,35 @@ pub(super) async fn acquire_transfer_storage_cancellable(
     }
 }
 
-pub(super) fn reopen_transfer_registry() -> Result<(), String> {
-    lock_transfer_registry()?.disabled = false;
-    Ok(())
-}
-
-pub(crate) fn resume_transfers_after_failed_reset() {
-    // A poisoned registry remains closed: subsequent registrations also fail,
-    // so credential-bearing work can never escape an unobservable drain state.
-    let _ = reopen_transfer_registry();
-}
-
-pub(super) fn close_transfer_registry() -> Result<Vec<CancelToken>, String> {
+/// Close the registry and return the owner token plus the tokens to cancel.
+///
+/// A second close while another operation owns the gate is refused instead of
+/// stealing ownership: reopening is only legal for the closer, and a stolen
+/// gate would let one operation reopen a drain another is still running.
+pub(crate) fn close_transfer_registry() -> Result<(TransferRegistryGate, Vec<CancelToken>), String>
+{
     let mut registry = lock_transfer_registry()?;
-    registry.disabled = true;
-    Ok(registry
+    if registry.gate_owner.is_some() {
+        return Err("Transfer registry is already closed by another operation".to_string());
+    }
+    let owner = registry.next_gate_owner;
+    registry.next_gate_owner = owner.wrapping_add(1);
+    registry.gate_owner = Some(owner);
+    let tokens = registry
         .registrations
         .values()
         .map(|active| Arc::clone(&active.token))
-        .collect())
+        .collect();
+    Ok((TransferRegistryGate { owner: Some(owner) }, tokens))
 }
 
-pub(super) fn cancel_tokens(tokens: Vec<CancelToken>) {
+pub(crate) fn cancel_tokens(tokens: Vec<CancelToken>) {
     for token in tokens {
         token.cancel();
     }
 }
 
-pub(super) async fn cancel_all_registered_transfers(context: &str) -> Result<(), String> {
+pub(crate) async fn cancel_all_registered_transfers(context: &str) -> Result<(), String> {
     let started = Instant::now();
     loop {
         let tokens = lock_transfer_registry()?
@@ -265,10 +441,11 @@ pub(super) async fn cancel_all_registered_transfers(context: &str) -> Result<(),
     }
 }
 
-pub(crate) async fn stop_all_transfers_for_reset() -> Result<(), String> {
-    let tokens = close_transfer_registry()?;
+pub(crate) async fn stop_all_transfers_for_reset() -> Result<TransferRegistryGate, String> {
+    let (gate, tokens) = close_transfer_registry()?;
     cancel_tokens(tokens);
-    cancel_all_registered_transfers("factory reset").await
+    cancel_all_registered_transfers("factory reset").await?;
+    Ok(gate)
 }
 
 /// Error returned when a transfer observes cancellation.

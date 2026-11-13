@@ -15,6 +15,19 @@
 // - The transfer indeterminate bar freezes at 35% under reduced motion and
 //   reads as real progress.
 // - The settings sidebar landmark has no accessible name.
+// - .form-row[hidden] (#conn-r2-account-row) stays visible with display: grid
+//   because .form-row overrides the UA [hidden] attribute on initial load.
+// - Connecting to an unsaved endpoint renders the hostname twice inside
+//   #conn-switcher-btn (#conn-switcher-name and #conn-switcher-host).
+// - #batch-toolbar uses --bg-active even when data-selection-state="idle".
+// - The docked inspector header squeezes #inspector-header-title, 4 tabs, and
+//   #inspector-close onto one row instead of wrapping .inspector-tabs onto row 2.
+// - #settings-panel-about displays a redundant .settings-instant-note banner
+//   even though About has no settings controls.
+// - Dynamically mounted #share-link-overlay does not trigger body.modal-open
+//   or inert background roots.
+// - Inspector preview [data-preview-copy] and empty-state [data-copy-path] do
+//   not announce clipboard copy in #status.
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import {
   countOf,
@@ -184,13 +197,6 @@ test.describe("text tokens and target sizes", () => {
         theme: "dark",
         html: '<button class="settings-tab settings-tab--active">x</button>',
         selector: ".settings-tab--active",
-        token: "--accent-fg",
-      },
-      {
-        name: "active bookmark chip (dark)",
-        theme: "dark",
-        html: '<span class="bookmark-chip bookmark-chip--active">x</span>',
-        selector: ".bookmark-chip--active",
         token: "--accent-fg",
       },
       {
@@ -682,5 +688,257 @@ test.describe("theme previews, help tips, header and selects", () => {
         4.5,
       );
     }
+  });
+
+  test("deep UI audit: [hidden] rows, ad-hoc switcher host, idle selection bar, docked inspector header, About note, and share-link modal layer", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await installLayoutTauriMock(page, {
+      objectCount: 2,
+      prefixes: [],
+    });
+    await page.goto("/");
+    await expect(page.locator("#connection-screen")).toBeVisible();
+
+    // 1. #conn-r2-account-row is [hidden] until Cloudflare R2 preset is selected.
+    await expect(page.locator("#conn-r2-account-row")).toBeHidden();
+
+    // 2. Settings About tab has no .settings-instant-note banner, and Security status card is horizontal flex.
+    await openSettingsTab(page, "about");
+    await expect(
+      page.locator("#settings-panel-about .settings-instant-note"),
+    ).toHaveCount(0);
+    await page.locator("#settings-tab-security").click();
+    const cardDisplay = await page
+      .locator("#security-status-card")
+      .evaluate((el) => getComputedStyle(el).display);
+    expect(cardDisplay).toBe("flex");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#settings-overlay")).not.toHaveClass(/active/);
+
+    // 3. Connect to an ad-hoc (unsaved) endpoint: #conn-switcher-host is hidden so the hostname is not duplicated.
+    await connectMockListing(page);
+    await expect(page.locator("#conn-switcher-name")).toHaveText(
+      "layout-test.invalid",
+    );
+    await expect(page.locator("#conn-switcher-host")).toBeHidden();
+
+    // 4. #batch-toolbar uses --bg-surface when idle and --bg-active when selected.
+    const idleBgMatchesActive = await page.evaluate(() => {
+      const bar = document.getElementById("batch-toolbar")!;
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--bg-active)";
+      document.body.appendChild(probe);
+      const activeColor = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return getComputedStyle(bar).backgroundColor === activeColor;
+    });
+    expect(idleBgMatchesActive).toBe(false);
+
+    const firstRow = page.locator(".object-row--file").first();
+    await firstRow.locator(".row-check").check();
+    const selectedBgMatchesActive = await page.evaluate(() => {
+      const bar = document.getElementById("batch-toolbar")!;
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--bg-active)";
+      document.body.appendChild(probe);
+      const activeColor = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return getComputedStyle(bar).backgroundColor === activeColor;
+    });
+    expect(selectedBgMatchesActive).toBe(true);
+
+    // 5. Docked inspector header places title on row 1 and tabs on row 2.
+    await firstRow.locator(".object-name").click();
+    if (await page.locator("#inspector-panel").isHidden()) {
+      await page.locator("#btn-inspector").click();
+    }
+    await expect(page.locator("#inspector-panel")).toBeVisible();
+    const headerLayout = await page.evaluate(() => {
+      const title = document
+        .getElementById("inspector-header-title")!
+        .getBoundingClientRect();
+      const tabs = document
+        .querySelector(".inspector-tabs")!
+        .getBoundingClientRect();
+      return {
+        titleWidth: title.width,
+        tabsBelowTitle: tabs.top >= title.bottom - 2,
+      };
+    });
+    expect(headerLayout.titleWidth).toBeGreaterThan(180);
+    expect(headerLayout.tabsBelowTitle).toBe(true);
+
+    // 6. Dynamically mounted #share-link-overlay sets body.modal-open and inerts #main-layout.
+    await firstRow.click({ button: "right" });
+    await page
+      .locator('.context-menu [role="menuitem"]', {
+        hasText: "Share link\u2026",
+      })
+      .click();
+    await expect(page.locator("#share-link-overlay")).toBeVisible();
+    await expect(page.locator("body")).toHaveClass(/modal-open/);
+    const mainInertWhileOpen = await page
+      .locator("#main-layout")
+      .evaluate((el) => el.closest("[inert]") !== null);
+    expect(mainInertWhileOpen).toBe(true);
+    await page.locator("#share-link-cancel").click();
+    await expect(page.locator("#share-link-overlay")).toHaveCount(0);
+    const mainInertAfterClose = await page
+      .locator("#main-layout")
+      .evaluate((el) => el.closest("[inert]") !== null);
+    expect(mainInertAfterClose).toBe(false);
+  });
+});
+
+test.describe("controls: keyboard focus and disabled ghost buttons", () => {
+  // Failure mode: .field:focus-visible drops the outline and keeps only the
+  // 10-12% alpha glow, so a text field reached by Tab has no visible focus
+  // ring in light or dark. The shared --focus-ring-width/--focus-ring-color
+  // solid outline must apply to keyboard focus in both themes.
+  test("a text field reached by Tab shows a solid focus outline in both themes", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    await expect(page.locator("#connection-screen")).toBeVisible();
+
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((mode) => {
+        document.documentElement.setAttribute("data-theme", mode);
+      }, theme);
+      await page.locator("#conn-provider-preset").focus();
+      await page.keyboard.press("Tab");
+      const endpoint = page.locator("#conn-endpoint");
+      await expect(endpoint).toBeFocused();
+      const outline = await endpoint.evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return {
+          style: cs.outlineStyle,
+          width: parseFloat(cs.outlineWidth),
+        };
+      });
+      expect(outline.style, `outline style, ${theme}`).toBe("solid");
+      expect(outline.width, `outline width, ${theme}`).toBeGreaterThanOrEqual(
+        2,
+      );
+    }
+  });
+
+  // Failure mode: .btn:disabled paints a filled --bg-hover tile, so the
+  // toolbar Back/Forward/Up buttons (ghost-style icon buttons) look like
+  // filled grey tiles on every fresh listing. Disabled ghost and icon buttons
+  // must stay transparent in both themes.
+  test("disabled toolbar Back, Forward and Up buttons stay transparent in both themes", async ({
+    page,
+  }) => {
+    await openMockListing(page, {});
+    const navIds = ["#nav-back", "#nav-forward", "#nav-up"] as const;
+    for (const id of navIds) {
+      await expect(page.locator(id)).toBeDisabled();
+    }
+
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((mode) => {
+        document.documentElement.setAttribute("data-theme", mode);
+      }, theme);
+      for (const id of navIds) {
+        const bg = await page
+          .locator(id)
+          .evaluate((el) => getComputedStyle(el).backgroundColor);
+        expect(bg, `${id} background, ${theme}`).toBe("rgba(0, 0, 0, 0)");
+      }
+    }
+  });
+});
+
+test.describe("label casing and ellipses", () => {
+  // Failure modes covered before implementation (batch D2, one label casing):
+  // - A palette command keeps Title Case ("Upload Files", "Select All") while
+  //   the action registry and the rest of the UI use sentence case, so one
+  //   menu mixes two casings.
+  // - The sentence-case pass lowercases a proper noun or acronym ("S3", "URL",
+  //   "ARN"); the allowlist below keeps them capitalized.
+  // - A visible placeholder keeps the ASCII "..." instead of the single
+  //   character "…", so the hint punctuation differs from the rest of the UI.
+  const CAPITALIZED_ALLOWLIST = new Set([
+    "S3",
+    "URL",
+    "URLs",
+    "URI",
+    "ARN",
+    "ARNs",
+    "ID",
+    "AWS",
+    "R2",
+    "B2",
+    "ACL",
+    "ETag",
+    "TLS",
+    "JSON",
+    "CSV",
+    "TSV",
+    "MB",
+    "KB",
+    "GitHub",
+    "Cloudflare",
+    "DigitalOcean",
+    "Spaces",
+    "MinIO",
+    "Backblaze",
+    "Wasabi",
+    "Touch",
+    "Windows",
+    "Hello",
+    "Linux",
+    "macOS",
+    "Flatpak",
+    "AppImage",
+    "HTTP",
+    "HTTPS",
+  ]);
+
+  function isSentenceCase(label: string): boolean {
+    const words = label.split(/[\s()/]+/).filter((word) => word.length > 0);
+    if (words.length === 0 || !/^[A-Z0-9]/.test(words[0])) return false;
+    return words
+      .slice(1)
+      .every((word) => !/^[A-Z]/.test(word) || CAPITALIZED_ALLOWLIST.has(word));
+  }
+
+  async function visibleAsciiEllipsisPlaceholders(
+    page: Page,
+  ): Promise<string[]> {
+    return page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>("[placeholder]"))
+        .filter((el) => el.getClientRects().length > 0)
+        .map((el) => el.getAttribute("placeholder") ?? "")
+        .filter((text) => text.includes("...")),
+    );
+  }
+
+  test("palette commands are sentence case and visible placeholders use the single-character ellipsis", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    expect(await visibleAsciiEllipsisPlaceholders(page)).toEqual([]);
+
+    await connectMockListing(page);
+    expect(await visibleAsciiEllipsisPlaceholders(page)).toEqual([]);
+
+    await page.locator("#palette-hint").click();
+    await expect(page.locator("#palette-overlay")).toBeVisible();
+    await page.locator("#palette-input").fill("");
+    const labels = (
+      await page
+        .locator("#palette-results .palette__item-label")
+        .allInnerTexts()
+    ).map((text) => text.trim());
+    expect(labels.length).toBeGreaterThan(0);
+    expect(labels.filter((label) => !isSentenceCase(label))).toEqual([]);
+    expect(await visibleAsciiEllipsisPlaceholders(page)).toEqual([]);
   });
 });

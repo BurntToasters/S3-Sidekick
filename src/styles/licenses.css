@@ -3,7 +3,7 @@
 .licenses-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 
 .license-card {
@@ -16,8 +16,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 10px 14px;
+  gap: var(--space-2-5);
+  padding: var(--space-2-5) var(--space-3-5);
   cursor: pointer;
   font-size: var(--text-sm);
   background: var(--bg-surface);
@@ -51,13 +51,13 @@
   font-size: var(--text-xs);
   background: var(--bg-active);
   color: var(--accent-fg);
-  padding: 2px var(--space-2);
+  padding: var(--space-0-5) var(--space-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
 }
 
 .license-card__body {
-  padding: var(--space-3) 14px;
+  padding: var(--space-3) var(--space-3-5);
   font-size: var(--text-sm);
   color: var(--text-secondary);
   line-height: 1.5;
@@ -79,7 +79,7 @@
 }
 
 .license-card__body p {
-  margin: 0 0 6px;
+  margin: 0 0 var(--space-1-5);
 }
 
 .license-card__body p:last-child {
@@ -105,10 +105,10 @@
 
 /* Full license text from the bundled notice; scrolls inside the card. */
 .license-card__text {
-  margin: 0 0 10px;
+  margin: 0 0 var(--space-2-5);
   max-height: 240px;
   overflow: auto;
-  padding: 10px var(--space-3);
+  padding: var(--space-2-5) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
@@ -126,7 +126,7 @@
   flex-direction: column;
   align-items: flex-start;
   gap: var(--space-2);
-  padding: var(--space-3) 14px;
+  padding: var(--space-3) var(--space-3-5);
   color: var(--text-secondary);
   font-size: var(--text-sm);
 }

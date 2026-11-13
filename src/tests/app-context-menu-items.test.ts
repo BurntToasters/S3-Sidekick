@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 // The builder is pure; these modules are only needed by the click handlers,
 // so empty factories keep the import graph out of the test.
 vi.mock("../browser.ts", () => ({}));
-vi.mock("../info-panel.ts", () => ({}));
+vi.mock("../info-panel.ts", () => ({
+  invalidateInfoPanelCaches: vi.fn(),
+  INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
+}));
 vi.mock("../preview.ts", () => ({}));
 vi.mock("../app-objects.ts", () => ({}));
 vi.mock("../app-downloads.ts", () => ({}));
@@ -67,11 +70,11 @@ describe("object context menu items", () => {
       "Copy keys",
       "Copy S3 URI",
       "Rename",
-      "Copy / Move\u2026",
-      "Delete Folder",
+      "Copy / move\u2026",
+      "Delete folder",
     ]);
     expect(find(items, "Rename").shortcut).toBe("F2");
-    expect(find(items, "Delete Folder").danger).toBe(true);
+    expect(find(items, "Delete folder").danger).toBe(true);
   });
 
   it("offers Copy ARNs only when the endpoint is AWS", () => {
@@ -95,7 +98,7 @@ describe("object context menu items", () => {
       "Copy keys",
       "Copy S3 URI",
       "Rename",
-      "Copy / Move\u2026",
+      "Copy / move\u2026",
       "Delete",
     ]);
 
@@ -167,12 +170,12 @@ describe("object context menu items", () => {
     const items = buildObjectMenuItems(
       selection({ fileKeys: ["a.txt"], moveSupported: false }),
     );
-    expect(labels(items)).not.toContain("Copy / Move\u2026");
+    expect(labels(items)).not.toContain("Copy / move\u2026");
     expect(find(items, "Copy to\u2026").disabled).toBeFalsy();
     const move = find(items, "Move to\u2026");
     expect(move.disabled).toBe(true);
     expect(move.disabledReason).toBe(
-      "This provider can't safely delete the source. Use Copy, then Delete.",
+      "This provider can't safely delete the source. Use copy, then delete.",
     );
   });
 

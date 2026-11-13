@@ -2,8 +2,12 @@ import { state } from "./state.ts";
 import { selectionCount } from "./app-selection.ts";
 import { isEditableElement } from "./utils.ts";
 import { hideContextMenu, isContextMenuOpen } from "./context-menu.ts";
-import { isDialogActive, showAlert } from "./dialogs.ts";
-import { shortcutListText } from "./shortcut-catalog.ts";
+import { isDialogActive, showContentDialog } from "./dialogs.ts";
+import {
+  shortcutGroups,
+  shortcutKeyChips,
+  type ShortcutEntry,
+} from "./shortcut-catalog.ts";
 import { closePreview } from "./preview.ts";
 import { requestCloseInfoPanel } from "./info-panel.ts";
 import { closeLicensesModal } from "./licenses.ts";
@@ -37,7 +41,63 @@ export interface KeyboardHandlers {
 
 /** Show the shortcut list, labelled for the current platform. */
 export function openKeyboardShortcuts(): Promise<void> {
-  return showAlert("Keyboard Shortcuts", shortcutListText(state.platformName));
+  return showContentDialog(
+    "Keyboard shortcuts",
+    buildShortcutList(state.platformName),
+    { okLabel: "Close" },
+  );
+}
+
+/** One heading per group, one row per shortcut, and a chip per key. */
+function buildShortcutList(platformName: string): HTMLElement {
+  const isMac = platformName === "macos";
+  const root = document.createElement("div");
+  root.className = "shortcut-list";
+  for (const group of shortcutGroups()) {
+    const section = document.createElement("div");
+    section.className = "shortcut-group";
+    const heading = document.createElement("h3");
+    heading.className = "shortcut-group__title";
+    heading.textContent = group.title;
+    const rows = document.createElement("ul");
+    rows.className = "shortcut-group__rows";
+    for (const entry of group.entries) {
+      rows.appendChild(buildShortcutRow(entry, isMac));
+    }
+    section.append(heading, rows);
+    root.appendChild(section);
+  }
+  return root;
+}
+
+function buildShortcutRow(entry: ShortcutEntry, isMac: boolean): HTMLElement {
+  const row = document.createElement("li");
+  row.className = "shortcut-row";
+  const action = document.createElement("span");
+  action.className = "shortcut-row__action";
+  action.textContent = entry.action;
+  const keys = document.createElement("span");
+  keys.className = "shortcut-row__keys";
+  const combos = isMac ? entry.macos : entry.other;
+  combos.forEach((combo, index) => {
+    if (index > 0) {
+      const or = document.createElement("span");
+      or.className = "shortcut-row__or";
+      or.textContent = "or";
+      keys.appendChild(or);
+    }
+    const chord = document.createElement("span");
+    chord.className = "shortcut-combo";
+    for (const key of shortcutKeyChips(combo)) {
+      const chip = document.createElement("kbd");
+      chip.className = "shortcut-key";
+      chip.textContent = key;
+      chord.appendChild(chip);
+    }
+    keys.appendChild(chord);
+  });
+  row.append(action, keys);
+  return row;
 }
 
 export function hasAccelModifier(e: MouseEvent | KeyboardEvent): boolean {
@@ -201,14 +261,14 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
 
     if (e.key === "F5" || (accel && key === "r")) {
       e.preventDefault();
-      if (modalOpen) return;
+      if (modalOpen || !state.connected) return;
       void handlers.handleRefresh();
       return;
     }
 
     if (modalOpen) return;
 
-    if (!inInput) {
+    if (!inInput && state.connected) {
       if (e.key === "F2" && selectionCount() === 1) {
         e.preventDefault();
         void handlers.handleRename();
@@ -236,6 +296,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
     // Ctrl+L / Cmd+L opens the location editor (Ctrl also works on macOS, where
     // the browser convention is Cmd+L; both are accepted).
     if (key === "l" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+      if (!state.connected) return;
       e.preventDefault();
       enterLocationEditMode();
       return;
@@ -264,12 +325,12 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
         return;
       }
 
-      if (key === "a" && !inInput) {
+      if (key === "a" && !inInput && state.connected) {
         e.preventDefault();
         handleSelectAll(true);
       }
 
-      if (key === "u" && !inInput) {
+      if (key === "u" && !inInput && state.connected) {
         e.preventDefault();
         if (e.shiftKey) {
           void handlers.handleUploadFolderButton();
@@ -278,7 +339,7 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
         }
       }
 
-      if (key === "n" && !inInput) {
+      if (key === "n" && !inInput && state.connected) {
         e.preventDefault();
         void handlers.handleCreateFolder();
       }
@@ -291,10 +352,11 @@ export function wireKeyboardShortcuts(handlers: KeyboardHandlers): () => void {
 
       if (key === "f") {
         e.preventDefault();
+        const targetId = state.connected ? "filter-input" : "conn-saved-filter";
         const filterEl = document.getElementById(
-          "filter-input",
+          targetId,
         ) as HTMLInputElement | null;
-        if (filterEl) {
+        if (filterEl && !filterEl.hidden) {
           filterEl.focus();
           filterEl.select();
         }

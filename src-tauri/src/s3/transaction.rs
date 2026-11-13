@@ -56,6 +56,16 @@ async fn copy_prefix_objects_inner(
         cancel,
     )
     .await?;
+    // CopySource is strictly percent-encoded per source key, so dot and empty
+    // segments no longer need a separate pre-mutation refusal here.
+    if source_plan.is_empty() {
+        // An empty plan used to return an empty receipt list, which the
+        // copy/move commands reported as success even though nothing matched.
+        return Err(format!(
+            "No objects matched source prefix '{}'. No destination was changed.",
+            src_prefix
+        ));
+    }
 
     preflight_prefix_overwrite_rollback(
         client,
@@ -317,6 +327,41 @@ async fn copy_prefix_objects_inner(
                 return Err(rollback_error(err, failures));
             }
         }
+        if !destination_was_absent {
+            let Some(backup) = backups
+                .last()
+                .filter(|backup| backup.destination_key == new_key)
+            else {
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
+                return Err(rollback_error(
+                    format!(
+                        "Internal rollback state lost the backup for '{}'; it was not replaced.",
+                        new_key
+                    ),
+                    failures,
+                ));
+            };
+            if let Err(err) =
+                require_destination_unchanged_since_backup(client, dst_bucket, backup, cancel).await
+            {
+                let failures = rollback_prefix_copy(
+                    client,
+                    dst_bucket,
+                    &created_destinations,
+                    &backups,
+                    provider,
+                )
+                .await;
+                return Err(rollback_error(err, failures));
+            }
+        }
         match copy_with_receipt(
             client,
             src_bucket,
@@ -444,6 +489,55 @@ async fn require_versioned_prefix_rollback(
     }
 }
 
+/// Re-read the destination immediately before replacing it and require the
+/// exact generation that was copied into the rollback backup. A concurrent
+/// external write after the backup would otherwise be overwritten and the
+/// backup (its only surviving copy) then deleted during cleanup.
+pub(super) async fn require_destination_unchanged_since_backup(
+    client: &Client,
+    bucket: &str,
+    backup: &DestinationBackup,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    let original = &backup.original_info;
+    let etag = original
+        .etag
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Destination '{}' has no ETag to bind the rollback backup; it was not replaced and backup '{}' was retained.",
+                backup.destination_key, backup.backup_key
+            )
+        })?;
+    let fingerprint = source_generation_fingerprint(original);
+    match current_source_identity_matches(
+        client,
+        bucket,
+        &backup.destination_key,
+        etag,
+        None,
+        original.version_id.as_deref(),
+        &fingerprint,
+        &original.acl_fingerprint,
+        &original.tag_fingerprint,
+        cancel,
+    )
+    .await?
+    {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
+            "Destination '{}' changed after its rollback backup was created; it was not replaced and backup '{}' was retained.",
+            backup.destination_key, backup.backup_key
+        )),
+        None => Err(format!(
+            "Destination '{}' disappeared after its rollback backup was created; it was not replaced and backup '{}' was retained.",
+            backup.destination_key, backup.backup_key
+        )),
+    }
+}
+
 /// Real-provider fault injection for rollback after one completed prefix item.
 /// The second source is removed only after the first replacement and its
 /// rollback backup have been recorded by the production transaction path.
@@ -500,6 +594,28 @@ pub(crate) async fn e2e_delete_move_receipts_checked(
     delete_move_receipts_checked(client, src_bucket, dst_bucket, receipts, provider, cancel).await
 }
 
+/// Whether a HEAD response still describes the expected generation.
+///
+/// An empty expected ETag is acceptable only when an immutable version ID
+/// pins the object (M6). Without a version, an empty ETag would match any
+/// object and is treated as a mismatch.
+fn generation_matches(
+    expected_etag: &str,
+    expected_version_id: Option<&str>,
+    head_etag: Option<&str>,
+    head_version_id: Option<&str>,
+) -> bool {
+    let etag_matches = if expected_etag.is_empty() {
+        expected_version_id.is_some()
+    } else {
+        head_etag == Some(expected_etag)
+    };
+    let version_matches = expected_version_id
+        .map(|expected| head_version_id == Some(expected))
+        .unwrap_or(true);
+    etag_matches && version_matches
+}
+
 pub(super) async fn current_identity_matches(
     client: &Client,
     bucket: &str,
@@ -522,14 +638,16 @@ pub(super) async fn current_identity_matches(
 
     match result {
         Ok(head) => {
-            let etag_matches = head.e_tag() == Some(expected_etag);
-            let version_matches = expected_version_id
-                .map(|expected| head.version_id() == Some(expected))
-                .unwrap_or(true);
+            let generation_matches = generation_matches(
+                expected_etag,
+                expected_version_id,
+                head.e_tag(),
+                head.version_id(),
+            );
             let fingerprint_matches = expected_fingerprint
                 .map(|expected| head_generation_fingerprint(&head) == expected)
                 .unwrap_or(true);
-            Ok(Some(etag_matches && version_matches && fingerprint_matches))
+            Ok(Some(generation_matches && fingerprint_matches))
         }
         Err(err) if is_not_found(&err) => Ok(None),
         Err(err) => Err(format!("Failed to verify '{}': {}", key, err)),
@@ -563,11 +681,12 @@ pub(super) async fn current_source_identity_matches(
         Err(err) if is_not_found(&err) => return Ok(None),
         Err(err) => return Err(format!("Failed to verify '{}': {}", key, err)),
     };
-    let head_matches = head.e_tag() == Some(expected_etag)
-        && expected_version_id
-            .map(|expected| head.version_id() == Some(expected))
-            .unwrap_or(true)
-        && head_generation_fingerprint(&head) == expected_head_fingerprint;
+    let head_matches = generation_matches(
+        expected_etag,
+        expected_version_id,
+        head.e_tag(),
+        head.version_id(),
+    ) && head_generation_fingerprint(&head) == expected_head_fingerprint;
     if !head_matches {
         return Ok(Some(false));
     }
@@ -851,12 +970,23 @@ pub(super) async fn delete_receipts_checked(
             _ = cancel.cancelled() => return Err(cancelled_error()),
             result = request => result,
         };
-        result.map_err(|err| {
-            format!(
-                "Copied successfully but conditional deletion of source '{}' failed: {}",
-                receipt.source_key, err
-            )
-        })?;
+        match result {
+            Ok(_) => {}
+            Err(err) if is_no_such_key(&err) => {
+                // A versioned source removed between the identity recheck and
+                // this DELETE is already the completed outcome, exactly like
+                // the unversioned path. Treat it as success, not a conflict.
+                // A bare 404 (NoSuchBucket, unknown provider body) is not
+                // proof that the key disappeared.
+                continue;
+            }
+            Err(err) => {
+                return Err(format!(
+                    "Copied successfully but conditional deletion of source '{}' failed: {}",
+                    receipt.source_key, err
+                ));
+            }
+        }
         deleted += 1;
     }
 
@@ -1058,9 +1188,10 @@ pub(super) async fn delete_unversioned_receipts_checked(
         };
         match result {
             Ok(_) => deleted += 1,
-            Err(err) if is_not_found(&err) => {
+            Err(err) if is_no_such_key(&err) => {
                 // Lost a race with an external deleter after the checks above;
-                // the source is gone, so the move is complete.
+                // the source is gone, so the move is complete. Only an explicit
+                // NoSuchKey counts; NoSuchBucket/unknown 404s stay failures.
             }
             Err(err) => {
                 use aws_sdk_s3::error::SdkError;
@@ -1119,5 +1250,22 @@ pub(super) async fn delete_move_receipts_checked(
             "Move receipts mix versioned and unversioned sources; source deletion was refused."
                 .to_string(),
         )
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::generation_matches;
+
+    #[test]
+    fn generation_matching_accepts_version_without_etag_but_never_etag_alone() {
+        assert!(generation_matches("etag-1", None, Some("etag-1"), None));
+        assert!(!generation_matches("etag-1", None, Some("etag-2"), None));
+        // Version-only providers: the immutable version pins the bytes (M6).
+        assert!(generation_matches("", Some("v1"), None, Some("v1")));
+        assert!(!generation_matches("", Some("v1"), None, Some("v2")));
+        // An empty ETag without a version must never match anything.
+        assert!(!generation_matches("", None, None, None));
+        assert!(!generation_matches("", None, Some("etag"), None));
     }
 }

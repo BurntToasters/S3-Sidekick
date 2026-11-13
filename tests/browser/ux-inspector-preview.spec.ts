@@ -389,3 +389,140 @@ test.describe("preview formats", () => {
     await expect(frame).toHaveClass(/preview-image--fit/);
   });
 });
+
+/** Resolves a CSS value to the browser's own computed serialisation. */
+async function resolveComputed(
+  page: Page,
+  declaration: { property: "color" | "font-size"; value: string },
+): Promise<string> {
+  return page.evaluate(({ property, value }) => {
+    const probe = document.createElement("span");
+    probe.style.setProperty(property, value);
+    document.body.append(probe);
+    const resolved = getComputedStyle(probe).getPropertyValue(property);
+    probe.remove();
+    return resolved;
+  }, declaration);
+}
+
+test.describe("inspector chrome styling", () => {
+  // Failure modes: the omnibar keeps the old 1px --border and 6px radius while
+  // the adjacent #filter-input uses the shared field border and radius; a token
+  // change diverges the two in only one colour scheme, so both schemes are read.
+  test("the location omnibar matches the filter field border and radius in light and dark", async ({
+    page,
+  }) => {
+    await openPreviewRoot(page);
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme, reducedMotion: "reduce" });
+      await page.mouse.move(0, 0);
+      const styles = await page.evaluate(() => {
+        const read = (id: string) => {
+          const style = getComputedStyle(document.getElementById(id)!);
+          return {
+            borderTopColor: style.borderTopColor,
+            borderRadius: style.borderTopLeftRadius,
+          };
+        };
+        return {
+          omnibar: read("location-omnibar"),
+          filter: read("filter-input"),
+        };
+      });
+      expect(styles.omnibar.borderTopColor, scheme).not.toBe("");
+      expect(styles.omnibar.borderTopColor, scheme).toBe(
+        styles.filter.borderTopColor,
+      );
+      expect(styles.omnibar.borderRadius, scheme).toBe(
+        styles.filter.borderRadius,
+      );
+    }
+  });
+
+  // Failure modes: .inspector-tab keeps the bordered pill (1px border, 11px
+  // text, --bg-active fill) instead of the underline used by .info-tab; the
+  // selected tab loses its 2px accent underline, or the inactive tabs get a
+  // visible bottom border that reads as a second rule under the tab strip.
+  test("inspector tabs are underline tabs like the Info modal tabs", async ({
+    page,
+  }) => {
+    await openPreviewRoot(page);
+    await openPreviewFor(page, "notes.txt");
+    const active = page.locator("#inspector-tab-preview");
+    const inactive = page.locator("#inspector-tab-details");
+    await expect(active).toHaveClass(/inspector-tab--active/);
+
+    const accent = await resolveComputed(page, {
+      property: "color",
+      value: "var(--accent)",
+    });
+    const textSm = await resolveComputed(page, {
+      property: "font-size",
+      value: "var(--text-sm)",
+    });
+
+    const read = (locator: Locator) =>
+      locator.evaluate((el) => {
+        const style = getComputedStyle(el);
+        return {
+          backgroundColor: style.backgroundColor,
+          borderLeftWidth: style.borderLeftWidth,
+          borderTopWidth: style.borderTopWidth,
+          borderBottomWidth: style.borderBottomWidth,
+          borderBottomColor: style.borderBottomColor,
+          fontSize: style.fontSize,
+        };
+      });
+    const activeStyle = await read(active);
+    const inactiveStyle = await read(inactive);
+
+    expect(activeStyle.backgroundColor).toMatch(
+      /^(rgba\(0, 0, 0, 0\)|transparent)$/,
+    );
+    expect(activeStyle.borderLeftWidth).toBe("0px");
+    expect(activeStyle.borderTopWidth).toBe("0px");
+    expect(activeStyle.borderBottomWidth).toBe("2px");
+    expect(activeStyle.borderBottomColor).toBe(accent);
+    expect(activeStyle.fontSize).toBe(textSm);
+
+    expect(inactiveStyle.borderBottomWidth).toBe("2px");
+    expect(inactiveStyle.borderBottomColor).toMatch(
+      /^(rgba\(0, 0, 0, 0\)|transparent)$/,
+    );
+  });
+
+  // Failure modes: .inspector-resizer keeps a permanent grey grip band at rest
+  // (visually heavy beside the panel border); the accent line never appears on
+  // hover, so the drag affordance is invisible until the pointer is over it.
+  test("the inspector resizer is transparent at rest and shows the accent line on hover", async ({
+    page,
+  }) => {
+    await openPreviewRoot(page);
+    await openPreviewFor(page, "notes.txt");
+    const resizer = page.locator("#inspector-resizer");
+    await expect(resizer).toBeVisible();
+    const accent = await resolveComputed(page, {
+      property: "color",
+      value: "var(--accent)",
+    });
+
+    const read = () =>
+      resizer.evaluate((el) => {
+        const style = getComputedStyle(el);
+        return {
+          backgroundImage: style.backgroundImage,
+          backgroundColor: style.backgroundColor,
+        };
+      });
+
+    await page.mouse.move(0, 0);
+    const rest = await read();
+    expect(rest.backgroundImage).toBe("none");
+    expect(rest.backgroundColor).toMatch(/^(rgba\(0, 0, 0, 0\)|transparent)$/);
+
+    await resizer.hover();
+    const hovered = await read();
+    expect(hovered.backgroundImage).not.toBe("none");
+    expect(hovered.backgroundImage).toContain(accent);
+  });
+});

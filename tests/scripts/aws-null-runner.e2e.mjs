@@ -40,15 +40,15 @@ try {
       path.join(bin, "cargo"),
       `#!/usr/bin/env node
 import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(appDataLog)},process.env.S3_SIDEKICK_TEST_APP_DATA);
-if(${JSON.stringify(scenario)}==='cargo-timeout') { setTimeout(()=>process.exit(0),1000); }
+if(${JSON.stringify(scenario)}==='cargo-timeout') { setTimeout(()=>process.exit(0),5000); }
 else if(${JSON.stringify(scenario)}==='malformed-checks') fs.writeFileSync(process.env.S3_SIDEKICK_E2E_REPORT,'broken json\\n');
-else if(${JSON.stringify(scenario)}!=='no-checks') fs.writeFileSync(process.env.S3_SIDEKICK_E2E_REPORT,JSON.stringify({passed:true,check:'fixture'})+'\\n');
+else if(${JSON.stringify(scenario)}!=='no-checks') fs.writeFileSync(process.env.S3_SIDEKICK_E2E_REPORT,JSON.stringify({test:'aws_null_version_http_fixture',check:'real AWS SDK HEAD parses literal null and rename refuses before any mutation request',passed:true})+'\\n');
 `,
       { mode: 0o755 },
     );
     fs.writeFileSync(
       path.join(bin, "npm"),
-      "#!/usr/bin/env node\nsetTimeout(()=>process.exit(1),1000);\n",
+      "#!/usr/bin/env node\nsetTimeout(()=>process.exit(1),5000);\n",
       { mode: 0o755 },
     );
     const started = Date.now();
@@ -64,7 +64,7 @@ else if(${JSON.stringify(scenario)}!=='no-checks') fs.writeFileSync(process.env.
           ...process.env,
           PATH: `${bin}${path.delimiter}${process.env.PATH}`,
           S3_SIDEKICK_E2E_ARTIFACT_DIR: artifacts,
-          S3_SIDEKICK_AWS_NULL_TIMEOUT_MS: "150",
+          S3_SIDEKICK_AWS_NULL_TIMEOUT_MS: "500",
         },
       },
     );

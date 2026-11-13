@@ -3,8 +3,10 @@
 .bottom-drawer {
   display: flex;
   flex-direction: column;
-  height: 240px;
-  min-height: 120px;
+  /* Cap the natural size against short windows; JS still writes an explicit
+     drag height, and min() keeps that height from overflowing the viewport. */
+  height: min(240px, 50vh);
+  min-height: min(120px, 50vh);
   max-height: 50vh;
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
@@ -16,7 +18,7 @@
   display: none;
 }
 .bottom-drawer:not([hidden]) {
-  animation: drawer-slide-up 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  animation: drawer-slide-up 0.25s var(--ease-standard);
   flex-shrink: 0;
 }
 
@@ -45,7 +47,7 @@
 }
 
 .bottom-drawer__resize-handle {
-  height: 6px;
+  height: 8px;
   cursor: ns-resize;
   position: relative;
   flex-shrink: 0;
@@ -55,7 +57,7 @@
   content: "";
   position: absolute;
   left: 50%;
-  top: 2px;
+  top: var(--space-1);
   transform: translateX(-50%);
   width: 32px;
   height: 3px;
@@ -77,24 +79,28 @@
 
 .bottom-drawer__header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-1);
   padding: 0 var(--space-3);
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .bottom-drawer__tabs {
   display: flex;
   gap: 0;
+  min-width: 0;
 }
 
 .bottom-drawer__tab {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
   min-height: 32px;
-  padding: 10px var(--space-4);
+  padding: var(--space-2-5) var(--space-4);
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -141,8 +147,11 @@
 
 .bottom-drawer__actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-1);
+  min-width: 0;
 }
 
 /* Icon-only header controls meet the 32px pointer target floor. */
@@ -162,4 +171,18 @@
 .bottom-drawer__panel {
   height: 100%;
   overflow-y: auto;
+}
+
+@media (max-width: 480px) {
+  .bottom-drawer__header {
+    padding: 0 var(--space-2);
+  }
+
+  .bottom-drawer__tab {
+    padding: var(--space-2) var(--space-2);
+  }
+
+  .bottom-drawer__actions .btn--ghost {
+    padding-inline: var(--space-2);
+  }
 }

@@ -10,7 +10,7 @@
   background: var(--setup-scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  animation: setup-overlay-in 0.3s ease;
+  animation: setup-overlay-in var(--duration-slow) ease;
 }
 
 .setup-wizard-overlay[hidden] {
@@ -35,9 +35,7 @@
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  background: var(--glass-bg-heavy);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
+  background: var(--bg-elevated);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
@@ -73,7 +71,7 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: var(--space-7) 28px var(--space-6);
+  padding: var(--space-4) 28px var(--space-6);
   gap: var(--space-2);
   min-width: 0;
 }
@@ -97,10 +95,11 @@
 }
 
 .setup-wizard-step__title {
-  font-size: 20px;
+  font-size: var(--text-xl);
   font-weight: 600;
   color: var(--text);
   margin: 0;
+  outline: none;
 }
 
 .setup-wizard-step__desc {
@@ -113,7 +112,7 @@
 
 .setup-wizard-step__actions {
   display: flex;
-  gap: 10px;
+  gap: var(--space-2-5);
   margin-top: var(--space-3);
   width: 100%;
   justify-content: center;
@@ -124,9 +123,22 @@
 }
 
 .setup-wizard-step-count {
-  margin: 0 0 var(--space-2);
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
+  padding: var(--space-4) 28px 0;
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.setup-wizard-substep {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  width: 100%;
 }
 
 .setup-wizard-substep[hidden] {
@@ -170,10 +182,38 @@
   display: none;
 }
 
+.setup-wizard-field-error {
+  font-size: var(--text-sm);
+  color: var(--danger-text, var(--danger));
+  margin: 0;
+  text-align: left;
+}
+
+.setup-wizard-field-error[hidden] {
+  display: none;
+}
+
+/* Keep the biometric row's place while the async availability check runs, so
+   the form does not grow under the pointer. A missing sensor gets an
+   explanation in the same slot rather than a silent gap. */
+.setup-wizard-biometric-slot {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 58px;
+}
+
+/* Boolean options: the text leads and the switch sits on the right edge of the
+   row, which spans the same width as the select beneath it. */
 .setup-wizard-checkbox-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  width: 100%;
   gap: var(--space-2);
+  text-align: left;
   font-size: var(--text-md);
   color: var(--text);
   cursor: pointer;
@@ -230,7 +270,7 @@
 .setup-wizard-updates-form {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-3-5);
   width: 100%;
   max-width: 300px;
   margin-top: var(--space-2);
@@ -240,7 +280,7 @@
 .setup-wizard-channel-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2-5);
   width: 100%;
 }
 
@@ -272,6 +312,6 @@
   .setup-wizard-channel-row {
     align-items: stretch;
     flex-direction: column;
-    gap: 6px;
+    gap: var(--space-1-5);
   }
 }

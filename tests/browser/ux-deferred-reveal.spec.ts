@@ -50,8 +50,28 @@ async function installRevealMocks(
             command: string,
             args: Record<string, unknown>,
           ) => {
-            if (command === "plugin:dialog|save") return downloadDestination;
-            if (command === "plugin:dialog|open") return uploadSource;
+            if (command === "pick_download_file") {
+              return {
+                token: "download-grant",
+                path: downloadDestination,
+                name: "000-sample-object.txt",
+                isDir: false,
+                directoryToken: null,
+                directoryPath: null,
+              };
+            }
+            if (command === "pick_upload_files") {
+              return [
+                {
+                  token: "upload-grant",
+                  path: uploadSource,
+                  name: "upload-source.csv",
+                  isDir: false,
+                  directoryToken: null,
+                  directoryPath: null,
+                },
+              ];
+            }
             if (command === "download_object") {
               // Record the call through the mock, then optionally never finish.
               const result = await original(command, args);
@@ -155,7 +175,10 @@ test.describe("deferred reveal of completed downloads", () => {
         commandCalls(await readMockCallLog(page), "reveal_local_path"),
       )
       .toEqual([
-        { command: "reveal_local_path", args: { path: DOWNLOAD_DESTINATION } },
+        {
+          command: "reveal_local_path",
+          args: { token: "download-grant", name: null },
+        },
       ]);
     await saveArtifact(page, testInfo, "completed-download-reveal");
   });

@@ -40,7 +40,7 @@
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  margin: 14px 0 6px;
+  margin: var(--space-3-5) 0 var(--space-1-5);
 }
 
 .metadata-section-heading:first-child {
@@ -65,7 +65,7 @@
 .metadata-copy-btn {
   flex-shrink: 0;
   font-size: var(--text-xs);
-  padding: 2px var(--space-2);
+  padding: var(--space-0-5) var(--space-2);
   min-height: 28px;
 }
 
@@ -84,8 +84,8 @@
 .metadata-entry {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: var(--space-1-5);
+  margin-bottom: var(--space-1-5);
 }
 
 .metadata-entry__key {
@@ -100,13 +100,13 @@
 
 .metadata-entry__delete {
   font-size: var(--text-sm);
-  padding: 2px 6px;
+  padding: var(--space-0-5) var(--space-1-5);
   flex-shrink: 0;
 }
 
 .metadata-add-btn {
   font-size: var(--text-sm);
-  padding: var(--space-1) 10px;
+  padding: var(--space-1) var(--space-2-5);
 }
 
 .metadata-batch-info {
@@ -122,7 +122,7 @@
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-0-5);
   max-height: 200px;
   overflow-y: auto;
   font-size: var(--text-sm);
@@ -133,7 +133,7 @@
 .metadata-batch-list li {
   padding: 3px var(--space-2);
   background: var(--bg);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
 }
 
 .metadata-batch-hint {
@@ -145,8 +145,8 @@
 .metadata-permissions-editor {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 10px;
+  gap: var(--space-1-5);
+  margin-bottom: var(--space-2-5);
 }
 
 .metadata-permissions-editor .metadata-label {
@@ -155,34 +155,4 @@
 
 .metadata-visibility-select {
   width: min(260px, 100%);
-}
-
-/* Badges: compact count or status pills. Colours come from tokens, so each reads in both themes. */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 var(--space-1);
-  border-radius: 999px;
-  background: var(--bg-hover);
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* Count: how many items are waiting, for example queued transfers. */
-.badge--count {
-  background: var(--accent);
-  color: var(--accent-text);
-}
-
-/* Alert: something failed or needs attention. Uses the strong red so white text clears 4.5:1. */
-.badge--alert {
-  background: var(--danger-strong);
-  color: var(--accent-text);
 }

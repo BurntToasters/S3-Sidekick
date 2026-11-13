@@ -70,10 +70,17 @@ interface DialogConfig {
   cancelValue?: string;
   initialFocus?: string;
   extraAction?: DialogExtraAction;
+  /** Replaces the text message with a node, such as a scrolling list. */
+  body?: HTMLElement;
 }
 
-const queue: (() => void)[] = [];
+const queue: {
+  run: () => void;
+  cancel: () => void;
+}[] = [];
 let active = false;
+/** Present dialog's cancel handler, so session teardown can force-close it. */
+let presentCancel: (() => void) | null = null;
 
 function els() {
   return {
@@ -108,6 +115,20 @@ function els() {
   };
 }
 
+/**
+ * Fixed-position controls report `offsetParent === null` even while visible,
+ * so the focus trap must test layout boxes and computed styles instead.
+ */
+function isVisibleForFocusTrap(node: HTMLElement): boolean {
+  if (node.getClientRects().length === 0) return false;
+  const style = window.getComputedStyle(node);
+  return (
+    style.visibility !== "hidden" &&
+    style.visibility !== "collapse" &&
+    style.display !== "none"
+  );
+}
+
 function shakeDialogBox(box: HTMLElement) {
   if (
     typeof window.matchMedia === "function" &&
@@ -137,7 +158,15 @@ function present(
     const el = els();
 
     el.title.textContent = config.title;
-    el.message.textContent = config.message;
+    if (config.body) {
+      // A content dialog scrolls its own body, so the message region takes
+      // keyboard focus and the box gets the wider content size.
+      el.message.replaceChildren(config.body);
+      el.message.tabIndex = 0;
+      el.box.classList.add("dialog-box--content");
+    } else {
+      el.message.textContent = config.message;
+    }
 
     el.inputWrapper.style.display = config.showInput ? "" : "none";
 
@@ -171,6 +200,11 @@ function present(
       }
       shakeDialogBox(el.box);
       el.input.focus();
+    }
+
+    function setOkBusy(busy: boolean) {
+      if (busy) el.ok.setAttribute("aria-busy", "true");
+      else el.ok.removeAttribute("aria-busy");
     }
 
     clearValidationError();
@@ -233,6 +267,7 @@ function present(
 
     el.overlay.classList.add("active");
     active = true;
+    presentCancel = onCancelForTeardown;
 
     const previouslyFocused =
       document.activeElement instanceof HTMLElement
@@ -265,6 +300,7 @@ function present(
         choices !== null
           ? choiceButtons
           : [
+              config.body ? el.message : null,
               config.showInput ? el.input : null,
               config.showInput && isPassword ? el.reveal : null,
               showCheckbox ? el.checkbox : null,
@@ -274,7 +310,7 @@ function present(
             ];
       return candidates.filter(
         (node): node is HTMLElement =>
-          node !== null && node.offsetParent !== null,
+          node !== null && isVisibleForFocusTrap(node),
       );
     }
 
@@ -311,13 +347,21 @@ function present(
     }
 
     function cleanup() {
+      presentCancel = null;
       el.overlay.classList.remove("active");
+      if (config.body) {
+        el.message.replaceChildren();
+        el.message.removeAttribute("tabindex");
+        el.box.classList.remove("dialog-box--content");
+      }
       el.cancel.removeEventListener("click", onCancel);
+      extraButton?.removeEventListener("click", onExtra);
       extraButton?.remove();
       el.ok.removeEventListener("click", onOk);
       el.input.removeEventListener("keydown", onInputKey);
       el.input.removeEventListener("input", clearValidationError);
       el.reveal.removeEventListener("click", onReveal);
+      setOkBusy(false);
       clearValidationError();
       // Never leave a typed password sitting in the hidden input.
       el.input.value = "";
@@ -342,7 +386,7 @@ function present(
         // user consent.
         active = true;
         const next = queue.shift();
-        if (next) setTimeout(next, 0);
+        if (next) setTimeout(next.run, 0);
       } else {
         active = false;
         if (previouslyFocused?.isConnected) previouslyFocused.focus();
@@ -355,6 +399,13 @@ function present(
     function onChoice(value: string) {
       cleanup();
       resolve(value);
+    }
+
+    // Teardown cancels exactly like the visible Cancel button. Choice
+    // dialogs resolve with their cancel value; alerts acknowledge downwards
+    // (never confirm a destructive action).
+    function onCancelForTeardown() {
+      onCancel();
     }
 
     function onCancel() {
@@ -394,6 +445,7 @@ function present(
         const generation = ++validateGeneration;
         validating = true;
         el.ok.disabled = true;
+        setOkBusy(true);
         try {
           const ok = await config.validate(el.input.value);
           if (generation !== validateGeneration) return;
@@ -416,6 +468,7 @@ function present(
           if (generation === validateGeneration) {
             validating = false;
             el.ok.disabled = false;
+            setOkBusy(false);
           }
         }
       }
@@ -470,12 +523,21 @@ function present(
   });
 }
 
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+interface QueuedDialog {
+  run: () => void;
+  cancel: () => void;
+}
+
+function enqueue<T>(fn: () => Promise<T>, cancelValue: () => T): Promise<T> {
   if (!active) return fn();
   return new Promise<T>((resolve, reject) => {
-    queue.push(() => {
-      fn().then(resolve, reject);
-    });
+    const entry: QueuedDialog = {
+      run: () => {
+        fn().then(resolve, reject);
+      },
+      cancel: () => resolve(cancelValue()),
+    };
+    queue.push(entry);
   });
 }
 
@@ -498,6 +560,7 @@ export function showConfirm(
         inputPlaceholder: "",
         inputDefault: "",
       }) as Promise<boolean>,
+    () => false,
   );
 }
 
@@ -525,6 +588,7 @@ export function showConfirmWithCheckbox(
         inputDefault: "",
         checkboxLabel: options.checkboxLabel,
       }) as Promise<CheckboxConfirmResult>,
+    () => ({ confirmed: false, checked: false }),
   );
 }
 
@@ -550,6 +614,33 @@ export function showPrompt(
         validate: options?.validate,
         extraAction: options?.extraAction,
       }) as Promise<string | null>,
+    () => null,
+  );
+}
+
+function presentAlert(
+  title: string,
+  message: string,
+  body: HTMLElement | undefined,
+  options?: AlertOptions,
+): Promise<void> {
+  return enqueue(
+    async () => {
+      await present({
+        title,
+        message,
+        body,
+        showInput: false,
+        showCancel: false,
+        okLabel: options?.okLabel ?? "OK",
+        cancelLabel: "Cancel",
+        okDanger: false,
+        inputType: "text",
+        inputPlaceholder: "",
+        inputDefault: "",
+      });
+    },
+    () => undefined,
   );
 }
 
@@ -558,20 +649,19 @@ export function showAlert(
   message: string,
   options?: AlertOptions,
 ): Promise<void> {
-  return enqueue(async () => {
-    await present({
-      title,
-      message,
-      showInput: false,
-      showCancel: false,
-      okLabel: options?.okLabel ?? "OK",
-      cancelLabel: "Cancel",
-      okDanger: false,
-      inputType: "text",
-      inputPlaceholder: "",
-      inputDefault: "",
-    });
-  });
+  return presentAlert(title, message, undefined, options);
+}
+
+/**
+ * Alert whose body is a DOM node instead of text. The node is shown in a
+ * wider dialog whose body scrolls, and Escape or the OK button closes it.
+ */
+export function showContentDialog(
+  title: string,
+  body: HTMLElement,
+  options?: AlertOptions,
+): Promise<void> {
+  return presentAlert(title, "", body, options);
 }
 
 /**
@@ -602,9 +692,26 @@ export function showChoiceDialog<T extends string>(
         cancelValue: options.cancelValue,
         initialFocus: options.initialFocus,
       }) as Promise<T>,
+    () => options.cancelValue,
   );
 }
 
 export function isDialogActive(): boolean {
   return active;
+}
+
+/**
+ * Force-close every dialog without asking. A present dialog resolves as
+ * cancelled; queued dialogs are dropped and also resolve as cancelled, so a
+ * queued dialog can never outlive the session that queued it (H5).
+ */
+export function closeAllDialogs(): void {
+  for (const entry of queue.splice(0)) {
+    entry.cancel();
+  }
+  if (presentCancel) {
+    const cancel = presentCancel;
+    presentCancel = null;
+    cancel();
+  }
 }

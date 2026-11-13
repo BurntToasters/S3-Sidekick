@@ -4,6 +4,7 @@ import { state, dom } from "./state.ts";
 import {
   openSettingsModal,
   closeSettingsModal,
+  closeSettingsModalForLock,
   resetSettings,
   resetAfterForgottenPassword,
   setBookmarkSelectHandler,
@@ -13,6 +14,8 @@ import {
   loadConnection,
   refreshObjects,
   loadMoreObjects,
+  currentConnectionGeneration,
+  currentListingGeneration,
 } from "./connection.ts";
 import {
   renderBucketList,
@@ -37,15 +40,24 @@ import {
   reportNavFailure,
   selectOnlyEntry,
   isLocationEditMode,
+  LOCATION_FLUSH_EVENT,
 } from "./browser.ts";
-import { wireInspectorChrome, toggleInspector } from "./inspector.ts";
+import {
+  wireInspectorChrome,
+  toggleInspector,
+  setInspectorOpen,
+} from "./inspector.ts";
 import { wireWindowSizePersistence } from "./window-size.ts";
 import {
   checkUpdates,
   getReleasePageUrl,
   setUpdateChannel,
 } from "./updater.ts";
-import { loadBookmarks, clearBookmarks } from "./bookmarks.ts";
+import {
+  loadBookmarks,
+  clearBookmarks,
+  setBookmarkChangeHandler,
+} from "./bookmarks.ts";
 import { openLicensesModal, closeLicensesModal } from "./licenses.ts";
 import {
   openInfoPanel,
@@ -75,7 +87,7 @@ import {
   openDrawer,
   setTransferFilter,
 } from "./bottom-drawer.ts";
-import { showConfirm } from "./dialogs.ts";
+import { showConfirm, closeAllDialogs } from "./dialogs.ts";
 import {
   handleSecurityChangePassword,
   handleSecurityToggle,
@@ -121,6 +133,12 @@ import {
   confirmSessionTeardown,
   handleConnectButton,
   setSavedConnectionsLocked,
+  rememberActiveConnectionLocation,
+  cancelPendingConnect,
+  cancelPendingTestConnection,
+  cancelInlineSavedConnectionEdit,
+  resetSecretRevealState,
+  unlockSavedConnectionsNow,
 } from "./app-connection.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
 import {
@@ -159,25 +177,60 @@ import {
   getObjectAction,
   resolveActionLabel,
   runObjectAction,
+  shortcutLabelFor,
   syncSelectionBar,
 } from "./object-actions.ts";
 
 let dragDropUnlisten: (() => void) | null = null;
+
+/** Surface an action that rejects after its click handler already returned. */
+function reportAsyncActionFailure(label: string, err: unknown): void {
+  const message = `${label} failed: ${friendlyError(err)}`;
+  setStatus(message);
+  logActivity(message, "error");
+}
+
+/**
+ * Shared lock teardown for both the auto-lock watcher and the manual
+ * "Lock now" button. A lock is only complete once nothing from the previous
+ * session can be seen or edited afterwards (H5): dialogs (including queued
+ * ones, which resolve cancelled), Settings (draft discarded, in-flight save
+ * awaited), the preview (with its fetch generation bumped), the inspector,
+ * inline saved-connection edits and duplicate drafts, and re-masked secrets.
+ */
+export async function teardownLockedSession(): Promise<void> {
+  closeAllDialogs();
+  await closeSettingsModalForLock();
+  closePreview();
+  setInspectorOpen(false);
+  cancelInlineSavedConnectionEdit();
+  setConnectionInputs("", "", "", "");
+  resetSecretRevealState();
+}
 
 /**
  * After an inactivity auto-lock: end the S3 session and drop decrypted
  * credentials and bookmarks from memory, as the manual lock button does.
  */
 export async function clearSessionAfterAutoLock(): Promise<boolean> {
+  // Capture the saved connection's bucket/prefix while the session still owns
+  // state. The manual lock path records this from handleDisconnect; auto-lock
+  // would otherwise clear it before that snapshot can run.
+  rememberActiveConnectionLocation();
+  // Cancel any connect/test UI before the access lock invalidates workflows,
+  // so the connect button cannot stay stuck on "Cancel".
+  cancelPendingConnect();
+  cancelPendingTestConnection();
   const hadSession = state.connected || Boolean(state.connectionId);
   setConnectionAccessLocked(true);
   setSavedConnectionsLocked(true);
   setConnectionUI(false);
-  closePreview();
-  setConnectionInputs("", "", "", "");
+  // Single teardown covers Settings, dialogs, preview, inspector, inline
+  // edits, and secret masking for both lock paths.
+  await teardownLockedSession();
   clearBookmarks();
   refreshBookmarkBar();
-  if (hadSession && !(await handleDisconnect())) {
+  if (hadSession && !(await handleDisconnect({ skipInspectorPrompt: true }))) {
     // A failed drain leaves the backend client retained for a safe retry. Keep
     // the browsing surface closed and retain only the session ID for retirement.
     setConnectionUI(false);
@@ -191,7 +244,9 @@ function wireConnectionForm(): void {
   dom.connectBtn.addEventListener("click", handleConnectButton);
 
   const connectionFieldIds = [
+    "conn-name",
     "conn-endpoint",
+    "conn-r2-account",
     "conn-region",
     "conn-access-key",
     "conn-secret-key",
@@ -202,7 +257,9 @@ function wireConnectionForm(): void {
     field?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        void handleConnect();
+        void handleConnect().catch((err) =>
+          reportAsyncActionFailure("Connect", err),
+        );
       }
     });
   }
@@ -249,7 +306,9 @@ function wireConnectionForm(): void {
     .addEventListener("click", handleBookmarkSave);
 
   document.getElementById("conn-new-btn")!.addEventListener("click", () => {
-    void handleNewConnection();
+    void handleNewConnection().catch((err) =>
+      reportAsyncActionFailure("Start new connection", err),
+    );
   });
 
   (
@@ -308,12 +367,14 @@ function wireSettingsModal(): void {
     checkNowButton.disabled = true;
     checkNowButton.setAttribute("aria-busy", "true");
     checkNowButton.textContent = "Checking\u2026";
-    void checkUpdates().finally(() => {
-      setUpdateChannel(persistedChannel);
-      checkNowButton.disabled = false;
-      checkNowButton.removeAttribute("aria-busy");
-      checkNowButton.textContent = idleLabel;
-    });
+    void checkUpdates()
+      .catch((err) => reportAsyncActionFailure("Check for updates", err))
+      .finally(() => {
+        setUpdateChannel(persistedChannel);
+        checkNowButton.disabled = false;
+        checkNowButton.removeAttribute("aria-busy");
+        checkNowButton.textContent = idleLabel;
+      });
   });
   document
     .getElementById("settings-open-release-page")!
@@ -349,25 +410,37 @@ function wireSettingsModal(): void {
     .getElementById("settings-overlay")!
     .addEventListener("click", (e) => {
       if ((e.target as HTMLElement).classList.contains("modal-overlay")) {
-        void closeSettingsModal(false);
+        void closeSettingsModal(false).catch((err) =>
+          reportAsyncActionFailure("Close settings", err),
+        );
       }
     });
 
-  document
-    .getElementById("info-close")!
-    .addEventListener("click", () => void requestCloseInfoPanel());
-  document
-    .getElementById("info-cancel")!
-    .addEventListener("click", () => void requestCloseInfoPanel());
-  document
-    .getElementById("info-save")!
-    .addEventListener("click", saveInfoPanel);
+  document.getElementById("info-close")!.addEventListener("click", () => {
+    void requestCloseInfoPanel().catch((err) =>
+      reportAsyncActionFailure("Close properties", err),
+    );
+  });
+  document.getElementById("info-cancel")!.addEventListener("click", () => {
+    void requestCloseInfoPanel().catch((err) =>
+      reportAsyncActionFailure("Close properties", err),
+    );
+  });
+  document.getElementById("info-save")!.addEventListener("click", () => {
+    void saveInfoPanel().catch((err) =>
+      reportAsyncActionFailure("Save properties", err),
+    );
+  });
 }
 
 /** Info overlay and the bottom activity drawer. */
 function wireOverlaysAndDrawer(): void {
   document.getElementById("info-overlay")!.addEventListener("click", (e) => {
-    if (e.target === e.currentTarget) void requestCloseInfoPanel();
+    if (e.target === e.currentTarget) {
+      void requestCloseInfoPanel().catch((err) =>
+        reportAsyncActionFailure("Close properties", err),
+      );
+    }
   });
 
   document.querySelectorAll<HTMLElement>(".info-tabs").forEach((infoTabs) => {
@@ -388,12 +461,35 @@ function wireOverlaysAndDrawer(): void {
   });
 
   initDrawer();
+  // Opening the drawer moves focus into it, the same way the mobile sidebar
+  // focuses its filter. Covered here because the drawer opens from several
+  // entry points (statusbar buttons, palette, toast actions).
+  const drawer = document.getElementById("bottom-drawer");
+  if (drawer) {
+    let drawerWasOpen = !drawer.hidden;
+    const focusDrawer = (): void => {
+      if (drawer.hidden) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && drawer.contains(active)) return;
+      const target =
+        drawer.querySelector<HTMLElement>(".bottom-drawer__tab--active") ??
+        drawer.querySelector<HTMLElement>("button, [tabindex='0']");
+      target?.focus();
+    };
+    new MutationObserver(() => {
+      const open = !drawer.hidden;
+      if (open && !drawerWasOpen) focusDrawer();
+      drawerWasOpen = open;
+    }).observe(drawer, { attributes: true, attributeFilter: ["hidden"] });
+  }
   document
     .getElementById("transfer-toggle")!
     .addEventListener("click", toggleTransferQueue);
   document.getElementById("drawer-export")?.addEventListener("click", () => {
     if (getActiveTab() === "activity") {
-      void handleExportActivityLog();
+      void handleExportActivityLog().catch((err) =>
+        reportAsyncActionFailure("Export activity log", err),
+      );
     }
   });
   document.getElementById("drawer-clear")!.addEventListener("click", () => {
@@ -403,9 +499,11 @@ function wireOverlaysAndDrawer(): void {
         "Clear activity log?",
         "This removes every entry from the activity log. Files and transfers are not changed.",
         { okLabel: "Clear", cancelLabel: "Keep", okDanger: true },
-      ).then((confirmed) => {
-        if (confirmed) clearActivityLog();
-      });
+      )
+        .then((confirmed) => {
+          if (confirmed) clearActivityLog();
+        })
+        .catch((err) => reportAsyncActionFailure("Clear activity log", err));
     } else {
       clearCompletedTransfers();
     }
@@ -430,13 +528,33 @@ function wireAppLifecycle(): void {
       );
     });
   });
+  // Every navigation announces the view it is leaving, so the per-connection
+  // location memory records the last real bucket/prefix before it changes.
+  window.addEventListener(LOCATION_FLUSH_EVENT, () => {
+    rememberActiveConnectionLocation();
+  });
   window.addEventListener("beforeunload", () => {
+    rememberActiveConnectionLocation();
     disposeFilterInputDebounce();
     disposeModalLayerObserver();
     dragDropUnlisten?.();
     dragDropUnlisten = null;
     void disposeTransferQueueUI();
   });
+  // Long dialog copy scrolls independently; keyboard users need the message
+  // area itself in the tab order, and the title names the group for heading
+  // navigation in screen readers.
+  const dialogTitle = document.getElementById("dialog-title");
+  if (dialogTitle) {
+    dialogTitle.setAttribute("role", "heading");
+    dialogTitle.setAttribute("aria-level", "2");
+  }
+  const dialogMessage = document.getElementById("dialog-message");
+  if (dialogMessage) {
+    dialogMessage.setAttribute("tabindex", "0");
+    dialogMessage.setAttribute("role", "region");
+    dialogMessage.setAttribute("aria-labelledby", "dialog-title");
+  }
 
   document
     .getElementById("preview-close")!
@@ -451,7 +569,7 @@ function moreMenuItems(): MenuItem[] {
   const items: MenuItem[] = [];
   for (const id of MORE_MENU_ACTION_IDS) {
     const action = getObjectAction(id);
-    if (!action || !action.isAvailable(context)) continue;
+    if (!action?.isAvailable(context)) continue;
     items.push({
       label: resolveActionLabel(action, context),
       action: id,
@@ -544,16 +662,32 @@ function wireSelectionActions(): void {
 /** Vault, biometric and lock controls in Settings. */
 function wireSecuritySettings(): void {
   // "Forgot password?" on the lock view goes straight to the erase explanation.
-  setForgotPasswordHandler(() => void resetAfterForgottenPassword());
+  setForgotPasswordHandler(() => {
+    void resetAfterForgottenPassword().catch((err) =>
+      reportAsyncActionFailure("Reset forgotten password", err),
+    );
+  });
   const runSecurityAction = (action: "setup" | "unlock" | "disable"): void => {
     void (async () => {
       const changed = await handleSecurityToggle(setStatus, action);
       if (!changed) return;
-      try {
-        await loadBookmarks();
-        refreshBookmarkBar();
-      } catch {
-        /* bookmarks unavailable */
+      if (action === "unlock") {
+        // One unlock path for Settings, the lock view and auto-lock: it loads
+        // bookmarks, registers the change handler, and clears the access lock.
+        if (!(await unlockSavedConnectionsNow())) {
+          // No handler registered (unit fixture): at least reload and rewire.
+          await loadBookmarks();
+          setBookmarkChangeHandler(refreshBookmarkBar);
+          refreshBookmarkBar();
+        }
+      } else {
+        try {
+          await loadBookmarks();
+          setBookmarkChangeHandler(refreshBookmarkBar);
+          refreshBookmarkBar();
+        } catch {
+          /* bookmarks unavailable */
+        }
       }
       try {
         const saved = await loadConnection();
@@ -569,7 +703,7 @@ function wireSecuritySettings(): void {
       } catch {
         /* connection unavailable */
       }
-    })();
+    })().catch((err) => reportAsyncActionFailure(`Security ${action}`, err));
   };
   document
     .getElementById("security-setup-btn")!
@@ -583,7 +717,9 @@ function wireSecuritySettings(): void {
   document
     .getElementById("security-change-password")!
     .addEventListener("click", () => {
-      void handleSecurityChangePassword(setStatus);
+      void handleSecurityChangePassword(setStatus).catch((err) =>
+        reportAsyncActionFailure("Change password", err),
+      );
     });
   document
     .getElementById("security-lock-btn")!
@@ -596,33 +732,46 @@ function wireSecuritySettings(): void {
         if (state.connected && !(await handleDisconnect())) return;
         const locked = await handleLockNow(setStatus);
         if (locked) {
-          setConnectionInputs("", "", "", "");
-          // Mirror clearSessionAfterAutoLock: show the locked saved list, not an empty one.
+          cancelPendingConnect();
+          cancelPendingTestConnection();
+          setConnectionAccessLocked(true);
+          // Same single teardown as auto-lock (H5), then show the locked
+          // saved list rather than an empty one.
+          await teardownLockedSession();
           setSavedConnectionsLocked(true);
           clearBookmarks();
           refreshBookmarkBar();
-          await closeSettingsModal(false);
         }
-      })();
+      })().catch((err) => reportAsyncActionFailure("Lock now", err));
     });
   document
     .getElementById("security-lock-timeout")!
     .addEventListener("change", () => {
-      void handleLockTimeoutChange();
+      void handleLockTimeoutChange().catch((err) =>
+        reportAsyncActionFailure("Change lock timeout", err),
+      );
     });
   document.getElementById("biometric-toggle")!.addEventListener("click", () => {
-    void handleBiometricToggle(setStatus);
+    void handleBiometricToggle(setStatus).catch((err) =>
+      reportAsyncActionFailure("Change biometric setting", err),
+    );
   });
 
-  document
-    .getElementById("nav-back")
-    ?.addEventListener("click", () => void navigateBack());
-  document
-    .getElementById("nav-forward")
-    ?.addEventListener("click", () => void navigateForward());
-  document
-    .getElementById("nav-up")
-    ?.addEventListener("click", () => void navigateUp());
+  document.getElementById("nav-back")?.addEventListener("click", () => {
+    void navigateBack().catch((err) =>
+      reportAsyncActionFailure("Navigate back", err),
+    );
+  });
+  document.getElementById("nav-forward")?.addEventListener("click", () => {
+    void navigateForward().catch((err) =>
+      reportAsyncActionFailure("Navigate forward", err),
+    );
+  });
+  document.getElementById("nav-up")?.addEventListener("click", () => {
+    void navigateUp().catch((err) =>
+      reportAsyncActionFailure("Navigate up", err),
+    );
+  });
 }
 
 /** Location omnibar, path input, filters and paging. */
@@ -633,9 +782,11 @@ function wireLocationAndFilters(): void {
   pathInput?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      void navigateToLocationPath(pathInput.value).then((ok) => {
-        if (ok) exitLocationEditMode(true);
-      });
+      void navigateToLocationPath(pathInput.value)
+        .then((ok) => {
+          if (ok) exitLocationEditMode(true);
+        })
+        .catch((err) => reportAsyncActionFailure("Go to location", err));
     } else if (e.key === "Escape") {
       e.preventDefault();
       exitLocationEditMode(true);
@@ -696,8 +847,15 @@ function wireLocationAndFilters(): void {
         ],
         (action) => {
           dismissUploadMenu();
-          if (action === "upload-files") void handleUploadButton();
-          else if (action === "upload-folder") void handleUploadFolderButton();
+          if (action === "upload-files") {
+            void handleUploadButton().catch((err) =>
+              reportAsyncActionFailure("Upload files", err),
+            );
+          } else if (action === "upload-folder") {
+            void handleUploadFolderButton().catch((err) =>
+              reportAsyncActionFailure("Upload folder", err),
+            );
+          }
         },
         dismissUploadMenu,
       );
@@ -716,7 +874,6 @@ function wireLocationAndFilters(): void {
     clearFilterInputDebounce();
     if (filterInput) filterInput.value = "";
     clearFilter();
-    renderObjectTable();
     filterInput?.focus();
   });
 
@@ -742,15 +899,39 @@ function wireLocationAndFilters(): void {
     "btn-load-more",
   ) as HTMLButtonElement;
   loadMoreBtn.addEventListener("click", async () => {
+    const connectionGeneration = currentConnectionGeneration();
+    const listingGeneration = currentListingGeneration();
+    const connectionId = state.connectionId;
+    const bucket = state.currentBucket;
+    const prefix = state.currentPrefix;
     loadMoreBtn.disabled = true;
     loadMoreBtn.textContent = "Loading\u2026";
-    setStatus("Loading more...");
+    setStatus("Loading more…");
     try {
       await loadMoreObjects();
+      // A navigation or reconnect that finished during the request owns the
+      // table and status now; a stale page must not repaint over it.
+      if (
+        connectionGeneration !== currentConnectionGeneration() ||
+        listingGeneration !== currentListingGeneration() ||
+        connectionId !== state.connectionId ||
+        bucket !== state.currentBucket ||
+        prefix !== state.currentPrefix
+      ) {
+        return;
+      }
       renderObjectTable();
       setStatus("");
     } catch (err) {
-      setStatus(`Failed to load more: ${friendlyError(err)}`);
+      if (
+        connectionGeneration === currentConnectionGeneration() &&
+        listingGeneration === currentListingGeneration() &&
+        connectionId === state.connectionId &&
+        bucket === state.currentBucket &&
+        prefix === state.currentPrefix
+      ) {
+        setStatus(`Failed to load more: ${friendlyError(err)}`);
+      }
     } finally {
       loadMoreBtn.disabled = false;
       loadMoreBtn.textContent = "Load more";
@@ -805,7 +986,11 @@ function wireBucketList(): void {
 /** A bucket that fails to open must not look like an empty bucket. */
 function reportBucketOpenFailure(bucket: string, err: unknown): void {
   const message = `Failed to open bucket "${bucket}": ${friendlyError(err)}`;
-  reportNavFailure(message, () => void selectBucket(bucket));
+  reportNavFailure(message, () => {
+    void selectBucket(bucket).catch((retryErr) =>
+      reportBucketOpenFailure(bucket, retryErr),
+    );
+  });
   logActivity(message, "error");
 }
 
@@ -882,7 +1067,11 @@ function wireObjectTable(): void {
           void navigateToFolder(prefix).catch((err) => {
             reportNavFailure(
               `Failed to open folder: ${friendlyError(err)}`,
-              () => void navigateToFolder(prefix),
+              () => {
+                void navigateToFolder(prefix).catch((retryErr) => {
+                  reportAsyncActionFailure("Open folder", retryErr);
+                });
+              },
             );
           });
         }
@@ -892,16 +1081,22 @@ function wireObjectTable(): void {
       const key = row.dataset.key;
       if (!key) return;
       if (canPreview(basename(key))) {
-        void openPreview(key);
+        void openPreview(key).catch((err) =>
+          reportAsyncActionFailure("Open preview", err),
+        );
       } else {
-        void openInfoPanel([fileEntry(key)]);
+        void openInfoPanel([fileEntry(key)]).catch((err) =>
+          reportAsyncActionFailure("Open properties", err),
+        );
       }
     }
   });
 
   dom.objectTbody.addEventListener("dblclick", (e) => {
     const target = e.target as HTMLElement;
-    if (target.closest(".row-check")) return;
+    // Checkbox cells toggle selection on click; a double-click there must not
+    // fall through to opening the row.
+    if (target.closest(".col-check, .row-check")) return;
     const row = target.closest<HTMLElement>(".object-row");
     if (!row) return;
     if (row.classList.contains("object-row--folder")) {
@@ -910,7 +1105,11 @@ function wireObjectTable(): void {
         void navigateToFolder(prefix).catch((err) => {
           reportNavFailure(
             `Failed to open folder: ${friendlyError(err)}`,
-            () => void navigateToFolder(prefix),
+            () => {
+              void navigateToFolder(prefix).catch((retryErr) => {
+                reportAsyncActionFailure("Open folder", retryErr);
+              });
+            },
           );
           logActivity(`Failed to open folder: ${friendlyError(err)}`, "error");
         });
@@ -920,9 +1119,13 @@ function wireObjectTable(): void {
     const key = row.dataset.key;
     if (!key) return;
     if (canPreview(basename(key))) {
-      void openPreview(key);
+      void openPreview(key).catch((err) =>
+        reportAsyncActionFailure("Open preview", err),
+      );
     } else {
-      void openInfoPanel([fileEntry(key)]);
+      void openInfoPanel([fileEntry(key)]).catch((err) =>
+        reportAsyncActionFailure("Open properties", err),
+      );
     }
   });
 
@@ -933,13 +1136,16 @@ function wireObjectTable(): void {
     if (!actionBtn) return;
     const action = actionBtn.dataset.emptyAction;
     if (action === "upload") {
-      void handleUploadButton();
+      void handleUploadButton().catch((err) =>
+        reportAsyncActionFailure("Upload files", err),
+      );
     } else if (action === "new-folder") {
-      void handleCreateFolder();
+      void handleCreateFolder().catch((err) =>
+        reportAsyncActionFailure("Create folder", err),
+      );
     } else if (action === "clear-filter") {
       clearFilterInputDebounce();
       clearFilter();
-      renderObjectTable();
       (
         document.getElementById("filter-input") as HTMLInputElement | null
       )?.focus();
@@ -977,10 +1183,11 @@ function wireObjectTable(): void {
     const prefix = seg.dataset.prefix;
     if (prefix !== undefined) {
       void navigateToFolder(prefix).catch((err) => {
-        reportNavFailure(
-          `Failed to open folder: ${friendlyError(err)}`,
-          () => void navigateToFolder(prefix),
-        );
+        reportNavFailure(`Failed to open folder: ${friendlyError(err)}`, () => {
+          void navigateToFolder(prefix).catch((retryErr) => {
+            reportAsyncActionFailure("Open folder", retryErr);
+          });
+        });
       });
     }
   });
@@ -1018,16 +1225,21 @@ function wireDropUpload(): void {
   objectPanel.addEventListener("drop", suppressDrag);
   dropOverlay.addEventListener("drop", suppressDrag);
 
-  // Escape dismisses the target without dropping; the next drag re-shows it.
+  // Escape dismisses the target without dropping. The native drop event still
+  // arrives afterwards, so remember the escaped drag and ignore its matching
+  // drop. A dragleave starts a new drag and clears that memory.
+  let escapedDrop = false;
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || dropOverlay.hidden) return;
     dropOverlay.hidden = true;
     objectPanel.classList.remove("object-panel--dragover");
+    escapedDrop = true;
   });
 
   void getCurrentWebview()
     .onDragDropEvent((event) => {
       if (event.payload.type === "enter") {
+        escapedDrop = false;
         // Only offer a target when a drop would actually upload: connected to
         // a bucket, carrying files, and no dialog waiting for an answer.
         const canUpload =
@@ -1041,11 +1253,16 @@ function wireDropUpload(): void {
           objectPanel.classList.add("object-panel--dragover");
         }
       } else if (event.payload.type === "leave") {
+        escapedDrop = false;
         objectPanel.classList.remove("object-panel--dragover");
         dropOverlay.hidden = true;
       } else if (event.payload.type === "drop") {
         objectPanel.classList.remove("object-panel--dragover");
         dropOverlay.hidden = true;
+        if (escapedDrop) {
+          escapedDrop = false;
+          return;
+        }
 
         if (document.body.classList.contains("modal-open")) {
           setStatus(
@@ -1061,10 +1278,12 @@ function wireDropUpload(): void {
 
         const paths = event.payload.paths;
         if (paths.length > 0) {
-          void queueDroppedPaths(paths, state.currentPrefix);
+          void queueDroppedPaths(state.currentPrefix).catch((err) =>
+            reportAsyncActionFailure("Queue dropped files", err),
+          );
         } else {
           setStatus(
-            "No dropped files detected. Try Upload Files instead.",
+            "No dropped files detected. Try upload files instead.",
             5000,
           );
         }
@@ -1200,18 +1419,26 @@ function wireCommandPalette(): void {
   registerCommands([
     {
       id: "upload-files",
-      label: "Upload Files",
+      label: "Upload files",
       icon: "upload",
       shortcut: `${accelLabel}U`,
-      action: () => void handleUploadButton(),
+      action: () => {
+        void handleUploadButton().catch((err) =>
+          reportAsyncActionFailure("Upload files", err),
+        );
+      },
       available: () => state.connected,
     },
     {
       id: "upload-folder",
-      label: "Upload Folder",
+      label: "Upload folder",
       icon: "folder-up",
-      shortcut: `${accelLabel}⇧U`,
-      action: () => void handleUploadFolderButton(),
+      shortcut: shortcutLabelFor("Upload folder"),
+      action: () => {
+        void handleUploadFolderButton().catch((err) =>
+          reportAsyncActionFailure("Upload folder", err),
+        );
+      },
       available: () => state.connected,
     },
     {
@@ -1220,7 +1447,11 @@ function wireCommandPalette(): void {
       icon: "folder-plus",
       shortcut: `${accelLabel}N`,
       keywords: ["mkdir", "new folder"],
-      action: () => void handleCreateFolder(),
+      action: () => {
+        void handleCreateFolder().catch((err) =>
+          reportAsyncActionFailure("Create folder", err),
+        );
+      },
       available: () => state.connected,
     },
     {
@@ -1229,15 +1460,23 @@ function wireCommandPalette(): void {
       icon: "refresh-cw",
       shortcut: "F5",
       keywords: ["reload"],
-      action: () => void handleRefresh(),
+      action: () => {
+        void handleRefresh().catch((err) =>
+          reportAsyncActionFailure("Refresh", err),
+        );
+      },
       available: () => state.connected,
     },
     {
       id: "refresh-buckets",
-      label: "Refresh Buckets",
+      label: "Refresh buckets",
       icon: "refresh-cw",
       keywords: ["bucket list", "reload buckets"],
-      action: () => void handleRefreshBuckets(),
+      action: () => {
+        void handleRefreshBuckets().catch((err) =>
+          reportAsyncActionFailure("Refresh buckets", err),
+        );
+      },
       available: () => state.connected,
     },
     // Selection commands come from the object-actions registry, so their
@@ -1256,7 +1495,7 @@ function wireCommandPalette(): void {
     paletteCommandForAction("preview"),
     {
       id: "select-all",
-      label: "Select All",
+      label: "Select all",
       icon: "check-square",
       shortcut: `${accelLabel}A`,
       action: () => {
@@ -1266,7 +1505,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "filter",
-      label: "Filter Objects",
+      label: "Filter objects",
       icon: "search",
       shortcut: `${accelLabel}F`,
       action: () => {
@@ -1279,36 +1518,48 @@ function wireCommandPalette(): void {
     },
     {
       id: "go-to-key-prefix",
-      label: "Go to Key/Prefix",
+      label: "Go to key/prefix",
       icon: "compass",
       keywords: ["jump", "path", "prefix"],
-      action: () => void handleGoToKeyOrPrefix(),
+      action: () => {
+        void handleGoToKeyOrPrefix().catch((err) =>
+          reportAsyncActionFailure("Go to key or prefix", err),
+        );
+      },
       available: () => state.connected,
     },
     {
       id: "open-last-download-folder",
-      label: "Open Last Download Folder",
+      label: "Open last download folder",
       icon: "folder",
-      action: () => void handleOpenLastDownloadFolder(),
+      action: () => {
+        void handleOpenLastDownloadFolder().catch((err) =>
+          reportAsyncActionFailure("Open download folder", err),
+        );
+      },
       available: () =>
         state.currentSettings.rememberDownloadPath &&
         getRememberedDownloadDir().length > 0,
     },
     {
       id: "export-activity-log",
-      label: "Export Activity Log",
+      label: "Export activity log",
       icon: "save",
-      action: () => void handleExportActivityLog(),
+      action: () => {
+        void handleExportActivityLog().catch((err) =>
+          reportAsyncActionFailure("Export activity log", err),
+        );
+      },
     },
     {
       id: "activity",
-      label: "Toggle Activity Log",
+      label: "Toggle activity log",
       icon: "clipboard-list",
       action: () => toggleActivityLog(),
     },
     {
       id: "settings",
-      label: "Open Settings",
+      label: "Open settings",
       icon: "settings",
       action: () => {
         document.getElementById("settings-btn")?.click();
@@ -1316,18 +1567,20 @@ function wireCommandPalette(): void {
     },
     {
       id: "toggle-inspector",
-      label: "Toggle Inspector",
+      label: "Toggle inspector",
       icon: "sidebar",
-      shortcut: `${accelLabel}⇧I`,
+      shortcut: shortcutLabelFor("Toggle inspector (connected only)"),
       action: () => toggleInspector(),
       available: () => state.connected,
     },
     {
       id: "go-up",
-      label: "Go Up (Parent Folder)",
+      label: "Go up (parent folder)",
       icon: "arrow-up",
       action: () => {
-        void navigateUp();
+        void navigateUp().catch((err) =>
+          reportAsyncActionFailure("Navigate up", err),
+        );
       },
       available: () => state.connected && state.currentPrefix.length > 0,
     },
@@ -1336,7 +1589,11 @@ function wireCommandPalette(): void {
       label: "Back",
       icon: "arrow-left",
       keywords: ["previous", "history"],
-      action: () => void navigateBack(),
+      action: () => {
+        void navigateBack().catch((err) =>
+          reportAsyncActionFailure("Navigate back", err),
+        );
+      },
       available: () => state.connected,
     },
     {
@@ -1344,12 +1601,16 @@ function wireCommandPalette(): void {
       label: "Forward",
       icon: "arrow-right",
       keywords: ["next", "history"],
-      action: () => void navigateForward(),
+      action: () => {
+        void navigateForward().catch((err) =>
+          reportAsyncActionFailure("Navigate forward", err),
+        );
+      },
       available: () => state.connected,
     },
     {
       id: "clear-filter",
-      label: "Clear Filter",
+      label: "Clear filter",
       icon: "x-square",
       keywords: ["reset filter"],
       action: () => clearFilter(),
@@ -1362,7 +1623,7 @@ function wireCommandPalette(): void {
     },
     {
       id: "edit-location",
-      label: "Edit Location",
+      label: "Edit location",
       icon: "compass",
       keywords: ["address bar", "path", "url"],
       action: () => enterLocationEditMode(),
@@ -1370,11 +1631,15 @@ function wireCommandPalette(): void {
     },
     {
       id: "keyboard-shortcuts",
-      label: "Keyboard Shortcuts",
+      label: "Keyboard shortcuts",
       icon: "info",
       shortcut: `${accelLabel}/`,
       keywords: ["keys", "hotkeys", "bindings"],
-      action: () => void openKeyboardShortcuts(),
+      action: () => {
+        void openKeyboardShortcuts().catch((err) =>
+          reportAsyncActionFailure("Open keyboard shortcuts", err),
+        );
+      },
     },
   ]);
 }
@@ -1417,7 +1682,8 @@ export function wireEvents(): void {
       bookmark.region,
       bookmark.access_key,
       bookmark.secret_key,
-    );
+      bookmark.session_token ?? "",
+    ).catch((err) => reportAsyncActionFailure("Open bookmark", err));
   });
 
   wireWindowSizePersistence();

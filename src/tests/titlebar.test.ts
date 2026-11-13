@@ -24,7 +24,7 @@ describe("titlebar", () => {
     document.body.innerHTML = `
       <header class="header">
         <div class="titlebar__main">
-          <div id="bookmark-bar" class="bookmark-bar"></div>
+          <div id="bookmark-bar"></div>
         </div>
         <div class="header__actions"></div>
         <div id="titlebar-win-controls" hidden></div>
@@ -57,7 +57,7 @@ describe("titlebar", () => {
     document.body.innerHTML = `
       <header class="header">
         <div class="titlebar__main">
-          <div id="bookmark-bar" class="bookmark-bar"></div>
+          <div id="bookmark-bar"></div>
         </div>
         <div class="header__actions"></div>
         <div id="titlebar-win-controls" hidden>

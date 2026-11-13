@@ -8,7 +8,11 @@ import {
   markSupportPromptDismissed,
   isSupportPromptDismissed,
 } from "./settings.ts";
-import { loadConnection, setConnectionAccessLocked } from "./connection.ts";
+import {
+  loadConnection,
+  setConnectionAccessLocked,
+  getConnectionLoadError,
+} from "./connection.ts";
 import {
   getBookmarkLoadError,
   loadBookmarks,
@@ -36,6 +40,8 @@ import {
   setConnectionUI,
   setSavedConnectionsLocked,
   setUnlockSavedConnectionsHandler,
+  cancelPendingConnect,
+  cancelPendingTestConnection,
 } from "./app-connection.ts";
 import { clearSessionAfterAutoLock, wireEvents } from "./app-events.ts";
 import {
@@ -44,6 +50,7 @@ import {
 } from "./transfers.ts";
 import { initializeIcons } from "./icons.ts";
 import { wireTitlebar } from "./titlebar.ts";
+import { showToast } from "./toast.ts";
 import {
   enableWindowSizePersistence,
   restoreWindowSize,
@@ -171,6 +178,9 @@ const SAVED_CONNECTIONS_LOCKED_MESSAGE =
 
 function lockSavedConnectionsAtStartup(): void {
   startupLocked = true;
+  cancelPendingConnect();
+  cancelPendingTestConnection();
+  setConnectionAccessLocked(true);
   setSavedConnectionsLocked(true);
   refreshBookmarkBar();
   setStatus(SAVED_CONNECTIONS_LOCKED_MESSAGE);
@@ -223,9 +233,10 @@ async function loadBookmarksIntoBar(): Promise<void> {
     refreshBookmarkBar();
     const loadError = getBookmarkLoadError();
     if (loadError) {
-      const message = `Saved bookmarks could not be loaded (${loadError}) Bookmark changes are disabled so the stored copy is not overwritten.`;
+      const message = `Saved bookmarks could not be loaded (${loadError}) Bookmark changes and export are disabled so the stored copy is not overwritten.`;
       logActivity(message, "warning");
       setStatus(message, 10000);
+      showToast(message, { type: "warning", duration: 10000 });
     }
   } catch (err) {
     console.warn("Failed to load bookmarks:", err);
@@ -244,6 +255,13 @@ async function loadSavedConnectionIntoInputs(): Promise<void> {
         saved.secret_key,
         saved.session_token ?? "",
       );
+      return;
+    }
+    const loadError = getConnectionLoadError();
+    if (loadError) {
+      const message = `Saved connection could not be loaded (${loadError}) Enter credentials to connect.`;
+      logActivity(message, "warning");
+      setStatus(message, 10000);
     }
   } catch (err) {
     setStatus(`Failed to load saved connection: ${String(err)}`);
@@ -297,7 +315,7 @@ export async function init(): Promise<void> {
 
   if (!settingsValid) {
     await showAlert(
-      "Settings Corrupted",
+      "Settings corrupted",
       "The settings file could not be read (it may be from an incompatible version). Settings will be reset to defaults. Your saved connections and last-used connection are unaffected.",
     );
     try {
@@ -343,9 +361,8 @@ export async function init(): Promise<void> {
 
     if (wizardSecurityReady) {
       await loadBookmarksIntoBar();
+      await loadSavedConnectionIntoInputs();
     }
-
-    await loadSavedConnectionIntoInputs();
 
     await initUpdater();
     scheduleAutoCheckUpdates();

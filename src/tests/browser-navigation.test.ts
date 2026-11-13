@@ -32,6 +32,8 @@ vi.mock("../connection.ts", () => ({
 }));
 
 vi.mock("../info-panel.ts", () => ({
+  invalidateInfoPanelCaches: vi.fn(),
+  INFO_PANEL_CLOSED_EVENT: "s3-sidekick:info-panel-closed",
   hasUnsavedInfoChanges: () => false,
   confirmDiscardInfoProperties: async () => true,
 }));
@@ -62,7 +64,7 @@ function renderFixture(): void {
     <button id="nav-forward"></button>
     <button id="nav-up"></button>
     <input id="location-omnibar-edit" type="text" hidden />
-    <button id="btn-download" disabled></button>
+    <button id="batch-download" disabled></button>
     <span id="status"></span>
   `;
 }

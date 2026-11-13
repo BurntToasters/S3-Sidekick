@@ -1,8 +1,21 @@
-import { basename, escapeHtml, formatSize, plural } from "./utils.ts";
+import {
+  basename,
+  escapeHtml,
+  formatSize,
+  friendlyError,
+  plural,
+} from "./utils.ts";
 import { getIconHtml } from "./icons.ts";
+import { iconForFileName, type FileIconName } from "./icon-map.ts";
 import { closeDrawer, isDrawerOpen } from "./bottom-drawer.ts";
-import { handleTabListArrowKey, syncPanelWidths } from "./app-layout.ts";
+import {
+  closeSidebarOnMobile,
+  handleTabListArrowKey,
+  registerMobileSidebarOpenHandler,
+  syncPanelWidths,
+} from "./app-layout.ts";
 import { getSelectionEntries, type SelectionEntry } from "./app-selection.ts";
+import { getSelectableEntries, selectedObjectRevisions } from "./browser.ts";
 import { installInspectorHost } from "./inspector-host.ts";
 import { restoreTableSelectionFromInspector } from "./layout-render-bridge.ts";
 import { canPreview, closePreview, openPreview } from "./preview.ts";
@@ -11,6 +24,7 @@ import {
   confirmDiscardInfoProperties,
   getInfoPanelEntries,
   hasUnsavedInfoChanges,
+  INFO_PANEL_CLOSED_EVENT,
   infoPanelShowsEntries,
   openInfoPanel,
   requestCloseInfoPanel,
@@ -18,6 +32,7 @@ import {
   showInfoPanelTab,
 } from "./info-panel.ts";
 import { state } from "./state.ts";
+import { setStatus } from "./app-status.ts";
 
 export type InspectorInfoTab = "details" | "permissions" | "metadata";
 export type InspectorPaneTab = "preview" | InspectorInfoTab;
@@ -26,6 +41,13 @@ type InspectorSyncReason = "selection" | "tab";
 
 /** The container width from which the inspector defaults to open. */
 const INSPECTOR_DEFAULT_OPEN_CONTAINER = 1280;
+
+/** Surface a rejected inspector action instead of leaving a floating promise. */
+function reportInspectorFailure(label: string, err: unknown): void {
+  const message = `${label} failed: ${friendlyError(err)}`;
+  console.error(message, err);
+  setStatus(message);
+}
 
 let inspectorOpen = false;
 let inspectorTab: InspectorPaneTab = "preview";
@@ -38,12 +60,62 @@ let preferredPaneTab: InspectorPaneTab | null = null;
 let inspectorEmptyActive = true;
 let inspectorSyncGeneration = 0;
 /**
+ * Signature of the last selection whose render finished. The open path syncs
+ * immediately and the browser's next selection tick carries the same entries;
+ * this lets the second sync be skipped without skipping empty selections.
+ */
+let lastCompletedSelectionSignature: string | null = null;
+// Closing the Properties pane removes the content that signature described.
+// Invalidate it so an explicit Cancel/reopen resync renders instead of being
+// mistaken for the browser's duplicate follow-up tick.
+document.addEventListener(INFO_PANEL_CLOSED_EVENT, () => {
+  lastCompletedSelectionSignature = null;
+});
+
+/**
+ * Forget the last completed selection render (H6).
+ *
+ * Manual Refresh re-reads object metadata, but the inspector used to keep its
+ * signature through the refresh, so a same-signature re-selection skipped the
+ * sync and left the panel carrying pre-refresh state — a later tab click then
+ * dropped dirty edits without the discard prompt. Browser invalidation routes
+ * through this reset; lock teardown keeps its own explicit reset as well.
+ */
+export function resetInspectorSelectionSync(): void {
+  lastCompletedSelectionSignature = null;
+  keptEditingRemovedSignature = null;
+}
+/**
  * True while the open state came from the wide-container default rather than
  * a stored or explicit choice, so a later shrink can undo it.
  */
 let inspectorOpenByDefault = false;
 
+const INFO_PANE_IDS: Record<InspectorInfoTab, string> = {
+  details: "inspector-pane-info",
+  permissions: "inspector-pane-permissions",
+  metadata: "inspector-pane-metadata",
+};
+
 const INSPECTOR_OPEN_STORAGE_KEY = "s3-sidekick.inspector.open";
+/** The stored open preference, or null when unset or storage is unavailable. */
+function readInspectorOpenPreference(): string | null {
+  try {
+    return window.localStorage.getItem(INSPECTOR_OPEN_STORAGE_KEY);
+  } catch {
+    // Storage unavailable (private mode); fall back to the default rule.
+    return null;
+  }
+}
+
+function writeInspectorOpenPreference(open: boolean): void {
+  try {
+    window.localStorage.setItem(INSPECTOR_OPEN_STORAGE_KEY, open ? "1" : "0");
+  } catch {
+    // Storage unavailable (private mode); the choice lasts for this session.
+  }
+}
+
 const INSPECTOR_FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -222,7 +294,7 @@ export function restoreInspectorOpenState(): void {
     setInspectorOpen(false);
     return;
   }
-  const stored = window.localStorage.getItem(INSPECTOR_OPEN_STORAGE_KEY);
+  const stored = readInspectorOpenPreference();
   if (stored === "1") {
     setInspectorOpen(true);
   } else if (stored === "0") {
@@ -258,12 +330,16 @@ export function setInspectorTab(tab: InspectorPaneTab): void {
   preferredPaneTab = tab;
   if (inspectorTab === tab) {
     syncInspectorPaneVisibility();
-    void syncInspectorFromSelection(undefined, { reason: "tab" });
+    void syncInspectorFromSelection(undefined, { reason: "tab" }).catch((err) =>
+      reportInspectorFailure("Inspector sync", err),
+    );
     return;
   }
   inspectorTab = tab;
   syncInspectorPaneVisibility();
-  void syncInspectorFromSelection(undefined, { reason: "tab" });
+  void syncInspectorFromSelection(undefined, { reason: "tab" }).catch((err) =>
+    reportInspectorFailure("Inspector sync", err),
+  );
 }
 
 export function markInspectorHasContent(): void {
@@ -284,32 +360,83 @@ function updatePreviewTabAffordance(previewAvailable: boolean): void {
     : "Preview is not available for this selection";
 }
 
+function getInfoPane(tab: InspectorInfoTab): HTMLElement | null {
+  return document.getElementById(INFO_PANE_IDS[tab]);
+}
+
+/**
+ * Details, Permissions and Metadata own separate tabpanels, but the title,
+ * body and footer are one set of nodes. Move them (never clone) into the panel
+ * of the active tab so ids stay unique and unsaved edits survive a tab flip.
+ */
+function moveSharedInfoContent(target: HTMLElement): void {
+  const footer = document.querySelector<HTMLElement>(
+    "#inspector-pane-info .inspector-panel__footer, " +
+      "#inspector-pane-permissions .inspector-panel__footer, " +
+      "#inspector-pane-metadata .inspector-panel__footer",
+  );
+  const shared = [
+    document.getElementById("inspector-info-title"),
+    document.getElementById("inspector-info-body"),
+    footer,
+  ];
+  if (shared.every((node) => node === null || node.parentElement === target)) {
+    return;
+  }
+  // Append in display order; appendChild moves each node, it does not copy it.
+  for (const node of shared) {
+    if (node) target.appendChild(node);
+  }
+}
+
 function syncInspectorPaneVisibility(): void {
   const previewPane = document.getElementById("inspector-pane-preview");
   const infoPane = document.getElementById("inspector-pane-info");
   const empty = document.getElementById("inspector-empty");
   if (!previewPane || !infoPane || !empty) return;
 
+  const infoPanes = Object.values(INFO_PANE_IDS)
+    .map((id) => document.getElementById(id))
+    .filter((pane): pane is HTMLElement => pane !== null);
+  const hasSplitInfoPanes = infoPanes.length > 1;
+  const activeInfoPane =
+    inspectorTab === "preview" ? null : (getInfoPane(inspectorTab) ?? infoPane);
+
+  if (hasSplitInfoPanes) {
+    for (const [tab, id] of Object.entries(INFO_PANE_IDS)) {
+      document
+        .getElementById(id)
+        ?.setAttribute("aria-labelledby", `inspector-tab-${tab}`);
+    }
+  } else if (inspectorTab !== "preview") {
+    // Unit fixtures define only #inspector-pane-info; keep the single panel
+    // naming whichever top-level tab owns it.
+    infoPane.setAttribute("aria-labelledby", `inspector-tab-${inspectorTab}`);
+  }
+
   if (!inspectorOpen) {
     empty.hidden = true;
     previewPane.hidden = true;
-    infoPane.hidden = true;
+    for (const pane of infoPanes) pane.hidden = true;
+    if (activeInfoPane) moveSharedInfoContent(activeInfoPane);
     return;
   }
 
   if (inspectorEmptyActive) {
     empty.hidden = false;
     previewPane.hidden = true;
-    infoPane.hidden = true;
   } else {
     const onPreview = inspectorTab === "preview";
     empty.hidden = true;
     previewPane.hidden = !onPreview;
-    infoPane.hidden = onPreview;
-    if (!onPreview) {
-      infoPane.setAttribute("aria-labelledby", `inspector-tab-${inspectorTab}`);
-    }
   }
+  for (const pane of infoPanes) {
+    pane.hidden =
+      inspectorEmptyActive ||
+      inspectorTab === "preview" ||
+      pane !== activeInfoPane;
+  }
+  if (activeInfoPane) moveSharedInfoContent(activeInfoPane);
 
   const tabs = document.querySelectorAll<HTMLElement>("[data-inspector-tab]");
   for (const tab of tabs) {
@@ -333,15 +460,19 @@ export function setInspectorOpen(
 
   if (!open) {
     inspectorSyncGeneration += 1;
+    lastCompletedSelectionSignature = null;
+    keptEditingRemovedSignature = null;
     releaseMobileInspectorModal(true);
   }
   inspectorOpen = open;
   if (!open) inspectorOpenByDefault = false;
   if (!mobile && options?.persist !== false) {
-    window.localStorage.setItem(INSPECTOR_OPEN_STORAGE_KEY, open ? "1" : "0");
+    writeInspectorOpenPreference(open);
   }
-  if (open && mobile && isDrawerOpen()) {
-    closeDrawer();
+  if (open && mobile) {
+    // Only one off-canvas panel may own the screen.
+    closeSidebarOnMobile();
+    if (isDrawerOpen()) closeDrawer();
   }
 
   if (panel) panel.hidden = !open;
@@ -364,7 +495,9 @@ export function setInspectorOpen(
   syncPanelWidths();
   if (open) {
     if (options?.syncSelection !== false) {
-      void syncInspectorFromSelection();
+      void syncInspectorFromSelection().catch((err) =>
+        reportInspectorFailure("Inspector sync", err),
+      );
     }
   } else {
     inspectorEmptyActive = true;
@@ -376,7 +509,9 @@ export function setInspectorOpen(
 
 export function toggleInspector(): void {
   if (inspectorOpen) {
-    void requestCloseInspector();
+    void requestCloseInspector().catch((err) =>
+      reportInspectorFailure("Close inspector", err),
+    );
   } else {
     inspectorOpenByDefault = false;
     setInspectorOpen(true);
@@ -398,109 +533,17 @@ export function isMobileInspectorMode(): boolean {
 }
 
 export function closeInspectorOnMobile(): void {
-  if (isMobileInspectorMode()) {
-    setInspectorOpen(false);
-  }
-}
-
-type FileIconName =
-  | "folder"
-  | "file"
-  | "file-text"
-  | "file-image"
-  | "file-code"
-  | "file-archive"
-  | "file-video"
-  | "file-audio";
-
-const IMAGE_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "avif",
-  "svg",
-  "ico",
-  "bmp",
-]);
-const TEXT_DATA_EXTENSIONS = new Set([
-  "txt",
-  "md",
-  "csv",
-  "tsv",
-  "json",
-  "xml",
-  "html",
-  "htm",
-  "log",
-]);
-const CODE_EXTENSIONS = new Set([
-  "js",
-  "mjs",
-  "cjs",
-  "ts",
-  "tsx",
-  "jsx",
-  "py",
-  "go",
-  "rs",
-  "java",
-  "c",
-  "cpp",
-  "h",
-  "hpp",
-  "css",
-  "scss",
-  "sh",
-  "bash",
-  "yaml",
-  "yml",
-  "toml",
-  "sql",
-  "rb",
-  "php",
-  "swift",
-  "kt",
-  "lua",
-]);
-const ARCHIVE_EXTENSIONS = new Set([
-  "zip",
-  "tar",
-  "gz",
-  "tgz",
-  "bz2",
-  "xz",
-  "7z",
-  "rar",
-]);
-const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "avi", "mkv", "webm", "m4v"]);
-const AUDIO_EXTENSIONS = new Set([
-  "mp3",
-  "wav",
-  "flac",
-  "ogg",
-  "m4a",
-  "aac",
-  "opus",
-]);
-
-function iconForName(name: string): FileIconName {
-  const trimmed = name.endsWith("/") ? name.slice(0, -1) : name;
-  const dot = trimmed.lastIndexOf(".");
-  const ext = dot > 0 ? trimmed.slice(dot + 1).toLowerCase() : "";
-  if (IMAGE_EXTENSIONS.has(ext)) return "file-image";
-  if (TEXT_DATA_EXTENSIONS.has(ext)) return "file-text";
-  if (CODE_EXTENSIONS.has(ext)) return "file-code";
-  if (ARCHIVE_EXTENSIONS.has(ext)) return "file-archive";
-  if (VIDEO_EXTENSIONS.has(ext)) return "file-video";
-  if (AUDIO_EXTENSIONS.has(ext)) return "file-audio";
-  return "file";
+  if (!isMobileInspectorMode()) return;
+  // Going through the normal close path keeps the discard prompt for unsaved
+  // Properties edits instead of silently dropping them.
+  void requestCloseInspector().catch((err) =>
+    reportInspectorFailure("Close inspector", err),
+  );
 }
 
 function typeIconHtml(name: string, kind: "file" | "folder"): string {
-  const iconName: FileIconName =
-    kind === "folder" ? "folder" : iconForName(name);
+  const iconName: FileIconName | "folder" =
+    kind === "folder" ? "folder" : iconForFileName(name);
   const icon = getIconHtml(iconName, {
     className: "lucide-icon lucide-icon--inline",
     decorative: true,
@@ -539,9 +582,12 @@ function renderInspectorEmpty(): void {
     return;
   }
   const prefix = state.currentPrefix;
-  const fileCount = state.objects.length;
+  // Same counts as the browser statusbar: folder-prefix entries and file
+  // objects only. Count and size ignore folder marker rows.
+  const fileObjects = state.objects.filter((object) => !object.is_folder);
+  const fileCount = fileObjects.length;
   const folderCount = state.prefixes.length;
-  const loadedBytes = state.objects.reduce((sum, o) => sum + o.size, 0);
+  const loadedBytes = fileObjects.reduce((sum, object) => sum + object.size, 0);
   const location = prefix
     ? `${state.currentBucket}/${prefix}`
     : `${state.currentBucket}/`;
@@ -561,10 +607,22 @@ function renderInspectorEmpty(): void {
     .querySelector<HTMLButtonElement>("[data-copy-path]")
     ?.addEventListener("click", () => {
       void navigator.clipboard.writeText(location).then(
-        () => undefined,
+        () => {
+          setStatus("Path copied to clipboard.", 3000);
+        },
         () => undefined,
       );
     });
+}
+
+/**
+ * Recompute the empty inspector summary after the listing changes. Called by
+ * the browser after every render/unload; a no-op unless the empty pane is the
+ * one on screen.
+ */
+export function refreshInspectorEmptySummary(): void {
+  if (!inspectorOpen || !inspectorEmptyActive) return;
+  renderInspectorEmpty();
 }
 
 function previewUnavailableMessage(fileKeys: string[]): string {
@@ -591,6 +649,46 @@ function paneForSelection(singlePreviewable: boolean): InspectorPaneTab {
   return wanted;
 }
 
+/**
+ * Identity of a selection for duplicate-sync suppression. Connection, bucket
+ * and prefix make a reconnect or navigation sync; key/size/modified make an
+ * in-place listing refresh sync even when the same keys stay selected.
+ */
+function selectionSyncSignature(entries: readonly SelectionEntry[]): string {
+  // Reuse the browser's listing-revision index instead of rebuilding a Map of
+  // every object on each selection tick.
+  return JSON.stringify([
+    state.connectionIdentity,
+    state.connectionId,
+    state.currentBucket,
+    state.currentPrefix,
+    selectedObjectRevisions([...entries]),
+  ]);
+}
+
+/**
+ * Record a selection whose render finished. `paneOpenCalls` accounts for the
+ * generation bump ensureInspectorOpenForPane() makes while a preview or info
+ * pane opens; any further bump means a newer sync superseded this one, so its
+ * signature must not overwrite the newer cache entry.
+ */
+function commitCompletedSelection(
+  signature: string,
+  syncGen: number,
+  paneOpenCalls: number,
+): void {
+  if (inspectorSyncGeneration !== syncGen + paneOpenCalls) return;
+  lastCompletedSelectionSignature = signature;
+}
+
+let pendingSelectionSync: number | null = null;
+/**
+ * Signature of an empty selection dismissed with "Keep editing" for an object
+ * the listing no longer has. Further empty ticks must not re-prompt; any new
+ * selection or location changes the signature and re-enables the gate.
+ */
+let keptEditingRemovedSignature: string | null = null;
+
 export async function syncInspectorFromSelection(
   selectedEntries?: readonly SelectionEntry[],
   options?: { reason?: InspectorSyncReason },
@@ -598,8 +696,56 @@ export async function syncInspectorFromSelection(
   if (!inspectorOpen) return;
 
   const reason: InspectorSyncReason = options?.reason ?? "selection";
-  const syncGen = ++inspectorSyncGeneration;
   const entries = selectedEntries ?? getSelectionEntries();
+  const signature = selectionSyncSignature(entries);
+  // A sync already running may be showing an older object. A new request must
+  // cancel it by taking a newer generation even when its signature matches the
+  // last completed render, so A → B → A cannot leave B painted.
+  const syncWasInFlight = pendingSelectionSync !== null;
+  const syncGen = ++inspectorSyncGeneration;
+  pendingSelectionSync = syncGen;
+  try {
+    await performInspectorSync(
+      entries,
+      signature,
+      reason,
+      syncGen,
+      syncWasInFlight,
+    );
+  } finally {
+    if (pendingSelectionSync === syncGen) pendingSelectionSync = null;
+  }
+}
+
+async function performInspectorSync(
+  entries: readonly SelectionEntry[],
+  signature: string,
+  reason: InspectorSyncReason,
+  syncGen: number,
+  syncWasInFlight: boolean,
+): Promise<void> {
+  // Opening the inspector syncs immediately and the browser's following
+  // selection tick repeats it. Skip only that duplicate when nothing else is
+  // in flight; an empty selection must always sync so Deselect All can show
+  // the empty inspector.
+  if (
+    reason === "selection" &&
+    entries.length === 0 &&
+    signature === keptEditingRemovedSignature
+  ) {
+    return;
+  }
+  if (
+    reason === "selection" &&
+    entries.length > 0 &&
+    signature === lastCompletedSelectionSignature &&
+    !syncWasInFlight
+  ) {
+    return;
+  }
+  if (reason === "selection" && entries.length > 0) {
+    keptEditingRemovedSignature = null;
+  }
 
   // A selection change replaces the object that the info pane edits.
   // Unsaved edits must be confirmed first. If the user keeps editing, the
@@ -608,8 +754,22 @@ export async function syncInspectorFromSelection(
     const discard = await confirmDiscardInfoProperties();
     if (syncGen !== inspectorSyncGeneration) return;
     if (!discard) {
-      // Keep editing: the table goes back to the object the pane still shows.
-      restoreTableSelectionFromInspector(getInfoPanelEntries());
+      // Keep editing: restore the table selection only when those rows still
+      // exist. Re-adding a pruned row would recreate the same removal loop.
+      const edited = getInfoPanelEntries();
+      const selectable = new Set(
+        getSelectableEntries().map((entry) => `${entry.kind}:${entry.key}`),
+      );
+      if (
+        edited.length > 0 &&
+        edited.every((entry) => selectable.has(`${entry.kind}:${entry.key}`))
+      ) {
+        restoreTableSelectionFromInspector(edited);
+      } else if (entries.length === 0) {
+        // The edited row is gone and cannot be re-added. Remember this empty
+        // selection so the prune does not ask again on every render tick.
+        keptEditingRemovedSignature = signature;
+      }
       return;
     }
   }
@@ -629,6 +789,7 @@ export async function syncInspectorFromSelection(
     syncInspectorPaneVisibility();
     document.getElementById("inspector-preview-body")?.replaceChildren();
     document.getElementById("preview-body")?.replaceChildren();
+    commitCompletedSelection(signature, syncGen, 0);
     return;
   }
 
@@ -670,11 +831,13 @@ export async function syncInspectorFromSelection(
         await new Promise((resolve) => window.setTimeout(resolve, 180));
         if (syncGen !== inspectorSyncGeneration) return;
         await openPreview(previewKey);
+        commitCompletedSelection(signature, syncGen, 1);
         return;
       }
       focusInspectorInfoPane(pane);
       if (syncGen !== inspectorSyncGeneration) return;
       await openInfoPanel(entries, pane);
+      commitCompletedSelection(signature, syncGen, 1);
       return;
     }
 
@@ -682,21 +845,29 @@ export async function syncInspectorFromSelection(
     if (inspectorTab === "preview") {
       if (singlePreviewable) {
         await openPreview(fileKeys[0]);
+        commitCompletedSelection(signature, syncGen, 1);
         return;
       }
       showPreviewUnavailable(previewUnavailableMessage(fileKeys));
+      commitCompletedSelection(signature, syncGen, 0);
       return;
     }
 
     if (syncGen !== inspectorSyncGeneration) return;
     if (!infoPanelShowsEntries(entries)) {
       await openInfoPanel(entries, inspectorTab);
+      commitCompletedSelection(signature, syncGen, 1);
       return;
     }
     showInfoPanelTab(inspectorTab);
+    commitCompletedSelection(signature, syncGen, 0);
   } catch (err) {
     if (syncGen !== inspectorSyncGeneration) return;
+    // A failed render is not a completed selection: retry on the next tick.
+    lastCompletedSelectionSignature = null;
     console.error("Inspector sync failed:", err);
+    // Never leave the failed object's name over the failure summary.
+    setInspectorHeaderTitle("Inspector");
     renderInspectorEmpty();
     inspectorEmptyActive = true;
     syncInspectorPaneVisibility();
@@ -715,6 +886,7 @@ function showPreviewUnavailable(message: string): void {
 export function wireInspectorChrome(): void {
   if (document.documentElement.dataset.inspectorChromeWired === "1") return;
   document.documentElement.dataset.inspectorChromeWired = "1";
+  registerMobileSidebarOpenHandler(closeInspectorOnMobile);
 
   document.getElementById("btn-inspector")?.addEventListener("click", (e) => {
     e.preventDefault();
@@ -724,11 +896,17 @@ export function wireInspectorChrome(): void {
   document.getElementById("inspector-close")?.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    void requestCloseInspector();
+    void requestCloseInspector().catch((err) =>
+      reportInspectorFailure("Close inspector", err),
+    );
   });
   document
     .getElementById("inspector-backdrop")
-    ?.addEventListener("click", () => void requestCloseInspector());
+    ?.addEventListener("click", () => {
+      void requestCloseInspector().catch((err) =>
+        reportInspectorFailure("Close inspector", err),
+      );
+    });
 
   const inspectorTabs = Array.from(
     document.querySelectorAll<HTMLElement>("[data-inspector-tab]"),
@@ -756,16 +934,18 @@ export function wireInspectorChrome(): void {
   document
     .getElementById("inspector-info-save")
     ?.addEventListener("click", () => {
-      void saveInfoPanel();
+      void saveInfoPanel().catch((err) =>
+        reportInspectorFailure("Save properties", err),
+      );
     });
   document
     .getElementById("inspector-info-cancel")
     ?.addEventListener("click", () => {
       void (async () => {
         if (await requestCloseInfoPanel()) {
-          void syncInspectorFromSelection();
+          await syncInspectorFromSelection();
         }
-      })();
+      })().catch((err) => reportInspectorFailure("Close properties", err));
     });
 
   window.addEventListener("resize", () => {
@@ -776,7 +956,9 @@ export function wireInspectorChrome(): void {
     // it into a modal here would make the listing inert mid-resize. Unsaved
     // edits are still confirmed first.
     if (mobile && layout.classList.contains("main-layout--inspector-docked")) {
-      void requestCloseInspector();
+      void requestCloseInspector().catch((err) =>
+        reportInspectorFailure("Close inspector", err),
+      );
       return;
     }
     // A default-open inspector also gives way when the container narrows
@@ -785,7 +967,9 @@ export function wireInspectorChrome(): void {
       inspectorOpenByDefault &&
       contentContainerWidth() < INSPECTOR_DEFAULT_OPEN_CONTAINER
     ) {
-      setInspectorOpen(false, { persist: false });
+      void requestCloseInspector().catch((err) =>
+        reportInspectorFailure("Close inspector", err),
+      );
       return;
     }
     layout.classList.toggle("main-layout--inspector-open", mobile);
@@ -796,6 +980,7 @@ export function wireInspectorChrome(): void {
     if (backdrop) backdrop.hidden = !inspectorOpen || !mobile;
     if (mobile) {
       if (isDrawerOpen()) closeDrawer();
+      closeSidebarOnMobile();
       acquireMobileInspectorModal();
     } else {
       releaseMobileInspectorModal(false);
@@ -816,17 +1001,20 @@ function watchInspectorDefaultOpen(): void {
   if (typeof ResizeObserver !== "function") return;
   const container = document.querySelector<HTMLElement>(".content-main");
   if (!container) return;
-  const observer = new ResizeObserver(() => {
-    if (inspectorOpen) return;
-    if (isMobileInspectorMode()) return;
-    if (window.localStorage.getItem(INSPECTOR_OPEN_STORAGE_KEY) !== null)
-      return;
-    if (contentContainerWidth() >= INSPECTOR_DEFAULT_OPEN_CONTAINER) {
-      inspectorOpenByDefault = true;
-      setInspectorOpen(true, { persist: false });
-    }
-  });
-  observer.observe(container);
+  try {
+    const observer = new ResizeObserver(() => {
+      if (inspectorOpen) return;
+      if (isMobileInspectorMode()) return;
+      if (readInspectorOpenPreference() !== null) return;
+      if (contentContainerWidth() >= INSPECTOR_DEFAULT_OPEN_CONTAINER) {
+        inspectorOpenByDefault = true;
+        setInspectorOpen(true, { persist: false });
+      }
+    });
+    observer.observe(container);
+  } catch {
+    // Observing is an enhancement; its failure must not abort startup.
+  }
 }
 
 installInspectorHost({

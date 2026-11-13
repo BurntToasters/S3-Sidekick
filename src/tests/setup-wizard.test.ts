@@ -100,8 +100,8 @@ describe("setup wizard", () => {
     const confirm = document.getElementById(
       "setup-enc-confirm",
     ) as HTMLInputElement;
-    password.value = "password123";
-    confirm.value = "password123";
+    password.value = "password1234";
+    confirm.value = "password1234";
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
 
@@ -146,8 +146,8 @@ describe("setup wizard", () => {
     const confirm = document.getElementById(
       "setup-enc-confirm",
     ) as HTMLInputElement;
-    password.value = "password123";
-    confirm.value = "password123";
+    password.value = "password1234";
+    confirm.value = "password1234";
     (
       document.getElementById("setup-enc-biometric") as HTMLInputElement
     ).checked = true;
@@ -242,7 +242,7 @@ describe("setup wizard", () => {
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(document.getElementById("setup-enc-error")?.textContent).toContain(
-      "at least 8 characters",
+      "at least 12 characters",
     );
     expect(
       mockInvoke.mock.calls.filter(([cmd]) => cmd === "initialize_security")
@@ -254,7 +254,7 @@ describe("setup wizard", () => {
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(document.getElementById("setup-enc-error")?.textContent).toContain(
-      "at least 8 characters",
+      "at least 12 characters",
     );
     expect(
       mockInvoke.mock.calls.filter(([cmd]) => cmd === "initialize_security")
@@ -277,7 +277,7 @@ describe("setup wizard", () => {
     const confirm = document.getElementById(
       "setup-enc-confirm",
     ) as HTMLInputElement;
-    password.value = "password123";
+    password.value = "password1234";
     confirm.value = "different456";
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
@@ -325,8 +325,8 @@ describe("setup wizard", () => {
     const confirm = document.getElementById(
       "setup-enc-confirm",
     ) as HTMLInputElement;
-    password.value = "password123";
-    confirm.value = "password123";
+    password.value = "password1234";
+    confirm.value = "password1234";
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(document.getElementById("setup-step-updates")?.hidden).toBe(false);
@@ -352,7 +352,7 @@ describe("setup wizard", () => {
     expect(mockFocusConnectionScreen).toHaveBeenCalledTimes(1);
     expect(mockInvoke).toHaveBeenCalledWith("initialize_security", {
       enableEncryption: true,
-      password: "password123",
+      password: "password1234",
     });
   });
 
@@ -472,8 +472,8 @@ describe("setup wizard", () => {
     const confirm = document.getElementById(
       "setup-enc-confirm",
     ) as HTMLInputElement;
-    password.value = "password123";
-    confirm.value = "password123";
+    password.value = "password1234";
+    confirm.value = "password1234";
     (
       document.getElementById("setup-enc-biometric") as HTMLInputElement
     ).checked = true;
@@ -526,9 +526,9 @@ describe("setup wizard", () => {
     await flushMicrotasks();
 
     (document.getElementById("setup-enc-password") as HTMLInputElement).value =
-      "password123";
+      "password1234";
     (document.getElementById("setup-enc-confirm") as HTMLInputElement).value =
-      "password123";
+      "password1234";
     (
       document.getElementById("setup-enc-biometric") as HTMLInputElement
     ).checked = true;
@@ -565,16 +565,16 @@ describe("setup wizard", () => {
       false,
     );
     (document.getElementById("setup-enc-password") as HTMLInputElement).value =
-      "password123";
+      "password1234";
     (document.getElementById("setup-enc-confirm") as HTMLInputElement).value =
-      "password123";
+      "password1234";
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks(6);
 
     expect(mockInvoke).toHaveBeenCalledWith("set_security_encryption", {
       enableEncryption: true,
       currentPassword: null,
-      newPassword: "password123",
+      newPassword: "password1234",
     });
     expect(
       mockInvoke.mock.calls.filter(([cmd]) => cmd === "initialize_security")
@@ -606,8 +606,8 @@ describe("setup wizard", () => {
     const confirm = document.getElementById(
       "setup-enc-confirm",
     ) as HTMLInputElement;
-    password.value = "password123";
-    confirm.value = "password123";
+    password.value = "password1234";
+    confirm.value = "password1234";
     (document.getElementById("setup-enc-next") as HTMLButtonElement).click();
     await flushMicrotasks();
     expect(document.getElementById("setup-step-updates")?.hidden).toBe(false);

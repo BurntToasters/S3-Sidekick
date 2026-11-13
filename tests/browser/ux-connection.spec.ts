@@ -180,7 +180,7 @@ test.describe("connection screen UX", () => {
     await page.locator(".object-row--file").first().click({ button: "right" });
     await page
       .locator('.context-menu [role="menuitem"]', {
-        hasText: "Copy / Move…",
+        hasText: "Copy / move…",
       })
       .click();
     await page.locator("#copy-move-path").fill("destination/");
@@ -413,6 +413,37 @@ test.describe("connection screen UX", () => {
     await expect(page.locator("#conn-provider-preset")).toHaveValue(
       "cloudflare",
     );
+  });
+
+  // Failure modes covered before implementation (batch D, strings and keys):
+  // - Enter in the Connection name or R2 Account ID field does nothing, so a
+  //   user who finishes typing there and presses Enter sees no validation and
+  //   no connect, unlike Enter in the endpoint field.
+  // - Enter in the R2 Account ID field must run the same validation as Enter
+  //   in the endpoint field before any connect attempt is made.
+  test("Enter in the connection name or R2 Account ID runs connect like the endpoint field", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {});
+    await page.goto("/");
+    await expect(page.locator("#conn-form-error")).toBeHidden();
+
+    await page.locator("#conn-provider-preset").selectOption("cloudflare");
+    const account = page.locator("#conn-r2-account");
+    await expect(account).toBeFocused();
+    await account.fill("abc123");
+    await account.press("Enter");
+    await expect(page.locator("#conn-form-error")).toContainText(
+      "Endpoint, access key, and secret key are required.",
+    );
+    expect(countOf(await readMockCallLog(page), "connect")).toBe(0);
+
+    await page.locator("#conn-access-key").fill("layout-access-key");
+    await page.locator("#conn-secret-key").fill("layout-secret-key");
+    await page.locator("#conn-name").fill("Staging");
+    await page.locator("#conn-name").press("Enter");
+    await expect(page.locator("#main-layout")).toBeVisible();
+    expect(countOf(await readMockCallLog(page), "connect")).toBe(1);
   });
 
   test("saving a connection suggests a provider, region and key-derived name", async ({

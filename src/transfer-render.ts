@@ -20,6 +20,7 @@ export const TRANSFER_TEXT = {
   thisOneOnly: "This one only",
   applyToAllRemaining: "Apply to all remaining conflicts",
   pause: "Pause",
+  pauseUnavailable: "Pause unavailable during upload",
   resume: "Resume",
   cancel: "Cancel",
   cancelling: "Cancelling…",
@@ -305,6 +306,13 @@ function isOwnershipAmbiguous(t: TransferItem): boolean {
   );
 }
 
+function hasReceiptBackedMoveProgress(t: TransferItem): boolean {
+  return (
+    t.operation === "move" &&
+    (t.movePhase === "copied" || (t.receipts?.length ?? 0) > 0)
+  );
+}
+
 function rowControl(
   action: string,
   label: string,
@@ -468,7 +476,7 @@ export function renderTransferRow(
   else if (t.status === "error") statusPlain = "Failed";
   else if (t.status === "skipped") statusPlain = "Skipped";
   else if (t.status === "cancelled") statusPlain = TRANSFER_TEXT.cancelled;
-  else if (isPaused) statusPlain = "Paused";
+  else if (isPaused) statusPlain = options.holdLabel ?? "Paused";
   else if (t.status === "queued") statusPlain = options.holdLabel ?? "Queued";
   const statusText = statusPlain
     ? `<span class="transfer-phase transfer-phase--status">${escapeHtml(statusPlain)}</span>`
@@ -491,7 +499,14 @@ export function renderTransferRow(
       : "transfer-item";
 
   // In-flight uploads would have to restart from zero if interrupted, so
-  // only expose pause for downloads or transfers not yet running.
+  // only expose pause for downloads or transfers not yet running. Show the
+  // disabled control with a visible reason instead of silently omitting it.
+  const pauseBlocked =
+    t.operation === "upload" &&
+    t.status === "uploading" &&
+    !t.paused &&
+    t.phase !== "paused" &&
+    !cancelling;
   const canPause =
     !(t.operation === "upload" && t.status === "uploading" && !t.paused) &&
     (t.status === "queued" || t.status === "uploading" || t.paused);
@@ -504,6 +519,17 @@ export function renderTransferRow(
         "transfer-pause",
         cancelling,
       )
+    : pauseBlocked
+      ? rowControl(
+          "pause",
+          `${TRANSFER_TEXT.pauseUnavailable} for ${t.fileName}`,
+          "pause",
+          "transfer-pause transfer-pause--unavailable",
+          true,
+        )
+      : "";
+  const pauseHint = pauseBlocked
+    ? `<span class="transfer-hint">${escapeHtml(TRANSFER_TEXT.pauseUnavailable)} — Cancel stops it</span>`
     : "";
   const cancelButton =
     t.status === "queued" || t.status === "uploading"
@@ -547,12 +573,22 @@ export function renderTransferRow(
           "transfer-reveal",
         )
       : "";
+  const reselectButton =
+    t.needsReselection && t.status !== "uploading"
+      ? rowControl(
+          "reselect",
+          `Re-select local path for ${t.fileName}`,
+          "folder-open",
+          "transfer-reselect",
+        )
+      : "";
   const removeButton =
     (t.status === "done" ||
       t.status === "error" ||
       t.status === "skipped" ||
       t.status === "cancelled") &&
-    !ambiguous
+    !ambiguous &&
+    !hasReceiptBackedMoveProgress(t)
       ? rowControl(
           "remove",
           `${TRANSFER_TEXT.remove} ${t.fileName} from the list`,
@@ -584,10 +620,11 @@ export function renderTransferRow(
     (attemptLabel ||
     phaseLabel ||
     statusText ||
+    pauseHint ||
     speedLabel ||
     etaLabel ||
     partsLabel
-      ? `<div class="transfer-meta">${statusText}${attemptLabel}${phaseLabel}${speedLabel}${etaLabel}${partsLabel}</div>`
+      ? `<div class="transfer-meta">${statusText}${attemptLabel}${phaseLabel}${pauseHint}${speedLabel}${etaLabel}${partsLabel}</div>`
       : "") +
     progressBar +
     errorLine +
@@ -597,6 +634,7 @@ export function renderTransferRow(
     retryButton +
     copyErrorButton +
     revealButton +
+    reselectButton +
     removeButton +
     `</div>`
   );

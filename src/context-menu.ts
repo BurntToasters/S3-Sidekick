@@ -21,19 +21,74 @@ export interface MenuSeparator {
 
 export type MenuItem = MenuAction | MenuSeparator;
 
+/**
+ * Why a menu closed. Action clicks are reported as "action"; Escape, Tab,
+ * outside clicks, scroll/resize and programmatic closes report "dismiss".
+ * Existing callers that ignore the argument keep working because a zero-arg
+ * callback is assignable to this signature.
+ */
+export type ContextMenuDismissReason = "action" | "dismiss";
+
 let activeMenu: HTMLElement | null = null;
-let dismissHandler: ((e: MouseEvent) => void) | null = null;
+let dismissHandler: ((e: Event) => void) | null = null;
+let viewportHandler: ((e: Event) => void) | null = null;
 let keyHandler: ((e: KeyboardEvent) => void) | null = null;
 let restoreFocusTarget: HTMLElement | null = null;
-let dismissCallback: (() => void) | null = null;
+let dismissCallback: ((reason: ContextMenuDismissReason) => void) | null = null;
 let reasonSequence = 0;
+
+function closeContextMenu(reason: ContextMenuDismissReason): boolean {
+  const menu = activeMenu;
+  const activeElement = document.activeElement;
+  const wasOpen = menu !== null;
+  const onDismiss = dismissCallback;
+
+  if (activeMenu) {
+    activeMenu.remove();
+    activeMenu = null;
+  }
+  dismissCallback = null;
+  if (dismissHandler) {
+    document.removeEventListener("pointerdown", dismissHandler);
+    document.removeEventListener("mousedown", dismissHandler);
+    dismissHandler = null;
+  }
+  if (viewportHandler) {
+    window.removeEventListener("resize", viewportHandler);
+    window.removeEventListener("scroll", viewportHandler, true);
+    viewportHandler = null;
+  }
+  if (keyHandler) {
+    document.removeEventListener("keydown", keyHandler);
+    keyHandler = null;
+  }
+  // Return focus to the invoker when the menu was dismissed without moving
+  // focus somewhere else (click actions own their own focus behavior).
+  const target = restoreFocusTarget;
+  restoreFocusTarget = null;
+  if (
+    target &&
+    target.isConnected &&
+    (activeElement === document.body ||
+      activeElement === menu ||
+      (menu !== null &&
+        activeElement instanceof Node &&
+        menu.contains(activeElement)))
+  ) {
+    target.focus();
+  }
+
+  onDismiss?.(reason);
+
+  return wasOpen;
+}
 
 export function showContextMenu(
   x: number,
   y: number,
   items: MenuItem[],
   onAction: (action: string) => void,
-  onDismiss?: () => void,
+  onDismiss?: (reason: ContextMenuDismissReason) => void,
 ): void {
   hideContextMenu();
   restoreFocusTarget =
@@ -43,14 +98,19 @@ export function showContextMenu(
   dismissCallback = onDismiss ?? null;
 
   const menu = document.createElement("div");
+  menu.id = "context-menu";
   menu.className = "context-menu";
   menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "Context menu");
+  // Measure while invisible so the first frame never paints at 0,0.
+  menu.style.visibility = "hidden";
 
   for (const item of items) {
     if (item.separator) {
       const sep = document.createElement("div");
       sep.className = "context-menu__sep";
       sep.setAttribute("role", "separator");
+      sep.setAttribute("aria-orientation", "horizontal");
       menu.appendChild(sep);
       continue;
     }
@@ -70,6 +130,16 @@ export function showContextMenu(
       });
       btn.appendChild(icon);
     }
+    const isDisabled = !!item.disabled;
+    if (isDisabled) {
+      // Keep the item focusable so keyboard and screen-reader users can reach
+      // the reason text; aria-disabled carries the state without removing it
+      // from the arrow-key order.
+      btn.setAttribute("aria-disabled", "true");
+      btn.classList.add("context-menu__item--disabled");
+      btn.style.opacity = "0.55";
+      btn.style.cursor = "not-allowed";
+    }
     const label = document.createElement("span");
     label.className = "context-menu__label";
     label.textContent = item.label;
@@ -81,10 +151,15 @@ export function showContextMenu(
       hint.textContent = item.shortcut;
       btn.appendChild(hint);
     }
-    btn.disabled = !!item.disabled;
+    btn.disabled = false;
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      hideContextMenu();
+      if (isDisabled) {
+        // A disabled item explains itself instead of firing.
+        btn.focus();
+        return;
+      }
+      closeContextMenu("action");
       onAction(item.action);
     });
     menu.appendChild(btn);
@@ -106,13 +181,23 @@ export function showContextMenu(
   const rect = menu.getBoundingClientRect();
   const vw = window.innerWidth;
   const vh = window.innerHeight;
+  // A custom titlebar owns the top strip of the viewport. The offset is
+  // published by modals.css; non-titlebar shells fall back to zero.
+  const titlebarOffset = Number.parseFloat(
+    window.getComputedStyle(menu).getPropertyValue("--context-menu-top-offset"),
+  );
+  const safeTop =
+    Number.isFinite(titlebarOffset) && titlebarOffset > 0
+      ? titlebarOffset + 4
+      : 4;
   if (x + rect.width > vw) x = vw - rect.width - 4;
   if (y + rect.height > vh) y = vh - rect.height - 4;
-  if (x < 0) x = 4;
-  if (y < 0) y = 4;
+  if (x < 4) x = 4;
+  if (y < safeTop) y = safeTop;
 
   menu.style.left = x + "px";
   menu.style.top = y + "px";
+  menu.style.visibility = "";
 
   activeMenu = menu;
 
@@ -129,7 +214,7 @@ export function showContextMenu(
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      hideContextMenu();
+      closeContextMenu("dismiss");
       return;
     }
     if (e.key === "Tab") {
@@ -137,7 +222,7 @@ export function showContextMenu(
       // returns focus to the element that opened it instead of trapping the
       // user in a menu that has no surrounding document order.
       e.preventDefault();
-      hideContextMenu();
+      closeContextMenu("dismiss");
       return;
     }
     if (
@@ -163,61 +248,41 @@ export function showContextMenu(
     }
   };
 
-  dismissHandler = (e: MouseEvent) => {
+  dismissHandler = (e: Event) => {
     if (!menu.contains(e.target as Node)) {
-      hideContextMenu();
+      closeContextMenu("dismiss");
     }
   };
+  viewportHandler = (e: Event) => {
+    // Scrolling inside a tall menu is not a viewport change.
+    if (
+      e.type === "scroll" &&
+      e.target instanceof Node &&
+      menu.contains(e.target)
+    ) {
+      return;
+    }
+    closeContextMenu("dismiss");
+  };
   const pendingDismiss = dismissHandler;
+  const pendingViewport = viewportHandler;
   const pendingKey = keyHandler;
   setTimeout(() => {
-    if (dismissHandler === pendingDismiss && pendingDismiss) {
-      document.addEventListener("mousedown", pendingDismiss);
-    }
-    if (keyHandler === pendingKey && pendingKey) {
-      document.addEventListener("keydown", pendingKey);
-    }
+    // A later menu (or a hide) supersedes this deferred registration.
+    if (activeMenu !== menu) return;
+    // pointerdown is the primary dismissal path; mousedown keeps older
+    // WebViews (and synthetic tests) working. The first event removes both
+    // listeners, so a gesture never hides the same menu twice.
+    document.addEventListener("pointerdown", pendingDismiss);
+    document.addEventListener("mousedown", pendingDismiss);
+    document.addEventListener("keydown", pendingKey);
+    window.addEventListener("resize", pendingViewport);
+    window.addEventListener("scroll", pendingViewport, true);
   }, 0);
 }
 
 export function hideContextMenu(): boolean {
-  const menu = activeMenu;
-  const activeElement = document.activeElement;
-  const wasOpen = menu !== null;
-  const onDismiss = dismissCallback;
-
-  if (activeMenu) {
-    activeMenu.remove();
-    activeMenu = null;
-  }
-  dismissCallback = null;
-  if (dismissHandler) {
-    document.removeEventListener("mousedown", dismissHandler);
-    dismissHandler = null;
-  }
-  if (keyHandler) {
-    document.removeEventListener("keydown", keyHandler);
-    keyHandler = null;
-  }
-  // Return focus to the invoker when the menu was dismissed without moving
-  // focus somewhere else (click actions own their own focus behavior).
-  const target = restoreFocusTarget;
-  restoreFocusTarget = null;
-  if (
-    target &&
-    target.isConnected &&
-    (activeElement === document.body ||
-      activeElement === menu ||
-      (menu !== null &&
-        activeElement instanceof Node &&
-        menu.contains(activeElement)))
-  ) {
-    target.focus();
-  }
-
-  onDismiss?.();
-
-  return wasOpen;
+  return closeContextMenu("dismiss");
 }
 
 /** Returns whether a transient context menu is currently mounted. */

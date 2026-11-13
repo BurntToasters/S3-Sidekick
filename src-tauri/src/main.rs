@@ -9,6 +9,7 @@ mod ipc_acl;
 #[cfg(test)]
 mod ipc_contract;
 mod lock_order;
+mod path_authority;
 mod platform;
 mod s3;
 mod security;
@@ -367,6 +368,41 @@ pub(crate) fn try_lock_storage_ops() -> Result<StorageOpsGuard, String> {
     })
 }
 
+/// Create an application-owned directory with owner-only permissions.
+///
+/// The app data directory holds credentials and transfer state. Unix creation
+/// uses 0700 so the files inside are not exposed by the directory's mode even
+/// before each file is written with 0600. An existing writable directory is
+/// tightened best-effort; deliberately read-only directories are left alone so
+/// failure-path tests can still make writes fail.
+pub(crate) fn ensure_private_dir(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::PermissionsExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path).map_err(|err| err.to_string())?;
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            let permissions = metadata.permissions();
+            if metadata.file_type().is_dir()
+                && permissions.mode() & 0o200 != 0
+                && permissions.mode() & 0o077 != 0
+            {
+                let mut tightened = permissions;
+                tightened.set_mode(0o700);
+                let _ = std::fs::set_permissions(path, tightened);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path).map_err(|err| err.to_string())
+    }
+}
+
 /// Resolve the app data directory, honouring the test-only override.
 ///
 /// On Windows, Tauri uses the Known Folder API for `app_data_dir()`, which
@@ -376,10 +412,28 @@ pub(crate) fn try_lock_storage_ops() -> Result<StorageOpsGuard, String> {
 pub(crate) fn resolved_app_data_dir<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<std::path::PathBuf, String> {
-    #[cfg(test)]
-    if let Some(dir) = std::env::var_os("S3_SIDEKICK_TEST_APP_DATA") {
+    // Test-only app-data override. Unit tests use it directly; the Windows
+    // startup E2E runs a release exe, so honour it only when the E2E trace flag
+    // is also set. Both variables are process-local environment values, and a
+    // local process that can set them can already write as this user.
+    let test_app_data = {
+        let configured = std::env::var_os("S3_SIDEKICK_TEST_APP_DATA");
+        #[cfg(test)]
+        {
+            configured
+        }
+        #[cfg(not(test))]
+        {
+            if std::env::var("S3_SIDEKICK_E2E_STARTUP_TRACE").as_deref() == Ok("1") {
+                configured
+            } else {
+                None
+            }
+        }
+    };
+    if let Some(dir) = test_app_data {
         let path = std::path::PathBuf::from(dir);
-        std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+        ensure_private_dir(&path)?;
         return Ok(path);
     }
 
@@ -387,7 +441,7 @@ pub(crate) fn resolved_app_data_dir<R: tauri::Runtime, M: tauri::Manager<R>>(
         .path()
         .app_data_dir()
         .map_err(|e: tauri::Error| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    ensure_private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -564,7 +618,7 @@ fn transfer_checkpoint_dir<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<PathBuf, String> {
     let checkpoints = resolved_app_data_dir(app)?.join("transfer-checkpoints");
-    std::fs::create_dir_all(&checkpoints).map_err(|e| e.to_string())?;
+    ensure_private_dir(&checkpoints)?;
     Ok(checkpoints)
 }
 
@@ -869,7 +923,7 @@ fn parse_user_path(raw: &str, label: &str) -> Result<PathBuf, String> {
 /// `file:stream` syntax outside the drive prefix) all name a different file
 /// than the user sees. Enforced only on Windows so Linux/macOS keep their
 /// native naming rules.
-fn validate_windows_file_name(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_windows_file_name(path: &Path) -> Result<(), String> {
     if !cfg!(target_os = "windows") {
         return Ok(());
     }
@@ -878,63 +932,78 @@ fn validate_windows_file_name(path: &Path) -> Result<(), String> {
             std::path::Component::Normal(os) => os.to_string_lossy().to_string(),
             _ => continue,
         };
-        if name.ends_with(' ') || name.ends_with('.') {
-            return Err(format!(
-                "Path must not end a file or directory name with a space or dot: {}",
-                path.display()
-            ));
-        }
-        if name
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
-        {
-            return Err(format!(
-                "Path contains characters Windows does not allow: {}",
-                path.display()
-            ));
-        }
-        let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-        let reserved = matches!(
-            stem.as_str(),
-            "CON"
-                | "PRN"
-                | "AUX"
-                | "NUL"
-                | "COM1"
-                | "COM2"
-                | "COM3"
-                | "COM4"
-                | "COM5"
-                | "COM6"
-                | "COM7"
-                | "COM8"
-                | "COM9"
-                | "LPT1"
-                | "LPT2"
-                | "LPT3"
-                | "LPT4"
-                | "LPT5"
-                | "LPT6"
-                | "LPT7"
-                | "LPT8"
-                | "LPT9"
-        );
-        if reserved {
-            return Err(format!(
-                "Path uses a Windows reserved device name: {}",
-                path.display()
-            ));
-        }
-        // Check every path segment, not just the file name: a colon in a
-        // parent directory (`dir:stream\file.txt`) is the same ADS syntax.
-        // The drive prefix (`C:`) is a Prefix component, not Normal, so it
-        // is unaffected by this check.
-        if name.contains(':') {
-            return Err(format!(
-                "Path must not contain ':' (Alternate Data Stream syntax): {}",
-                path.display()
-            ));
-        }
+        validate_portable_component(&name, path)?;
+    }
+    Ok(())
+}
+
+/// Windows-portable rules for a renderer-supplied child name.
+///
+/// A name saved on macOS/Linux must still be openable if the folder is later
+/// used from Windows, so download child names enforce these rules on every
+/// host. The full user path check above stays Windows-only: `:` and a trailing
+/// dot are legitimate on other platforms and the user explicitly picked that
+/// path (M10).
+pub(crate) fn validate_portable_child_name(name: &str) -> Result<(), String> {
+    validate_portable_component(name, Path::new(name))
+}
+
+fn validate_portable_component(name: &str, display: &Path) -> Result<(), String> {
+    if name.ends_with(' ') || name.ends_with('.') {
+        return Err(format!(
+            "Path must not end a file or directory name with a space or dot: {}",
+            display.display()
+        ));
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+    {
+        return Err(format!(
+            "Path contains characters Windows does not allow: {}",
+            display.display()
+        ));
+    }
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if reserved {
+        return Err(format!(
+            "Path uses a Windows reserved device name: {}",
+            display.display()
+        ));
+    }
+    // Check every path segment, not just the file name: a colon in a parent
+    // directory (`dir:stream\file.txt`) is the same ADS syntax. The drive
+    // prefix (`C:`) is a Prefix component, not Normal, so it is unaffected.
+    if name.contains(':') {
+        return Err(format!(
+            "Path must not contain ':' (Alternate Data Stream syntax): {}",
+            display.display()
+        ));
     }
     Ok(())
 }
@@ -982,11 +1051,13 @@ pub(crate) fn detect_case_fold_collision(
 ) -> Result<(), String> {
     let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for (fold_key, original) in pairs {
-        let folded = fold_key.to_lowercase();
+        // APFS also treats NFC/NFD spellings as the same file. Normalizing
+        // before case folding catches both collision classes.
+        let folded = files::normalize_nfc(&fold_key).to_lowercase();
         if let Some(first) = seen.get(&folded) {
             if first != &original {
                 return Err(format!(
-                    "Case-insensitive volume collision in {}: '{}' and '{}' map to the same file",
+                    "Case-insensitive or normalization-equivalent volume collision in {}: '{}' and '{}' map to the same file",
                     what, first, original
                 ));
             }
@@ -1027,6 +1098,29 @@ pub(crate) fn lock_vault_file(app_data_dir: &Path) -> Result<VaultFileGuard, Str
     })
 }
 
+/// Fail closed when link metadata cannot be read.
+fn path_is_link_or_reparse(path: &Path) -> Result<bool, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(format!("Cannot inspect path '{}': {}", path.display(), err));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(true);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn validate_existing_path(raw: &str, label: &str) -> Result<PathBuf, String> {
     let path = parse_user_path(raw, label)?;
     if !path.exists() {
@@ -1041,13 +1135,9 @@ pub(crate) fn validate_existing_path(raw: &str, label: &str) -> Result<PathBuf, 
 /// read outside the path the user selected.
 pub(crate) fn validate_upload_source_path(raw: &str) -> Result<PathBuf, String> {
     let path = validate_existing_path(raw, "Upload file")?;
-    if path
-        .symlink_metadata()
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+    if path_is_link_or_reparse(&path)? {
         return Err(format!(
-            "Upload file is a symbolic link: {}",
+            "Upload file is a symbolic link or reparse point: {}",
             path.display()
         ));
     }
@@ -1057,16 +1147,15 @@ pub(crate) fn validate_upload_source_path(raw: &str) -> Result<PathBuf, String> 
     Ok(path)
 }
 
-pub(crate) fn validate_destination_path(raw: &str) -> Result<PathBuf, String> {
-    let destination = parse_user_path(raw, "Destination")?;
-    validate_destination_parent(&destination)?;
+pub(crate) fn validate_destination_path_parsed(destination: &Path) -> Result<(), String> {
+    validate_destination_parent(destination)?;
     if destination.exists() {
         return Err(format!(
             "Destination already exists: {}",
             destination.display()
         ));
     }
-    Ok(destination)
+    Ok(())
 }
 
 fn validate_destination_parent(destination: &Path) -> Result<(), String> {
@@ -1088,13 +1177,9 @@ fn validate_destination_parent(destination: &Path) -> Result<(), String> {
             parent.display()
         ));
     }
-    if parent
-        .symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+    if path_is_link_or_reparse(parent)? {
         return Err(format!(
-            "Destination parent is a symbolic link: {}",
+            "Destination parent is a symbolic link or reparse point: {}",
             parent.display()
         ));
     }
@@ -1103,14 +1188,17 @@ fn validate_destination_parent(destination: &Path) -> Result<(), String> {
 
 pub(crate) fn validate_destination_path_allow_overwrite(raw: &str) -> Result<PathBuf, String> {
     let destination = parse_user_path(raw, "Destination")?;
-    validate_destination_parent(&destination)?;
-    if destination
-        .symlink_metadata()
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+    validate_destination_path_allow_overwrite_parsed(&destination)?;
+    Ok(destination)
+}
+
+pub(crate) fn validate_destination_path_allow_overwrite_parsed(
+    destination: &Path,
+) -> Result<(), String> {
+    validate_destination_parent(destination)?;
+    if path_is_link_or_reparse(destination)? {
         return Err(format!(
-            "Destination is a symbolic link: {}",
+            "Destination is a symbolic link or reparse point: {}",
             destination.display()
         ));
     }
@@ -1120,13 +1208,44 @@ pub(crate) fn validate_destination_path_allow_overwrite(raw: &str) -> Result<Pat
             destination.display()
         ));
     }
-    Ok(destination)
+    Ok(())
 }
 
+/// Existence probe for a granted local path.
+///
+/// The webview no longer names a path; it spends a token minted by the picker
+/// that chose the path. The answer is a boolean only, so an arbitrary path
+/// cannot be probed for disclosure.
+///
+/// A child name is not a general query capability. Only a download-destination
+/// directory, resolved through the write capability that owns child joins, may
+/// bind one validated component; every other grant answers for its exact path
+/// only. This keeps an upload-folder or reveal grant from becoming an
+/// existence oracle for sibling names.
 #[tauri::command(async)]
-fn path_exists(path: String) -> Result<bool, String> {
-    let parsed = parse_user_path(&path, "Path")?;
-    Ok(parsed.exists())
+fn path_exists(token: String, name: Option<String>) -> Result<bool, String> {
+    let child = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let granted = match child {
+        Some(child) => {
+            path_authority::resolve(&token, path_authority::GrantUse::WriteDownload, Some(child))?
+        }
+        None => path_authority::authorize(&token, path_authority::GrantUse::QueryPath)?,
+    };
+    Ok(granted.path.exists())
+}
+
+/// Resolve a download destination grant into the exact file path.
+fn resolve_download_destination(token: &str, name: Option<&str>) -> Result<PathBuf, String> {
+    let granted = path_authority::resolve(token, path_authority::GrantUse::WriteDownload, name)?;
+    if granted.is_dir {
+        return Err(
+            "Download destination must include a file name; choose the file again.".to_string(),
+        );
+    }
+    Ok(granted.path)
 }
 
 /// Suffix that marks a file as an in-progress download owned by this app.
@@ -1182,6 +1301,20 @@ fn owned_download_temps() -> &'static Mutex<std::collections::HashMap<PathBuf, P
 #[derive(Debug)]
 pub(crate) struct DownloadTempGuard {
     temp_path: PathBuf,
+    /// Destination-parent identity pinned by the claim. Publication calls
+    /// [`DownloadTempGuard::verify_parent_unchanged`] immediately before the
+    /// rename so a parent swapped for a symlink cannot redirect the write.
+    parent_identity: DestinationParentIdentity,
+    // Dropping this handle releases the OS lock. The lock file itself stays
+    // behind (zero bytes) because unlinking it could race a new owner.
+    _lock_file: std::fs::File,
+}
+
+impl DownloadTempGuard {
+    /// Destination-parent identity pinned at claim time, for publication.
+    pub(crate) fn parent_identity(&self) -> DestinationParentIdentity {
+        self.parent_identity.clone()
+    }
 }
 
 impl Drop for DownloadTempGuard {
@@ -1190,6 +1323,31 @@ impl Drop for DownloadTempGuard {
             owned.remove(&self.temp_path);
         }
     }
+}
+
+/// Lock file derived from an already-validated scratch path.
+///
+/// The caller never supplies this path: `claim_download_temp` rejects any
+/// `temp_path` that is not `download_temp_path(destination)`, so the lock
+/// always sits beside a backend-derived scratch file.
+fn download_temp_lock_path(temp_path: &Path) -> PathBuf {
+    let mut lock = temp_path.as_os_str().to_os_string();
+    lock.push(".lock");
+    PathBuf::from(lock)
+}
+
+/// `LockFileEx` reports a held byte range as ERROR_LOCK_VIOLATION (33).
+/// Rust maps it to `WouldBlock` on most versions, but treat the raw code as
+/// contention as well so a platform mapping change cannot turn a locked
+/// scratch into a hard failure.
+#[cfg(windows)]
+fn is_lock_violation(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(33)
+}
+
+#[cfg(not(windows))]
+fn is_lock_violation(_err: &std::io::Error) -> bool {
+    false
 }
 
 pub(crate) fn claim_download_temp(
@@ -1204,18 +1362,52 @@ pub(crate) fn claim_download_temp(
     }
     let temp_identity = download_path_identity(temp_path)?;
     let destination_identity = download_path_identity(destination)?;
+    let lock_path = download_temp_lock_path(temp_path);
     let mut owned = owned_download_temps()
         .lock()
         .map_err(|_| "Download scratch ownership state is unavailable".to_string())?;
+    // Fast path: this process already owns the scratch. Also avoids opening
+    // the OS lock twice for one guard.
     if owned.contains_key(&temp_identity) {
         return Err(format!(
             "Download scratch path is already in use: {}",
             temp_path.display()
         ));
     }
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|err| {
+            format!(
+                "Failed to open download scratch lock '{}': {}",
+                lock_path.display(),
+                err
+            )
+        })?;
+    match fs2::FileExt::try_lock_exclusive(&lock_file) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock || is_lock_violation(&err) => {
+            return Err(format!(
+                "Download scratch already in use: {}",
+                temp_path.display()
+            ));
+        }
+        Err(err) => {
+            return Err(format!(
+                "Failed to lock download scratch '{}': {}",
+                lock_path.display(),
+                err
+            ));
+        }
+    }
+    let parent_identity = destination_parent_identity(destination)?;
     owned.insert(temp_identity.clone(), destination_identity);
     Ok(DownloadTempGuard {
         temp_path: temp_identity,
+        parent_identity,
+        _lock_file: lock_file,
     })
 }
 
@@ -1243,7 +1435,7 @@ struct DownloadScratchLease {
 
 fn download_lease_dir<R: tauri::Runtime, M: tauri::Manager<R>>(app: &M) -> Result<PathBuf, String> {
     let dir = resolved_app_data_dir(app)?.join("download-leases");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    ensure_private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -1406,13 +1598,9 @@ pub(crate) fn clear_unusable_download_scratch(temp_path: &Path) -> Result<(), St
             temp_path.display()
         ));
     }
-    if temp_path
-        .symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+    if path_is_link_or_reparse(temp_path)? {
         return Err(format!(
-            "Refusing to remove a symbolic link: {}",
+            "Refusing to remove a symbolic link or reparse point: {}",
             temp_path.display()
         ));
     }
@@ -1422,11 +1610,10 @@ pub(crate) fn clear_unusable_download_scratch(temp_path: &Path) -> Result<(), St
 
 fn discard_download_scratch_for_destination<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
-    destination: &str,
+    destination: &Path,
 ) -> Result<(), String> {
-    let destination = parse_user_path(destination, "Destination")?;
-    let temp_path = download_temp_path(&destination);
-    let lease_path = match download_lease_path(app, &destination) {
+    let temp_path = download_temp_path(destination);
+    let lease_path = match download_lease_path(app, destination) {
         Ok(path) => path,
         // The destination folder is gone (unplugged drive, deleted folder), so
         // no scratch file can exist beside it. Any orphaned lease is reclaimed
@@ -1440,7 +1627,7 @@ fn discard_download_scratch_for_destination<R: tauri::Runtime>(
     // A running download owns this scratch and its lease. Removing them would
     // fail that download (and its resume state); its own completion or
     // cancellation path cleans up instead.
-    if is_claimed_download_temp(&temp_path, &destination) {
+    if is_claimed_download_temp(&temp_path, destination) {
         return Ok(());
     }
     let lease_authorizes = if lease_path.exists() {
@@ -1448,7 +1635,7 @@ fn discard_download_scratch_for_destination<R: tauri::Runtime>(
             Ok(json) => match serde_json::from_str::<DownloadScratchLease>(&json) {
                 Ok(lease) => {
                     Path::new(&lease.temp_path) == temp_path
-                        && Path::new(&lease.destination) == destination.as_path()
+                        && Path::new(&lease.destination) == destination
                 }
                 Err(_) => false,
             },
@@ -1472,8 +1659,13 @@ fn discard_download_scratch_for_destination<R: tauri::Runtime>(
 
 fn discard_download_scratch_blocking(
     app: tauri::AppHandle,
-    destination: String,
+    destination_token: String,
+    destination_name: Option<String>,
 ) -> Result<(), String> {
+    // Resolve before taking the storage lock: a bad token is not a storage
+    // operation and must fail closed without touching any file.
+    let destination =
+        resolve_download_destination(&destination_token, destination_name.as_deref())?;
     let _storage_guard = lock_storage_meta()?;
     discard_download_scratch_for_destination(&app, &destination)
 }
@@ -1484,20 +1676,513 @@ fn discard_download_scratch_blocking(
 #[tauri::command]
 async fn discard_download_scratch(
     app: tauri::AppHandle,
-    destination: String,
+    destination_token: String,
+    destination_name: Option<String>,
 ) -> Result<(), String> {
-    security::run_blocking(move || discard_download_scratch_blocking(app, destination)).await
+    security::run_blocking(move || {
+        discard_download_scratch_blocking(app, destination_token, destination_name)
+    })
+    .await
 }
 
-/// Extensions `write_text_file` is permitted to produce.
+/// Extensions a backend-issued text export grant is permitted to produce.
 ///
-/// The command exists to export the activity log. Restricting the extension
-/// keeps it from being used to drop a shell profile, a launch agent, or a
-/// script onto disk if the webview is ever compromised.
+/// The command exists to export the activity log and saved connections.
+/// Restricting the extension keeps it from being used to drop a shell profile,
+/// a launch agent, or a script onto disk if the webview is ever compromised.
 const WRITABLE_TEXT_EXTENSIONS: &[&str] = &["txt", "log", "json", "csv", "md"];
 
-// Only the ownership tests exercise this now; production cleanup goes through
-// `discard_download_scratch`.
+/// File names the vault, settings, saved connection and recovery state use.
+/// Even a granted export may not overwrite them.
+const RESERVED_APP_FILE_NAMES: &[&str] = &[
+    "settings.json",
+    "settings.json.bak",
+    "bookmarks.json",
+    "bookmarks-backup.json",
+    "connection.json",
+    "security.json",
+    "security.json.lock",
+    "security-migration.journal",
+    "transfer-manifest.json",
+];
+
+/// The path a native dialog handed back, plus the grant that authorizes later
+/// commands to spend it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PickedPath {
+    token: String,
+    path: String,
+    name: String,
+    is_dir: bool,
+    /// Size recorded when the grant was minted, when known. Recovery uses it
+    /// to reject a re-selected upload that only shares a name.
+    size: Option<u64>,
+    /// Reveal grant for the containing directory, so "Open download folder"
+    /// keeps working after a single-file save.
+    directory_token: Option<String>,
+    directory_path: Option<String>,
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| files::root_label(path))
+}
+
+fn pick_view(
+    purpose: path_authority::GrantPurpose,
+    path: &Path,
+    is_dir: bool,
+    expected_len: Option<u64>,
+    with_directory: bool,
+) -> Result<PickedPath, String> {
+    // The dialog should only ever return absolute paths, but never trust the
+    // platform bridge blindly.
+    let path = parse_user_path(&path.to_string_lossy(), "Selected path")?;
+    let (directory_token, directory_path) = if with_directory && !is_dir {
+        match path.parent() {
+            Some(parent) if parent.is_dir() => {
+                let parent_text = files::absolute_path_string_no_follow(parent);
+                let token = path_authority::mint(
+                    path_authority::GrantPurpose::Reveal,
+                    Path::new(&parent_text),
+                    true,
+                    None,
+                );
+                (Some(token), Some(parent_text))
+            }
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    let token = path_authority::mint(purpose, &path, is_dir, expected_len);
+    Ok(PickedPath {
+        token,
+        path: files::absolute_path_string_no_follow(&path),
+        name: display_name(&path),
+        is_dir,
+        size: expected_len,
+        directory_token,
+        directory_path,
+    })
+}
+
+fn suggested_file_name(name: Option<String>) -> Option<String> {
+    name.map(|value| value.trim().to_string())
+        .filter(|value| path_authority::is_valid_child_name(value))
+}
+
+fn picker_paths(files: Option<Vec<tauri_plugin_dialog::FilePath>>) -> Vec<PathBuf> {
+    files
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|file| file.into_path().ok())
+        .collect()
+}
+
+/// Turn a renderer hint into a dialog starting directory.
+///
+/// The hint is presentation only: it never mints a grant, and an invalid or
+/// non-directory hint simply leaves the dialog at its platform default.
+fn picker_default_directory(default_path: Option<String>) -> Option<PathBuf> {
+    let parsed = parse_user_path(default_path.as_deref()?, "Picker default").ok()?;
+    let directory = if parsed.is_dir() {
+        parsed
+    } else {
+        parsed.parent()?.to_path_buf()
+    };
+    directory.is_dir().then_some(directory)
+}
+
+/// Native picker for one or more upload files. The only minting path for
+/// `upload-file` grants; the renderer supplies no paths.
+#[tauri::command]
+async fn pick_upload_files(
+    app: tauri::AppHandle,
+    default_path: Option<String>,
+) -> Result<Vec<PickedPath>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let default_directory = picker_default_directory(default_path);
+    let paths = security::run_blocking(move || {
+        let mut dialog = app.dialog().file().set_title("Select files to upload");
+        if let Some(directory) = default_directory {
+            dialog = dialog.set_directory(directory);
+        }
+        Ok(picker_paths(dialog.blocking_pick_files()))
+    })
+    .await?;
+    let mut picked = Vec::new();
+    for path in paths {
+        let validated = validate_upload_source_path(&path.to_string_lossy())?;
+        let len = validated
+            .metadata()
+            .map_err(|err| format!("Cannot read file metadata: {}", err))?
+            .len();
+        picked.push(pick_view(
+            path_authority::GrantPurpose::UploadFile,
+            &validated,
+            false,
+            Some(len),
+            false,
+        )?);
+    }
+    Ok(picked)
+}
+
+/// Native picker for one or more upload folders. Each folder becomes an
+/// `upload-root` grant; the recursive scan may never leave these roots.
+#[tauri::command]
+async fn pick_upload_folder(
+    app: tauri::AppHandle,
+    default_path: Option<String>,
+) -> Result<Vec<PickedPath>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let default_directory = picker_default_directory(default_path);
+    let paths = security::run_blocking(move || {
+        let mut dialog = app.dialog().file().set_title("Select folder(s) to upload");
+        if let Some(directory) = default_directory {
+            dialog = dialog.set_directory(directory);
+        }
+        Ok(picker_paths(dialog.blocking_pick_folders()))
+    })
+    .await?;
+    let mut picked = Vec::new();
+    for path in paths {
+        let validated = parse_user_path(&path.to_string_lossy(), "Selected folder")?;
+        if !validated.is_dir() {
+            return Err(format!(
+                "Selected path is not a folder: {}",
+                validated.display()
+            ));
+        }
+        let granted = path_authority::GrantedPath {
+            path: validated.clone(),
+            is_dir: true,
+            expected_len: None,
+            canonical_identity: std::fs::canonicalize(&validated).ok(),
+            identity_path: validated.clone(),
+        };
+        granted.reject_symlink()?;
+        picked.push(pick_view(
+            path_authority::GrantPurpose::UploadRoot,
+            &validated,
+            true,
+            None,
+            false,
+        )?);
+    }
+    Ok(picked)
+}
+
+/// Native save dialog for a single download destination.
+#[tauri::command]
+async fn pick_download_file(
+    app: tauri::AppHandle,
+    file_name: Option<String>,
+    title: Option<String>,
+    default_directory: Option<String>,
+) -> Result<Option<PickedPath>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let suggested = suggested_file_name(file_name);
+    let title = title
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Save download".to_string());
+    let default_directory = picker_default_directory(default_directory);
+    let path = security::run_blocking(move || {
+        let mut dialog = app.dialog().file().set_title(title);
+        if let Some(directory) = default_directory {
+            dialog = dialog.set_directory(directory);
+        }
+        if let Some(name) = suggested {
+            dialog = dialog.set_file_name(name);
+        }
+        Ok(dialog
+            .blocking_save_file()
+            .and_then(|file| file.into_path().ok()))
+    })
+    .await?;
+    match path {
+        Some(path) => {
+            let validated = validate_destination_path_allow_overwrite(&path.to_string_lossy())?;
+            Ok(Some(pick_view(
+                path_authority::GrantPurpose::DownloadDestination,
+                &validated,
+                false,
+                None,
+                true,
+            )?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Native folder picker for a multi-object download destination (or for
+/// re-opening the remembered download folder).
+#[tauri::command]
+async fn pick_download_directory(
+    app: tauri::AppHandle,
+    title: Option<String>,
+    default_directory: Option<String>,
+) -> Result<Option<PickedPath>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let title = title
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Select destination folder".to_string());
+    let default_directory = picker_default_directory(default_directory);
+    let path = security::run_blocking(move || {
+        let mut dialog = app.dialog().file().set_title(title);
+        if let Some(directory) = default_directory {
+            dialog = dialog.set_directory(directory);
+        }
+        Ok(dialog
+            .blocking_pick_folder()
+            .and_then(|file| file.into_path().ok()))
+    })
+    .await?;
+    match path {
+        Some(path) => {
+            let validated = parse_user_path(&path.to_string_lossy(), "Selected folder")?;
+            if !validated.is_dir() {
+                return Err(format!(
+                    "Selected path is not a folder: {}",
+                    validated.display()
+                ));
+            }
+            path_authority::GrantedPath {
+                path: validated.clone(),
+                is_dir: true,
+                expected_len: None,
+                canonical_identity: std::fs::canonicalize(&validated).ok(),
+                identity_path: validated.clone(),
+            }
+            .reject_symlink()?;
+            Ok(Some(pick_view(
+                path_authority::GrantPurpose::DownloadDestination,
+                &validated,
+                true,
+                None,
+                false,
+            )?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Native save dialog for a text export. The grant it returns is the only way
+/// `export_text_file` can name a destination.
+#[tauri::command]
+async fn pick_text_export(
+    app: tauri::AppHandle,
+    file_name: Option<String>,
+    title: Option<String>,
+    default_directory: Option<String>,
+) -> Result<Option<PickedPath>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let suggested = suggested_file_name(file_name);
+    let title = title
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Export text".to_string());
+    let default_directory = picker_default_directory(default_directory);
+    let dialog_app = app.clone();
+    let path = security::run_blocking(move || {
+        let mut dialog = dialog_app
+            .dialog()
+            .file()
+            .set_title(title)
+            .add_filter("Text", WRITABLE_TEXT_EXTENSIONS);
+        if let Some(directory) = default_directory {
+            dialog = dialog.set_directory(directory);
+        }
+        Ok(dialog
+            .set_file_name(suggested.unwrap_or_else(|| "export.txt".to_string()))
+            .blocking_save_file()
+            .and_then(|file| file.into_path().ok()))
+    })
+    .await?;
+    match path {
+        Some(path) => {
+            // Validate the extension and final path while the picker context
+            // is still fresh; never mint a grant the export command will
+            // reject after the user has already dismissed the dialog.
+            let app_data = resolved_app_data_dir(&app).ok();
+            validate_export_target(&path, app_data.as_deref())?;
+            Ok(Some(pick_view(
+                path_authority::GrantPurpose::ExportText,
+                &path,
+                false,
+                None,
+                false,
+            )?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Hand the webview the grants for the most recent native drag-drop.
+///
+/// The paths come from `WindowEvent::DragDrop` in this process, not from the
+/// renderer, so a compromised webview cannot use this command to authorize an
+/// arbitrary path.
+#[tauri::command]
+async fn take_dropped_upload_grants() -> Result<Vec<path_authority::DroppedPathGrant>, String> {
+    Ok(path_authority::take_native_drop_grants())
+}
+
+/// Guard a backend write that a granted path authorized.
+///
+/// A dialog grant is user consent for one item, not for the vault, settings,
+/// or the recovery manifest inside the app's private data directory.
+pub(crate) fn validate_user_write_target<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    path: &Path,
+) -> Result<(), String> {
+    if let Ok(app_data) = resolved_app_data_dir(app) {
+        if path_is_within_app_data(path, &app_data) {
+            return Err(
+                "Refusing to write into the application's private data directory.".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Compare a write target with the app data directory after resolving both.
+///
+/// The final component may not exist yet, so resolve its parent and append the
+/// file name. macOS and Windows compare case-insensitively, matching the
+/// default volume behavior there.
+fn path_is_within_app_data(path: &Path, app_data: &Path) -> bool {
+    fn resolved(path: &Path) -> Option<PathBuf> {
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            return Some(canonical);
+        }
+        let parent = path.parent()?;
+        let name = path.file_name()?;
+        Some(std::fs::canonicalize(parent).ok()?.join(name))
+    }
+
+    let (Some(path), Some(app_data)) = (resolved(path), resolved(app_data)) else {
+        // If either side cannot be resolved, keep the old lexical guard rather
+        // than silently treating the target as outside app data.
+        return path.starts_with(app_data);
+    };
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        let path = path.to_string_lossy().to_lowercase();
+        let app_data = app_data.to_string_lossy().to_lowercase();
+        path == app_data
+            || path
+                .strip_prefix(&app_data)
+                .is_some_and(|rest| rest.starts_with(std::path::MAIN_SEPARATOR))
+    } else {
+        path.starts_with(app_data)
+    }
+}
+
+fn validate_export_target(path: &Path, app_data: Option<&Path>) -> Result<(), String> {
+    let parsed = parse_user_path(&path.to_string_lossy(), "Export destination")?;
+    if let Some(parent) = parsed.parent() {
+        if !parent.exists() || !parent.is_dir() {
+            return Err(format!(
+                "Export folder does not exist: {}",
+                parent.display()
+            ));
+        }
+        let parent_metadata = parent.symlink_metadata().map_err(|err| {
+            format!(
+                "Cannot inspect export folder '{}': {}",
+                parent.display(),
+                err
+            )
+        })?;
+        if parent_metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing to write inside a symbolic link: {}",
+                parent.display()
+            ));
+        }
+    }
+    match parsed.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "Refusing to write through a symbolic link: {}",
+                parsed.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(format!(
+                "Cannot inspect export destination '{}': {}",
+                parsed.display(),
+                err
+            ));
+        }
+    }
+    if parsed.exists() && !parsed.is_file() {
+        return Err(format!(
+            "Export destination is not a file: {}",
+            parsed.display()
+        ));
+    }
+    let extension = parsed
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !WRITABLE_TEXT_EXTENSIONS.contains(&extension.as_str()) {
+        return Err(format!(
+            "Text export must use one of these extensions: {}",
+            WRITABLE_TEXT_EXTENSIONS.join(", ")
+        ));
+    }
+    // Reserved state names only matter inside app data. A user exporting
+    // `~/Documents/settings.json` is not touching the vault and must not be
+    // blocked just because the file name matches.
+    if let Some(app_data) = app_data {
+        if path_is_within_app_data(&parsed, app_data) {
+            let file_name = parsed
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+                .unwrap_or_default();
+            if RESERVED_APP_FILE_NAMES.contains(&file_name.as_str()) {
+                return Err(format!(
+                    "Refusing to export over application state: {}",
+                    parsed.display()
+                ));
+            }
+            return Err(
+                "Refusing to export into the application's private data directory.".to_string(),
+            );
+        }
+    }
+    validate_windows_file_name(&parsed)?;
+    Ok(())
+}
+
+fn write_export_text(path: &Path, text: &str, app_data: Option<&Path>) -> Result<(), String> {
+    validate_export_target(path, app_data)?;
+    atomic_write_with_overwrite(path, text, true)
+}
+
+/// Write exported text to a granted destination.
+///
+/// The save dialog already asked about replacing an existing file, so a grant
+/// carries that consent; the renderer cannot nominate a path or bypass the
+/// extension/reserved-name guards.
+#[tauri::command(async)]
+fn export_text_file(app: tauri::AppHandle, token: String, text: String) -> Result<(), String> {
+    let granted = path_authority::authorize(&token, path_authority::GrantUse::ExportText)?;
+    if granted.is_dir {
+        return Err("Export destination must be a file, not a folder.".to_string());
+    }
+    let app_data = resolved_app_data_dir(&app).ok();
+    write_export_text(&granted.path, &text, app_data.as_deref())
+}
+
 #[cfg(test)]
 fn remove_owned_download_temp(
     path: &str,
@@ -1523,47 +2208,13 @@ fn remove_owned_download_temp(
             parsed.display()
         ));
     }
-    if parsed
-        .symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+    if path_is_link_or_reparse(&parsed)? {
         return Err(format!(
-            "Refusing to remove a symbolic link: {}",
+            "Refusing to remove a symbolic link or reparse point: {}",
             parsed.display()
         ));
     }
     std::fs::remove_file(&parsed).map_err(|e| e.to_string())
-}
-
-#[tauri::command(async)]
-fn write_text_file(path: String, text: String, overwrite: bool) -> Result<(), String> {
-    let parsed = validate_destination_path_allow_overwrite(&path)?;
-    let extension = parsed
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .unwrap_or_default();
-    if !WRITABLE_TEXT_EXTENSIONS.contains(&extension.as_str()) {
-        return Err(format!(
-            "Text export must use one of these extensions: {}",
-            WRITABLE_TEXT_EXTENSIONS.join(", ")
-        ));
-    }
-    if parsed
-        .symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(format!(
-            "Refusing to write through a symbolic link: {}",
-            parsed.display()
-        ));
-    }
-    if parsed.exists() && !overwrite {
-        return Err(format!("Destination already exists: {}", parsed.display()));
-    }
-    atomic_write_with_overwrite(&parsed, &text, overwrite)
 }
 
 fn transfer_checkpoint_remove_blocking(
@@ -1717,6 +2368,69 @@ fn transfer_checkpoint_gc_blocking(
     Ok(removed)
 }
 
+/// Hard ceiling for a checkpoint-less download lease, independent of the
+/// caller-configured checkpoint retention. A lease with no surviving
+/// checkpoint is orphaned scratch; the user-facing TTL can be raised to 30
+/// days, so the startup sweep uses the larger of the two. The checkpoint GC
+/// path passes the user TTL; the startup path uses this constant.
+pub(crate) const DOWNLOAD_LEASE_STARTUP_MAX_AGE_SECS: u64 = 30 * 24 * 3600;
+
+fn download_lease_age_exceeds(
+    modified: std::time::SystemTime,
+    now: std::time::SystemTime,
+    max_age: std::time::Duration,
+) -> bool {
+    now.duration_since(modified).is_ok_and(|age| age > max_age)
+}
+
+/// Startup reaping of lease-tracked download scratch.
+///
+/// Runs once at launch (not on every webview navigation): the same
+/// [`sweep_unreferenced_download_leases`] the checkpoint GC uses, with the
+/// keep-set built from every checkpoint still on disk. A lease whose scratch
+/// another live process holds survives the sweep via the OS lock check.
+/// Leases older than [`DOWNLOAD_LEASE_STARTUP_MAX_AGE_SECS`] are reaped even
+/// when a checkpoint of unknown age happens to reference them — no resumable
+/// download is kept that long. Locked vaults keep every lease: checkpoint
+/// payloads cannot be read without the key, so the reference set is unknown
+/// and deleting on a guess could orphan a resumable download.
+pub(crate) fn sweep_orphaned_download_leases_at_startup<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) {
+    let app_handle = app.app_handle();
+    let Ok(security) = load_security_config(app_handle) else {
+        return;
+    };
+    if security.encryption_enabled && crate::security::require_unlocked_key().is_err() {
+        return;
+    }
+    let mut kept_destinations: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let now = std::time::SystemTime::now();
+    let max_age = std::time::Duration::from_secs(DOWNLOAD_LEASE_STARTUP_MAX_AGE_SECS);
+    // Collect surviving checkpoints first; the sweep below needs only their
+    // destinations, and a fresh checkpoint protects its lease regardless of
+    // the lease file's own age.
+    if let Ok(paths) = transfer_checkpoint_files(app_handle) {
+        for path in paths {
+            let modified = path
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok());
+            let expired =
+                modified.is_some_and(|time| download_lease_age_exceeds(time, now, max_age));
+            if expired {
+                continue;
+            }
+            if let Ok(json) = read_checkpoint_json(&path, &security) {
+                if let Ok(Some(scratch)) = checkpoint_scratch_path(&json) {
+                    kept_destinations.insert(scratch.destination);
+                }
+            }
+        }
+    }
+    let _ = sweep_unreferenced_download_leases(app, &kept_destinations);
+}
+
 // Runs on the blocking pool: plain sync commands run on the main thread,
 // where waiting for the storage lock (held through PBKDF2 during a password
 // change) or disk I/O would freeze the window.
@@ -1731,6 +2445,23 @@ async fn transfer_checkpoint_gc(
         transfer_checkpoint_gc_blocking(app, ttl_hours, keep_checkpoint_ids, recovery_session)
     })
     .await
+}
+
+/// Validate a lease into the only scratch path it may delete.
+///
+/// A lease is not authority to name a file: the scratch must be derived from
+/// its own destination, and that destination must still pass the same checks
+/// a live download would apply.
+fn lease_scratch_target(lease: &DownloadScratchLease) -> Option<(PathBuf, PathBuf)> {
+    let destination = parse_user_path(&lease.destination, "Lease destination").ok()?;
+    let temp_path = parse_user_path(&lease.temp_path, "Lease scratch").ok()?;
+    if temp_path != download_temp_path(&destination) {
+        return None;
+    }
+    if validate_destination_path_allow_overwrite_parsed(&destination).is_err() {
+        return None;
+    }
+    Some((destination, temp_path))
 }
 
 /// Remove download leases (and their derived scratch) that no surviving
@@ -1767,18 +2498,22 @@ fn sweep_unreferenced_download_leases<R: tauri::Runtime, M: tauri::Manager<R>>(
         if keep_destinations.contains(&lease.destination) {
             continue;
         }
-        if let Ok(temp_path) = parse_user_path(&lease.temp_path, "Lease scratch") {
-            // Leases are written before the first checkpoint, so a running
-            // download (possibly started before a webview reload) can have a
-            // lease that no checkpoint references yet.
-            if is_claimed_download_temp(&temp_path, Path::new(&lease.destination)) {
-                continue;
-            }
-            // Per-entry failures keep the lease for the next sweep instead of
-            // failing recovery.
-            if temp_path.exists() && clear_unusable_download_scratch(&temp_path).is_err() {
-                continue;
-            }
+        // A lease is only authority to delete the scratch path derived from
+        // its own validated destination. Anything else is retained, not
+        // treated as an arbitrary deletion request.
+        let Some((destination, temp_path)) = lease_scratch_target(&lease) else {
+            continue;
+        };
+        // Acquire the same OS lock a live download holds. If another owner
+        // has it (possibly from another process), the lease is live and must
+        // survive this sweep.
+        let Ok(_scratch_guard) = claim_download_temp(&temp_path, &destination) else {
+            continue;
+        };
+        // Per-entry failures keep the lease for the next sweep instead of
+        // failing recovery.
+        if temp_path.exists() && clear_unusable_download_scratch(&temp_path).is_err() {
+            continue;
         }
         let _ = std::fs::remove_file(&path);
     }
@@ -1786,17 +2521,15 @@ fn sweep_unreferenced_download_leases<R: tauri::Runtime, M: tauri::Manager<R>>(
 }
 
 #[tauri::command(async)]
-fn get_available_disk_bytes(path: String) -> Result<u64, String> {
-    let parsed = parse_user_path(&path, "Path")?;
-    let target = if parsed.exists() {
-        if parsed.is_dir() {
-            parsed
-        } else {
-            parsed
-                .parent()
-                .ok_or_else(|| format!("Path has no parent directory: {}", parsed.display()))?
-                .to_path_buf()
-        }
+fn get_available_disk_bytes(token: String) -> Result<u64, String> {
+    // Free space is only reported for a path the user already granted; the
+    // command cannot be used to probe arbitrary volumes. The grant is spent
+    // exactly as issued: there is no child-name argument here.
+    let parsed = path_authority::authorize(&token, path_authority::GrantUse::QueryPath)?.path;
+    // A file or a not-yet-created destination reports the free space of its
+    // containing directory; a directory reports its own volume.
+    let target = if parsed.is_dir() {
+        parsed
     } else {
         parsed
             .parent()
@@ -1859,6 +2592,62 @@ async fn save_settings(app: tauri::AppHandle, json: String) -> Result<(), String
     .await
 }
 
+#[derive(serde::Serialize)]
+struct BookmarkFileState {
+    present: bool,
+    contents: String,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct BookmarksState {
+    primary: BookmarkFileState,
+    backup: BookmarkFileState,
+}
+
+fn read_bookmark_state(
+    path: &std::path::Path,
+    security: &security::SecurityConfig,
+) -> BookmarkFileState {
+    match std::fs::metadata(path) {
+        Ok(_) => match security::read_protected_file(path, "", security) {
+            Ok(contents) => BookmarkFileState {
+                present: true,
+                contents,
+                error: None,
+            },
+            Err(error) => BookmarkFileState {
+                present: true,
+                contents: String::new(),
+                error: Some(error),
+            },
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => BookmarkFileState {
+            present: false,
+            contents: String::new(),
+            error: None,
+        },
+        Err(err) => BookmarkFileState {
+            present: true,
+            contents: String::new(),
+            error: Some(format!("Could not inspect '{}': {}", path.display(), err)),
+        },
+    }
+}
+
+#[tauri::command]
+async fn load_bookmarks_state(app: tauri::AppHandle) -> Result<BookmarksState, String> {
+    security::run_blocking(move || {
+        let _storage_guard = lock_storage_meta()?;
+        let security = load_security_config(&app)?;
+        Ok(BookmarksState {
+            primary: read_bookmark_state(&bookmarks_path(&app)?, &security),
+            backup: read_bookmark_state(&bookmarks_backup_path(&app)?, &security),
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 async fn load_bookmarks(app: tauri::AppHandle) -> Result<String, String> {
     security::run_blocking(move || {
@@ -1908,6 +2697,10 @@ fn save_connection_blocking(
     let _storage_guard = lock_storage_meta()?;
     let s3 = lock_s3_state(&state)?;
     s3::require_connection_session(&s3, &connection_id)?;
+    let persisted_identity = s3::persisted_connection_identity(&json)?;
+    if s3.connection_identity.as_deref() != Some(persisted_identity.as_str()) {
+        return Err("Saved connection does not match the active session".to_string());
+    }
     let path = connection_path(&app)?;
     let security = load_security_config(&app)?;
     write_protected_file(&path, &json, &security)
@@ -1925,7 +2718,21 @@ async fn save_connection(
     security::run_blocking(move || save_connection_blocking(app, connection_id, json)).await
 }
 
-fn clear_saved_connection_blocking(app: tauri::AppHandle) -> Result<(), String> {
+/// A reset may proceed when no live session exists; when one does, the caller
+/// must name it exactly. A stale or missing id is a distinct refusal so the UI
+/// can tell the user to disconnect and retry instead of showing a generic
+/// failure.
+fn require_reset_session(expected: Option<&str>, current: Option<&str>) -> Result<(), String> {
+    match current {
+        Some(current) if expected != Some(current) => Err(s3::STALE_CONNECTION_SESSION.to_string()),
+        _ => Ok(()),
+    }
+}
+
+fn clear_saved_connection_file(
+    app: tauri::AppHandle,
+    expected_connection_id: Option<String>,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     // Same global order as `save_connection` (storage -> S3). Serializing
     // against credential saves and invalidating the session after the write
@@ -1933,6 +2740,10 @@ fn clear_saved_connection_blocking(app: tauri::AppHandle) -> Result<(), String> 
     // credentials that this reset removed.
     let _storage_guard = lock_storage_meta()?;
     let mut s3 = lock_s3_state(&state)?;
+    require_reset_session(
+        expected_connection_id.as_deref(),
+        s3.connection_id.as_deref(),
+    )?;
     let path = connection_path(&app)?;
     // Delete rather than write an empty (encrypted) payload: removal needs no
     // vault key, so "Reset settings" works while storage is locked instead of
@@ -1945,9 +2756,50 @@ fn clear_saved_connection_blocking(app: tauri::AppHandle) -> Result<(), String> 
 // Runs on the blocking pool: plain sync commands run on the main thread,
 // where waiting for the storage lock (held through PBKDF2 during a password
 // change) or disk I/O would freeze the window.
+//
+// A reset can run with no active session (after a disconnect, a failed
+// connect, or while locked). In that case there is no newer session to
+// protect, so credentials are still removed even when no connection id is
+// supplied; a supplied id is only compared while a session exists.
 #[tauri::command]
-async fn clear_saved_connection(app: tauri::AppHandle) -> Result<(), String> {
-    security::run_blocking(move || clear_saved_connection_blocking(app)).await
+async fn clear_saved_connection(
+    app: tauri::AppHandle,
+    connection_id: Option<String>,
+) -> Result<(), String> {
+    let requested = connection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let (mut gate, tokens) = s3::close_transfer_registry()?;
+    let current = {
+        let state = app.state::<AppState>();
+        let current = match lock_s3_state(&state) {
+            Ok(s3) => s3.connection_id.clone(),
+            Err(err) => {
+                gate.reopen();
+                return Err(err);
+            }
+        };
+        current
+    };
+    if let Err(err) = require_reset_session(requested.as_deref(), current.as_deref()) {
+        gate.reopen();
+        return Err(err);
+    }
+    s3::cancel_tokens(tokens);
+    if let Err(err) = s3::cancel_all_registered_transfers("saved connection reset").await {
+        // Nothing has been removed yet, so a timeout leaves the session and
+        // settings intact and the user can retry the reset.
+        gate.reopen();
+        return Err(err);
+    }
+
+    let expected = current.clone();
+    let result = security::run_blocking(move || clear_saved_connection_file(app, expected)).await;
+    gate.reopen();
+    result?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2071,24 +2923,111 @@ pub(crate) fn make_temp_path(path: &Path, purpose: &str) -> PathBuf {
     path.with_extension(extension)
 }
 
+/// Filesystems that do not implement directory fsync report one of these.
+#[cfg(unix)]
+fn directory_sync_failure_is_unsupported(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+    )
+}
+
+/// Restrict a private file to its owner on Windows.
+///
+/// App data is user-profile-scoped, but files written to a shared or synced
+/// volume can inherit a DACL that lets other principals read the vault,
+/// checkpoints, or marked-up manifests. Set a protected DACL granting full
+/// access only to the owner (the `OW` owner-rights SID, no token query),
+/// LOCAL SYSTEM, and Builtin Administrators (M10).
+#[cfg(windows)]
+pub(crate) fn harden_private_file(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows::Win32::Security::{
+        SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+
+    const SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)";
+    let sddl: Vec<u16> = SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            1,
+            &mut descriptor,
+            None,
+        )
+        .map_err(|err| format!("Failed to build a private file DACL: {}", err))?;
+    }
+    let wide: Vec<u16> = to_extended_windows_path(path)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let applied = unsafe {
+        SetFileSecurityW(
+            PCWSTR(wide.as_ptr()),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    };
+    unsafe {
+        LocalFree(HLOCAL(descriptor.0));
+    }
+    if !applied.as_bool() {
+        return Err(format!(
+            "Failed to restrict '{}' to its owner: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn harden_private_file(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 /// Flush directory metadata after creating, replacing, or removing an entry.
+///
+/// This is the strict form used for vault, checkpoint, and journal
+/// publication: a directory entry that cannot be flushed is not durable, and
+/// reporting success would lose the vault after a power failure on vFAT,
+/// exFAT, FUSE, or SMB. Only the download path may downgrade this to a
+/// warning.
 #[cfg(unix)]
 fn fsync_directory(dir: &std::path::Path) -> Result<(), String> {
     let file = std::fs::File::open(dir).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
+}
+
+/// Download-only variant: an unsupported directory fsync must not turn a
+/// successfully published file into a reported failure.
+#[cfg(unix)]
+fn fsync_directory_best_effort(dir: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::File::open(dir).map_err(|e| e.to_string())?;
     match file.sync_all() {
         Ok(()) => Ok(()),
-        // vfat/exFAT/FUSE/SMB reject directory fsync with EINVAL/ENOTSUP.
-        // The rename is already visible to readers; reporting failure here
-        // would mark a successful download as failed.
-        Err(err)
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
-            ) =>
-        {
+        Err(err) if directory_sync_failure_is_unsupported(&err) => {
+            eprintln!(
+                "Directory '{}' does not support fsync; the published download may not survive a power loss: {}",
+                dir.display(),
+                err
+            );
             Ok(())
         }
-        Err(err) => Err(err.to_string()),
+        Err(err) => {
+            eprintln!(
+                "Directory '{}' could not be flushed after publishing a download; the file is visible but may not survive a power loss: {}",
+                dir.display(),
+                err
+            );
+            Ok(())
+        }
     }
 }
 
@@ -2162,6 +3101,142 @@ pub(crate) fn fsync_parent(path: &std::path::Path) -> Result<(), String> {
             Err(e) => Err(e.to_string()),
         }
     }
+}
+
+/// Download-destination variant of [`fsync_parent`].
+///
+/// The file is already published; an unsupported or failing directory flush
+/// must not be reported as a failed download. It is logged so a power-loss
+/// risk remains visible.
+pub(crate) fn fsync_parent_best_effort(path: &std::path::Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    #[cfg(unix)]
+    {
+        fsync_directory_best_effort(parent)
+    }
+
+    #[cfg(windows)]
+    {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(file) => {
+                if let Err(err) = file.sync_all() {
+                    eprintln!(
+                        "Published download '{}' could not be flushed; it may not survive a power loss: {}",
+                        path.display(),
+                        err
+                    );
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(err) = fsync_directory(parent) {
+                    eprintln!(
+                        "Download directory '{}' could not be flushed; the removal may not survive a power loss: {}",
+                        parent.display(),
+                        err
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!(
+                    "Published download '{}' could not be opened for flushing; it may not survive a power loss: {}",
+                    path.display(),
+                    e
+                );
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = parent;
+        Ok(())
+    }
+}
+
+/// Identity of the directory that will receive a published download.
+///
+/// Captured when the download claims its scratch file and re-checked
+/// immediately before publication. The canonical path catches a parent
+/// swapped for a symlink; the device/inode pair catches a different real
+/// directory mounted at the same path on Unix. Windows stable directory ids
+/// need a separate handle query and remain the documented residual.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DestinationParentIdentity {
+    canonical: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+pub(crate) fn destination_parent_identity(
+    destination: &std::path::Path,
+) -> Result<DestinationParentIdentity, String> {
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "Destination must include a parent directory: {}",
+            destination.display()
+        )
+    })?;
+    let canonical = std::fs::canonicalize(parent).map_err(|err| {
+        format!(
+            "Failed to resolve destination parent '{}': {}",
+            parent.display(),
+            err
+        )
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|err| {
+        format!(
+            "Failed to inspect destination parent '{}': {}",
+            canonical.display(),
+            err
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Destination parent is not a directory: {}",
+            canonical.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(DestinationParentIdentity {
+            canonical,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(DestinationParentIdentity { canonical })
+    }
+}
+
+/// Re-check the destination parent immediately before a rename.
+pub(crate) fn verify_destination_parent_identity(
+    destination: &std::path::Path,
+    expected: &DestinationParentIdentity,
+) -> Result<(), String> {
+    let current = destination_parent_identity(destination)?;
+    if &current != expected {
+        return Err(format!(
+            "Destination parent directory changed while the download was running; publication was \
+             refused: {}",
+            destination.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Create-only move for Windows volumes where hard links are unavailable.
@@ -2347,6 +3422,51 @@ fn publish_temp_file_create_only_with(
 /// `keep_temp_on_failure` disables the consuming Windows move fallback for a
 /// checkpointed download. Ambiguous create-only publication failures retain the
 /// scratch regardless, because deleting its pathname cannot be made ownership-safe.
+/// Download publication: same rename, but the destination parent was pinned
+/// at scratch-claim time and the directory flush is best-effort.
+///
+/// `fsync_parent` is strict because vault/checkpoint callers must not lose a
+/// published file silently. A download destination the user picked can live on
+/// vFAT, FUSE, or SMB, and a failed directory flush there must not turn a
+/// completed file into a reported failure. Callers verify the destination
+/// parent identity immediately before invoking this.
+pub(crate) fn publish_download_temp_file(
+    temp_path: &std::path::Path,
+    destination_path: &std::path::Path,
+    overwrite: bool,
+    keep_temp_on_failure: bool,
+) -> Result<(), String> {
+    let discard_temp = || {
+        if !keep_temp_on_failure {
+            let _ = std::fs::remove_file(temp_path);
+        }
+    };
+    if overwrite {
+        let mut last_err = String::new();
+        for attempt in 0..3 {
+            match std::fs::rename(temp_path, destination_path) {
+                Ok(()) => return fsync_parent_best_effort(destination_path),
+                Err(err) => {
+                    last_err = err.to_string();
+                    if attempt < 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
+        }
+        discard_temp();
+        return Err(last_err);
+    }
+
+    publish_temp_file_create_only_with(
+        temp_path,
+        destination_path,
+        keep_temp_on_failure,
+        publish_exclusive,
+        fsync_parent_best_effort,
+    )
+}
+
 pub(crate) fn publish_temp_file(
     temp_path: &std::path::Path,
     destination_path: &std::path::Path,
@@ -2399,6 +3519,10 @@ fn atomic_write_with_overwrite(
         options.mode(0o600);
     }
     let mut tmp_file = options.open(&tmp_path).map_err(|e| e.to_string())?;
+    // Vault, checkpoint, settings, and bookmark payloads must never inherit a
+    // shared-volume DACL (M10). Fail closed: a private policy is part of the
+    // write, not an optional hardening step.
+    harden_private_file(&tmp_path)?;
     let write_result = tmp_file
         .write_all(data.as_bytes())
         .and_then(|()| tmp_file.sync_all());
@@ -2553,12 +3677,26 @@ fn main() {
                         }
                     }
                 }
+                // Reap lease-tracked download scratch with no surviving
+                // checkpoint. Lease files live beside the user destination;
+                // without this sweep a crashed or abandoned download leaks a
+                // full-size scratch file forever.
+                sweep_orphaned_download_leases_at_startup(app.handle());
             }
             Ok(())
         });
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    // The operating system, not the webview, supplies dragged paths. Mint
+    // upload grants here so `take_dropped_upload_grants` can only hand back
+    // what the user actually dropped.
+    let builder = builder.on_window_event(|_window, event| {
+        if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+            path_authority::record_native_drop(paths.clone());
+        }
+    });
 
     e2e_startup_trace("before-builder-run");
     if let Err(err) = builder
@@ -2575,6 +3713,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             s3::connect,
             s3::disconnect,
+            s3::get_connection_id,
             s3::list_buckets,
             s3::list_objects,
             s3::head_object,
@@ -2594,20 +3733,29 @@ fn main() {
             s3::copy_object_to,
             s3::copy_prefix_to,
             s3::delete_copied_objects,
+            s3::list_rollback_backups,
+            s3::delete_rollback_backups,
             s3::object_exists,
             s3::build_object_url,
             s3::generate_presigned_url,
             s3::preview_object,
             files::list_local_files_recursive,
+            pick_upload_files,
+            pick_upload_folder,
+            pick_download_file,
+            pick_download_directory,
+            pick_text_export,
+            take_dropped_upload_grants,
+            export_text_file,
             path_exists,
             discard_download_scratch,
-            write_text_file,
             transfer_checkpoint_remove,
             transfer_checkpoint_gc,
             get_available_disk_bytes,
             load_settings,
             save_settings,
             load_bookmarks,
+            load_bookmarks_state,
             save_bookmarks,
             load_connection,
             save_connection,
@@ -2723,6 +3871,52 @@ mod tests {
         let t1 = make_temp_path(base, "test");
         let t2 = make_temp_path(base, "test");
         assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn picker_default_directory_resolves_directories_and_files() {
+        let dir = scratch_dir("picker-default");
+        let file = dir.join("report.txt");
+        std::fs::write(&file, b"data").unwrap();
+
+        assert_eq!(
+            picker_default_directory(Some(dir.to_string_lossy().into_owned())),
+            Some(dir.clone())
+        );
+        assert_eq!(
+            picker_default_directory(Some(file.to_string_lossy().into_owned())),
+            Some(dir.clone())
+        );
+        assert_eq!(
+            picker_default_directory(Some(
+                dir.join("not-created-yet.txt")
+                    .to_string_lossy()
+                    .into_owned()
+            )),
+            Some(dir.clone())
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn picker_default_directory_ignores_invalid_hints() {
+        assert_eq!(picker_default_directory(None), None);
+        assert_eq!(picker_default_directory(Some(String::new())), None);
+        assert_eq!(
+            picker_default_directory(Some("relative/path".to_string())),
+            None
+        );
+        assert_eq!(
+            picker_default_directory(Some("/tmp/../etc/passwd".to_string())),
+            None
+        );
+        assert_eq!(
+            picker_default_directory(Some(
+                "/definitely/not/a/real/path/abc123/file.txt".to_string()
+            )),
+            None
+        );
     }
 
     #[test]
@@ -2843,15 +4037,85 @@ mod tests {
     }
 
     #[test]
+    fn download_lease_only_authorizes_its_derived_scratch() {
+        let dir = scratch_dir("lease-derived");
+        let destination = dir.join("movie.mkv");
+        let derived = download_temp_path(&destination);
+        let lease = DownloadScratchLease {
+            destination: destination.to_string_lossy().into_owned(),
+            temp_path: derived.to_string_lossy().into_owned(),
+            nonce: "n".to_string(),
+        };
+        assert_eq!(
+            lease_scratch_target(&lease),
+            Some((destination.clone(), derived))
+        );
+
+        let arbitrary = dir.join("important.txt");
+        std::fs::write(&arbitrary, b"keep me").unwrap();
+        let malicious = DownloadScratchLease {
+            destination: destination.to_string_lossy().into_owned(),
+            temp_path: arbitrary.to_string_lossy().into_owned(),
+            nonce: "n".to_string(),
+        };
+        assert!(lease_scratch_target(&malicious).is_none());
+        assert!(
+            arbitrary.exists(),
+            "an arbitrary path must never be deleted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn claiming_the_same_scratch_twice_fails_until_the_guard_drops() {
         let dir = scratch_dir("claim-twice");
         let dest = dir.join("file.bin");
         let temp = download_temp_path(&dest);
+        let lock_path = download_temp_lock_path(&temp);
         let first = claim_download_temp(&temp, &dest).unwrap();
+        assert!(lock_path.exists(), "the OS lock file must be created");
         let err = claim_download_temp(&temp, &dest).expect_err("second claim must fail");
         assert!(err.contains("already in use"), "unexpected error: {}", err);
         drop(first);
+        // A new guard re-locks the same persistent lock file, proving the OS
+        // lock was released on drop.
         let _second = claim_download_temp(&temp, &dest).unwrap();
+        assert!(lock_path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claim_rejects_a_scratch_locked_by_another_owner() {
+        use fs2::FileExt;
+
+        // fs2 locks are OS-level, so a second open handle in this test behaves
+        // like another process: the second exclusive lock is refused. This
+        // documents the cross-process guarantee without spawning a child.
+        let dir = scratch_dir("claim-os-lock");
+        let dest = dir.join("file.bin");
+        let temp = download_temp_path(&dest);
+        let lock_path = download_temp_lock_path(&temp);
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        held.try_lock_exclusive().unwrap();
+
+        let err = claim_download_temp(&temp, &dest).expect_err("foreign lock must block claim");
+        assert!(err.contains("already in use"), "unexpected error: {}", err);
+        assert!(
+            !is_claimed_download_temp(&temp, &dest),
+            "a rejected claim must not register in-memory ownership"
+        );
+
+        drop(held);
+        let guard = claim_download_temp(&temp, &dest).unwrap();
+        assert!(is_claimed_download_temp(&temp, &dest));
+        drop(guard);
+        assert!(!is_claimed_download_temp(&temp, &dest));
+        assert!(lock_path.exists(), "the lock file must not be deleted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2875,6 +4139,138 @@ mod tests {
         fsync_parent(&temp).unwrap();
         assert!(!temp.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_unsupported_directory_sync_errors_are_downgraded() {
+        // Vault and checkpoint publication must fail closed. Only the two
+        // error kinds filesystems use to say "directory fsync is not
+        // implemented" may be treated as success, and only on the
+        // best-effort download path.
+        for kind in [
+            std::io::ErrorKind::Unsupported,
+            std::io::ErrorKind::InvalidInput,
+        ] {
+            assert!(
+                directory_sync_failure_is_unsupported(&std::io::Error::from(kind)),
+                "{kind:?} must be recognised as an unsupported filesystem"
+            );
+        }
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(
+                !directory_sync_failure_is_unsupported(&std::io::Error::from(kind)),
+                "{kind:?} must not be downgraded to success"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_parent_identity_refuses_a_swapped_parent() {
+        let dir = scratch_dir("parent-swap");
+        let destination = dir.join("out.bin");
+        let expected = destination_parent_identity(&destination).unwrap();
+        verify_destination_parent_identity(&destination, &expected)
+            .expect("an unchanged parent must verify");
+
+        // Replace the validated parent with a symlink to another directory.
+        let moved = dir.with_extension("moved");
+        std::fs::rename(&dir, &moved).unwrap();
+        let other = scratch_dir("parent-swap-target");
+        std::os::unix::fs::symlink(&other, &dir).unwrap();
+        let err = verify_destination_parent_identity(&destination, &expected)
+            .expect_err("a parent swapped for a symlink must be refused");
+        assert!(err.contains("changed"), "unexpected error: {err}");
+
+        let _ = std::fs::remove_file(&dir);
+        let _ = std::fs::remove_dir_all(&moved);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn startup_lease_sweep_age_is_bounded_by_max_retention() {
+        let now = std::time::SystemTime::now();
+        let max_age = std::time::Duration::from_secs(DOWNLOAD_LEASE_STARTUP_MAX_AGE_SECS);
+        let fresh = now - std::time::Duration::from_secs(24 * 3600);
+        let stale = now - (max_age + std::time::Duration::from_secs(1));
+        assert!(!download_lease_age_exceeds(fresh, now, max_age));
+        assert!(download_lease_age_exceeds(stale, now, max_age));
+        // A clock that moved backwards must retain the lease, not reap it.
+        assert!(!download_lease_age_exceeds(now, fresh, max_age));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_file_dacl_is_protected() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            SE_DACL_PROTECTED,
+        };
+
+        let path = scratch_dir("windows-dacl").join("vault.tmp");
+        std::fs::write(&path, b"secret").unwrap();
+        harden_private_file(&path).unwrap();
+
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+        let mut dacl = std::ptr::null_mut();
+        unsafe {
+            GetNamedSecurityInfoW(
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut dacl),
+                None,
+                &mut descriptor,
+            )
+            .ok()
+            .unwrap();
+            let mut control = 0u16;
+            let mut revision = 0u32;
+            GetSecurityDescriptorControl(descriptor, &mut control, &mut revision).unwrap();
+            LocalFree(HLOCAL(descriptor.0));
+            assert_ne!(
+                control & SE_DACL_PROTECTED.0,
+                0,
+                "the private DACL must not inherit shared-volume ACEs"
+            );
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_data_directories_are_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("private-app-data").join("nested");
+        ensure_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+
+        let existing = scratch_dir("private-existing");
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_dir(&existing).unwrap();
+        let mode = std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&existing);
     }
 
     #[test]
@@ -2904,16 +4300,23 @@ mod tests {
     }
 
     #[test]
-    fn write_text_file_rejects_non_text_extensions() {
+    fn write_export_text_rejects_non_text_extensions() {
         let dir = scratch_dir("write-guard");
         for name in ["payload.sh", "agent.plist", "profile", "thing.exe"] {
             let target = dir.join(name);
-            let err = write_text_file(
-                target.to_string_lossy().to_string(),
-                "#!/bin/sh\n".to_string(),
-                true,
-            )
-            .expect_err("only text exports are allowed");
+            let token = path_authority::mint(
+                path_authority::GrantPurpose::ExportText,
+                &target,
+                false,
+                None,
+            );
+            // A grant exists, so the refusal must come from the extension
+            // allowlist rather than from the missing authority.
+            assert!(
+                path_authority::authorize(&token, path_authority::GrantUse::ExportText).is_ok()
+            );
+            let err = write_export_text(&target, "#!/bin/sh\n", None)
+                .expect_err("only text exports are allowed");
             assert!(err.contains("extensions"), "unexpected error: {}", err);
             assert!(!target.exists());
         }
@@ -2921,31 +4324,152 @@ mod tests {
     }
 
     #[test]
-    fn write_text_file_allows_log_exports() {
-        let dir = scratch_dir("write-allow");
-        let target = dir.join("activity.txt");
-        write_text_file(
-            target.to_string_lossy().to_string(),
-            "hello".to_string(),
-            false,
-        )
-        .unwrap();
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+    fn download_destination_requires_a_grant() {
+        // The old signature accepted an absolute destination string. Passing
+        // one now must fail before any file is touched.
+        let err = resolve_download_destination("C:\\tmp\\picked.bin", None)
+            .expect_err("a raw destination must not authorize a download");
+        assert!(err.contains("grant"), "unexpected error: {}", err);
+    }
 
-        // Without overwrite an existing file must be refused.
-        assert!(write_text_file(
-            target.to_string_lossy().to_string(),
-            "again".to_string(),
-            false
+    #[test]
+    fn path_exists_requires_a_grant() {
+        let err = path_exists("C:\\tmp\\probe.txt".to_string(), None)
+            .expect_err("a raw path must not be probeable");
+        assert!(err.contains("grant"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn path_exists_child_queries_bind_only_to_a_download_destination() {
+        let dir = scratch_dir("query-child");
+        let child = dir.join("probe.txt");
+        std::fs::write(&child, b"x").unwrap();
+
+        let upload_root =
+            path_authority::mint(path_authority::GrantPurpose::UploadRoot, &dir, true, None);
+        // An upload grant is not a free-space or child-existence oracle (M8).
+        let err = path_exists(upload_root.clone(), None)
+            .expect_err("an upload-root grant must not answer a path query");
+        assert!(err.contains("cannot be used"), "unexpected error: {}", err);
+        let err = path_exists(upload_root, Some("probe.txt".to_string()))
+            .expect_err("an upload-root grant must not become a child oracle");
+        assert!(err.contains("cannot be used"), "unexpected error: {}", err);
+
+        let download_dir = path_authority::mint(
+            path_authority::GrantPurpose::DownloadDestination,
+            &dir,
+            true,
+            None,
+        );
+        assert!(path_exists(download_dir.clone(), Some("probe.txt".to_string())).unwrap());
+        assert!(!path_exists(download_dir.clone(), Some("missing.txt".to_string())).unwrap());
+        assert!(
+            path_exists(download_dir, Some("../escape".to_string())).is_err(),
+            "a download destination must still reject path traversal"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_saved_connection_reset_names_the_user_action() {
+        assert_eq!(
+            require_reset_session(Some("old-session"), Some("new-session"))
+                .expect_err("a stale reset must be refused"),
+            s3::STALE_CONNECTION_SESSION
+        );
+        assert!(
+            require_reset_session(None, Some("new-session")).is_err(),
+            "a reset with no id must not silently clear a live session"
+        );
+        assert!(require_reset_session(Some("new-session"), Some("new-session")).is_ok());
+        assert!(
+            require_reset_session(Some("old-session"), None).is_ok(),
+            "a disconnected reset still clears saved credentials"
+        );
+        assert!(require_reset_session(None, None).is_ok());
+    }
+
+    #[test]
+    fn export_command_requires_a_grant() {
+        // The old command took a raw path. It must now fail before touching
+        // the filesystem, whatever the path is.
+        assert!(path_authority::authorize(
+            "/tmp/not-a-grant.txt",
+            path_authority::GrantUse::ExportText
         )
         .is_err());
+    }
 
-        write_text_file(
-            target.to_string_lossy().to_string(),
-            "again".to_string(),
-            true,
+    #[test]
+    fn write_export_text_refuses_reserved_app_state_names_inside_app_data() {
+        let dir = scratch_dir("write-reserved");
+        for name in ["settings.json", "bookmarks.json", "security.json"] {
+            let target = dir.join(name);
+            let err = write_export_text(&target, "{}", Some(&dir))
+                .expect_err("application state must not be overwritten");
+            assert!(
+                err.contains("application state"),
+                "unexpected error: {}",
+                err
+            );
+            assert!(!target.exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_export_text_allows_reserved_names_outside_app_data() {
+        let app_data = scratch_dir("write-reserved-app");
+        let documents = scratch_dir("write-reserved-documents");
+        let target = documents.join("settings.json");
+        write_export_text(&target, "{}", Some(&app_data)).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
+        let _ = std::fs::remove_dir_all(&app_data);
+        let _ = std::fs::remove_dir_all(&documents);
+    }
+
+    #[test]
+    fn case_fold_collision_detection_folds_nfc_equivalents() {
+        let err = detect_case_fold_collision(
+            [
+                (
+                    "cafe\u{301}.txt".to_string(),
+                    "/a/cafe\u{301}.txt".to_string(),
+                ),
+                ("caf\u{e9}.txt".to_string(), "/b/caf\u{e9}.txt".to_string()),
+            ],
+            "upload paths",
         )
-        .unwrap();
+        .expect_err("normalization-equivalent names must collide");
+        assert!(err.contains("collision"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn write_export_text_refuses_the_app_data_directory() {
+        let dir = scratch_dir("write-app-data");
+        let target = dir.join("activity.txt");
+        let err = write_export_text(&target, "hello", Some(&dir))
+            .expect_err("app data must stay private");
+        assert!(
+            err.contains("private data directory"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_export_text_allows_log_exports() {
+        let dir = scratch_dir("write-allow");
+        let target = dir.join("activity.txt");
+        write_export_text(&target, "hello", None).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+
+        // The save dialog owns overwrite consent, so a second export replaces
+        // the previous file.
+        write_export_text(&target, "again", None).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "again");
 
         let _ = std::fs::remove_dir_all(&dir);

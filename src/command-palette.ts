@@ -21,6 +21,14 @@ const WORD_SEPARATORS = /[\s/\-_.]+/;
 const KEYWORD_WEIGHT = 0.8;
 const ID_WEIGHT = 0.6;
 
+/** Case- and diacritic-insensitive search: "preféré" also matches "prefere". */
+function normalizeSearchText(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 function wordsOf(text: string): string[] {
   return text.split(WORD_SEPARATORS).filter((word) => word.length > 0);
 }
@@ -36,18 +44,18 @@ function isSubsequence(token: string, text: string): boolean {
 
 /**
  * How well one search token matches one text. Stronger matches score higher:
- * whole label, label prefix, word prefix, word initials, then plain substring
+ * whole label, label prefix, word initials, word prefix, then plain substring
  * and finally a loose letter-order match.
  */
 function tokenScore(token: string, text: string, weight: number): number {
-  const lower = text.toLowerCase();
+  const lower = normalizeSearchText(text);
   const words = wordsOf(lower);
   const initials = words.map((word) => word[0]).join("");
   let best = 0;
   if (lower === token) best = 100;
   else if (lower.startsWith(token)) best = 90;
-  else if (words.some((word) => word.startsWith(token))) best = 75;
   else if (initials === token) best = 85;
+  else if (words.some((word) => word.startsWith(token))) best = 75;
   else if (token.length >= 2 && initials.startsWith(token)) best = 70;
   else if (lower.includes(token)) best = 50;
   else if (token.length >= 2 && isSubsequence(token, lower)) best = 25;
@@ -64,8 +72,7 @@ export function rankCommands(
   query: string,
 ): PaletteCommand[] {
   const available = list.filter((cmd) => !cmd.available || cmd.available());
-  const tokens = query
-    .toLowerCase()
+  const tokens = normalizeSearchText(query)
     .split(/\s+/)
     .filter((t) => t.length > 0);
   if (tokens.length === 0) return available;
@@ -178,9 +185,41 @@ export function initPalette(): void {
   ) as HTMLDivElement | null;
   if (!overlay || !input || !results) return;
 
+  // Keep the combobox/listbox wiring complete even when the markup is built by
+  // a test fixture or an older shell: the input owns the active option, while
+  // the results container owns the option roles.
+  const resultsId = results.id || "palette-results";
+  results.id = resultsId;
+  results.setAttribute("role", "listbox");
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-controls", resultsId);
+  input.setAttribute("aria-autocomplete", "list");
+  if (
+    !input.hasAttribute("aria-label") &&
+    !input.hasAttribute("aria-labelledby")
+  ) {
+    input.setAttribute("aria-label", "Search commands");
+  }
+  if (!input.hasAttribute("aria-expanded")) {
+    input.setAttribute("aria-expanded", "false");
+  }
+
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) closePalette();
   });
+
+  // Result count is announced outside the listbox: the empty state itself is
+  // an (aria-disabled) option so role=listbox never contains a stray status.
+  let resultStatus = document.getElementById("palette-result-status");
+  if (!resultStatus) {
+    resultStatus = document.createElement("span");
+    resultStatus.id = "palette-result-status";
+    resultStatus.className = "sr-only";
+    resultStatus.setAttribute("role", "status");
+    resultStatus.setAttribute("aria-live", "polite");
+    resultStatus.setAttribute("aria-atomic", "true");
+    results.parentElement?.appendChild(resultStatus);
+  }
 
   // Focus trap: keep focus inside the palette while open
   overlay.addEventListener("keydown", (e) => {
@@ -207,12 +246,14 @@ export function initPalette(): void {
     }
     if (e.key === "ArrowDown") {
       e.preventDefault();
+      if (filtered.length === 0) return;
       activeIndex = Math.min(activeIndex + 1, filtered.length - 1);
       updateActiveOption();
       return;
     }
     if (e.key === "ArrowUp") {
       e.preventDefault();
+      if (filtered.length === 0) return;
       activeIndex = Math.max(activeIndex - 1, 0);
       updateActiveOption();
       return;
@@ -274,6 +315,9 @@ function updateActiveOption(): void {
 
 function filterAndRender(query: string): void {
   filtered = rankCommands(commands, query);
+  // A shorter list must never leave the keyboard cursor past its end.
+  activeIndex =
+    filtered.length === 0 ? 0 : Math.min(activeIndex, filtered.length - 1);
   renderResults();
   updateActiveOption();
 }
@@ -282,8 +326,19 @@ function renderResults(): void {
   const results = document.getElementById("palette-results");
   if (!results) return;
 
+  const status = document.getElementById("palette-result-status");
+  if (status) {
+    const count = filtered.length;
+    status.textContent =
+      count === 0
+        ? "No commands found"
+        : `${count} command${count === 1 ? "" : "s"} available`;
+  }
+
   if (filtered.length === 0) {
-    results.innerHTML = `<div class="palette__empty">No commands found</div>`;
+    // An empty list is still a listbox: carry the empty state as an inert
+    // option instead of a non-option child.
+    results.innerHTML = `<div class="palette__empty" role="option" aria-disabled="true" aria-selected="false">No commands found</div>`;
     return;
   }
 

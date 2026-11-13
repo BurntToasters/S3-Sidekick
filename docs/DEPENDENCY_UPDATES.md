@@ -2,7 +2,11 @@
 
 `npm run u` is a lockfile-only dependency proposal. It does not install npm packages, run npm lifecycle scripts, compile Rust, execute Cargo build scripts or procedural macros, format source files, or run tests.
 
-The command requires Node.js `^24.18.0 || >=26.0.0`, npm 12.0.2 or newer, and an already-installed Rust stable toolchain. It performs these steps:
+The command requires Node.js `^24.22.1 || >=26.13.0`, npm 12.2.1 or newer, and the Rust toolchain pinned in `rust-toolchain.toml` to already be installed.
+
+Toolchain pins have one canonical value each. Node's supported floor is `engines.node` in `package.json`; CI's `NODE_VERSION=26.13.0` is the tested release line, and the Node 24 floor is not exercised in CI. The Flatpak sandbox is a documented build-only exception at Node 24.18 (the version in `org.freedesktop.Sdk.Extension.node24//26.08`), not a supported local floor. Rust is pinned by `channel` in `rust-toolchain.toml`, which also carries the profile and components; `npm run rust:update`, the target scripts, CI, and the Flatpak build read that value at runtime, so do not add a Rust version literal elsewhere. `rust-version` in `src-tauri/Cargo.toml` is the MSRV and an intentional duplicate that must equal the channel; the pin test fails when they diverge. To bump Rust, edit `rust-toolchain.toml` and set the guarded MSRV to the same value, then run `npm run test:cargo-safe-update`. Update the canonical value first, then the duplicate pins.
+
+It performs these steps:
 
 1. Resolve npm updates with `--package-lock-only`, `--ignore-scripts`, and a three-day minimum release age in a disposable npm cache.
 2. Reject high-severity npm audit findings without populating the project `node_modules` directory.
@@ -32,3 +36,13 @@ No RustSec ignore list is added. The existing informational warnings for `proc-m
 Run `npm run test:e2e:cargo-security` to resolve all target dependencies with `--locked`, confirm patched TLS and removal of zip, verify updater features/artifact configuration, and run the real RustSec scanner with no ignored advisories. This executes no dependency build scripts or procedural macros. The repeatable evidence is `test-results/cargo-security/report.json`, including the lockfile SHA-256, plus full Cargo metadata and audit JSON. CI runs this on Linux, Windows, and macOS and uploads the reports. Native builds and signed updater installation still need CI/platform validation; this security check does not certify those flows.
 
 `scripts/cargo-safe-update.mjs` and `scripts/check-cargo-update-policy.mjs` are a temporary stand-in for a minimum publish age in Cargo itself. Remove both (and restore direct `cargo update` call sites) once the supported stable Cargo ships a global minimum publish age.
+
+## CI tool installation
+
+CI installs Rust helper binaries (`cargo-audit`, `cargo-llvm-cov`,
+`tauri-driver`) with a pinned `--version` and `--locked`. Cargo verifies each
+crate against the checksums in the crates.io index; there is no separate
+signature layer for crates outside the index. npm tooling is installed with a
+pinned version and the workflow runs `npm audit signatures` for the project
+dependencies. Rotate a pinned tool by changing its version here and in
+`.github/workflows/ci.yml` in the same change, then re-run the gate.

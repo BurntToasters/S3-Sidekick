@@ -61,6 +61,9 @@ interface AclResponse {
 type ObjectVisibility = "private" | "public-read";
 type VisibilitySelection = "unchanged" | ObjectVisibility;
 
+/** Fired after the Properties pane closes, so the inspector can re-render. */
+export const INFO_PANEL_CLOSED_EVENT = "s3-sidekick:info-panel-closed";
+
 let currentKey = "";
 let batchKeys: string[] = [];
 // The selection the pane was opened for; Keep editing selects it again.
@@ -73,6 +76,8 @@ let metadataRows: { key: string; value: string }[] = [];
 // shows the merged `details` view instead.
 let activeTab: InspectorInfoTab | "general" | "s3" = "details";
 let panelRequestToken = 0;
+/** Latest URL build; a superseded render must not append a second block. */
+let urlBuildToken = 0;
 let metadataDirty = false;
 let aclDirty = false;
 let selectedVisibility: VisibilitySelection = "unchanged";
@@ -189,6 +194,19 @@ function resetEditorState(): void {
   updateInspectorFooter();
 }
 
+/**
+ * Forget fetched HEAD and ACL responses so the next render re-reads them.
+ * Manual Refresh calls this; unsaved edits stay intact.
+ */
+export function invalidateInfoPanelCaches(): void {
+  headData = null;
+  aclData = null;
+  // Invalidate an in-flight HEAD/ACL read so it cannot repopulate the cache
+  // with the pre-refresh response.
+  panelRequestToken += 1;
+  urlBuildToken += 1;
+}
+
 function fileKeysOf(entries: readonly SelectionEntry[]): string[] {
   return entries
     .filter((entry) => entry.kind === "file")
@@ -265,6 +283,7 @@ export async function openInfoPanel(
       setTabsVisible(false);
       updateInspectorFooter();
       const body = getInfoBodyEl();
+      body.setAttribute("aria-busy", "false");
       body.innerHTML =
         `<div class="metadata-batch-info">` +
         `<p><strong>${folderCount} folder${folderCount === 1 ? "" : "s"}</strong> selected.</p>` +
@@ -323,7 +342,8 @@ export async function openInfoPanel(
   resetEditorState();
 
   const body = getInfoBodyEl();
-  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
+  body.setAttribute("aria-busy", "true");
+  body.innerHTML = `<div class="metadata-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading&#8230;</div>`;
 
   try {
     const nextHeadData = await invokeS3<HeadObjectResponse>("head_object", {
@@ -341,11 +361,13 @@ export async function openInfoPanel(
     }
 
     saveBtn.disabled = false;
+    body.setAttribute("aria-busy", "false");
     renderTab();
   } catch (err) {
     if (requestToken !== panelRequestToken || currentKey !== selectedKey) {
       return;
     }
+    body.setAttribute("aria-busy", "false");
     renderLoadError(body, `Failed to load: ${escapeHtml(friendlyError(err))}`);
   }
 }
@@ -368,6 +390,7 @@ function showHeaderFor(entries: readonly SelectionEntry[]): void {
  * Shown for HEAD and ACL failures alike.
  */
 function renderLoadError(body: HTMLElement, message: string): void {
+  body.setAttribute("aria-busy", "false");
   body.innerHTML =
     `<div class="metadata-loading" role="alert">` +
     `${message} ` +
@@ -388,19 +411,24 @@ function retryInfoLoad(): void {
       : activeTab === "metadata"
         ? "metadata"
         : "details";
+  const reportOpenFailure = (err: unknown): void => {
+    setStatus(`Failed to reopen properties: ${friendlyError(err)}`);
+  };
   if (batchKeys.length > 0) {
     void openInfoPanel(
       shownEntries.map((entry) => ({ ...entry })),
       tab,
-    );
+    ).catch(reportOpenFailure);
     return;
   }
   if (currentKey) {
-    void openInfoPanel([{ kind: "file", key: currentKey }], tab);
+    void openInfoPanel([{ kind: "file", key: currentKey }], tab).catch(
+      reportOpenFailure,
+    );
     return;
   }
   if (shownEntries.length === 1 && shownEntries[0].kind === "folder") {
-    void openInfoPanel([{ ...shownEntries[0] }], tab);
+    void openInfoPanel([{ ...shownEntries[0] }], tab).catch(reportOpenFailure);
   }
 }
 
@@ -414,7 +442,9 @@ export function showInfoPanelTab(tab: InspectorInfoTab): void {
   updateInspectorFooter();
   if (!headData && currentKey) {
     const entry: SelectionEntry = { kind: "file", key: currentKey };
-    void openInfoPanel([entry], tab);
+    void openInfoPanel([entry], tab).catch((err) => {
+      setStatus(`Failed to show ${tab}: ${friendlyError(err)}`);
+    });
     return;
   }
   if (batchKeys.length > 0) {
@@ -448,6 +478,13 @@ function updateTabUI(): void {
     tab.setAttribute("aria-selected", String(isActive));
     tab.setAttribute("tabindex", isActive ? "0" : "-1");
   }
+  if (!shouldUseInspectorMount()) {
+    // The legacy overlay has one panel that all four tabs control. Point its
+    // aria-labelledby at whichever tab is active so the relationship is valid.
+    document
+      .getElementById("info-body")
+      ?.setAttribute("aria-labelledby", `info-tab-${activeTab}`);
+  }
 }
 
 const INFO_TAB_KEYS: readonly string[] = [
@@ -475,6 +512,7 @@ export function switchTab(tab: string): void {
 function renderTab(): void {
   if (!headData) return;
   const body = getInfoBodyEl();
+  body.setAttribute("aria-busy", "false");
 
   if (activeTab === "details") {
     renderDetails(body);
@@ -498,7 +536,7 @@ function renderDetails(body: HTMLElement): void {
   if (!headData) return;
 
   const httpHeaderRows = [
-    infoRow("Content Type", headData.content_type),
+    infoRow("Content type", headData.content_type),
     headData.cache_control
       ? infoRow("Cache-Control", headData.cache_control)
       : "",
@@ -515,8 +553,8 @@ function renderDetails(body: HTMLElement): void {
     infoRowCopyable("Path", currentKey, true) +
     infoSection("Size & dates") +
     infoRow("Size", formatSize(headData.content_length)) +
-    infoRow("Last Modified", formatDate(headData.last_modified)) +
-    infoRow("Storage Class", headData.storage_class || "STANDARD") +
+    infoRow("Last modified", formatDate(headData.last_modified)) +
+    infoRow("Storage class", headData.storage_class || "STANDARD") +
     infoRow("Encryption", headData.server_side_encryption || "None") +
     infoRowCopyable("ETag", headData.etag, true) +
     (httpHeaderRows.length > 0
@@ -524,7 +562,7 @@ function renderDetails(body: HTMLElement): void {
       : "");
 
   attachCopyButtons(body);
-  void buildUrlAsync(body, currentKey, panelRequestToken);
+  void buildUrlAsync(body, currentKey, panelRequestToken, ++urlBuildToken);
 }
 
 function renderGeneral(body: HTMLElement): void {
@@ -533,7 +571,7 @@ function renderGeneral(body: HTMLElement): void {
   const storageClass = headData.storage_class || "STANDARD";
   const encryption = headData.server_side_encryption || "None";
   const httpHeaderRows = [
-    infoRow("Content Type", headData.content_type),
+    infoRow("Content type", headData.content_type),
     headData.cache_control
       ? infoRow("Cache-Control", headData.cache_control)
       : "",
@@ -551,8 +589,8 @@ function renderGeneral(body: HTMLElement): void {
     infoRowCopyable("Path", currentKey, true) +
     infoSection("Size & dates") +
     infoRow("Size", formatSize(headData.content_length)) +
-    infoRow("Last Modified", formatDate(headData.last_modified)) +
-    infoRow("Storage Class", storageClass) +
+    infoRow("Last modified", formatDate(headData.last_modified)) +
+    infoRow("Storage class", storageClass) +
     infoRow("Encryption", encryption) +
     infoRowCopyable("ETag", headData.etag, true) +
     (httpHeaderRows.length > 0
@@ -560,11 +598,12 @@ function renderGeneral(body: HTMLElement): void {
       : "");
 
   attachCopyButtons(body);
-  void buildUrlAsync(body, currentKey, panelRequestToken);
+  void buildUrlAsync(body, currentKey, panelRequestToken, ++urlBuildToken);
 }
 
 function renderFolderProperties(body: HTMLElement, folderPrefix: string): void {
   const displayName = basename(folderPrefix) || folderPrefix;
+  body.setAttribute("aria-busy", "false");
   body.innerHTML =
     infoSection("Location") +
     infoRow("Name", displayName) +
@@ -577,6 +616,7 @@ async function buildUrlAsync(
   body: HTMLElement,
   expectedKey: string,
   requestToken: number,
+  buildToken: number,
 ): Promise<void> {
   try {
     const url = await invokeS3<string>("build_object_url", {
@@ -584,11 +624,13 @@ async function buildUrlAsync(
       key: expectedKey,
     });
     if (
+      buildToken === urlBuildToken &&
       requestToken === panelRequestToken &&
       (activeTab === "details" || activeTab === "general") &&
       currentKey === expectedKey &&
       url
     ) {
+      body.querySelector(".metadata-url-block")?.remove();
       const urlBlock = document.createElement("div");
       urlBlock.className = "metadata-url-block";
       urlBlock.innerHTML =
@@ -609,7 +651,8 @@ async function buildUrlAsync(
 async function renderPermissions(body: HTMLElement): Promise<void> {
   const requestToken = panelRequestToken;
   const selectedKey = currentKey;
-  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading permissions&#8230;</div>`;
+  body.setAttribute("aria-busy", "true");
+  body.innerHTML = `<div class="metadata-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading permissions&#8230;</div>`;
 
   if (!aclData) {
     try {
@@ -673,6 +716,7 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
     html += `<div class="acl-empty" role="status">No ACL grants found.</div>`;
   }
 
+  body.setAttribute("aria-busy", "false");
   body.innerHTML = html;
 
   const visibilitySelect = body.querySelector<HTMLSelectElement>(
@@ -719,6 +763,7 @@ function renderBatchView(
     folderCount > 0
       ? `<p class="metadata-batch-hint">Folder selections are not edited; changes below apply to files only.</p>`
       : "";
+  body.setAttribute("aria-busy", "false");
   body.innerHTML =
     `<div class="metadata-batch-info">` +
     `<p><strong>${escapeHtml(plural(keys.length, "file"))}</strong> in this selection.</p>` +
@@ -730,8 +775,8 @@ function renderBatchView(
     `<label for="batch-visibility" class="metadata-label">Access</label>` +
     `<select id="batch-visibility" class="field metadata-visibility-select">` +
     `<option value="unchanged">Keep unchanged</option>` +
-    `<option value="private">Set Private</option>` +
-    `<option value="public-read">Set Public (read-only)</option>` +
+    `<option value="private">Set private</option>` +
+    `<option value="public-read">Set public (read-only)</option>` +
     `</select>` +
     `<p class="metadata-batch-hint">Use this to set all selected files to private or publicly readable.</p>` +
     `</div>` +
@@ -910,9 +955,9 @@ function renderEntryRows(): void {
 function renderS3(body: HTMLElement): void {
   if (!headData) return;
   body.innerHTML = [
-    infoRow("Storage Class", headData.storage_class || "STANDARD"),
+    infoRow("Storage class", headData.storage_class || "STANDARD"),
     infoRow(
-      "Server-Side Encryption",
+      "Server-side encryption",
       headData.server_side_encryption || "None",
     ),
     infoRow("ETag", headData.etag, true),
@@ -1038,6 +1083,29 @@ export async function saveInfoPanel(): Promise<void> {
   await saveSingleChanges();
 }
 
+/**
+ * Removed keys: the pane may still edit an object the listing no longer has.
+ * Pass the same discard gate as navigation, then close instead of saving into
+ * a dangling row or re-adding it.
+ */
+async function confirmEditedObjectsStillListed(
+  keys: string[],
+): Promise<boolean> {
+  if (keys.length === 0) return true;
+  const listed = new Set(
+    state.objects.filter((object) => !object.is_folder).map((o) => o.key),
+  );
+  if (keys.every((key) => listed.has(key))) return true;
+  const discard = await confirmDiscardInfoProperties();
+  if (!discard) return false;
+  closeInfoPanel();
+  setStatus(
+    "The edited object is no longer in the listing. Properties were closed.",
+    5000,
+  );
+  return false;
+}
+
 async function saveSingleChanges(): Promise<void> {
   const selectedKey = currentKey;
   let target: ConnectionSnapshot;
@@ -1049,6 +1117,8 @@ async function saveSingleChanges(): Promise<void> {
   }
   const requestToken = panelRequestToken;
   if (!selectedKey) return;
+  if (!(await confirmEditedObjectsStillListed([selectedKey]))) return;
+  if (requestToken !== panelRequestToken) return;
 
   const isCurrentRequest = () =>
     requestToken === panelRequestToken &&
@@ -1165,6 +1235,8 @@ async function saveBatchChanges(): Promise<void> {
   const targetKeys = [...batchKeys];
   const isCurrentRequest = () =>
     requestToken === panelRequestToken && !connectionIdentityChanged(target);
+  if (!(await confirmEditedObjectsStillListed(targetKeys))) return;
+  if (requestToken !== panelRequestToken) return;
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl = aclDirty && requestedVisibility !== null;
 
@@ -1195,69 +1267,90 @@ async function saveBatchChanges(): Promise<void> {
   let succeeded = 0;
   let failed = 0;
   let partial = 0;
+  let firstError: string | null = null;
+  let stoppedEarly = false;
 
   const BATCH_CONCURRENCY = 6;
   let processed = 0;
 
-  for (let i = 0; i < targetKeys.length; i += BATCH_CONCURRENCY) {
-    if (!isCurrentRequest()) return;
-    const chunk = targetKeys.slice(i, i + BATCH_CONCURRENCY);
-    const results = await Promise.allSettled(
-      chunk.map(async (key) => {
-        let metadataFailed = false;
-        let aclFailed = false;
+  const actionLabel =
+    shouldApplyMetadata && shouldApplyAcl
+      ? "properties"
+      : shouldApplyAcl
+        ? "permissions"
+        : "metadata";
+  const capitalized = `${actionLabel[0].toUpperCase()}${actionLabel.slice(1)}`;
 
-        if (shouldApplyMetadata) {
-          try {
-            const head = await invokeS3For<HeadObjectResponse>(
-              target.connectionId,
-              "head_object",
-              {
+  try {
+    for (let i = 0; i < targetKeys.length; i += BATCH_CONCURRENCY) {
+      if (!isCurrentRequest()) {
+        stoppedEarly = true;
+        break;
+      }
+      const chunk = targetKeys.slice(i, i + BATCH_CONCURRENCY);
+      const results = await Promise.allSettled(
+        chunk.map(async (key) => {
+          let metadataFailed = false;
+          let aclFailed = false;
+          let error: string | null = null;
+
+          if (shouldApplyMetadata) {
+            try {
+              const head = await invokeS3For<HeadObjectResponse>(
+                target.connectionId,
+                "head_object",
+                {
+                  bucket: target.bucket,
+                  key,
+                },
+              );
+              const merged: Record<string, string> = {
+                ...head.metadata,
+                ...newMeta,
+              };
+              await invokeS3For(target.connectionId, "update_metadata", {
                 bucket: target.bucket,
                 key,
-              },
-            );
-            const merged: Record<string, string> = {
-              ...head.metadata,
-              ...newMeta,
-            };
-            await invokeS3For(target.connectionId, "update_metadata", {
-              bucket: target.bucket,
-              key,
-              contentType: head.content_type,
-              metadata: merged,
-            });
-          } catch {
-            metadataFailed = true;
+                contentType: head.content_type,
+                metadata: merged,
+              });
+            } catch (err) {
+              metadataFailed = true;
+              error = errorText(err);
+            }
           }
-        }
 
-        if (shouldApplyAcl && requestedVisibility) {
-          try {
-            await invokeS3For(target.connectionId, "set_object_acl", {
-              bucket: target.bucket,
-              key,
-              visibility: requestedVisibility,
-            });
-          } catch {
-            aclFailed = true;
+          if (shouldApplyAcl && requestedVisibility) {
+            try {
+              await invokeS3For(target.connectionId, "set_object_acl", {
+                bucket: target.bucket,
+                key,
+                visibility: requestedVisibility,
+              });
+            } catch (err) {
+              aclFailed = true;
+              error ??= errorText(err);
+            }
           }
+
+          return { metadataFailed, aclFailed, error };
+        }),
+      );
+
+      for (const result of results) {
+        processed++;
+        if (requestToken === panelRequestToken) {
+          saveBtn.textContent = `Saving ${processed}/${targetKeys.length}\u2026`;
         }
-
-        return { metadataFailed, aclFailed };
-      }),
-    );
-
-    if (!isCurrentRequest()) return;
-    for (const result of results) {
-      processed++;
-      saveBtn.textContent = `Saving ${processed}/${targetKeys.length}\u2026`;
-      if (result.status === "rejected") {
-        failed++;
-      } else {
-        const { metadataFailed, aclFailed } = result.value;
+        if (result.status === "rejected") {
+          failed++;
+          firstError ??= errorText(result.reason);
+          continue;
+        }
+        const { metadataFailed, aclFailed, error } = result.value;
         if (metadataFailed || aclFailed) {
           failed++;
+          firstError ??= error ?? "Unknown error";
           if (
             shouldApplyMetadata &&
             shouldApplyAcl &&
@@ -1269,31 +1362,44 @@ async function saveBatchChanges(): Promise<void> {
           succeeded++;
         }
       }
+
+      if (!isCurrentRequest()) {
+        stoppedEarly = true;
+        break;
+      }
+    }
+  } finally {
+    // Keep Save usable for a retry. A newer panel generation owns its own
+    // button state, so never overwrite that one from a stale save.
+    if (requestToken === panelRequestToken) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save";
     }
   }
 
-  if (!isCurrentRequest()) return;
-  saveBtn.disabled = false;
-  saveBtn.textContent = "Save";
+  if (stoppedEarly) {
+    if (requestToken === panelRequestToken && processed > 0) {
+      const suffix = firstError ? ` First error: ${firstError}` : "";
+      setStatus(
+        `${capitalized} saved on ${succeeded} of ${targetKeys.length} files before stopping, ${failed} failed.${suffix}`,
+      );
+    }
+    return;
+  }
 
-  const actionLabel =
-    shouldApplyMetadata && shouldApplyAcl
-      ? "properties"
-      : shouldApplyAcl
-        ? "permissions"
-        : "metadata";
-
-  const capitalized = `${actionLabel[0].toUpperCase()}${actionLabel.slice(1)}`;
   if (failed === 0) {
+    if (requestToken !== panelRequestToken) return;
     finishSaveBatch();
     setStatus(`${capitalized} updated on ${plural(succeeded, "file")}.`, 5000);
   } else {
+    if (requestToken !== panelRequestToken) return;
     const partialSuffix =
       shouldApplyMetadata && shouldApplyAcl && partial > 0
         ? ` (${partial} partial)`
         : "";
+    const errorSuffix = firstError ? ` First error: ${firstError}` : "";
     setStatus(
-      `${capitalized} updated on ${plural(succeeded, "file")}, ${failed} failed${partialSuffix}.`,
+      `${capitalized} saved on ${succeeded} of ${targetKeys.length} files, ${failed} failed${partialSuffix}.${errorSuffix}`,
     );
   }
 }
@@ -1378,6 +1484,9 @@ export function closeInfoPanel(): void {
       saveBtn.textContent = "Save";
     }
   }
+  // The inspector caches the last completed selection. Closing this pane
+  // removes what that selection rendered, so the next sync must run again.
+  document.dispatchEvent(new Event(INFO_PANEL_CLOSED_EVENT));
 }
 
 function setStatus(text: string, autoResetMs?: number): void {

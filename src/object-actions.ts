@@ -1,4 +1,5 @@
 import { state } from "./state.ts";
+import { syncModalLayerState } from "./app-layout.ts";
 import {
   getSelectedFileKeys,
   getSelectedPrefixes,
@@ -7,7 +8,11 @@ import {
 import { canPreview, openPreview } from "./preview.ts";
 import { openInfoPanel } from "./info-panel.ts";
 import { basename, friendlyError, plural } from "./utils.ts";
-import { invokeS3 } from "./connection.ts";
+import {
+  captureConnectionSnapshot,
+  connectionIdentityChanged,
+  invokeS3For,
+} from "./connection.ts";
 import {
   isAwsEndpoint,
   handleCopyArn,
@@ -22,6 +27,7 @@ import { setStatus } from "./app-status.ts";
 import { logActivity } from "./activity-log.ts";
 import { SHORTCUTS } from "./shortcut-catalog.ts";
 import {
+  CONNECTION_RESET_EVENT,
   navigateToFolder,
   reportNavFailure,
   clearSelection,
@@ -68,7 +74,7 @@ export interface ObjectAction {
 }
 
 const MOVE_UNSUPPORTED_REASON =
-  "This provider can't safely delete the source. Use Copy, then Delete.";
+  "This provider can't safely delete the source. Use copy, then delete.";
 
 export function currentActionContext(): ObjectActionContext {
   const fileKeys = getSelectedFileKeys();
@@ -150,7 +156,7 @@ function propertiesLabel(context: ObjectActionContext): string {
 function deleteLabel(context: ObjectActionContext): string {
   const { fileKeys, folderPrefixes, total } = context;
   if (total === 1) {
-    return folderPrefixes.length === 1 ? "Delete Folder" : "Delete";
+    return folderPrefixes.length === 1 ? "Delete folder" : "Delete";
   }
   if (fileKeys.length > 0 && folderPrefixes.length > 0) {
     return `Delete ${plural(fileKeys.length, "file")} and ${plural(folderPrefixes.length, "folder")}`;
@@ -244,7 +250,7 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
   {
     id: "copy-move",
     label: (context) =>
-      context.moveSupported ? "Copy / Move\u2026" : "Copy to\u2026",
+      context.moveSupported ? "Copy / move\u2026" : "Copy to\u2026",
     icon: "folder",
     group: "transfer",
     keywords: ["duplicate", "destination"],
@@ -267,7 +273,7 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     group: "transfer",
     shortcut: shortcutLabelFor("Rename selected item"),
     keywords: ["move", "name"],
-    isAvailable: (context) => context.total === 1,
+    isAvailable: (context) => context.total === 1 && !context.listingLoading,
     run: () => void handleRename(),
   },
   {
@@ -324,12 +330,12 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     danger: true,
     shortcut: shortcutLabelFor("Delete selected items"),
     keywords: ["trash", "remove"],
-    isAvailable: (context) => context.total > 0,
+    isAvailable: (context) => context.total > 0 && !context.listingLoading,
     run: () => void handleDelete(),
   },
   {
     id: "deselect-all",
-    label: "Deselect All",
+    label: "Deselect all",
     icon: "x-square",
     group: "selection",
     isAvailable: (context) => context.total > 0,
@@ -413,6 +419,7 @@ function closeShareLinkDialog(
   opener: HTMLElement | null,
 ): void {
   overlay.remove();
+  syncModalLayerState();
   if (opener && document.contains(opener)) opener.focus();
 }
 
@@ -423,6 +430,12 @@ function closeShareLinkDialog(
 export function openShareLinkDialog(): void {
   const keys = getSelectedFileKeys();
   if (keys.length !== 1 || !state.currentBucket) return;
+  let snapshot: ReturnType<typeof captureConnectionSnapshot>;
+  try {
+    snapshot = captureConnectionSnapshot();
+  } catch {
+    return;
+  }
   const key = keys[0];
   const opener =
     document.activeElement instanceof HTMLElement
@@ -488,7 +501,14 @@ export function openShareLinkDialog(): void {
   box.appendChild(actions);
   overlay.appendChild(box);
 
-  const close = (): void => closeShareLinkDialog(overlay, opener);
+  const close = (): void => {
+    document.removeEventListener(CONNECTION_RESET_EVENT, handleConnectionReset);
+    closeShareLinkDialog(overlay, opener);
+  };
+  function handleConnectionReset(): void {
+    close();
+  }
+  document.addEventListener(CONNECTION_RESET_EVENT, handleConnectionReset);
 
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) close();
@@ -505,12 +525,28 @@ export function openShareLinkDialog(): void {
     copy.disabled = true;
     void (async () => {
       const expiresInSecs = Number.parseInt(select.value, 10);
+      if (connectionIdentityChanged(snapshot)) {
+        close();
+        setStatus("Share link cancelled because the connection changed.", 5000);
+        return;
+      }
       try {
-        const url = await invokeS3<string>("generate_presigned_url", {
-          bucket: state.currentBucket,
-          key,
-          expiresInSecs,
-        });
+        const url = await invokeS3For<string>(
+          snapshot.connectionId,
+          "generate_presigned_url",
+          {
+            bucket: snapshot.bucket,
+            key,
+            expiresInSecs,
+          },
+        );
+        if (connectionIdentityChanged(snapshot)) {
+          setStatus(
+            "Share link discarded because the connection changed.",
+            5000,
+          );
+          return;
+        }
         await navigator.clipboard.writeText(url);
         setStatus(
           `Share link copied (expires in ${formatExpiration(expiresInSecs)}).`,
@@ -530,6 +566,7 @@ export function openShareLinkDialog(): void {
   });
 
   document.body.appendChild(overlay);
+  syncModalLayerState();
   select.focus();
 }
 

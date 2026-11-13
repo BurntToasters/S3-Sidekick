@@ -19,7 +19,10 @@ const ROOT_OBJECTS = [
   },
 ];
 
-async function openRootWithObjects(page: Page): Promise<void> {
+async function openRootWithObjects(
+  page: Page,
+  platform: "linux" | "macos" | "windows" = "linux",
+): Promise<void> {
   await page.addInitScript((extra) => {
     type Invoke = (
       command: string,
@@ -44,7 +47,11 @@ async function openRootWithObjects(page: Page): Promise<void> {
       },
     });
   }, ROOT_OBJECTS);
-  await openMockListing(page, { objectCount: 0, prefixes: ["archive/"] });
+  await openMockListing(page, {
+    objectCount: 0,
+    prefixes: ["archive/"],
+    platform,
+  });
 }
 
 function options(page: Page): Locator {
@@ -93,7 +100,7 @@ test.describe("command palette focus and ranking", () => {
     await openRootWithObjects(page);
     await page.locator("#palette-hint").click();
     await typeQuery(page, "uf");
-    expect(await firstLabel(page)).toBe("Upload Files");
+    expect(await firstLabel(page)).toBe("Upload files");
     await typeQuery(page, "mkdir");
     expect(await firstLabel(page)).toBe("New folder");
     await typeQuery(page, "ref");
@@ -126,6 +133,34 @@ test.describe("command palette focus and ranking", () => {
     await page.keyboard.press("Escape");
   });
 
+  // Failure modes covered before implementation (batch D, strings and keys):
+  // - Off macOS the Shift-bearing palette hints are built from the macOS glyph
+  //   "⇧" after "Ctrl+", so Upload Folder reads "Ctrl+⇧U" and Toggle Inspector
+  //   reads "Ctrl+⇧I".
+  // - Any other row that pairs "Ctrl+" with "⇧" has the same mixed notation.
+  test("off macOS, palette shortcut hints spell Shift out in words", async ({
+    page,
+  }) => {
+    await openRootWithObjects(page, "windows");
+    await page.locator("#palette-hint").click();
+    await typeQuery(page, "upload folder");
+    const uploadFolder = options(page).filter({ hasText: "Upload folder" });
+    await expect(uploadFolder).toHaveCount(1);
+    await expect(uploadFolder.locator(".palette__item-shortcut")).toHaveText(
+      "Ctrl+Shift+U",
+    );
+
+    await typeQuery(page, "");
+    const shortcuts = await page
+      .locator("#palette-results .palette__item-shortcut")
+      .allInnerTexts();
+    expect(shortcuts.length).toBeGreaterThan(0);
+    for (const text of shortcuts) {
+      expect(text.includes("Ctrl+") && text.includes("⇧")).toBe(false);
+    }
+    await page.keyboard.press("Escape");
+  });
+
   test("toolbar actions are reachable by name from the palette", async ({
     page,
   }) => {
@@ -138,7 +173,7 @@ test.describe("command palette focus and ranking", () => {
     await typeQuery(page, "copy url");
     expect(await firstLabel(page)).toBe("Copy URL");
     await typeQuery(page, "location");
-    expect(await firstLabel(page)).toBe("Edit Location");
+    expect(await firstLabel(page)).toBe("Edit location");
     await typeQuery(page, "back");
     expect(await firstLabel(page)).toBe("Back");
     await page.keyboard.press("Escape");

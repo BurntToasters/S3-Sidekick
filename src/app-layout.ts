@@ -36,6 +36,15 @@ const sidebarBackgroundInert = new Map<HTMLElement, boolean>();
 // window can restore the requested layout.
 let preferredSidebarWidth = 240;
 let preferredInspectorWidth = 360;
+let desktopSidebarCollapsed = false;
+let mobileSidebarOpenHandler: (() => void) | null = null;
+
+/** Lets the inspector close itself when the mobile bucket sidebar opens. */
+export function registerMobileSidebarOpenHandler(
+  handler: (() => void) | null,
+): void {
+  mobileSidebarOpenHandler = handler;
+}
 
 export function clearFilterInputDebounce(): void {
   if (filterInputDebounce !== undefined) {
@@ -195,11 +204,24 @@ export function setSidebarOpen(open: boolean): void {
       active instanceof HTMLElement && !sidebar.contains(active)
         ? active
         : toggle;
+    // Only one mobile panel may be on screen at a time.
+    mobileSidebarOpenHandler?.();
   }
 
   layout.classList.toggle("main-layout--sidebar-open", open);
-  backdrop.hidden = !open;
-  toggle?.setAttribute("aria-expanded", String(mobile && open));
+  if (mobile) {
+    layout.classList.remove("main-layout--sidebar-collapsed");
+  } else {
+    layout.classList.toggle(
+      "main-layout--sidebar-collapsed",
+      desktopSidebarCollapsed,
+    );
+  }
+  backdrop.hidden = mobile ? !open : true;
+  toggle?.setAttribute(
+    "aria-expanded",
+    String(mobile ? open : !desktopSidebarCollapsed),
+  );
 
   if (mobile) {
     if (open) {
@@ -237,8 +259,18 @@ export function setSidebarOpen(open: boolean): void {
 function toggleSidebar(): void {
   const layout = document.getElementById("main-layout");
   if (!layout) return;
-  const open = !layout.classList.contains("main-layout--sidebar-open");
-  setSidebarOpen(open);
+  if (isMobileSidebarMode()) {
+    setSidebarOpen(!layout.classList.contains("main-layout--sidebar-open"));
+    return;
+  }
+  desktopSidebarCollapsed = !desktopSidebarCollapsed;
+  layout.classList.toggle(
+    "main-layout--sidebar-collapsed",
+    desktopSidebarCollapsed,
+  );
+  const toggle = document.getElementById("sidebar-toggle");
+  toggle?.setAttribute("aria-expanded", String(!desktopSidebarCollapsed));
+  syncPanelWidths();
 }
 
 export function closeSidebarOnMobile(): void {
@@ -277,6 +309,7 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
   return nodes.filter(
     (node) =>
       !node.hasAttribute("disabled") &&
+      node.getAttribute("tabindex") !== "-1" &&
       node.getAttribute("aria-hidden") !== "true" &&
       (node.offsetWidth > 0 ||
         node.offsetHeight > 0 ||
@@ -380,7 +413,7 @@ function focusFirstInOverlay(overlay: HTMLElement): void {
   target.focus();
 }
 
-function syncModalLayerState(): void {
+export function syncModalLayerState(): void {
   const overlay = getActiveModalOverlay();
   const hasActiveOverlay = !!overlay;
 
@@ -551,6 +584,9 @@ export function syncPanelWidths(): void {
   const inspectorResizer = document.getElementById("inspector-resizer");
   const contentMain = document.querySelector<HTMLElement>(".content-main");
   const inspectorOpen = Boolean(inspector && !inspector.hidden);
+  const sidebarCollapsed =
+    !isMobileSidebarMode() &&
+    layout.classList.contains("main-layout--sidebar-collapsed");
 
   const storedSidebar = Number.isFinite(preferredSidebarWidth)
     ? preferredSidebarWidth
@@ -571,11 +607,11 @@ export function syncPanelWidths(): void {
     layout,
     Number.isFinite(window.innerWidth) ? window.innerWidth : 0,
   );
-  const sidebarWidth = clampSidebarWidth(
-    readElementWidth(sidebar, requestedSidebar),
-  );
+  const sidebarWidth = sidebarCollapsed
+    ? 0
+    : clampSidebarWidth(readElementWidth(sidebar, requestedSidebar));
   const sidebarResizerWidth =
-    sidebarResizer && !sidebarResizer.hidden
+    !sidebarCollapsed && sidebarResizer && !sidebarResizer.hidden
       ? readElementWidth(sidebarResizer, RESIZER_WIDTH_FALLBACK)
       : 0;
   const inspectorWidth = inspectorOpen
@@ -621,7 +657,7 @@ export function syncPanelWidths(): void {
     deficit -= sidebarReduction;
   }
 
-  applySidebarWidth(effectiveSidebar);
+  if (!sidebarCollapsed) applySidebarWidth(effectiveSidebar);
   if (inspector) applyInspectorWidth(effectiveInspector || requestedInspector);
   setResizerAria(sidebarResizer, SIDEBAR_MIN, SIDEBAR_MAX, effectiveSidebar);
   setResizerAria(
@@ -728,8 +764,9 @@ export function wireInspectorControls(): void {
   syncPanelWidths();
 }
 
-/* Toolbar collapse: labels first (a container query in layout.css), then
-   whole buttons into the ⋯ overflow menu, so the toolbar never wraps. */
+/* Toolbar collapse: labels first (the 950px container query in layout.css and
+   browser.css), then whole buttons into the ⋯ overflow menu, so the toolbar
+   never wraps. Keep this slack in step with those two stylesheets. */
 const TOOLBAR_BREADCRUMB_MIN = 160;
 const TOOLBAR_SLACK_PX = 24;
 const TOOLBAR_COLLAPSE_ORDER = [

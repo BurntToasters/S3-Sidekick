@@ -43,14 +43,6 @@ body.titlebar-custom .titlebar__traffic-spacer {
   -webkit-app-region: drag;
 }
 
-body.titlebar-custom .bookmark-bar {
-  -webkit-app-region: drag;
-}
-
-body.titlebar-custom .bookmark-chip {
-  -webkit-app-region: no-drag;
-}
-
 body.titlebar-custom .header__actions {
   position: relative;
   z-index: 2;
@@ -76,17 +68,9 @@ body.titlebar-custom.platform-macos .titlebar__traffic-spacer {
   height: 1px;
 }
 
-body.titlebar-custom.platform-macos .bookmark-bar {
-  padding-left: var(--space-1);
-}
-
 body.titlebar-custom.platform-windows .header {
   padding-left: var(--space-3);
   padding-right: 0;
-}
-
-body.titlebar-custom.platform-windows .bookmark-bar {
-  padding-left: 0;
 }
 
 .titlebar-win-controls {

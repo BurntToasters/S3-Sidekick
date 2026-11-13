@@ -5,6 +5,18 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { withoutGpgSecrets } = require("./release-integrity.cjs");
 
+const DEFAULT_GH_TIMEOUT_MS = 15 * 60 * 1000;
+
+function githubTimeoutMs(environment = process.env) {
+  const raw = String(environment.GH_CLI_TIMEOUT_MS || "").trim();
+  if (!raw) return DEFAULT_GH_TIMEOUT_MS;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("GH_CLI_TIMEOUT_MS must be a positive integer.");
+  }
+  return value;
+}
+
 function githubCliEnvironment(environment = process.env) {
   const childEnvironment = withoutGpgSecrets(environment);
   delete childEnvironment.GH_TOKEN;
@@ -76,6 +88,8 @@ function runGitHub(args, { input, allowFailure = false } = {}) {
     input,
     stdio: ["pipe", "pipe", "pipe"],
     maxBuffer: 16 * 1024 * 1024,
+    timeout: githubTimeoutMs(),
+    killSignal: "SIGKILL",
   });
   if (result.error) {
     if (result.error.code === "ENOENT") {
@@ -149,7 +163,7 @@ function downloadReleaseAsset(repository, assetId, filePath) {
     const result = spawnSync("gh", args, {
       env: githubCliEnvironment(),
       stdio: ["ignore", descriptor, "pipe"],
-      timeout: 15 * 60 * 1000,
+      timeout: githubTimeoutMs(),
       killSignal: "SIGKILL",
       maxBuffer: 1024 * 1024,
     });
@@ -185,6 +199,7 @@ module.exports = {
   githubApiArgs,
   githubCliEnvironment,
   githubStatusCode,
+  githubTimeoutMs,
   releaseAssetDeleteArgs,
   releaseAssetDownloadArgs,
   releaseAssetUploadArgs,

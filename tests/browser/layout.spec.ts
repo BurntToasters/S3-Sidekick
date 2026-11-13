@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
@@ -18,6 +18,16 @@ interface PanelBoxes {
   listing: BoundingBox;
   sidebar: BoundingBox;
   inspector: BoundingBox;
+}
+
+/** Wait until the browser has applied layout and painted the next frame. */
+async function settleLayout(page: Page): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
 }
 
 function requireBoundingBox(
@@ -463,7 +473,7 @@ test.describe("production table at compact and wide viewports", () => {
       inspectorResizer.y + inspectorResizer.height / 2,
     );
     await page.mouse.up();
-    await page.waitForTimeout(20);
+    await settleLayout(page);
     let widths = await panelBoxes(page);
     expectPanelContainment(widths, 1100);
 
@@ -471,7 +481,7 @@ test.describe("production table at compact and wide viewports", () => {
     await page.locator("#sidebar-resizer").press("End");
     await page.locator("#inspector-resizer").focus();
     await page.locator("#inspector-resizer").press("Home");
-    await page.waitForTimeout(20);
+    await settleLayout(page);
     widths = await panelBoxes(page);
     expectPanelContainment(widths, 1100);
     expect(widths.listing.width).toBeGreaterThanOrEqual(360);
@@ -481,7 +491,7 @@ test.describe("production table at compact and wide viewports", () => {
     expect(widths.inspector.width).toBeLessThanOrEqual(560);
 
     await page.setViewportSize({ width: 901, height: 720 });
-    await page.waitForTimeout(20);
+    await settleLayout(page);
     widths = await panelBoxes(page);
     expectPanelContainment(widths, 901);
     expect(widths.listing.width).toBeGreaterThanOrEqual(360);
@@ -496,7 +506,7 @@ test.describe("production table at compact and wide viewports", () => {
     await expect(page.locator("#inspector-panel")).toBeVisible();
 
     await page.setViewportSize({ width: 1920, height: 1080 });
-    await page.waitForTimeout(20);
+    await settleLayout(page);
     widths = await panelBoxes(page);
     expectPanelContainment(widths, 1920);
     expect(widths.listing.width).toBeGreaterThanOrEqual(360);
@@ -588,7 +598,7 @@ test.describe("production compact selection and dialogs", () => {
     await page.locator("#sidebar-resizer").press("End");
     await page.locator("#inspector-resizer").focus();
     await page.locator("#inspector-resizer").press("Home");
-    await page.waitForTimeout(20);
+    await settleLayout(page);
     const widths = await panelBoxes(page);
     expect(widths.listing.width).toBeGreaterThanOrEqual(360);
     expect(widths.listing.width).toBeLessThanOrEqual(361);

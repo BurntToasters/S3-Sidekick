@@ -1,7 +1,7 @@
 import { invoke } from "./ipc.ts";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { save } from "@tauri-apps/plugin-dialog";
+import { pickTextExport } from "./path-grants.ts";
 import { state } from "./state.ts";
 import {
   type DateFormat,
@@ -23,13 +23,15 @@ import {
   exportBookmarksJson,
   importBookmarksJson,
   updateBookmark,
+  getBookmarkLoadError,
   MAX_IMPORT_BYTES,
   type Bookmark,
   type BookmarkImportResult,
   type BookmarkPatch,
 } from "./bookmarks.ts";
 import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
-import { refreshSecuritySettingsUI } from "./security.ts";
+import { forgetConnectionLocation } from "./connection.ts";
+import { refreshSecuritySettingsUI, isCancellationError } from "./security.ts";
 import {
   showConfirm,
   showConfirmWithCheckbox,
@@ -47,6 +49,12 @@ import { renderObjectTableFromLayout } from "./layout-render-bridge.ts";
 let onBookmarkSelect: ((b: Bookmark) => void) | null = null;
 let settingsSaveTail: Promise<void> = Promise.resolve();
 let settingsModalSaveOperation: Promise<void> | null = null;
+/**
+ * Set once a reset is confirmed and stays set through the destructive write and
+ * relaunch. New settings saves are refused so a late save can never overwrite
+ * the reset payload or resurrect cleared state.
+ */
+let resetInProgress = false;
 
 /**
  * Tabs with no explicit-save settings: their controls apply at once or carry
@@ -56,6 +64,9 @@ const NO_SAVE_TABS = new Set(["security", "bookmarks", "about", "reset"]);
 
 /** Set by the last search: whether a result row needs the explicit Save. */
 let searchShowsExplicitSave = false;
+
+/** Advanced transfer settings stay expanded for the session after the user opens them. */
+let transfersAdvancedExpanded = false;
 
 function isExplicitSaveTab(tab: string): boolean {
   return !NO_SAVE_TABS.has(tab);
@@ -275,6 +286,11 @@ function enqueueSettingsSnapshot(
   settingsSnapshot: UserSettings,
   extrasSnapshot: typeof state.settingsExtras,
 ): Promise<void> {
+  if (resetInProgress) {
+    return Promise.reject(
+      new Error("A reset is in progress; settings cannot be saved."),
+    );
+  }
   clampWindowSize(settingsSnapshot);
   const payload = mergeSettingsPayload(settingsSnapshot, extrasSnapshot);
   const persistSnapshot = async () => {
@@ -362,8 +378,9 @@ function restoreSearchItems(): void {
 }
 
 /**
- * What a row is searched by: its label, its description text, and its section
- * heading. Option text is left out, so "default" finds no row by itself.
+ * What a row is searched by: its label, description text, section heading and
+ * the visible text of its options. Option text is what makes queries like
+ * "default" or "custom" find the control that offers those choices.
  */
 const SEARCH_DESCRIPTION_SELECTOR = ".setting-description, .setting-note";
 const SEARCH_SKIP_SELECTOR = `select, option, button, input, textarea, .setting-section, ${SEARCH_DESCRIPTION_SELECTOR}`;
@@ -372,15 +389,29 @@ function searchableText(item: HTMLElement): {
   label: string;
   description: string;
   heading: string;
+  options: string;
 } {
   const labelOnly = item.cloneNode(true) as HTMLElement;
   for (const el of labelOnly.querySelectorAll(SEARCH_SKIP_SELECTOR)) {
     el.remove();
   }
-  const description = Array.from(
+  const descriptions = Array.from(
     item.querySelectorAll<HTMLElement>(SEARCH_DESCRIPTION_SELECTOR),
-  )
-    .map((el) => el.textContent ?? "")
+  ).map((el) => el.textContent ?? "");
+  // Help text can live outside the row but be linked by aria-describedby.
+  for (const described of Array.from(
+    item.querySelectorAll<HTMLElement>("[aria-describedby]"),
+  )) {
+    for (const id of (described.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/)
+      .filter(Boolean)) {
+      const help = document.getElementById(id);
+      if (help) descriptions.push(help.textContent ?? "");
+    }
+  }
+  const description = descriptions.join(" ");
+  const options = Array.from(item.querySelectorAll<HTMLOptionElement>("option"))
+    .map((option) => option.textContent ?? "")
     .join(" ");
   const heading =
     item
@@ -390,6 +421,7 @@ function searchableText(item: HTMLElement): {
     label: (labelOnly.textContent ?? "").toLowerCase(),
     description: description.toLowerCase(),
     heading: heading.toLowerCase(),
+    options: options.toLowerCase(),
   };
 }
 
@@ -449,7 +481,8 @@ export function updateSettingsSearch(query: string): void {
       if (
         text.label.includes(trimmed) ||
         text.description.includes(trimmed) ||
-        text.heading.includes(trimmed)
+        text.heading.includes(trimmed) ||
+        text.options.includes(trimmed)
       ) {
         matched.push(item);
       }
@@ -517,6 +550,7 @@ function initAdvancedTransferToggle(): void {
   toggle.addEventListener("click", () => {
     const expanded = toggle.getAttribute("aria-expanded") === "true";
     const next = !expanded;
+    transfersAdvancedExpanded = next;
     toggle.setAttribute("aria-expanded", String(next));
     group.hidden = !next;
   });
@@ -797,8 +831,12 @@ export function populateSettingsModal(): void {
     "transfers-advanced",
   ) as HTMLElement | null;
   const advancedToggle = document.getElementById("transfers-advanced-toggle");
-  if (advancedGroup) advancedGroup.hidden = true;
-  if (advancedToggle) advancedToggle.setAttribute("aria-expanded", "false");
+  if (advancedGroup) advancedGroup.hidden = !transfersAdvancedExpanded;
+  if (advancedToggle)
+    advancedToggle.setAttribute(
+      "aria-expanded",
+      String(transfersAdvancedExpanded),
+    );
 
   switchSettingsTab("appearance");
 }
@@ -1016,9 +1054,15 @@ export function readSettingsModal(): void {
   }
 }
 
-export function openSettingsModal(): void {
+/**
+ * Open Settings. An optional tab name (or the click Event the toolbar passes)
+ * selects the panel before the overlay is made visible, so a caller that opens
+ * Saved connections never paints Appearance first.
+ */
+export function openSettingsModal(initialTab?: string | Event): void {
   hideBookmarkEdit();
   populateSettingsModal();
+  switchSettingsTab(typeof initialTab === "string" ? initialTab : "appearance");
   const overlay = document.getElementById("settings-overlay");
   if (overlay) overlay.classList.add("active");
 }
@@ -1122,7 +1166,7 @@ async function discardSettingsDraft(): Promise<void> {
     try {
       choice = await showChoiceDialog<"save" | "discard" | "keep">(
         "Discard changes?",
-        "Your Settings changes have not been saved.",
+        "Your settings changes have not been saved.",
         [
           { value: "save", label: "Save" },
           { value: "discard", label: "Discard changes", danger: true },
@@ -1139,10 +1183,32 @@ async function discardSettingsDraft(): Promise<void> {
     }
     if (choice !== "discard") return;
   }
+  closeSettingsWithoutPrompt();
+}
+
+/** Reset the draft and hide Settings without asking the user anything. */
+function closeSettingsWithoutPrompt(): void {
   applyAppearance(state.lastPersistedSettings);
   state.currentSettings = { ...state.lastPersistedSettings };
   setUpdateChannel(state.lastPersistedSettings.updateChannel);
   document.getElementById("settings-overlay")?.classList.remove("active");
+}
+
+/**
+ * Close Settings during a lock teardown.
+ *
+ * The vault is already locking, so an unsaved draft can no longer be saved and
+ * a discard prompt would stall the teardown behind a dialog (H5). An in-flight
+ * save is awaited, then the draft is discarded without prompting.
+ */
+export function closeSettingsModalForLock(): Promise<void> {
+  if (settingsModalSaveOperation) {
+    return settingsModalSaveOperation
+      .catch(() => undefined)
+      .then(closeSettingsWithoutPrompt);
+  }
+  closeSettingsWithoutPrompt();
+  return Promise.resolve();
 }
 
 export function closeSettingsModal(save: boolean): Promise<void> {
@@ -1179,9 +1245,17 @@ function importSkippedClause(result: BookmarkImportResult): string {
   return parts.length > 0 ? `, skipped ${parts.join(" and ")}` : "";
 }
 
+/** Wait for any in-flight Settings save writes before a reset writes. */
+async function joinPendingSettingsSaves(): Promise<void> {
+  if (settingsModalSaveOperation) {
+    await settingsModalSaveOperation.catch(() => undefined);
+  }
+  await settingsSaveTail.catch(() => undefined);
+}
+
 export async function resetSettings(): Promise<void> {
   const confirmed = await showConfirm(
-    "Reset Settings",
+    "Reset settings",
     "This will reset settings to defaults and restart the app.\nChoose how much to reset on the next step.",
     { okLabel: "Continue", okDanger: true },
   );
@@ -1190,7 +1264,7 @@ export async function resetSettings(): Promise<void> {
   // Escape and the default focus both mean Cancel: only an explicit choice
   // runs a reset.
   const scope = await showChoiceDialog<"partial" | "factory" | "cancel">(
-    "Reset Scope",
+    "Reset scope",
     "Choose what to reset. The app restarts afterwards.\n\nKeep saved connections: resets settings, clears the last-used connection, and interrupts running transfers. Saved connections and encryption stay.\n\nFactory reset: also deletes saved connections, transfer recovery data, and encryption.",
     [
       { value: "partial", label: "Keep saved connections" },
@@ -1201,11 +1275,24 @@ export async function resetSettings(): Promise<void> {
   );
   if (scope === "cancel") return;
 
+  // A Settings save that was already running must land before the reset does,
+  // otherwise it can overwrite the reset payload or resurrect a cleared state.
+  // Once the reset is confirmed, new saves are refused until relaunch.
   if (scope === "factory") {
     if (!(await confirmFactoryReset())) return;
-    if (!(await runFactoryReset())) return;
+    resetInProgress = true;
+    await joinPendingSettingsSaves();
+    if (!(await runFactoryReset())) {
+      resetInProgress = false;
+      return;
+    }
   } else {
-    if (!(await runPartialReset())) return;
+    resetInProgress = true;
+    await joinPendingSettingsSaves();
+    if (!(await runPartialReset())) {
+      resetInProgress = false;
+      return;
+    }
   }
 
   await relaunchApp();
@@ -1218,23 +1305,29 @@ export async function resetSettings(): Promise<void> {
  */
 export async function resetAfterForgottenPassword(): Promise<void> {
   const confirmed = await showConfirm(
-    "Erase the Encrypted Vault?",
+    "Erase the encrypted vault?",
     "A forgotten password can't be recovered. Continuing erases the encrypted vault and all saved connections inside it, including their saved secret keys. The last-used connection, transfer checkpoints and partial downloads are erased too. Running transfers are stopped. Settings return to their starting values and the app restarts.",
     { okLabel: "Continue", okDanger: true },
   );
   if (!confirmed) return;
   if (!(await confirmFactoryReset())) return;
-  if (!(await runFactoryReset())) return;
+  // Join any save already queued, then keep new saves out until relaunch.
+  resetInProgress = true;
+  await joinPendingSettingsSaves();
+  if (!(await runFactoryReset())) {
+    resetInProgress = false;
+    return;
+  }
   await relaunchApp();
 }
 
 async function confirmFactoryReset(): Promise<boolean> {
   return showConfirm(
-    "Permanently Delete All App Data?",
+    "Permanently delete all app data?",
     "This permanently deletes saved connections, the last-used connection, encrypted storage, transfer checkpoints, and partial download files. Running transfers will be stopped. This cannot be undone.",
     {
-      okLabel: "Delete Everything",
-      cancelLabel: "Cancel Reset",
+      okLabel: "Delete everything",
+      cancelLabel: "Cancel reset",
       okDanger: true,
     },
   );
@@ -1246,7 +1339,10 @@ async function runFactoryReset(): Promise<boolean> {
   try {
     await invoke("factory_reset", { settingsJson: defaults });
   } catch (err) {
-    await showAlert("Factory Reset Failed", friendlyError(err));
+    // Declining the native confirmation is a no-op; the caller then does not
+    // relaunch or clear local state.
+    if (isCancellationError(err)) return false;
+    await showAlert("Factory reset failed", friendlyError(err));
     return false;
   }
 
@@ -1260,6 +1356,37 @@ async function runFactoryReset(): Promise<boolean> {
     // remains authoritative and the relaunch below must still happen.
   }
   return true;
+}
+
+/**
+ * Recover the live backend session before a reset clears credentials.
+ *
+ * A webview reload loses `state.connectionId` while the native session keeps
+ * running. Passing a blank id then looks like a stale caller; ask the backend
+ * for the current id first so the reset can name the session it is replacing.
+ */
+async function resetConnectionId(): Promise<string | null> {
+  if (state.connectionId) return state.connectionId;
+  try {
+    const current = await invoke<string | null>("get_connection_id");
+    if (typeof current !== "string") return null;
+    const trimmed = current.trim();
+    return trimmed || null;
+  } catch {
+    // No readable session (locked storage, or no session at all) is not a
+    // reason to block clearing credentials; the backend still rejects a live
+    // session that was not named.
+    return null;
+  }
+}
+
+/** Map the backend's stale-session refusal to the action the user can take. */
+function resetErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (raw.includes("Connection session changed")) {
+    return "Your session changed; disconnect and retry.";
+  }
+  return friendlyError(err);
 }
 
 /**
@@ -1285,11 +1412,14 @@ async function runPartialReset(): Promise<boolean> {
   const defaults = mergeSettingsPayload(SETTING_DEFAULTS, carriedExtras);
   try {
     // Credentials first: if clearing them fails, nothing is reset and the
-    // user is not left with default settings but surviving credentials.
-    await invoke("clear_saved_connection");
+    // user is not left with default settings but surviving credentials. The
+    // active session id lets the backend reject a stale reset; a disconnected
+    // reset passes none and still removes the stored credentials.
+    const connectionId = await resetConnectionId();
+    await invoke("clear_saved_connection", { connectionId });
     await invoke("save_settings", { json: defaults });
   } catch (err) {
-    await showAlert("Reset Failed", friendlyError(err));
+    await showAlert("Reset failed", resetErrorMessage(err));
     return false;
   }
   return true;
@@ -1325,7 +1455,13 @@ export function isTransfersHintDismissed(): boolean {
 
 export async function markTransfersHintDismissed(): Promise<void> {
   state.settingsExtras.transfersHintDismissed = true;
-  await saveSettings();
+  try {
+    await saveSettings();
+  } catch (err) {
+    // Best-effort hint state: a failed save must not surface as an unhandled
+    // rejection from the transfer UI's fire-and-forget call.
+    console.warn("Failed to save transfers hint preference:", err);
+  }
 }
 
 export function isSupportPromptDismissed(): boolean {
@@ -1338,6 +1474,12 @@ async function refreshBookmarkListUI(): Promise<void> {
   await loadBookmarks();
   const listEl = document.getElementById("bookmark-list");
   if (!listEl) return;
+  const loadError = getBookmarkLoadError();
+  if (loadError) {
+    setBookmarkStatus(
+      `Saved connections could not be loaded (${loadError}) Changes and export stay disabled so the stored copy is not overwritten.`,
+    );
+  }
 
   renderBookmarkList(
     listEl,
@@ -1357,8 +1499,9 @@ async function refreshBookmarkListUI(): Promise<void> {
       if (!confirmed) return;
       try {
         await removeBookmark(bookmark);
+        forgetConnectionLocation(bookmark.name, bookmark.endpoint);
       } catch (err) {
-        void showAlert("Delete Failed", friendlyError(err));
+        void showAlert("Delete failed", friendlyError(err));
         return;
       }
       void refreshBookmarkListUI();
@@ -1381,7 +1524,7 @@ function wireBookmarkImportExport(): void {
 
   exportBtn?.addEventListener("click", () => {
     void exportBookmarksToFile().catch((err: unknown) => {
-      void showAlert("Export Failed", friendlyError(err));
+      void showAlert("Export failed", friendlyError(err));
     });
   });
 
@@ -1396,7 +1539,7 @@ function wireBookmarkImportExport(): void {
     importInput.value = "";
     if (file.size > MAX_IMPORT_BYTES) {
       void showAlert(
-        "Import Failed",
+        "Import failed",
         "The saved connections file is too large.",
       );
       return;
@@ -1404,30 +1547,30 @@ function wireBookmarkImportExport(): void {
     const reader = new FileReader();
     reader.onerror = () => {
       void showAlert(
-        "Import Failed",
+        "Import failed",
         `Could not read "${file.name}": ${reader.error?.message ?? "unknown error"}`,
       );
     };
     reader.onabort = () => {
-      void showAlert("Import Failed", `Reading "${file.name}" was aborted.`);
+      void showAlert("Import failed", `Reading "${file.name}" was aborted.`);
     };
     reader.onload = () => {
       const text = typeof reader.result === "string" ? reader.result : "";
       void importBookmarksJson(text)
         .then((result) => {
           if (result.error) {
-            void showAlert("Import Failed", result.error);
+            void showAlert("Import failed", result.error);
             return;
           }
           const msg =
             `Imported ${plural(result.imported, "saved connection")}` +
             importSkippedClause(result) +
             ".";
-          void showAlert("Import Complete", msg);
+          void showAlert("Import complete", msg);
           void refreshBookmarkListUI();
         })
         .catch((err: unknown) => {
-          void showAlert("Import Failed", friendlyError(err));
+          void showAlert("Import failed", friendlyError(err));
         });
     };
     reader.readAsText(file);
@@ -1438,40 +1581,49 @@ function wireBookmarkImportExport(): void {
 /// file (possibly with plaintext secrets) in the default Downloads folder
 /// without letting the user choose where it goes.
 async function exportBookmarksToFile(): Promise<void> {
+  const loadError = getBookmarkLoadError();
+  if (loadError) {
+    await showAlert(
+      "Export unavailable",
+      `Saved connections could not be loaded (${loadError}) Export is disabled so an incomplete list is never mistaken for the stored one.`,
+    );
+    return;
+  }
   const choice = await showConfirmWithCheckbox(
-    "Export saved connections",
-    "Save your saved connections to a JSON file. Secret keys are left out unless you tick the box below.",
+    "Export saved connections (secrets and session tokens optional)",
+    "Save your saved connections to a JSON file. Secret keys and session tokens are left out unless you tick the box below. Names, endpoints, regions, and access keys are always included.",
     {
       okLabel: "Export",
       cancelLabel: "Cancel",
-      checkboxLabel: "Include secret keys (written as plain text)",
+      checkboxLabel:
+        "Include secret keys and session tokens (written as plain text)",
     },
   );
   if (!choice.confirmed) return;
   const includeSecrets = choice.checked;
-  const path = await save({
-    title: includeSecrets
-      ? "Save saved connections (includes secret keys)"
+  const grant = await pickTextExport(
+    "s3-sidekick-bookmarks.json",
+    includeSecrets
+      ? "Save saved connections (includes secret keys and session tokens)"
       : "Save saved connections",
-    defaultPath: "s3-sidekick-bookmarks.json",
-    filters: [{ name: "JSON", extensions: ["json"] }],
-  });
-  if (!path) return;
-  await invoke("write_text_file", {
-    path,
+  );
+  if (!grant) return;
+  await invoke("export_text_file", {
+    token: grant.token,
     text: exportBookmarksJson(includeSecrets),
-    // The save dialog already asked before replacing an existing file.
-    overwrite: true,
   });
   const statusEl = document.getElementById("bookmarks-status");
   if (statusEl) {
-    statusEl.textContent = `Exported saved connections${includeSecrets ? " with secret keys" : ""}.`;
+    statusEl.textContent = `Exported saved connections${includeSecrets ? " with secret keys and session tokens" : ""}.`;
   }
 }
 
 /** The saved connection whose edit form is open, or null when none is. */
 let editingBookmark: Bookmark | null = null;
 let bookmarkEditSaving = false;
+/** Bumped whenever the edit form opens or closes, so an in-flight save from an
+ * older form cannot hide or rewrite a form the user opened meanwhile. */
+let bookmarkEditRevision = 0;
 
 type BookmarkEditField =
   "name" | "endpoint" | "region" | "accessKey" | "secretKey" | "sessionToken";
@@ -1510,6 +1662,7 @@ function setBookmarkEditBusy(busy: boolean): void {
 
 /** Close the edit form and clear every field, so no secret stays in the DOM. */
 function hideBookmarkEdit(): void {
+  bookmarkEditRevision += 1;
   editingBookmark = null;
   setBookmarkEditError(null);
   for (const field of Object.keys(
@@ -1523,6 +1676,7 @@ function hideBookmarkEdit(): void {
 }
 
 function showBookmarkEdit(bookmark: Bookmark): void {
+  bookmarkEditRevision += 1;
   editingBookmark = bookmark;
   setBookmarkEditError(null);
   const values: Record<BookmarkEditField, string> = {
@@ -1557,6 +1711,7 @@ function setBookmarkStatus(message: string): void {
 async function saveBookmarkEdit(): Promise<void> {
   const target = editingBookmark;
   if (!target || bookmarkEditSaving) return;
+  const editRevision = bookmarkEditRevision;
   const name = bookmarkEditField("name")?.value.trim() ?? "";
   const endpoint = bookmarkEditField("endpoint")?.value.trim() ?? "";
   const region = bookmarkEditField("region")?.value.trim() ?? "";
@@ -1608,7 +1763,12 @@ async function saveBookmarkEdit(): Promise<void> {
       { endpoint: target.endpoint, access_key: target.access_key },
       patch,
     );
-    hideBookmarkEdit();
+    const stillEditingTarget =
+      editingBookmark === target && bookmarkEditRevision === editRevision;
+    if (updated && (name !== target.name || endpoint !== target.endpoint)) {
+      forgetConnectionLocation(target.name, target.endpoint);
+    }
+    if (stillEditingTarget) hideBookmarkEdit();
     setBookmarkStatus(
       updated
         ? `Saved changes to "${name}".`
@@ -1616,8 +1776,15 @@ async function saveBookmarkEdit(): Promise<void> {
     );
     await refreshBookmarkListUI();
   } catch (err) {
-    // Stays open so nothing typed is lost; the message never echoes secrets.
-    setBookmarkEditError(`Could not save changes: ${friendlyError(err)}`);
+    // The form may have been replaced while the save was in flight; never write
+    // the old target's error into a newer form.
+    if (editingBookmark === target && bookmarkEditRevision === editRevision) {
+      setBookmarkEditError(`Could not save changes: ${friendlyError(err)}`);
+    } else {
+      setBookmarkStatus(
+        `Could not save changes to "${target.name}": ${friendlyError(err)}`,
+      );
+    }
   } finally {
     bookmarkEditSaving = false;
     setBookmarkEditBusy(false);
@@ -1650,7 +1817,7 @@ function wireBookmarkEdit(): void {
  */
 export function editSavedConnection(bookmark: Bookmark): void {
   wireBookmarkEdit();
-  if (!settingsIsOpen()) openSettingsModal();
+  if (!settingsIsOpen()) openSettingsModal("bookmarks");
   switchSettingsTab("bookmarks");
   showBookmarkEdit(bookmark);
 }

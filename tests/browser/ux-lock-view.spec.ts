@@ -134,6 +134,9 @@ test("Touch ID retry is offered on macOS only when biometric is enrolled", async
       biometric_available: true,
       biometric_enrolled: true,
     },
+    // Keep the automatic Touch ID attempt pending long enough to assert the
+    // retry control, rather than racing an immediate successful unlock.
+    holdBiometric: true,
     unlockPasswords: ["correct-horse-1"],
   });
   await page.goto("/");
@@ -206,7 +209,7 @@ test("Forgot password? explains the erase, and Cancel leaves the vault untouched
   await page.locator("#lock-view-forgot").click();
   await expect(page.locator("#dialog-overlay")).toHaveClass(/active/);
   await expect(page.locator("#dialog-title")).toHaveText(
-    "Erase the Encrypted Vault?",
+    "Erase the encrypted vault?",
   );
   await expect(page.locator("#dialog-message")).toContainText(
     /can.t be recovered/i,
@@ -238,11 +241,11 @@ test("confirming the erase runs the factory reset after a final confirmation", a
   await page.goto("/");
   await page.locator("#lock-view-forgot").click();
   await expect(page.locator("#dialog-title")).toHaveText(
-    "Erase the Encrypted Vault?",
+    "Erase the encrypted vault?",
   );
   await page.locator("#dialog-ok").click();
   await expect(page.locator("#dialog-title")).toHaveText(
-    "Permanently Delete All App Data?",
+    "Permanently delete all app data?",
   );
   await page.locator("#dialog-ok").click();
 
@@ -269,4 +272,82 @@ test("Continue locked leaves saved connections locked and closes the lock view",
   await expect(page.locator("#lock-view")).toBeHidden();
   await expect(page.locator("#connection-screen")).toBeVisible();
   expect(await lockViewVisible(page)).toBe(false);
+});
+
+type Rgb = [number, number, number];
+
+function channels(css: string): Rgb {
+  const parts = css.match(/[\d.]+/g)?.map(Number) ?? [];
+  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
+}
+
+function contrast(a: Rgb, b: Rgb): number {
+  const lum = ([r, g, bl]: Rgb) => {
+    const [R, G, B] = [r, g, bl].map((value) => {
+      const c = value / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * R + 0.7152 * G + 0.0722 * B;
+  };
+  const [la, lb] = [lum(a), lum(b)];
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+// Failure modes (dark lock view):
+// - "Forgot password?" and "Continue locked" use --accent (#4f46e5), about
+//   2.8:1 on the #18181b lock card, below the 4.5:1 text minimum.
+// - The lock icon uses the same accent, below the 3:1 non-text minimum.
+// - The links have no focus-visible ring, so a Tab user cannot see focus.
+test("dark lock view links meet text contrast, the icon meets 3:1, and a Tab-focused link shows a ring", async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await installLayoutTauriMock(page, {
+    objectCount: 0,
+    prefixes: [],
+    security: ENCRYPTED_LOCKED,
+    unlockPasswords: ["correct-horse-1"],
+    settings: { theme: "dark" },
+  });
+  await page.goto("/");
+  await expect(page.locator("#lock-view")).toBeVisible();
+
+  const colorOf = (selector: string) =>
+    page.locator(selector).evaluate((el) => getComputedStyle(el).color);
+  const card = channels(
+    await page
+      .locator(".lock-view__card")
+      .evaluate((el) => getComputedStyle(el).backgroundColor),
+  );
+  const forgot = channels(await colorOf("#lock-view-forgot"));
+  const cont = channels(await colorOf("#lock-view-continue"));
+  const icon = channels(await colorOf(".lock-view__icon"));
+
+  expect(
+    contrast(forgot, card),
+    "Forgot password? on lock card",
+  ).toBeGreaterThanOrEqual(4.5);
+  expect(
+    contrast(cont, card),
+    "Continue locked on lock card",
+  ).toBeGreaterThanOrEqual(4.5);
+  expect(contrast(icon, card), "lock icon on lock card").toBeGreaterThanOrEqual(
+    3,
+  );
+
+  let reached = false;
+  for (let i = 0; i < 12 && !reached; i += 1) {
+    await page.keyboard.press("Tab");
+    reached = await page.evaluate(
+      () =>
+        document.activeElement?.classList.contains("lock-view__link") ?? false,
+    );
+  }
+  expect(reached, "Tab reaches a lock-view link").toBe(true);
+  const outline = await page.evaluate(() => {
+    const cs = getComputedStyle(document.activeElement as HTMLElement);
+    return { style: cs.outlineStyle, width: parseFloat(cs.outlineWidth) };
+  });
+  expect(outline.style).not.toBe("none");
+  expect(outline.width).toBeGreaterThanOrEqual(2);
 });

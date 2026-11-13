@@ -883,7 +883,7 @@ describe("copy/move browser and recents", () => {
     expect(moveBtn.disabled).toBe(true);
     expect(reason.hidden).toBe(false);
     expect(reason.textContent).toBe(
-      "This provider can't safely delete the source. Use Copy, then Delete.",
+      "This provider can't safely delete the source. Use copy, then delete.",
     );
     expect(
       (document.getElementById("copy-move-copy-btn") as HTMLButtonElement)

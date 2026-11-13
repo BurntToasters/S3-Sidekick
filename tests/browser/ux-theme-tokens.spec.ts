@@ -8,11 +8,15 @@
 // - Owned stylesheets reintroduce raw hex/rgb colours or px font sizes.
 // - Any stylesheet outside tokens.css reintroduces a raw hex/rgb/hsl colour.
 // - A component surface token drifts between the light and dark theme blocks.
-// - The .badge, .switch and select chevron primitives are missing or unthemed.
+// - The .switch and select chevron primitives are missing or unthemed.
 // - The connected-dot pulse repeats forever.
 // - The dialog title and modal title sizes diverge.
 // - Every 0.12.0 icon name resolves in the icon registry.
 // - .btn--danger lives in controls.css, not modals.css.
+// - Dark --border equals --bg-elevated, so the Settings footer rule and the
+//   settings search edge vanish into the modal surface.
+// - .support-card keeps translucent nested glass with backdrop-filter while
+//   every other overlay surface is opaque.
 import {
   expect,
   test,
@@ -40,6 +44,7 @@ const PARITY_TOKENS = [
   "--bg-active",
   "--bg-elevated",
   "--border",
+  "--border-elevated",
   "--border-strong",
   "--border-focus",
   "--focus-ring-color",
@@ -126,6 +131,7 @@ const DESIGN_TOKENS = [
   "--focus-ring-width",
   "--focus-ring-offset",
   "--row-height",
+  "--border-elevated",
 ];
 
 /** Stylesheets this worker owns; the static checks read them from src/styles. */
@@ -830,41 +836,6 @@ test("btn--danger is a button primitive in controls.css", () => {
   expect(read("modals.css")).not.toMatch(/\.btn--danger\b/);
 });
 
-test("badge, count and alert primitives render with token colours", async ({
-  page,
-}) => {
-  await installLayoutTauriMock(page);
-  await page.goto("/");
-  await expect(page.locator("#connection-screen")).toBeVisible();
-  const colors = await resolveTokenColors(page, [
-    "--accent",
-    "--danger-strong",
-  ]);
-  const badges = await page.evaluate(() => {
-    const host = document.createElement("div");
-    host.innerHTML =
-      '<span class="badge" data-kind="base">1</span>' +
-      '<span class="badge badge--count" data-kind="count">3</span>' +
-      '<span class="badge badge--alert" data-kind="alert">!</span>';
-    document.body.appendChild(host);
-    return [...host.querySelectorAll<HTMLElement>(".badge")].map((el) => {
-      const cs = getComputedStyle(el);
-      return {
-        kind: el.dataset.kind ?? "",
-        bg: cs.backgroundColor,
-        radius: cs.borderTopLeftRadius,
-      };
-    });
-  });
-  const byKind = Object.fromEntries(badges.map((b) => [b.kind, b]));
-  expect(byKind.base?.bg).not.toBe("rgba(0, 0, 0, 0)");
-  expect(byKind.count?.bg).toBe(colors["--accent"]);
-  expect(byKind.alert?.bg).toBe(colors["--danger-strong"]);
-  for (const badge of badges) {
-    expect(badge.radius, badge.kind).not.toBe("0px");
-  }
-});
-
 test("switch checkbox is a themed toggle with a focus ring", async ({
   page,
 }) => {
@@ -918,10 +889,11 @@ test("connected-dot pulse does not repeat forever", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator("#connection-screen")).toBeVisible();
   const iterations = await page.evaluate(() => {
-    const badge = document.createElement("span");
-    badge.className = "connection-badge connection-badge--on";
-    document.body.appendChild(badge);
-    return getComputedStyle(badge, "::before").animationIterationCount;
+    const dot = document.createElement("span");
+    dot.className = "conn-switcher__dot";
+    dot.dataset.state = "busy";
+    document.body.appendChild(dot);
+    return getComputedStyle(dot).animationIterationCount;
   });
   expect(iterations).not.toBe("infinite");
 });
@@ -960,4 +932,94 @@ test("every 0.12.0 icon name resolves in the icon registry", async ({
     return names.filter((name) => !mod.getIconHtml(name).includes("<svg"));
   }, UI_ICON_NAMES);
   expect(missing).toEqual([]);
+});
+
+/** Light and dark coverage for the surface tests: the OS scheme and app theme pairs. */
+const SURFACE_THEME_CASES = [
+  { os: "light", app: "light" },
+  { os: "dark", app: "system" },
+  { os: "light", app: "dark" },
+] as const satisfies readonly { os: OsScheme; app: AppTheme }[];
+
+// Failure modes: in dark, --border and --bg-elevated are both #27272a, so the
+// Settings footer rule and the settings search edge sit on the modal colour
+// (1.0:1) and disappear. Checked in light, OS-dark and forced dark.
+test("settings footer rule and search edge stay visible on the modal", async ({
+  page,
+}) => {
+  for (const { os, app } of SURFACE_THEME_CASES) {
+    const p = await page.context().newPage();
+    try {
+      await p.setViewportSize({ width: 1280, height: 800 });
+      await p.emulateMedia({ colorScheme: os, reducedMotion: "reduce" });
+      await openMockListing(p, { objectCount: 3, settings: { theme: app } });
+      await p.locator("#settings-btn").click();
+      await expect(p.locator("#settings-overlay")).toBeVisible();
+
+      const modal = await p
+        .locator("#settings-overlay .modal")
+        .evaluate((el) => getComputedStyle(el).backgroundColor);
+      const footer = await p
+        .locator("#settings-overlay .modal__footer")
+        .evaluate((el) => getComputedStyle(el).borderTopColor);
+      const search = await p
+        .locator("#settings-search")
+        .evaluate((el) => getComputedStyle(el).borderTopColor);
+      const checks = [
+        contrastCheck(`${os}/${app} modal footer rule`, footer, modal, 1.2),
+        contrastCheck(`${os}/${app} settings search edge`, search, modal, 1.2),
+      ];
+      const failures = checks
+        .filter((check) => !(check.ratio >= check.min))
+        .map(
+          (check) =>
+            `${check.label} = ${check.ratio.toFixed(2)}:1 (need ${check.min}) [${check.fg} on ${check.bg}]`,
+        );
+      expect(failures, `${os}/${app}`).toEqual([]);
+    } finally {
+      await p.close();
+    }
+  }
+});
+
+// Failure modes: .support-card keeps --glass-bg-heavy (translucent) plus
+// backdrop-filter inside an overlay that is itself blurred, so the prompt is
+// nested glass while every other overlay surface is opaque.
+test("support card is an opaque elevated surface with no backdrop blur", async ({
+  page,
+}) => {
+  for (const { os, app } of SURFACE_THEME_CASES) {
+    const p = await page.context().newPage();
+    try {
+      await p.setViewportSize({ width: 1280, height: 800 });
+      await p.emulateMedia({ colorScheme: os, reducedMotion: "reduce" });
+      await openMockListing(p, { objectCount: 3, settings: { theme: app } });
+      await p.evaluate(() => {
+        const overlay = document.getElementById(
+          "support-overlay",
+        ) as HTMLElement;
+        overlay.hidden = false;
+      });
+      const card = await p.locator(".support-card").evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return {
+          bg: cs.backgroundColor,
+          blur: cs.backdropFilter,
+          webkitBlur: cs.getPropertyValue("-webkit-backdrop-filter"),
+        };
+      });
+      // A computed rgba() carries alpha as the fourth component; rgb() is opaque.
+      const parts = card.bg.match(/[\d.]+/g) ?? [];
+      const alpha = parts.length === 4 ? Number(parts[3]) : 1;
+      expect(alpha, `${os}/${app} support card background ${card.bg}`).toBe(1);
+      expect(card.blur, `${os}/${app} backdrop-filter`).toBe("none");
+      // Chromium does not expose the -webkit- alias through getPropertyValue
+      // (it reads ""), so accept that alongside "none" from WebKit.
+      expect(["", "none"], `${os}/${app} -webkit-backdrop-filter`).toContain(
+        card.webkitBlur,
+      );
+    } finally {
+      await p.close();
+    }
+  }
 });

@@ -99,6 +99,49 @@ export function currentConnectionGeneration(): number {
   return connectionGeneration;
 }
 
+/** Generation of the object listing currently owned by the view. */
+export function currentListingGeneration(): number {
+  return listingGeneration;
+}
+
+/** Storage key for the per-saved-connection bucket/prefix memory. */
+export const CONNECTION_MEMORY_STORAGE_KEY = "s3-sidekick.connection-memory";
+
+/** Location memory is keyed on the saved connection's name and endpoint only. */
+export function connectionMemoryKey(name: string, endpoint: string): string {
+  return `${name}\n${endpoint}`;
+}
+
+/**
+ * Drop the remembered bucket/prefix for a saved connection. Called when the
+ * connection is deleted or its name/endpoint changes, so a stale key can never
+ * redirect a later connection to the wrong place.
+ */
+export function forgetConnectionLocation(name: string, endpoint: string): void {
+  try {
+    const raw = window.localStorage.getItem(CONNECTION_MEMORY_STORAGE_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return;
+    }
+    const store = parsed as Record<string, unknown>;
+    const key = connectionMemoryKey(name, endpoint);
+    if (!(key in store)) return;
+    delete store[key];
+    window.localStorage.setItem(
+      CONNECTION_MEMORY_STORAGE_KEY,
+      JSON.stringify(store),
+    );
+  } catch {
+    // Storage unavailable; nothing to clean up.
+  }
+}
+
 /** Close every frontend S3 admission path after encrypted storage locks. */
 export function setConnectionAccessLocked(locked: boolean): void {
   if (connectionAccessLocked === locked) return;
@@ -355,9 +398,23 @@ export async function saveConnection(
   });
 }
 
+/**
+ * Why the last loadConnection() could not read the stored connection, or null
+ * when it could (including "nothing saved"). Mirrors the bookmark loader so
+ * startup can warn without treating a corrupt file as an empty one.
+ */
+let connectionLoadError: string | null = null;
+
+export function getConnectionLoadError(): string | null {
+  return connectionLoadError;
+}
+
 export async function loadConnection(): Promise<ConnectionConfig | null> {
+  connectionLoadError = null;
   const raw = await invoke<string>("load_connection");
-  if (!raw) return null;
+  if (!raw) {
+    return null;
+  }
   try {
     const parsed: unknown = JSON.parse(raw);
     if (
@@ -370,10 +427,13 @@ export async function loadConnection(): Promise<ConnectionConfig | null> {
       ((parsed as Record<string, unknown>).session_token === undefined ||
         typeof (parsed as Record<string, unknown>).session_token === "string")
     ) {
+      connectionLoadError = null;
       return parsed as ConnectionConfig;
     }
+    connectionLoadError = "the saved connection file is corrupt.";
     return null;
   } catch {
+    connectionLoadError = "the saved connection could not be parsed.";
     return null;
   }
 }

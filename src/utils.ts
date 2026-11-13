@@ -93,6 +93,14 @@ export function plural(
   return `${count.toLocaleString()} ${count === 1 ? singular : pluralForm}`;
 }
 
+/**
+ * Length in Unicode code points, not UTF-16 code units. A password made of
+ * emoji or astral characters must not count twice toward the minimum.
+ */
+export function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
 export function formatDate(iso: string): string {
   if (!iso) return "—";
   // Relative times change with the clock, so they are never cached.
@@ -178,12 +186,11 @@ function percentEncodeAscii(value: string): string {
  * traverse out of the destination directory (`%` itself is encoded). Unicode
  * is folded to NFC because APFS treats NFC/NFD spellings as one file.
  */
-export function safeFileName(key: string, platform: string): string {
+export function safeFileName(key: string, _platform: string): string {
   const normalized = basename(key).normalize("NFC");
   const base = normalized.length > 0 ? normalized : "unnamed";
-  if (platform !== "windows") {
-    return base === "." || base === ".." ? percentEncodeAscii(base) : base;
-  }
+  // Apply Windows-portable rules on every host: a download made on macOS or
+  // Linux must still open if the folder is later used from Windows (M10).
   let name = base.replace(WINDOWS_ILLEGAL_NAME_CHARS, percentEncodeAscii);
   const stem = name.split(".")[0] ?? "";
   if (WINDOWS_RESERVED_NAME.test(stem)) {
@@ -258,7 +265,7 @@ function statusToken(code: number): RegExp {
 }
 
 const INTERNAL_FAILURE_MESSAGE =
-  "Something went wrong talking to the app backend. Try again; details are in the Activity log.";
+  "Something went wrong talking to the app backend. Try again; details are in the activity log.";
 
 export function friendlyError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);

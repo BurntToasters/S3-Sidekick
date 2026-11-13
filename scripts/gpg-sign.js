@@ -21,6 +21,14 @@ const {
 const require = createRequire(import.meta.url);
 const { signDetachedFile } = require("./release-integrity.cjs");
 const {
+  assertProductionSignatureEnvironment,
+} = require("./release-signature-gate.cjs");
+const {
+  approvedFingerprint,
+  sha256: sha256FileDigest,
+  verifyGpgSignature,
+} = require("./release-asset-verification.cjs");
+const {
   assertStableReleaseOverridesAllowed,
   isExplicitTruthy,
   isStableReleaseVersion,
@@ -961,6 +969,92 @@ async function syncBetaManifestsToLatestStable(
   }
 }
 
+function verifyBetaManifestChecksums(manifestNames, checksumNames, directory) {
+  const expectedDigests = new Map();
+  for (const name of checksumNames) {
+    const seen = new Set();
+    const lines = fs
+      .readFileSync(path.join(directory, name), "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean);
+    for (const line of lines) {
+      const match = line.match(/^([a-f0-9]{64}) {2}([^\r\n]+)$/i);
+      if (!match) throw new Error(`Malformed checksum entry in ${name}.`);
+      const [, expected, payload] = match;
+      if (payload !== path.posix.basename(payload)) {
+        throw new Error(`Unsafe checksum filename in ${name}.`);
+      }
+      if (seen.has(payload)) {
+        throw new Error(`Duplicate checksum entry for ${payload} in ${name}.`);
+      }
+      seen.add(payload);
+      if (!expectedDigests.has(payload))
+        expectedDigests.set(payload, new Set());
+      expectedDigests.get(payload).add(expected.toLowerCase());
+    }
+  }
+  for (const name of manifestNames) {
+    const digests = expectedDigests.get(name);
+    if (!digests || digests.size === 0) {
+      throw new Error(`Beta manifest ${name} is not covered by a checksum.`);
+    }
+    const actual = sha256FileDigest(path.join(directory, name));
+    if (digests.size !== 1 || !digests.has(actual)) {
+      throw new Error(
+        `Beta manifest ${name} does not match its signed checksum.`,
+      );
+    }
+  }
+}
+
+function verifyBetaManifestAssets(assets, manifestNames, destination) {
+  const byName = new Map();
+  for (const asset of assets) {
+    if (byName.has(asset.name)) {
+      throw new Error(`Duplicate release asset: ${asset.name}.`);
+    }
+    byName.set(asset.name, asset);
+  }
+  const checksumNames = assets
+    .filter((asset) => CHECKSUM_PATTERN.test(asset?.name ?? ""))
+    .map((asset) => asset.name);
+  if (checksumNames.length === 0) {
+    throw new Error(
+      `Published release ${TAG} has no signed checksum manifests; refusing to recover beta manifests.`,
+    );
+  }
+  const requiredNames = [
+    ...manifestNames.flatMap((name) => [name, `${name}.asc`]),
+    ...checksumNames.flatMap((name) => [name, `${name}.asc`]),
+  ].sort();
+  const fingerprint = approvedFingerprint(process.env);
+  for (const name of requiredNames) {
+    const asset = byName.get(name);
+    if (!asset) {
+      throw new Error(`Recovery is missing required release asset ${name}.`);
+    }
+    const file = path.join(destination, name);
+    downloadReleaseAsset(REPOSITORY, asset.id, file);
+    if (fs.statSync(file).size === 0) {
+      throw new Error(`Recovery asset ${name} is empty.`);
+    }
+  }
+  for (const name of requiredNames.filter((name) => name.endsWith(".asc"))) {
+    const payload = name.slice(0, -4);
+    if (!requiredNames.includes(payload)) {
+      throw new Error(`Recovery signature has no payload: ${name}.`);
+    }
+    verifyGpgSignature(
+      path.join(destination, payload),
+      path.join(destination, name),
+      fingerprint,
+      process.env,
+    );
+  }
+  verifyBetaManifestChecksums(manifestNames, checksumNames, destination);
+  return manifestNames.map((name) => path.join(destination, name));
+}
+
 async function syncBetaManifestsAfterPublish() {
   if (!IS_PRERELEASE) {
     throw new Error(
@@ -987,23 +1081,29 @@ async function syncBetaManifestsAfterPublish() {
       `Release ${TAG} is still a draft. Publish it on GitHub before syncing beta manifests to /latest.`,
     );
   }
-  const assets = listReleaseAssets(currentRelease.id).filter((asset) =>
-    /^latest-[a-z0-9]+-beta-[a-z0-9_-]+\.json$/i.test(asset?.name ?? ""),
-  );
-  if (assets.length === 0) {
+  const assets = listReleaseAssets(currentRelease.id);
+  const betaManifestNames = assets
+    .filter((asset) =>
+      /^latest-[a-z0-9]+-beta-[a-z0-9_-]+\.json$/i.test(asset?.name ?? ""),
+    )
+    .map((asset) => asset.name);
+  if (betaManifestNames.length === 0) {
     throw new Error(`Published release ${TAG} has no beta updater manifests.`);
   }
   const temporaryDirectory = fs.mkdtempSync(
     path.join(os.tmpdir(), "s3-sidekick-beta-manifests-"),
   );
   try {
-    const files = assets.map((asset) => {
-      const dest = path.join(temporaryDirectory, asset.name);
-      downloadReleaseAsset(REPOSITORY, asset.id, dest);
-      return dest;
-    });
+    // Recovery must not copy unverified bytes into the stable feed. Verify the
+    // detached GPG signatures and the signed checksum coverage before the
+    // transactional replacement; any mismatch aborts with the live feed intact.
+    const files = verifyBetaManifestAssets(
+      assets,
+      betaManifestNames,
+      temporaryDirectory,
+    );
     console.log(
-      `Syncing ${files.length} beta updater manifest(s) from ${TAG} onto /releases/latest…`,
+      `Verified ${files.length} beta updater manifest(s) from ${TAG} before syncing…`,
     );
     await syncBetaManifestsToLatestStable(files, currentRelease.id);
     console.log("Done: beta manifests synced to latest stable release.\n");
@@ -1013,6 +1113,7 @@ async function syncBetaManifestsAfterPublish() {
 }
 
 async function main() {
+  assertProductionSignatureEnvironment(process.env);
   assertStableReleaseOverridesAllowed(process.env, VERSION);
   assertGitHubCliAuthenticated();
   verifyReleaseSession(root);
@@ -1079,5 +1180,7 @@ export {
   releaseArtifactSearchDirs,
   resolveUpdaterTargets,
   targetKeysForArtifact,
+  verifyBetaManifestAssets,
+  verifyBetaManifestChecksums,
   verifyUpdaterSignature,
 };

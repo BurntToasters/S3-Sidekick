@@ -166,7 +166,7 @@ test.describe("inspector edit safety", () => {
     await expect(page.locator("#inspector-header-title")).toHaveText(
       "notes.txt",
     );
-    await expect(page.locator("#inspector-pane-info")).toBeVisible();
+    await expect(page.locator("#inspector-pane-metadata")).toBeVisible();
   });
 
   test("Discard moves the inspector to the newly selected object", async ({
@@ -240,22 +240,25 @@ test.describe("inspector tab behaviour", () => {
   }) => {
     await openEditableRoot(page);
     await fileRow(page, "notes.txt").locator(".object-name").click();
-    const previewTab = page.locator(
-      '#inspector-panel [data-inspector-tab="preview"]',
-    );
-    await expect(previewTab).toHaveAttribute("role", "tab");
-    await expect(previewTab).toHaveAttribute(
-      "aria-controls",
-      "inspector-pane-preview",
-    );
-    await expect(page.locator("#inspector-pane-preview")).toHaveAttribute(
-      "role",
-      "tabpanel",
-    );
-    await expect(page.locator("#inspector-pane-info")).toHaveAttribute(
-      "role",
-      "tabpanel",
-    );
+    const panelByTab = {
+      preview: "inspector-pane-preview",
+      details: "inspector-pane-info",
+      permissions: "inspector-pane-permissions",
+      metadata: "inspector-pane-metadata",
+    } as const;
+    for (const [tab, panelId] of Object.entries(panelByTab)) {
+      const tabEl = page.locator(
+        `#inspector-panel [data-inspector-tab="${tab}"]`,
+      );
+      await expect(tabEl).toHaveAttribute("role", "tab");
+      await expect(tabEl).toHaveAttribute("aria-controls", panelId);
+      const panel = page.locator(`#${panelId}`);
+      await expect(panel).toHaveAttribute("role", "tabpanel");
+      await expect(panel).toHaveAttribute(
+        "aria-labelledby",
+        `inspector-tab-${tab}`,
+      );
+    }
   });
 
   test("arrow keys move across the merged tab row and skip a disabled Preview", async ({
@@ -279,7 +282,7 @@ test.describe("inspector tab behaviour", () => {
     await page.keyboard.press("ArrowRight");
     await expect(permissionsTab).toBeFocused();
     await expect(permissionsTab).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator("#inspector-pane-info")).toBeVisible();
+    await expect(page.locator("#inspector-pane-permissions")).toBeVisible();
     await page.keyboard.press("ArrowRight");
     await expect(metadataTab).toBeFocused();
     await page.keyboard.press("ArrowLeft");
@@ -325,11 +328,11 @@ test.describe("inspector tab behaviour", () => {
     const labels = await body
       .locator(".metadata-label")
       .evaluateAll((elements) => elements.map((el) => el.textContent ?? ""));
-    for (const label of ["Path", "Size", "Last Modified", "ETag"]) {
+    for (const label of ["Path", "Size", "Last modified", "ETag"]) {
       expect(labels.filter((text) => text === label)).toHaveLength(1);
     }
     // Storage Class and Encryption existed in both old tabs; exactly once now.
-    expect(labels.filter((text) => text === "Storage Class")).toHaveLength(1);
+    expect(labels.filter((text) => text === "Storage class")).toHaveLength(1);
     expect(labels.filter((text) => text === "Encryption")).toHaveLength(1);
   });
 
@@ -413,7 +416,7 @@ test.describe("inspector empty state and footer", () => {
     } else {
       await page.locator("#batch-more").click();
       await page
-        .locator('.context-menu [role="menuitem"]', { hasText: "Deselect All" })
+        .locator('.context-menu [role="menuitem"]', { hasText: "Deselect all" })
         .click();
     }
 
@@ -434,9 +437,7 @@ test.describe("inspector empty state and footer", () => {
   }) => {
     await openEditableRoot(page);
     await fileRow(page, "notes.txt").locator(".object-name").click();
-    const footer = page.locator(
-      "#inspector-pane-info .inspector-panel__footer",
-    );
+    const footer = page.locator("#inspector-panel .inspector-panel__footer");
 
     // Details: never, even while an edit is unsaved.
     await page
@@ -480,9 +481,7 @@ test.describe("inspector empty state and footer", () => {
 
     // The batch view has no sub-tabs, so the footer follows the dirty edit
     // alone: hidden while clean, visible with Save once Access is changed.
-    const footer = page.locator(
-      "#inspector-pane-info .inspector-panel__footer",
-    );
+    const footer = page.locator("#inspector-panel .inspector-panel__footer");
     await expect(footer).toBeHidden();
     await page.locator("#batch-visibility").selectOption("private");
     await expect(footer).toBeVisible();

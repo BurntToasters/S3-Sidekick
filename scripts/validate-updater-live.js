@@ -101,6 +101,24 @@ const BASE = (
   process.env.UPDATER_LIVE_BASE_URL ||
   "https://github.com/BurntToasters/S3-Sidekick/releases/latest/download"
 ).replace(/\/+$/, "");
+// Test seam: the release-assets E2E serves the real published bytes from a
+// local HTTP fixture. Production never sets this.
+const ARTIFACT_BASE = String(process.env.UPDATER_LIVE_ARTIFACT_BASE_URL || "")
+  .trim()
+  .replace(/\/+$/, "");
+if (ARTIFACT_BASE) {
+  const parsed = new URL(ARTIFACT_BASE);
+  if (
+    !/^https?:$/.test(parsed.protocol) ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new Error(
+      "UPDATER_LIVE_ARTIFACT_BASE_URL must be a plain http(s) URL.",
+    );
+  }
+}
+const FETCH_TIMEOUT_MS = 120_000;
 
 async function fetchManifest(target) {
   const url = `${BASE}/latest-${target}.json`;
@@ -110,6 +128,7 @@ async function fetchManifest(target) {
       "User-Agent": "s3-sidekick-ci",
     },
     redirect: "follow",
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (response.status === 404) {
     return { target, url, status: 404, body: null };
@@ -204,12 +223,19 @@ export function collectManifestArtifactRefs(bodies) {
 }
 
 async function downloadToFile(url, dest) {
-  const response = await fetch(url, {
+  const filename = decodeURIComponent(
+    new URL(url).pathname.split("/").pop() || "",
+  );
+  const fetchUrl = ARTIFACT_BASE
+    ? `${ARTIFACT_BASE}/${encodeURIComponent(filename)}`
+    : url;
+  const response = await fetch(fetchUrl, {
     headers: {
       Accept: "application/octet-stream",
       "User-Agent": "s3-sidekick-ci",
     },
     redirect: "follow",
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${url}: HTTP ${response.status}`);

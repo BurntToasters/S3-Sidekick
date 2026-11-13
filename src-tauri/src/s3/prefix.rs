@@ -38,6 +38,17 @@ pub(super) async fn preflight_prefix_copy_sources(
     require_immutable_versions: bool,
     cancel: &CancelToken,
 ) -> Result<Vec<PrefixCopySource>, String> {
+    // A destination prefix without a trailing slash would concatenate the
+    // suffix onto the last segment (`archive` + `a.jpg` -> `archivea.jpg`).
+    // Normalize at the boundary so direct IPC and resumed transfers cannot
+    // create surprising keys.
+    let normalized_destination;
+    let dst_prefix = if dst_prefix.is_empty() || dst_prefix.ends_with('/') {
+        dst_prefix
+    } else {
+        normalized_destination = format!("{}/", dst_prefix);
+        &normalized_destination
+    };
     let mut sources = Vec::new();
     let mut continuation_token: Option<String> = None;
     let mut seen_tokens = HashSet::new();
@@ -59,13 +70,15 @@ pub(super) async fn preflight_prefix_copy_sources(
             })?,
         };
 
-        let encoding = listed_encoding(&output);
+        let encoding = listed_encoding_for(src_bucket, &output);
+        let page_start = sources.len();
+        let mut page_plans: Vec<(String, String)> = Vec::new();
         for object in output.contents() {
             let Some(raw_key) = object.key() else {
                 continue;
             };
             let key = encoding.decode(raw_key);
-            if sources.len() >= MAX_PREFIX_TRANSACTION_OBJECTS {
+            if page_start + page_plans.len() >= MAX_PREFIX_TRANSACTION_OBJECTS {
                 return Err(format!(
                     "Prefix operation exceeds the {}-object transaction limit; no destination was changed",
                     MAX_PREFIX_TRANSACTION_OBJECTS
@@ -88,16 +101,25 @@ pub(super) async fn preflight_prefix_copy_sources(
                     key
                 ));
             }
-            // Move plans bind immutable versions; truly unversioned sources
-            // record `None` and may use the provider-gated ETag fallback.
-            // A suspended bucket's mutable `null` version is a hard refusal.
-            let immutable_version_id = if require_immutable_versions {
-                preflight_optional_move_version(client, src_bucket, &key, cancel).await?
-            } else {
-                None
-            };
+            page_plans.push((key, destination_key));
+        }
+
+        // Move plans bind immutable versions; truly unversioned sources
+        // record `None` and may use the provider-gated ETag fallback.
+        // A suspended bucket's mutable `null` version is a hard refusal.
+        // One HEAD per object used to run serially under the transfer gate,
+        // so a large move blocked rekey/reset for hours (M5). Run bounded
+        // batches while preserving listing order.
+        let versions = if require_immutable_versions {
+            preflight_move_versions(client, src_bucket, &page_plans, cancel).await?
+        } else {
+            vec![None; page_plans.len()]
+        };
+        for ((source_key, destination_key), immutable_version_id) in
+            page_plans.into_iter().zip(versions)
+        {
             sources.push(PrefixCopySource {
-                source_key: key,
+                source_key,
                 destination_key,
                 immutable_version_id,
             });
@@ -114,6 +136,90 @@ pub(super) async fn preflight_prefix_copy_sources(
     }
 
     Ok(sources)
+}
+
+/// Bounded concurrency for the per-object immutable-version preflight.
+///
+/// The transfer gate is held for the whole preflight, so serial HEADs made a
+/// large prefix move block unrelated storage operations for hours. Eight
+/// concurrent HEADs per batch is enough to cut wall time without hammering a
+/// provider's request rate.
+pub(super) const MOVE_VERSION_PREFLIGHT_CONCURRENCY: usize = 8;
+
+/// Contiguous index ranges, in listing order, for bounded-concurrency work.
+fn preflight_chunk_ranges(len: usize, size: usize) -> Vec<std::ops::Range<usize>> {
+    let size = size.max(1);
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < len {
+        let end = (start + size).min(len);
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
+async fn preflight_move_versions(
+    client: &Client,
+    bucket: &str,
+    plans: &[(String, String)],
+    cancel: &CancelToken,
+) -> Result<Vec<Option<String>>, String> {
+    let mut versions = Vec::with_capacity(plans.len());
+    for range in preflight_chunk_ranges(plans.len(), MOVE_VERSION_PREFLIGHT_CONCURRENCY) {
+        let mut handles = Vec::with_capacity(range.len());
+        for (key, _) in &plans[range.clone()] {
+            let client = client.clone();
+            let bucket = bucket.to_string();
+            let key = key.clone();
+            let cancel = cancel.clone();
+            handles.push(tokio::spawn(async move {
+                preflight_optional_move_version(&client, &bucket, &key, &cancel).await
+            }));
+        }
+        // Await the whole batch before surfacing a failure: returning early
+        // would detach sibling HEADs against a client the gate is about to
+        // release. Order within the batch still matches the listing.
+        let mut batch = Vec::with_capacity(handles.len());
+        for handle in handles {
+            batch.push(
+                handle
+                    .await
+                    .map_err(|err| format!("Version preflight task failed: {}", err))?,
+            );
+        }
+        for result in batch {
+            versions.push(result?);
+        }
+    }
+    Ok(versions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preflight_chunk_ranges;
+
+    #[test]
+    fn version_preflight_chunks_preserve_order_and_bound_concurrency() {
+        assert!(preflight_chunk_ranges(0, 8).is_empty());
+        assert_eq!(preflight_chunk_ranges(3, 8), vec![0..3]);
+        assert_eq!(preflight_chunk_ranges(8, 8), vec![0..8]);
+        assert_eq!(preflight_chunk_ranges(9, 8), vec![0..8, 8..9]);
+        assert_eq!(
+            preflight_chunk_ranges(5, 0),
+            vec![0..1, 1..2, 2..3, 3..4, 4..5],
+            "a zero batch size must still make progress"
+        );
+
+        let chunks = preflight_chunk_ranges(1000, 8);
+        assert_eq!(chunks.len(), 125);
+        assert_eq!(chunks.first().map(|range| range.start), Some(0));
+        assert_eq!(chunks.last().map(|range| range.end), Some(1000));
+        for pair in chunks.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "chunks must not skip or repeat");
+        }
+        assert!(chunks.iter().all(|range| range.len() <= 8));
+    }
 }
 
 /// List rollback keys defensively (no delimiter, recursive, paginated).
@@ -144,7 +250,7 @@ pub(super) async fn list_all_keys_under_prefix(
             }
         };
 
-        let encoding = listed_encoding(&output);
+        let encoding = listed_encoding_for(bucket, &output);
         for obj in output.contents() {
             if let Some(k) = obj.key() {
                 if keys.len() >= MAX_PREFIX_TRANSACTION_OBJECTS {
@@ -195,6 +301,8 @@ pub(crate) async fn delete_prefix(
     let cancel = client.token();
 
     let mut result = DeleteResult::default();
+    let versioned = bucket_creates_delete_markers(&client, &bucket, &cancel).await;
+    apply_versioning_warning(&mut result, versioned);
     let mut continuation_token: Option<String> = None;
     let mut seen_tokens = HashSet::new();
 
@@ -232,7 +340,7 @@ pub(crate) async fn delete_prefix(
             }
         };
 
-        let encoding = listed_encoding(&output);
+        let encoding = listed_encoding_for(&bucket, &output);
         let keys: Vec<String> = output
             .contents()
             .iter()
@@ -324,10 +432,17 @@ pub(crate) async fn delete_prefix(
             };
 
             let errors = del_output.errors();
+            if !errors.is_empty() {
+                // The batch transport succeeded, but individual keys did not
+                // delete. Report a partial failure instead of an Ok receipt.
+                result.incomplete = true;
+            }
             result.failed = result.failed.saturating_add(errors.len() as u32);
-            result.deleted = result
-                .deleted
-                .saturating_add(chunk.len().saturating_sub(errors.len()) as u32);
+            let accepted = chunk.len().saturating_sub(errors.len()) as u32;
+            result.deleted = result.deleted.saturating_add(accepted);
+            if versioned == Some(true) {
+                result.delete_markers = result.delete_markers.saturating_add(accepted);
+            }
             for err in errors {
                 record_delete_error(
                     &mut result,
@@ -347,5 +462,5 @@ pub(crate) async fn delete_prefix(
         }
     }
 
-    Ok(result)
+    finish_delete_result(result, "Prefix delete")
 }

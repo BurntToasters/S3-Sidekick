@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { commandCalls, saveArtifact } from "./helpers";
+import { commandCalls, openCopyMoveFromRow, saveArtifact } from "./helpers";
 import {
   openMockListing,
   readMockCallLog,
@@ -142,12 +142,13 @@ test.describe("delete outcomes and confirmation wording", () => {
         fileRow(page, `${String(i).padStart(3, "0")}-sample-object.txt`),
       ),
     );
+    await page.clock.install();
     await openDeleteDialog(page);
     await page.locator("#dialog-ok").click();
 
     const toast = page.locator("#toast-region .toast--error");
     await expect(toast).toContainText("Couldn't delete 2 of 5 items");
-    await page.waitForTimeout(8_500);
+    await page.clock.fastForward(8_500);
     await expect(toast).toBeVisible();
 
     await toast.getByRole("button", { name: "Details" }).click();
@@ -334,9 +335,9 @@ test.describe("context menu labels and availability", () => {
     const move = menuItem(page, "Move to…");
     await expect(move).toBeDisabled();
     await expect(page.locator(".context-menu")).toContainText(
-      "This provider can't safely delete the source. Use Copy, then Delete.",
+      "This provider can't safely delete the source. Use copy, then delete.",
     );
-    await expect(menuItem(page, "Copy / Move…")).toHaveCount(0);
+    await expect(menuItem(page, "Copy / move…")).toHaveCount(0);
     await expect(menuItem(page, "Copy to…")).toBeEnabled();
 
     const calls = await readMockCallLog(page);
@@ -415,12 +416,21 @@ test.describe("go to, export and bucket refresh", () => {
     await saveArtifact(page, testInfo, ARTIFACT_SUITE, "go-to-reveal", calls);
   });
 
-  test("exporting the activity log asks once, through the save dialog", async ({
+  test("exporting the activity log asks once, through the native picker", async ({
     page,
   }, testInfo) => {
     await installNative(page, {
       commands: {
-        "plugin:dialog|save": { result: "/tmp/s3-sidekick-activity.txt" },
+        pick_text_export: {
+          result: {
+            token: "grant-activity",
+            path: "/tmp/s3-sidekick-activity.txt",
+            name: "s3-sidekick-activity.txt",
+            isDir: false,
+            directoryToken: null,
+            directoryPath: null,
+          },
+        },
         path_exists: { result: true },
       },
     });
@@ -434,15 +444,16 @@ test.describe("go to, export and bucket refresh", () => {
 
     await expect
       .poll(async () =>
-        commandCalls(await readMockCallLog(page), "write_text_file"),
+        commandCalls(await readMockCallLog(page), "export_text_file"),
       )
       .toHaveLength(1);
     await expect(page.locator("#dialog-overlay")).toBeHidden();
     const [write] = commandCalls(
       await readMockCallLog(page),
-      "write_text_file",
+      "export_text_file",
     );
-    expect(write.args).toMatchObject({ overwrite: true });
+    expect(write.args).toMatchObject({ token: "grant-activity" });
+    expect(write.args).not.toHaveProperty("path");
 
     await saveArtifact(page, testInfo, ARTIFACT_SUITE, "export-once", []);
   });
@@ -456,7 +467,7 @@ test.describe("go to, export and bucket refresh", () => {
     await page.locator("#bucket-list .list__item-btn").first().click({
       button: "right",
     });
-    await menuItem(page, "Refresh Buckets").click();
+    await menuItem(page, "Refresh buckets").click();
 
     await expect(
       page.locator("#bucket-list .list__item-btn", {
@@ -471,5 +482,30 @@ test.describe("go to, export and bucket refresh", () => {
 
     const calls = await readMockCallLog(page);
     await saveArtifact(page, testInfo, ARTIFACT_SUITE, "bucket-banner", calls);
+  });
+});
+
+test.describe("copy status wording", () => {
+  // Failure modes covered before implementation (batch D, strings and keys):
+  // - An accepted copy reports "Queued 1 item….", an ellipsis followed by a
+  //   full stop, instead of a single terminator.
+  // - The status line is the only place a user reads the queue result, so a
+  //   stray "…." reads as a typo on every copy and move.
+  test("an accepted copy ends its status with a single full stop", async ({
+    page,
+  }, testInfo) => {
+    await openMockListing(page, { objectCount: 12 });
+    await openCopyMoveFromRow(page, fileRow(page, "001-sample-object.txt"));
+    await page.locator("#copy-move-path").fill("destination/");
+    await page.locator("#copy-move-copy-btn").click();
+    await expect(page.locator("#copy-move-overlay")).not.toHaveClass(/active/);
+
+    const status = ((await page.locator("#status").textContent()) ?? "").trim();
+    expect(status).toBe("Queued 1 item.");
+    expect(status).not.toMatch(/…\./);
+    expect(status).toMatch(/[^.]\.$/);
+
+    const calls = await readMockCallLog(page);
+    await saveArtifact(page, testInfo, ARTIFACT_SUITE, "copy-status", calls);
   });
 });

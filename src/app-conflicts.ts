@@ -34,7 +34,7 @@ export async function promptUnguardedWrite(): Promise<UnguardedWriteDecision> {
     return { proceed: true, suppressed: true };
   }
   const { confirmed, checked } = await showConfirmWithCheckbox(
-    "Unconditional Write",
+    "Unconditional write",
     "This storage provider cannot enforce create-only writes. Another client could create the same key before this transfer finishes. Write anyway?",
     {
       okLabel: "Write anyway",
@@ -50,7 +50,7 @@ export async function promptUnguardedWrite(): Promise<UnguardedWriteDecision> {
   try {
     await saveSettings();
     logActivity(
-      "Unconditional write warnings turned off. Turn them back on in Settings > Transfers.",
+      "Unconditional write warnings turned off. Turn them back on in settings > transfers.",
       "info",
     );
   } catch (err) {
@@ -71,7 +71,7 @@ async function confirmUnguardedWrite(
   if (!proceed) return false;
   if (hasBatchRemainder && !suppressed) {
     const applyAll = await showConfirm(
-      "Apply Choice",
+      "Apply choice",
       'Apply "Write anyway" to remaining new destinations on this provider?',
       { okLabel: "Apply to all", cancelLabel: "Only this one" },
     );
@@ -156,8 +156,14 @@ export async function resolveDownloadEntriesWithConflicts(
   const existingResults = await Promise.all(
     entries.map(async (entry) => {
       try {
+        if (!entry.destinationToken) {
+          // Without a grant the backend cannot check the path; fail closed by
+          // treating it as an existing destination.
+          throw new Error("destination grant is unavailable");
+        }
         return await invoke<boolean>("path_exists", {
-          path: entry.destination,
+          token: entry.destinationToken,
+          name: entry.destinationName ?? null,
         });
       } catch (err) {
         // Fail closed: an unreadable destination must not be taken as "free to

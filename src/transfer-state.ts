@@ -31,11 +31,17 @@ function moveTo(item: TransferItem, next: TransferStatus): void {
 }
 
 /** Why a claimed item went back to the queue without running. */
-export type ParkReason = "offline" | "disconnected";
+export type ParkReason =
+  "offline" | "disconnected" | "no-connection" | "session-replaced";
+
+export const CONNECT_TO_RESUME_MESSAGE = "Connect to resume";
 
 const PARK_MESSAGES: Record<ParkReason, string> = {
   offline: "Offline — waiting for connection",
   disconnected: "Disconnected — waiting to reconnect",
+  "no-connection": CONNECT_TO_RESUME_MESSAGE,
+  "session-replaced":
+    "Connection changed — resume when the new session is ready",
 };
 
 /**
@@ -154,6 +160,23 @@ export function resume(item: TransferItem): boolean {
 export function releaseHold(item: TransferItem): void {
   item.paused = false;
   item.phase = "running";
+}
+
+/**
+ * A row parked by a disconnect or live-session replacement, rather than by
+ * the user. Reconnects release these automatically; user pauses must stay
+ * paused. Keep this list in step with PARK_MESSAGES.
+ */
+const AUTO_PARK_MESSAGES: readonly string[] = [
+  "Disconnected — waiting to reconnect",
+  "Connect to resume",
+  "Connection changed — resume when the new session is ready",
+  "Offline — waiting for connection",
+];
+
+export function isAutoParked(item: TransferItem): boolean {
+  if (item.status !== "queued" || !item.paused) return false;
+  return AUTO_PARK_MESSAGES.includes(item.error ?? "");
 }
 
 /** Put a failed or skipped row back in the queue from scratch. */

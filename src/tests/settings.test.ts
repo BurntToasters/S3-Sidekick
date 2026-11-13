@@ -9,6 +9,7 @@ const mockLoadBookmarks = vi.fn<() => Promise<void>>();
 const mockRenderBookmarkList = vi.fn();
 const mockRemoveBookmark = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockGetBookmarks = vi.fn();
+const mockGetBookmarkLoadError = vi.fn<() => string | null>();
 const mockExportBookmarksJson = vi.fn();
 const mockImportBookmarksJson = vi.fn();
 const mockIsUpdaterEnabled = vi.fn();
@@ -21,7 +22,7 @@ const mockShowConfirmWithCheckbox =
   vi.fn<
     (...args: unknown[]) => Promise<{ confirmed: boolean; checked: boolean }>
   >();
-const mockSave = vi.fn<(...args: unknown[]) => Promise<string | null>>();
+const mockPickTextExport = vi.fn<() => Promise<unknown>>();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: mockInvoke,
@@ -35,8 +36,8 @@ vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: mockRelaunch,
 }));
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  save: mockSave,
+vi.mock("../path-grants.ts", () => ({
+  pickTextExport: () => mockPickTextExport(),
 }));
 
 vi.mock("../bookmarks.ts", () => ({
@@ -44,6 +45,7 @@ vi.mock("../bookmarks.ts", () => ({
   renderBookmarkList: mockRenderBookmarkList,
   removeBookmark: mockRemoveBookmark,
   getBookmarks: mockGetBookmarks,
+  getBookmarkLoadError: mockGetBookmarkLoadError,
   exportBookmarksJson: mockExportBookmarksJson,
   importBookmarksJson: mockImportBookmarksJson,
   updateBookmark: mockUpdateBookmark,
@@ -57,6 +59,7 @@ vi.mock("../updater.ts", () => ({
 
 vi.mock("../security.ts", () => ({
   refreshSecuritySettingsUI: mockRefreshSecuritySettingsUI,
+  isCancellationError: () => false,
 }));
 
 vi.mock("../dialogs.ts", () => ({
@@ -76,14 +79,23 @@ describe("settings module", () => {
   beforeEach(async () => {
     vi.resetModules();
     mockInvoke.mockReset();
-    mockSave.mockReset();
-    mockSave.mockResolvedValue("C:\exports\s3-sidekick-bookmarks.json");
+    mockPickTextExport.mockReset();
+    mockPickTextExport.mockResolvedValue({
+      token: "grant-bookmarks",
+      path: "C:\exports\s3-sidekick-bookmarks.json",
+      name: "s3-sidekick-bookmarks.json",
+      isDir: false,
+      directoryToken: null,
+      directoryPath: null,
+    });
     mockGetVersion.mockReset();
     mockRelaunch.mockReset();
     mockLoadBookmarks.mockReset();
     mockRenderBookmarkList.mockReset();
     mockRemoveBookmark.mockReset();
     mockGetBookmarks.mockReset();
+    mockGetBookmarkLoadError.mockReset();
+    mockGetBookmarkLoadError.mockReturnValue(null);
     mockExportBookmarksJson.mockReset();
     mockImportBookmarksJson.mockReset();
     mockIsUpdaterEnabled.mockReset();
@@ -487,6 +499,8 @@ describe("settings module", () => {
 
   it("resets settings with relaunch success and location fallback", async () => {
     const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.connectionId = "session-reset";
 
     mockShowConfirm.mockResolvedValueOnce(false);
     await settings.resetSettings();
@@ -503,7 +517,9 @@ describe("settings module", () => {
         json: expect.stringContaining('"theme": "system"'),
       }),
     );
-    expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection");
+    expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection", {
+      connectionId: "session-reset",
+    });
     expect(mockRelaunch).toHaveBeenCalledTimes(1);
 
     const assignMock = vi.fn();
@@ -522,6 +538,88 @@ describe("settings module", () => {
       value: locationValue,
       configurable: true,
     });
+  });
+
+  it("waits for an in-flight settings save before reset writes", async () => {
+    const settings = await import("../settings.ts");
+    let resolveSave!: () => void;
+    let saveCalls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "save_settings") {
+        saveCalls += 1;
+        if (saveCalls === 1) {
+          return new Promise<void>((resolve) => {
+            resolveSave = resolve;
+          });
+        }
+      }
+      return undefined;
+    });
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
+    mockRelaunch.mockResolvedValue(undefined);
+
+    const pendingSave = settings.saveSettings();
+    const reset = settings.resetSettings();
+    await flushMicrotasks(4);
+    expect(mockInvoke).not.toHaveBeenCalledWith("clear_saved_connection");
+
+    resolveSave();
+    await pendingSave;
+    await reset;
+    expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection", {
+      connectionId: null,
+    });
+    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("resyncs the backend session before a reloaded reset clears credentials", async () => {
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.connectionId = "";
+
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
+    mockRelaunch.mockResolvedValue(undefined);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_connection_id") return "backend-session";
+      return undefined;
+    });
+
+    await settings.resetSettings();
+
+    expect(mockInvoke).toHaveBeenCalledWith("get_connection_id");
+    expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection", {
+      connectionId: "backend-session",
+    });
+    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps a stale reset session to disconnect-and-retry", async () => {
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.connectionId = "old-session";
+
+    mockShowConfirm.mockResolvedValueOnce(true);
+    mockShowChoiceDialog.mockResolvedValueOnce("partial");
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "clear_saved_connection") {
+        throw new Error("Connection session changed; disconnect and retry.");
+      }
+      return undefined;
+    });
+
+    await settings.resetSettings();
+
+    expect(mockShowAlert).toHaveBeenCalledWith(
+      "Reset failed",
+      "Your session changed; disconnect and retry.",
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "save_settings",
+      expect.anything(),
+    );
+    expect(mockRelaunch).not.toHaveBeenCalled();
   });
 
   it("factory reset gets final consent before one backend transaction", async () => {
@@ -546,6 +644,16 @@ describe("settings module", () => {
     expect(mockInvoke).toHaveBeenCalledWith("factory_reset", {
       settingsJson: expect.stringContaining('"theme": "system"'),
     });
+    const factoryCall = mockInvoke.mock.calls.find(
+      ([command]) => command === "factory_reset",
+    );
+    const factoryPayload = JSON.parse(
+      (factoryCall?.[1] as { settingsJson: string }).settingsJson,
+    ) as Record<string, unknown>;
+    expect(
+      factoryPayload._setupComplete,
+      "factory reset must not be able to skip the setup wizard",
+    ).toBeUndefined();
     expect(localStorage.length).toBe(0);
     expect(mockRelaunch).toHaveBeenCalledTimes(1);
   });
@@ -571,6 +679,26 @@ describe("settings module", () => {
     mockShowChoiceDialog.mockResolvedValueOnce("discard");
     await settings.closeSettingsModal(false);
 
+    expect(state.currentSettings).toEqual(state.lastPersistedSettings);
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(
+      (
+        document.getElementById("settings-overlay") as HTMLDivElement
+      ).classList.contains("active"),
+    ).toBe(false);
+  });
+
+  it("discards a settings draft without a prompt when the vault is locking (H5)", async () => {
+    document.body.innerHTML = `<div id="settings-overlay" class="modal-overlay active"></div>`;
+    const settings = await import("../settings.ts");
+    const { state } = await import("../state.ts");
+    state.lastPersistedSettings = { ...SETTING_DEFAULTS, theme: "dark" };
+    state.currentSettings = { ...SETTING_DEFAULTS, theme: "light" };
+    mockShowChoiceDialog.mockClear();
+
+    await settings.closeSettingsModalForLock();
+
+    expect(mockShowChoiceDialog).not.toHaveBeenCalled();
     expect(state.currentSettings).toEqual(state.lastPersistedSettings);
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
     expect(
@@ -708,7 +836,7 @@ describe("settings module", () => {
     await onDelete(0);
     await flushMicrotasks();
 
-    expect(mockShowAlert).toHaveBeenCalledWith("Delete Failed", "disk full");
+    expect(mockShowAlert).toHaveBeenCalledWith("Delete failed", "disk full");
     expect(mockRenderBookmarkList).toHaveBeenCalledTimes(1);
   });
 
@@ -839,14 +967,13 @@ describe("settings module", () => {
       document.getElementById("bookmarks-export-btn") as HTMLButtonElement
     ).click();
     await vi.waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("write_text_file", {
-        path: "C:\exports\s3-sidekick-bookmarks.json",
+      expect(mockInvoke).toHaveBeenCalledWith("export_text_file", {
+        token: "grant-bookmarks",
         text: '[{"name":"x"}]',
-        overwrite: true,
       });
     });
     expect(mockExportBookmarksJson).toHaveBeenCalledTimes(1);
-    expect(mockSave).toHaveBeenCalledTimes(1);
+    expect(mockPickTextExport).toHaveBeenCalledTimes(1);
 
     const importInput = document.getElementById(
       "bookmarks-import-input",
@@ -871,7 +998,7 @@ describe("settings module", () => {
     });
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
-    expect(mockShowAlert).toHaveBeenCalledWith("Import Failed", "bad file");
+    expect(mockShowAlert).toHaveBeenCalledWith("Import failed", "bad file");
 
     Object.defineProperty(importInput, "files", {
       value: [
@@ -882,11 +1009,11 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       expect.stringContaining("Imported 2 saved connections"),
     );
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       expect.stringContaining("skipped 1 duplicate"),
     );
 
@@ -899,7 +1026,7 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       "Imported 1 saved connection.",
     );
 
@@ -919,7 +1046,7 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       "Imported 3 saved connections, skipped 1 duplicate and 2 invalid entries.",
     );
 
@@ -938,7 +1065,7 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Complete",
+      "Import complete",
       "Imported 0 saved connections, skipped 1 invalid entry.",
     );
 
@@ -954,7 +1081,7 @@ describe("settings module", () => {
     importInput.dispatchEvent(new Event("change", { bubbles: true }));
     await flushMicrotasks(5);
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Import Failed",
+      "Import failed",
       "The saved connections file is too large.",
     );
     expect(mockImportBookmarksJson.mock.calls.length).toBe(importCalls);
@@ -1131,7 +1258,9 @@ describe("settings module", () => {
     expect(payload.transfersHintDismissed).toBe(true);
     expect(payload._setupComplete).toBe(true);
     expect(payload._schemaVersion).toBe(2);
-    expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection");
+    expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection", {
+      connectionId: null,
+    });
     expect(mockRelaunch).toHaveBeenCalledTimes(1);
   });
 
@@ -1169,12 +1298,15 @@ describe("settings module", () => {
     state.settingsExtras = { launchCount: 3 };
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("partial");
-    mockInvoke.mockRejectedValueOnce(new Error("disk full"));
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "save_settings") throw new Error("disk full");
+      return undefined;
+    });
 
     await settings.resetSettings();
 
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Reset Failed",
+      "Reset failed",
       expect.stringContaining("disk full"),
     );
     expect(mockRelaunch).not.toHaveBeenCalled();
@@ -1190,7 +1322,7 @@ describe("settings module", () => {
     await settings.resetSettings();
 
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Factory Reset Failed",
+      "Factory reset failed",
       expect.stringContaining("factory boom"),
     );
     expect(localStorage.getItem("s3-sidekick.keep")).toBe("1");
@@ -1240,7 +1372,7 @@ describe("settings module", () => {
     `;
     const settings = await import("../settings.ts");
     const writes = (): unknown[][] =>
-      mockInvoke.mock.calls.filter(([cmd]) => cmd === "write_text_file");
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "export_text_file");
     settings.openSettingsModal();
     await flushMicrotasks();
     const exportBtn = document.getElementById(
@@ -1256,7 +1388,7 @@ describe("settings module", () => {
     exportBtn.click();
     await flushMicrotasks(4);
     expect(mockShowConfirmWithCheckbox).toHaveBeenCalledWith(
-      "Export saved connections",
+      "Export saved connections (secrets and session tokens optional)",
       expect.any(String),
       expect.objectContaining({
         okLabel: "Export",
@@ -1287,7 +1419,7 @@ describe("settings module", () => {
     expect(writes()).toHaveLength(2);
 
     // Cancelling the save dialog writes nothing.
-    mockSave.mockResolvedValueOnce(null);
+    mockPickTextExport.mockResolvedValueOnce(null);
     mockShowConfirmWithCheckbox.mockResolvedValueOnce({
       confirmed: true,
       checked: false,
@@ -1800,7 +1932,7 @@ describe("settings module", () => {
     await settings.resetAfterForgottenPassword();
 
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Factory Reset Failed",
+      "Factory reset failed",
       expect.any(String),
     );
     expect(mockRelaunch).not.toHaveBeenCalled();
@@ -1835,7 +1967,7 @@ describe("settings module", () => {
     ).toBe(false);
   });
 
-  it("search ignores option text and matches labels, descriptions and section headings", async () => {
+  it("search indexes option text and matches labels, descriptions and section headings", async () => {
     document.body.innerHTML = `
       <div class="settings-tabs">
         <button class="settings-tab settings-tab--active" data-settings-tab="transfers">Transfers</button>
@@ -1855,10 +1987,14 @@ describe("settings module", () => {
     const settings = await import("../settings.ts");
 
     settings.updateSettingsSearch("default");
-    expect(document.querySelectorAll(".settings-search-group").length).toBe(0);
+    expect(document.querySelectorAll(".settings-search-group").length).toBe(1);
     expect(
       (document.querySelector(".settings-search-empty") as HTMLElement).hidden,
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      document.querySelector(".settings-search-group .setting-item label")
+        ?.textContent,
+    ).toBe("Concurrent transfers");
 
     settings.updateSettingsSearch("network");
     expect(
@@ -2239,5 +2375,45 @@ describe("saved connection edit form", () => {
 
     await vi.waitFor(() => expect(errorText()).toMatch(/already uses/));
     expect(editFormHidden()).toBe(false);
+  });
+
+  it("does not hide a newer edit form when an older save finishes", async () => {
+    mountEditForm();
+    await openEdit();
+    const settings = await import("../settings.ts");
+    let resolveUpdate!: (value: boolean) => void;
+    mockUpdateBookmark.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveUpdate = resolve;
+        }),
+    );
+    field("bookmark-edit-endpoint").value = "https://alpha-new.example.com";
+
+    (
+      document.getElementById("bookmark-edit-save") as HTMLButtonElement
+    ).click();
+    await vi.waitFor(() => expect(mockUpdateBookmark).toHaveBeenCalledTimes(1));
+
+    const beta = {
+      name: "beta",
+      endpoint: "https://beta.example.com",
+      region: "us-west-2",
+      access_key: "AKIABETA",
+      secret_key: "secret-beta",
+    };
+    settings.editSavedConnection(beta);
+    expect(field("bookmark-edit-name").value).toBe("beta");
+
+    resolveUpdate(true);
+    await vi.waitFor(() =>
+      expect(
+        document.getElementById("bookmarks-status")?.textContent,
+      ).toContain('Saved changes to "alpha".'),
+    );
+
+    // The newer form survives the older save's completion.
+    expect(editFormHidden()).toBe(false);
+    expect(field("bookmark-edit-name").value).toBe("beta");
   });
 });

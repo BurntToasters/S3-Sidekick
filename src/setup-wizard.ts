@@ -8,9 +8,25 @@ import {
   type SecurityStatus,
 } from "./security.ts";
 import { focusConnectionScreen } from "./app-connection.ts";
+import { codePointLength } from "./utils.ts";
 
 /** Welcome + theme, security, then updates + done. */
 const STEP_COUNT = 3;
+/** The progress bar measures the five visible sub-screens, not the step digits. */
+const SUBSTEP_COUNT = 5;
+const STEP_PROGRESS: Record<string, number> = {
+  "setup-wizard-title-welcome": 1,
+  "setup-wizard-title-theme": 2,
+  "setup-wizard-title-encryption": 3,
+  "setup-wizard-title-updates": 4,
+  "setup-wizard-title-done": 5,
+};
+const SUBSTEP_PROGRESS: Record<string, number> = {
+  "setup-substep-welcome": 1,
+  "setup-substep-theme": 2,
+  "setup-substep-updates": 4,
+  "setup-substep-done": 5,
+};
 
 interface SetupResult {
   theme: ThemePreference;
@@ -24,10 +40,10 @@ function $(id: string): HTMLElement {
   return document.getElementById(id)!;
 }
 
-function setProgress(step: number): void {
+function setProgress(step: number, progressUnit: number): void {
   const bar = $("setup-wizard-progress-bar");
   const progress = bar.parentElement;
-  const pct = ((step + 1) / STEP_COUNT) * 100;
+  const pct = (progressUnit / SUBSTEP_COUNT) * 100;
   bar.style.width = `${pct}%`;
   progress?.setAttribute("aria-valuenow", String(Math.round(pct)));
   $("setup-step-count").textContent = `Step ${step + 1} of ${STEP_COUNT}`;
@@ -42,7 +58,10 @@ function showStep(step: number, focusId: string): void {
     s.hidden = idx !== step;
     s.setAttribute("aria-hidden", String(idx !== step));
   }
-  setProgress(step);
+  setProgress(
+    step,
+    STEP_PROGRESS[focusId] ?? Math.min(step + 1, SUBSTEP_COUNT),
+  );
   overlay.setAttribute("aria-labelledby", focusId);
   $(focusId).focus();
 }
@@ -58,6 +77,13 @@ function showSubstep(substepId: string): void {
       sub.hidden = sub !== substep;
     }
   }
+  const step = Number(
+    substep.closest<HTMLElement>(".setup-wizard-step")?.dataset.step ?? 0,
+  );
+  setProgress(
+    step,
+    SUBSTEP_PROGRESS[substepId] ?? Math.min(step + 1, SUBSTEP_COUNT),
+  );
   const heading = substep.querySelector<HTMLElement>("h2");
   if (heading) {
     $("setup-wizard-overlay").setAttribute("aria-labelledby", heading.id);
@@ -101,6 +127,11 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     const overlay = $("setup-wizard-overlay");
     overlay.hidden = false;
 
+    // The theme preview is live. If the wizard is abandoned, put the saved
+    // theme back; only a completed wizard returns the chosen theme.
+    const startingTheme = state.currentSettings.theme;
+    let completed = false;
+
     let selectedTheme: ThemePreference = "system";
     const cleanups: Array<() => void> = [];
     const listen = (
@@ -111,6 +142,11 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       target.addEventListener(type, handler);
       cleanups.push(() => target.removeEventListener(type, handler));
     };
+    // Closing the app without finishing must not leave the previewed theme
+    // applied for the rest of the process.
+    listen(window, "pagehide", () => {
+      if (!completed) applyTheme(startingTheme);
+    });
 
     const welcomeNext = $("setup-welcome-next") as HTMLButtonElement;
     const themeBack = $("setup-theme-back") as HTMLButtonElement;
@@ -124,12 +160,20 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     ) as HTMLButtonElement;
     const encConfirm = $("setup-enc-confirm") as HTMLInputElement;
     const encConfirmReveal = $("setup-enc-confirm-reveal") as HTMLButtonElement;
+    const encPasswordError = $("setup-enc-password-error") as HTMLElement;
+    const encConfirmError = $("setup-enc-confirm-error") as HTMLElement;
     const encError = $("setup-enc-error") as HTMLElement;
     const encStatus = $("setup-enc-status") as HTMLElement;
     const encSkipNote = $("setup-enc-skip-note") as HTMLElement;
     const encBiometric = $("setup-enc-biometric") as HTMLInputElement;
+    encPassword.placeholder = "Password (12+ characters)";
+    encPassword.minLength = 12;
+    encConfirm.minLength = 12;
     const biometricLabel = $("setup-biometric-label") as HTMLElement;
     const biometricText = $("setup-biometric-text") as HTMLElement;
+    const biometricUnavailable = $(
+      "setup-biometric-unavailable",
+    ) as HTMLElement;
     const biometricCaveatEl = $("setup-biometric-caveat") as HTMLElement;
     const updatesBack = $("setup-updates-back") as HTMLButtonElement;
     const updatesNext = $("setup-updates-next") as HTMLButtonElement;
@@ -141,6 +185,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     );
 
     function cleanup(): void {
+      if (!completed) applyTheme(startingTheme);
       // Clear wizard passwords after init so secrets do not linger in DOM.
       encPassword.value = "";
       encConfirm.value = "";
@@ -150,6 +195,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       encConfirm.disabled = false;
       encPasswordReveal.disabled = false;
       encConfirmReveal.disabled = false;
+      hideFieldErrors();
       encStatus.hidden = true;
       encBack.disabled = false;
       overlay.hidden = true;
@@ -160,13 +206,17 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       input: HTMLInputElement,
       btn: HTMLButtonElement,
     ): void {
-      // Visible text carries the state; aria-pressed tells assistive tech it
-      // is a toggle. The accessible name stays "Show password".
+      // Visible text and the accessible name both carry the state, matching
+      // the lock view toggle.
       listen(btn, "click", () => {
         const showing = input.type === "text";
         input.type = showing ? "password" : "text";
         btn.textContent = showing ? "Show" : "Hide";
         btn.setAttribute("aria-pressed", String(!showing));
+        btn.setAttribute(
+          "aria-label",
+          showing ? "Show password" : "Hide password",
+        );
         input.focus();
       });
     }
@@ -175,6 +225,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
     let encryptionCommitted = false;
     let biometricEnrolled = false;
+    let encActionToken = 0;
     const encSkipDefaultLabel = encSkip.textContent;
     const encNextDefaultLabel = encNext.textContent;
 
@@ -187,12 +238,15 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       // is Continue, so the skip action goes away.
       encSkip.hidden = encryptionCommitted;
       encSkipNote.hidden = encryptionCommitted;
+      encSkip.removeAttribute("title");
+      encNext.removeAttribute("title");
     }
 
     function setEncBusy(busy: boolean): void {
+      // Back stays usable while the backend or keychain is busy. Next and Skip
+      // are disabled together so the same action cannot be submitted twice.
       encNext.disabled = busy;
       encSkip.disabled = busy;
-      encBack.disabled = busy;
     }
 
     /**
@@ -205,8 +259,10 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       encConfirm.disabled = true;
       encPasswordReveal.disabled = true;
       encConfirmReveal.disabled = true;
+      encStatus.textContent = "Encryption enabled.";
       encStatus.hidden = false;
       hideEncError();
+      hideFieldErrors();
       restoreEncActionLabels();
     }
 
@@ -214,20 +270,28 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       try {
         const status = await readVaultStatus();
         const platform = await invoke<string>("get_platform_info");
-        if (status.biometric_available) {
-          biometricLabel.hidden = false;
-          if (platform === "macos") {
-            biometricText.textContent = "Enable Touch ID unlock";
-          } else if (platform === "windows") {
-            biometricText.textContent = "Enable Windows Hello unlock";
-          } else {
-            biometricText.textContent = "Enable biometric unlock";
-          }
-          biometricCaveatEl.textContent = biometricCaveat(platform);
-          biometricCaveatEl.hidden = false;
+        if (!status.biometric_available) {
+          biometricLabel.hidden = true;
+          biometricCaveatEl.hidden = true;
+          biometricUnavailable.hidden = false;
+          return;
         }
+        biometricUnavailable.hidden = true;
+        biometricLabel.hidden = false;
+        if (platform === "macos") {
+          biometricText.textContent = "Enable Touch ID unlock";
+        } else if (platform === "windows") {
+          biometricText.textContent = "Enable Windows Hello unlock";
+        } else {
+          biometricText.textContent = "Enable biometric unlock";
+        }
+        biometricCaveatEl.textContent = biometricCaveat(platform);
+        biometricCaveatEl.hidden = false;
       } catch {
-        // biometric not available
+        // The slot keeps its space and explains why the row is absent.
+        biometricLabel.hidden = true;
+        biometricCaveatEl.hidden = true;
+        biometricUnavailable.hidden = false;
       }
     }
     void initBiometricUI();
@@ -267,6 +331,27 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       encError.hidden = true;
     }
 
+    function setFieldError(
+      input: HTMLInputElement,
+      el: HTMLElement,
+      msg: string,
+    ): void {
+      el.textContent = msg;
+      el.hidden = false;
+      input.setAttribute("aria-invalid", "true");
+    }
+
+    function hideFieldErrors(): void {
+      for (const [input, el] of [
+        [encPassword, encPasswordError],
+        [encConfirm, encConfirmError],
+      ] as const) {
+        el.textContent = "";
+        el.hidden = true;
+        input.removeAttribute("aria-invalid");
+      }
+    }
+
     function onWelcomeNext(): void {
       showSubstep("setup-substep-theme");
     }
@@ -294,7 +379,12 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     }
 
     function onEncBack(): void {
+      // Any in-flight encryption action is now stale. Its eventual result is
+      // ignored instead of pulling the user back to Updates.
+      encActionToken += 1;
+      setEncBusy(false);
       hideEncError();
+      hideFieldErrors();
       restoreEncActionLabels();
       showStep(0, "setup-wizard-title-theme");
       showSubstep("setup-substep-theme");
@@ -305,18 +395,21 @@ export function showSetupWizard(): Promise<SetupResult | null> {
       showSubstep("setup-substep-updates");
     }
 
-    /** Skip setup: store unencrypted (not recommended), then continue. */
+    /** Continue without encryption: store unencrypted (not recommended). */
     async function onEncSkip(): Promise<void> {
       hideEncError();
+      hideFieldErrors();
       if (encryptionCommitted) {
         encBiometric.checked = false;
         restoreEncActionLabels();
         goToUpdates();
         return;
       }
+      const token = ++encActionToken;
       setEncBusy(true);
       try {
         const vault = await readVaultStatus();
+        if (token !== encActionToken) return;
         if (encryptionIsSetUp(vault)) {
           commitEncryptionUI();
           encBiometric.checked = false;
@@ -325,16 +418,18 @@ export function showSetupWizard(): Promise<SetupResult | null> {
             enableEncryption: false,
             password: null,
           });
+          if (token !== encActionToken) return;
         }
         // Already initialized without encryption: the state already matches a
         // skip, so nothing is written again.
       } catch (err) {
+        if (token !== encActionToken) return;
         showEncError(
           `Could not turn off encryption. ${securityErrorMessage(err)}`,
         );
         return;
       } finally {
-        setEncBusy(false);
+        if (token === encActionToken) setEncBusy(false);
       }
       restoreEncActionLabels();
       goToUpdates();
@@ -342,20 +437,33 @@ export function showSetupWizard(): Promise<SetupResult | null> {
 
     async function onEncNext(): Promise<void> {
       hideEncError();
+      hideFieldErrors();
+      const token = ++encActionToken;
       setEncBusy(true);
       try {
         if (!encryptionCommitted) {
           const vault = await readVaultStatus();
+          if (token !== encActionToken) return;
           if (encryptionIsSetUp(vault)) {
             commitEncryptionUI();
           } else {
             const pw = encPassword.value;
             const confirm = encConfirm.value;
-            if (pw.length < 8) {
-              showEncError("Password must be at least 8 characters.");
+            if (codePointLength(pw) < 12) {
+              setFieldError(
+                encPassword,
+                encPasswordError,
+                "Password must be at least 12 characters.",
+              );
+              showEncError("Password must be at least 12 characters.");
               return;
             }
             if (pw !== confirm) {
+              setFieldError(
+                encConfirm,
+                encConfirmError,
+                "Passwords do not match.",
+              );
               showEncError("Passwords do not match.");
               return;
             }
@@ -373,6 +481,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
                 password: pw,
               });
             }
+            if (token !== encActionToken) return;
             commitEncryptionUI();
           }
         }
@@ -380,15 +489,25 @@ export function showSetupWizard(): Promise<SetupResult | null> {
         if (encBiometric.checked && !biometricEnrolled) {
           try {
             await invoke<SecurityStatus>("enable_biometric");
+            if (token !== encActionToken) return;
             biometricEnrolled = true;
           } catch (err) {
+            if (token !== encActionToken) return;
             // Encryption is already on, so only biometric is offered again.
+            encStatus.textContent =
+              "Encryption is enabled. Biometric unlock was not set up, so you will use your password.";
+            encStatus.hidden = false;
             showEncError(
               `Encryption is on, but biometric unlock was not enabled. ${securityErrorMessage(err)}`,
             );
             encNext.textContent = "Retry biometric";
+            encNext.title =
+              "Try enabling biometric unlock again. Encryption is already on.";
             encSkip.hidden = false;
-            encSkip.textContent = "Continue without biometric";
+            encSkip.textContent =
+              "Continue without biometric (encryption stays on)";
+            encSkip.title =
+              "Continue setup with encryption on; you will unlock with your password.";
             return;
           }
         }
@@ -396,11 +515,12 @@ export function showSetupWizard(): Promise<SetupResult | null> {
         restoreEncActionLabels();
         goToUpdates();
       } catch (err) {
+        if (token !== encActionToken) return;
         showEncError(
           `Could not turn on encryption. ${securityErrorMessage(err)}`,
         );
       } finally {
-        setEncBusy(false);
+        if (token === encActionToken) setEncBusy(false);
       }
     }
 
@@ -413,6 +533,7 @@ export function showSetupWizard(): Promise<SetupResult | null> {
     }
 
     function onDone(): void {
+      completed = true;
       const result: SetupResult = {
         theme: selectedTheme,
         encryptionEnabled: encryptionCommitted,

@@ -13,7 +13,9 @@
   container-name: content-toolbar;
 }
 
-@container content-toolbar (max-width: 950px) {
+/* 949 matches the label-collapse query in layout.css; labels and shortcut
+   chips disappear on the same toolbar width. */
+@container content-toolbar (max-width: 949px) {
   .content-toolbar .shortcut-chip {
     display: none;
   }
@@ -38,7 +40,7 @@
 .content-toolbar__actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-0-5);
   padding-right: var(--space-2);
   flex-shrink: 0;
 }
@@ -55,13 +57,13 @@
   align-items: center;
   flex: 0 0 auto;
   min-width: 0;
-  gap: 2px;
+  gap: var(--space-0-5);
 }
 
 .filter-clear {
   width: 24px;
   height: 24px;
-  padding: 2px;
+  padding: var(--space-0-5);
   visibility: hidden;
   pointer-events: none;
 }
@@ -87,7 +89,7 @@
 
 .sidebar-toggle {
   display: none;
-  margin-left: 6px;
+  margin-left: var(--space-1-5);
   font-size: var(--text-lg);
 }
 
@@ -97,7 +99,7 @@
   font-family: var(--mono);
   padding: 1px var(--space-1);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   color: var(--text-secondary);
   background: var(--bg);
   margin-left: var(--space-1);
@@ -225,7 +227,7 @@
 }
 
 .object-table th {
-  padding: var(--space-2) 14px;
+  padding: var(--space-2) var(--space-3-5);
   text-align: left;
   font-size: var(--text-sm);
   font-weight: 600;
@@ -236,7 +238,7 @@
 
 .object-table td {
   height: var(--row-height, 36px);
-  padding: 0 14px;
+  padding: 0 var(--space-3-5);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   overflow: hidden;
@@ -266,7 +268,7 @@
 .object-name__inner {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
@@ -287,19 +289,19 @@
 }
 
 .object-modified {
-  width: 180px;
+  width: 200px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
 
 .table-empty {
   text-align: center;
-  padding: var(--space-7) 14px;
+  padding: var(--space-7) var(--space-3-5);
   color: var(--text-secondary);
 }
 
 .table-error {
-  padding: 10px 14px;
+  padding: var(--space-2-5) var(--space-3-5);
   color: var(--disconnect-text);
   background: var(--disconnect-bg);
   font-size: var(--text-md);
@@ -334,7 +336,7 @@
   padding: var(--space-2);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-0-5);
 }
 
 .list__item {
@@ -348,7 +350,7 @@
   gap: var(--space-2);
   width: 100%;
   min-width: 0;
-  padding: 6px 10px;
+  padding: var(--space-1-5) var(--space-2-5);
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -405,6 +407,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
   padding: var(--space-1) var(--space-4);
   font-size: var(--text-sm);
   color: var(--text-secondary);
@@ -414,10 +418,86 @@
   border-top: 1px solid var(--glass-border);
 }
 
+/* Status text yields first: it can ellipsize down to nothing while the right
+   cluster keeps its controls and counters usable. */
+.statusbar > #status {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar .statusbar__right {
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.statusbar .statusbar__right > * {
+  flex-shrink: 0;
+}
+
+/* Counters are the only shrinkable items on the right; ellipsis beats clipping
+   the fixed buttons or the version label. */
+.statusbar .statusbar__right > .statusbar__count {
+  flex: 0 1 auto;
+  min-width: 3ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar .statusbar__count:empty {
+  display: none;
+}
+
+#version-label {
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  /* Tighter gaps and an icon-only palette button keep count, throughput,
+     version and both drawer controls on one row at 320px. The palette keeps
+     its aria-label. */
+  .statusbar.statusbar {
+    gap: var(--space-1);
+    padding-inline: var(--space-1);
+  }
+
+  .statusbar .statusbar__right {
+    gap: var(--space-1);
+  }
+
+  .statusbar .statusbar__right > #statusbar-count {
+    max-width: 68px;
+  }
+
+  .statusbar .statusbar__right > #statusbar-throughput {
+    max-width: 56px;
+  }
+
+  .statusbar #version-label {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    font-size: var(--text-xs);
+    text-overflow: ellipsis;
+  }
+
+  .statusbar #palette-hint {
+    padding-inline: var(--space-1);
+  }
+
+  #palette-hint > span:not(.lucide-icon):not(.shortcut-chip) {
+    display: none;
+  }
+}
+
 .statusbar__palette {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
   color: var(--text-secondary);
 }
 

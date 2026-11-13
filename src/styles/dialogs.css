@@ -36,9 +36,7 @@ body.modal-open .dialog-overlay.active {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--glass-bg-heavy);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
+  background: var(--bg-elevated);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   padding: var(--space-6);
@@ -90,7 +88,7 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-input-icon {
   position: absolute;
-  left: 10px;
+  left: var(--space-2-5);
   top: 50%;
   transform: translateY(-50%);
   width: 16px;
@@ -114,7 +112,7 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-input-reveal {
   position: absolute;
-  right: 8px;
+  right: var(--space-2);
   top: 50%;
   transform: translateY(-50%);
   background: none;
@@ -123,7 +121,7 @@ body.modal-open .dialog-overlay.active {
      too faint on the dialog surface. */
   min-width: 24px;
   min-height: 24px;
-  padding: 2px 6px;
+  padding: var(--space-0-5) var(--space-1-5);
   cursor: pointer;
   font-size: var(--text-xs);
   color: var(--text-secondary);
@@ -186,12 +184,16 @@ body.modal-open .dialog-overlay.active {
   flex-shrink: 0;
 }
 
+.dialog-box__actions .btn[aria-busy="true"] {
+  cursor: progress;
+}
+
 .modal--wide {
   width: min(560px, 94vw);
 }
 
 .dialog-validation-error {
-  margin: -12px 0 var(--space-5);
+  margin: calc(-1 * var(--space-3)) 0 var(--space-5);
   color: var(--danger-text);
   font-size: var(--text-sm);
   line-height: 1.4;
@@ -203,4 +205,57 @@ body.modal-open .dialog-overlay.active {
 
 .dialog-extra-action {
   margin-right: auto;
+}
+
+/* Modal shell: the page behind is inert, but Windows/Linux caption buttons
+   must stay clickable above the scrim. */
+body.modal-open #titlebar-win-controls,
+body.modal-open #titlebar-win-controls * {
+  pointer-events: auto;
+}
+
+/* Resizer hit targets: the visible grip stays thin, while an invisible 24px
+   band around it is easy to grab with a pointer. */
+#sidebar-resizer::before,
+#inspector-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  background: transparent;
+}
+
+/* Grow the hit area into the panel being resized, never over the object
+   table: an invisible band over the first table column would swallow clicks. */
+#sidebar-resizer::before {
+  left: auto;
+  right: 0;
+}
+
+#inspector-resizer::before {
+  left: 0;
+  right: auto;
+}
+
+#bottom-drawer .bottom-drawer__resize-handle::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 24px;
+  background: transparent;
+}
+
+/* Toast stack: bounded above an open drawer, scrollable once full. */
+.toast-region {
+  max-height: 520px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
+body.modal-open .toast-region {
+  max-height: min(520px, calc(100vh - var(--titlebar-height) - 24px));
 }

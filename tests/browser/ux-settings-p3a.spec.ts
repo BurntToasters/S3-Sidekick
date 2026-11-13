@@ -217,21 +217,30 @@ test("Discard changes? offers Save and saves the draft", async ({
   await saveArtifact(page, testInfo, SUITE, "discard-prompt-save", calls);
 });
 
-test("Search matches labels, descriptions and headings, not option text", async ({
+test("Search matches labels, descriptions, headings and option text", async ({
   page,
 }) => {
   await installLayoutTauriMock(page, { objectCount: 0, prefixes: [] });
   await page.goto("/");
   await openSettings(page);
 
+  // "default" appears only inside select options, so this row is found by its
+  // option text rather than its label or description.
   await page.locator("#settings-search").fill("default");
-  await expect(page.locator(".settings-search-group")).toHaveCount(0);
-  await expect(page.locator(".settings-search-empty")).toBeVisible();
+  const densityRow = page
+    .locator(".settings-search-group .setting-item")
+    .filter({ has: page.locator("#setting-density") });
+  await expect(densityRow).toBeVisible();
+  await expect(page.locator(".settings-search-empty")).toBeHidden();
 
   await page.locator("#settings-search").fill("Performance");
   await expect(
     page.locator(".settings-search-group .setting-item").first(),
   ).toBeVisible();
+
+  await page.locator("#settings-search").fill("zzz-no-match");
+  await expect(page.locator(".settings-search-group")).toHaveCount(0);
+  await expect(page.locator(".settings-search-empty")).toBeVisible();
 });
 
 test("Density applies at once, Cancel reverts it, and Save keeps it", async ({

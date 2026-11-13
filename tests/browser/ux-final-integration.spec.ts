@@ -132,9 +132,10 @@ test.describe("selection and focus survive background work", () => {
     await expect(page.locator("#status")).not.toContainText("failed", {
       timeout: 15_000,
     });
-    await page.waitForTimeout(1200);
 
-    await expect(rowByKey(page, key)).toHaveAttribute("aria-selected", "true");
+    await expect(rowByKey(page, key)).toHaveAttribute("aria-selected", "true", {
+      timeout: 15_000,
+    });
     await expect(page.locator("#inspector-header-title")).toHaveText(
       headerBefore ?? "",
     );
@@ -537,8 +538,15 @@ test.describe("single download overwrite", () => {
           set: (value: { invoke: Invoke }) => {
             const original = value.invoke;
             value.invoke = async (command, args) => {
-              if (command === "plugin:dialog|save") {
-                return "/tmp/s3-final/notes.txt";
+              if (command === "pick_download_file") {
+                return {
+                  token: "download-token",
+                  path: "/tmp/s3-final/notes.txt",
+                  name: "notes.txt",
+                  isDir: false,
+                  directoryToken: null,
+                  directoryPath: null,
+                };
               }
               if (command === "path_exists") return true;
               return original(command, args);
@@ -579,9 +587,9 @@ test.describe("command palette", () => {
     ).length;
     await page.locator("#palette-hint").click();
     await expect(page.locator("#palette-overlay")).toBeVisible();
-    await page.locator("#palette-input").fill("Refresh Buckets");
+    await page.locator("#palette-input").fill("Refresh buckets");
     const item = page.locator("#palette-results .palette__item", {
-      hasText: "Refresh Buckets",
+      hasText: "Refresh buckets",
     });
     await expect(item).toBeVisible();
     await page.keyboard.press("Enter");

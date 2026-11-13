@@ -5,7 +5,11 @@ import {
   invokeS3For,
   type ConnectionSnapshot,
 } from "./connection.ts";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import {
+  pickDownloadDirectory,
+  pickDownloadFile,
+  type NativePathGrant,
+} from "./path-grants.ts";
 import { state } from "./state.ts";
 import {
   enqueueDownloads,
@@ -21,6 +25,7 @@ import {
   friendlyError,
   plural,
   safeFileName,
+  basename,
 } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
 import { getSelectedFileKeys } from "./app-selection.ts";
@@ -31,6 +36,10 @@ export interface DownloadQueueEntry {
   bucket: string;
   key: string;
   destination: string;
+  /** Backend grant for the chosen file or folder. */
+  destinationToken: string;
+  /** File name when the grant is a folder. */
+  destinationName?: string;
   conflictResolution?: Exclude<ConflictPolicy, "ask">;
 }
 
@@ -48,6 +57,62 @@ function parentDirectory(path: string): string {
   const idx = normalized.lastIndexOf("/");
   if (idx <= 0) return "";
   return normalized.slice(0, idx);
+}
+
+function pathLeaf(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+const SHELL_STARTUP_NAMES = new Set([
+  ".zshenv",
+  ".zprofile",
+  ".zshrc",
+  ".zlogin",
+  ".zlogout",
+  ".bashrc",
+  ".bash_profile",
+  ".bash_login",
+  ".bash_logout",
+  ".profile",
+  ".login",
+  ".logout",
+  ".cshrc",
+  ".tcshrc",
+  ".kshrc",
+  "config.fish",
+  "profile.ps1",
+  "microsoft.powershell_profile.ps1",
+]);
+
+function isShellStartupOrDotfile(name: string): boolean {
+  const normalized = name.normalize("NFC").trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.startsWith(".") || SHELL_STARTUP_NAMES.has(normalized);
+}
+
+function encodeDotName(name: string): string {
+  return name.replace(
+    /[.]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/**
+ * Match the backend's child-name rules before deduplication.
+ *
+ * `path_authority::validate_child_name` trims the name and rejects path
+ * separators on every platform, including backslashes that Unix filesystems
+ * would otherwise accept. Trim first so a key like `"notes.txt "` cannot
+ * dedupe separately from `"notes.txt"` and then collide after the backend
+ * trims it. Encode a backslash rather than ever sending a name the backend
+ * must reject.
+ */
+function downloadChildName(key: string, platform: string): string {
+  let name = safeFileName(key, platform).normalize("NFC").trim();
+  if (!name) name = "unnamed";
+  if (name === "." || name === "..") name = encodeDotName(name);
+  return name.replace(/\\/g, "%5C");
 }
 
 function readRecentDownloadDirs(): string[] {
@@ -93,6 +158,28 @@ function rememberDownloadDirectory(dir: string): void {
   writeRecentDownloadDirs(updated);
 }
 
+/**
+ * Grants are session memory. Remember the last folder's reveal grant so
+ * "Open download folder" keeps working without asking again; after a restart
+ * the command opens a native picker instead of trusting localStorage.
+ */
+let rememberedDirectoryGrant: { directory: string; token: string } | null =
+  null;
+
+function rememberDirectoryGrant(grant: NativePathGrant): void {
+  const directory = grant.directoryPath ?? (grant.isDir ? grant.path : "");
+  const token = grant.directoryToken ?? (grant.isDir ? grant.token : null);
+  if (!directory || !token) return;
+  rememberedDirectoryGrant = { directory, token };
+}
+
+function revealTokenForRememberedDirectory(directory: string): string | null {
+  if (!rememberedDirectoryGrant) return null;
+  return rememberedDirectoryGrant.directory === directory
+    ? rememberedDirectoryGrant.token
+    : null;
+}
+
 export function getRememberedDownloadDir(): string {
   try {
     const direct = localStorage.getItem(LAST_DOWNLOAD_DIR_STORAGE_KEY);
@@ -120,6 +207,7 @@ async function uniqueDownloadEntries(
   keys: string[],
   destinationDir: string,
   bucket: string,
+  destinationToken: string,
 ): Promise<DownloadQueueEntry[]> {
   const taken = new Set<string>();
   const entries: DownloadQueueEntry[] = [];
@@ -129,7 +217,7 @@ async function uniqueDownloadEntries(
     caseInsensitive ? name.normalize("NFC").toLowerCase() : name;
 
   for (const key of keys) {
-    const base = safeFileName(key, state.platformName);
+    const base = downloadChildName(key, state.platformName);
     const { stem, ext } = splitNameExt(base);
     let candidate = base;
     let n = 2;
@@ -142,6 +230,8 @@ async function uniqueDownloadEntries(
       bucket,
       key,
       destination: joinPath(destinationDir, candidate, state.platformName),
+      destinationToken,
+      destinationName: candidate,
     });
   }
 
@@ -189,13 +279,18 @@ async function preflightDownloadDiskSpace(
     entries.map((entry) => estimateDownloadEntryBytes(entry, connectionId)),
   );
   if (estimatedBytes.some((bytes) => bytes === null)) {
-    // Fail open and say so: proceeding without a preflight is honest, while a
-    // zero estimate would pretend small downloads need no disk check.
+    // Fail closed (M3): an unknown size is not proof of free space. The old
+    // fail-open behaviour let a long queue exhaust the destination mid-way
+    // with no warning at all.
     logActivity(
-      "Disk preflight skipped: could not determine every download size.",
-      "warning",
+      "Disk preflight refused the queue: could not determine every download size.",
+      "error",
     );
-    return true;
+    setStatus(
+      "Download queue refused: object sizes could not be confirmed, so free space was not verified.",
+      8000,
+    );
+    return false;
   }
   const knownBytes = estimatedBytes as number[];
   const totalEstimatedBytes = knownBytes.reduce((sum, bytes) => sum + bytes, 0);
@@ -203,32 +298,47 @@ async function preflightDownloadDiskSpace(
     return true;
   }
 
-  const requiredByDirectory = new Map<string, number>();
+  const requiredByDirectory = new Map<
+    string,
+    { required: number; token: string }
+  >();
   for (let i = 0; i < entries.length; i += 1) {
     const dir = parentDirectory(entries[i].destination);
     if (!dir) continue;
     const size = knownBytes[i];
     if (!Number.isFinite(size) || size <= 0) continue;
-    requiredByDirectory.set(dir, (requiredByDirectory.get(dir) ?? 0) + size);
+    const existing = requiredByDirectory.get(dir);
+    requiredByDirectory.set(dir, {
+      required: (existing?.required ?? 0) + size,
+      token: existing?.token ?? entries[i].destinationToken,
+    });
   }
   if (requiredByDirectory.size === 0) return true;
 
   const shortages: Array<{ dir: string; required: number; available: number }> =
     [];
-  for (const [dir, required] of requiredByDirectory) {
+  for (const [dir, requirement] of requiredByDirectory) {
+    const { required, token } = requirement;
+    if (!token) continue;
     try {
       const available = await invoke<number>("get_available_disk_bytes", {
-        path: dir,
+        token,
       });
       if (!Number.isFinite(available) || available < 0) continue;
       if (available < required) {
         shortages.push({ dir, required, available });
       }
     } catch (err) {
+      // A failed probe is not evidence of free space (M3). Fail closed.
       logActivity(
-        `Disk preflight warning for ${dir}: ${friendlyError(err)}`,
-        "warning",
+        `Disk preflight failed for ${dir}: ${friendlyError(err)}`,
+        "error",
       );
+      setStatus(
+        `Download queue refused: free space for ${dir} could not be verified.`,
+        8000,
+      );
+      return false;
     }
   }
   if (shortages.length === 0) return true;
@@ -243,7 +353,7 @@ async function preflightDownloadDiskSpace(
     lines.push(`+${shortages.length - 3} more destination(s)`);
   }
   const proceed = await showConfirm(
-    "Low Disk Space",
+    "Low disk space",
     `Destination free space may be insufficient:\n${lines.join("\n")}\n\nQueue downloads anyway?`,
     { okLabel: "Queue anyway", cancelLabel: "Cancel queue", okDanger: true },
   );
@@ -282,23 +392,20 @@ export async function handleDownload(): Promise<void> {
   }
   const capturedKeys = [...keys];
   const entries: DownloadQueueEntry[] = [];
-  const rememberedDir = getRememberedDownloadDir();
-
   if (capturedKeys.length === 1) {
     const fileName = safeFileName(capturedKeys[0], state.platformName);
-    let destination: string | null;
+    let grant: NativePathGrant | null;
     try {
-      destination = await save({
-        defaultPath: rememberedDir
-          ? joinPath(rememberedDir, fileName, state.platformName)
-          : fileName,
-        title: `Save ${fileName}`,
-      });
+      grant = await pickDownloadFile(
+        fileName,
+        `Save ${fileName}`,
+        getRememberedDownloadDir(),
+      );
     } catch (err) {
       setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
       return;
     }
-    if (!destination) return;
+    if (!grant) return;
     if (connectionSnapshotChanged(snap)) {
       setStatus(
         "Download cancelled because connection or location changed.",
@@ -306,29 +413,45 @@ export async function handleDownload(): Promise<void> {
       );
       return;
     }
-    saveRememberedDownloadDir(destination);
+    saveRememberedDownloadDir(grant.path);
+    rememberDirectoryGrant(grant);
+    const destinationName = grant.name || pathLeaf(grant.path);
+    if (isShellStartupOrDotfile(destinationName)) {
+      const replace = await showConfirm(
+        "Replace shell startup file?",
+        `${destinationName} is a shell startup file or dotfile. Replacing it can change how your shell or tools start. Download over it?`,
+        {
+          okLabel: "Download and replace",
+          cancelLabel: "Cancel",
+          okDanger: true,
+        },
+      );
+      if (!replace) {
+        setStatus("Download cancelled: shell startup file not replaced.", 5000);
+        return;
+      }
+    }
     // The save dialog already asked the user about replacing an existing file,
     // so that answer is the confirmed replace; no second prompt follows.
     entries.push({
       bucket: snap.bucket,
       key: capturedKeys[0],
-      destination,
+      destination: grant.path,
+      destinationToken: grant.token,
       conflictResolution: "replace",
     });
   } else {
-    let selected: string | string[] | null;
+    let grant: NativePathGrant | null;
     try {
-      selected = await open({
-        title: "Select destination folder",
-        multiple: false,
-        directory: true,
-        defaultPath: rememberedDir || undefined,
-      });
+      grant = await pickDownloadDirectory(
+        undefined,
+        getRememberedDownloadDir(),
+      );
     } catch (err) {
       setStatus(`Failed to open folder picker: ${friendlyError(err)}`);
       return;
     }
-    if (!selected || Array.isArray(selected)) return;
+    if (!grant) return;
     if (connectionSnapshotChanged(snap)) {
       setStatus(
         "Download cancelled because connection or location changed.",
@@ -336,9 +459,15 @@ export async function handleDownload(): Promise<void> {
       );
       return;
     }
-    saveRememberedDownloadDirectoryValue(selected);
+    saveRememberedDownloadDirectoryValue(grant.path);
+    rememberDirectoryGrant(grant);
     entries.push(
-      ...(await uniqueDownloadEntries(capturedKeys, selected, snap.bucket)),
+      ...(await uniqueDownloadEntries(
+        capturedKeys,
+        grant.path,
+        snap.bucket,
+        grant.token,
+      )),
     );
   }
 
@@ -350,7 +479,7 @@ export async function handleDownload(): Promise<void> {
     );
     return;
   }
-  const resolvedEntries =
+  let resolvedEntries =
     capturedKeys.length === 1
       ? entries
       : await resolveDownloadEntriesWithConflicts(entries);
@@ -360,6 +489,47 @@ export async function handleDownload(): Promise<void> {
       5000,
     );
     return;
+  }
+  const sensitiveEntries = resolvedEntries.filter((entry) =>
+    isShellStartupOrDotfile(
+      entry.destinationName ?? pathLeaf(entry.destination),
+    ),
+  );
+  if (sensitiveEntries.length > 0) {
+    const names = sensitiveEntries
+      .slice(0, 3)
+      .map((entry) => entry.destinationName ?? pathLeaf(entry.destination))
+      .join(", ");
+    const extra =
+      sensitiveEntries.length > 3
+        ? ` and ${sensitiveEntries.length - 3} more`
+        : "";
+    const replace = await showConfirm(
+      "Replace shell startup files?",
+      `${names}${extra} ${sensitiveEntries.length === 1 ? "is a shell startup file or dotfile" : "are shell startup files or dotfiles"}. Replacing them can change how your shell or tools start. Download them?`,
+      {
+        okLabel: "Download selected",
+        cancelLabel: "Skip them",
+        okDanger: true,
+      },
+    );
+    if (!replace) {
+      const skipped = new Set(sensitiveEntries);
+      resolvedEntries = resolvedEntries.filter((entry) => !skipped.has(entry));
+      for (const entry of sensitiveEntries) {
+        logActivity(
+          `Skipped download for ${basename(entry.key)}: shell startup or dotfile destination was not replaced.`,
+          "warning",
+        );
+      }
+      if (resolvedEntries.length === 0) {
+        setStatus(
+          "No downloads queued: shell startup files were skipped.",
+          5000,
+        );
+        return;
+      }
+    }
   }
   if (resolvedEntries.length === 0) {
     setStatus("No downloads queued (all conflicts were skipped).", 5000);
@@ -399,7 +569,16 @@ export async function handleOpenLastDownloadFolder(): Promise<void> {
     return;
   }
   try {
-    await invoke("open_local_path", { path: dir });
+    let token = revealTokenForRememberedDirectory(dir);
+    if (!token) {
+      // Grants end with the session. Ask the user to confirm the remembered
+      // folder in a native picker instead of trusting the stored path.
+      const grant = await pickDownloadDirectory("Open download folder", dir);
+      if (!grant) return;
+      rememberDirectoryGrant(grant);
+      token = grant.directoryToken ?? grant.token;
+    }
+    await invoke("open_local_path", { token });
     setStatus("Opened last download folder.", 3000);
   } catch (err) {
     setStatus(`Failed to open folder: ${friendlyError(err)}`);

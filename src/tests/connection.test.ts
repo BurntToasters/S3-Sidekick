@@ -330,14 +330,17 @@ describe("connection module", () => {
 
     mockInvoke.mockResolvedValueOnce("");
     await expect(connection.loadConnection()).resolves.toBeNull();
+    expect(connection.getConnectionLoadError()).toBe(null);
 
     mockInvoke.mockResolvedValueOnce("{broken");
     await expect(connection.loadConnection()).resolves.toBeNull();
+    expect(connection.getConnectionLoadError()).toContain("parsed");
 
     mockInvoke.mockResolvedValueOnce(
       JSON.stringify({ endpoint: "https://s3.example.com" }),
     );
     await expect(connection.loadConnection()).resolves.toBeNull();
+    expect(connection.getConnectionLoadError()).toContain("corrupt");
   });
 
   it("refreshBuckets stores returned buckets", async () => {

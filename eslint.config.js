@@ -55,6 +55,14 @@ export default [
                 "Import invoke from ./ipc.ts; it is typed against src/generated/ipc-contract.ts.",
             },
           ],
+          patterns: [
+            {
+              group: ["@tauri-apps/api/core"],
+              importNames: ["*"],
+              message:
+                "Import invoke from ./ipc.ts; a namespace import bypasses the typed contract.",
+            },
+          ],
         },
       ],
     },

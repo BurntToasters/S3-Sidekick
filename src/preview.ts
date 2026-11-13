@@ -1,4 +1,5 @@
 import { invokeS3 } from "./connection.ts";
+import { setStatus } from "./app-status.ts";
 import { escapeHtml, formatSize, basename, friendlyError } from "./utils.ts";
 import { state } from "./state.ts";
 import {
@@ -10,9 +11,11 @@ import {
 } from "./inspector-mount.ts";
 import {
   ensureInspectorOpenForPane,
+  focusInspectorInfoPane,
   focusInspectorPreviewPane,
   markInspectorHasContent,
 } from "./inspector-host.ts";
+import { handleDownload } from "./app-downloads.ts";
 
 interface PreviewResponse {
   content_type: string;
@@ -124,7 +127,19 @@ function base64ToBlobUrl(base64: string, type: string): string {
 }
 
 function unsupportedMarkup(): string {
-  return `<div class="preview-unsupported" role="status">${UNSUPPORTED_MESSAGE}</div>`;
+  // A known-binary extension or an unsupported fetched content type leaves the
+  // Preview tab open. Offer a way out instead of a dead pane: switch to the
+  // existing Details tab when mounted in the inspector, or download the bytes
+  // when the standalone overlay has no tabs.
+  const fallback = document.querySelector('[data-inspector-tab="details"]')
+    ? `<button type="button" class="btn btn--sm" data-preview-details>Show details</button>`
+    : `<button type="button" class="btn btn--sm" data-preview-download aria-label="Download file">Download</button>`;
+  return (
+    `<div class="preview-unsupported">` +
+    `<p class="preview-unsupported__message" role="status">${UNSUPPORTED_MESSAGE}</p>` +
+    fallback +
+    `</div>`
+  );
 }
 
 function tooLargeMarkup(totalSize: number): string {
@@ -132,18 +147,53 @@ function tooLargeMarkup(totalSize: number): string {
     `<div class="preview-too-large">` +
     `<p class="preview-unsupported" role="status">Too large to preview (${escapeHtml(formatSize(totalSize))}). ` +
     `Download the file to open it.</p>` +
-    `<button type="button" class="btn btn--sm" data-preview-download>Download</button>` +
+    `<button type="button" class="btn btn--sm" data-preview-download aria-label="Download file">Download</button>` +
     `</div>`
   );
+}
+
+function truncatedMarkup(totalSize: number): string {
+  return (
+    `<div class="preview-truncated">` +
+    `<span role="status">Showing first 1 MB of ${escapeHtml(formatSize(totalSize))}</span>` +
+    `<button type="button" class="btn btn--sm" data-preview-download aria-label="Download file">Download</button>` +
+    `</div>`
+  );
+}
+
+function showUnsupported(body: HTMLElement): void {
+  body.setAttribute("aria-busy", "false");
+  body.innerHTML = unsupportedMarkup();
+  wirePreviewFallbacks(body);
+}
+
+function wirePreviewFallbacks(body: HTMLElement): void {
+  wireDownloadAction(body);
+  body
+    .querySelector<HTMLButtonElement>("[data-preview-details]")
+    ?.addEventListener("click", () => {
+      const detailsTab = document.querySelector<HTMLButtonElement>(
+        '[data-inspector-tab="details"]',
+      );
+      if (detailsTab) {
+        detailsTab.click();
+        detailsTab.focus();
+        return;
+      }
+      // The standalone overlay has no Details tab: open the inspector first,
+      // then put focus on its Details pane.
+      ensureInspectorOpenForPane("details");
+      focusInspectorInfoPane("details");
+    });
 }
 
 function wireDownloadAction(body: HTMLElement): void {
   body
     .querySelector<HTMLButtonElement>("[data-preview-download]")
     ?.addEventListener("click", () => {
-      // The preview always belongs to the single selected file, so the toolbar
-      // download acts on the object being shown.
-      document.getElementById("btn-download")?.click();
+      // The preview always belongs to the single selected file, so the shared
+      // download action acts on the object being shown.
+      void handleDownload();
     });
 }
 
@@ -325,8 +375,8 @@ function codeBlockHtml(linesHtml: string[]): string {
   return (
     `<div class="preview-code" data-wrap="on">` +
     `<div class="preview-code__tools">` +
-    `<button type="button" class="btn btn--ghost btn--sm" data-preview-wrap aria-pressed="true">Wrap</button>` +
-    `<button type="button" class="btn btn--ghost btn--sm" data-preview-copy>Copy</button>` +
+    `<button type="button" class="btn btn--ghost btn--sm" data-preview-wrap aria-pressed="true" aria-label="Toggle line wrapping">Wrap</button>` +
+    `<button type="button" class="btn btn--ghost btn--sm" data-preview-copy aria-label="Copy preview text">Copy</button>` +
     `</div>` +
     `<div class="preview-code__lines">${lines}</div>` +
     `</div>`
@@ -338,7 +388,9 @@ function wireCopyButton(root: ParentNode, raw: string): void {
     .querySelector<HTMLButtonElement>("[data-preview-copy]")
     ?.addEventListener("click", () => {
       void navigator.clipboard.writeText(raw).then(
-        () => undefined,
+        () => {
+          setStatus("Preview copied to clipboard.", 3000);
+        },
         () => undefined,
       );
     });
@@ -361,7 +413,7 @@ function wireCodeTools(container: HTMLElement, raw: string): void {
 function tableToolsHtml(): string {
   return (
     `<div class="preview-code__tools">` +
-    `<button type="button" class="btn btn--ghost btn--sm" data-preview-copy>Copy</button>` +
+    `<button type="button" class="btn btn--ghost btn--sm" data-preview-copy aria-label="Copy preview text">Copy</button>` +
     `</div>`
   );
 }
@@ -397,7 +449,7 @@ function imagePreviewHtml(src: string, alt: string): string {
     `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" />` +
     `</div>` +
     `<div class="preview-code__tools">` +
-    `<button type="button" class="btn btn--ghost btn--sm" data-preview-zoom>100%</button>` +
+    `<button type="button" class="btn btn--ghost btn--sm" data-preview-zoom aria-label="Zoom image to 100%">100%</button>` +
     `</div>`
   );
 }
@@ -412,6 +464,10 @@ function wireZoomToggle(body: HTMLElement): void {
       const zoomed = frame.classList.toggle("preview-image--zoom-100");
       frame.classList.toggle("preview-image--fit", !zoomed);
       button.textContent = zoomed ? "Fit" : "100%";
+      button.setAttribute(
+        "aria-label",
+        zoomed ? "Fit image to pane" : "Zoom image to 100%",
+      );
     });
 }
 
@@ -435,13 +491,12 @@ export async function openPreview(key: string): Promise<void> {
   showPreviewOverlay(true);
 
   if (!canPreview(basename(key))) {
-    body.setAttribute("aria-busy", "false");
-    body.innerHTML = unsupportedMarkup();
+    showUnsupported(body);
     return;
   }
 
   body.setAttribute("aria-busy", "true");
-  body.innerHTML = `<div class="metadata-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading preview&#8230;</div>`;
+  body.innerHTML = `<div class="metadata-loading" role="status" data-preview-loading><span class="spinner" aria-hidden="true"></span>Loading preview&#8230;</div>`;
 
   try {
     const resp = await invokeS3<PreviewResponse>("preview_object", {
@@ -494,7 +549,7 @@ export async function openPreview(key: string): Promise<void> {
     }
 
     if (resp.truncated) {
-      html += `<div class="preview-truncated">Showing first 1 MB of ${formatSize(resp.total_size)}</div>`;
+      html += truncatedMarkup(resp.total_size);
     }
 
     body.setAttribute("aria-busy", "false");
@@ -508,6 +563,7 @@ export async function openPreview(key: string): Promise<void> {
     if (PREVIEWABLE_IMAGE_TYPES.has(type)) {
       wireZoomToggle(body);
     }
+    wirePreviewFallbacks(body);
   } catch (err) {
     if (
       seq !== previewSeq ||

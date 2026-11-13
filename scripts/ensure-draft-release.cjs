@@ -38,13 +38,34 @@ const IS_PRERELEASE = BETA_VERSION.test(VERSION);
 const REPO_OWNER = process.env.GH_REPO_OWNER || "BurntToasters";
 const REPO_NAME = process.env.GH_REPO_NAME || "S3-Sidekick";
 const WAIT_MODE = process.argv.includes("--wait");
-const WAIT_TIMEOUT_MS = Number.parseInt(
-  process.env.RELEASE_DRAFT_WAIT_TIMEOUT_MS || "1800000",
-  10,
+
+function positiveIntegerFromEnvironment(name, fallback) {
+  const raw = String(process.env[name] ?? "").trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(
+      `${name} must be a positive integer, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  return value;
+}
+
+const WAIT_TIMEOUT_MS = positiveIntegerFromEnvironment(
+  "RELEASE_DRAFT_WAIT_TIMEOUT_MS",
+  1_800_000,
 );
-const WAIT_POLL_INTERVAL_MS = Number.parseInt(
-  process.env.RELEASE_DRAFT_WAIT_POLL_MS || "15000",
-  10,
+const WAIT_POLL_INTERVAL_MS = positiveIntegerFromEnvironment(
+  "RELEASE_DRAFT_WAIT_POLL_MS",
+  15_000,
+);
+const GH_REQUEST_RETRIES = positiveIntegerFromEnvironment(
+  "GH_REQUEST_RETRIES",
+  3,
+);
+const GH_REQUEST_RETRY_DELAY_MS = positiveIntegerFromEnvironment(
+  "GH_REQUEST_RETRY_DELAY_MS",
+  1_500,
 );
 
 function currentCommit() {
@@ -103,27 +124,13 @@ function request(method, endpoint, body) {
 }
 
 async function requestWithRetry(method, endpoint, body) {
-  const attempts = Math.max(
-    1,
-    Number.parseInt(process.env.GH_REQUEST_RETRIES || "3", 10),
-  );
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+  for (let attempt = 1; attempt <= GH_REQUEST_RETRIES; attempt += 1) {
     try {
       return request(method, endpoint, body);
     } catch (error) {
-      if (attempt >= attempts || !isRetryable(error)) throw error;
+      if (attempt >= GH_REQUEST_RETRIES || !isRetryable(error)) throw error;
       await new Promise((resolve) =>
-        setTimeout(
-          resolve,
-          attempt *
-            Math.max(
-              100,
-              Number.parseInt(
-                process.env.GH_REQUEST_RETRY_DELAY_MS || "1500",
-                10,
-              ),
-            ),
-        ),
+        setTimeout(resolve, attempt * GH_REQUEST_RETRY_DELAY_MS),
       );
     }
   }
