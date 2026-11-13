@@ -215,6 +215,7 @@ export interface IpcCommandArgs {
     bucket: string;
     key: string;
   };
+  relaunch_app: Record<never, never>;
   rename_object: {
     connectionId: string;
     bucket: string;

@@ -29,7 +29,7 @@ const DESTRUCTIVE_COMMANDS = [
   "clear_saved_connection",
   "save_settings",
   "factory_reset",
-  "plugin:process|restart",
+  "relaunch_app",
 ];
 
 async function callNames(page: Page): Promise<string[]> {

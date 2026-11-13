@@ -224,10 +224,6 @@ vi.mock("../path-grants.ts", () => ({
   takeDroppedUploadGrants: () => mockTakeDroppedUploadGrants(),
 }));
 
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
-}));
-
 vi.mock("../settings.ts", () => ({
   loadSettings: mockLoadSettings,
   openSettingsModal: mockOpenSettingsModal,

@@ -54,6 +54,7 @@ const COMMANDS: &[&str] = &[
     "pick_upload_files",
     "pick_upload_folder",
     "preview_object",
+    "relaunch_app",
     "rename_object",
     "rename_prefix",
     "reveal_local_path",

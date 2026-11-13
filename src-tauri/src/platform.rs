@@ -449,6 +449,112 @@ pub(crate) fn reveal_local_path(token: String, name: Option<String>) -> Result<(
     }
 }
 
+/// Polls of `kill -0` on the old PID before the helper gives up (600 x 0.1 s).
+#[cfg(target_os = "macos")]
+const RELAUNCH_MAX_POLLS: &str = "600";
+
+/// Positional args: `$1` old PID, `$2` bundle, `$3` launcher, `$4` poll limit.
+/// Nothing is interpolated into this text.
+#[cfg(any(target_os = "macos", test))]
+const RELAUNCH_HELPER_SCRIPT: &str = r#"
+i=0
+while kill -0 "$1" 2>/dev/null; do
+  i=$((i + 1))
+  if [ "$i" -gt "$4" ]; then
+    exit 1
+  fi
+  /bin/sleep 0.1
+done
+exec "$3" "$2"
+"#;
+
+/// Returns `<X>.app` for an executable at `<X>.app/Contents/MacOS/<bin>`.
+/// Dev builds and other layouts return `None`, so they use the plain restart.
+#[cfg(any(target_os = "macos", test))]
+fn bundle_root_for_exe(exe: &std::path::Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    if macos.file_name()? != "MacOS" || contents.file_name()? != "Contents" {
+        return None;
+    }
+    if bundle.extension()? != "app" {
+        return None;
+    }
+    Some(bundle.to_path_buf())
+}
+
+/// Starts the detached helper. It waits for `pid` to exit, then opens the
+/// bundle without `-n`, so the Dock tile binds to the new instance.
+#[cfg(target_os = "macos")]
+fn spawn_relaunch_helper(
+    pid: u32,
+    bundle: &std::path::Path,
+    launcher: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    // Own process group, so the helper is not killed with the old process.
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg(RELAUNCH_HELPER_SCRIPT)
+        .arg("sh")
+        .arg(pid.to_string())
+        .arg(bundle)
+        .arg(launcher)
+        .arg(RELAUNCH_MAX_POLLS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map(drop)
+}
+
+/// Starts the helper and exits. Returns false when the caller must fall back.
+#[cfg(target_os = "macos")]
+fn relaunch_through_helper(app: &tauri::AppHandle) -> bool {
+    let Some(bundle) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| bundle_root_for_exe(&exe))
+    else {
+        return false;
+    };
+    let launcher = match unix_launcher("open") {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Relaunch helper unavailable: {error}");
+            return false;
+        }
+    };
+    match spawn_relaunch_helper(std::process::id(), &bundle, &launcher) {
+        Ok(()) => {
+            // Exit now; the helper opens the bundle once this PID is gone.
+            app.exit(0);
+            true
+        }
+        Err(error) => {
+            eprintln!("Failed to start relaunch helper: {error}");
+            false
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn relaunch_through_helper(_app: &tauri::AppHandle) -> bool {
+    false
+}
+
+/// Restart the app. On macOS the old process exits before the new copy is
+/// opened, so a pinned Dock tile does not keep pointing at the old instance.
+#[tauri::command]
+pub(crate) fn relaunch_app(app: tauri::AppHandle) {
+    if !relaunch_through_helper(&app) {
+        app.request_restart();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,5 +795,224 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(plan.program, "xdg-open");
         assert_eq!(plan.args, vec![expected.into_os_string()]);
+    }
+
+    // ---- Relaunch helper: restart without a second Dock tile (macOS) ----
+
+    #[test]
+    fn relaunch_bundle_root_found_for_installed_executable() {
+        assert_eq!(
+            bundle_root_for_exe(std::path::Path::new(
+                "/Applications/S3 Sidekick.app/Contents/MacOS/s3-sidekick"
+            )),
+            Some(PathBuf::from("/Applications/S3 Sidekick.app"))
+        );
+    }
+
+    #[test]
+    fn relaunch_bundle_root_keeps_spaces_quotes_and_dollars_in_path() {
+        let exe = std::path::Path::new(
+            "/Users/me/My \"Apps\" $HOME/S3 Sidekick.app/Contents/MacOS/s3-sidekick",
+        );
+        assert_eq!(
+            bundle_root_for_exe(exe),
+            Some(PathBuf::from("/Users/me/My \"Apps\" $HOME/S3 Sidekick.app"))
+        );
+    }
+
+    #[test]
+    fn relaunch_bundle_root_rejects_dev_build_paths() {
+        assert_eq!(
+            bundle_root_for_exe(std::path::Path::new(
+                "/repo/src-tauri/target/debug/s3-sidekick"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn relaunch_bundle_root_rejects_wrong_layouts() {
+        for exe in [
+            "/Applications/S3 Sidekick.app/Contents/Resources/s3-sidekick",
+            "/Applications/S3 Sidekick.app/MacOS/s3-sidekick",
+            "/Applications/S3 Sidekick/Contents/MacOS/s3-sidekick",
+            "/Applications/.app/Contents/MacOS/s3-sidekick",
+            "/Contents/MacOS/s3-sidekick",
+            "s3-sidekick",
+        ] {
+            assert_eq!(
+                bundle_root_for_exe(std::path::Path::new(exe)),
+                None,
+                "{exe}"
+            );
+        }
+    }
+
+    #[test]
+    fn relaunch_script_takes_pid_bundle_launcher_and_limit_positionally() {
+        assert!(RELAUNCH_HELPER_SCRIPT.contains("kill -0 \"$1\""));
+        assert!(RELAUNCH_HELPER_SCRIPT.contains("-gt \"$4\""));
+        assert!(RELAUNCH_HELPER_SCRIPT.contains("exec \"$3\" \"$2\""));
+        assert!(!RELAUNCH_HELPER_SCRIPT.contains("/usr/bin/open"));
+    }
+
+    #[test]
+    fn relaunch_script_never_passes_dash_n_to_the_launcher() {
+        assert!(!RELAUNCH_HELPER_SCRIPT
+            .split_whitespace()
+            .any(|token| token == "-n"));
+    }
+
+    #[test]
+    fn relaunch_script_timeout_exit_comes_before_exec() {
+        let exit_at = RELAUNCH_HELPER_SCRIPT.find("exit 1").expect("timeout exit");
+        let exec_at = RELAUNCH_HELPER_SCRIPT.find("exec ").expect("exec line");
+        assert!(exit_at < exec_at);
+    }
+
+    /// Scratch directory removed on drop, so a failing assert leaves nothing.
+    #[cfg(unix)]
+    struct RelaunchScratch(PathBuf);
+
+    #[cfg(unix)]
+    impl RelaunchScratch {
+        fn new(name: &str) -> Self {
+            let mut dir = std::env::temp_dir();
+            dir.push(format!(
+                "s3-sidekick-relaunch-{}-{}",
+                name,
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create relaunch scratch dir");
+            Self(dir)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RelaunchScratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Stub launcher that writes its argv, one argument per line, to `marker`.
+    #[cfg(unix)]
+    fn write_stub_launcher(dir: &std::path::Path, marker: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let stub = dir.join("stub-open");
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            marker.display()
+        );
+        std::fs::write(&stub, body).expect("write stub launcher");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub launcher");
+        stub
+    }
+
+    #[cfg(unix)]
+    fn spawn_helper(
+        pid: u32,
+        bundle: &std::path::Path,
+        stub: &std::path::Path,
+        limit: &str,
+    ) -> std::process::Child {
+        use std::process::Stdio;
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(RELAUNCH_HELPER_SCRIPT)
+            .arg("sh")
+            .arg(pid.to_string())
+            .arg(bundle)
+            .arg(stub)
+            .arg(limit)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn relaunch helper")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relaunch_helper_opens_bundle_only_after_old_pid_has_exited() {
+        let scratch = RelaunchScratch::new("waits");
+        let marker = scratch.path("opened.txt");
+        let stub = write_stub_launcher(&scratch.0, &marker);
+        let bundle = std::path::Path::new("/Applications/S3 Sidekick.app");
+
+        let mut old = Command::new("/bin/sleep")
+            .arg("1")
+            .spawn()
+            .expect("spawn old process");
+        let started = std::time::Instant::now();
+        let mut helper = spawn_helper(old.id(), bundle, &stub, "600");
+        // A zombie still answers `kill -0`, so the helper cannot pass this
+        // point until the old process has exited and been reaped here.
+        old.wait().expect("reap old process");
+        let status = helper.wait().expect("wait for helper");
+
+        assert!(status.success(), "helper failed: {status}");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+        let opened = std::fs::read_to_string(&marker).expect("stub launcher ran");
+        assert_eq!(
+            opened.lines().collect::<Vec<_>>(),
+            vec![bundle.to_str().unwrap()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relaunch_helper_gives_up_on_a_live_pid_without_opening() {
+        let scratch = RelaunchScratch::new("timeout");
+        let marker = scratch.path("opened.txt");
+        let stub = write_stub_launcher(&scratch.0, &marker);
+        let bundle = std::path::Path::new("/Applications/S3 Sidekick.app");
+
+        let mut live = Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn live process");
+        let started = std::time::Instant::now();
+        let status = spawn_helper(live.id(), bundle, &stub, "3")
+            .wait()
+            .expect("wait for helper");
+        let elapsed = started.elapsed();
+        let _ = live.kill();
+        let _ = live.wait();
+
+        assert!(!status.success(), "helper must fail on timeout");
+        assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+        assert!(!marker.exists(), "launcher must not run on timeout");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relaunch_helper_passes_awkward_bundle_path_verbatim() {
+        let scratch = RelaunchScratch::new("verbatim");
+        let marker = scratch.path("opened.txt");
+        let stub = write_stub_launcher(&scratch.0, &marker);
+        let bundle_text = "/Users/me/My \"Apps\" $HOME/S3 Sidekick.app";
+
+        // An exited and reaped child gives a PID that `kill -0` rejects.
+        let mut gone = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn short-lived process");
+        let pid = gone.id();
+        gone.wait().expect("reap short-lived process");
+
+        let status = spawn_helper(pid, std::path::Path::new(bundle_text), &stub, "600")
+            .wait()
+            .expect("wait for helper");
+
+        assert!(status.success(), "helper failed: {status}");
+        let opened = std::fs::read_to_string(&marker).expect("stub launcher ran");
+        assert_eq!(opened.lines().collect::<Vec<_>>(), vec![bundle_text]);
     }
 }

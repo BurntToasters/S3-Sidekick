@@ -17,6 +17,10 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
+## Changes in `v0.12.0-beta.3:`
+
+- **macOS Dock:** Restarting to apply an update (or after a settings reset) no longer adds a second S3 Sidekick icon to the Dock when the app is pinned; the new copy opens only after the old one has quit.
+
 ## Changes in `v0.12.0-beta.2:`
 
 - **UI audit fixes:** In dark mode, dividers inside Settings, dialogs, and menus are visible again, and the settings search box has a visible edge. Text fields show the shared focus ring when reached by keyboard. Disabled Back, Forward, and Up buttons no longer turn into grey tiles. The theme picker lines up with its label. Lock-screen links meet text contrast and show a focus ring. The support card, context menu, connection menu, and saved-connection menu share one opaque surface. Inspector tabs are underline tabs like the other tab rows, the location field matches the filter field, and panel resizers stay hidden until hovered or focused. The connection switcher text is larger. A selected transfer row keeps its highlight on hover. The command palette shows `Ctrl+Shift+U` and `Ctrl+Shift+I` on Windows and Linux. Enter in the connection Name or R2 Account ID field connects. The copy and move status no longer ends in "….". Instant-apply settings tabs no longer mention Save and Cancel.

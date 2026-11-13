@@ -29,7 +29,6 @@
     "updater:allow-check",
     "updater:allow-download",
     "updater:allow-install",
-    "process:allow-restart",
     "notification:allow-is-permission-granted",
     "notification:allow-notify",
     "notification:allow-request-permission"

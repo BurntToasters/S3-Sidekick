@@ -4,8 +4,8 @@
 # capabilities/default.json grants the core and plugin commands explicitly
 # instead of using a `:default` set: app version, event listen/unlisten, the
 # window commands used by titlebar.ts and window-size.ts, dialog message (ask is
-# an alias), notification permission, updater check/download/install,
-# and process restart.
+# an alias), notification permission, and updater check/download/install.
+# Restart goes through the app's own relaunch_app command (platform set).
 
 [[set]]
 identifier = "s3-session"
@@ -126,4 +126,5 @@ permissions = [
   "allow-updater-supported",
   "allow-updater-support-info",
   "allow-open-external-url",
+  "allow-relaunch-app",
 ]

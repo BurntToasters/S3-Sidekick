@@ -4,7 +4,6 @@ import { SETTING_DEFAULTS, parseSettingsRaw } from "../settings-model.ts";
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockUpdateBookmark = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
-const mockRelaunch = vi.fn<() => Promise<void>>();
 const mockLoadBookmarks = vi.fn<() => Promise<void>>();
 const mockRenderBookmarkList = vi.fn();
 const mockRemoveBookmark = vi.fn<(...args: unknown[]) => Promise<void>>();
@@ -30,10 +29,6 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: mockGetVersion,
-}));
-
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: mockRelaunch,
 }));
 
 vi.mock("../path-grants.ts", () => ({
@@ -89,7 +84,6 @@ describe("settings module", () => {
       directoryPath: null,
     });
     mockGetVersion.mockReset();
-    mockRelaunch.mockReset();
     mockLoadBookmarks.mockReset();
     mockRenderBookmarkList.mockReset();
     mockRemoveBookmark.mockReset();
@@ -509,7 +503,6 @@ describe("settings module", () => {
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("partial");
     mockInvoke.mockResolvedValue(undefined);
-    mockRelaunch.mockResolvedValueOnce(undefined);
     await settings.resetSettings();
     expect(mockInvoke).toHaveBeenCalledWith(
       "save_settings",
@@ -520,7 +513,7 @@ describe("settings module", () => {
     expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection", {
       connectionId: "session-reset",
     });
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
 
     const assignMock = vi.fn();
     const locationValue = window.location;
@@ -531,7 +524,10 @@ describe("settings module", () => {
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("partial");
     mockInvoke.mockResolvedValue(undefined);
-    mockRelaunch.mockRejectedValueOnce(new Error("relaunch failed"));
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "relaunch_app") throw new Error("relaunch failed");
+      return undefined;
+    });
     await settings.resetSettings();
     expect(assignMock).toHaveBeenCalledWith("https://app.local/");
     Object.defineProperty(window, "location", {
@@ -557,7 +553,6 @@ describe("settings module", () => {
     });
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("partial");
-    mockRelaunch.mockResolvedValue(undefined);
 
     const pendingSave = settings.saveSettings();
     const reset = settings.resetSettings();
@@ -570,7 +565,7 @@ describe("settings module", () => {
     expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection", {
       connectionId: null,
     });
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("resyncs the backend session before a reloaded reset clears credentials", async () => {
@@ -580,7 +575,6 @@ describe("settings module", () => {
 
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("partial");
-    mockRelaunch.mockResolvedValue(undefined);
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_connection_id") return "backend-session";
       return undefined;
@@ -592,7 +586,7 @@ describe("settings module", () => {
     expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection", {
       connectionId: "backend-session",
     });
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("maps a stale reset session to disconnect-and-retry", async () => {
@@ -619,7 +613,7 @@ describe("settings module", () => {
       "save_settings",
       expect.anything(),
     );
-    expect(mockRelaunch).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith("relaunch_app");
   });
 
   it("factory reset gets final consent before one backend transaction", async () => {
@@ -637,10 +631,9 @@ describe("settings module", () => {
     mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("factory");
     mockInvoke.mockResolvedValue(undefined);
-    mockRelaunch.mockResolvedValue(undefined);
     await settings.resetSettings();
 
-    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
     expect(mockInvoke).toHaveBeenCalledWith("factory_reset", {
       settingsJson: expect.stringContaining('"theme": "system"'),
     });
@@ -655,7 +648,7 @@ describe("settings module", () => {
       "factory reset must not be able to skip the setup wizard",
     ).toBeUndefined();
     expect(localStorage.length).toBe(0);
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("reverts in-memory settings when close modal is cancelled", async () => {
@@ -1236,7 +1229,6 @@ describe("settings module", () => {
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("partial");
     mockInvoke.mockResolvedValue(undefined);
-    mockRelaunch.mockResolvedValue(undefined);
 
     await settings.resetSettings();
 
@@ -1261,7 +1253,7 @@ describe("settings module", () => {
     expect(mockInvoke).toHaveBeenCalledWith("clear_saved_connection", {
       connectionId: null,
     });
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("partial reset drops mistyped extras but keeps setup complete", async () => {
@@ -1275,7 +1267,6 @@ describe("settings module", () => {
     mockShowConfirm.mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("partial");
     mockInvoke.mockResolvedValue(undefined);
-    mockRelaunch.mockResolvedValue(undefined);
 
     await settings.resetSettings();
 
@@ -1309,7 +1300,7 @@ describe("settings module", () => {
       "Reset failed",
       expect.stringContaining("disk full"),
     );
-    expect(mockRelaunch).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith("relaunch_app");
   });
 
   it("alerts when factory reset fails before destructive cleanup", async () => {
@@ -1326,7 +1317,7 @@ describe("settings module", () => {
       expect.stringContaining("factory boom"),
     );
     expect(localStorage.getItem("s3-sidekick.keep")).toBe("1");
-    expect(mockRelaunch).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith("relaunch_app");
     localStorage.clear();
   });
 
@@ -1335,7 +1326,6 @@ describe("settings module", () => {
     mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
     mockShowChoiceDialog.mockResolvedValueOnce("factory");
     mockInvoke.mockResolvedValue(undefined);
-    mockRelaunch.mockResolvedValue(undefined);
     const clearSpy = vi
       .spyOn(Storage.prototype, "clear")
       .mockImplementationOnce(() => {
@@ -1350,7 +1340,7 @@ describe("settings module", () => {
         settingsJson: expect.stringContaining('"_schemaVersion": 2'),
       }),
     );
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
     clearSpy.mockRestore();
   });
 
@@ -1899,19 +1889,18 @@ describe("settings module", () => {
     localStorage.setItem("s3-sidekick.transfer-manifest.v1", "plaintext");
     mockShowConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
     mockInvoke.mockResolvedValue(undefined);
-    mockRelaunch.mockResolvedValue(undefined);
 
     await settings.resetAfterForgottenPassword();
 
     expect(mockShowConfirm).toHaveBeenCalledTimes(2);
     expect(mockShowChoiceDialog).not.toHaveBeenCalled();
-    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
     expect(mockInvoke).toHaveBeenCalledWith("factory_reset", {
       settingsJson: expect.stringContaining('"theme": "system"'),
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("clear_saved_connection");
     expect(localStorage.length).toBe(0);
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("resetAfterForgottenPassword resets nothing when the final confirmation is declined", async () => {
@@ -1921,7 +1910,7 @@ describe("settings module", () => {
     await settings.resetAfterForgottenPassword();
 
     expect(mockInvoke).not.toHaveBeenCalled();
-    expect(mockRelaunch).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith("relaunch_app");
   });
 
   it("resetAfterForgottenPassword alerts and does not relaunch when the factory reset fails", async () => {
@@ -1935,7 +1924,7 @@ describe("settings module", () => {
       "Factory reset failed",
       expect.any(String),
     );
-    expect(mockRelaunch).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith("relaunch_app");
   });
 
   it("the Discard changes prompt offers Save and saves the draft", async () => {

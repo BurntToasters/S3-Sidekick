@@ -1,5 +1,4 @@
 import { check } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { message, ask } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import {
@@ -238,7 +237,7 @@ Restart anyway?`,
   if (restart) {
     setStatus("Installing update…");
     await install();
-    await relaunch();
+    await invoke("relaunch_app");
   } else {
     await notify("S3 Sidekick", notInstalledText(version));
     setStatus("");
