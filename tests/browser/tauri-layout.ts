@@ -1,4 +1,5 @@
 import { expect, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import type { IpcCommand } from "../../src/generated/ipc-contract.ts";
 
 /**
@@ -117,7 +118,13 @@ interface LayoutMockInit {
   autoLockAfterMs: number;
   platform: string;
   holdBiometric: boolean;
+  appVersion: string;
 }
+
+/** Version reported by `plugin:app|version`, read from package.json. */
+const APP_VERSION = (
+  JSON.parse(readFileSync("package.json", "utf8")) as { version: string }
+).version;
 
 /**
  * Install a browser-side Tauri IPC/event bridge before the production entry
@@ -170,6 +177,7 @@ export async function installLayoutTauriMock(
     autoLockAfterMs: options.autoLockAfterMs ?? 0,
     platform: options.platform ?? "linux",
     holdBiometric: options.holdBiometric ?? false,
+    appVersion: APP_VERSION,
   };
 
   await page.addInitScript(
@@ -197,6 +205,7 @@ export async function installLayoutTauriMock(
       autoLockAfterMs,
       platform,
       holdBiometric,
+      appVersion,
     }: LayoutMockInit) => {
       const callbacks = new Map<number, (value: unknown) => void>();
       const listeners = new Map<string, Set<number>>();
@@ -372,7 +381,7 @@ export async function installLayoutTauriMock(
           case "get_platform_info":
             return platform;
           case "plugin:app|version":
-            return "0.11.0-beta.7";
+            return appVersion;
           case "load_settings":
             return JSON.stringify({
               _schemaVersion: 2,

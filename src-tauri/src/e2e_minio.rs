@@ -93,6 +93,7 @@ fn make_app() -> tauri::App<tauri::test::MockRuntime> {
             connection_id: None,
             connection_identity: None,
             storage_provider: StorageProviderKind::default(),
+            sftp: None,
         })))
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("build mock app")

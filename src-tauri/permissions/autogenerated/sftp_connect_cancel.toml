@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sftp-connect-cancel"
+description = "Enables the sftp_connect_cancel command without any pre-configured scope."
+commands.allow = ["sftp_connect_cancel"]
+
+[[permission]]
+identifier = "deny-sftp-connect-cancel"
+description = "Denies the sftp_connect_cancel command without any pre-configured scope."
+commands.deny = ["sftp_connect_cancel"]

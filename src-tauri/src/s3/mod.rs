@@ -58,7 +58,7 @@ const MAX_MULTIPART_COPY_PARTS: u64 = 10_000;
 const MAX_OBJECT_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 const MULTIPART_COPY_THRESHOLD: i64 = 5_368_709_120;
 const MULTIPART_ABORT_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_PREFIX_TRANSACTION_OBJECTS: usize = 100_000;
+pub(crate) const MAX_PREFIX_TRANSACTION_OBJECTS: usize = 100_000;
 const MAX_KEY_LEN: usize = 1024;
 const PENDING_CANCEL_TTL: Duration = Duration::from_secs(30);
 const MAX_PENDING_CANCELS: usize = 4096;
@@ -102,7 +102,7 @@ use transaction::*;
 pub(crate) use transaction::{
     e2e_copy_prefix_with_failure_after_first, e2e_delete_move_receipts_checked,
 };
-use transfer_support::*;
+pub(crate) use transfer_support::*;
 pub(crate) use types::*;
 pub(crate) use upload::*;
 use validation::*;
@@ -1350,6 +1350,7 @@ mod tests {
             connection_id: Some("session-a".to_string()),
             connection_identity: Some("ident-a".to_string()),
             storage_provider: StorageProviderKind::default(),
+            sftp: None,
         };
         let empty = require_connected_client(&s3, "").expect_err("empty id");
         assert!(empty.contains("required"), "{empty}");
@@ -1371,6 +1372,7 @@ mod tests {
             connection_id: Some("session-a".to_string()),
             connection_identity: Some("ident-a".to_string()),
             storage_provider: StorageProviderKind::default(),
+            sftp: None,
         };
 
         invalidate_connection_session(&mut s3);

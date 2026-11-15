@@ -37,6 +37,10 @@ zeroize = "=1.9.0"
 fs2 = "=0.4.3"
 bytes = "=1.12.1"
 md-5 = "=0.11.0"
+# `rsa` feature is off: it pulls the `rsa` crate (RUSTSEC-2023-0071). `flate2`
+# (SSH compression) is also off.
+russh = { version = "=0.65.1", default-features = false, features = ["aws-lc-rs"] }
+russh-sftp = "=3.0.1"
 
 tauri-plugin-single-instance = "=2.5.0"
 # Only v2 updater artifacts are published (createUpdaterArtifacts = true).

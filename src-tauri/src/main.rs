@@ -13,6 +13,7 @@ mod path_authority;
 mod platform;
 mod s3;
 mod security;
+mod sftp;
 
 use aws_sdk_s3::Client;
 use rand::RngCore;
@@ -292,6 +293,9 @@ pub(crate) struct S3State {
     pub connection_id: Option<String>,
     pub connection_identity: Option<String>,
     pub storage_provider: StorageProviderKind,
+    /// Live SFTP session. Set only by an SFTP connect, and always empty on an
+    /// S3 session, so each protocol's commands fail closed on the other.
+    pub sftp: Option<std::sync::Arc<crate::sftp::SftpHandle>>,
 }
 
 /// Detected S3-compatible backend for provider-specific API behavior.
@@ -3709,6 +3713,7 @@ fn main() {
             connection_id: None,
             connection_identity: None,
             storage_provider: StorageProviderKind::default(),
+            sftp: None,
         })))
         .invoke_handler(tauri::generate_handler![
             s3::connect,
@@ -3739,6 +3744,21 @@ fn main() {
             s3::build_object_url,
             s3::generate_presigned_url,
             s3::preview_object,
+            sftp::sftp_connect,
+            sftp::sftp_connect_continue,
+            sftp::sftp_connect_cancel,
+            sftp::pick_ssh_private_key,
+            sftp::sftp_list_dir,
+            sftp::sftp_stat,
+            sftp::sftp_exists,
+            sftp::sftp_create_dir,
+            sftp::sftp_rename,
+            sftp::sftp_delete,
+            sftp::sftp_delete_dir,
+            sftp::sftp_preview,
+            sftp::sftp_upload,
+            sftp::sftp_upload_bytes,
+            sftp::sftp_download,
             files::list_local_files_recursive,
             pick_upload_files,
             pick_upload_folder,

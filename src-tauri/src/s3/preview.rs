@@ -4,16 +4,16 @@ use super::*;
 
 /// Largest text body the preview reads. Text keeps this prefix with a size
 /// hint; the rest of the object is never pulled for a preview.
-const MAX_PREVIEW: i64 = 1_048_576;
+pub(crate) const MAX_PREVIEW: i64 = 1_048_576;
 
 /// Largest image body the preview reads. A partial image cannot be drawn, so
 /// images above this are refused instead of truncated.
-const MAX_IMAGE_PREVIEW: i64 = 16_777_216;
+pub(crate) const MAX_IMAGE_PREVIEW: i64 = 16_777_216;
 
 /// What the preview does once HEAD has named the content type and size.
 /// Only `Read` fetches the body; the other plans answer from HEAD alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreviewPlan {
+pub(crate) enum PreviewPlan {
     Read,
     TooLarge,
     Unsupported,
@@ -28,7 +28,7 @@ fn preview_media_type(content_type: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn is_previewable_image_type(content_type: &str) -> bool {
+pub(crate) fn is_previewable_image_type(content_type: &str) -> bool {
     matches!(
         preview_media_type(content_type).as_str(),
         "image/png"
@@ -44,7 +44,7 @@ fn is_previewable_image_type(content_type: &str) -> bool {
 
 /// The read cap for a previewable type: the image cap for images, the text
 /// cap for text, and `None` when the type is not previewable at all.
-fn preview_read_cap(content_type: &str) -> Option<i64> {
+pub(crate) fn preview_read_cap(content_type: &str) -> Option<i64> {
     if is_previewable_image_type(content_type) {
         Some(MAX_IMAGE_PREVIEW)
     } else if is_text_content_type(content_type) {
@@ -56,7 +56,7 @@ fn preview_read_cap(content_type: &str) -> Option<i64> {
 
 /// How a readable body is cut to its cap. Text is truncated to its prefix;
 /// images are never truncated, so they have no truncation cap.
-fn preview_truncation_cap(content_type: &str) -> Option<i64> {
+pub(crate) fn preview_truncation_cap(content_type: &str) -> Option<i64> {
     if is_previewable_image_type(content_type) {
         None
     } else if is_text_content_type(content_type) {
@@ -66,7 +66,7 @@ fn preview_truncation_cap(content_type: &str) -> Option<i64> {
     }
 }
 
-fn plan_preview(content_type: &str, total_size: i64) -> PreviewPlan {
+pub(crate) fn plan_preview(content_type: &str, total_size: i64) -> PreviewPlan {
     match preview_read_cap(content_type) {
         None => PreviewPlan::Unsupported,
         // Images must arrive whole: anything above the image cap is refused
@@ -195,15 +195,15 @@ pub(super) async fn preview_object_inner(
 
 /// A preview body after the per-type read policy has been applied.
 #[derive(Debug, PartialEq, Eq)]
-struct PreviewBody {
-    bytes: Vec<u8>,
-    truncated: bool,
+pub(crate) struct PreviewBody {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) truncated: bool,
 }
 
 /// Streams a preview body from `reader` up to the type's read cap, reading one
 /// byte past it so an exact fit is distinguishable from an overflow. Text
 /// overflow is cut to its prefix; an image overflow is refused, never cut.
-async fn read_preview_body<R>(
+pub(crate) async fn read_preview_body<R>(
     reader: &mut R,
     content_type: &str,
     cancel: &CancelFlag,

@@ -38,6 +38,7 @@
     "test:cov": "vitest run --coverage",
     "test:cov:watch": "vitest --coverage",
     "test:all": "node scripts/test-all.js --write-evidence && node scripts/finalize-quality-gate.js",
+    "screenshots": "node scripts/screenshots.mjs",
     "test:release-assets": "node --test \"scripts/*.test.js\" \"scripts/*.test.cjs\"",
     "test:cargo-safe-update": "node --test scripts/cargo-safe-update.test.mjs scripts/check-cargo-update-policy.test.mjs scripts/deps-majors.test.mjs",
     "check:cargo-update-policy": "node scripts/check-cargo-update-policy.mjs",

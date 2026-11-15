@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pick-ssh-private-key"
+description = "Enables the pick_ssh_private_key command without any pre-configured scope."
+commands.allow = ["pick_ssh_private_key"]
+
+[[permission]]
+identifier = "deny-pick-ssh-private-key"
+description = "Denies the pick_ssh_private_key command without any pre-configured scope."
+commands.deny = ["pick_ssh_private_key"]

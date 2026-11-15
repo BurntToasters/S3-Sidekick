@@ -7,14 +7,14 @@ use aws_sdk_s3::types::EncodingType;
 
 #[derive(serde::Serialize)]
 pub(crate) struct PreviewResponse {
-    pub(super) content_type: String,
-    pub(super) data: String,
-    pub(super) is_text: bool,
-    pub(super) truncated: bool,
-    pub(super) total_size: i64,
+    pub(crate) content_type: String,
+    pub(crate) data: String,
+    pub(crate) is_text: bool,
+    pub(crate) truncated: bool,
+    pub(crate) total_size: i64,
 }
 
-pub(super) fn is_text_content_type(ct: &str) -> bool {
+pub(crate) fn is_text_content_type(ct: &str) -> bool {
     let media_type = ct
         .split(';')
         .next()
