@@ -1,7 +1,31 @@
 const DOWNLOADS_START_MARKER = "# ⬇️ Downloads";
 const DOWNLOADS_END_MARKER = "\n> [!IMPORTANT]";
 const SUPPORT_LINE_PATTERN = /^### ℹ️ Enjoying S3 Sidekick\?.*$/m;
+const BANNER_LINES = ["> [!NOTE]", "> 🅱️ This is a beta build."];
 const SECTION_HEADING_PATTERN = /^## Changes in `/m;
+
+/**
+ * Show the "this is a beta build" note at the top of the CHANGELOG for
+ * prerelease versions and comment it out (so GitHub renders nothing) for
+ * stable versions. Only the note at the very start of the file is rewritten;
+ * if it is in neither form the sync throws rather than guess.
+ */
+export function syncBetaBanner(changelog, version) {
+  const eol = changelog.includes("\r\n") ? "\r\n" : "\n";
+  const [first, second] = BANNER_LINES;
+  const active = [first, second].join(eol);
+  const hidden = [`<!-- ${first}`, second, "-->"].join(eol);
+  const next = version.includes("-") ? active : hidden;
+  for (const current of [active, hidden]) {
+    if (
+      changelog.startsWith(current) &&
+      /^(\r?\n|$)/.test(changelog.slice(current.length))
+    ) {
+      return next + changelog.slice(current.length);
+    }
+  }
+  throw new Error("CHANGELOG.md beta banner not found at the top of the file");
+}
 
 /**
  * Align CHANGELOG download URLs and the release section heading with the

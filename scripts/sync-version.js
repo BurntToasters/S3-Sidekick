@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { run as updateMetainfo } from "./update-metainfo.js";
 import {
+  syncBetaBanner,
   syncChangelogForVersion,
   syncNpmLockfileVersion,
   syncReadmeVersion,
@@ -27,7 +28,10 @@ let syncedChangelog;
 let syncedNpmLock;
 let syncedReadme;
 try {
-  syncedChangelog = syncChangelogForVersion(changelog, version);
+  syncedChangelog = syncBetaBanner(
+    syncChangelogForVersion(changelog, version),
+    version,
+  );
   syncedNpmLock = syncNpmLockfileVersion(npmLock, version);
   syncedReadme = syncReadmeVersion(readme, version);
 } catch (error) {
@@ -106,7 +110,7 @@ if (syncedReadme !== readme) {
 
 if (syncedChangelog !== changelog) {
   fs.writeFileSync(changelogPath, syncedChangelog);
-  console.log(`CHANGELOG.md    → v${version} (download URLs + section)`);
+  console.log(`CHANGELOG.md    → v${version} (download URLs + section + beta banner)`);
 }
 
 if (syncedNpmLock !== npmLock) {

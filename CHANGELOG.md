@@ -1,12 +1,13 @@
-> [!NOTE]
+<!-- > [!NOTE]
 > 🅱️ This is a beta build.
+-->
 
 # ⬇️ Downloads
 
 | <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows                                                                                                                                | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS          | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux                                                                                                                                                      |
 | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.3/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.3/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.3/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.3/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.3/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> -->                                          | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.3/S3-Sidekick-macOS.zip)** | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.3/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0-beta.3/S3-Sidekick-Linux-arm64.flatpak) -->    |
+| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Linux-arm64.AppImage) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> -->                                          | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-macOS.zip)** | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Linux-arm64.flatpak) -->    |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
@@ -17,16 +18,7 @@
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
-## Changes in `v0.12.0-beta.3:`
-
-- **macOS Dock:** Restarting to apply an update (or after a settings reset) no longer adds a second S3 Sidekick icon to the Dock when the app is pinned; the new copy opens only after the old one has quit.
-
-## Changes in `v0.12.0-beta.2:`
-
-- **UI audit fixes:** In dark mode, dividers inside Settings, dialogs, and menus are visible again, and the settings search box has a visible edge. Text fields show the shared focus ring when reached by keyboard. Disabled Back, Forward, and Up buttons no longer turn into grey tiles. The theme picker lines up with its label. Lock-screen links meet text contrast and show a focus ring. The support card, context menu, connection menu, and saved-connection menu share one opaque surface. Inspector tabs are underline tabs like the other tab rows, the location field matches the filter field, and panel resizers stay hidden until hovered or focused. The connection switcher text is larger. A selected transfer row keeps its highlight on hover. The command palette shows `Ctrl+Shift+U` and `Ctrl+Shift+I` on Windows and Linux. Enter in the connection Name or R2 Account ID field connects. The copy and move status no longer ends in "….". Instant-apply settings tabs no longer mention Save and Cancel.
-- **Consistency pass:** On/off settings in Settings and setup are now switches, aligned with the menus beside them. Keyboard shortcuts open in a grouped dialog with key chips. Labels, menus, and the command palette use sentence case, and placeholders and progress messages use a single “…” character. Setup and lock-screen titles now match the size of the other dialog titles. Unused styles were removed.
-
-## Changes in `v0.12.0-beta.1:`
+## Changes in `v0.12.0:`
 
 - **Linux packages:** DEB and RPM packages are retired. Linux builds now ship as the AppImage, which updates itself, and the side-loaded Flatpak. If you installed the DEB or RPM, remove it (`sudo apt remove s3-sidekick` or `sudo dnf remove s3-sidekick`) and install the AppImage or Flatpak instead; the DEB and RPM will not receive further releases.
 - **Connect & browse craft:** Calmer section labels and table headers, a clearer connection title, and tabular dates in the object list.
@@ -46,11 +38,13 @@
 - **Lock and setup:** A full-window lock view with a password field, a Touch ID or Windows Hello retry, and **Forgot password?**, which explains that the encrypted vault will be erased before doing so. The Security tab shows a status card with explicit Set up, Unlock, Lock now, Change password, and Disable actions. Setup is three steps (Welcome and Theme, Security, Updates) with a step counter and **Skip setup**, and no longer re-initializes a vault after Skip and Back.
 - **Visual refresh:** New design tokens for spacing, type, motion, elevation, overlay scrim, success colors, and row density, one focus ring across controls, shared badge and switch styles, and a connected-status dot that pulses three times instead of forever.
 - **Security:** S3 diagnostics redact authorization headers, presigned-query credentials, and secret fields before logging. Upload sources and overwrite destinations that are symbolic links are refused.
-- **Release:** `release:prepare` now runs the local `test:all` evidence gate, Cargo audit, and license checks, and requires the aggregate CI `Release gate` check to pass for the exact pushed commit. The local gate still runs icon validation and release-asset script tests, but not Playwright, MinIO, or full-stack tests; those remain CI jobs. The ignored `--skip-e2e` flag was removed.
+- **Release:** `release:prepare` now runs the local `test:all` evidence gate, Cargo audit, and license checks. The local gate still runs icon validation and release-asset script tests, but not Playwright, MinIO, or full-stack tests; those remain CI jobs. The ignored `--skip-e2e` flag was removed.
 - **Updater security:** Updater manifests now require signatures bound to the announced app version. The isolated signing step passes `--app-version` from `package.json` and refuses to sign when the version is missing.
 - **Project metadata:** The package declares the MPL-2.0 license, and Prettier now checks `scripts/*.mjs`.
 - **Maintainability:** Transfer row and queue-chrome rendering moved out of the queue/recovery module, and the browser, inspector, preview, and properties import cycles were replaced with explicit dependency boundaries. Stylesheets take every color from design tokens and use the spacing, type, and radius tokens wherever a value is on the scale, with no visual change.
 - **CI:** Unsigned Windows arm64, macOS universal, and Flatpak builds now run in CI so platform toolchain breaks surface before a release host spends a session.
+- **Consistency pass:** On/off settings in Settings and setup are now switches, aligned with the menus beside them. Keyboard shortcuts open in a grouped dialog with key chips. Labels, menus, and the command palette use sentence case, and placeholders and progress messages use a single “…” character. Setup and lock-screen titles now match the size of the other dialog titles. Unused styles were removed.
+- **macOS Dock:** Restarting to apply an update (or after a settings reset) no longer adds a second S3 Sidekick icon to the Dock when the app is pinned; the new copy opens only after the old one has quit.
 
 ## Changes in `v0.11.3:`
 
