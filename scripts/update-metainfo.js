@@ -18,6 +18,25 @@ function formatDate(date) {
   return `${year}-${month}-${day}`;
 }
 
+const SCREENSHOT_URL_PATTERN =
+  /(https:\/\/raw\.githubusercontent\.com\/BurntToasters\/S3-Sidekick\/)[^/\s<]+(\/docs\/screenshots\/)/g;
+
+/** Beta screenshots live on the next-X.Y.Z branch until the merge to main. */
+function screenshotBranch(version) {
+  const match = /^(\d+\.\d+\.\d+)(-[0-9A-Za-z.-]+)?$/.exec(version);
+  if (!match) {
+    throw new Error(
+      `Cannot derive screenshot branch from version "${version}"`,
+    );
+  }
+  return match[2] ? `next-${match[1]}` : "main";
+}
+
+function syncScreenshotBranch(xml, version) {
+  const branch = screenshotBranch(version);
+  return xml.replace(SCREENSHOT_URL_PATTERN, `$1${branch}$2`);
+}
+
 function compareVersionsDescending(left, right) {
   const parse = (value) => {
     const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
@@ -83,7 +102,8 @@ function run({
   }
 
   const dateStr = formatDate(now);
-  const xml = fs.readFileSync(metadataPath, "utf8");
+  const originalXml = fs.readFileSync(metadataPath, "utf8");
+  const xml = syncScreenshotBranch(originalXml, version);
   const lineEnding = xml.includes("\r\n") ? "\r\n" : "\n";
 
   const releasesLineMatch = xml.match(/^([ \t]*)<releases>[ \t]*\r?$/m);
@@ -159,11 +179,11 @@ function run({
     .map(({ tag }) => `${releaseIndent}${tag}`)
     .join(lineEnding)}${lineEnding}${baseIndent}</releases>`;
 
-  if (updatedSection === releasesSectionMatch[0]) {
+  const updatedXml = xml.replace(releasesSectionRegex, () => updatedSection);
+  if (updatedXml === originalXml) {
     return { updated: false, version, date: currentVersionDate };
   }
 
-  const updatedXml = xml.replace(releasesSectionRegex, updatedSection);
   fs.writeFileSync(metadataPath, updatedXml, "utf8");
   return { updated: true, version, date: currentVersionDate };
 }
@@ -188,4 +208,4 @@ if (isDirectExecution(import.meta.url)) {
   }
 }
 
-export { formatDate, run };
+export { formatDate, run, screenshotBranch, syncScreenshotBranch };

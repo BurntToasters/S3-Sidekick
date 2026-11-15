@@ -9,8 +9,10 @@ Captured: 2026-11-12
 | `inspector-dark.png` | 1440x800 | text preview docked, dark theme  |
 | `settings-dark.png`  | 1280x800 | Settings / Transfers, dark theme |
 
-The AppStream metadata points at `next-0.12.0` because that is the first branch
-that contains these files. Point it at `main` only after the 0.12.0 merge.
+The AppStream metadata points at `main` for stable versions and at the
+`next-X.Y.0` branch for beta versions, because that branch is the first to
+contain newly captured files. `npm run sync-version` rewrites the branch
+segment and `scripts/screenshots.test.js` enforces it.
 
 ## Regenerate
 
