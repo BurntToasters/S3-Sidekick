@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { screenshotBranch } from "./update-metainfo.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const packageJson = JSON.parse(
@@ -16,11 +17,6 @@ const screenshotsReadme = fs.readFileSync(
   path.join(root, "docs", "screenshots", "README.md"),
   "utf8",
 );
-
-/** Beta screenshots live on the next-X.Y.0 branch until the merge to main. */
-function screenshotBranch(version) {
-  return version.includes("-") ? `next-${version.split("-")[0]}` : "main";
-}
 
 function pngSize(file) {
   const bytes = fs.readFileSync(file);
