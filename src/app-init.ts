@@ -1,6 +1,5 @@
 import { invoke } from "./ipc.ts";
 import { getVersion } from "@tauri-apps/api/app";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { state, dom } from "./state.ts";
 import {
   loadSettings,
@@ -8,7 +7,11 @@ import {
   markSupportPromptDismissed,
   isSupportPromptDismissed,
 } from "./settings.ts";
-import { loadConnection, setConnectionAccessLocked } from "./connection.ts";
+import {
+  loadConnection,
+  setConnectionAccessLocked,
+  getConnectionLoadError,
+} from "./connection.ts";
 import {
   getBookmarkLoadError,
   loadBookmarks,
@@ -34,6 +37,10 @@ import {
   setConnectionInputs,
   refreshBookmarkBar,
   setConnectionUI,
+  setSavedConnectionsLocked,
+  setUnlockSavedConnectionsHandler,
+  cancelPendingConnect,
+  cancelPendingTestConnection,
 } from "./app-connection.ts";
 import { clearSessionAfterAutoLock, wireEvents } from "./app-events.ts";
 import {
@@ -42,6 +49,7 @@ import {
 } from "./transfers.ts";
 import { initializeIcons } from "./icons.ts";
 import { wireTitlebar } from "./titlebar.ts";
+import { showToast } from "./toast.ts";
 import {
   enableWindowSizePersistence,
   restoreWindowSize,
@@ -161,6 +169,46 @@ function scheduleAutoCheckUpdates(): void {
   }
 }
 
+/** True while secure storage was not unlocked at startup and no unlock has happened since. */
+let startupLocked = false;
+
+const SAVED_CONNECTIONS_LOCKED_MESSAGE =
+  "Secure storage is locked. Saved connections are unavailable until you unlock them.";
+
+function lockSavedConnectionsAtStartup(): void {
+  startupLocked = true;
+  cancelPendingConnect();
+  cancelPendingTestConnection();
+  setConnectionAccessLocked(true);
+  setSavedConnectionsLocked(true);
+  refreshBookmarkBar();
+  setStatus(SAVED_CONNECTIONS_LOCKED_MESSAGE);
+  logActivity(SAVED_CONNECTIONS_LOCKED_MESSAGE, "warning");
+}
+
+/**
+ * Unlock secure storage and load saved connections. Shared by the Unlock
+ * button in the saved-connections list and the auto-lock watcher.
+ */
+async function unlockSavedConnections(): Promise<boolean> {
+  if (!(await ensureSecurityReady())) {
+    setStatus(
+      "Secure storage is still locked. Saved connections stay unavailable.",
+      5000,
+    );
+    return false;
+  }
+  const wasStartupLocked = startupLocked;
+  startupLocked = false;
+  setConnectionAccessLocked(false);
+  setSavedConnectionsLocked(false);
+  if (wasStartupLocked) {
+    await recoverTransfersAfterSecurityReady();
+  }
+  await Promise.all([loadBookmarksIntoBar(), loadSavedConnectionIntoInputs()]);
+  return true;
+}
+
 function startAutoLock(): void {
   startAutoLockWatcher(async () => {
     const retired = await clearSessionAfterAutoLock();
@@ -172,13 +220,7 @@ function startAutoLock(): void {
     }
     setStatus("Encrypted storage locked after inactivity.");
     logActivity("Encrypted storage locked after inactivity.", "info");
-    if (await ensureSecurityReady()) {
-      setConnectionAccessLocked(false);
-      await Promise.all([
-        loadBookmarksIntoBar(),
-        loadSavedConnectionIntoInputs(),
-      ]);
-    }
+    await unlockSavedConnections();
     return true;
   });
 }
@@ -190,9 +232,10 @@ async function loadBookmarksIntoBar(): Promise<void> {
     refreshBookmarkBar();
     const loadError = getBookmarkLoadError();
     if (loadError) {
-      const message = `Saved bookmarks could not be loaded (${loadError}) Bookmark changes are disabled so the stored copy is not overwritten.`;
+      const message = `Saved bookmarks could not be loaded (${loadError}) Bookmark changes and export are disabled so the stored copy is not overwritten.`;
       logActivity(message, "warning");
       setStatus(message, 10000);
+      showToast(message, { type: "warning", duration: 10000 });
     }
   } catch (err) {
     console.warn("Failed to load bookmarks:", err);
@@ -211,6 +254,13 @@ async function loadSavedConnectionIntoInputs(): Promise<void> {
         saved.secret_key,
         saved.session_token ?? "",
       );
+      return;
+    }
+    const loadError = getConnectionLoadError();
+    if (loadError) {
+      const message = `Saved connection could not be loaded (${loadError}) Enter credentials to connect.`;
+      logActivity(message, "warning");
+      setStatus(message, 10000);
     }
   } catch (err) {
     setStatus(`Failed to load saved connection: ${String(err)}`);
@@ -220,6 +270,7 @@ async function loadSavedConnectionIntoInputs(): Promise<void> {
 
 export async function init(): Promise<void> {
   initializeIcons();
+  setUnlockSavedConnectionsHandler(unlockSavedConnections);
   setConnectionUI(false);
 
   try {
@@ -263,8 +314,8 @@ export async function init(): Promise<void> {
 
   if (!settingsValid) {
     await showAlert(
-      "Settings Corrupted",
-      "The settings file could not be read (it may be from an incompatible version). Settings will be reset to defaults. Your bookmarks and saved connections are unaffected.",
+      "Settings corrupted",
+      "The settings file could not be read (it may be from an incompatible version). Settings will be reset to defaults. Your saved connections and last-used connection are unaffected.",
     );
     try {
       await invoke("save_settings", { json: "{}" });
@@ -272,7 +323,7 @@ export async function init(): Promise<void> {
       /* best effort */
     }
     try {
-      await relaunch();
+      await invoke("relaunch_app");
     } catch {
       window.location.assign(window.location.href);
     }
@@ -299,13 +350,7 @@ export async function init(): Promise<void> {
 
     const wizardSecurityReady = await ensureSecurityReady();
     if (!wizardSecurityReady) {
-      setStatus(
-        "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
-      );
-      logActivity(
-        "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
-        "warning",
-      );
+      lockSavedConnectionsAtStartup();
     } else {
       await recoverTransfersAfterSecurityReady();
     }
@@ -315,9 +360,8 @@ export async function init(): Promise<void> {
 
     if (wizardSecurityReady) {
       await loadBookmarksIntoBar();
+      await loadSavedConnectionIntoInputs();
     }
-
-    await loadSavedConnectionIntoInputs();
 
     await initUpdater();
     scheduleAutoCheckUpdates();
@@ -327,13 +371,7 @@ export async function init(): Promise<void> {
 
   const securityReady = await ensureSecurityReady();
   if (!securityReady) {
-    setStatus(
-      "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
-    );
-    logActivity(
-      "Secure storage is locked. Saved bookmarks and credentials are unavailable.",
-      "warning",
-    );
+    lockSavedConnectionsAtStartup();
   } else {
     await recoverTransfersAfterSecurityReady();
   }

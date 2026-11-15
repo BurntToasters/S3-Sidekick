@@ -1,12 +1,13 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
+use argon2::{Algorithm, Argon2, Params as Argon2Params, Version as Argon2Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -34,15 +35,66 @@ const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
 /// `security.json` would otherwise hang unlock indefinitely with no way to
 /// recover short of editing the file by hand.
 const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
+/// Argon2id work factors for vaults created or rekeyed by this release.
+const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
+const ARGON2_ITERATIONS: u32 = 3;
+const ARGON2_PARALLELISM: u32 = 1;
+/// Bounds for Argon2 parameters read from disk.
+///
+/// Argon2 also runs before the vault can be opened, so a config that asks for
+/// an absurd amount of memory or work must be rejected rather than allowed to
+/// exhaust the machine during unlock.
+const MIN_ARGON2_MEMORY_KIB: u32 = 8 * 1024;
+const MAX_ARGON2_MEMORY_KIB: u32 = 256 * 1024;
+const MIN_ARGON2_ITERATIONS: u32 = 1;
+const MAX_ARGON2_ITERATIONS: u32 = 32;
+const MIN_ARGON2_PARALLELISM: u32 = 1;
+const MAX_ARGON2_PARALLELISM: u32 = 16;
+/// Current policy schema. Schema 2 requires a keyed policy tag.
+const POLICY_SCHEMA_LEGACY: u8 = 1;
+/// Schema 2 signed only the mutable policy fields below the salt/verifier
+/// pair. It remains readable so a vault written by an earlier 0.12 build can
+/// upgrade in place instead of failing closed.
+const POLICY_SCHEMA_PREVIOUS: u8 = 2;
+/// Schema 3 additionally binds the fields that select encrypted mode, the
+/// initialization flag, and the salt/verifier pair.
+const POLICY_SCHEMA_CURRENT: u8 = 3;
 pub(crate) const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 /// Bytes of the key verifier embedded in each payload as a key-check value.
 const KEY_CHECK_LEN: usize = 8;
+/// Auto-lock target for configurations created by this release.
+const DEFAULT_LOCK_TIMEOUT_MINUTES: u16 = 15;
+/// Longest auto-lock a caller may request (24 hours).
+const MAX_LOCK_TIMEOUT_MINUTES: u16 = 1440;
+/// Minimum spacing between activity touches accepted from the webview.
+const MIN_ACTIVITY_TOUCH_INTERVAL: Duration = Duration::from_secs(5);
+/// Failed unlocks after which the in-memory throttle always waits the maximum
+/// backoff window. The window is bounded and expires, so a retry never needs a
+/// restart.
+const MAX_UNLOCK_FAILURES: u32 = 10;
+#[cfg(not(test))]
+const UNLOCK_BACKOFF_BASE: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const UNLOCK_BACKOFF_BASE: Duration = Duration::from_millis(1);
+const MAX_UNLOCK_BACKOFF: Duration = Duration::from_secs(60);
+/// Encrypted payloads written by this release carry a keyed metadata tag.
+const PAYLOAD_VERSION_LEGACY: u8 = 1;
+const PAYLOAD_VERSION_CURRENT: u8 = 2;
+/// Current durable factory-reset journal. Version 2 binds the replay to the
+/// vault key that authorised the reset.
+const FACTORY_RESET_JOURNAL_VERSION: u8 = 2;
 
 struct KeyState {
     key: Option<[u8; KEY_LEN]>,
-    last_activity: Option<Instant>,
+    last_activity: Option<SystemTime>,
+    /// Wall-clock instant at which the key must be retired.
+    ///
+    /// Stored separately from `last_activity` so a deadline survives a clock
+    /// that moves backwards: that case is detected against `last_activity` and
+    /// fails closed instead of extending the session.
+    expires_at: Option<SystemTime>,
     lock_timeout_secs: u64,
 }
 
@@ -58,6 +110,125 @@ static KEY_STATE: OnceLock<Mutex<KeyState>> = OnceLock::new();
 static MIGRATION_RECOVERY_FAILURE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static SECURITY_ENCRYPTION_ENABLED: AtomicBool = AtomicBool::new(true);
 static S3_SESSION_RETIREMENT_REQUIRED: AtomicBool = AtomicBool::new(false);
+static UNLOCK_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+/// Set when a legacy vault's missing/zero auto-lock value is replaced by the
+/// 15-minute default. The UI shows a one-time notice for this process.
+static LEGACY_LOCK_TIMEOUT_DEFAULTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Default)]
+struct UnlockThrottle {
+    /// Identifies the vault configuration these failures belong to.
+    marker: String,
+    failures: u32,
+    blocked_until: Option<SystemTime>,
+}
+
+static UNLOCK_THROTTLE: OnceLock<Mutex<UnlockThrottle>> = OnceLock::new();
+
+fn unlock_throttle() -> &'static Mutex<UnlockThrottle> {
+    UNLOCK_THROTTLE.get_or_init(|| Mutex::new(UnlockThrottle::default()))
+}
+
+fn unlock_vault_marker(config: &SecurityConfig) -> String {
+    format!(
+        "{}:{}:{:?}:{}:{}:{}:{}",
+        config.salt,
+        config.verifier,
+        config.kdf,
+        config.pbkdf2_iterations,
+        config.argon2_memory_kib,
+        config.argon2_iterations,
+        config.argon2_parallelism
+    )
+}
+
+/// Refuse an unlock that is still inside its backoff window.
+///
+/// In-memory only, so restarting the app clears it. The window is bounded and
+/// never becomes a permanent lockout: once it expires the same password path is
+/// retried without a restart.
+fn check_unlock_throttle(config: &SecurityConfig) -> Result<(), String> {
+    let marker = unlock_vault_marker(config);
+    let mut throttle = unlock_throttle()
+        .lock()
+        .map_err(|_| "Unlock attempt state is unavailable".to_string())?;
+    if throttle.marker != marker {
+        *throttle = UnlockThrottle {
+            marker,
+            ..UnlockThrottle::default()
+        };
+    }
+    if let Some(until) = throttle.blocked_until {
+        if let Ok(remaining) = until.duration_since(SystemTime::now()) {
+            let seconds = remaining.as_secs();
+            let wait = if seconds == 0 {
+                "less than a second".to_string()
+            } else {
+                format!("{} seconds", seconds)
+            };
+            return Err(format!(
+                "Too many failed unlock attempts. Try again in {}.",
+                wait
+            ));
+        }
+        throttle.blocked_until = None;
+    }
+    Ok(())
+}
+
+/// Count a failed password check and return the backoff to apply.
+///
+/// The caller must sleep only after dropping the protected-storage lock so a
+/// throttle delay cannot stall unrelated vault operations. Failures past the
+/// threshold keep using the maximum bounded window instead of blocking the
+/// password path until restart.
+fn record_unlock_failure(config: &SecurityConfig) -> Duration {
+    let marker = unlock_vault_marker(config);
+    let mut throttle = match unlock_throttle().lock() {
+        Ok(throttle) => throttle,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if throttle.marker != marker {
+        *throttle = UnlockThrottle {
+            marker,
+            ..UnlockThrottle::default()
+        };
+    }
+    throttle.failures = throttle.failures.saturating_add(1);
+    let exponent = if throttle.failures >= MAX_UNLOCK_FAILURES {
+        6
+    } else {
+        (throttle.failures.saturating_sub(1)).min(6)
+    };
+    let delay = UNLOCK_BACKOFF_BASE
+        .saturating_mul(1u32 << exponent)
+        .min(MAX_UNLOCK_BACKOFF);
+    throttle.blocked_until = SystemTime::now().checked_add(delay);
+    delay
+}
+
+fn clear_unlock_failures() {
+    if let Ok(mut throttle) = unlock_throttle().lock() {
+        *throttle = UnlockThrottle::default();
+    }
+}
+
+struct UnlockAttemptGuard;
+
+impl UnlockAttemptGuard {
+    fn acquire() -> Result<Self, String> {
+        UNLOCK_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "An unlock attempt is already in progress".to_string())?;
+        Ok(Self)
+    }
+}
+
+impl Drop for UnlockAttemptGuard {
+    fn drop(&mut self) {
+        UNLOCK_IN_PROGRESS.store(false, Ordering::Release);
+    }
+}
 
 fn migration_recovery_failure() -> &'static Mutex<Option<String>> {
     MIGRATION_RECOVERY_FAILURE.get_or_init(|| Mutex::new(None))
@@ -82,16 +253,48 @@ pub(crate) fn ensure_migration_recovered() -> Result<(), String> {
     Ok(())
 }
 
+fn migration_recovery_is_healthy() -> bool {
+    migration_recovery_failure()
+        .lock()
+        .map(|failure| failure.is_none())
+        .unwrap_or(false)
+}
+
+/// Key-derivation function recorded in the vault configuration.
+///
+/// Legacy configurations have no `kdf` field and deserialize to PBKDF2. They
+/// are rekeyed to Argon2id on the next successful password unlock.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum KdfAlgorithm {
+    #[default]
+    Pbkdf2,
+    Argon2id,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub(crate) struct SecurityConfig {
     pub initialized: bool,
     pub encryption_enabled: bool,
     pub salt: String,
     pub verifier: String,
-    #[serde(default)]
+    #[serde(default = "default_lock_timeout_minutes")]
     pub lock_timeout_minutes: u16,
     #[serde(default = "default_pbkdf2_iterations")]
     pub pbkdf2_iterations: u32,
+    #[serde(default)]
+    pub kdf: KdfAlgorithm,
+    #[serde(default = "default_argon2_memory_kib")]
+    pub argon2_memory_kib: u32,
+    #[serde(default = "default_argon2_iterations")]
+    pub argon2_iterations: u32,
+    #[serde(default = "default_argon2_parallelism")]
+    pub argon2_parallelism: u32,
+    /// Policy schema version. Missing in configurations written before the
+    /// keyed policy tag became mandatory, which is the population that still
+    /// tolerates an absent tag during upgrade.
+    #[serde(default = "default_policy_schema")]
+    pub policy_schema: u8,
     #[serde(default)]
     pub biometric_enrolled: bool,
     /// True once every file an earlier release may have left in plaintext has
@@ -110,6 +313,27 @@ pub(crate) struct SecurityConfig {
     /// migration.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub legacy_plaintext_adoption_proof: String,
+    /// Keyed tag over the security policy fields.
+    ///
+    /// `lock_timeout_minutes`, `biometric_enrolled`, `legacy_plaintext_adopted`
+    /// and `legacy_plaintext_adoption_proof` do not affect the key derivation,
+    /// so nothing else authenticates them: a local edit could disable auto-lock
+    /// or re-arm plaintext adoption. Schema 3 also binds `encryption_enabled`,
+    /// `initialized`, `salt`, and `verifier` so a keyed verification refuses a
+    /// payload whose encrypted-mode claim disagrees with the signed state. This
+    /// tag is derived from the vault key and verified after the password is
+    /// proven. Schema 1 configurations may omit the tag and are upgraded to the
+    /// current schema on their next successful unlock.
+    ///
+    /// Residual: an attacker with write access to `security.json` can still
+    /// delete the tag *and* downgrade `policy_schema` to 1, which is
+    /// indistinguishable from a genuinely old configuration. Solving that
+    /// requires an integrity anchor outside the vault directory (OS keychain or
+    /// equivalent), which is not available on every platform. Schema 2 at
+    /// least makes accidental or naive tag removal fail closed; it does not
+    /// claim to stop a deliberate full rollback.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub policy_mac: String,
 }
 
 /// Whether a protected file may legitimately still be plaintext.
@@ -127,6 +351,26 @@ fn default_pbkdf2_iterations() -> u32 {
     PBKDF2_ITERATIONS
 }
 
+fn default_lock_timeout_minutes() -> u16 {
+    DEFAULT_LOCK_TIMEOUT_MINUTES
+}
+
+fn default_argon2_memory_kib() -> u32 {
+    ARGON2_MEMORY_KIB
+}
+
+fn default_argon2_iterations() -> u32 {
+    ARGON2_ITERATIONS
+}
+
+fn default_argon2_parallelism() -> u32 {
+    ARGON2_PARALLELISM
+}
+
+fn default_policy_schema() -> u8 {
+    POLICY_SCHEMA_LEGACY
+}
+
 #[derive(serde::Serialize, Debug)]
 pub(crate) struct SecurityStatus {
     initialized: bool,
@@ -135,6 +379,14 @@ pub(crate) struct SecurityStatus {
     lock_timeout_minutes: u16,
     biometric_available: bool,
     biometric_enrolled: bool,
+    /// A legacy vault was migrated to the current 15-minute auto-lock default.
+    /// The UI shows this once so the change is not silent.
+    lock_timeout_defaulted: bool,
+    /// Set when a security operation committed but secondary cleanup (for
+    /// example biometric credential removal) still needs to be retried. The
+    /// new vault is usable; this is a warning, not a failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cleanup_warning: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -149,6 +401,14 @@ struct EncryptedPayload {
     /// field existed still decrypt.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     kv: String,
+    /// Keyed authentication tag over the payload metadata.
+    ///
+    /// Payloads written before this field existed still decrypt; for those the
+    /// AES-GCM tag remains the only authenticator. New payloads bind `v`,
+    /// `nonce`, `ciphertext`, and `kv` together so migration recovery cannot be
+    /// steered by editing the unauthenticated key-check value.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    mac: String,
 }
 
 /// True when `raw` is shaped like an encrypted payload.
@@ -169,6 +429,134 @@ pub(crate) fn looks_encrypted(raw: &str) -> bool {
 fn key_check_value(key: &[u8; KEY_LEN]) -> String {
     let verifier = key_verifier(key);
     B64.encode(&verifier[..KEY_CHECK_LEN])
+}
+
+/// HMAC-SHA256 (RFC 2104) without adding another dependency.
+///
+/// Every production caller uses a 32-byte domain-separated key, but the helper
+/// is implemented for arbitrary key lengths so test vectors from RFC 4231,
+/// including the block-size boundary and keys longer than one block, are
+/// meaningful. Long keys are hashed first; they are never folded with XOR.
+fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut normalized = Zeroizing::new([0u8; BLOCK]);
+    if key.len() > BLOCK {
+        let digest = Sha256::digest(key);
+        normalized[..digest.len()].copy_from_slice(&digest);
+    } else {
+        normalized[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_pad = [0x36u8; BLOCK];
+    let mut outer_pad = [0x5cu8; BLOCK];
+    for (pad, byte) in inner_pad.iter_mut().zip(normalized.iter()) {
+        *pad ^= byte;
+    }
+    for (pad, byte) in outer_pad.iter_mut().zip(normalized.iter()) {
+        *pad ^= byte;
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    for part in parts {
+        inner.update(part);
+    }
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_digest);
+    let mut tag = [0u8; 32];
+    tag.copy_from_slice(&outer.finalize()[..32]);
+    inner_pad.zeroize();
+    outer_pad.zeroize();
+    tag
+}
+
+fn payload_mac_key(key: &[u8; KEY_LEN]) -> Zeroizing<[u8; KEY_LEN]> {
+    let mut hasher = Sha256::new();
+    hasher.update(key);
+    hasher.update(b"s3-sidekick-payload-metadata-v1");
+    let digest = hasher.finalize();
+    let mut out = Zeroizing::new([0u8; KEY_LEN]);
+    out.copy_from_slice(&digest[..KEY_LEN]);
+    out
+}
+
+fn payload_mac(key: &[u8; KEY_LEN], v: u8, nonce: &str, ciphertext: &str, kv: &str) -> String {
+    let mac_key = payload_mac_key(key);
+    let mut tag = hmac_sha256(
+        mac_key.as_slice(),
+        &[
+            b"s3-sidekick-payload-metadata",
+            &[v],
+            nonce.as_bytes(),
+            ciphertext.as_bytes(),
+            kv.as_bytes(),
+        ],
+    );
+    let encoded = B64.encode(tag);
+    tag.zeroize();
+    encoded
+}
+
+fn verify_payload_mac(payload: &EncryptedPayload, key: &[u8; KEY_LEN]) -> Result<(), String> {
+    if payload.mac.is_empty() {
+        if payload.v >= PAYLOAD_VERSION_CURRENT {
+            // New payloads must carry the metadata tag. Accepting a stripped
+            // tag would let a local writer change the unauthenticated `kv`
+            // field without detection.
+            return Err("Encrypted payload is missing its metadata authentication tag".to_string());
+        }
+        // Written by an earlier release: AES-GCM still authenticates the
+        // ciphertext and nonce, and `kv` never authorises a replace by itself.
+        return Ok(());
+    }
+    let expected = payload_mac(
+        key,
+        payload.v,
+        &payload.nonce,
+        &payload.ciphertext,
+        &payload.kv,
+    );
+    let stored = payload.mac.as_bytes();
+    let valid = constant_time_eq(stored, expected.as_bytes());
+    if !valid {
+        return Err("Encrypted payload metadata failed authentication".to_string());
+    }
+    Ok(())
+}
+
+fn validate_payload_version(payload: &EncryptedPayload) -> Result<(), String> {
+    if (PAYLOAD_VERSION_LEGACY..=PAYLOAD_VERSION_CURRENT).contains(&payload.v) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unsupported encrypted payload version {}",
+            payload.v
+        ))
+    }
+}
+
+/// Confirm the unlocked key is the one the configuration describes.
+///
+/// A stale or swapped in-memory key must never be used to encrypt over data it
+/// cannot read back.
+fn validate_config_key(config: &SecurityConfig, key: &[u8; KEY_LEN]) -> Result<(), String> {
+    let stored = B64
+        .decode(&config.verifier)
+        .map_err(|_| "Security configuration has an invalid verifier".to_string())?;
+    if stored.len() != KEY_LEN {
+        return Err("Security configuration has an invalid verifier length".to_string());
+    }
+    let mut verifier = key_verifier(key);
+    let matches = constant_time_eq(&verifier, &stored);
+    verifier.zeroize();
+    if !matches {
+        return Err(
+            "The unlocked key does not match the security configuration; refusing to touch \
+             protected data."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Read the key-check value out of a payload without decrypting it.
@@ -226,6 +614,7 @@ fn key_state_mutex() -> &'static Mutex<KeyState> {
         Mutex::new(KeyState {
             key: None,
             last_activity: None,
+            expires_at: None,
             lock_timeout_secs: 0,
         })
     })
@@ -299,20 +688,58 @@ fn is_unlocked() -> bool {
     if guard.key.is_none() {
         return false;
     }
-    if guard.lock_timeout_secs > 0 {
-        if let Some(last) = guard.last_activity {
-            if last.elapsed() >= Duration::from_secs(guard.lock_timeout_secs) {
-                if let Some(ref mut k) = guard.key {
-                    k.zeroize();
-                }
-                guard.key = None;
-                guard.last_activity = None;
-                S3_SESSION_RETIREMENT_REQUIRED.store(true, Ordering::Release);
-                return false;
-            }
-        }
+    if expire_key_if_needed(&mut guard, SystemTime::now()) {
+        return false;
     }
     true
+}
+
+fn expiry_deadline(now: SystemTime, lock_timeout_secs: u64) -> Option<SystemTime> {
+    if lock_timeout_secs == 0 {
+        None
+    } else {
+        now.checked_add(Duration::from_secs(lock_timeout_secs))
+    }
+}
+
+/// Zeroize and drop the key once the wall-clock deadline has passed.
+///
+/// `SystemTime` keeps advancing while the machine sleeps, unlike the monotonic
+/// clock on some platforms, so an idle vault locks after a laptop lid closes
+/// instead of pausing the timer. No separate suspend/resume hook is registered
+/// (the Tauri run loop belongs to `main.rs`), so the wall-clock deadline is the
+/// portable resume path: the next vault access or renderer poll observes the
+/// expired deadline and retires the key. A wall clock that jumps backwards also
+/// fails closed because the elapsed duration cannot be trusted.
+fn expire_key_if_needed(guard: &mut KeyState, now: SystemTime) -> bool {
+    if guard.key.is_none() || guard.lock_timeout_secs == 0 {
+        return false;
+    }
+    let Some(last) = guard.last_activity else {
+        // A key with a timeout but no activity stamp has no trustworthy
+        // deadline; fail closed instead of keeping it open indefinitely.
+        retire_key(guard);
+        return true;
+    };
+    let expired = match guard.expires_at {
+        Some(deadline) => now >= deadline || now < last,
+        None => true,
+    };
+    if !expired {
+        return false;
+    }
+    retire_key(guard);
+    true
+}
+
+fn retire_key(guard: &mut KeyState) {
+    if let Some(ref mut k) = guard.key {
+        k.zeroize();
+    }
+    guard.key = None;
+    guard.last_activity = None;
+    guard.expires_at = None;
+    S3_SESSION_RETIREMENT_REQUIRED.store(true, Ordering::Release);
 }
 
 pub(crate) fn set_unlocked_key(
@@ -325,14 +752,46 @@ pub(crate) fn set_unlocked_key(
     if let Some(ref mut old_key) = guard.key {
         old_key.zeroize();
     }
-    guard.last_activity = if key.is_some() {
-        Some(Instant::now())
+    let now = SystemTime::now();
+    guard.last_activity = if key.is_some() { Some(now) } else { None };
+    guard.expires_at = if key.is_some() {
+        expiry_deadline(now, lock_timeout_secs)
     } else {
         None
     };
     guard.key = key;
     guard.lock_timeout_secs = lock_timeout_secs;
     Ok(())
+}
+
+/// Clear the unlocked key and return whether one was present.
+///
+/// Used by lock paths that must retire the key even when the configuration
+/// cannot be read, so a damaged security file can never leave the vault open.
+fn clear_unlocked_key() -> bool {
+    match key_state().lock() {
+        Ok(mut guard) => {
+            let had_key = guard.key.is_some();
+            if let Some(ref mut key) = guard.key {
+                key.zeroize();
+            }
+            guard.key = None;
+            guard.last_activity = None;
+            guard.expires_at = None;
+            had_key
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            let had_key = guard.key.is_some();
+            if let Some(ref mut key) = guard.key {
+                key.zeroize();
+            }
+            guard.key = None;
+            guard.last_activity = None;
+            guard.expires_at = None;
+            had_key
+        }
+    }
 }
 
 /// Hand out the unlocked master key wrapped so callers cannot leak it.
@@ -344,22 +803,13 @@ pub(crate) fn require_unlocked_key() -> Result<Zeroizing<[u8; KEY_LEN]>, String>
     let mut guard = key_state()
         .lock()
         .map_err(|_| "Internal key state error".to_string())?;
-    if guard.lock_timeout_secs > 0 {
-        if let Some(last) = guard.last_activity {
-            if last.elapsed() >= Duration::from_secs(guard.lock_timeout_secs) {
-                if let Some(ref mut k) = guard.key {
-                    k.zeroize();
-                }
-                guard.key = None;
-                guard.last_activity = None;
-                S3_SESSION_RETIREMENT_REQUIRED.store(true, Ordering::Release);
-            }
-        }
-    }
+    expire_key_if_needed(&mut guard, SystemTime::now());
     let key = guard
         .key
         .ok_or_else(|| "Encrypted storage is locked. Unlock with your password.".to_string())?;
-    guard.last_activity = Some(Instant::now());
+    let now = SystemTime::now();
+    guard.last_activity = Some(now);
+    guard.expires_at = expiry_deadline(now, guard.lock_timeout_secs);
     Ok(Zeroizing::new(key))
 }
 
@@ -373,14 +823,20 @@ fn default_security_config() -> SecurityConfig {
         encryption_enabled: true,
         salt: String::new(),
         verifier: String::new(),
-        lock_timeout_minutes: 0,
+        lock_timeout_minutes: DEFAULT_LOCK_TIMEOUT_MINUTES,
         pbkdf2_iterations: PBKDF2_ITERATIONS,
+        kdf: KdfAlgorithm::Argon2id,
+        argon2_memory_kib: ARGON2_MEMORY_KIB,
+        argon2_iterations: ARGON2_ITERATIONS,
+        argon2_parallelism: ARGON2_PARALLELISM,
+        policy_schema: POLICY_SCHEMA_CURRENT,
         biometric_enrolled: false,
         // A configuration created now has no history, so there is nothing to
         // adopt and plaintext never has a legitimate explanation. Unencrypted
         // configurations have no key with which to create an adoption proof.
         legacy_plaintext_adopted: true,
         legacy_plaintext_adoption_proof: String::new(),
+        policy_mac: String::new(),
     }
 }
 
@@ -394,35 +850,134 @@ fn uninitialized_plaintext_config() -> SecurityConfig {
         encryption_enabled: false,
         salt: String::new(),
         verifier: String::new(),
-        lock_timeout_minutes: 0,
+        lock_timeout_minutes: DEFAULT_LOCK_TIMEOUT_MINUTES,
         pbkdf2_iterations: PBKDF2_ITERATIONS,
+        kdf: KdfAlgorithm::Argon2id,
+        argon2_memory_kib: ARGON2_MEMORY_KIB,
+        argon2_iterations: ARGON2_ITERATIONS,
+        argon2_parallelism: ARGON2_PARALLELISM,
+        policy_schema: POLICY_SCHEMA_CURRENT,
         biometric_enrolled: false,
         legacy_plaintext_adopted: true,
         legacy_plaintext_adoption_proof: String::new(),
+        policy_mac: String::new(),
     }
 }
 
-/// True when managed files from before the vault existed are still on disk.
+/// What a missing `security.json` says about the files already on disk.
+enum FreshInstallState {
+    /// No managed data, so the encrypted fresh default is safe.
+    Empty,
+    /// Plaintext left by a release before the vault existed.
+    LegacyPlaintext,
+}
+
+/// Classify a fresh install without ever guessing that ciphertext is plaintext.
 ///
-/// Those installs have no `security.json` but hold plaintext worth keeping.
-/// Returning the encrypted fresh default for them would lock the user out of
-/// their own data; they get the plaintext config instead so old reads keep
-/// working and the setup wizard records an explicit choice.
-fn fresh_install_has_legacy_plaintext<R: tauri::Runtime, M: tauri::Manager<R>>(app: &M) -> bool {
+/// A missing `security.json` with non-empty managed files used to be treated as
+/// "legacy plaintext". If the config was actually lost while the files are
+/// encrypted, that handed the renderer raw ciphertext and the next save
+/// overwrote the only copy of the data. Ciphertext (including payloads from
+/// older releases) now fails closed instead.
+fn classify_fresh_install<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<FreshInstallState, String> {
     let paths = [
         bookmarks_path(app),
         connection_path(app),
         bookmarks_backup_path(app),
         transfer_manifest_path(app),
     ];
-    paths.into_iter().any(|path| {
-        path.map(|path| {
-            std::fs::metadata(&path)
-                .map(|metadata| metadata.len() > 0)
-                .unwrap_or(false)
-        })
-        .unwrap_or(false)
+    let mut saw_plaintext = false;
+    for path in paths {
+        let path = match path {
+            Ok(path) => path,
+            Err(_) => {
+                return Err(
+                    "Cannot inspect managed files because their storage path is unavailable"
+                        .to_string(),
+                )
+            }
+        };
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(format!(
+                    "Cannot inspect '{}' while classifying storage: {}",
+                    path.display(),
+                    err
+                ))
+            }
+        };
+        if metadata.len() == 0 {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).map_err(|err| {
+            format!(
+                "Cannot read '{}' while classifying storage: {}",
+                path.display(),
+                err
+            )
+        })?;
+        if looks_encrypted(&raw) {
+            return Err(format!(
+                "'{}' is encrypted but 'security.json' is missing. The key material may have \
+                 been lost or the configuration replaced. Restore the matching 'security.json' \
+                 (or 'security.json.corrupt') before opening this vault, or use Factory Reset to \
+                 delete the unreadable data deliberately.",
+                path.display()
+            ));
+        }
+        if !raw.trim().is_empty() {
+            saw_plaintext = true;
+        }
+    }
+    Ok(if saw_plaintext {
+        FreshInstallState::LegacyPlaintext
+    } else {
+        FreshInstallState::Empty
     })
+}
+
+/// Refuse to commit a plaintext configuration while managed files still hold
+/// ciphertext. Without this, an interrupted disable or a lost key followed by
+/// "Skip encryption" would overwrite the only readable configuration and make
+/// the remaining files permanently unopenable.
+fn ensure_no_encrypted_managed_files<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<(), String> {
+    for path in [
+        bookmarks_path(app),
+        connection_path(app),
+        bookmarks_backup_path(app),
+        transfer_manifest_path(app),
+    ] {
+        let path = match path {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(format!(
+                    "Cannot inspect '{}' before disabling encryption: {}",
+                    path.display(),
+                    err
+                ))
+            }
+        };
+        if looks_encrypted(&raw) {
+            return Err(format!(
+                "Refusing to disable encryption because '{}' still holds encrypted data that \
+                 this configuration cannot read. Restore the matching 'security.json' or use \
+                 Factory Reset to delete it deliberately.",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn load_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
@@ -430,15 +985,58 @@ pub(crate) fn load_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
 ) -> Result<SecurityConfig, String> {
     let path = security_path(app)?;
     if !path.exists() {
-        if fresh_install_has_legacy_plaintext(app) {
-            return Ok(remember_security_config(uninitialized_plaintext_config()));
-        }
-        return Ok(remember_security_config(default_security_config()));
+        return match classify_fresh_install(app)? {
+            FreshInstallState::LegacyPlaintext => {
+                Ok(remember_security_config(uninitialized_plaintext_config()))
+            }
+            FreshInstallState::Empty => Ok(remember_security_config(default_security_config())),
+        };
     }
 
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     match serde_json::from_str::<SecurityConfig>(&raw) {
-        Ok(config) => Ok(remember_security_config(config)),
+        Ok(config) => {
+            // A configuration written before `lock_timeout_minutes` existed
+            // defaults to the current 15-minute policy instead of silently
+            // meaning "never". Record that once so the UI can say so.
+            if config.initialized
+                && config.encryption_enabled
+                && config.policy_schema < POLICY_SCHEMA_CURRENT
+                && !json_object_has_field(&raw, "lock_timeout_minutes")
+            {
+                LEGACY_LOCK_TIMEOUT_DEFAULTED.store(true, Ordering::Release);
+            }
+            // A plaintext configuration must never retain material that only an
+            // encrypted vault can produce. Leaving the tag, salt, or verifier
+            // behind while flipping `encryption_enabled` is the obvious way to
+            // try to make ciphertext look like a legitimate plaintext install.
+            // (A deliberate attacker can still clear all of them; that is the
+            // documented schema-1 rollback residual, indistinguishable from a
+            // genuinely plaintext install without an external anchor.)
+            if !config.encryption_enabled
+                && (!config.policy_mac.is_empty()
+                    || !config.salt.is_empty()
+                    || !config.verifier.is_empty())
+            {
+                return Err(
+                    "Security configuration claims plaintext while carrying encrypted policy \
+                     material; refusing to trust it. Restore 'security.json' from a backup or \
+                     reset security."
+                        .to_string(),
+                );
+            }
+            if !config.initialized && config.encryption_enabled && !config.policy_mac.is_empty() {
+                return Err(
+                    "Security configuration claims an uninitialized vault while carrying an \
+                     encrypted policy tag; refusing to trust it. Restore 'security.json' from a \
+                     backup or reset security."
+                        .to_string(),
+                );
+            }
+            validate_loaded_policy(&config)?;
+            validate_argon2_parameters(&config)?;
+            Ok(remember_security_config(config))
+        }
         Err(e) => {
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -477,6 +1075,29 @@ fn remember_security_config(config: SecurityConfig) -> SecurityConfig {
     config
 }
 
+fn json_object_has_field(raw: &str, field: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.as_object().map(|object| object.contains_key(field)))
+        .unwrap_or(false)
+}
+
+/// Replace a pre-policy legacy zero auto-lock with the current default.
+///
+/// Schema 2 configurations may legitimately choose "never" (with a native
+/// confirmation), but a schema-1 configuration with zero predates the
+/// 15-minute default. Preserve the visible setting and warn instead of
+/// re-signing the old no-timeout behaviour as if the user had chosen it.
+fn normalize_legacy_lock_timeout(config: &mut SecurityConfig) {
+    if config.encryption_enabled
+        && config.policy_schema < POLICY_SCHEMA_CURRENT
+        && config.lock_timeout_minutes == 0
+    {
+        config.lock_timeout_minutes = DEFAULT_LOCK_TIMEOUT_MINUTES;
+        LEGACY_LOCK_TIMEOUT_DEFAULTED.store(true, Ordering::Release);
+    }
+}
+
 pub(crate) fn save_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
     config: &SecurityConfig,
@@ -491,18 +1112,86 @@ pub(crate) fn save_security_config<R: tauri::Runtime, M: tauri::Manager<R>>(
     Ok(())
 }
 
-/// Validate the key-derivation parameters read from disk before using them.
-fn validate_kdf_params(config: &SecurityConfig) -> Result<Vec<u8>, String> {
-    if config.pbkdf2_iterations < MIN_PBKDF2_ITERATIONS {
+/// Refuse a policy schema that this release cannot interpret, and enforce the
+/// schema-2 rule that an encrypted vault always carries a keyed policy tag.
+///
+/// Schema 1 is the only version allowed to omit the tag. It is upgraded after
+/// the password is proven, not at load time, because signing needs the key.
+fn validate_loaded_policy(config: &SecurityConfig) -> Result<(), String> {
+    if !config.initialized || !config.encryption_enabled {
+        return Ok(());
+    }
+    if !(POLICY_SCHEMA_LEGACY..=POLICY_SCHEMA_CURRENT).contains(&config.policy_schema) {
+        return Err(format!(
+            "Security configuration has unsupported policy schema {}; refusing to trust it. \
+             Restore 'security.json' from a backup or reset security.",
+            config.policy_schema
+        ));
+    }
+    if config.policy_schema >= POLICY_SCHEMA_PREVIOUS && config.policy_mac.is_empty() {
         return Err(
-            "Security configuration appears corrupted (iteration count too low). Please reset security.".to_string(),
+            "Security configuration uses policy schema 2 or newer but has no policy authentication \
+             tag; refusing to unlock. Restore 'security.json' from a backup or reset security."
+                .to_string(),
         );
     }
-    if config.pbkdf2_iterations > MAX_PBKDF2_ITERATIONS {
+    Ok(())
+}
+
+fn validate_argon2_parameters(config: &SecurityConfig) -> Result<(), String> {
+    if config.kdf != KdfAlgorithm::Argon2id {
+        return Ok(());
+    }
+    if !(MIN_ARGON2_MEMORY_KIB..=MAX_ARGON2_MEMORY_KIB).contains(&config.argon2_memory_kib) {
         return Err(format!(
-            "Security configuration appears corrupted (iteration count above the {} maximum). Please reset security.",
-            MAX_PBKDF2_ITERATIONS
+            "Security configuration appears corrupted (Argon2 memory must be between {} and {} KiB). Please reset security.",
+            MIN_ARGON2_MEMORY_KIB, MAX_ARGON2_MEMORY_KIB
         ));
+    }
+    if !(MIN_ARGON2_ITERATIONS..=MAX_ARGON2_ITERATIONS).contains(&config.argon2_iterations) {
+        return Err(format!(
+            "Security configuration appears corrupted (Argon2 iterations must be between {} and {}). Please reset security.",
+            MIN_ARGON2_ITERATIONS, MAX_ARGON2_ITERATIONS
+        ));
+    }
+    if !(MIN_ARGON2_PARALLELISM..=MAX_ARGON2_PARALLELISM).contains(&config.argon2_parallelism) {
+        return Err(format!(
+            "Security configuration appears corrupted (Argon2 parallelism must be between {} and {}). Please reset security.",
+            MIN_ARGON2_PARALLELISM, MAX_ARGON2_PARALLELISM
+        ));
+    }
+    Argon2Params::new(
+        config.argon2_memory_kib,
+        config.argon2_iterations,
+        config.argon2_parallelism,
+        Some(KEY_LEN),
+    )
+    .map(|_| ())
+    .map_err(|err| {
+        format!(
+            "Security configuration appears corrupted (invalid Argon2 parameters: {}). Please reset security.",
+            err
+        )
+    })
+}
+
+/// Validate the key-derivation parameters read from disk before using them.
+fn validate_kdf_params(config: &SecurityConfig) -> Result<Vec<u8>, String> {
+    match config.kdf {
+        KdfAlgorithm::Pbkdf2 => {
+            if config.pbkdf2_iterations < MIN_PBKDF2_ITERATIONS {
+                return Err(
+                    "Security configuration appears corrupted (iteration count too low). Please reset security.".to_string(),
+                );
+            }
+            if config.pbkdf2_iterations > MAX_PBKDF2_ITERATIONS {
+                return Err(format!(
+                    "Security configuration appears corrupted (iteration count above the {} maximum). Please reset security.",
+                    MAX_PBKDF2_ITERATIONS
+                ));
+            }
+        }
+        KdfAlgorithm::Argon2id => validate_argon2_parameters(config)?,
     }
     let salt = B64
         .decode(&config.salt)
@@ -520,6 +1209,64 @@ fn derive_key(password: &str, salt: &[u8], iterations: u32) -> Zeroizing<[u8; KE
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
     pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut *key);
     key
+}
+
+fn derive_argon2_key(
+    password: &str,
+    salt: &[u8],
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Result<Zeroizing<[u8; KEY_LEN]>, String> {
+    let params = Argon2Params::new(memory_kib, iterations, parallelism, Some(KEY_LEN))
+        .map_err(|err| format!("Invalid Argon2 parameters: {}", err))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Argon2Version::V0x13, params);
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut *key)
+        .map_err(|err| format!("Argon2 key derivation failed: {}", err))?;
+    Ok(key)
+}
+
+/// Derive with whatever KDF the configuration records.
+fn derive_config_key(
+    password: &str,
+    salt: &[u8],
+    config: &SecurityConfig,
+) -> Result<Zeroizing<[u8; KEY_LEN]>, String> {
+    match config.kdf {
+        KdfAlgorithm::Pbkdf2 => Ok(derive_key(password, salt, config.pbkdf2_iterations)),
+        KdfAlgorithm::Argon2id => derive_argon2_key(
+            password,
+            salt,
+            config.argon2_memory_kib,
+            config.argon2_iterations,
+            config.argon2_parallelism,
+        ),
+    }
+}
+
+/// Build an Argon2id configuration from a freshly derived key and salt.
+fn argon2_config(salt: &[u8], verifier: &[u8; KEY_LEN], key: &[u8; KEY_LEN]) -> SecurityConfig {
+    let mut config = SecurityConfig {
+        initialized: true,
+        encryption_enabled: true,
+        salt: B64.encode(salt),
+        verifier: B64.encode(verifier),
+        lock_timeout_minutes: DEFAULT_LOCK_TIMEOUT_MINUTES,
+        pbkdf2_iterations: PBKDF2_ITERATIONS,
+        kdf: KdfAlgorithm::Argon2id,
+        argon2_memory_kib: ARGON2_MEMORY_KIB,
+        argon2_iterations: ARGON2_ITERATIONS,
+        argon2_parallelism: ARGON2_PARALLELISM,
+        policy_schema: POLICY_SCHEMA_CURRENT,
+        biometric_enrolled: false,
+        legacy_plaintext_adopted: true,
+        legacy_plaintext_adoption_proof: adoption_proof_string(key),
+        policy_mac: String::new(),
+    };
+    sign_policy(&mut config, key);
+    config
 }
 
 pub(crate) fn key_verifier(key: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
@@ -583,6 +1330,219 @@ fn adoption_proof_string(key: &[u8; KEY_LEN]) -> String {
     encoded
 }
 
+/// Domain-separated HMAC key for the mutable security-policy tag.
+fn policy_mac_key(key: &[u8; KEY_LEN]) -> Zeroizing<[u8; KEY_LEN]> {
+    let mut hasher = Sha256::new();
+    hasher.update(key);
+    hasher.update(b"s3-sidekick-security-policy-v1");
+    let digest = hasher.finalize();
+    let mut out = Zeroizing::new([0u8; KEY_LEN]);
+    out.copy_from_slice(&digest[..KEY_LEN]);
+    out
+}
+
+fn policy_kdf_label(kdf: KdfAlgorithm) -> &'static str {
+    match kdf {
+        KdfAlgorithm::Pbkdf2 => "pbkdf2",
+        KdfAlgorithm::Argon2id => "argon2id",
+    }
+}
+
+fn policy_mac_tag(config: &SecurityConfig, key: &[u8; KEY_LEN]) -> [u8; 32] {
+    let mac_key = policy_mac_key(key);
+    // Schema 1 tags were produced by older releases over the original v1
+    // payload. Schema 2 added the KDF choice and parameters but still left the
+    // encrypted-mode selector outside the tag. Both must keep verifying so an
+    // existing vault can be upgraded; schema 3 binds every security-relevant
+    // field except the tag itself.
+    let (domain, payload) = match config.policy_schema {
+        POLICY_SCHEMA_LEGACY => (
+            b"s3-sidekick-security-policy".as_slice(),
+            format!(
+                "v1\n{}\n{}\n{}\n{}",
+                config.lock_timeout_minutes,
+                u8::from(config.biometric_enrolled),
+                u8::from(config.legacy_plaintext_adopted),
+                config.legacy_plaintext_adoption_proof,
+            ),
+        ),
+        POLICY_SCHEMA_PREVIOUS => (
+            b"s3-sidekick-security-policy-v2".as_slice(),
+            format!(
+                "v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                config.policy_schema,
+                policy_kdf_label(config.kdf),
+                config.argon2_memory_kib,
+                config.argon2_iterations,
+                config.argon2_parallelism,
+                config.pbkdf2_iterations,
+                config.lock_timeout_minutes,
+                u8::from(config.biometric_enrolled),
+                u8::from(config.legacy_plaintext_adopted),
+                config.legacy_plaintext_adoption_proof,
+            ),
+        ),
+        _ => (
+            b"s3-sidekick-security-policy-v3".as_slice(),
+            format!(
+                "v3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                config.policy_schema,
+                u8::from(config.initialized),
+                u8::from(config.encryption_enabled),
+                config.salt,
+                config.verifier,
+                policy_kdf_label(config.kdf),
+                config.argon2_memory_kib,
+                config.argon2_iterations,
+                config.argon2_parallelism,
+                config.pbkdf2_iterations,
+                config.lock_timeout_minutes,
+                u8::from(config.biometric_enrolled),
+                u8::from(config.legacy_plaintext_adopted),
+                config.legacy_plaintext_adoption_proof,
+            ),
+        ),
+    };
+    let mut tag = hmac_sha256(mac_key.as_slice(), &[domain, payload.as_bytes()]);
+    let out = tag;
+    tag.zeroize();
+    out
+}
+
+fn policy_mac_string(config: &SecurityConfig, key: &[u8; KEY_LEN]) -> String {
+    let mut tag = policy_mac_tag(config, key);
+    let encoded = B64.encode(tag);
+    tag.zeroize();
+    encoded
+}
+
+/// Verify the keyed policy tag when one is present.
+///
+/// Configuration written before this field existed has an empty tag: accepting
+/// that once is what keeps existing installs open, and the unlock path writes a
+/// tag afterwards. A present tag that does not match means the mutable policy
+/// fields were changed without the vault key, so refuse to open until the file
+/// is restored or security is reset. An out-of-range auto-lock value is rejected
+/// even without a tag because no supported release could have written it.
+pub(crate) fn verify_policy_integrity(
+    config: &SecurityConfig,
+    key: &[u8; KEY_LEN],
+) -> Result<(), String> {
+    if !config.encryption_enabled {
+        return Ok(());
+    }
+    if !(POLICY_SCHEMA_LEGACY..=POLICY_SCHEMA_CURRENT).contains(&config.policy_schema) {
+        return Err(format!(
+            "Security configuration has unsupported policy schema {}; refusing to unlock. \
+             Restore the file from a backup or reset security.",
+            config.policy_schema
+        ));
+    }
+    if config.lock_timeout_minutes > MAX_LOCK_TIMEOUT_MINUTES {
+        return Err(
+            "Security configuration has an invalid auto-lock timeout; refusing to unlock. Restore \
+             the file from a backup or reset security."
+                .to_string(),
+        );
+    }
+    if config.policy_mac.is_empty() {
+        if config.policy_schema >= POLICY_SCHEMA_PREVIOUS {
+            return Err(
+                "Security configuration uses policy schema 2 or newer but has no policy \
+                 authentication tag; refusing to unlock. Restore 'security.json' from a backup or \
+                 reset security."
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+    let stored = B64.decode(&config.policy_mac).map_err(|_| {
+        "Security policy integrity tag is invalid; refusing to unlock. Restore the file from a \
+         backup or reset security."
+            .to_string()
+    })?;
+    let mut expected = policy_mac_tag(config, key);
+    let valid = constant_time_eq(&stored, &expected);
+    expected.zeroize();
+    if !valid {
+        return Err(
+            "Security policy was modified without the vault key; refusing to unlock. Restore \
+             'security.json' from a backup or reset security."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Add the policy tag for a configuration that is about to be saved.
+///
+/// Signing always promotes the configuration to the current schema: every
+/// successful unlock or settings change writes a schema-2 tag. Configurations
+/// whose tag is cleared while the vault is locked are demoted explicitly by
+/// `refresh_policy_mac_for_config` so the next unlock can re-establish it.
+fn sign_policy(config: &mut SecurityConfig, key: &[u8; KEY_LEN]) {
+    if config.encryption_enabled {
+        config.policy_schema = POLICY_SCHEMA_CURRENT;
+        config.policy_mac = policy_mac_string(config, key);
+    } else {
+        config.policy_schema = POLICY_SCHEMA_CURRENT;
+        config.policy_mac.clear();
+    }
+}
+
+/// Re-sign mutable policy when the vault key happens to be available.
+///
+/// Used by credential cleanup paths that must also work while locked. Clearing
+/// the tag in that case is deliberate: the next password unlock re-establishes
+/// it, and leaving a stale tag would make a legitimate state change look like
+/// tampering and brick the vault. The schema is downgraded to 1 at the same
+/// time so the schema-2 fail-closed rule does not reject a tag the locked
+/// process could not produce. This is the documented rollback residual; it is
+/// only used by native cleanup paths, never by a renderer-supplied config.
+pub(crate) fn refresh_policy_mac_for_config(config: &mut SecurityConfig) {
+    if !config.encryption_enabled {
+        config.policy_schema = POLICY_SCHEMA_CURRENT;
+        config.policy_mac.clear();
+        return;
+    }
+    match require_unlocked_key() {
+        Ok(key) => sign_policy(config, &key),
+        Err(_) => {
+            config.policy_schema = POLICY_SCHEMA_LEGACY;
+            config.policy_mac.clear();
+        }
+    }
+}
+
+/// Native confirmation for a destructive security-state change.
+///
+/// Runs on the blocking pool (the dialog blocks its caller) and returns false
+/// when the user declines or closes the prompt. Command wrappers call this so a
+/// compromised renderer cannot disable encryption, auto-lock, biometric unlock
+/// or the vault itself without a fresh native user decision.
+pub(crate) fn confirm_security_state_change<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    title: &str,
+    message: &str,
+    confirm_label: &str,
+) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            confirm_label.to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show()
+}
+
+/// Error returned by a security command whose native confirmation was declined.
+pub(crate) const SECURITY_CONFIRMATION_CANCELLED: &str =
+    "Cancelled by the user; no security settings were changed.";
+
 pub(crate) fn encrypt_text(plain: &str, key: &[u8; KEY_LEN]) -> Result<String, String> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| e.to_string())?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -593,20 +1553,28 @@ pub(crate) fn encrypt_text(plain: &str, key: &[u8; KEY_LEN]) -> Result<String, S
         .map_err(|e| format!("Encryption failed: {}", e))?;
 
     let payload = EncryptedPayload {
-        v: 1,
+        v: PAYLOAD_VERSION_CURRENT,
         nonce: B64.encode(nonce_bytes),
         ciphertext: B64.encode(ciphertext),
         kv: key_check_value(key),
+        mac: String::new(),
     };
+    let mac = payload_mac(
+        key,
+        payload.v,
+        &payload.nonce,
+        &payload.ciphertext,
+        &payload.kv,
+    );
+    let payload = EncryptedPayload { mac, ..payload };
     serde_json::to_string(&payload).map_err(|e| e.to_string())
 }
 
 pub(crate) fn decrypt_text(encoded: &str, key: &[u8; KEY_LEN]) -> Result<String, String> {
     let payload: EncryptedPayload =
         serde_json::from_str(encoded).map_err(|e| format!("Invalid encrypted payload: {}", e))?;
-    if payload.v != 1 {
-        return Err("Unsupported encrypted payload version".to_string());
-    }
+    validate_payload_version(&payload)?;
+    verify_payload_mac(&payload, key)?;
 
     let nonce_bytes = B64
         .decode(payload.nonce)
@@ -758,6 +1726,7 @@ fn mark_legacy_plaintext_adopted<R: tauri::Runtime, M: tauri::Manager<R>>(
     let mut updated = config.clone();
     updated.legacy_plaintext_adopted = true;
     updated.legacy_plaintext_adoption_proof = adoption_proof_string(key);
+    sign_policy(&mut updated, key);
     save_security_config(app, &updated)?;
     *config = updated;
     Ok(())
@@ -792,8 +1761,31 @@ pub(crate) fn write_protected_file(
     ensure_migration_recovered()?;
     let output = if security.encryption_enabled {
         let key = require_unlocked_key()?;
+        validate_config_key(security, &key)?;
         encrypt_text(json, &key)?
     } else {
+        // Fail closed when the key material is gone but the destination still
+        // holds ciphertext. Returning early here would let the next save
+        // overwrite the only copy of the data with a plaintext default.
+        match std::fs::read_to_string(path) {
+            Ok(existing) if looks_encrypted(&existing) => {
+                return Err(format!(
+                    "Refusing to overwrite '{}': it is still encrypted but the current \
+                     configuration has no key material. Restore the matching 'security.json' \
+                     or delete the file deliberately.",
+                    path.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "Refusing to overwrite '{}' without reading it first: {}",
+                    path.display(),
+                    err
+                ))
+            }
+        }
         json.to_string()
     };
 
@@ -809,7 +1801,7 @@ struct MigrationPlan {
 
 /// Identity of a vault configuration, used to decide whether an interrupted
 /// migration had reached its commit point.
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
 struct ConfigFingerprint {
     encryption_enabled: bool,
     salt: String,
@@ -874,7 +1866,8 @@ struct MigrationJournal {
 /// deletion, the security/settings commits, checkpoint cleanup, and biometric
 /// key removal one retryable transaction instead of a sequence that can stop in
 /// an irreversibly mixed state.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 struct FactoryResetJournal {
     v: u8,
     settings_json: String,
@@ -882,6 +1875,27 @@ struct FactoryResetJournal {
     checkpoint_scratch_paths: Vec<crate::CheckpointScratchPath>,
     #[serde(default)]
     target_recovery_session: Option<String>,
+    /// Vault configuration the reset was requested against. Replay only trusts
+    /// a tagged journal while the live configuration still matches, so an old
+    /// journal cannot reset a newer vault.
+    #[serde(default)]
+    previous: Option<ConfigFingerprint>,
+    /// Keyed tag over every other field, produced with the vault key when the
+    /// vault was open at reset time. Startup replay requires this tag: a local
+    /// writer cannot forge a reset that deletes a locked encrypted vault.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    mac: String,
+}
+
+/// How a factory-reset journal replay was authorised.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FactoryResetReplay {
+    /// Startup/unlock recovery. Only a journal authenticated by the current
+    /// vault key may run without asking the user again.
+    Automatic,
+    /// The caller just obtained a fresh native confirmation and wrote the
+    /// journal itself. Untagged journals are acceptable in this case.
+    CallerConfirmed,
 }
 
 fn factory_reset_journal_path<R: tauri::Runtime, M: tauri::Manager<R>>(
@@ -892,6 +1906,188 @@ fn factory_reset_journal_path<R: tauri::Runtime, M: tauri::Manager<R>>(
         .parent()
         .ok_or_else(|| "Security journal has no parent directory".to_string())?;
     Ok(parent.join("factory-reset.journal"))
+}
+
+fn factory_reset_mac_key(key: &[u8; KEY_LEN]) -> Zeroizing<[u8; KEY_LEN]> {
+    let mut hasher = Sha256::new();
+    hasher.update(key);
+    hasher.update(b"s3-sidekick-factory-reset-journal-v1");
+    let digest = hasher.finalize();
+    let mut out = Zeroizing::new([0u8; KEY_LEN]);
+    out.copy_from_slice(&digest[..KEY_LEN]);
+    out
+}
+
+#[derive(serde::Serialize)]
+struct FactoryResetJournalMacPayload<'a> {
+    v: u8,
+    settings_json: &'a str,
+    entries: &'a [ManagedDataId],
+    checkpoint_scratch_paths: &'a [crate::CheckpointScratchPath],
+    target_recovery_session: &'a Option<String>,
+    previous: &'a Option<ConfigFingerprint>,
+}
+
+fn factory_reset_mac(journal: &FactoryResetJournal, key: &[u8; KEY_LEN]) -> Result<String, String> {
+    let mac_key = factory_reset_mac_key(key);
+    let payload = FactoryResetJournalMacPayload {
+        v: journal.v,
+        settings_json: &journal.settings_json,
+        entries: &journal.entries,
+        checkpoint_scratch_paths: &journal.checkpoint_scratch_paths,
+        target_recovery_session: &journal.target_recovery_session,
+        previous: &journal.previous,
+    };
+    let mut encoded = serde_json::to_vec(&payload)
+        .map_err(|err| format!("Factory-reset journal could not be serialized: {}", err))?;
+    let mut tag = hmac_sha256(
+        mac_key.as_slice(),
+        &[b"s3-sidekick-factory-reset-journal", &encoded],
+    );
+    let out = B64.encode(tag);
+    tag.zeroize();
+    encoded.zeroize();
+    Ok(out)
+}
+
+fn verify_factory_reset_mac(
+    journal: &FactoryResetJournal,
+    key: &[u8; KEY_LEN],
+) -> Result<(), String> {
+    let expected = factory_reset_mac(journal, key)?;
+    let valid = constant_time_eq(journal.mac.as_bytes(), expected.as_bytes());
+    if !valid {
+        return Err(
+            "Factory-reset journal failed authentication; journal retained and no data changed"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn sign_factory_reset_journal(
+    journal: &mut FactoryResetJournal,
+    key: &[u8; KEY_LEN],
+) -> Result<(), String> {
+    journal.mac = factory_reset_mac(journal, key)?;
+    Ok(())
+}
+
+/// Remove every migration stage file, optionally keeping stages named in a
+/// live journal. A crash between writing plaintext stages and the durable
+/// journal used to leave unprotected copies of user data behind forever.
+fn sweep_stray_migration_stages<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    keep: &[ManagedDataId],
+) -> Result<(), String> {
+    for id in [
+        ManagedDataId::Bookmarks,
+        ManagedDataId::Connection,
+        ManagedDataId::BookmarksBackup,
+        ManagedDataId::TransferManifest,
+    ] {
+        if keep.contains(&id) {
+            continue;
+        }
+        let staged = migration_stage_path(app, id)?;
+        remove_file_if_present(&staged)?;
+    }
+    Ok(())
+}
+
+fn quarantine_record(path: &std::path::Path) -> Result<(), String> {
+    let stamp = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "record".to_string());
+    let quarantined =
+        path.with_file_name(format!("{}.corrupt.{}.{}", name, std::process::id(), stamp));
+    std::fs::rename(path, &quarantined).map_err(|err| {
+        format!(
+            "Failed to quarantine unreadable recovery record '{}': {}",
+            path.display(),
+            err
+        )
+    })?;
+    fsync_parent(&quarantined)
+}
+
+/// Move download-lease records that cannot be parsed aside so destructive
+/// cleanup is not wedged by a single corrupt file.
+///
+/// `quarantine_encrypted` is used only during factory reset, where the vault
+/// may be locked and the lease is about to be deleted anyway. Routine migration
+/// keeps encrypted legacy leases because the unlocked vault can still read them.
+fn quarantine_unreadable_leases<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    quarantine_encrypted: bool,
+) -> Result<(), String> {
+    let dir = crate::resolved_app_data_dir(app)?.join("download-leases");
+    let iter = match std::fs::read_dir(&dir) {
+        Ok(iter) => iter,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    for entry in iter {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(_) => {
+                quarantine_record(&path)?;
+                continue;
+            }
+        };
+        let unreadable = raw.trim().is_empty() || {
+            let looks_like_cipher = looks_encrypted(&raw);
+            let valid_lease = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|value| {
+                    let object = value.as_object()?;
+                    let string_field = |key: &str| {
+                        object
+                            .get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|value| !value.is_empty())
+                    };
+                    Some(
+                        string_field("destination")
+                            && string_field("temp_path")
+                            && string_field("nonce"),
+                    )
+                })
+                .unwrap_or(false);
+            (quarantine_encrypted && looks_like_cipher) || (!looks_like_cipher && !valid_lease)
+        };
+        if unreadable {
+            quarantine_record(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Evidence that a destructive reset supersedes, not preserves.
+///
+/// The factory-reset journal is already durable at this point, so deleting the
+/// migration journal and stages cannot lose data the reset intends to keep.
+/// Corrupt download leases are quarantined because cleanup cannot parse them
+/// and a single bad file must not make "Delete Everything" impossible.
+fn clear_recovery_evidence_for_reset<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<(), String> {
+    let journal_path = security_journal_path(app)?;
+    remove_file_if_present(&journal_path)?;
+    sweep_stray_migration_stages(app, &[])?;
+    quarantine_unreadable_leases(app, true)?;
+    set_migration_recovery_failure(None);
+    Ok(())
 }
 
 /// Every file whose contents follow the vault's encryption state.
@@ -974,9 +2170,16 @@ fn build_migration_plans<R: tauri::Runtime, M: tauri::Manager<R>>(
         } else if raw.trim().is_empty() {
             default_value.to_string()
         } else if !already_encrypted {
-            // Already plaintext. Skip instead of attempting to decrypt it,
-            // which would fail and wedge the whole operation.
-            continue;
+            // Plaintext inside an encrypted vault is either unadopted legacy
+            // state (the unlock sweep handles it before this runs) or replaced
+            // data. Skipping it used to leave a plaintext destination behind
+            // after a disable, so the operation now fails closed instead.
+            return Err(format!(
+                "Refusing to disable encryption because '{}' is already unencrypted. \
+                 Unlock the vault first so the upgrade sweep can adopt legacy plaintext, or \
+                 delete the file deliberately.",
+                path.display()
+            ));
         } else {
             decrypt_text(&raw, key)?
         };
@@ -1054,10 +2257,42 @@ fn discard_staged(plans: &[MigrationPlan]) {
 }
 
 /// Move staged payloads over their destinations.
+///
+/// A missing stage is only acceptable when the destination already holds the
+/// exact payload this migration planned; otherwise the commit would drop the
+/// only copy of the data and still remove the recovery journal.
 fn commit_staged(plans: &[MigrationPlan]) -> Result<(), String> {
     for plan in plans {
         if !plan.staged.exists() {
-            continue;
+            match std::fs::read_to_string(&plan.path) {
+                Ok(existing) if existing == plan.transformed => continue,
+                Ok(_) => {
+                    return Err(format!(
+                        "Vault migration staging for '{}' is missing and the destination is not in the intended state",
+                        plan.path.display()
+                    ))
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "Vault migration staging for '{}' is missing and the destination could not be read: {}",
+                        plan.path.display(),
+                        err
+                    ))
+                }
+            }
+        }
+        let staged = std::fs::read_to_string(&plan.staged).map_err(|err| {
+            format!(
+                "Failed to verify staged vault migration '{}': {}",
+                plan.staged.display(),
+                err
+            )
+        })?;
+        if staged != plan.transformed {
+            return Err(format!(
+                "Refusing to publish '{}': staged payload changed after it was written",
+                plan.path.display()
+            ));
         }
         std::fs::rename(&plan.staged, &plan.path).map_err(|e| {
             format!(
@@ -1067,6 +2302,60 @@ fn commit_staged(plans: &[MigrationPlan]) -> Result<(), String> {
             )
         })?;
         fsync_parent(&plan.path)?;
+    }
+    Ok(())
+}
+
+/// Authenticate a staged payload against the committed target configuration.
+///
+/// The old check compared only the 8-byte `kv` field the payload advertises
+/// about itself. That value is attacker-writable and says nothing about whether
+/// the ciphertext belongs to the committed vault. New payloads carry a keyed
+/// metadata tag; every payload must also decrypt under the unlocked target key.
+fn verify_staged_payload(path: &std::path::Path, target: &SecurityConfig) -> Result<(), String> {
+    let raw = std::fs::read_to_string(path).map_err(|err| {
+        format!(
+            "Failed to inspect staged vault migration '{}': {}",
+            path.display(),
+            err
+        )
+    })?;
+    if !target.encryption_enabled {
+        if looks_encrypted(&raw) {
+            return Err(format!(
+                "Staged vault migration '{}' is encrypted but the committed configuration is plaintext",
+                path.display()
+            ));
+        }
+        return Ok(());
+    }
+
+    let key = require_unlocked_key().map_err(|_| {
+        format!(
+            "Staged vault migration '{}' cannot be authenticated while the vault is locked. Unlock with your password to finish recovery.",
+            path.display()
+        )
+    })?;
+    validate_config_key(target, &key)?;
+    let payload: EncryptedPayload = serde_json::from_str(raw.trim()).map_err(|err| {
+        format!(
+            "Staged vault migration '{}' is not a valid encrypted payload: {}",
+            path.display(),
+            err
+        )
+    })?;
+    if payload.v != PAYLOAD_VERSION_LEGACY && payload.v != PAYLOAD_VERSION_CURRENT {
+        return Err(format!(
+            "Staged vault migration '{}' has an unsupported payload version",
+            path.display()
+        ));
+    }
+    verify_payload_mac(&payload, &key)?;
+    let plain = decrypt_text(&raw, &key)?;
+    if plain.is_empty() {
+        // The transform is allowed to be empty (the connection default is an
+        // empty string), but it must still be a decryptable payload. Nothing
+        // further to check.
     }
     Ok(())
 }
@@ -1086,7 +2375,20 @@ fn migrated_payload_matches(
         let Some(expected) = config_key_check(target) else {
             return Err("Target security configuration has no valid key check".to_string());
         };
-        Ok(payload_key_check(&raw).as_deref() == Some(expected.as_str()))
+        if payload_key_check(&raw).as_deref() != Some(expected.as_str()) {
+            return Ok(false);
+        }
+        let key = require_unlocked_key().map_err(|_| {
+            format!(
+                "Cannot authenticate migrated file '{}' while the vault is locked",
+                path.display()
+            )
+        })?;
+        validate_config_key(target, &key)?;
+        match decrypt_text(&raw, &key) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
     } else {
         Ok(!looks_encrypted(&raw))
     }
@@ -1189,6 +2491,14 @@ fn run_migration<R: tauri::Runtime, M: tauri::Manager<R>>(
         return Ok(());
     }
 
+    if let Err(quarantine_error) = quarantine_unreadable_leases(app, false) {
+        set_migration_recovery_failure(Some(quarantine_error.clone()));
+        let _ = set_unlocked_key(None, 0);
+        return Err(format!(
+            "Vault data was migrated, but unreadable recovery records could not be quarantined: {}",
+            quarantine_error
+        ));
+    }
     if let Err(cleanup_error) = purge_transfer_checkpoints(app, &journal.checkpoint_scratch_paths) {
         set_migration_recovery_failure(Some(cleanup_error.clone()));
         let _ = set_unlocked_key(None, 0);
@@ -1223,7 +2533,7 @@ fn run_biometric_invalidating_migration<R: tauri::Runtime, M: tauri::Manager<R>>
     plans: &[MigrationPlan],
     previous: &SecurityConfig,
     target: &SecurityConfig,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     // A failed migration restores `biometric_enrolled = true`, and in that case
     // the retained credential is still the one the committed config describes.
     crate::biometric::journal_cleanup_unless_enrolled(app)?;
@@ -1254,14 +2564,21 @@ fn run_biometric_invalidating_migration<R: tauri::Runtime, M: tauri::Manager<R>>
         };
     }
 
+    // The vault migration is committed. A failure here only leaves the old
+    // biometric credential queued for cleanup; it must not revoke the new key
+    // or report the rekey as failed. Callers keep the new vault usable and
+    // surface this warning to the user.
     if let Err(cleanup_error) = recover_interrupted_migration(app) {
-        let _ = set_unlocked_key(None, 0);
-        return Err(format!(
-            "Vault migration committed, but biometric cleanup failed: {}",
+        eprintln!(
+            "Vault migration committed, but biometric cleanup is pending and will be retried: {}",
             cleanup_error
-        ));
+        );
+        return Ok(Some(format!(
+            "Your new vault is active, but biometric cleanup is still pending and will be retried: {}",
+            cleanup_error
+        )));
     }
-    Ok(())
+    Ok(None)
 }
 
 fn recover_interrupted_migration_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
@@ -1269,6 +2586,7 @@ fn recover_interrupted_migration_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
 ) -> Result<(), String> {
     let journal_path = security_journal_path(app)?;
     if !journal_path.exists() {
+        sweep_stray_migration_stages(app, &[])?;
         return Ok(());
     }
 
@@ -1303,12 +2621,7 @@ fn recover_interrupted_migration_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
             let (path, _) = managed_data_file(app, *id)?;
             let staged = migration_stage_path(app, *id)?;
             if staged.is_file() {
-                if !migrated_payload_matches(&staged, &journal.target)? {
-                    return Err(format!(
-                        "Refusing to publish '{}': staged payload does not match the committed vault configuration",
-                        path.display()
-                    ));
-                }
+                verify_staged_payload(&staged, &journal.target)?;
                 std::fs::rename(&staged, &path).map_err(|err| {
                     format!(
                         "Failed to complete vault migration for '{}': {}",
@@ -1324,6 +2637,7 @@ fn recover_interrupted_migration_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
                 ));
             }
         }
+        quarantine_unreadable_leases(app, false)?;
         purge_transfer_checkpoints(app, &journal.checkpoint_scratch_paths)?;
     } else {
         // The commit point was never reached, so originals must stay intact.
@@ -1345,43 +2659,98 @@ fn recover_interrupted_migration_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
 
     std::fs::remove_file(&journal_path).map_err(|err| err.to_string())?;
     fsync_parent(&journal_path)?;
+    sweep_stray_migration_stages(app, &[])?;
     Ok(())
 }
 
 /// Finish or unwind a migration interrupted by a crash or power loss, then
-/// finish any factory reset whose durable intent was recorded. Any failure
-/// remains latched and blocks protected reads/writes until a later retry
-/// succeeds.
+/// finish any factory reset whose durable intent was recorded.
+///
+/// The two recoveries run independently: a broken migration journal must not
+/// prevent a durable factory reset from being replayed (and vice versa). Errors
+/// are aggregated and only the storage failures latch protected I/O. A biometric
+/// cleanup failure is reported but deliberately cannot block password unlock:
+/// the credential journal stays on disk and is retried on the next operation.
 pub(crate) fn recover_interrupted_migration<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
 ) -> Result<(), String> {
-    // Credential cleanup has no ordering dependency on file recovery, so it must
-    // not be skipped when an unrelated replay fails. It still runs last, because
-    // migration replay is what decides whether the committed configuration still
-    // claims enrollment, and it can only ever remove a key the config says is
-    // unwanted. Errors are aggregated so no attempt masks another.
     let mut errors = Vec::new();
-    let file_recovery = recover_interrupted_migration_inner(app)
-        .and_then(|()| recover_interrupted_factory_reset_inner(app));
-    if let Err(error) = file_recovery {
+    let migration_result = recover_interrupted_migration_inner(app);
+    let reset_pending = factory_reset_journal_path(app)
+        .map(|path| path.exists())
+        .unwrap_or(true);
+    let reset_result = recover_interrupted_factory_reset_inner(app, FactoryResetReplay::Automatic);
+    let reset_succeeded = reset_pending && reset_result.is_ok();
+    let mut storage_failed = false;
+    if let Err(error) = migration_result {
+        storage_failed = true;
+        errors.push(error);
+    }
+    if let Err(error) = reset_result {
+        storage_failed = true;
         errors.push(error);
     }
     if let Err(error) = crate::biometric::recover_pending_biometric_cleanup(app) {
         errors.push(error);
     }
-    let result = if errors.is_empty() {
+    if reset_succeeded {
+        // The reset journal supersedes any migration evidence it just cleared.
+        set_migration_recovery_failure(None);
+    } else if storage_failed {
+        set_migration_recovery_failure(Some(errors.join("; ")));
+    } else {
+        set_migration_recovery_failure(None);
+    }
+    if errors.is_empty() {
         Ok(())
     } else {
         Err(errors.join("; "))
-    };
-    match &result {
-        Ok(()) => set_migration_recovery_failure(None),
-        Err(error) => set_migration_recovery_failure(Some(error.clone())),
     }
-    result
+}
+
+/// Recover storage state without letting a stuck biometric credential block
+/// password unlock. The biometric journal is retained for a later retry.
+fn recover_interrupted_storage<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    let migration_result = recover_interrupted_migration_inner(app);
+    let reset_pending = factory_reset_journal_path(app)
+        .map(|path| path.exists())
+        .unwrap_or(true);
+    let reset_result = recover_interrupted_factory_reset_inner(app, FactoryResetReplay::Automatic);
+    let reset_succeeded = reset_pending && reset_result.is_ok();
+    let mut storage_failed = false;
+    if let Err(error) = migration_result {
+        storage_failed = true;
+        errors.push(error);
+    }
+    if let Err(error) = reset_result {
+        storage_failed = true;
+        errors.push(error);
+    }
+    if reset_succeeded {
+        set_migration_recovery_failure(None);
+    } else if storage_failed {
+        set_migration_recovery_failure(Some(errors.join("; ")));
+    } else {
+        set_migration_recovery_failure(None);
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 pub(crate) fn security_status(config: &SecurityConfig) -> SecurityStatus {
+    security_status_with_warning(config, None)
+}
+
+fn security_status_with_warning(
+    config: &SecurityConfig,
+    cleanup_warning: Option<String>,
+) -> SecurityStatus {
     SECURITY_ENCRYPTION_ENABLED.store(config.encryption_enabled, Ordering::Release);
     SecurityStatus {
         initialized: config.initialized,
@@ -1390,6 +2759,8 @@ pub(crate) fn security_status(config: &SecurityConfig) -> SecurityStatus {
         lock_timeout_minutes: config.lock_timeout_minutes,
         biometric_available: crate::biometric::is_available(),
         biometric_enrolled: config.biometric_enrolled,
+        lock_timeout_defaulted: LEGACY_LOCK_TIMEOUT_DEFAULTED.load(Ordering::Acquire),
+        cleanup_warning,
     }
 }
 
@@ -1436,10 +2807,11 @@ pub(crate) async fn initialize_security(
 fn initialize_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
     enable_encryption: bool,
-    mut password: Option<String>,
+    password: Option<String>,
 ) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
     ensure_migration_recovered()?;
+    let mut password = Zeroizing::new(password);
     let current = load_security_config(app)?;
     if current.initialized {
         // Initialization never changes an existing vault. Reporting success
@@ -1448,7 +2820,6 @@ fn initialize_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
         // silently ignored.
         let differs = enable_encryption != current.encryption_enabled
             || (enable_encryption && password.as_deref().is_some_and(|p| !p.is_empty()));
-        password.zeroize();
         if differs {
             return Err(
                 "Secure storage is already set up. Change encryption or the password in Settings > Security."
@@ -1459,61 +2830,63 @@ fn initialize_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     }
 
     if !enable_encryption {
+        ensure_no_encrypted_managed_files(app)?;
         let config = SecurityConfig {
             initialized: true,
             encryption_enabled: false,
             salt: String::new(),
             verifier: String::new(),
-            lock_timeout_minutes: 0,
+            lock_timeout_minutes: DEFAULT_LOCK_TIMEOUT_MINUTES,
             pbkdf2_iterations: 0,
+            kdf: KdfAlgorithm::Argon2id,
+            argon2_memory_kib: ARGON2_MEMORY_KIB,
+            argon2_iterations: ARGON2_ITERATIONS,
+            argon2_parallelism: ARGON2_PARALLELISM,
+            policy_schema: POLICY_SCHEMA_CURRENT,
             biometric_enrolled: false,
             legacy_plaintext_adopted: true,
             legacy_plaintext_adoption_proof: String::new(),
+            policy_mac: String::new(),
         };
         set_unlocked_key(None, 0)?;
         save_security_config(app, &config)?;
+        clear_unlock_failures();
         return Ok(security_status(&config));
     }
 
-    let mut pw = password
-        .filter(|p| !p.is_empty())
-        .ok_or_else(|| "Password is required to enable encryption".to_string())?;
-    if let Err(err) = validate_password_length(&pw) {
-        pw.zeroize();
-        return Err(err);
-    }
+    let pw = Zeroizing::new(
+        password
+            .take()
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| "Password is required to enable encryption".to_string())?,
+    );
+    validate_password_length(&pw)?;
     let mut salt = [0u8; SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut salt);
-    let key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
-    pw.zeroize();
+    let key = derive_argon2_key(
+        &pw,
+        &salt,
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_PARALLELISM,
+    )?;
     let mut verifier = key_verifier(&key);
-
-    let config = SecurityConfig {
-        initialized: true,
-        encryption_enabled: true,
-        salt: B64.encode(salt),
-        verifier: B64.encode(verifier),
-        lock_timeout_minutes: 0,
-        pbkdf2_iterations: PBKDF2_ITERATIONS,
-        biometric_enrolled: false,
-        // A vault created now has no unprotected history to adopt.
-        legacy_plaintext_adopted: true,
-        legacy_plaintext_adoption_proof: adoption_proof_string(&key),
-    };
+    let config = argon2_config(&salt, &verifier, &key);
     verifier.zeroize();
 
     let plans = build_migration_plans(app, true, &key)?;
     run_migration(app, &plans, &current, &config)?;
 
-    set_unlocked_key(Some(*key), 0)?;
+    set_unlocked_key(Some(*key), config.lock_timeout_minutes as u64 * 60)?;
+    clear_unlock_failures();
     Ok(security_status(&config))
 }
 
 fn validate_password_length(password: &str) -> Result<(), String> {
-    if password.len() < 8 {
-        return Err("Password must be at least 8 characters".to_string());
+    if password.chars().count() < 12 {
+        return Err("Password must be at least 12 characters".to_string());
     }
-    if password.len() > 256 {
+    if password.chars().count() > 256 {
         return Err("Password must be at most 256 characters".to_string());
     }
     Ok(())
@@ -1529,115 +2902,202 @@ pub(crate) async fn unlock_security(
 
 fn unlock_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
-    mut password: String,
+    password: String,
 ) -> Result<SecurityStatus, String> {
-    let _storage_guard = lock_storage_ops()?;
+    let _attempt = UnlockAttemptGuard::acquire()?;
+    let storage_guard = lock_storage_ops()?;
+    let password = Zeroizing::new(password);
     let mut config = load_security_config(app)?;
     if !config.initialized || !config.encryption_enabled {
-        password.zeroize();
         set_unlocked_key(None, 0)?;
+        clear_unlock_failures();
         return Ok(security_status(&config));
     }
 
-    let salt = match validate_kdf_params(&config) {
-        Ok(salt) => salt,
-        Err(err) => {
-            password.zeroize();
-            return Err(err);
-        }
-    };
-    let expected_verifier = match B64.decode(&config.verifier) {
-        Ok(verifier) => verifier,
-        Err(e) => {
-            password.zeroize();
-            return Err(format!("Invalid security verifier: {}", e));
-        }
-    };
+    check_unlock_throttle(&config)?;
+    let salt = validate_kdf_params(&config)?;
+    let expected_verifier = B64
+        .decode(&config.verifier)
+        .map_err(|e| format!("Invalid security verifier: {}", e))?;
     if expected_verifier.len() != KEY_LEN {
-        password.zeroize();
         return Err("Invalid security verifier length".to_string());
     }
 
-    let key = derive_key(&password, &salt, config.pbkdf2_iterations);
+    let key = derive_config_key(&password, &salt, &config)?;
     let mut verifier = key_verifier(&key);
     if !constant_time_eq(verifier.as_slice(), expected_verifier.as_slice()) {
         verifier.zeroize();
-        password.zeroize();
+        let delay = record_unlock_failure(&config);
+        // Backoff must never hold the protected-storage lock: a wrong password
+        // would otherwise stall every vault operation for up to a minute.
+        drop(storage_guard);
+        std::thread::sleep(delay);
         return Err("Invalid password".to_string());
     }
     verifier.zeroize();
 
+    // The password proves possession of the vault key; only now can the keyed
+    // policy tag be checked. A mismatch is tampering, not a typo, so it must not
+    // count against the password throttle.
+    verify_policy_integrity(&config, &key)?;
+    // A legacy zero predates the current default. Do not re-sign "never" as if
+    // the user had chosen it; adopt 15 minutes and let the UI show a notice.
+    normalize_legacy_lock_timeout(&mut config);
+
     let timeout_secs = config.lock_timeout_minutes as u64 * 60;
     set_unlocked_key(Some(*key), timeout_secs)?;
-    if let Err(err) = recover_interrupted_migration(app) {
+    if let Err(err) = recover_interrupted_storage(app) {
         let _ = set_unlocked_key(None, 0);
-        password.zeroize();
         return Err(err);
     }
+    // Credential cleanup is best-effort here: a missing or wedged platform
+    // credential store must never turn a correct password into a failed unlock.
+    // The cleanup journal is retained so the operation retries later.
+    let _ = crate::biometric::recover_pending_biometric_cleanup(app);
 
     // Must precede the rekey below: a migration reads every managed file and
     // checkpoint, so any file an earlier version left in plaintext has to be
     // adopted before that read happens.
     if let Err(err) = adopt_legacy_plaintext_files(app, &mut config) {
         let _ = set_unlocked_key(None, 0);
-        password.zeroize();
         return Err(err);
     }
 
-    if config.pbkdf2_iterations < PBKDF2_ITERATIONS {
-        let previous = config.clone();
-        let mut new_salt = [0u8; SALT_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut new_salt);
-        let new_key = derive_key(&password, &new_salt, PBKDF2_ITERATIONS);
-        let mut new_verifier = key_verifier(&new_key);
-
-        // Every failure below reports an error to the unlock prompt, so it
-        // must also relock: the UI would otherwise show "locked" while the
-        // backend holds the old key.
-        let legacy_plaintext_allowed = match legacy_plaintext_adoption_completed(&config, &key) {
-            Ok(completed) => !completed,
-            Err(err) => {
-                new_verifier.zeroize();
-                password.zeroize();
-                let _ = set_unlocked_key(None, 0);
-                return Err(err);
+    let mut cleanup_warning = None;
+    if config.kdf == KdfAlgorithm::Pbkdf2 {
+        cleanup_warning =
+            lazily_rekey_to_argon2id(app, &mut config, &password, &key, timeout_secs)?;
+    }
+    // Upgrade a configuration written before the policy tag existed, and
+    // re-sign after adoption or credential cleanup changed the legacy flags.
+    // Re-read first so a cleanup that ran during recovery is not overwritten by
+    // the stale snapshot this unlock started with. Best-effort: a read-only data
+    // directory must not turn a correct password into a failed unlock.
+    if let Ok(current_key) = require_unlocked_key() {
+        if let Ok(mut current) = load_security_config(app) {
+            normalize_legacy_lock_timeout(&mut current);
+            if current.encryption_enabled
+                && (current.policy_schema < POLICY_SCHEMA_CURRENT
+                    || current.policy_mac != policy_mac_string(&current, &current_key))
+            {
+                sign_policy(&mut current, &current_key);
+                let _ = save_security_config(app, &current);
             }
-        };
-        let plans = match build_rekey_plans(app, &key, &new_key, legacy_plaintext_allowed) {
-            Ok(plans) => plans,
-            Err(err) => {
-                new_verifier.zeroize();
-                password.zeroize();
-                let _ = set_unlocked_key(None, 0);
-                return Err(err);
-            }
-        };
-
-        config.salt = B64.encode(new_salt);
-        config.verifier = B64.encode(new_verifier);
-        new_verifier.zeroize();
-        config.pbkdf2_iterations = PBKDF2_ITERATIONS;
-        config.biometric_enrolled = false;
-        // Every managed file is rewritten and every checkpoint purged by the
-        // migration below, so nothing can still be legitimately plaintext.
-        config.legacy_plaintext_adopted = true;
-        config.legacy_plaintext_adoption_proof = adoption_proof_string(&new_key);
-
-        if let Err(err) = run_biometric_invalidating_migration(app, &plans, &previous, &config) {
-            password.zeroize();
-            let _ = set_unlocked_key(None, 0);
-            return Err(err);
-        }
-
-        if let Err(err) = set_unlocked_key(Some(*new_key), timeout_secs) {
-            password.zeroize();
-            let _ = set_unlocked_key(None, 0);
-            return Err(err);
+            config = current;
         }
     }
-    password.zeroize();
+    clear_unlock_failures();
 
-    Ok(security_status(&config))
+    Ok(security_status_with_warning(&config, cleanup_warning))
+}
+
+/// Rekey a legacy PBKDF2 vault to Argon2id after the password was proven.
+///
+/// The old configuration stays authoritative until `run_migration` commits its
+/// journaled target. A failure before that point is deliberately non-fatal:
+/// the user keeps a working PBKDF2 vault and the migration is retried on the
+/// next unlock. A failure after the commit point is returned as an error
+/// because the on-disk configuration and staged files must be recovered; the
+/// caller relocks in that case rather than leaving a stale in-memory key.
+fn lazily_rekey_to_argon2id<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    config: &mut SecurityConfig,
+    password: &str,
+    old_key: &[u8; KEY_LEN],
+    timeout_secs: u64,
+) -> Result<Option<String>, String> {
+    let previous = config.clone();
+    let mut new_salt = [0u8; SALT_LEN];
+    rand::rngs::OsRng.fill_bytes(&mut new_salt);
+    let new_key = derive_argon2_key(
+        password,
+        &new_salt,
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_PARALLELISM,
+    )?;
+    let mut new_verifier = key_verifier(&new_key);
+
+    let legacy_plaintext_allowed = match legacy_plaintext_adoption_completed(&previous, old_key) {
+        Ok(completed) => !completed,
+        Err(err) => {
+            new_verifier.zeroize();
+            return Err(err);
+        }
+    };
+    let plans = match build_rekey_plans(app, old_key, &new_key, legacy_plaintext_allowed) {
+        Ok(plans) => plans,
+        Err(err) => {
+            new_verifier.zeroize();
+            return continue_unlock_after_deferred_rekey(app, config, &previous, &err)
+                .map(|()| None);
+        }
+    };
+
+    let mut target = previous.clone();
+    target.salt = B64.encode(new_salt);
+    target.verifier = B64.encode(new_verifier);
+    new_verifier.zeroize();
+    target.kdf = KdfAlgorithm::Argon2id;
+    target.argon2_memory_kib = ARGON2_MEMORY_KIB;
+    target.argon2_iterations = ARGON2_ITERATIONS;
+    target.argon2_parallelism = ARGON2_PARALLELISM;
+    target.pbkdf2_iterations = PBKDF2_ITERATIONS;
+    target.biometric_enrolled = false;
+    // Every managed file is rewritten and every checkpoint purged by the
+    // migration below, so nothing can still be legitimately plaintext.
+    target.legacy_plaintext_adopted = true;
+    target.legacy_plaintext_adoption_proof = adoption_proof_string(&new_key);
+    sign_policy(&mut target, &new_key);
+
+    let cleanup_warning =
+        match run_biometric_invalidating_migration(app, &plans, &previous, &target) {
+            Ok(warning) => warning,
+            Err(err) => {
+                continue_unlock_after_deferred_rekey(app, config, &previous, &err)?;
+                return Ok(None);
+            }
+        };
+
+    if let Err(err) = set_unlocked_key(Some(*new_key), timeout_secs) {
+        let _ = set_unlocked_key(None, 0);
+        return Err(err);
+    }
+    *config = target;
+    Ok(cleanup_warning)
+}
+
+/// Keep the old PBKDF2 vault usable when an Argon2 rekey failed before commit.
+///
+/// Continuing is only safe when the on-disk configuration is provably still the
+/// previous one, no migration journal remains, recovery is healthy, and the old
+/// key is still resident. Otherwise the failure reached the commit point and
+/// the caller must relock so startup recovery sees a consistent state.
+fn continue_unlock_after_deferred_rekey<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    config: &mut SecurityConfig,
+    previous: &SecurityConfig,
+    error: &str,
+) -> Result<(), String> {
+    let previous_intact = ensure_migration_recovered().is_ok()
+        && security_journal_path(app)
+            .map(|path| !path.exists())
+            .unwrap_or(false)
+        && require_unlocked_key().is_ok()
+        && load_security_config(app)
+            .map(|current| fingerprint(&current) == fingerprint(previous))
+            .unwrap_or(false);
+    if !previous_intact {
+        let _ = set_unlocked_key(None, 0);
+        return Err(error.to_string());
+    }
+    eprintln!(
+        "Vault rekey to Argon2id was deferred; the existing PBKDF2 configuration remains in use \
+         and the migration will be retried on the next unlock: {}",
+        error
+    );
+    *config = previous.clone();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1648,6 +3108,18 @@ pub(crate) async fn set_security_encryption(
     new_password: Option<String>,
 ) -> Result<SecurityStatus, String> {
     run_blocking(move || {
+        // Turning encryption off destroys the only key that can read the vault.
+        // Require a fresh native decision, not just whatever the webview sent.
+        if !enable_encryption
+            && !confirm_security_state_change(
+                &app,
+                "Turn Off Encryption",
+                "Saved connections and your last-used connection will be stored unencrypted on this device. Continue?",
+                "Turn Off Encryption",
+            )
+        {
+            return Err(SECURITY_CONFIRMATION_CANCELLED.to_string());
+        }
         set_security_encryption_inner(&app, enable_encryption, current_password, new_password)
     })
     .await
@@ -1656,17 +3128,12 @@ pub(crate) async fn set_security_encryption(
 fn set_security_encryption_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
     enable_encryption: bool,
-    mut current_password: Option<String>,
-    mut new_password: Option<String>,
+    current_password: Option<String>,
+    new_password: Option<String>,
 ) -> Result<SecurityStatus, String> {
-    let _storage_guard = match try_lock_storage_ops() {
-        Ok(guard) => guard,
-        Err(err) => {
-            current_password.zeroize();
-            new_password.zeroize();
-            return Err(err);
-        }
-    };
+    let current_password = Zeroizing::new(current_password);
+    let new_password = Zeroizing::new(new_password);
+    let storage_guard = try_lock_storage_ops()?;
     ensure_migration_recovered()?;
     let mut config = load_security_config(app)?;
     if !config.initialized {
@@ -1678,18 +3145,29 @@ fn set_security_encryption_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     let previous = config.clone();
 
     if enable_encryption {
-        let mut pw = new_password
-            .take()
-            .filter(|p| !p.is_empty())
-            .ok_or_else(|| "New password is required".to_string())?;
-        if let Err(err) = validate_password_length(&pw) {
-            pw.zeroize();
-            return Err(err);
+        // A plaintext configuration may carry `0` (auto-lock was meaningless
+        // before the vault existed). Never preserve that as an encrypted
+        // "never" policy without a separate native confirmation.
+        if config.lock_timeout_minutes == 0 {
+            config.lock_timeout_minutes = DEFAULT_LOCK_TIMEOUT_MINUTES;
         }
+        let pw = Zeroizing::new(
+            new_password
+                .as_ref()
+                .filter(|password| !password.is_empty())
+                .cloned()
+                .ok_or_else(|| "New password is required".to_string())?,
+        );
+        validate_password_length(&pw)?;
         let mut salt = [0u8; SALT_LEN];
         rand::rngs::OsRng.fill_bytes(&mut salt);
-        let key = derive_key(&pw, &salt, PBKDF2_ITERATIONS);
-        pw.zeroize();
+        let key = derive_argon2_key(
+            &pw,
+            &salt,
+            ARGON2_MEMORY_KIB,
+            ARGON2_ITERATIONS,
+            ARGON2_PARALLELISM,
+        )?;
         let mut verifier = key_verifier(&key);
 
         let plans = build_migration_plans(app, true, &key)?;
@@ -1698,37 +3176,48 @@ fn set_security_encryption_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
         config.verifier = B64.encode(verifier);
         verifier.zeroize();
         config.pbkdf2_iterations = PBKDF2_ITERATIONS;
+        config.kdf = KdfAlgorithm::Argon2id;
+        config.argon2_memory_kib = ARGON2_MEMORY_KIB;
+        config.argon2_iterations = ARGON2_ITERATIONS;
+        config.argon2_parallelism = ARGON2_PARALLELISM;
         config.legacy_plaintext_adopted = true;
         config.legacy_plaintext_adoption_proof = adoption_proof_string(&key);
+        sign_policy(&mut config, &key);
 
         run_migration(app, &plans, &previous, &config)?;
 
         set_unlocked_key(Some(*key), config.lock_timeout_minutes as u64 * 60)?;
+        clear_unlock_failures();
         return Ok(security_status(&config));
     }
 
-    let mut current_password = current_password
-        .take()
-        .filter(|p| !p.is_empty())
-        .ok_or_else(|| "Current password is required".to_string())?;
-    let salt = match validate_kdf_params(&config) {
-        Ok(salt) => salt,
-        Err(err) => {
-            current_password.zeroize();
-            return Err(err);
-        }
-    };
-    let key = derive_key(&current_password, &salt, config.pbkdf2_iterations);
-    current_password.zeroize();
+    let current_password = Zeroizing::new(
+        current_password
+            .as_ref()
+            .filter(|password| !password.is_empty())
+            .cloned()
+            .ok_or_else(|| "Current password is required".to_string())?,
+    );
+    check_unlock_throttle(&config)?;
+    let salt = validate_kdf_params(&config)?;
+    let key = derive_config_key(&current_password, &salt, &config)?;
     let mut verifier = key_verifier(&key);
     let expected_verifier = B64
         .decode(&config.verifier)
         .map_err(|e| format!("Invalid security verifier: {}", e))?;
     if !constant_time_eq(verifier.as_slice(), expected_verifier.as_slice()) {
         verifier.zeroize();
+        let delay = record_unlock_failure(&config);
+        drop(storage_guard);
+        std::thread::sleep(delay);
         return Err("Invalid password".to_string());
     }
     verifier.zeroize();
+
+    // Refuse to turn off encryption for a policy file that was edited after the
+    // vault was last verified; that state must be repaired, not laundered into
+    // a fresh plaintext configuration.
+    verify_policy_integrity(&config, &key)?;
 
     let plans = build_migration_plans(app, false, &key)?;
     drop(key);
@@ -1739,11 +3228,14 @@ fn set_security_encryption_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     config.biometric_enrolled = false;
     config.legacy_plaintext_adopted = true;
     config.legacy_plaintext_adoption_proof.clear();
+    config.policy_schema = POLICY_SCHEMA_CURRENT;
+    config.policy_mac.clear();
 
-    run_biometric_invalidating_migration(app, &plans, &previous, &config)?;
+    let cleanup_warning = run_biometric_invalidating_migration(app, &plans, &previous, &config)?;
 
     set_unlocked_key(None, 0)?;
-    Ok(security_status(&config))
+    clear_unlock_failures();
+    Ok(security_status_with_warning(&config, cleanup_warning))
 }
 
 #[tauri::command]
@@ -1757,61 +3249,47 @@ pub(crate) async fn change_security_password(
 
 fn change_security_password_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
-    mut current_password: String,
-    mut new_password: String,
+    current_password: String,
+    new_password: String,
 ) -> Result<SecurityStatus, String> {
-    let _storage_guard = match try_lock_storage_ops() {
-        Ok(guard) => guard,
-        Err(err) => {
-            current_password.zeroize();
-            new_password.zeroize();
-            return Err(err);
-        }
-    };
+    let current_password = Zeroizing::new(current_password);
+    let new_password = Zeroizing::new(new_password);
+    let storage_guard = try_lock_storage_ops()?;
     ensure_migration_recovered()?;
     let mut config = load_security_config(app)?;
     if !config.initialized || !config.encryption_enabled {
-        current_password.zeroize();
-        new_password.zeroize();
         return Err("Encryption is not enabled".to_string());
     }
-    if let Err(err) = validate_password_length(&new_password) {
-        current_password.zeroize();
-        new_password.zeroize();
-        return Err(err);
-    }
-    let previous = config.clone();
+    validate_password_length(&new_password)?;
 
-    let old_salt = match validate_kdf_params(&config) {
-        Ok(salt) => salt,
-        Err(err) => {
-            current_password.zeroize();
-            new_password.zeroize();
-            return Err(err);
-        }
-    };
-    let old_key = derive_key(&current_password, &old_salt, config.pbkdf2_iterations);
-    current_password.zeroize();
+    check_unlock_throttle(&config)?;
+    let old_salt = validate_kdf_params(&config)?;
+    let old_key = derive_config_key(&current_password, &old_salt, &config)?;
     let mut old_verifier = key_verifier(&old_key);
-    let expected_verifier = match B64.decode(&config.verifier) {
-        Ok(value) => value,
-        Err(e) => {
-            old_verifier.zeroize();
-            new_password.zeroize();
-            return Err(format!("Invalid security verifier: {}", e));
-        }
-    };
+    let expected_verifier = B64
+        .decode(&config.verifier)
+        .map_err(|e| format!("Invalid security verifier: {}", e))?;
     if !constant_time_eq(old_verifier.as_slice(), expected_verifier.as_slice()) {
         old_verifier.zeroize();
-        new_password.zeroize();
+        let delay = record_unlock_failure(&config);
+        drop(storage_guard);
+        std::thread::sleep(delay);
         return Err("Invalid password".to_string());
     }
     old_verifier.zeroize();
+    verify_policy_integrity(&config, &old_key)?;
+    normalize_legacy_lock_timeout(&mut config);
+    let previous = config.clone();
 
     let mut new_salt = [0u8; SALT_LEN];
     rand::rngs::OsRng.fill_bytes(&mut new_salt);
-    let new_key = derive_key(&new_password, &new_salt, PBKDF2_ITERATIONS);
-    new_password.zeroize();
+    let new_key = derive_argon2_key(
+        &new_password,
+        &new_salt,
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_PARALLELISM,
+    )?;
     let mut new_verifier = key_verifier(&new_key);
 
     let legacy_plaintext_allowed = match legacy_plaintext_adoption_completed(&config, &old_key) {
@@ -1834,29 +3312,102 @@ fn change_security_password_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     config.verifier = B64.encode(new_verifier);
     new_verifier.zeroize();
     config.pbkdf2_iterations = PBKDF2_ITERATIONS;
+    config.kdf = KdfAlgorithm::Argon2id;
+    config.argon2_memory_kib = ARGON2_MEMORY_KIB;
+    config.argon2_iterations = ARGON2_ITERATIONS;
+    config.argon2_parallelism = ARGON2_PARALLELISM;
     config.biometric_enrolled = false;
     config.legacy_plaintext_adopted = true;
     config.legacy_plaintext_adoption_proof = adoption_proof_string(&new_key);
+    sign_policy(&mut config, &new_key);
 
-    run_biometric_invalidating_migration(app, &plans, &previous, &config)?;
+    let cleanup_warning = run_biometric_invalidating_migration(app, &plans, &previous, &config)?;
 
     set_unlocked_key(Some(*new_key), config.lock_timeout_minutes as u64 * 60)?;
+    clear_unlock_failures();
 
-    Ok(security_status(&config))
+    Ok(security_status_with_warning(&config, cleanup_warning))
 }
 
 #[tauri::command]
-pub(crate) async fn lock_security(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
-    run_blocking(move || {
-        let _storage_guard = lock_storage_meta()?;
-        let config = load_security_config(&app)?;
-        if config.encryption_enabled {
-            S3_SESSION_RETIREMENT_REQUIRED.store(true, Ordering::Release);
-            set_unlocked_key(None, 0)?;
+pub(crate) async fn lock_security(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<SecurityStatus, String> {
+    // Close registration before clearing the key so no new S3 client can slip
+    // in behind the lock, then cancel and drain every registered client. The
+    // key is cleared even when the drain times out; security wins over
+    // transfer cleanup.
+    let mut registry_error = None;
+    let mut gate = None;
+    let drain_result = match crate::s3::close_transfer_registry() {
+        Ok((registry_gate, tokens)) => {
+            gate = Some(registry_gate);
+            crate::s3::cancel_tokens(tokens);
+            crate::s3::cancel_all_registered_transfers("lock").await
         }
-        Ok(security_status(&config))
-    })
-    .await
+        Err(err) => {
+            registry_error = Some(err);
+            Ok(())
+        }
+    };
+    let invalidation = crate::lock_s3_state(&state).map(|mut s3| {
+        crate::s3::invalidate_connection_session(&mut s3);
+    });
+    let lock_result = run_blocking(move || lock_security_inner(&app)).await;
+    // Reopening is safe only after a successful drain: the vault stays locked
+    // and `require_s3_access` still gates every new registration. A failed
+    // drain keeps the gate closed (security wins over cleanup).
+    if let Some(registry_gate) = gate.as_mut() {
+        if drain_result.is_ok() {
+            registry_gate.reopen();
+        } else {
+            registry_gate.keep_closed();
+        }
+    }
+    let status = lock_result?;
+    invalidation?;
+    if let Some(err) = registry_error {
+        return Err(format!(
+            "Encrypted storage was locked, but the transfer registry could not be closed: {}",
+            err
+        ));
+    }
+    drain_result?;
+    Ok(status)
+}
+
+fn lock_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+) -> Result<SecurityStatus, String> {
+    // Take the storage gate before clearing the key. An unlock or rekey that
+    // already started holds this gate and will be waited out; one that starts
+    // afterwards cannot install a key until this lock has cleared it. Clearing
+    // first allowed a concurrent unlock to revive the vault after the lock
+    // returned. A damaged security.json must still never leave the vault open.
+    let storage_guard = lock_storage_meta();
+    S3_SESSION_RETIREMENT_REQUIRED.store(true, Ordering::Release);
+    clear_unlocked_key();
+    let config = match storage_guard {
+        Ok(guard) => {
+            let config = load_security_config(app);
+            drop(guard);
+            config
+        }
+        Err(err) => Err(err),
+    };
+    let config = config?;
+    Ok(security_status(&config))
+}
+
+/// Whether a new auto-lock value needs a fresh native decision.
+///
+/// Any increase weakens auto-lock, and any value above the current default
+/// weakens it even when it shortens a previously longer custom value. Turning
+/// auto-lock off is the strongest weakening.
+fn lock_timeout_change_weakens(current: u16, requested: u16) -> bool {
+    requested != current
+        && (requested == 0 || requested > current || requested > DEFAULT_LOCK_TIMEOUT_MINUTES)
 }
 
 #[tauri::command]
@@ -1864,42 +3415,119 @@ pub(crate) async fn set_lock_timeout(
     app: tauri::AppHandle,
     minutes: u16,
 ) -> Result<SecurityStatus, String> {
-    if minutes > 1440 {
-        return Err("Lock timeout must be between 0 and 1440 minutes".to_string());
+    if minutes > MAX_LOCK_TIMEOUT_MINUTES {
+        return Err(format!(
+            "Lock timeout must be between 0 and {} minutes",
+            MAX_LOCK_TIMEOUT_MINUTES
+        ));
     }
     run_blocking(move || {
-        let _storage_guard = lock_storage_meta()?;
-        let mut config = load_security_config(&app)?;
-        config.lock_timeout_minutes = minutes;
-        save_security_config(&app, &config)?;
-        let mut guard = key_state()
-            .lock()
-            .map_err(|_| "Internal key state error".to_string())?;
-        guard.lock_timeout_secs = minutes as u64 * 60;
-        // Measure the new timeout from now. Against the old activity stamp,
-        // shortening or enabling it could lock the vault the moment it is set.
-        if guard.key.is_some() {
-            guard.last_activity = Some(Instant::now());
+        let current = {
+            let _storage_guard = lock_storage_meta()?;
+            load_security_config(&app)?.lock_timeout_minutes
+        };
+        // Any increase weakens auto-lock; any value beyond the 15-minute
+        // default also weakens it even when it shortens a previously longer
+        // custom value. Turning it off is the strongest weakening. All of these
+        // need a fresh native decision, not just a renderer call.
+        let weakens = lock_timeout_change_weakens(current, minutes);
+        if weakens {
+            let (title, message, confirm_label) = if minutes == 0 {
+                (
+                    "Turn Off Auto-Lock",
+                    "Auto-lock will be disabled and encrypted storage will stay unlocked until you lock it or quit S3 Sidekick. Continue?".to_string(),
+                    "Turn Off Auto-Lock",
+                )
+            } else {
+                (
+                    "Weaken Auto-Lock",
+                    format!(
+                        "Auto-lock will be extended to {} minutes. Encrypted storage may stay unlocked longer while you are away. Continue?",
+                        minutes
+                    ),
+                    "Extend Auto-Lock",
+                )
+            };
+            if !confirm_security_state_change(&app, title, &message, confirm_label) {
+                return Err(SECURITY_CONFIRMATION_CANCELLED.to_string());
+            }
         }
-        drop(guard);
-        Ok(security_status(&config))
+        set_lock_timeout_inner(&app, minutes)
     })
     .await
 }
 
+fn set_lock_timeout_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
+    app: &M,
+    minutes: u16,
+) -> Result<SecurityStatus, String> {
+    let _storage_guard = lock_storage_meta()?;
+    let mut config = load_security_config(app)?;
+    // Changing the idle policy is a vault operation. Allowing it while locked
+    // let an unauthenticated caller silently disable auto-lock (or shorten it)
+    // before the password was ever presented.
+    if config.encryption_enabled && !is_unlocked() {
+        return Err(
+            "Unlock encrypted storage with your password before changing auto-lock.".to_string(),
+        );
+    }
+    if config.encryption_enabled {
+        let key = require_unlocked_key().map_err(|_| {
+            "Unlock encrypted storage with your password before changing auto-lock.".to_string()
+        })?;
+        // Refuse to launder a policy file that was edited after the process
+        // last verified it: the new choice must be signed, not the old one.
+        verify_policy_integrity(&config, &key)?;
+        config.lock_timeout_minutes = minutes;
+        sign_policy(&mut config, &key);
+    } else {
+        config.lock_timeout_minutes = minutes;
+        config.policy_schema = POLICY_SCHEMA_CURRENT;
+        config.policy_mac.clear();
+    }
+    save_security_config(app, &config)?;
+    let mut guard = key_state()
+        .lock()
+        .map_err(|_| "Internal key state error".to_string())?;
+    expire_key_if_needed(&mut guard, SystemTime::now());
+    guard.lock_timeout_secs = minutes as u64 * 60;
+    // Measure the new timeout from now. Against the old activity stamp,
+    // shortening or enabling it could lock the vault the moment it is set.
+    if guard.key.is_some() {
+        let now = SystemTime::now();
+        guard.last_activity = Some(now);
+        guard.expires_at = expiry_deadline(now, guard.lock_timeout_secs);
+    } else {
+        guard.expires_at = None;
+    }
+    drop(guard);
+    Ok(security_status(&config))
+}
+
 /// Record user activity in the app so the auto-lock timeout measures idle time,
 /// not time since the last vault read. Never unlocks: an expired or locked
-/// key stays locked.
+/// key stays locked. Touches are rate-limited in the backend too, so a
+/// compromised renderer cannot keep the vault alive by spamming the command.
 #[tauri::command(async)]
 pub(crate) fn touch_security_activity() {
-    if !is_unlocked() {
+    let now = SystemTime::now();
+    let Ok(mut guard) = key_state().lock() else {
+        return;
+    };
+    if guard.key.is_none() || expire_key_if_needed(&mut guard, now) {
         return;
     }
-    if let Ok(mut guard) = key_state().lock() {
-        if guard.key.is_some() {
-            guard.last_activity = Some(Instant::now());
+    if let Some(last) = guard.last_activity {
+        if now
+            .duration_since(last)
+            .map(|elapsed| elapsed < MIN_ACTIVITY_TOUCH_INTERVAL)
+            .unwrap_or(true)
+        {
+            return;
         }
     }
+    guard.last_activity = Some(now);
+    guard.expires_at = expiry_deadline(now, guard.lock_timeout_secs);
 }
 
 pub(crate) fn remove_file_if_present(path: &std::path::Path) -> Result<(), String> {
@@ -1912,15 +3540,34 @@ pub(crate) fn remove_file_if_present(path: &std::path::Path) -> Result<(), Strin
 
 fn validate_factory_settings(settings_json: &str) -> Result<(), String> {
     // Destructive endpoint: fail closed on oversized or misshapen payloads
-    // before the preflight reads. Extras are allowed (schema v2), so shape
-    // validation is limited to object-ness plus a size cap.
+    // before the preflight reads. A reset restores UI preferences, never
+    // security or setup state: `_setupComplete` and other underscored extras
+    // are rejected so a forged journal cannot skip the setup wizard or weaken
+    // later prompts.
     if settings_json.len() > 256 * 1024 {
         return Err("Factory settings payload is too large".to_string());
     }
     let settings_value: serde_json::Value = serde_json::from_str(settings_json)
         .map_err(|err| format!("Invalid factory settings JSON: {}", err))?;
-    if !settings_value.is_object() {
-        return Err("Factory settings payload must be a JSON object".to_string());
+    let settings = settings_value
+        .as_object()
+        .ok_or_else(|| "Factory settings payload must be a JSON object".to_string())?;
+    for key in settings.keys() {
+        if matches!(
+            key.as_str(),
+            "__proto__" | "constructor" | "prototype" | "_setupComplete"
+        ) {
+            return Err(format!(
+                "Factory settings payload must not contain '{}'",
+                key
+            ));
+        }
+        if key.starts_with('_') && key != "_schemaVersion" {
+            return Err(format!(
+                "Factory settings payload must not contain setup extras ('{}')",
+                key
+            ));
+        }
     }
     Ok(())
 }
@@ -1929,8 +3576,15 @@ fn validate_factory_settings(settings_json: &str) -> Result<(), String> {
 ///
 /// Every step is idempotent and the journal is removed last, so a crash after
 /// any individual write/delete resumes toward the same fully reset state.
+///
+/// `Automatic` replay (startup or unlock) requires a journal authenticated by
+/// the current vault key. A locally written journal without that tag is left
+/// untouched: it cannot silently delete a locked vault, bookmarks, or settings.
+/// `CallerConfirmed` is used only after the reset command obtained a fresh
+/// native confirmation and wrote the journal itself.
 fn recover_interrupted_factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     app: &M,
+    replay: FactoryResetReplay,
 ) -> Result<(), String> {
     let journal_path = factory_reset_journal_path(app)?;
     if !journal_path.exists() {
@@ -1951,7 +3605,7 @@ fn recover_interrupted_factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<
             err
         )
     })?;
-    if journal.v != 1 {
+    if journal.v != 1 && journal.v != FACTORY_RESET_JOURNAL_VERSION {
         return Err(format!(
             "Unsupported factory-reset journal version {}; journal retained",
             journal.v
@@ -1959,10 +3613,65 @@ fn recover_interrupted_factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<
     }
     validate_factory_settings(&journal.settings_json)?;
 
+    // Verify the keyed tag before any destructive step. A journal written while
+    // the vault was unlocked is bound to that vault; a tagged journal whose
+    // previous fingerprint no longer matches is stale or forged. When the vault
+    // is locked the tag cannot be checked, so automatic replay waits until the
+    // key is available (unlock calls recovery again) and never guesses.
+    let mut authenticated = false;
+    if !journal.mac.is_empty() {
+        match require_unlocked_key() {
+            Ok(key) => {
+                let current = load_security_config(app)?;
+                let matches_previous = journal
+                    .previous
+                    .as_ref()
+                    .is_some_and(|previous| fingerprint(&current) == *previous);
+                if matches_previous {
+                    if current.encryption_enabled {
+                        validate_config_key(&current, &key)?;
+                    }
+                    verify_factory_reset_mac(&journal, &key)?;
+                    authenticated = true;
+                } else if replay == FactoryResetReplay::Automatic {
+                    return Err(
+                        "Factory-reset journal does not match the current vault configuration; \
+                         journal retained and no data changed"
+                            .to_string(),
+                    );
+                }
+            }
+            Err(_) => {
+                if replay == FactoryResetReplay::Automatic {
+                    // Do not consume an unverifiable journal. Unlock runs
+                    // recovery again with the key resident.
+                    return Err(
+                        "Factory-reset journal cannot be authenticated while the vault is locked; \
+                         journal retained and no data changed"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    if !authenticated && replay == FactoryResetReplay::Automatic {
+        return Err(
+            "Factory-reset journal is not authenticated by the current vault key; journal \
+             retained and no data changed. Run Factory Reset from Settings to continue."
+                .to_string(),
+        );
+    }
+
     // Previous releases committed v1 journals without a recovery-session
     // target. Choose it once, then durably add it to the journal before any
-    // replay action so every retry rotates to the same value.
+    // replay action so every retry rotates to the same value. A v2 journal
+    // always carries one; its absence is corruption, not an upgrade case.
     if journal.target_recovery_session.is_none() {
+        if journal.v >= FACTORY_RESET_JOURNAL_VERSION {
+            return Err(
+                "Factory-reset journal has no recovery session; journal retained".to_string(),
+            );
+        }
         journal.target_recovery_session = Some(crate::mint_transfer_recovery_session());
         let upgraded = serde_json::to_string_pretty(&journal).map_err(|err| err.to_string())?;
         atomic_write(&journal_path, &upgraded)?;
@@ -1990,6 +3699,11 @@ fn recover_interrupted_factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<
             err
         )
     })?;
+
+    // A factory reset is the escape hatch from a wedged migration or biometric
+    // recovery. Its own intent journal is durable, so any earlier recovery
+    // evidence can be discarded instead of blocking the destructive cleanup.
+    clear_recovery_evidence_for_reset(app)?;
 
     // Security and settings are both replayed from the durable journal. If a
     // crash lands between them, protected I/O stays latched until this function
@@ -2029,10 +3743,26 @@ pub(crate) async fn factory_reset(
     state: tauri::State<'_, crate::AppState>,
     settings_json: String,
 ) -> Result<SecurityStatus, String> {
-    if let Err(err) = crate::s3::stop_all_transfers_for_reset().await {
-        crate::s3::resume_transfers_after_failed_reset();
-        return Err(err);
+    // Ask natively before stopping transfers or writing the durable intent
+    // journal. Declining must leave running transfers and every file untouched.
+    let prompt_app = app.clone();
+    let confirmed = run_blocking(move || {
+        Ok::<bool, String>(confirm_security_state_change(
+            &prompt_app,
+            "Delete All App Data?",
+            "This permanently deletes saved connections, encrypted storage, transfer checkpoints, and partial downloads. This cannot be undone.",
+            "Delete Everything",
+        ))
+    })
+    .await?;
+    if !confirmed {
+        return Err(SECURITY_CONFIRMATION_CANCELLED.to_string());
     }
+
+    let mut reset_gate = match crate::s3::stop_all_transfers_for_reset().await {
+        Ok(gate) => gate,
+        Err(err) => return Err(err),
+    };
 
     let reset_app = app.clone();
     let result = run_blocking(move || factory_reset_inner(&reset_app, &settings_json)).await;
@@ -2043,8 +3773,10 @@ pub(crate) async fn factory_reset(
         let reset_pending = factory_reset_journal_path(&app)
             .map(|path| path.exists())
             .unwrap_or(true);
-        if !reset_pending {
-            crate::s3::resume_transfers_after_failed_reset();
+        if reset_pending {
+            reset_gate.keep_closed();
+        } else {
+            reset_gate.reopen();
         }
         return result;
     }
@@ -2056,7 +3788,7 @@ pub(crate) async fn factory_reset(
     let invalidation = crate::lock_s3_state(&state).map(|mut s3| {
         crate::s3::invalidate_connection_session(&mut s3);
     });
-    crate::s3::resume_transfers_after_failed_reset();
+    reset_gate.reopen();
     invalidation?;
     result
 }
@@ -2066,37 +3798,24 @@ fn factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     settings_json: &str,
 ) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
-    ensure_migration_recovered()?;
+    // Deliberately no `ensure_migration_recovered`: factory reset is the
+    // supported escape hatch from a wedged migration or credential cleanup.
     validate_factory_settings(settings_json)?;
 
-    let config = load_security_config(app)?;
+    // The configuration only decides whether checkpoint scratch paths can be
+    // named. A corrupt or missing security.json must not make deletion
+    // impossible, so its failure is downgraded to "vault not readable".
+    let config = load_security_config(app).ok();
     let managed = managed_data_files(app)?;
     // Complete every fallible read before recording reset intent, so a broken
     // filesystem is reported before anything is destroyed. A factory reset
     // deletes this data by definition, so being able to *decrypt* it is not a
-    // precondition: when the vault is locked, check readability at the I/O level
-    // only. Requiring the key here would make "Delete Everything" impossible for
-    // exactly the users most likely to need it.
-    let vault_open = vault_is_readable(&config);
-    for (id, path, default_value) in &managed {
+    // precondition; only I/O readability is checked.
+    for (_, path, _) in &managed {
         if !path.exists() {
             continue;
         }
-        let result = if vault_open {
-            // A file an interrupted upgrade sweep left plaintext must not block
-            // the reset that would clean it up anyway.
-            let legacy = if LEGACY_PLAINTEXT_CAPABLE_FILES.contains(id) {
-                LegacyPlaintext::Adopt
-            } else {
-                LegacyPlaintext::Reject
-            };
-            read_protected_file_with_legacy(path, default_value, &config, legacy).map(|_| ())
-        } else {
-            std::fs::read_to_string(path)
-                .map(|_| ())
-                .map_err(|err| err.to_string())
-        };
-        result.map_err(|err| {
+        std::fs::read_to_string(path).map(|_| ()).map_err(|err| {
             format!(
                 "Factory reset preflight failed for '{}': {}",
                 path.display(),
@@ -2104,29 +3823,50 @@ fn factory_reset_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
             )
         })?;
     }
-    // Without the key the checkpoints cannot name their partial download files.
-    // Those files are then left on disk: the reset removes the records that point
-    // at them, so nothing can reclaim them automatically afterwards. Blocking the
-    // reset instead would trap a user who cannot unlock, so the leak is the
-    // deliberate cost of keeping the escape hatch open.
-    let checkpoint_scratch_paths = if vault_open {
-        collect_transfer_checkpoint_scratch_paths(app, &config)?
+    // Without a readable vault the checkpoints cannot name their partial
+    // download files. Those files are then left on disk: the reset removes the
+    // records that point at them, so nothing can reclaim them automatically
+    // afterwards. Blocking the reset instead would trap a user who cannot
+    // unlock, so the leak is the deliberate cost of keeping the escape hatch
+    // open.
+    let vault_open = config.as_ref().is_some_and(vault_is_readable);
+    let checkpoint_scratch_paths = if vault_open && migration_recovery_is_healthy() {
+        match config.as_ref() {
+            Some(config) => {
+                collect_transfer_checkpoint_scratch_paths(app, config).unwrap_or_default()
+            }
+            None => Vec::new(),
+        }
     } else {
         Vec::new()
     };
 
-    let journal = FactoryResetJournal {
-        v: 1,
+    let previous = config.as_ref().map(fingerprint);
+    let mut journal = FactoryResetJournal {
+        v: FACTORY_RESET_JOURNAL_VERSION,
         settings_json: settings_json.to_string(),
         entries: managed.iter().map(|(id, _, _)| *id).collect(),
         checkpoint_scratch_paths,
         target_recovery_session: Some(crate::mint_transfer_recovery_session()),
+        previous,
+        mac: String::new(),
     };
+    // When the vault is open, bind the journal to the vault key so startup
+    // replay can prove the reset was authorised by this vault rather than by a
+    // local file writer. A locked/plaintext reset has no key; it is still
+    // replayed immediately under the caller's fresh native confirmation.
+    if let Some(current) = config.as_ref() {
+        if let Ok(key) = require_unlocked_key() {
+            if validate_config_key(current, &key).is_ok() {
+                sign_factory_reset_journal(&mut journal, &key)?;
+            }
+        }
+    }
     let journal_json = serde_json::to_string_pretty(&journal).map_err(|err| err.to_string())?;
     let journal_path = factory_reset_journal_path(app)?;
     atomic_write(&journal_path, &journal_json)?;
 
-    let result = recover_interrupted_factory_reset_inner(app);
+    let result = recover_interrupted_factory_reset_inner(app, FactoryResetReplay::CallerConfirmed);
     match &result {
         Ok(()) => set_migration_recovery_failure(None),
         Err(error) => set_migration_recovery_failure(Some(error.clone())),
@@ -2155,8 +3895,11 @@ fn reset_security_inner<R: tauri::Runtime, M: tauri::Manager<R>>(
     destroy_encrypted_data: bool,
 ) -> Result<SecurityStatus, String> {
     let _storage_guard = lock_storage_ops()?;
-    ensure_migration_recovered()?;
+    // Destructive reset is also an escape hatch from failed recovery.
     let config = load_security_config(app)?;
+    if destroy_encrypted_data {
+        quarantine_unreadable_leases(app, true)?;
+    }
     // Scratch paths can only be read while the vault is open. When the caller has
     // already accepted the loss of encrypted data, a locked vault must not block
     // the reset: the checkpoints are removed either way, and the only cost is
@@ -2350,6 +4093,7 @@ mod tests {
             // Process-global latch: one failed biometric/migration cleanup must
             // not poison every later test in the same cargo-test process.
             set_migration_recovery_failure(None);
+            LEGACY_LOCK_TIMEOUT_DEFAULTED.store(false, Ordering::Release);
             let _ = set_unlocked_key(None, 0);
 
             Self {
@@ -2367,6 +4111,7 @@ mod tests {
     impl Drop for TestEnvGuard {
         fn drop(&mut self) {
             set_migration_recovery_failure(None);
+            LEGACY_LOCK_TIMEOUT_DEFAULTED.store(false, Ordering::Release);
             let _ = set_unlocked_key(None, 0);
             restore_env_var("HOME", &self.home);
             restore_env_var("APPDATA", &self.appdata);
@@ -2418,6 +4163,84 @@ mod tests {
     #[test]
     fn constant_time_eq_empty_slices() {
         assert!(constant_time_eq(b"", b""));
+    }
+
+    /// The throttle must stay a bounded window: repeated failures may delay a
+    /// retry, but never require an app restart.
+    #[test]
+    fn unlock_throttle_is_bounded_and_expires() {
+        let _env = TestEnvGuard::new("unlock-throttle");
+        let config = default_security_config();
+        clear_unlock_failures();
+        let mut delay = Duration::ZERO;
+        for _ in 0..(MAX_UNLOCK_FAILURES + 5) {
+            delay = record_unlock_failure(&config);
+        }
+        assert!(delay <= MAX_UNLOCK_BACKOFF);
+        assert!(
+            check_unlock_throttle(&config).is_err(),
+            "window must be active"
+        );
+
+        // Simulate the bounded window elapsing. The same password path is
+        // accepted again without clearing process state or restarting.
+        {
+            let mut throttle = unlock_throttle().lock().unwrap();
+            throttle.blocked_until = Some(SystemTime::now() - Duration::from_secs(1));
+        }
+        assert!(check_unlock_throttle(&config).is_ok());
+        clear_unlock_failures();
+    }
+
+    #[test]
+    fn lock_timeout_increases_and_values_above_default_require_confirmation() {
+        assert!(!lock_timeout_change_weakens(15, 15));
+        assert!(!lock_timeout_change_weakens(15, 5));
+        assert!(lock_timeout_change_weakens(0, 15));
+        assert!(lock_timeout_change_weakens(15, 0));
+        assert!(lock_timeout_change_weakens(5, 15));
+        assert!(lock_timeout_change_weakens(5, 30));
+        assert!(lock_timeout_change_weakens(60, 30));
+        assert!(!lock_timeout_change_weakens(60, 60));
+    }
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// RFC 4231 test vectors 2, 6, and 7. The long-key cases catch an
+    /// implementation that folds key bytes with XOR instead of hashing keys
+    /// larger than the SHA-256 block size.
+    #[test]
+    fn hmac_sha256_matches_rfc_4231_vectors() {
+        let case2 = hmac_sha256(b"Jefe", &[b"what do ya want for nothing?"]);
+        assert_eq!(
+            case2.as_slice(),
+            hex_bytes("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+        );
+
+        let long_key = [0xaau8; 131];
+        let case6 = hmac_sha256(
+            &long_key,
+            &[b"Test Using Larger Than Block-Size Key - Hash Key First"],
+        );
+        assert_eq!(
+            case6.as_slice(),
+            hex_bytes("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
+        );
+
+        let case7 = hmac_sha256(
+            &long_key,
+            &[b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm."],
+        );
+        assert_eq!(
+            case7.as_slice(),
+            hex_bytes("9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2")
+        );
     }
 
     #[test]
@@ -2493,6 +4316,8 @@ mod tests {
         assert!(!config.initialized);
         assert!(config.encryption_enabled);
         assert_eq!(config.pbkdf2_iterations, PBKDF2_ITERATIONS);
+        assert_eq!(config.kdf, KdfAlgorithm::Argon2id);
+        assert_eq!(config.policy_schema, POLICY_SCHEMA_CURRENT);
     }
 
     #[tokio::test]
@@ -2538,9 +4363,15 @@ mod tests {
             verifier: B64.encode(legacy_verifier),
             lock_timeout_minutes: 15,
             pbkdf2_iterations: legacy_iterations,
+            kdf: KdfAlgorithm::Pbkdf2,
+            argon2_memory_kib: ARGON2_MEMORY_KIB,
+            argon2_iterations: ARGON2_ITERATIONS,
+            argon2_parallelism: ARGON2_PARALLELISM,
+            policy_schema: POLICY_SCHEMA_LEGACY,
             biometric_enrolled: false,
             legacy_plaintext_adopted: false,
             legacy_plaintext_adoption_proof: String::new(),
+            policy_mac: String::new(),
         };
         save_security_config(&app_handle, &legacy_config).unwrap();
 
@@ -2550,6 +4381,12 @@ mod tests {
 
         let migrated_config = load_security_config(&app_handle).unwrap();
         assert_eq!(migrated_config.pbkdf2_iterations, PBKDF2_ITERATIONS);
+        assert_eq!(migrated_config.kdf, KdfAlgorithm::Argon2id);
+        assert_eq!(migrated_config.argon2_memory_kib, ARGON2_MEMORY_KIB);
+        assert_eq!(migrated_config.argon2_iterations, ARGON2_ITERATIONS);
+        assert_eq!(migrated_config.argon2_parallelism, ARGON2_PARALLELISM);
+        assert_eq!(migrated_config.policy_schema, POLICY_SCHEMA_CURRENT);
+        assert!(!migrated_config.policy_mac.is_empty());
         assert_ne!(migrated_config.salt, legacy_config.salt);
         assert_ne!(migrated_config.verifier, legacy_config.verifier);
 
@@ -2673,6 +4510,7 @@ mod tests {
         unlock_security_inner(&handle, "second password".to_string()).unwrap();
 
         let config = load_security_config(&handle).unwrap();
+        assert_eq!(config.kdf, KdfAlgorithm::Argon2id);
         for (path, original) in &seeded {
             let value = read_protected_file(path, "", &config).unwrap();
             assert_eq!(&value, original, "{} lost its contents", path.display());
@@ -2701,6 +4539,8 @@ mod tests {
         let mut upgraded = load_security_config(&handle).unwrap();
         upgraded.legacy_plaintext_adopted = false;
         upgraded.legacy_plaintext_adoption_proof.clear();
+        upgraded.policy_mac.clear();
+        upgraded.policy_schema = POLICY_SCHEMA_LEGACY;
         save_security_config(&handle, &upgraded).unwrap();
 
         let manifest = crate::transfer_manifest_path(&handle).unwrap();
@@ -2766,20 +4606,25 @@ mod tests {
         let mut old = load_security_config(&handle).unwrap();
         old.legacy_plaintext_adopted = false;
         old.legacy_plaintext_adoption_proof.clear();
+        old.policy_mac.clear();
+        old.policy_schema = POLICY_SCHEMA_LEGACY;
         save_security_config(&handle, &old).unwrap();
         set_unlocked_key(None, 0).unwrap();
         unlock_security_inner(&handle, "first password".to_string()).unwrap();
         let adopted = load_security_config(&handle).unwrap();
         assert!(!adopted.legacy_plaintext_adoption_proof.is_empty());
 
-        // Remove only the unauthenticated compatibility marker while retaining
-        // the keyed proof, then replace a legacy-capable file with plaintext.
+        // Remove the unauthenticated compatibility marker and the policy tag,
+        // as a configuration written before the tag existed would look, while
+        // retaining the keyed proof. The proof must still prevent re-arming.
         let security_file = security_path(&handle).unwrap();
         let mut raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&security_file).unwrap()).unwrap();
         raw.as_object_mut()
             .unwrap()
             .remove("legacy_plaintext_adopted");
+        raw.as_object_mut().unwrap().remove("policy_mac");
+        raw.as_object_mut().unwrap().remove("policy_schema");
         atomic_write(&security_file, &serde_json::to_string_pretty(&raw).unwrap()).unwrap();
 
         let manifest = crate::transfer_manifest_path(&handle).unwrap();
@@ -2814,6 +4659,8 @@ mod tests {
         let mut config = load_security_config(&handle).unwrap();
         config.legacy_plaintext_adopted = false;
         config.legacy_plaintext_adoption_proof.clear();
+        config.policy_mac.clear();
+        config.policy_schema = POLICY_SCHEMA_LEGACY;
         save_security_config(&handle, &config).unwrap();
 
         let manifest = crate::transfer_manifest_path(&handle).unwrap();
@@ -2936,6 +4783,8 @@ mod tests {
         let mut upgraded = load_security_config(&handle).unwrap();
         upgraded.legacy_plaintext_adopted = false;
         upgraded.legacy_plaintext_adoption_proof.clear();
+        upgraded.policy_mac.clear();
+        upgraded.policy_schema = POLICY_SCHEMA_LEGACY;
         save_security_config(&handle, &upgraded).unwrap();
         set_unlocked_key(None, 0).unwrap();
 
@@ -2981,6 +4830,8 @@ mod tests {
         let mut upgraded = load_security_config(&handle).unwrap();
         upgraded.legacy_plaintext_adopted = false;
         upgraded.legacy_plaintext_adoption_proof.clear();
+        upgraded.policy_mac.clear();
+        upgraded.policy_schema = POLICY_SCHEMA_LEGACY;
         save_security_config(&handle, &upgraded).unwrap();
         set_unlocked_key(None, 0).unwrap();
 
@@ -3029,6 +4880,8 @@ mod tests {
         let mut upgraded = load_security_config(&handle).unwrap();
         upgraded.legacy_plaintext_adopted = false;
         upgraded.legacy_plaintext_adoption_proof.clear();
+        upgraded.policy_mac.clear();
+        upgraded.policy_schema = POLICY_SCHEMA_LEGACY;
         save_security_config(&handle, &upgraded).unwrap();
 
         let manifest = crate::transfer_manifest_path(&handle).unwrap();
@@ -3081,9 +4934,15 @@ mod tests {
             verifier: B64.encode(key_verifier(&key)),
             lock_timeout_minutes: 0,
             pbkdf2_iterations: MIN_PBKDF2_ITERATIONS,
+            kdf: KdfAlgorithm::Pbkdf2,
+            argon2_memory_kib: ARGON2_MEMORY_KIB,
+            argon2_iterations: ARGON2_ITERATIONS,
+            argon2_parallelism: ARGON2_PARALLELISM,
+            policy_schema: POLICY_SCHEMA_LEGACY,
             biometric_enrolled: false,
             legacy_plaintext_adopted: true,
             legacy_plaintext_adoption_proof: adoption_proof_string(&key),
+            policy_mac: String::new(),
         };
         let journal_path = crate::security_journal_path(&handle).unwrap();
         let journal = MigrationJournal {
@@ -3147,9 +5006,15 @@ mod tests {
             verifier: B64.encode(key_verifier(&key)),
             lock_timeout_minutes: 0,
             pbkdf2_iterations: MIN_PBKDF2_ITERATIONS,
+            kdf: KdfAlgorithm::Pbkdf2,
+            argon2_memory_kib: ARGON2_MEMORY_KIB,
+            argon2_iterations: ARGON2_ITERATIONS,
+            argon2_parallelism: ARGON2_PARALLELISM,
+            policy_schema: POLICY_SCHEMA_LEGACY,
             biometric_enrolled: false,
             legacy_plaintext_adopted: true,
             legacy_plaintext_adoption_proof: adoption_proof_string(&key),
+            policy_mac: String::new(),
         };
         let journal_path = crate::security_journal_path(&handle).unwrap();
         let journal = MigrationJournal {
@@ -3166,6 +5031,9 @@ mod tests {
         .unwrap();
         // Commit the configuration, then "die" before publishing the renames.
         save_security_config(&handle, &target).unwrap();
+        // The target key is needed to authenticate staged ciphertext; startup
+        // recovery without it deliberately defers until the user unlocks.
+        set_unlocked_key(Some(*key), 0).unwrap();
 
         recover_interrupted_migration(&handle).unwrap();
 
@@ -3279,6 +5147,10 @@ mod tests {
 
         let key = derive_key("pw", b"salt1234salt1234", MIN_PBKDF2_ITERATIONS);
         let path = crate::bookmarks_path(&handle).unwrap();
+        // A lost security.json with ciphertext on disk is classified as
+        // unrecoverable and refused earlier; seed the plaintext config so this
+        // test exercises the reset confirmation instead.
+        save_security_config(&handle, &uninitialized_plaintext_config()).unwrap();
         std::fs::write(&path, encrypt_text("[]", &key).unwrap()).unwrap();
 
         let err = reset_security_inner(&handle, false)
@@ -3313,9 +5185,15 @@ mod tests {
             verifier: B64.encode([9u8; KEY_LEN]),
             lock_timeout_minutes: 15,
             pbkdf2_iterations: PBKDF2_ITERATIONS,
+            kdf: KdfAlgorithm::Argon2id,
+            argon2_memory_kib: ARGON2_MEMORY_KIB,
+            argon2_iterations: ARGON2_ITERATIONS,
+            argon2_parallelism: ARGON2_PARALLELISM,
+            policy_schema: POLICY_SCHEMA_LEGACY,
             biometric_enrolled: true,
             legacy_plaintext_adopted: true,
             legacy_plaintext_adoption_proof: String::new(),
+            policy_mac: String::new(),
         }
     }
 
@@ -3570,6 +5448,8 @@ mod tests {
                 .collect(),
             checkpoint_scratch_paths: Vec::new(),
             target_recovery_session: Some("malformed".to_string()),
+            previous: None,
+            mac: String::new(),
         };
         let journal_path = factory_reset_journal_path(&handle).unwrap();
         atomic_write(
@@ -3578,7 +5458,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            recover_interrupted_migration(&handle).is_err(),
+            recover_interrupted_factory_reset_inner(&handle, FactoryResetReplay::CallerConfirmed)
+                .is_err(),
             "a malformed journal session must fail closed"
         );
         assert!(journal_path.exists(), "malformed journal must be retained");
@@ -3602,7 +5483,8 @@ mod tests {
         save_security_config(&handle, &default_security_config()).unwrap();
         remove_file_if_present(&seeded[0].0).unwrap();
 
-        recover_interrupted_migration(&handle).unwrap();
+        recover_interrupted_factory_reset_inner(&handle, FactoryResetReplay::CallerConfirmed)
+            .unwrap();
 
         assert_ne!(
             crate::load_or_create_transfer_recovery_session_unchecked(&handle).unwrap(),
@@ -3629,6 +5511,178 @@ mod tests {
         }
     }
 
+    /// A locally written factory-reset journal must not delete an encrypted
+    /// vault, downgrade it to plaintext, or change settings at startup.
+    #[test]
+    fn forged_factory_reset_journal_cannot_wipe_or_downgrade_the_vault() {
+        let _env = TestEnvGuard::new("factory-reset-forged");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        let seeded = seed_managed_files(&handle);
+        let settings_path = crate::settings_path(&handle).unwrap();
+        atomic_write(&settings_path, "{\"theme\":\"dark\"}").unwrap();
+
+        let config = load_security_config(&handle).unwrap();
+        let entries: Vec<ManagedDataId> = managed_data_files(&handle)
+            .unwrap()
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect();
+        let mut journal = FactoryResetJournal {
+            v: FACTORY_RESET_JOURNAL_VERSION,
+            settings_json: "{\"theme\":\"system\"}".to_string(),
+            entries,
+            checkpoint_scratch_paths: Vec::new(),
+            target_recovery_session: Some(crate::mint_transfer_recovery_session()),
+            previous: Some(fingerprint(&config)),
+            mac: B64.encode([0u8; 32]),
+        };
+        let journal_path = factory_reset_journal_path(&handle).unwrap();
+        atomic_write(
+            &journal_path,
+            &serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+
+        let err = recover_interrupted_migration(&handle)
+            .expect_err("a forged tagged journal must not replay");
+        assert!(err.contains("authentication"), "unexpected error: {err}");
+        assert!(journal_path.exists(), "forged journal must be retained");
+        let still_encrypted = load_security_config(&handle).unwrap();
+        assert!(still_encrypted.initialized && still_encrypted.encryption_enabled);
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            "{\"theme\":\"dark\"}"
+        );
+        for (path, _) in &seeded {
+            assert!(path.exists(), "forged reset deleted {}", path.display());
+        }
+
+        // An unauthenticated journal cannot replay while the vault is locked.
+        journal.mac.clear();
+        atomic_write(
+            &journal_path,
+            &serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        set_unlocked_key(None, 0).unwrap();
+        let err = recover_interrupted_migration(&handle)
+            .expect_err("an unauthenticated journal must not replay while locked");
+        assert!(
+            err.contains("authenticated") || err.contains("locked"),
+            "unexpected error: {err}"
+        );
+        assert!(journal_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            "{\"theme\":\"dark\"}"
+        );
+        for (path, _) in &seeded {
+            assert!(
+                path.exists(),
+                "locked vault data deleted: {}",
+                path.display()
+            );
+        }
+
+        // `_setupComplete` is not a factory preference: it must never be set by
+        // the reset payload, which is what would skip the setup wizard.
+        let err = factory_reset_inner(&handle, "{\"_setupComplete\":true}")
+            .expect_err("setup state must not be settable through factory reset");
+        assert!(err.contains("_setupComplete"), "unexpected error: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            "{\"theme\":\"dark\"}"
+        );
+
+        // The same tampering inside a durable journal is rejected at replay.
+        journal.settings_json = "{\"_setupComplete\":true}".to_string();
+        atomic_write(
+            &journal_path,
+            &serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        let err =
+            recover_interrupted_factory_reset_inner(&handle, FactoryResetReplay::CallerConfirmed)
+                .expect_err("journal settings must not skip the setup wizard");
+        assert!(err.contains("_setupComplete"), "unexpected error: {err}");
+        assert!(journal_path.exists(), "rejected journal must be retained");
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            "{\"theme\":\"dark\"}"
+        );
+
+        set_unlocked_key(None, 0).unwrap();
+    }
+
+    /// A broken migration journal must not prevent an authenticated factory
+    /// reset from finishing, and the reset must remove the migration evidence it
+    /// supersedes.
+    #[test]
+    fn factory_reset_recovery_runs_even_when_migration_recovery_fails() {
+        let _env = TestEnvGuard::new("factory-reset-independent");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        let seeded = seed_managed_files(&handle);
+        let settings_path = crate::settings_path(&handle).unwrap();
+        atomic_write(&settings_path, "{\"theme\":\"dark\"}").unwrap();
+
+        let config = load_security_config(&handle).unwrap();
+        let key = require_unlocked_key().unwrap();
+        let mut journal = FactoryResetJournal {
+            v: FACTORY_RESET_JOURNAL_VERSION,
+            settings_json: "{\"theme\":\"system\"}".to_string(),
+            entries: managed_data_files(&handle)
+                .unwrap()
+                .iter()
+                .map(|(id, _, _)| *id)
+                .collect(),
+            checkpoint_scratch_paths: Vec::new(),
+            target_recovery_session: Some(crate::mint_transfer_recovery_session()),
+            previous: Some(fingerprint(&config)),
+            mac: String::new(),
+        };
+        sign_factory_reset_journal(&mut journal, &key).unwrap();
+        drop(key);
+        let journal_path = factory_reset_journal_path(&handle).unwrap();
+        atomic_write(
+            &journal_path,
+            &serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+
+        // The migration journal is corrupt and will fail recovery; the reset
+        // journal is authenticated and must still be replayed.
+        let migration_journal = crate::security_journal_path(&handle).unwrap();
+        std::fs::write(&migration_journal, "{not-valid-json").unwrap();
+
+        let err = recover_interrupted_migration(&handle)
+            .expect_err("the migration failure must still be reported");
+        assert!(err.contains("unreadable"), "unexpected error: {err}");
+        assert!(!journal_path.exists(), "factory reset must complete");
+        assert!(
+            !migration_journal.exists(),
+            "reset must clear migration evidence"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            "{\"theme\":\"system\"}"
+        );
+        let config = load_security_config(&handle).unwrap();
+        assert!(!config.initialized && !config.encryption_enabled);
+        for (path, _) in seeded {
+            assert!(!path.exists(), "managed data survived: {}", path.display());
+        }
+
+        set_unlocked_key(None, 0).unwrap();
+    }
+
     /// M11: key-derivation parameters read from disk are bounded.
     #[test]
     fn kdf_params_are_validated() {
@@ -3639,9 +5693,15 @@ mod tests {
             verifier: String::new(),
             lock_timeout_minutes: 0,
             pbkdf2_iterations: PBKDF2_ITERATIONS,
+            kdf: KdfAlgorithm::Pbkdf2,
+            argon2_memory_kib: ARGON2_MEMORY_KIB,
+            argon2_iterations: ARGON2_ITERATIONS,
+            argon2_parallelism: ARGON2_PARALLELISM,
+            policy_schema: POLICY_SCHEMA_LEGACY,
             biometric_enrolled: false,
             legacy_plaintext_adopted: true,
             legacy_plaintext_adoption_proof: String::new(),
+            policy_mac: String::new(),
         };
         assert!(validate_kdf_params(&config).is_ok());
 
@@ -3660,6 +5720,74 @@ mod tests {
             validate_kdf_params(&config).is_err(),
             "salt length not enforced"
         );
+
+        // Argon2 parameters are bounded independently of the PBKDF2 fields.
+        config.salt = B64.encode(b"salt1234salt1234");
+        config.kdf = KdfAlgorithm::Argon2id;
+        config.pbkdf2_iterations = 0;
+        assert!(
+            validate_kdf_params(&config).is_ok(),
+            "PBKDF2 metadata must not gate an Argon2 vault"
+        );
+
+        config.argon2_memory_kib = MIN_ARGON2_MEMORY_KIB - 1;
+        assert!(
+            validate_kdf_params(&config).is_err(),
+            "Argon2 memory floor not enforced"
+        );
+        config.argon2_memory_kib = MAX_ARGON2_MEMORY_KIB + 1;
+        assert!(
+            validate_kdf_params(&config).is_err(),
+            "Argon2 memory ceiling not enforced"
+        );
+
+        config.argon2_memory_kib = ARGON2_MEMORY_KIB;
+        config.argon2_iterations = MIN_ARGON2_ITERATIONS - 1;
+        assert!(
+            validate_kdf_params(&config).is_err(),
+            "Argon2 iteration floor not enforced"
+        );
+        config.argon2_iterations = MAX_ARGON2_ITERATIONS + 1;
+        assert!(
+            validate_kdf_params(&config).is_err(),
+            "Argon2 iteration ceiling not enforced"
+        );
+
+        config.argon2_iterations = ARGON2_ITERATIONS;
+        config.argon2_parallelism = MIN_ARGON2_PARALLELISM - 1;
+        assert!(
+            validate_kdf_params(&config).is_err(),
+            "Argon2 parallelism floor not enforced"
+        );
+        config.argon2_parallelism = MAX_ARGON2_PARALLELISM + 1;
+        assert!(
+            validate_kdf_params(&config).is_err(),
+            "Argon2 parallelism ceiling not enforced"
+        );
+        config.argon2_parallelism = ARGON2_PARALLELISM;
+        assert!(validate_kdf_params(&config).is_ok());
+    }
+
+    #[test]
+    fn corrupt_argon2_parameters_are_rejected_on_load() {
+        let _env = TestEnvGuard::new("argon2-load-bounds");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        let mut config = load_security_config(&handle).unwrap();
+        config.argon2_memory_kib = MIN_ARGON2_MEMORY_KIB - 1;
+        save_security_config(&handle, &config).unwrap();
+
+        let err = match load_security_config(&handle) {
+            Ok(_) => panic!("out-of-range Argon2 memory must not load"),
+            Err(err) => err,
+        };
+        assert!(err.contains("Argon2"), "unexpected error: {err}");
+
+        set_unlocked_key(None, 0).unwrap();
     }
 
     #[test]
@@ -3670,6 +5798,581 @@ mod tests {
         assert!(!looks_encrypted("{\"name\":\"prod\"}"));
         assert!(!looks_encrypted(""));
         assert!(!looks_encrypted("   "));
+    }
+
+    #[test]
+    fn fresh_install_without_config_refuses_ciphertext() {
+        let _env = TestEnvGuard::new("fresh-install-ciphertext");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        let key = derive_key("pw", b"salt1234salt1234", MIN_PBKDF2_ITERATIONS);
+        let path = crate::bookmarks_path(&handle).unwrap();
+        std::fs::write(&path, encrypt_text("[{\"name\":\"prod\"}]", &key).unwrap()).unwrap();
+
+        let err = match load_security_config(&handle) {
+            Ok(_) => panic!("ciphertext without security.json must fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.contains("security.json"), "unexpected error: {err}");
+        assert!(
+            !security_path(&handle).unwrap().exists(),
+            "classification must not create a plaintext configuration"
+        );
+    }
+
+    #[test]
+    fn plaintext_write_refuses_to_overwrite_ciphertext() {
+        let _env = TestEnvGuard::new("plaintext-write-guard");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        let key = derive_key("pw", b"salt1234salt1234", MIN_PBKDF2_ITERATIONS);
+        let path = crate::bookmarks_path(&handle).unwrap();
+        let ciphertext = encrypt_text("[{\"name\":\"prod\"}]", &key).unwrap();
+        std::fs::write(&path, &ciphertext).unwrap();
+
+        let err = write_protected_file(&path, "[]", &uninitialized_plaintext_config())
+            .expect_err("plaintext must not overwrite ciphertext");
+        assert!(err.contains("still encrypted"), "unexpected error: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ciphertext);
+    }
+
+    #[test]
+    fn disable_migration_rejects_plaintext_managed_file() {
+        let _env = TestEnvGuard::new("disable-plaintext-guard");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        let key = derive_key("pw", b"salt1234salt1234", MIN_PBKDF2_ITERATIONS);
+        let path = crate::bookmarks_path(&handle).unwrap();
+        std::fs::write(&path, "[{\"name\":\"prod\"}]").unwrap();
+
+        let err = match build_migration_plans(&handle, false, &key) {
+            Ok(_) => panic!("plaintext inside an encrypted vault must block disable"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("already unencrypted"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[{\"name\":\"prod\"}]"
+        );
+    }
+
+    #[test]
+    fn factory_reset_bypasses_recovery_latch() {
+        let _env = TestEnvGuard::new("factory-reset-latch");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+        initialize_security_inner(&handle, false, None).unwrap();
+        let seeded = seed_managed_files(&handle);
+
+        set_migration_recovery_failure(Some("simulated wedged recovery".to_string()));
+        assert!(ensure_migration_recovered().is_err());
+        factory_reset_inner(&handle, "{}").expect("factory reset must bypass the latch");
+        assert!(ensure_migration_recovered().is_ok());
+        for (path, _) in seeded {
+            assert!(!path.exists(), "managed data survived: {}", path.display());
+        }
+    }
+
+    #[test]
+    fn set_lock_timeout_requires_an_unlocked_vault() {
+        let _env = TestEnvGuard::new("lock-timeout-auth");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        assert_eq!(
+            load_security_config(&handle).unwrap().lock_timeout_minutes,
+            DEFAULT_LOCK_TIMEOUT_MINUTES
+        );
+
+        set_unlocked_key(None, 0).unwrap();
+        let err = set_lock_timeout_inner(&handle, 30).expect_err("locked vault must not change");
+        assert!(err.contains("Unlock"), "unexpected error: {err}");
+        assert_eq!(
+            load_security_config(&handle).unwrap().lock_timeout_minutes,
+            DEFAULT_LOCK_TIMEOUT_MINUTES
+        );
+
+        unlock_security_inner(&handle, "first password".to_string()).unwrap();
+        set_lock_timeout_inner(&handle, 30).unwrap();
+        assert_eq!(
+            load_security_config(&handle).unwrap().lock_timeout_minutes,
+            30
+        );
+        set_unlocked_key(None, 0).unwrap();
+    }
+
+    #[test]
+    fn lock_clears_the_key_when_the_config_is_unreadable() {
+        let _env = TestEnvGuard::new("lock-unreadable-config");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        assert!(require_unlocked_key().is_ok());
+
+        std::fs::write(security_path(&handle).unwrap(), "{not-valid-json").unwrap();
+        lock_security_inner(&handle).expect_err("unreadable config must still report an error");
+        assert!(
+            require_unlocked_key().is_err(),
+            "lock must clear the key before trying to read the config"
+        );
+    }
+
+    /// The lock must take the storage gate before clearing the key. Otherwise a
+    /// concurrent unlock/rekey could install a key after the lock returned.
+    #[test]
+    fn lock_waits_for_storage_gate_before_clearing_the_key() {
+        let _env = TestEnvGuard::new("lock-storage-gate");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+        initialize_security_inner(&handle, false, None).unwrap();
+        set_unlocked_key(Some([7u8; KEY_LEN]), 60).unwrap();
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _gate = lock_storage_ops().unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            // Simulate a rekey finishing while the lock is waiting.
+            set_unlocked_key(Some([9u8; KEY_LEN]), 60).unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        let started = std::time::Instant::now();
+        lock_security_inner(&handle).unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "lock returned while a vault writer still held the storage gate"
+        );
+        worker.join().unwrap();
+        assert!(
+            require_unlocked_key().is_err(),
+            "a key installed before the lock acquired the gate must be cleared"
+        );
+    }
+
+    #[test]
+    fn password_policy_requires_twelve_characters() {
+        assert!(validate_password_length("short").is_err());
+        assert!(validate_password_length("elevenchars").is_err());
+        assert!(validate_password_length("twelve-chars-ok").is_ok());
+        assert!(validate_password_length("this-password-is-definitely-long-enough").is_ok());
+    }
+
+    #[test]
+    fn payload_metadata_tampering_is_rejected() {
+        let key = derive_key("pw", b"salt1234salt1234", MIN_PBKDF2_ITERATIONS);
+        let payload = encrypt_text("{\"secret\":true}", &key).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "kv".to_string(),
+            serde_json::Value::String("forged".to_string()),
+        );
+        let tampered = serde_json::to_string(&value).unwrap();
+        assert!(decrypt_text(&tampered, &key).is_err());
+
+        // Payloads from before the metadata tag existed still decrypt because
+        // AES-GCM authenticates the ciphertext itself.
+        let legacy = "{\"v\":1,\"nonce\":\"abc\",\"ciphertext\":\"def\"}";
+        assert!(decrypt_text(legacy, &key).is_err());
+    }
+
+    #[test]
+    fn stripped_payload_mac_is_rejected_for_new_payloads() {
+        let key = derive_key("pw", b"salt1234salt1234", MIN_PBKDF2_ITERATIONS);
+        let payload = encrypt_text("{\"secret\":true}", &key).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value.get("v").and_then(|v| v.as_u64()), Some(2));
+        value.as_object_mut().unwrap().remove("mac");
+        let stripped = serde_json::to_string(&value).unwrap();
+        let err = decrypt_text(&stripped, &key)
+            .expect_err("a new payload without its metadata tag must fail closed");
+        assert!(err.contains("metadata authentication tag"), "{err}");
+
+        // Rewriting a genuinely old payload as version 1 keeps it readable.
+        let mut legacy = serde_json::from_str::<serde_json::Value>(&payload).unwrap();
+        legacy.as_object_mut().unwrap().remove("mac");
+        legacy.as_object_mut().unwrap().insert(
+            "v".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(1)),
+        );
+        assert_eq!(
+            decrypt_text(&serde_json::to_string(&legacy).unwrap(), &key).unwrap(),
+            "{\"secret\":true}"
+        );
+    }
+
+    #[test]
+    fn stray_migration_stages_are_swept_without_a_journal() {
+        let _env = TestEnvGuard::new("stage-sweep");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        let staged = migration_stage_path(&handle, ManagedDataId::Bookmarks).unwrap();
+        std::fs::write(&staged, "plaintext stage").unwrap();
+        recover_interrupted_migration(&handle).unwrap();
+        assert!(
+            !staged.exists(),
+            "an orphaned stage file must be removed at startup"
+        );
+    }
+
+    #[test]
+    fn policy_tampering_is_rejected_and_legacy_configs_are_upgraded() {
+        let _env = TestEnvGuard::new("policy-integrity");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        set_unlocked_key(None, 0).unwrap();
+        unlock_security_inner(&handle, "first password".to_string()).unwrap();
+        let signed = load_security_config(&handle).unwrap();
+        assert!(
+            !signed.policy_mac.is_empty(),
+            "a fresh encrypted config must carry a policy tag"
+        );
+        assert_eq!(signed.policy_schema, POLICY_SCHEMA_CURRENT);
+
+        // A configuration from before the tag existed still unlocks and is
+        // upgraded in place instead of being treated as tampering.
+        let security_file = security_path(&handle).unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&security_file).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("policy_mac");
+        raw.as_object_mut().unwrap().remove("policy_schema");
+        atomic_write(&security_file, &serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+        set_unlocked_key(None, 0).unwrap();
+        unlock_security_inner(&handle, "first password".to_string())
+            .expect("a legacy config without a tag must still unlock");
+        let upgraded = load_security_config(&handle).unwrap();
+        assert!(!upgraded.policy_mac.is_empty());
+        assert_eq!(upgraded.policy_schema, POLICY_SCHEMA_CURRENT);
+
+        // Editing a covered field without the vault key is refused.
+        let mut tampered = load_security_config(&handle).unwrap();
+        tampered.lock_timeout_minutes = 0;
+        save_security_config(&handle, &tampered).unwrap();
+        set_unlocked_key(None, 0).unwrap();
+        let err = unlock_security_inner(&handle, "first password".to_string())
+            .expect_err("a policy tag mismatch must fail closed");
+        assert!(err.contains("policy"), "unexpected error: {err}");
+
+        // Flipping only the encryption flag leaves the encrypted-vault tag
+        // behind, which is an obvious tamper rather than a plaintext install.
+        let mut downgraded = tampered;
+        downgraded.encryption_enabled = false;
+        save_security_config(&handle, &downgraded).unwrap();
+        let err = match load_security_config(&handle) {
+            Ok(_) => panic!("mixed plaintext state must be refused"),
+            Err(err) => err,
+        };
+        assert!(err.contains("plaintext"), "unexpected error: {err}");
+
+        set_unlocked_key(None, 0).unwrap();
+    }
+
+    /// A schema-1 vault with the old implicit zero timeout is migrated to the
+    /// 15-minute default instead of being re-signed as "never" without consent.
+    #[test]
+    fn legacy_zero_lock_timeout_is_defaulted_and_flagged() {
+        let _env = TestEnvGuard::new("legacy-lock-timeout");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        let mut legacy = load_security_config(&handle).unwrap();
+        legacy.policy_schema = POLICY_SCHEMA_LEGACY;
+        legacy.policy_mac.clear();
+        legacy.lock_timeout_minutes = 0;
+        save_security_config(&handle, &legacy).unwrap();
+        set_unlocked_key(None, 0).unwrap();
+        LEGACY_LOCK_TIMEOUT_DEFAULTED.store(false, Ordering::Release);
+
+        let status = unlock_security_inner(&handle, "first password".to_string()).unwrap();
+        assert_eq!(status.lock_timeout_minutes, DEFAULT_LOCK_TIMEOUT_MINUTES);
+        assert!(
+            status.lock_timeout_defaulted,
+            "the automatic default change must be visible"
+        );
+        let migrated = load_security_config(&handle).unwrap();
+        assert_eq!(migrated.lock_timeout_minutes, DEFAULT_LOCK_TIMEOUT_MINUTES);
+        assert_eq!(migrated.policy_schema, POLICY_SCHEMA_CURRENT);
+        assert!(!migrated.policy_mac.is_empty());
+
+        set_unlocked_key(None, 0).unwrap();
+    }
+
+    #[test]
+    fn argon2id_vault_unlocks_with_the_recorded_parameters() {
+        let _env = TestEnvGuard::new("argon2-roundtrip");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        let config = load_security_config(&handle).unwrap();
+        assert_eq!(config.kdf, KdfAlgorithm::Argon2id);
+        assert_eq!(config.argon2_memory_kib, ARGON2_MEMORY_KIB);
+        assert_eq!(config.argon2_iterations, ARGON2_ITERATIONS);
+        assert_eq!(config.argon2_parallelism, ARGON2_PARALLELISM);
+        assert_eq!(config.policy_schema, POLICY_SCHEMA_CURRENT);
+        assert!(!config.policy_mac.is_empty());
+
+        set_unlocked_key(None, 0).unwrap();
+        assert!(unlock_security_inner(&handle, "wrong password".to_string()).is_err());
+        unlock_security_inner(&handle, "first password".to_string())
+            .expect("Argon2id unlock must use the recorded parameters");
+
+        set_unlocked_key(None, 0).unwrap();
+    }
+
+    #[test]
+    fn schema_two_without_a_policy_tag_fails_closed() {
+        let _env = TestEnvGuard::new("schema-two-missing-tag");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        set_unlocked_key(None, 0).unwrap();
+
+        let security_file = security_path(&handle).unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&security_file).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("policy_mac");
+        atomic_write(&security_file, &serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        let err = match load_security_config(&handle) {
+            Ok(_) => panic!("schema 2 without a policy tag must not load"),
+            Err(err) => err,
+        };
+        assert!(err.contains("schema 2"), "unexpected error: {err}");
+        assert!(security_file.exists(), "the config must be retained");
+        let err = unlock_security_inner(&handle, "first password".to_string())
+            .expect_err("schema 2 without a policy tag must not unlock");
+        assert!(err.contains("schema 2"), "unexpected error: {err}");
+
+        set_unlocked_key(None, 0).unwrap();
+    }
+
+    #[test]
+    fn schema_one_tag_is_verified_and_upgraded() {
+        let _env = TestEnvGuard::new("schema-one-upgrade");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        initialize_security_inner(&handle, true, Some("first password".to_string())).unwrap();
+        let key = require_unlocked_key().unwrap();
+        let mut legacy = load_security_config(&handle).unwrap();
+        legacy.policy_schema = POLICY_SCHEMA_LEGACY;
+        legacy.policy_mac = policy_mac_string(&legacy, &key);
+        let legacy_tag = legacy.policy_mac.clone();
+        save_security_config(&handle, &legacy).unwrap();
+        drop(key);
+
+        set_unlocked_key(None, 0).unwrap();
+        unlock_security_inner(&handle, "first password".to_string())
+            .expect("a schema-1 tag must verify and unlock");
+
+        let upgraded = load_security_config(&handle).unwrap();
+        assert_eq!(upgraded.policy_schema, POLICY_SCHEMA_CURRENT);
+        assert!(!upgraded.policy_mac.is_empty());
+        assert_ne!(
+            upgraded.policy_mac, legacy_tag,
+            "the upgrade must replace the schema-1 tag with a schema-2 tag"
+        );
+
+        set_unlocked_key(None, 0).unwrap();
+    }
+
+    /// A PBKDF2 vault already at the legacy iteration count still migrates to
+    /// Argon2id: the KDF choice, not only the work factor, triggers the rekey.
+    #[test]
+    fn current_pbkdf2_vault_is_lazily_rekeyed_to_argon2id() {
+        let _env = TestEnvGuard::new("lazy-argon2-current-pbkdf2");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        let password = "correct horse battery staple";
+        let salt = *b"legacy-salt-1234";
+        let key = derive_key(password, &salt, PBKDF2_ITERATIONS);
+        let verifier = key_verifier(&key);
+        let bookmarks = crate::bookmarks_path(&handle).unwrap();
+        let plain = "[{\"name\":\"legacy\"}]";
+        std::fs::write(&bookmarks, encrypt_text(plain, &key).unwrap()).unwrap();
+
+        let legacy = SecurityConfig {
+            initialized: true,
+            encryption_enabled: true,
+            salt: B64.encode(salt),
+            verifier: B64.encode(verifier),
+            lock_timeout_minutes: 15,
+            pbkdf2_iterations: PBKDF2_ITERATIONS,
+            kdf: KdfAlgorithm::Pbkdf2,
+            argon2_memory_kib: ARGON2_MEMORY_KIB,
+            argon2_iterations: ARGON2_ITERATIONS,
+            argon2_parallelism: ARGON2_PARALLELISM,
+            policy_schema: POLICY_SCHEMA_LEGACY,
+            biometric_enrolled: false,
+            legacy_plaintext_adopted: true,
+            legacy_plaintext_adoption_proof: adoption_proof_string(&key),
+            policy_mac: String::new(),
+        };
+        save_security_config(&handle, &legacy).unwrap();
+
+        unlock_security_inner(&handle, password.to_string())
+            .expect("legacy PBKDF2 unlock must succeed");
+
+        let migrated = load_security_config(&handle).unwrap();
+        assert_eq!(migrated.kdf, KdfAlgorithm::Argon2id);
+        assert_eq!(migrated.policy_schema, POLICY_SCHEMA_CURRENT);
+        assert_ne!(migrated.salt, legacy.salt);
+        assert_ne!(migrated.verifier, legacy.verifier);
+        assert_eq!(
+            read_protected_file(&bookmarks, "[]", &migrated).unwrap(),
+            plain
+        );
+
+        set_unlocked_key(None, 0).unwrap();
+    }
+
+    /// A rekey that fails before its commit point must not lock the user out.
+    /// The old PBKDF2 vault stays usable and the retry happens on the next
+    /// unlock once the blocking file is repaired.
+    #[test]
+    fn failed_lazy_rekey_keeps_the_pbkdf2_vault_unlocked_and_retries() {
+        let _env = TestEnvGuard::new("lazy-argon2-deferred");
+        let app = make_test_app();
+        let _guard = TestAppDataGuard::new(&app);
+        let handle = app.handle().clone();
+        set_unlocked_key(None, 0).unwrap();
+
+        let password = "correct horse battery staple";
+        let salt = *b"legacy-salt-1234";
+        let key = derive_key(password, &salt, PBKDF2_ITERATIONS);
+        let verifier = key_verifier(&key);
+        let connection = crate::connection_path(&handle).unwrap();
+        let connection_plain = "{\"endpoint\":\"https://example.com\"}";
+        std::fs::write(&connection, encrypt_text(connection_plain, &key).unwrap()).unwrap();
+        // A plaintext bookmarks file is not legacy-capable, so building the
+        // rekey plans fails while the old configuration is still intact.
+        let bookmarks = crate::bookmarks_path(&handle).unwrap();
+        std::fs::write(&bookmarks, "[]").unwrap();
+
+        let legacy = SecurityConfig {
+            initialized: true,
+            encryption_enabled: true,
+            salt: B64.encode(salt),
+            verifier: B64.encode(verifier),
+            lock_timeout_minutes: 15,
+            pbkdf2_iterations: PBKDF2_ITERATIONS,
+            kdf: KdfAlgorithm::Pbkdf2,
+            argon2_memory_kib: ARGON2_MEMORY_KIB,
+            argon2_iterations: ARGON2_ITERATIONS,
+            argon2_parallelism: ARGON2_PARALLELISM,
+            policy_schema: POLICY_SCHEMA_LEGACY,
+            biometric_enrolled: false,
+            legacy_plaintext_adopted: true,
+            legacy_plaintext_adoption_proof: adoption_proof_string(&key),
+            policy_mac: String::new(),
+        };
+        save_security_config(&handle, &legacy).unwrap();
+
+        unlock_security_inner(&handle, password.to_string())
+            .expect("a failed rekey must keep the old vault usable");
+        let deferred = load_security_config(&handle).unwrap();
+        assert_eq!(deferred.kdf, KdfAlgorithm::Pbkdf2);
+        assert_eq!(deferred.salt, legacy.salt);
+        assert_eq!(
+            read_protected_file(&connection, "", &deferred).unwrap(),
+            connection_plain
+        );
+        assert_eq!(std::fs::read_to_string(&bookmarks).unwrap(), "[]");
+
+        // Repair the blocking file, then the next unlock must complete the
+        // Argon2id migration.
+        std::fs::write(&bookmarks, encrypt_text("[]", &key).unwrap()).unwrap();
+        set_unlocked_key(None, 0).unwrap();
+        unlock_security_inner(&handle, password.to_string())
+            .expect("the retry must complete the deferred rekey");
+        let rekeyed = load_security_config(&handle).unwrap();
+        assert_eq!(rekeyed.kdf, KdfAlgorithm::Argon2id);
+        assert_eq!(
+            read_protected_file(&connection, "", &rekeyed).unwrap(),
+            connection_plain
+        );
+        assert_eq!(
+            read_protected_file(&bookmarks, "[]", &rekeyed).unwrap(),
+            "[]"
+        );
+
+        set_unlocked_key(None, 0).unwrap();
+    }
+
+    #[test]
+    fn wall_clock_deadline_retires_the_key_after_a_suspend() {
+        let _env = TestEnvGuard::new("wall-clock-deadline");
+        set_unlocked_key(Some([3u8; KEY_LEN]), 60).unwrap();
+
+        // Simulate a machine that slept past the deadline: the wall clock moved
+        // forward while no activity touch could run.
+        {
+            let mut guard = key_state().lock().unwrap();
+            let past = SystemTime::now() - Duration::from_secs(120);
+            guard.last_activity = Some(past);
+            guard.expires_at = Some(past + Duration::from_secs(60));
+        }
+        assert!(
+            require_unlocked_key().is_err(),
+            "a suspended machine must not keep the vault open"
+        );
+
+        // A clock that jumped backwards cannot prove elapsed idle time, so the
+        // key is retired rather than kept alive indefinitely.
+        set_unlocked_key(Some([4u8; KEY_LEN]), 60).unwrap();
+        {
+            let mut guard = key_state().lock().unwrap();
+            let future = SystemTime::now() + Duration::from_secs(120);
+            guard.last_activity = Some(future);
+            guard.expires_at = Some(future + Duration::from_secs(60));
+        }
+        assert!(
+            require_unlocked_key().is_err(),
+            "a backwards wall clock must fail closed"
+        );
+
+        set_unlocked_key(None, 0).unwrap();
     }
 
     #[test]

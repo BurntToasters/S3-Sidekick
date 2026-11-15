@@ -7,6 +7,11 @@ export default defineConfig({
   build: {
     outDir: "../dist",
     emptyOutDir: true,
+    // Tauri's macOS deployment target is 13.3, the first Ventura release with
+    // Safari 16.4. The UI uses `@container` and `color-mix()`, so keep this
+    // aligned with bundle.macOS.minimumSystemVersion in tauri.conf.json.
+    target: ["safari16.4"],
+    cssTarget: ["safari16.4"],
     // Wave 4 perf note: route-level lazy imports were evaluated and deferred.
     // The app is a single view (one HTML entry, no router), so there is no
     // trivial split point — manualChunks would only add file:// fetch hops

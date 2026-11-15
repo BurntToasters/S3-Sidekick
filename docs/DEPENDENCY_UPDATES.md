@@ -2,7 +2,11 @@
 
 `npm run u` is a lockfile-only dependency proposal. It does not install npm packages, run npm lifecycle scripts, compile Rust, execute Cargo build scripts or procedural macros, format source files, or run tests.
 
-The command requires Node.js `^24.18.0 || >=26.0.0`, npm 12.0.2 or newer, and an already-installed Rust stable toolchain. It performs these steps:
+The command requires Node.js `^24.22.1 || >=26.13.0`, npm 12.2.1 or newer, and the Rust toolchain pinned in `rust-toolchain.toml` to already be installed.
+
+Toolchain pins have one canonical value each. Node's supported floor is `engines.node` in `package.json`; CI's `NODE_VERSION=26.13.0` is the tested release line, and the Node 24 floor is not exercised in CI. The Flatpak sandbox is a documented build-only exception at Node 24.18 (the version in `org.freedesktop.Sdk.Extension.node24//26.08`), not a supported local floor. Rust is pinned by `channel` in `rust-toolchain.toml`, which also carries the profile and components; `npm run rust:update`, the target scripts, CI, and the Flatpak build read that value at runtime, so do not add a Rust version literal elsewhere. `rust-version` in `src-tauri/Cargo.toml` is the MSRV and an intentional duplicate that must equal the channel; the pin test fails when they diverge. To bump Rust, edit `rust-toolchain.toml` and set the guarded MSRV to the same value, then run `npm run test:cargo-safe-update`. Update the canonical value first, then the duplicate pins.
+
+It performs these steps:
 
 1. Resolve npm updates with `--package-lock-only`, `--ignore-scripts`, and a three-day minimum release age in a disposable npm cache.
 2. Reject high-severity npm audit findings without populating the project `node_modules` directory.
@@ -15,9 +19,7 @@ Move the Tauri family as one change: the Cargo.toml pins, `Cargo.lock`, and pack
 
 Both updaters serialize their own runs. npm rollback and final Cargo lock installation compare expected bytes, preserving a concurrent process's lockfile edit instead of overwriting it.
 
-Review both lockfile diffs before committing. Push the update branch and let GitHub-hosted CI perform code-executing validation. CI installs npm packages with lifecycle scripts disabled, verifies registry signatures, and only then runs dependency code. CI is intentionally the first environment that installs or executes newly selected dependency code.
-
-Do not run `npm run workspace:prepare`, `npm run test:all`, Cargo checks, builds, or tests on a workstation immediately after updating locks. Those commands execute dependency code. If local validation is necessary, use a disposable VM with no credentials, mounted home directory, SSH agent, signing keys, cloud metadata access, or persistent package caches.
+Review both lockfile diffs, then run `npm run test:all` locally before committing. Local validation is allowed right after a lock update. `test:all`, `npm run workspace:prepare`, and Cargo checks, builds, and tests run the newly selected dependency code (build scripts, procedural macros, and test binaries) on the workstation. The publish-age filter is the only guard before that code runs, so read the lock diff first. Push the update branch afterward; CI repeats the validation with npm lifecycle scripts disabled and registry signatures verified.
 
 The three-day delay reduces exposure to newly published supply-chain attacks; it cannot prove that an older package is benign. Emergency young-crate and Git overrides must name one exact version or revision and include a written reason.
 
@@ -27,8 +29,20 @@ The three-day delay reduces exposure to newly published supply-chain attacks; it
 
 The updater's default `zip` feature supports legacy Tauri v1 updater archives and pulls in Windows-only `zip` 4.6.1. Even the currently available updater 2.14.0 still requests zip 4, so a compatible lockfile update cannot select zip 9. Disable updater defaults and explicitly retain `rustls-tls` and `system-proxy` instead. This removes zip and RUSTSEC-2026-0367 through RUSTSEC-2026-0369 from the resolved graph on every target. Keep `bundle.createUpdaterArtifacts` set to `true`: our v2 Windows installers and Linux AppImages do not require legacy archive support; macOS `.app.tar.gz` support remains enabled independently. Legacy v1 updater archives are no longer accepted. See [Tauri updater artifact formats](https://v2.tauri.app/plugin/updater/#building).
 
+RUSTSEC-2026-0387 (timing variability in `crypto-bigint` 0.5.5) reaches the graph through `aws-sigv4`'s SigV4a signer. `aws-sigv4` 1.6.4 moves to `crypto-bigint` ^0.7.10 but requires the 2026-10-27 `aws-smithy-http` 0.64.3, `aws-smithy-runtime-api` 1.19.2, `aws-smithy-runtime-api-macros` 1.2.0, and `aws-smithy-types` 1.9.1 releases, all younger than 72 hours when selected. They were installed with one-shot `--allow-young` overrides. The override is not stored anywhere: the age filter always admits versions already in `Cargo.lock`, so a plain `npm run u` keeps them and needs no exception or cleanup.
+
 No RustSec ignore list is added. The existing informational warnings for `proc-macro-error`, `zbus_names`, `zvariant`, `zvariant_derive`, and `glib` remain visible in the audit report. These come through the upstream Linux GTK/notification stack, not solely dev dependencies. Unmaintained warnings are maintenance risks; the glib unsoundness remains unresolved upstream in the selected GTK stack. They do not currently fail the audit gate and should not be described as fixed.
 
 Run `npm run test:e2e:cargo-security` to resolve all target dependencies with `--locked`, confirm patched TLS and removal of zip, verify updater features/artifact configuration, and run the real RustSec scanner with no ignored advisories. This executes no dependency build scripts or procedural macros. The repeatable evidence is `test-results/cargo-security/report.json`, including the lockfile SHA-256, plus full Cargo metadata and audit JSON. CI runs this on Linux, Windows, and macOS and uploads the reports. Native builds and signed updater installation still need CI/platform validation; this security check does not certify those flows.
 
 `scripts/cargo-safe-update.mjs` and `scripts/check-cargo-update-policy.mjs` are a temporary stand-in for a minimum publish age in Cargo itself. Remove both (and restore direct `cargo update` call sites) once the supported stable Cargo ships a global minimum publish age.
+
+## CI tool installation
+
+CI installs Rust helper binaries (`cargo-audit`, `cargo-llvm-cov`,
+`tauri-driver`) with a pinned `--version` and `--locked`. Cargo verifies each
+crate against the checksums in the crates.io index; there is no separate
+signature layer for crates outside the index. npm tooling is installed with a
+pinned version and the workflow runs `npm audit signatures` for the project
+dependencies. Rotate a pinned tool by changing its version here and in
+`.github/workflows/ci.yml` in the same change, then re-run the gate.

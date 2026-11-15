@@ -33,7 +33,7 @@ async function relevantCalls(page: Page): Promise<MockCall[]> {
 
 async function startNewFolder(page: Page, name: string): Promise<void> {
   await page.locator("#btn-new-folder").click();
-  await expect(page.locator("#dialog-title")).toHaveText("New Folder");
+  await expect(page.locator("#dialog-title")).toHaveText("New folder");
   await page.locator("#dialog-input").fill(name);
   await page.locator("#dialog-ok").click();
 }
@@ -61,7 +61,7 @@ test("unconditional write warning honors Don't ask again and Settings re-enable"
 
   await test.step("1. warning shows with unchecked box; Cancel writes nothing", async () => {
     await startNewFolder(page, "first");
-    await expect(title).toHaveText("Unconditional Write");
+    await expect(title).toHaveText("Unconditional write");
     await expect(page.locator("#dialog-checkbox-wrapper")).toBeVisible();
     await expect(page.locator("#dialog-checkbox-label")).toHaveText(
       "Don't ask again",
@@ -75,7 +75,7 @@ test("unconditional write warning honors Don't ask again and Settings re-enable"
 
   await test.step("2. keyboard: box is in tab order; checked + Escape changes nothing", async () => {
     await startNewFolder(page, "second");
-    await expect(title).toHaveText("Unconditional Write");
+    await expect(title).toHaveText("Unconditional write");
     // Destructive default: Cancel has focus, and the checkbox precedes it.
     await expect(page.locator("#dialog-cancel")).toBeFocused();
     await page.keyboard.press("Shift+Tab");
@@ -91,7 +91,7 @@ test("unconditional write warning honors Don't ask again and Settings re-enable"
 
   await test.step("3. box resets; Don't ask again + Write anyway persists and writes", async () => {
     await startNewFolder(page, "third");
-    await expect(title).toHaveText("Unconditional Write");
+    await expect(title).toHaveText("Unconditional write");
     await expect(checkbox).not.toBeChecked();
     await checkbox.check();
     await page.screenshot({ path: path.join(outDir, "3-dont-ask-again.png") });
@@ -142,7 +142,7 @@ test("unconditional write warning honors Don't ask again and Settings re-enable"
     });
 
     await startNewFolder(page, "fifth");
-    await expect(title).toHaveText("Unconditional Write");
+    await expect(title).toHaveText("Unconditional write");
     await expect(checkbox).not.toBeChecked();
     await page.locator("#dialog-cancel").click();
     await expect(dialog).not.toHaveClass(/active/);

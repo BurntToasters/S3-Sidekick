@@ -218,14 +218,55 @@ pub(super) fn map_create_only_write_error<E: std::fmt::Debug>(
 
 /// A create-only write can commit while its response is lost. The SDK (or the
 /// multipart completion loop) then retries with the same `If-None-Match: *`
-/// and gets 412 against the object it just wrote. Recognise that case by the
-/// exact size and SHA-256 ownership marker the write carried.
+/// and gets 412 against the object it just wrote. This is an upload-recovery
+/// check only, never deletion authority: it decides whether to accept a
+/// retried upload, while move/rename retirement requires the ETag-bound copy
+/// receipt produced by `copy_with_receipt` and validated by
+/// `delete_move_receipts_checked`.
+///
+/// A principal with PutObject permission can spoof the SHA-256 metadata marker,
+/// so marker+size is sufficient only for an upload retry, not for claiming the
+/// object. A single-part PutObject whose HEAD ETag is the content MD5 gets a
+/// stronger, content-derived proof. Multipart/composite and SSE-KMS ETags are
+/// not content MD5s, so they fail that comparison and keep the marker path,
+/// preserving lost-response recovery.
+pub(super) fn head_confirms_own_upload(
+    content_length: Option<i64>,
+    etag: Option<&str>,
+    marker: Option<&str>,
+    checksum_hex: &str,
+    size: u64,
+    expected_md5_hex: Option<&str>,
+) -> bool {
+    let size_matches =
+        content_length.is_some_and(|length| u64::try_from(length).ok() == Some(size));
+    if !size_matches {
+        return false;
+    }
+    let md5_matches = expected_md5_hex
+        .zip(etag)
+        .is_some_and(|(expected, actual)| etag_matches_md5(actual, expected));
+    let marker_matches =
+        marker.is_some_and(|value| value.trim().eq_ignore_ascii_case(checksum_hex));
+    md5_matches || marker_matches
+}
+
+fn etag_matches_md5(etag: &str, md5_hex: &str) -> bool {
+    let trimmed = etag.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    unquoted.eq_ignore_ascii_case(md5_hex)
+}
+
 pub(super) async fn destination_is_own_write(
     client: &Client,
     bucket: &str,
     key: &str,
     checksum_hex: &str,
     size: u64,
+    expected_md5_hex: Option<&str>,
     cancel: &CancelToken,
 ) -> bool {
     let request = client.head_object().bucket(bucket).key(key).send();
@@ -236,14 +277,16 @@ pub(super) async fn destination_is_own_write(
             Err(_) => return false,
         },
     };
-    let size_matches = head
-        .content_length()
-        .is_some_and(|length| u64::try_from(length).ok() == Some(size));
-    let marker_matches = head
-        .metadata()
-        .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(checksum_hex));
-    size_matches && marker_matches
+    head_confirms_own_upload(
+        head.content_length(),
+        head.e_tag(),
+        head.metadata()
+            .and_then(|metadata| metadata.get(CHECKSUM_METADATA_KEY))
+            .map(String::as_str),
+        checksum_hex,
+        size,
+        expected_md5_hex,
+    )
 }
 
 pub(super) fn detect_storage_provider(endpoint: &str) -> StorageProviderKind {

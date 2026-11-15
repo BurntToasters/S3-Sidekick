@@ -18,6 +18,13 @@ const testFilter =
 const appData = fs.mkdtempSync(
   path.join(os.tmpdir(), "s3sk-null-version-appdata-"),
 );
+const expectedChecks = [
+  {
+    test: "aws_null_version_http_fixture",
+    check:
+      "real AWS SDK HEAD parses literal null and rename refuses before any mutation request",
+  },
+];
 
 function run(command, args, timeoutMs, options = {}) {
   return new Promise((resolve) => {
@@ -184,11 +191,18 @@ async function main() {
   } catch (err) {
     failure = `Invalid check artifact: ${err instanceof Error ? err.message : String(err)}`;
   }
+  const checksMatch =
+    checks.length === expectedChecks.length &&
+    expectedChecks.every(
+      (expected, index) =>
+        checks[index]?.test === expected.test &&
+        checks[index]?.check === expected.check,
+    );
   const passed =
     !failure &&
     !timedOut &&
     cargoStatus === 0 &&
-    checks.length > 0 &&
+    checksMatch &&
     checks.every((check) => check.passed);
   const report = {
     suite: "aws-null-version-local-http-e2e",
@@ -199,6 +213,8 @@ async function main() {
     phase,
     cargoStatus,
     checkCount: checks.length,
+    expectedCheckCount: expectedChecks.length,
+    expectedChecks,
     checks,
   };
   fs.writeFileSync(

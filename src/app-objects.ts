@@ -1,8 +1,9 @@
 import { invoke } from "./ipc.ts";
-import { save } from "@tauri-apps/plugin-dialog";
+import { pickTextExport } from "./path-grants.ts";
 import { state } from "./state.ts";
 import {
   captureConnectionSnapshot,
+  connectionIdentityChanged,
   connectionSnapshotChanged,
   invokeS3,
   invokeS3For,
@@ -18,16 +19,25 @@ import {
   clearSelection,
   updateSelectionUI,
   invalidateInspectorSelectionSync,
+  renderedIndexOfSelection,
+  focusObjectTableRow,
+  revealRow,
+  CONNECTION_RESET_EVENT,
 } from "./browser.ts";
 import { showConfirm, showPrompt } from "./dialogs.ts";
 import { logActivity, exportActivityLogText } from "./activity-log.ts";
-import { basename, friendlyError } from "./utils.ts";
+import { basename, friendlyError, plural } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
+import { showToast } from "./toast.ts";
+import { openDrawer } from "./bottom-drawer.ts";
 import {
   addSelection,
   clearAllSelection,
+  fileEntry,
+  folderEntry,
   getSelectedFileKeys,
   getSelectedPrefixes,
+  type SelectionEntry,
 } from "./app-selection.ts";
 import {
   promptUnguardedWrite,
@@ -43,9 +53,13 @@ import {
 
 interface DeleteResult {
   deleted: number;
+  /** Subset of `deleted` that became delete markers on a versioned bucket. */
+  delete_markers?: number;
   failed: number;
   incomplete: boolean;
   errors: string[];
+  /** Backend warning: deletion semantics differ from permanent removal. */
+  warning?: string | null;
 }
 
 function normalizeDeleteResult(value: unknown): DeleteResult {
@@ -69,7 +83,22 @@ function normalizeDeleteResult(value: unknown): DeleteResult {
   ) {
     throw new Error("Delete command returned an invalid result");
   }
-  return row as DeleteResult;
+  // The backend adds delete_markers/warning without changing the legacy
+  // shape; older backends omit both. Anything non-conforming is ignored —
+  // the warning UI must never fail an otherwise valid delete result.
+  const normalized: DeleteResult = {
+    deleted: row.deleted as number,
+    failed: row.failed as number,
+    incomplete: row.incomplete as boolean,
+    errors: row.errors as string[],
+  };
+  if (Number.isInteger(row.delete_markers) && (row.delete_markers ?? -1) >= 0) {
+    normalized.delete_markers = row.delete_markers as number;
+  }
+  if (typeof row.warning === "string" && row.warning.length > 0) {
+    normalized.warning = row.warning;
+  }
+  return normalized;
 }
 
 function deleteFailureSummary(result: DeleteResult): string | null {
@@ -82,6 +111,79 @@ function deleteFailureSummary(result: DeleteResult): string | null {
   if (result.errors.length > 0)
     parts.push(result.errors.slice(0, 3).join("; "));
   return parts.join("; ");
+}
+
+/** True only for hosts under amazonaws.com; ARNs are an AWS-only concept. */
+export function isAwsEndpoint(endpoint: string): boolean {
+  const raw = endpoint.trim();
+  if (!raw) return false;
+  let host: string;
+  try {
+    host = new URL(
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`,
+    ).hostname;
+  } catch {
+    return false;
+  }
+  return host === "amazonaws.com" || host.endsWith(".amazonaws.com");
+}
+
+/** Plain-language confirmation for a delete; plurals agree with the counts. */
+export function deleteConfirmationMessage(
+  keys: string[],
+  prefixes: string[],
+): string {
+  const fileCount = keys.length;
+  const folderCount = prefixes.length;
+  if (folderCount === 0) return `Delete ${plural(fileCount, "file")}?`;
+  const folders = plural(folderCount, "folder");
+  if (fileCount === 0) {
+    return folderCount === 1
+      ? `Delete ${folders}? Its contents are deleted too.`
+      : `Delete ${folders}? Their contents are deleted too.`;
+  }
+  const head = `Delete ${plural(fileCount, "file")} and ${folders}?`;
+  return folderCount === 1
+    ? `${head} The folder's contents are deleted too.`
+    : `${head} The folders' contents are deleted too.`;
+}
+
+/** Shared rename rules for files and folders; null means the name is usable. */
+export function objectNameProblem(
+  value: string,
+  currentName: string,
+  kind: "file" | "folder",
+): string | null {
+  const name = value.trim();
+  if (!name) {
+    return kind === "folder"
+      ? "Folder name cannot be empty."
+      : "Name cannot be empty.";
+  }
+  if (name.includes("/")) {
+    return kind === "folder"
+      ? "Folder name cannot contain slashes."
+      : 'Name cannot contain "/".';
+  }
+  if (name === currentName) return "That is already the name.";
+  return null;
+}
+
+/**
+ * Keeps the entries the listing still shows; used after a delete. When more
+ * pages exist, an entry missing from the loaded page cannot be checked, so it
+ * stays selected (fail closed) instead of being reported as deleted.
+ */
+function stillListed(entries: SelectionEntry[]): SelectionEntry[] {
+  const objectKeys = new Set(state.objects.map((object) => object.key));
+  const prefixes = new Set(state.prefixes);
+  return entries.filter((entry) => {
+    const present =
+      entry.kind === "folder"
+        ? prefixes.has(entry.key)
+        : objectKeys.has(entry.key);
+    return present || state.hasMore;
+  });
 }
 
 let deleteOperation: Promise<void> | null = null;
@@ -104,7 +206,7 @@ function setDeleteOperationBusy(busy: boolean): void {
     button.disabled = selectedCount === 0;
     button.title =
       selectedCount > 0
-        ? `Delete ${selectedCount} selected item${selectedCount === 1 ? "" : "s"}`
+        ? `Delete ${plural(selectedCount, "selected item")}`
         : "Select items to delete";
   }
 }
@@ -133,6 +235,22 @@ export function handleDelete(): Promise<void> {
   return operation;
 }
 
+/**
+ * Keep keyboard focus in the table after a delete removed the focused row.
+ * Focus the user moved elsewhere (a dialog, the filter) is left alone.
+ */
+function restoreFocusAfterDelete(index: number): void {
+  if (index < 0) return;
+  const active = document.activeElement;
+  // The confirm dialog holds focus until it closes; the toolbar button that
+  // opened it is disabled while the delete runs, so focus ends up on body.
+  const focusWasLost =
+    !active ||
+    active === document.body ||
+    active.closest("#object-tbody, #batch-toolbar, #dialog-overlay") !== null;
+  if (focusWasLost) focusObjectTableRow({ logicalIndex: index });
+}
+
 async function performDelete(): Promise<void> {
   const keys = getSelectedFileKeys();
   const prefixes = getSelectedPrefixes();
@@ -147,13 +265,6 @@ async function performDelete(): Promise<void> {
     return;
   }
 
-  const parts: string[] = [];
-  if (keys.length > 0)
-    parts.push(`${keys.length} file${keys.length === 1 ? "" : "s"}`);
-  if (prefixes.length > 0)
-    parts.push(
-      `${prefixes.length} folder${prefixes.length === 1 ? "" : "s"} and all their contents`,
-    );
   // Name what is about to be destroyed (at most 5) and say it cannot be
   // undone; the dialog message preserves line breaks (pre-line).
   const targetNames = [...prefixes, ...keys]
@@ -164,7 +275,7 @@ async function performDelete(): Promise<void> {
     targetNames.length > 0
       ? `\n${targetNames.join(", ")}${remaining > 0 ? `, and ${remaining} more` : ""}`
       : "";
-  const msg = `Delete ${parts.join(" and ")}?${nameList}\nThis cannot be undone.`;
+  const msg = `${deleteConfirmationMessage(keys, prefixes)}${nameList}\nThis cannot be undone.`;
 
   const confirmed = await showConfirm("Delete", msg, {
     okLabel: "Delete",
@@ -183,16 +294,22 @@ async function performDelete(): Promise<void> {
     return;
   }
 
+  // Where focus lands once the rows are gone: the row that took the first
+  // deleted row's place, so the next Space or Enter acts on what the user saw.
+  const focusIndex = renderedIndexOfSelection();
   let totalDeleted = 0;
+  const versioningWarnings = new Set<string>();
   const failures: string[] = [];
+  // Targets whose delete did not confirm. A failed batch does not say which
+  // key failed, so each member stays a candidate until the listing settles it.
+  const unresolved: SelectionEntry[] = [];
   try {
     if (keys.length > 0) {
       if (connectionSnapshotChanged(target)) {
         failures.push(`${keys.join(", ")}: connection changed`);
+        unresolved.push(...keys.map((key) => fileEntry(key)));
       } else {
-        setStatus(
-          `Deleting ${keys.length} file${keys.length === 1 ? "" : "s"}...`,
-        );
+        setStatus(`Deleting ${plural(keys.length, "file")}…`);
         try {
           const result = normalizeDeleteResult(
             await invokeS3For<unknown>(target.connectionId, "delete_objects", {
@@ -201,10 +318,15 @@ async function performDelete(): Promise<void> {
             }),
           );
           totalDeleted += result.deleted;
+          if (result.warning) versioningWarnings.add(result.warning);
           const failure = deleteFailureSummary(result);
-          if (failure) failures.push(`${keys.join(", ")}: ${failure}`);
+          if (failure) {
+            failures.push(`${keys.join(", ")}: ${failure}`);
+            unresolved.push(...keys.map((key) => fileEntry(key)));
+          }
         } catch (err) {
           failures.push(`${keys.join(", ")}: ${friendlyError(err)}`);
+          unresolved.push(...keys.map((key) => fileEntry(key)));
         }
       }
     }
@@ -213,7 +335,7 @@ async function performDelete(): Promise<void> {
         failures.push(`${prefix}: connection changed`);
         break;
       }
-      setStatus(`Deleting folder "${basename(prefix.replace(/\/$/, ""))}"...`);
+      setStatus(`Deleting folder "${basename(prefix.replace(/\/$/, ""))}"…`);
       try {
         const result = normalizeDeleteResult(
           await invokeS3For<unknown>(target.connectionId, "delete_prefix", {
@@ -222,30 +344,55 @@ async function performDelete(): Promise<void> {
           }),
         );
         totalDeleted += result.deleted;
+        if (result.warning) versioningWarnings.add(result.warning);
         const failure = deleteFailureSummary(result);
-        if (failure) failures.push(`${prefix}: ${failure}`);
+        if (failure) {
+          failures.push(`${prefix}: ${failure}`);
+          unresolved.push(folderEntry(prefix));
+        }
       } catch (err) {
         failures.push(`${prefix}: ${friendlyError(err)}`);
+        unresolved.push(folderEntry(prefix));
       }
     }
-    if (failures.length > 0) {
+    // A versioned-bucket delete succeeds but is not a permanent removal; it
+    // creates delete markers. Never let the success message claim otherwise.
+    for (const warning of versioningWarnings) {
+      logActivity(warning, "warning");
+    }
+    const succeeded = failures.length === 0;
+    if (succeeded) {
+      const marker = versioningWarnings.size > 0;
       setStatus(
-        `Delete failed for ${failures.length} target(s); deleted ${totalDeleted} item(s).`,
-        5000,
+        `Deleted ${plural(totalDeleted, "item")}${marker ? "; delete markers created (see notice)" : ""}.`,
+        8000,
       );
+      logActivity(`Deleted ${plural(totalDeleted, "object")}.`, "success");
+      if (marker) {
+        showToast([...versioningWarnings].join(" "), {
+          type: "warning",
+          duration: 0,
+        });
+      }
+    } else {
       logActivity(
-        `Delete partially failed after ${totalDeleted} item(s): ${failures.join("; ")}`,
+        `Delete partially failed after ${plural(totalDeleted, "object")}: ${failures.join("; ")}`,
         "warning",
       );
-    } else {
-      setStatus(`Deleted ${totalDeleted} item(s).`, 5000);
-      logActivity(`Deleted ${totalDeleted} object(s).`, "success");
     }
+
+    let remaining: SelectionEntry[] = unresolved;
     if (!connectionSnapshotChanged(target)) {
-      clearSelection();
+      if (succeeded) clearSelection();
+      let listingCommitted = false;
       try {
-        const committed = await refreshObjects(target.bucket, target.prefix);
+        // A mutation refresh must not supersede an in-flight navigation.
+        const committed = await refreshObjects(target.bucket, target.prefix, {
+          supersedePending: false,
+        });
         if (committed && !connectionSnapshotChanged(target)) {
+          listingCommitted = true;
+          remaining = stillListed(unresolved);
           renderObjectTable();
           renderBreadcrumb();
         }
@@ -255,6 +402,33 @@ async function performDelete(): Promise<void> {
           "warning",
         );
       }
+      if (!succeeded) {
+        clearAllSelection();
+        for (const entry of remaining) addSelection(entry);
+        updateSelectionUI();
+        renderObjectTable();
+      }
+      if (listingCommitted) restoreFocusAfterDelete(focusIndex);
+    }
+
+    if (!succeeded) {
+      const total = keys.length + prefixes.length;
+      setStatus(
+        `Delete failed; deleted ${plural(totalDeleted, "item")}. See the notice for details.`,
+        8000,
+      );
+      // Sticky: the user must see which items survived before acting again.
+      showToast(
+        total === 1
+          ? `Couldn't delete "${targetNames[0]}"`
+          : `Couldn't delete ${Math.max(1, remaining.length)} of ${plural(total, "item")}`,
+        {
+          type: "error",
+          duration: 0,
+          actionLabel: "Details",
+          onAction: () => openDrawer("activity"),
+        },
+      );
     }
   } catch (err) {
     setStatus(`Delete failed: ${friendlyError(err)}`);
@@ -352,6 +526,10 @@ export async function handleCopyArn(): Promise<void> {
   const prefixes = getSelectedPrefixes();
   const allKeys = [...fileKeys, ...prefixes];
   if (allKeys.length === 0) return;
+  if (!isAwsEndpoint(state.endpoint)) {
+    setStatus("ARNs are only available for AWS S3 endpoints.", 5000);
+    return;
+  }
 
   const bucket = state.currentBucket;
   const arns = allKeys.map((key) => `arn:aws:s3:::${bucket}/${key}`);
@@ -394,16 +572,15 @@ export async function handleRename(): Promise<void> {
     const oldName = basename(oldKey);
     const rawName = await showPrompt("Rename", "Enter new name:", {
       inputDefault: oldName,
+      validate: async (value) =>
+        objectNameProblem(value, oldName, "file") ?? true,
     });
-    if (!rawName || rawName === oldName) return;
+    if (!rawName) return;
     const newName = rawName.trim();
-    if (!newName) {
-      setStatus("Name cannot be empty.", 5000);
-      return;
-    }
     if (newName === oldName) return;
-    if (newName.includes("/")) {
-      setStatus('Name cannot contain "/".', 5000);
+    const problem = objectNameProblem(newName, oldName, "file");
+    if (problem) {
+      setStatus(problem, 5000);
       return;
     }
     if (targetLocationChanged()) {
@@ -446,7 +623,7 @@ export async function handleRename(): Promise<void> {
     }
 
     try {
-      setStatus("Renaming...");
+      setStatus("Renaming…");
       await invokeS3For(target.connectionId, "rename_object", {
         bucket: targetBucket,
         oldKey,
@@ -458,10 +635,19 @@ export async function handleRename(): Promise<void> {
       logActivity(`Renamed "${oldName}" to "${newName}".`, "success");
       clearSelection();
       if (!targetLocationChanged()) {
-        const committed = await refreshObjects(targetBucket, targetPrefix);
+        const committed = await refreshObjects(targetBucket, targetPrefix, {
+          supersedePending: false,
+        });
         if (committed && !targetLocationChanged()) {
           renderObjectTable();
         }
+      }
+      // Keep the renamed item selected and focused, wherever it sorts now.
+      if (!targetLocationChanged()) {
+        clearAllSelection();
+        addSelection(fileEntry(newKey));
+        updateSelectionUI();
+        revealRow(newKey, "file");
       }
     } catch (err) {
       if (targetLocationChanged()) return;
@@ -479,16 +665,21 @@ export async function handleRename(): Promise<void> {
       oldPrefix.length - folderName.length - 1,
     );
 
-    const newName = await showPrompt(
-      "Rename Folder",
+    const enteredName = await showPrompt(
+      "Rename folder",
       "Enter new folder name:",
       {
         inputDefault: folderName,
+        validate: async (value) =>
+          objectNameProblem(value, folderName, "folder") ?? true,
       },
     );
-    if (!newName || newName === folderName) return;
-    if (newName.includes("/")) {
-      setStatus("Folder name cannot contain slashes.", 5000);
+    if (!enteredName) return;
+    const newName = enteredName.trim();
+    if (newName === folderName) return;
+    const folderProblem = objectNameProblem(newName, folderName, "folder");
+    if (folderProblem) {
+      setStatus(folderProblem, 5000);
       return;
     }
     if (targetLocationChanged()) {
@@ -579,7 +770,7 @@ export async function handleRename(): Promise<void> {
     }
 
     try {
-      setStatus(`Renaming folder "${folderName}"...`);
+      setStatus(`Renaming folder "${folderName}"…`);
       const renamePrefix = (withOverwrite: boolean): Promise<unknown> =>
         invokeS3For(target.connectionId, "rename_prefix", {
           bucket: targetBucket,
@@ -610,10 +801,18 @@ export async function handleRename(): Promise<void> {
       logActivity(`Renamed folder "${folderName}" to "${newName}".`, "success");
       clearSelection();
       if (!targetLocationChanged()) {
-        const committed = await refreshObjects(targetBucket, targetPrefix);
+        const committed = await refreshObjects(targetBucket, targetPrefix, {
+          supersedePending: false,
+        });
         if (committed && !targetLocationChanged()) {
           renderObjectTable();
         }
+      }
+      if (!targetLocationChanged()) {
+        clearAllSelection();
+        addSelection(folderEntry(newPrefix));
+        updateSelectionUI();
+        revealRow(newPrefix, "folder");
       }
     } catch (err) {
       if (targetLocationChanged()) return;
@@ -643,7 +842,7 @@ export async function handleCreateFolder(): Promise<void> {
     state.currentBucket !== targetBucket ||
     state.currentPrefix !== targetPrefix;
 
-  const name = await showPrompt("New Folder", "Enter folder name:", {
+  const name = await showPrompt("New folder", "Enter folder name:", {
     inputPlaceholder: "Folder name",
   });
   if (!name) return;
@@ -700,13 +899,15 @@ export async function handleCreateFolder(): Promise<void> {
     });
 
   try {
-    setStatus("Creating folder...");
+    setStatus("Creating folder…");
     await createWithOverwrite(intent.overwrite);
     if (targetLocationChanged()) return;
     setStatus(`Created folder "${trimmed}".`, 5000);
     logActivity(`Created folder ${trimmed}.`, "success");
     if (!targetLocationChanged()) {
-      const committed = await refreshObjects(targetBucket, targetPrefix);
+      const committed = await refreshObjects(targetBucket, targetPrefix, {
+        supersedePending: false,
+      });
       if (committed && !targetLocationChanged()) renderObjectTable();
     }
   } catch (err) {
@@ -725,7 +926,7 @@ export async function handleCreateFolder(): Promise<void> {
       const replace = unsupported
         ? (await promptUnguardedWrite()).proceed
         : await showConfirm(
-            "Folder Exists",
+            "Folder exists",
             `${targetBucket}/${folderKey} already exists. Replace it?`,
             { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
           );
@@ -740,13 +941,15 @@ export async function handleCreateFolder(): Promise<void> {
         return;
       }
       try {
-        setStatus("Creating folder...");
+        setStatus("Creating folder…");
         await createWithOverwrite(true);
         if (targetLocationChanged()) return;
         setStatus(`Created folder "${trimmed}".`, 5000);
         logActivity(`Created folder ${trimmed}.`, "success");
         if (!targetLocationChanged()) {
-          const committed = await refreshObjects(targetBucket, targetPrefix);
+          const committed = await refreshObjects(targetBucket, targetPrefix, {
+            supersedePending: false,
+          });
           if (committed && !targetLocationChanged()) renderObjectTable();
         }
         return;
@@ -773,10 +976,12 @@ export async function handleRefresh(): Promise<void> {
   } catch {
     return;
   }
-  setStatus("Refreshing...");
+  setStatus("Refreshing…");
   try {
+    // Manual refresh must not cancel a navigation the user just started.
     const committed = await refreshObjects(target.bucket, target.prefix, {
       preserveSelection: true,
+      supersedePending: false,
     });
     if (committed && !connectionSnapshotChanged(target)) {
       invalidateInspectorSelectionSync();
@@ -792,7 +997,54 @@ export async function handleRefresh(): Promise<void> {
   }
 }
 
+const BUCKET_BANNER_CLASS = "bucket-refresh-banner";
+
+/**
+ * Shows a failed bucket refresh above the list. The previous bucket list is
+ * kept, so the user can still act on it while retrying.
+ */
+function showBucketRefreshBanner(
+  list: HTMLElement | null,
+  message: string,
+): void {
+  const panel = list?.parentElement;
+  if (!list || !panel) return;
+  list.setAttribute("aria-busy", "false");
+  let banner = panel.querySelector<HTMLElement>(`.${BUCKET_BANNER_CLASS}`);
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.className = `${BUCKET_BANNER_CLASS} table-error`;
+    banner.setAttribute("role", "alert");
+    panel.insertBefore(banner, list);
+  }
+  const text = document.createElement("span");
+  text.textContent = message;
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.className = "btn btn--sm";
+  retryBtn.textContent = "Retry bucket refresh";
+  retryBtn.addEventListener("click", () => {
+    void handleRefreshBuckets().catch((err) => {
+      setStatus(`Failed to refresh buckets: ${friendlyError(err)}`);
+    });
+  });
+  banner.replaceChildren(text, retryBtn);
+}
+
+function clearBucketRefreshBanner(list: HTMLElement | null): void {
+  list?.parentElement?.querySelector(`.${BUCKET_BANNER_CLASS}`)?.remove();
+}
+
 let bucketRefreshInFlight = false;
+let bucketResetListenerInstalled = false;
+
+function installBucketResetListener(): void {
+  if (bucketResetListenerInstalled) return;
+  bucketResetListenerInstalled = true;
+  document.addEventListener(CONNECTION_RESET_EVENT, () => {
+    clearBucketRefreshBanner(document.getElementById("bucket-list"));
+  });
+}
 
 export function isBucketRefreshInFlight(): boolean {
   return bucketRefreshInFlight;
@@ -800,37 +1052,26 @@ export function isBucketRefreshInFlight(): boolean {
 
 export async function handleRefreshBuckets(): Promise<void> {
   if (!state.connected || bucketRefreshInFlight) return;
+  installBucketResetListener();
   const connectionId = state.connectionId;
   const bucketList = document.getElementById("bucket-list");
   bucketRefreshInFlight = true;
   try {
-    setStatus("Refreshing buckets...");
+    setStatus("Refreshing buckets…");
     bucketList?.setAttribute("aria-busy", "true");
     await refreshBuckets();
     // Ignore stale completions after disconnect/reconnect.
     if (!state.connected || state.connectionId !== connectionId) return;
     renderBucketList();
+    clearBucketRefreshBanner(bucketList);
     setStatus("Buckets refreshed.", 3000);
   } catch (err) {
     if (!state.connected || state.connectionId !== connectionId) return;
-    setStatus(`Failed to refresh buckets: ${friendlyError(err)}`);
-    logActivity(`Failed to refresh buckets: ${friendlyError(err)}`, "error");
-    // Inline retry affordance inside the list (aria-busy cleared).
-    if (bucketList) {
-      bucketList.setAttribute("aria-busy", "false");
-      const retryRow = document.createElement("li");
-      retryRow.className = "list__empty";
-      const retryBtn = document.createElement("button");
-      retryBtn.type = "button";
-      retryBtn.className = "btn btn--sm";
-      retryBtn.textContent = "Retry bucket refresh";
-      retryBtn.addEventListener("click", () => {
-        void handleRefreshBuckets();
-      });
-      retryRow.textContent = `Failed to refresh buckets: ${friendlyError(err)} `;
-      retryRow.appendChild(retryBtn);
-      bucketList.replaceChildren(retryRow);
-    }
+    const message = `Failed to refresh buckets: ${friendlyError(err)}`;
+    setStatus(message);
+    logActivity(message, "error");
+    // The last good list stays visible; the banner says it may be stale.
+    showBucketRefreshBanner(bucketList, message);
     return;
   } finally {
     bucketRefreshInFlight = false;
@@ -847,32 +1088,27 @@ export async function handleExportActivityLog(): Promise<void> {
     return;
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  let destination: string | null;
+  let grant: Awaited<ReturnType<typeof pickTextExport>>;
   try {
-    destination = await save({
-      title: "Export Activity Log",
-      defaultPath: `s3-sidekick-activity-${stamp}.txt`,
-    });
+    grant = await pickTextExport(
+      `s3-sidekick-activity-${stamp}.txt`,
+      "Export activity log",
+    );
   } catch (err) {
     setStatus(`Failed to open save dialog: ${friendlyError(err)}`);
     return;
   }
-  if (!destination) return;
+  if (!grant) return;
 
-  let overwrite = false;
+  // The save dialog already asked about replacing an existing file. A second
+  // overwrite prompt would ask the same question twice, so write directly.
   try {
-    const exists = await invoke<boolean>("path_exists", { path: destination });
-    if (exists) {
-      overwrite = await showConfirm(
-        "Overwrite File",
-        `${destination} already exists. Replace it?`,
-        { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
-      );
-      if (!overwrite) return;
-    }
-    await invoke("write_text_file", { path: destination, text, overwrite });
+    await invoke("export_text_file", {
+      token: grant.token,
+      text,
+    });
     setStatus("Activity log exported.", 5000);
-    logActivity(`Exported activity log to ${destination}.`, "success");
+    logActivity(`Exported activity log to ${grant.path}.`, "success");
   } catch (err) {
     setStatus(`Failed to export activity log: ${friendlyError(err)}`);
     logActivity(
@@ -884,13 +1120,18 @@ export async function handleExportActivityLog(): Promise<void> {
 
 export async function handleGoToKeyOrPrefix(): Promise<void> {
   if (!state.connected || !state.currentBucket) return;
-  const targetBucket = state.currentBucket;
-  const raw = await showPrompt("Go To", "Enter key or prefix:", {
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch {
+    return;
+  }
+  const raw = await showPrompt("Go to", "Enter key or prefix:", {
     inputPlaceholder: "e.g. folder/file.txt or folder/subfolder/",
   });
   if (!raw) return;
-  if (!state.connected || state.currentBucket !== targetBucket) {
-    setStatus("Go To cancelled because connection changed.", 5000);
+  if (connectionIdentityChanged(target)) {
+    setStatus("Go to cancelled because connection changed.", 5000);
     return;
   }
 
@@ -905,13 +1146,23 @@ export async function handleGoToKeyOrPrefix(): Promise<void> {
 
     const idx = input.lastIndexOf("/");
     const parentPrefix = idx >= 0 ? input.slice(0, idx + 1) : "";
+    const navigationTarget: ConnectionSnapshot = {
+      ...target,
+      prefix: parentPrefix,
+    };
     await navigateToFolder(parentPrefix);
+    // Navigation can be superseded while its listing loads (another jump,
+    // reconnect, or bucket change). Only select from the exact view this
+    // request asked for; abort silently when a newer action owns the table.
+    if (connectionSnapshotChanged(navigationTarget)) return;
 
     const targetKey = input;
     if (state.objects.some((obj) => obj.key === targetKey)) {
       clearAllSelection();
-      addSelection(targetKey);
+      addSelection(fileEntry(targetKey));
       updateSelectionUI();
+      // Scroll the row into view and move focus to it, not just select it.
+      revealRow(targetKey, "file");
       return;
     }
 

@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { closeLicensesModal, openLicensesModal } from "../licenses.ts";
 
+const mockInvoke = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("../ipc.ts", () => ({ invoke: mockInvoke }));
+
 async function flushMicrotasks(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve();
@@ -10,9 +13,11 @@ async function flushMicrotasks(cycles = 6): Promise<void> {
 
 describe("licenses modal", () => {
   beforeEach(() => {
+    // Mirrors index.html: the list (and its delegated clicks) lives inside the overlay.
     document.body.innerHTML = `
-      <div id="licenses-overlay" class="modal-overlay"></div>
-      <div id="licenses-list"></div>
+      <div id="licenses-overlay" class="modal-overlay">
+        <div id="licenses-list"></div>
+      </div>
     `;
     vi.unstubAllGlobals();
   });
@@ -143,6 +148,100 @@ describe("licenses modal", () => {
 
     const list = document.getElementById("licenses-list") as HTMLDivElement;
     expect(list.textContent).toContain("Failed to load licenses.");
+  });
+
+  it("renders license text when the data includes it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: string | URL) => {
+        if (String(input).endsWith("/licenses.json")) {
+          return {
+            ok: true,
+            json: async () => ({
+              "pkg-text": {
+                licenses: "ISC",
+                licenseText:
+                  "Permission to use, copy, modify, and/or distribute",
+              },
+            }),
+          };
+        }
+        return { ok: false, status: 404 };
+      }),
+    );
+
+    openLicensesModal();
+    await flushMicrotasks();
+
+    const card = document.querySelector("details.license-card") as HTMLElement;
+    expect(card.textContent).toContain(
+      "Permission to use, copy, modify, and/or distribute",
+    );
+  });
+
+  it("offers Retry after a failed load and recovers on retry", async () => {
+    let licenseAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: string | URL) => {
+        if (String(input).endsWith("/licenses.json")) {
+          licenseAttempts += 1;
+          if (licenseAttempts === 1) return { ok: false, status: 500 };
+          return {
+            ok: true,
+            json: async () => ({ "pkg-retry": { licenses: "MIT" } }),
+          };
+        }
+        return { ok: false, status: 404 };
+      }),
+    );
+
+    openLicensesModal();
+    await flushMicrotasks();
+    const list = document.getElementById("licenses-list") as HTMLDivElement;
+    const retry = list.querySelector("button") as HTMLButtonElement;
+    expect(retry.textContent).toBe("Retry");
+
+    retry.click();
+    await flushMicrotasks();
+    expect(list.textContent).toContain("pkg-retry");
+    expect(licenseAttempts).toBe(2);
+  });
+
+  it("routes license repository links through open_external_url", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: string | URL) => {
+        if (String(input).endsWith("/licenses.json")) {
+          return {
+            ok: true,
+            json: async () => ({
+              "pkg-link": {
+                licenses: "MIT",
+                repository: "https://example.com/pkg-link",
+              },
+            }),
+          };
+        }
+        return { ok: false, status: 404 };
+      }),
+    );
+    mockInvoke.mockClear();
+
+    openLicensesModal();
+    await flushMicrotasks();
+    const link = document.querySelector(
+      "details.license-card a",
+    ) as HTMLAnchorElement;
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+    link.dispatchEvent(event);
+    await flushMicrotasks();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(link.getAttribute("target")).toBeNull();
+    expect(mockInvoke).toHaveBeenCalledWith("open_external_url", {
+      url: "https://example.com/pkg-link",
+    });
   });
 
   it("closes the modal", () => {

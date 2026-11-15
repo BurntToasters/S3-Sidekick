@@ -7,6 +7,8 @@
 // - A missing table marker or malformed lockfile leaves a partial update.
 // - CRLF input gains mixed line endings.
 // - npm, Tauri, Cargo, AppStream, or changelog versions diverge.
+// - The beta-build banner is shown on a stable release or hidden on a beta,
+//   or a missing/edited banner leaves a partial update.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -67,6 +69,7 @@ function seed(version) {
     "package.json",
     "package-lock.json",
     "CHANGELOG.md",
+    "README.md",
     "run.rosie.s3-sidekick.metainfo.xml",
     "src-tauri/tauri.conf.json",
     "src-tauri/Cargo.toml",
@@ -160,12 +163,22 @@ try {
       changelog.includes(`${heading}\n\n${previousHeading}`),
   );
   check(
-    "only URL lines and heading changed in changelog",
+    "only URL, heading, and banner lines changed in changelog",
     changedContent.every(
       (line) =>
-        line === "" || line === heading || line.includes("releases/download"),
+        line === "" ||
+        line === heading ||
+        line.includes("releases/download") ||
+        line === "<!-- > [!NOTE]" ||
+        line === "> [!NOTE]" ||
+        line === "-->" ||
+        line.includes("This is a beta build."),
     ),
     changedContent,
+  );
+  check(
+    "beta version shows the beta banner",
+    changelog.startsWith("> [!NOTE]\n> 🅱️ This is a beta build.\n\n"),
   );
   const lock = JSON.parse(read("package-lock.json"));
   check(
@@ -175,6 +188,12 @@ try {
   check(
     "tauri.conf synced",
     JSON.parse(read("src-tauri/tauri.conf.json")).version === version,
+  );
+  check(
+    "README version synced",
+    read("README.md").includes(
+      `> **Package version in this checkout: ${version}.**`,
+    ),
   );
 
   seed("0.11.3");
@@ -187,6 +206,39 @@ try {
   const missingStatus = runSync("missing-marker.log");
   check("missing marker exits 1", missingStatus === 1, missingStatus);
   check("missing marker writes nothing", isClean());
+
+  seed("0.11.3");
+  fs.writeFileSync(
+    path.join(repo, "CHANGELOG.md"),
+    read("CHANGELOG.md").replace(/beta build\./, "release notes."),
+  );
+  git(["add", "CHANGELOG.md"]);
+  git(["commit", "-qm", "missing-banner"]);
+  const missingBannerStatus = runSync("missing-banner.log");
+  check(
+    "missing banner exits 1",
+    missingBannerStatus === 1,
+    missingBannerStatus,
+  );
+  check("missing banner writes nothing", isClean());
+
+  seed("0.11.3");
+  fs.writeFileSync(
+    path.join(repo, "README.md"),
+    read("README.md").replace(
+      /^> \*\*Package version in this checkout:.*$/m,
+      "> Package version marker removed.",
+    ),
+  );
+  git(["add", "README.md"]);
+  git(["commit", "-qm", "missing-readme-marker"]);
+  const missingReadmeStatus = runSync("missing-readme-marker.log");
+  check(
+    "missing README marker exits 1",
+    missingReadmeStatus === 1,
+    missingReadmeStatus,
+  );
+  check("missing README marker writes nothing", isClean());
 
   seed("0.11.3");
   fs.writeFileSync(path.join(repo, "package-lock.json"), "{ broken\n");
@@ -212,6 +264,12 @@ try {
   );
   check("crlf has no bare LF", !/(^|[^\r])\n/.test(crlf));
   check(
+    "stable version hides the beta banner",
+    crlf.startsWith(
+      "<!-- > [!NOTE]\r\n> 🅱️ This is a beta build.\r\n-->\r\n\r\n",
+    ),
+  );
+  check(
     "crlf URLs use stable tag",
     crlf.includes("releases/download/v0.12.0/"),
   );
@@ -222,7 +280,7 @@ try {
     `${JSON.stringify(
       {
         suite: "sync-version-real-script",
-        passed: passed === results.length && results.length === 18,
+        passed: passed === results.length && results.length >= 25,
         checkCount: results.length,
         passedCount: passed,
         checks: results,
@@ -235,7 +293,7 @@ try {
 }
 
 const passed =
-  results.length === 18 && results.every((result) => result.passed);
+  results.length >= 25 && results.every((result) => result.passed);
 process.stdout.write(
   `${passed ? "ALL PASS" : "FAILURES"} (${results.filter((result) => result.passed).length}/${results.length})\n`,
 );

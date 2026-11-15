@@ -120,6 +120,214 @@ pub(super) async fn ensure_no_orphaned_rollback_backups(
     ))
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct RollbackBackupInfo {
+    pub(super) namespace: String,
+    pub(super) keys: Vec<String>,
+    pub(super) active: bool,
+}
+
+#[allow(dead_code)] // expose to the Tauri handler; registration lives in main.rs
+fn valid_rollback_namespace(namespace: &str) -> bool {
+    !namespace.is_empty()
+        && !namespace.contains('/')
+        && !namespace.contains('\\')
+        && namespace
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// List every rollback namespace in a bucket so the user can resolve one left
+/// behind by an interrupted copy or move. Namespaces belonging to an operation
+/// running in this process are marked active and cannot be deleted.
+#[allow(dead_code)] // expose to the Tauri handler; registration lives in main.rs
+#[tauri::command]
+pub(crate) async fn list_rollback_backups(
+    state: tauri::State<'_, AppState>,
+    connection_id: String,
+    bucket: String,
+) -> Result<Vec<RollbackBackupInfo>, String> {
+    let client = require_client(&state, &connection_id, None)?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
+    validate_bucket_name(&bucket)?;
+    let cancel = client.token();
+    let keys =
+        list_all_keys_under_prefix(&client, &bucket, ROLLBACK_BACKUP_PREFIX, &cancel).await?;
+    let active = active_rollback_namespaces()
+        .lock()
+        .map_err(|_| "Internal rollback namespace state error".to_string())?
+        .clone();
+    let mut namespaces: Vec<RollbackBackupInfo> = Vec::new();
+    for key in keys {
+        let Some(namespace) = namespace_of_backup_key(&key).map(str::to_string) else {
+            continue;
+        };
+        let existing = namespaces
+            .iter()
+            .position(|entry| entry.namespace == namespace);
+        match existing {
+            Some(index) => namespaces[index].keys.push(key),
+            None => {
+                let active_entry = active.contains(&namespace);
+                namespaces.push(RollbackBackupInfo {
+                    namespace,
+                    keys: vec![key],
+                    active: active_entry,
+                });
+            }
+        }
+    }
+    namespaces.sort_by(|first, second| first.namespace.cmp(&second.namespace));
+    Ok(namespaces)
+}
+
+/// Delete named orphaned rollback namespaces after a native confirmation.
+///
+/// The backups may hold the only copy of an overwritten destination, so this
+/// never runs from the renderer silently. Active namespaces and keys outside
+/// the requested namespace are refused.
+#[allow(dead_code)] // expose to the Tauri handler; registration lives in main.rs
+#[tauri::command]
+pub(crate) async fn delete_rollback_backups(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    connection_id: String,
+    bucket: String,
+    namespaces: Vec<String>,
+) -> Result<u32, String> {
+    let client = require_client(&state, &connection_id, None)?;
+    let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
+    validate_bucket_name(&bucket)?;
+    if namespaces.is_empty() {
+        return Ok(0);
+    }
+    let cancel = client.token();
+    let active = active_rollback_namespaces()
+        .lock()
+        .map_err(|_| "Internal rollback namespace state error".to_string())?
+        .clone();
+
+    let mut keys = Vec::new();
+    for namespace in &namespaces {
+        if !valid_rollback_namespace(namespace) {
+            return Err(format!(
+                "'{}' is not a valid rollback backup namespace.",
+                namespace
+            ));
+        }
+        if active.contains(namespace) {
+            return Err(format!(
+                "Rollback namespace '{}' belongs to a running operation and cannot be deleted.",
+                namespace
+            ));
+        }
+        let prefix = format!("{}{}/", ROLLBACK_BACKUP_PREFIX, namespace);
+        for key in list_all_keys_under_prefix(&client, &bucket, &prefix, &cancel).await? {
+            if namespace_of_backup_key(&key) != Some(namespace.as_str()) {
+                return Err(format!(
+                    "Refusing to delete '{}' because it is outside rollback namespace '{}'.",
+                    key, namespace
+                ));
+            }
+            keys.push(key);
+        }
+    }
+    if keys.is_empty() {
+        return Ok(0);
+    }
+
+    let confirmation_app = app.clone();
+    let message = format!(
+        "Permanently delete {} rollback backup object(s) in bucket '{}'? These may be the only \
+         copy of data overwritten by an interrupted operation. Restore anything you need before \
+         confirming.",
+        keys.len(),
+        bucket
+    );
+    let confirmed = tokio::task::spawn_blocking(move || {
+        crate::security::confirm_security_state_change(
+            &confirmation_app,
+            "Delete rollback backups?",
+            &message,
+            "Delete backups",
+        )
+    })
+    .await
+    .map_err(|err| format!("Rollback confirmation task failed: {}", err))?;
+    if !confirmed {
+        return Err(crate::security::SECURITY_CONFIRMATION_CANCELLED.to_string());
+    }
+
+    let _mutation_guard = crate::acquire_s3_mutation_cancellable(
+        namespaces
+            .iter()
+            .map(|namespace| {
+                crate::S3MutationScope::prefix(
+                    &connection_id,
+                    &bucket,
+                    &format!("{}{}/", ROLLBACK_BACKUP_PREFIX, namespace),
+                )
+            })
+            .collect(),
+        &cancel,
+    )
+    .await?;
+
+    let mut deleted = 0u32;
+    for chunk in keys.chunks(1000) {
+        let objects = chunk
+            .iter()
+            .map(|key| {
+                ObjectIdentifier::builder()
+                    .key(key)
+                    .build()
+                    .map_err(|err| format!("Invalid rollback backup key '{}': {}", key, err))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let delete = Delete::builder()
+            .set_objects(Some(objects))
+            .quiet(true)
+            .build()
+            .map_err(|err| format!("Rollback backup delete build failed: {}", err))?;
+        let request = client
+            .delete_objects()
+            .bucket(&bucket)
+            .delete(delete)
+            .send();
+        let output = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = request => result.map_err(|err| format!(
+                "Rollback backup deletion stopped after {} confirmed deletion(s): {}",
+                deleted, err
+            ))?,
+        };
+        if !output.errors().is_empty() {
+            let details = output
+                .errors()
+                .iter()
+                .take(MAX_DELETE_ERROR_DETAILS)
+                .map(|err| {
+                    format!(
+                        "{}: {}",
+                        err.key().unwrap_or("?"),
+                        err.message().unwrap_or("unknown error")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "Rollback backup deletion did not finish: {} deleted, {} failed ({}).",
+                deleted,
+                output.errors().len(),
+                details
+            ));
+        }
+        deleted = deleted.saturating_add(chunk.len() as u32);
+    }
+
+    Ok(deleted)
+}
+
 pub(super) fn rollback_error(original: String, failures: Vec<String>) -> String {
     if failures.is_empty() {
         original
@@ -363,6 +571,40 @@ pub(super) async fn rollback_prefix_copy_unbounded(
                 ));
                 continue;
             }
+            // Stage the restore before deleting the replacement: prove the
+            // backup object is still readable and unchanged, so the delete is
+            // never followed by a restore that cannot find its source.
+            let backup_etag = backup
+                .source_info
+                .etag
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let backup_ready = {
+                let mut request = client.head_object().bucket(bucket).key(&backup.backup_key);
+                if let Some(version_id) = backup.source_info.version_id.as_deref() {
+                    request = request.version_id(version_id);
+                }
+                let result = tokio::select! {
+                    _ = rollback_cancel.cancelled() => None,
+                    result = request.send() => result.ok(),
+                };
+                result.is_some_and(|head| {
+                    let size_matches = head.content_length() == Some(backup.source_info.size);
+                    let etag_matches = backup_etag.is_none_or(|expected| {
+                        head.e_tag()
+                            .is_some_and(|actual| actual.trim() == expected.trim())
+                    });
+                    size_matches && etag_matches
+                })
+            };
+            if !backup_ready {
+                failures.push(format!(
+                    "did not replace '{}' because its retained backup '{}' could not be verified as restorable",
+                    backup.destination_key, backup.backup_key
+                ));
+                continue;
+            }
             let delete_result = client
                 .delete_object()
                 .bucket(bucket)
@@ -391,7 +633,7 @@ pub(super) async fn rollback_prefix_copy_unbounded(
             .await
             {
                 failures.push(format!(
-                    "could not recreate '{}' without overwriting a concurrent writer: {}; retained backup '{}'",
+                    "could not recreate '{}' without overwriting a concurrent writer: {}; the destination is currently missing and retained backup '{}' is its only copy",
                     backup.destination_key, err, backup.backup_key
                 ));
                 continue;
@@ -476,6 +718,14 @@ pub(super) async fn rollback_prefix_copy_unbounded(
     failures
 }
 
+/// Bound automatic rollback per request, never with a deadline that can strike
+/// between removing a replacement and restoring its backup.
+///
+/// The previous implementation wrapped the whole rollback in one 180 second
+/// timeout. When it fired after the conditional delete but before the restore,
+/// the destination was missing and only an opaque backup remained. Individual
+/// SDK attempts already carry their own timeout, so the delete/restore pair is
+/// now allowed to finish and every failure names the destination/backup pair.
 pub(super) async fn rollback_prefix_copy(
     client: &Client,
     bucket: &str,
@@ -483,8 +733,5 @@ pub(super) async fn rollback_prefix_copy(
     backups: &[DestinationBackup],
     provider: StorageProviderKind,
 ) -> Vec<String> {
-    // Rollback owns the only in-memory map from overwritten destinations to
-    // their backups. Dropping it on a timer can strand a partially restored
-    // transaction, so once rollback begins it must be awaited to completion.
     rollback_prefix_copy_unbounded(client, bucket, created_destinations, backups, provider).await
 }

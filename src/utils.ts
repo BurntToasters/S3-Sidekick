@@ -1,3 +1,5 @@
+import type { DateFormat, SizeUnits } from "./settings-model.ts";
+
 export function $<T extends HTMLElement = HTMLElement>(id: string): T {
   const el = document.getElementById(id);
   if (!el) throw new Error(`Element #${id} not found`);
@@ -35,10 +37,34 @@ export function safeHref(url: string): string {
   return SAFE_URL_PATTERN.test(url) ? escapeHtml(url) : "#";
 }
 
+/** Display preferences read by formatSize and formatDate. Set from Settings. */
+let sizeUnitStyle: SizeUnits = "binary";
+let dateFormatStyle: DateFormat = "locale";
+
+export function setFormatPreferences(prefs: {
+  sizeUnits: SizeUnits;
+  dateFormat: DateFormat;
+}): void {
+  sizeUnitStyle = prefs.sizeUnits;
+  dateFormatStyle = prefs.dateFormat;
+  formatDateCache.clear();
+}
+
+export function getFormatPreferences(): {
+  sizeUnits: SizeUnits;
+  dateFormat: DateFormat;
+} {
+  return { sizeUnits: sizeUnitStyle, dateFormat: dateFormatStyle };
+}
+
 export function formatSize(bytes: number): string {
   if (bytes < 0) return "—";
   if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
+  if (sizeUnitStyle === "decimal") return formatDecimalSize(bytes);
+  const units =
+    sizeUnitStyle === "iec"
+      ? ["B", "KiB", "MiB", "GiB", "TiB"]
+      : ["B", "KB", "MB", "GB", "TB"];
   const i = Math.min(
     Math.floor(Math.log(bytes) / Math.log(1024)),
     units.length - 1,
@@ -47,8 +73,41 @@ export function formatSize(bytes: number): string {
   return `${i === 0 ? value : value.toFixed(1)} ${units[i]}`;
 }
 
+/** Powers of 1000 with KB labels. Steps by division, so 1 GB never reads 1000 MB. */
+function formatDecimalSize(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let i = 0;
+  while (value >= 1000 && i < units.length - 1) {
+    value /= 1000;
+    i += 1;
+  }
+  return `${i === 0 ? value : value.toFixed(1)} ${units[i]}`;
+}
+
+export function plural(
+  count: number,
+  singular: string,
+  pluralForm = `${singular}s`,
+): string {
+  return `${count.toLocaleString()} ${count === 1 ? singular : pluralForm}`;
+}
+
+/**
+ * Length in Unicode code points, not UTF-16 code units. A password made of
+ * emoji or astral characters must not count twice toward the minimum.
+ */
+export function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
 export function formatDate(iso: string): string {
   if (!iso) return "—";
+  // Relative times change with the clock, so they are never cached.
+  if (dateFormatStyle === "relative") {
+    const relative = formatRelativeDate(iso);
+    if (relative !== null) return relative;
+  }
   const cached = formatDateCache.get(iso);
   if (cached !== undefined) return cached;
   const formatted = formatDateUncached(iso);
@@ -59,11 +118,32 @@ export function formatDate(iso: string): string {
 
 const FORMAT_DATE_CACHE_MAX = 2000;
 const formatDateCache = new Map<string, string>();
+const RELATIVE_DATE_LIMIT_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** "3 min ago" style text, or null when the locale format should be used. */
+function formatRelativeDate(iso: string): string | null {
+  const time = new Date(iso).getTime();
+  if (isNaN(time)) return null;
+  const elapsed = Date.now() - time;
+  // Clocks drift, so a few seconds ahead still reads as "just now".
+  if (elapsed < -60_000 || elapsed >= RELATIVE_DATE_LIMIT_MS) return null;
+  if (elapsed < 60_000) return "just now";
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
+}
 
 function formatDateUncached(iso: string): string {
   try {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
+    if (dateFormatStyle === "iso") {
+      // Local wall-clock time, so the digits match what the table's neighbours show.
+      const pad = (n: number) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
     return d.toLocaleDateString(undefined, {
       year: "numeric",
       month: "short",
@@ -106,12 +186,11 @@ function percentEncodeAscii(value: string): string {
  * traverse out of the destination directory (`%` itself is encoded). Unicode
  * is folded to NFC because APFS treats NFC/NFD spellings as one file.
  */
-export function safeFileName(key: string, platform: string): string {
+export function safeFileName(key: string, _platform: string): string {
   const normalized = basename(key).normalize("NFC");
   const base = normalized.length > 0 ? normalized : "unnamed";
-  if (platform !== "windows") {
-    return base === "." || base === ".." ? percentEncodeAscii(base) : base;
-  }
+  // Apply Windows-portable rules on every host: a download made on macOS or
+  // Linux must still open if the folder is later used from Windows (M10).
   let name = base.replace(WINDOWS_ILLEGAL_NAME_CHARS, percentEncodeAscii);
   const stem = name.split(".")[0] ?? "";
   if (WINDOWS_RESERVED_NAME.test(stem)) {
@@ -121,15 +200,25 @@ export function safeFileName(key: string, platform: string): string {
   return name.length > 0 ? name : "unnamed";
 }
 
+/** Input types that accept typed text. Checkboxes, radios, buttons and
+ * ranges take Space/arrow keys for their own behavior, not text entry. */
+const TEXT_ENTRY_INPUT_TYPES = new Set([
+  "text",
+  "search",
+  "email",
+  "url",
+  "password",
+  "number",
+  "tel",
+]);
+
 export function isEditableElement(el: Element | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
   const tag = el.tagName;
-  return (
-    el.isContentEditable ||
-    tag === "INPUT" ||
-    tag === "TEXTAREA" ||
-    tag === "SELECT"
-  );
+  if (tag === "INPUT") {
+    return TEXT_ENTRY_INPUT_TYPES.has((el as HTMLInputElement).type);
+  }
+  return el.isContentEditable || tag === "TEXTAREA" || tag === "SELECT";
 }
 
 export { getIconHtml } from "./icons.ts";
@@ -175,6 +264,9 @@ function statusToken(code: number): RegExp {
   return new RegExp(`(?<![\\w\\-./%])${code}(?![\\w\\-./%])`);
 }
 
+const INTERNAL_FAILURE_MESSAGE =
+  "Something went wrong talking to the app backend. Try again; details are in the activity log.";
+
 export function friendlyError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
   const msg = unwrapTransferErrorEnvelope(raw.replace(/^Error:\s*/u, ""));
@@ -208,6 +300,16 @@ export function friendlyError(err: unknown): string {
     statusToken(429).test(text)
   )
     return "Rate limited. Too many requests \u2014 wait a moment and try again.";
+  // Runtime and shape errors come from the app itself. Their raw text is
+  // developer-facing and can leak internal identifiers, so show a generic
+  // sentence and let the Activity log hold the detail.
+  if (
+    /^(TypeError|ReferenceError|RangeError|SyntaxError)\b/.test(text) ||
+    /Cannot read propert|is not a function|is not defined|is not iterable|Unexpected response shape/i.test(
+      text,
+    )
+  )
+    return INTERNAL_FAILURE_MESSAGE;
   return msg;
 }
 

@@ -121,12 +121,62 @@ describe("context menu", () => {
     const disabled = document.querySelectorAll<HTMLButtonElement>(
       ".context-menu__item",
     )[1];
-    expect(disabled.disabled).toBe(true);
+    // Disabled items stay focusable so their reason is discoverable.
+    expect(disabled.disabled).toBe(false);
+    expect(disabled.getAttribute("aria-disabled")).toBe("true");
     disabled.click();
     expect(onAction).not.toHaveBeenCalled();
 
     document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     expect(document.querySelector(".context-menu")).toBeNull();
+  });
+
+  it("shows why a disabled item is unavailable and links it to the item", () => {
+    showContextMenu(
+      5,
+      5,
+      [
+        {
+          label: "Move to...",
+          action: "move",
+          disabled: true,
+          disabledReason: "This provider can't safely delete the source.",
+        },
+      ],
+      () => {},
+    );
+    const item = document.querySelector<HTMLButtonElement>(
+      ".context-menu__item",
+    )!;
+    expect(item.type).toBe("button");
+    const reason = document.querySelector(".context-menu__reason");
+    expect(reason?.textContent).toBe(
+      "This provider can't safely delete the source.",
+    );
+    expect(item.getAttribute("aria-describedby")).toBe(reason?.id);
+  });
+
+  it("keeps shortcut hints out of the accessible name", () => {
+    showContextMenu(
+      5,
+      5,
+      [{ label: "Rename", action: "rename", shortcut: "F2" }],
+      () => {},
+    );
+    const item = document.querySelector<HTMLButtonElement>(
+      ".context-menu__item",
+    )!;
+    expect(item.querySelector(".context-menu__shortcut")?.textContent).toBe(
+      "F2",
+    );
+    expect(
+      item
+        .querySelector(".context-menu__shortcut")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    expect(item.querySelector(".context-menu__label")?.textContent).toBe(
+      "Rename",
+    );
   });
 
   it("hideContextMenu is safe to call repeatedly", () => {

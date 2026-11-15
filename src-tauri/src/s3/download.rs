@@ -9,7 +9,8 @@ pub(crate) async fn download_object(
     connection_id: String,
     bucket: String,
     key: String,
-    destination: String,
+    destination_token: String,
+    destination_name: Option<String>,
     transfer_id: u32,
     overwrite: bool,
     attempt: Option<u32>,
@@ -21,11 +22,17 @@ pub(crate) async fn download_object(
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
     validate_readable_key(&key, "Object key")?;
-    let destination_path = if overwrite {
-        validate_destination_path_allow_overwrite(&destination)?
+    // The destination is the file the user picked in a native save dialog, or
+    // one backend-validated file name inside the folder they picked. The
+    // webview never supplies an absolute destination path.
+    let destination_path =
+        crate::resolve_download_destination(&destination_token, destination_name.as_deref())?;
+    if overwrite {
+        validate_destination_path_allow_overwrite_parsed(&destination_path)?;
     } else {
-        validate_destination_path(&destination)?
-    };
+        validate_destination_path_parsed(&destination_path)?;
+    }
+    crate::validate_user_write_target(&app, &destination_path)?;
     // The scratch path is derived here rather than accepted from the caller.
     // Accepting it meant any script in the webview could name an arbitrary
     // existing file and have the backend truncate and overwrite it.
@@ -35,6 +42,7 @@ pub(crate) async fn download_object(
     }
     let cancel = client.token();
     let _temp_guard = claim_download_temp_async(&temp_path, &destination_path).await?;
+    let parent_identity = _temp_guard.parent_identity();
     let download_lease_nonce =
         issue_download_lease_async(&app, &destination_path, &temp_path).await?;
     if tokio::fs::try_exists(&temp_path).await.unwrap_or(false) {
@@ -66,25 +74,31 @@ pub(crate) async fn download_object(
         .e_tag()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            encode_transfer_error(
-                "generation_unavailable",
-                false,
-                None,
-                "Sequential download is unsafe because the provider returned no ETag.".to_string(),
-            )
-        })?
+        .unwrap_or_default()
         .to_string();
     let object_version_id = generation_head
         .version_id()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    // An immutable version ID pins the bytes even when a provider omits ETag
+    // (some S3-compatible gateways do). Without either, a sequential read has
+    // no generation identity to verify before publication (M6).
+    if object_etag.is_empty() && object_version_id.is_none() {
+        return Err(encode_transfer_error(
+            "generation_unavailable",
+            false,
+            None,
+            "Sequential download is unsafe because the provider returned neither an ETag nor a version ID."
+                .to_string(),
+        ));
+    }
     let expected_checksum = if checksum_enabled {
         Some(expected_download_checksum(&client, &bucket, &key, &generation_head, &cancel).await?)
     } else {
         None
     };
+    let expected_object_bytes = sanitized_content_length(generation_head.content_length());
 
     let mut download_request = client.get_object().bucket(&bucket).key(&key);
     if let Some(version_id) = object_version_id.as_deref() {
@@ -92,7 +106,10 @@ pub(crate) async fn download_object(
     } else {
         download_request = download_request.if_match(&object_etag);
     }
-    let download_request = download_request.send();
+    let download_request = download_request
+        .customize()
+        .config_override(body_attempt_timeout_override(expected_object_bytes))
+        .send();
     let output = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
         result = download_request => {
@@ -193,7 +210,31 @@ pub(crate) async fn download_object(
         ));
     }
 
-    publish_completed_download_file(&temp_path, &destination_path, overwrite, false).await?;
+    let scratch_identity = match open_download_scratch_async(&temp_path, false, None).await {
+        Ok((_, identity)) => identity,
+        Err(err) => {
+            remove_download_scratch(&temp_path).await;
+            release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;
+            return Err(err);
+        }
+    };
+    if let Err(err) = publish_verified_download_file(
+        &temp_path,
+        &scratch_identity,
+        &destination_path,
+        overwrite,
+        false,
+        parent_identity,
+    )
+    .await
+    {
+        // A non-checkpointed sequential download has nothing to resume, so a
+        // failed publication must not strand a full-size scratch file or its
+        // lease beside the destination.
+        remove_download_scratch(&temp_path).await;
+        release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;
+        return Err(err);
+    }
     release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;
 
     emit_transfer_progress(
@@ -231,9 +272,11 @@ pub(super) async fn stream_body_to_temp(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut reader = output.body.into_async_read();
-    let mut file = tokio::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(temp_path)
         .await
         .map_err(|e| format!("Failed to create temp file: {}", e))?;
@@ -439,6 +482,63 @@ fn download_scratch_identity(file: &std::fs::File) -> std::io::Result<DownloadSc
     }
 }
 
+/// Serialize the inode/device identity into checkpoint-safe integers.
+#[cfg(unix)]
+fn download_scratch_stamp(identity: &DownloadScratchIdentity) -> (Option<u64>, Option<u64>) {
+    (Some(identity.device), Some(identity.inode))
+}
+
+#[cfg(windows)]
+fn download_scratch_stamp(identity: &DownloadScratchIdentity) -> (Option<u64>, Option<u64>) {
+    (Some(identity.volume as u64), Some(identity.file_index))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn download_scratch_stamp(_identity: &DownloadScratchIdentity) -> (Option<u64>, Option<u64>) {
+    (None, None)
+}
+
+/// Recomputed digest of one completed scratch range. A checkpoint is trusted
+/// only when every recorded range still hashes to what was written: file length
+/// alone accepts a same-size replaced or preallocated scratch file.
+async fn verify_download_part_digest(
+    path: &Path,
+    identity: &DownloadScratchIdentity,
+    start: u64,
+    end: u64,
+    expected_hex: &str,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let (mut file, _) = open_download_scratch_async(path, false, Some(identity.clone())).await?;
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|error| format!("Failed to seek resumable scratch: {}", error))?;
+    let mut remaining = end.saturating_sub(start) + 1;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let want = std::cmp::min(remaining, buffer.len() as u64) as usize;
+        let count = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_error()),
+            result = file.read(&mut buffer[..want]) => {
+                result.map_err(|error| format!("Failed to read resumable scratch: {}", error))?
+            }
+        };
+        if count == 0 {
+            return Err("Resumable scratch ended before a checkpointed part".to_string());
+        }
+        hasher.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    let actual = digest_to_hex(&hasher.finalize());
+    if actual != expected_hex {
+        return Err("Resumable scratch digest does not match its checkpoint".to_string());
+    }
+    Ok(())
+}
+
 fn open_download_scratch_file(
     path: &Path,
     create: bool,
@@ -493,6 +593,7 @@ fn open_download_scratch_file(
             target_os = "netbsd"
         ))]
         options.custom_flags(O_NOFOLLOW);
+        options.mode(0o600);
     }
 
     #[cfg(windows)]
@@ -509,6 +610,24 @@ fn open_download_scratch_file(
     ));
 
     let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `mode` only applies on creation. Tighten a scratch file left by an
+        // older build or created under a laxer umask as well.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    // Scratch may contain object bytes and can live on a shared volume. Set an
+    // owner-only DACL where the filesystem supports one, but keep downloads
+    // working on FAT/exFAT where ACLs are unavailable (best-effort, unlike the
+    // fail-closed vault/checkpoint write in main.rs).
+    if let Err(err) = crate::harden_private_file(path) {
+        eprintln!(
+            "Download scratch '{}' could not be restricted to its owner: {}",
+            path.display(),
+            err
+        );
+    }
     let identity = download_scratch_identity(&file)?;
     if expected_identity.is_some_and(|expected| expected != &identity) {
         return Err(std::io::Error::new(
@@ -612,6 +731,7 @@ async fn publish_verified_download_file(
     destination_path: &Path,
     overwrite: bool,
     keep_temp_on_failure: bool,
+    parent_identity: crate::DestinationParentIdentity,
 ) -> Result<(), String> {
     let temp_path = temp_path.to_path_buf();
     let identity = identity.clone();
@@ -619,12 +739,16 @@ async fn publish_verified_download_file(
     tokio::task::spawn_blocking(move || {
         let (_validated_file, _) = open_download_scratch_file(&temp_path, false, Some(&identity))
             .map_err(|error| {
-                format!(
-                    "Download scratch identity changed before publication; scratch and checkpoint were retained: {}",
-                    error
-                )
-            })?;
-        crate::publish_temp_file(
+            format!(
+                "Download scratch identity changed before publication: {}",
+                error
+            )
+        })?;
+        // Reject a destination parent swapped for a symlink since the
+        // scratch claim pinned it. The rename below must never run against
+        // a different directory than the user granted.
+        crate::verify_destination_parent_identity(&destination_path, &parent_identity)?;
+        crate::publish_download_temp_file(
             &temp_path,
             &destination_path,
             overwrite,
@@ -636,19 +760,23 @@ async fn publish_verified_download_file(
     .map_err(|error| format!("Failed to finalize download: {}", error))
 }
 
+#[cfg(test)]
 pub(super) async fn publish_completed_download_file(
     temp_path: &Path,
     destination_path: &Path,
     overwrite: bool,
     keep_temp_on_failure: bool,
 ) -> Result<(), String> {
-    // publish_temp_file performs rename/hard_link/fsync — blocking syscalls
-    // on potentially large files — so run it on the blocking pool following
-    // the files.rs::list_local_files_recursive pattern.
+    // publish_download_temp_file performs rename/hard_link/fsync — blocking
+    // syscalls on potentially large files — so run it on the blocking pool
+    // following the files.rs::list_local_files_recursive pattern. Tests run
+    // without a scratch guard, so the parent identity is captured here.
     let temp_path = temp_path.to_path_buf();
     let destination_path = destination_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        crate::publish_temp_file(
+        let parent_identity = crate::destination_parent_identity(&destination_path)?;
+        crate::verify_destination_parent_identity(&destination_path, &parent_identity)?;
+        crate::publish_download_temp_file(
             &temp_path,
             &destination_path,
             overwrite,
@@ -780,7 +908,7 @@ async fn download_parallel_part(
     version_id: Option<String>,
     etag: String,
     cancel: CancelToken,
-) -> Result<u64, String> {
+) -> Result<(u64, String), String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
     if cancel.is_cancelled() {
@@ -799,7 +927,10 @@ async fn download_parallel_part(
     } else {
         request = request.if_match(etag);
     }
-    let request = request.send();
+    let request = request
+        .customize()
+        .config_override(body_attempt_timeout_override(expected_len))
+        .send();
     let output = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_error()),
         result = request => {
@@ -821,6 +952,7 @@ async fn download_parallel_part(
         .map_err(|e| format!("Failed to seek temp file: {}", e))?;
 
     let mut written = 0u64;
+    let mut hasher = Sha256::new();
     let mut buf = [0u8; 128 * 1024];
     loop {
         if cancel.is_cancelled() {
@@ -850,6 +982,7 @@ async fn download_parallel_part(
                 result.map_err(|e| format!("Failed to write ranged temp file: {}", e))?;
             }
         }
+        hasher.update(&buf[..count]);
         written += count as u64;
     }
 
@@ -869,7 +1002,7 @@ async fn download_parallel_part(
     file.sync_all()
         .await
         .map_err(|e| format!("Failed to sync ranged temp file: {}", e))?;
-    Ok(written)
+    Ok((written, digest_to_hex(&hasher.finalize())))
 }
 
 #[tauri::command]
@@ -879,7 +1012,8 @@ pub(crate) async fn download_object_parallel(
     connection_id: String,
     bucket: String,
     key: String,
-    destination: String,
+    destination_token: String,
+    destination_name: Option<String>,
     transfer_id: u32,
     overwrite: bool,
     attempt: Option<u32>,
@@ -909,11 +1043,17 @@ pub(crate) async fn download_object_parallel(
     // becomes a local path (the destination is caller-chosen and validated
     // separately), so `.`/`..` segments must remain downloadable.
     validate_readable_key(&key, "Object key")?;
-    let destination_path = if overwrite {
-        validate_destination_path_allow_overwrite(&destination)?
+    // The destination is the file the user picked in a native save dialog, or
+    // one backend-validated file name inside the folder they picked. The
+    // webview never supplies an absolute destination path.
+    let destination_path =
+        crate::resolve_download_destination(&destination_token, destination_name.as_deref())?;
+    if overwrite {
+        validate_destination_path_allow_overwrite_parsed(&destination_path)?;
     } else {
-        validate_destination_path(&destination)?
-    };
+        validate_destination_path_parsed(&destination_path)?;
+    }
+    crate::validate_user_write_target(&app, &destination_path)?;
     // Derived, not caller-supplied: see `download_object`.
     let temp_path = crate::download_temp_path(&destination_path);
     if temp_path == destination_path {
@@ -921,6 +1061,7 @@ pub(crate) async fn download_object_parallel(
     }
     let cancel = client.token();
     let _temp_guard = claim_download_temp_async(&temp_path, &destination_path).await?;
+    let parent_identity = _temp_guard.parent_identity();
     let download_lease_nonce =
         issue_download_lease_async(&app, &destination_path, &temp_path).await?;
     let attempt = normalize_attempt(attempt);
@@ -974,7 +1115,8 @@ pub(crate) async fn download_object_parallel(
             connection_id,
             bucket,
             key,
-            destination,
+            destination_token,
+            destination_name,
             transfer_id,
             overwrite,
             Some(attempt),
@@ -1005,7 +1147,8 @@ pub(crate) async fn download_object_parallel(
             connection_id,
             bucket,
             key,
-            destination,
+            destination_token,
+            destination_name,
             transfer_id,
             overwrite,
             Some(attempt),
@@ -1072,8 +1215,10 @@ pub(crate) async fn download_object_parallel(
         .map_err(|error| format!("Failed to inspect opened download scratch: {}", error))
         .map(|metadata| metadata.len())?;
     let temp_usable = temp_len == total_bytes;
+    let (scratch_device, scratch_inode) = download_scratch_stamp(&temp_identity);
 
     let mut completed = vec![false; total_parts as usize];
+    let mut part_digests: Vec<Option<String>> = vec![None; total_parts as usize];
 
     if checkpoint_enabled {
         if let Some(id) = checkpoint_id.as_deref() {
@@ -1100,7 +1245,14 @@ pub(crate) async fn download_object_parallel(
                     &object_etag,
                     object_version_id.as_deref(),
                 );
+                // A recorded scratch identity must exist and match. Without it
+                // a same-size replaced or preallocated file would satisfy the
+                // length check and let stale bytes publish.
+                let identity_matches = scratch_device.is_some()
+                    && payload.scratch_device == scratch_device
+                    && payload.scratch_inode == scratch_inode;
                 if temp_usable
+                    && identity_matches
                     && payload.mode == "download_parallel"
                     && payload.bucket == bucket
                     && payload.key == key
@@ -1110,7 +1262,35 @@ pub(crate) async fn download_object_parallel(
                     && generation_matches
                 {
                     for part in normalize_checkpoint_parts(&payload.completed_parts, total_parts) {
-                        completed[part as usize] = true;
+                        let Some(digest) = payload.part_digests.iter().find(|digest| {
+                            digest.part == part
+                                && digest.sha256.len() == 64
+                                && digest.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        }) else {
+                            // Legacy or malformed checkpoint entry: re-fetch it.
+                            continue;
+                        };
+                        let start = (part as u64) * part_size;
+                        let end = std::cmp::min(start + part_size, total_bytes) - 1;
+                        match verify_download_part_digest(
+                            &temp_path,
+                            &temp_identity,
+                            start,
+                            end,
+                            &digest.sha256,
+                            &cancel,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                completed[part as usize] = true;
+                                part_digests[part as usize] = Some(digest.sha256.clone());
+                            }
+                            Err(err) if cancel.is_cancelled() => return Err(err),
+                            Err(_) => {
+                                // Replaced or preallocated range: re-download it.
+                            }
+                        }
                     }
                 }
             }
@@ -1162,8 +1342,11 @@ pub(crate) async fn download_object_parallel(
     let bytes_done = Arc::new(AtomicU64::new(completed_bytes));
     let mut join_set = tokio::task::JoinSet::new();
     let mut next_part = 0u32;
+    // Maintained incrementally: a full rescan per completed part is O(parts²)
+    // on a long download (M4).
+    let mut completed_count = completed.iter().filter(|v| **v).count() as u32;
     let mut last_checkpoint_saved_at = Instant::now();
-    let mut last_checkpoint_saved_parts = completed.iter().filter(|v| **v).count() as u32;
+    let mut last_checkpoint_saved_parts = completed_count;
 
     while next_part < total_parts || !join_set.is_empty() {
         if cancel.is_cancelled() {
@@ -1197,7 +1380,7 @@ pub(crate) async fn download_object_parallel(
             let etag_clone = object_etag.clone();
             let part_cancel = Arc::clone(&cancel);
             join_set.spawn(async move {
-                let size = download_parallel_part(
+                let (size, digest) = download_parallel_part(
                     client_clone,
                     bucket_clone,
                     key_clone,
@@ -1210,7 +1393,7 @@ pub(crate) async fn download_object_parallel(
                     part_cancel,
                 )
                 .await?;
-                Ok::<(u32, u64), String>((index, size))
+                Ok::<(u32, u64, String), String>((index, size, digest))
             });
         }
 
@@ -1227,8 +1410,12 @@ pub(crate) async fn download_object_parallel(
         };
 
         match joined {
-            Some(Ok(Ok((index, written)))) => {
-                completed[index as usize] = true;
+            Some(Ok(Ok((index, written, digest)))) => {
+                if !completed[index as usize] {
+                    completed[index as usize] = true;
+                    completed_count = completed_count.saturating_add(1);
+                }
+                part_digests[index as usize] = Some(digest);
                 let sent = bytes_done.fetch_add(written, Ordering::Relaxed) + written;
                 if bandwidth_limit_bps > 0 {
                     let elapsed = started_at.elapsed().as_secs_f64();
@@ -1241,14 +1428,17 @@ pub(crate) async fn download_object_parallel(
                         continue;
                     }
                 }
-                let completed_count = completed.iter().filter(|v| **v).count() as u32;
-
                 if checkpoint_enabled {
                     if let Some(id) = checkpoint_id.as_deref() {
                         let elapsed_ms = last_checkpoint_saved_at.elapsed().as_millis() as u64;
+                        // Checkpoint writes serialize every completed part and
+                        // fsync, so writing every 8 parts or 1.5 s was churn on
+                        // a fast link. Still save the final part and resume
+                        // promptly: at most 16 parts or 3 s of progress is at
+                        // risk on a crash (M4).
                         if completed_count == total_parts
-                            || completed_count.saturating_sub(last_checkpoint_saved_parts) >= 8
-                            || elapsed_ms >= 1500
+                            || completed_count.saturating_sub(last_checkpoint_saved_parts) >= 16
+                            || elapsed_ms >= 3000
                         {
                             let payload = TransferCheckpoint {
                                 version: 1,
@@ -1269,6 +1459,18 @@ pub(crate) async fn download_object_parallel(
                                 updated_at_ms: now_ms(),
                                 etag: object_etag.clone(),
                                 version_id: object_version_id.clone(),
+                                scratch_device,
+                                scratch_inode,
+                                part_digests: part_digests
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(part, digest)| {
+                                        digest.as_ref().map(|sha256| TransferPartDigest {
+                                            part: part as u32,
+                                            sha256: sha256.clone(),
+                                        })
+                                    })
+                                    .collect(),
                             };
                             if let Err(err) = persist_checkpoint_and_advance(
                                 &mut last_checkpoint_saved_at,
@@ -1278,7 +1480,7 @@ pub(crate) async fn download_object_parallel(
                                     let save_app = app.clone();
                                     let save_id = id.to_string();
                                     let save_session = recovery_session.clone();
-                                    let save_payload = payload.clone();
+                                    let save_payload = payload;
                                     move || async move {
                                         tokio::task::spawn_blocking(move || {
                                             save_checkpoint_payload(
@@ -1455,6 +1657,7 @@ pub(crate) async fn download_object_parallel(
         &destination_path,
         overwrite,
         checkpoint_enabled,
+        parent_identity,
     )
     .await?;
     release_download_lease_async(&app, &destination_path, &download_lease_nonce).await;

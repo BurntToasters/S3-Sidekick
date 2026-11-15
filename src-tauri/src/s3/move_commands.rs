@@ -2,6 +2,61 @@
 
 use super::*;
 
+/// Validate that a receipt set names independent source/destination pairs.
+///
+/// A forged receipt with identical source and destination would authorize
+/// deleting the object that is supposed to preserve the copy. A chain
+/// (`A -> B`, `B -> C`) is just as destructive: deleting `B` as the second
+/// source removes the first receipt's only destination. Both fail closed.
+fn validate_receipt_pairing(
+    src_bucket: &str,
+    dst_bucket: &str,
+    receipts: &[CopyReceipt],
+) -> Result<(), String> {
+    let mut source_keys = BTreeSet::new();
+    let mut destination_keys = BTreeSet::new();
+    for receipt in receipts {
+        // Only the source is deleted here. It gets dot-tolerant deletable
+        // validation (deletion never derives a local path), and the
+        // destination gets read validation: both may legally contain dot
+        // segments after a dot-tolerant copy, and refusing them here would
+        // strand a completed copy as a half-move.
+        validate_deletable_key(&receipt.source_key, "Source key")?;
+        validate_readable_key(&receipt.destination_key, "Destination key")?;
+        reject_reserved_backup_key(&receipt.destination_key, "Destination key")?;
+        if receipt.source_etag.is_empty() || receipt.destination_etag.is_empty() {
+            return Err("Copy receipts must contain non-empty ETags".to_string());
+        }
+        if src_bucket == dst_bucket && receipt.source_key == receipt.destination_key {
+            return Err(format!(
+                "Copy receipt names '{}' as both source and destination; source deletion was refused.",
+                receipt.source_key
+            ));
+        }
+        if !source_keys.insert(receipt.source_key.clone())
+            || !destination_keys.insert(receipt.destination_key.clone())
+        {
+            return Err("Copy receipts contain duplicate keys".to_string());
+        }
+    }
+
+    let chained_key = if src_bucket == dst_bucket {
+        receipts
+            .iter()
+            .map(|receipt| &receipt.destination_key)
+            .find(|key| source_keys.contains(*key))
+    } else {
+        None
+    };
+    if let Some(key) = chained_key {
+        return Err(format!(
+            "Copy receipts form a chain through '{}'; deleting that source would remove another receipt's destination. Source deletion was refused.",
+            key
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn delete_copied_objects(
     state: tauri::State<'_, AppState>,
@@ -20,25 +75,7 @@ pub(crate) async fn delete_copied_objects(
     if receipts.is_empty() {
         return Ok(0);
     }
-    let mut source_keys = BTreeSet::new();
-    let mut destination_keys = BTreeSet::new();
-    for receipt in &receipts {
-        // Only the source is deleted here. It gets dot-tolerant deletable
-        // validation (deletion never derives a local path), and the
-        // destination gets read validation: both may legally contain dot
-        // segments after a dot-tolerant copy, and refusing them here would
-        // strand a completed copy as a half-move.
-        validate_deletable_key(&receipt.source_key, "Source key")?;
-        validate_readable_key(&receipt.destination_key, "Destination key")?;
-        if receipt.source_etag.is_empty() || receipt.destination_etag.is_empty() {
-            return Err("Copy receipts must contain non-empty ETags".to_string());
-        }
-        if !source_keys.insert(receipt.source_key.clone())
-            || !destination_keys.insert(receipt.destination_key.clone())
-        {
-            return Err("Copy receipts contain duplicate keys".to_string());
-        }
-    }
+    validate_receipt_pairing(&src_bucket, &dst_bucket, &receipts)?;
 
     let provider = client.provider();
     if let Some(receipt) = receipts.first() {
@@ -67,6 +104,12 @@ pub(crate) async fn delete_copied_objects(
     .await
 }
 
+/// Source folder of a prefix move. The folder is named with its trailing `/`,
+/// so a source such as `old` cannot reach sibling objects like `old.zip`.
+fn validate_move_source_prefix(prefix: &str) -> Result<(), String> {
+    validate_mutating_folder_prefix(prefix, "Source prefix")
+}
+
 #[tauri::command]
 pub(crate) async fn rename_prefix(
     state: tauri::State<'_, AppState>,
@@ -82,7 +125,7 @@ pub(crate) async fn rename_prefix(
     let client = require_client(&state, &connection_id, transfer_id)?;
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&bucket)?;
-    validate_mutating_prefix(&old_prefix, "Source prefix")?;
+    validate_move_source_prefix(&old_prefix)?;
     validate_mutating_prefix(&new_prefix, "Destination prefix")?;
     if prefixes_overlap(&old_prefix, &new_prefix) {
         return Err("Source and destination prefixes overlap; move was refused.".to_string());
@@ -143,6 +186,9 @@ pub(crate) async fn copy_object_to(
     validate_bucket_name(&src_bucket)?;
     validate_bucket_name(&dst_bucket)?;
     validate_readable_key(&src_key, "Source key")?;
+    // CopySource is a strictly percent-encoded path (`encode_copy_source`), so
+    // dot and empty segments stay literal at the endpoint. Reads elsewhere
+    // accept them; rejecting them only here stranded readable objects.
     // Copying out of the backup namespace is how a user restores data from an
     // interrupted operation, so only the destination is restricted.
     validate_mutating_key(&dst_key, "Destination key")?;
@@ -222,7 +268,7 @@ pub(crate) async fn copy_prefix_to(
     let _storage_guard = acquire_transfer_storage_cancellable(&client.token()).await?;
     validate_bucket_name(&src_bucket)?;
     validate_bucket_name(&dst_bucket)?;
-    validate_mutating_prefix(&src_prefix, "Source prefix")?;
+    validate_move_source_prefix(&src_prefix)?;
     validate_mutating_prefix(&dst_prefix, "Destination prefix")?;
     if src_bucket == dst_bucket && prefixes_overlap(&src_prefix, &dst_prefix) {
         return Err("Source and destination prefixes overlap; copy was refused.".to_string());
@@ -254,4 +300,66 @@ pub(crate) async fn copy_prefix_to(
         &cancel,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_receipt(source_key: &str, destination_key: &str) -> CopyReceipt {
+        CopyReceipt {
+            source_key: source_key.to_string(),
+            source_etag: "source-etag".to_string(),
+            source_fingerprint: String::new(),
+            source_acl_fingerprint: String::new(),
+            source_tag_fingerprint: String::new(),
+            source_version_id: None,
+            destination_key: destination_key.to_string(),
+            destination_etag: "destination-etag".to_string(),
+            destination_fingerprint: String::new(),
+            destination_acl_fingerprint: String::new(),
+            destination_tag_fingerprint: String::new(),
+            destination_version_id: None,
+            ownership_ambiguous: false,
+        }
+    }
+
+    #[test]
+    fn move_source_prefix_requires_trailing_slash() {
+        // Without the trailing `/`, `old` also matches `old.zip` and
+        // `old-logs/...`, so a folder move would reach sibling objects.
+        for prefix in ["old", "old.zip", "old-logs"] {
+            assert!(
+                validate_move_source_prefix(prefix).is_err(),
+                "{prefix} must be refused as a move source without a trailing slash"
+            );
+        }
+        assert!(validate_move_source_prefix("old/").is_ok());
+    }
+
+    #[test]
+    fn receipt_pairing_refuses_self_and_chained_deletions() {
+        let self_pair = vec![test_receipt("same.txt", "same.txt")];
+        assert!(validate_receipt_pairing("bucket", "bucket", &self_pair)
+            .unwrap_err()
+            .contains("both source and destination"));
+
+        let chain = vec![
+            test_receipt("a.txt", "b.txt"),
+            test_receipt("b.txt", "c.txt"),
+        ];
+        assert!(validate_receipt_pairing("bucket", "bucket", &chain)
+            .unwrap_err()
+            .contains("form a chain"));
+
+        // The same key names may be reused across buckets; only a same-bucket
+        // identity or chain is destructive.
+        assert!(validate_receipt_pairing("src", "dst", &self_pair).is_ok());
+    }
+
+    #[test]
+    fn receipt_pairing_refuses_reserved_destinations() {
+        let receipt = vec![test_receipt("source.txt", ".s3-sidekick-rollback/1/0")];
+        assert!(validate_receipt_pairing("bucket", "bucket", &receipt).is_err());
+    }
 }

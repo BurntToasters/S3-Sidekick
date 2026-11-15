@@ -29,18 +29,29 @@ function commandCalls(command: string) {
   return mockInvoke.mock.calls.filter(([cmd]) => cmd === command);
 }
 
+function bookmarkState(primary: string | null, backup: string | null = null) {
+  const file = (contents: string | null) => ({
+    present: contents !== null,
+    contents: contents ?? "",
+    error: null as string | null,
+  });
+  return {
+    primary: file(primary),
+    backup: file(backup),
+  };
+}
+
 beforeEach(() => {
   vi.resetModules();
   mockInvoke.mockReset();
 });
 
 describe("bookmarks fallback and backup sync", () => {
-  it("loads valid bookmarks from primary and refreshes backup", async () => {
+  it("loads valid bookmarks from primary without writing the backup", async () => {
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_bookmarks") {
-        return JSON.stringify([alphaBookmark]);
+      if (command === "load_bookmarks_state") {
+        return bookmarkState(JSON.stringify([alphaBookmark]), null);
       }
-      if (command === "save_bookmarks_backup") return undefined;
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
 
@@ -48,16 +59,14 @@ describe("bookmarks fallback and backup sync", () => {
     await bookmarks.loadBookmarks();
 
     expect(bookmarks.getBookmarks()).toEqual([alphaBookmark]);
-    expect(mockInvoke).toHaveBeenCalledWith("save_bookmarks_backup", {
-      json: JSON.stringify([alphaBookmark], null, 2),
-    });
+    expect(bookmarks.getBookmarkLoadError()).toBeNull();
+    expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
   });
 
-  it("falls back to backup when primary returns invalid JSON", async () => {
+  it("falls back to backup when primary is corrupt without overwriting it", async () => {
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_bookmarks") return "{broken";
-      if (command === "load_bookmarks_backup") {
-        return JSON.stringify([betaBookmark]);
+      if (command === "load_bookmarks_state") {
+        return bookmarkState("{broken", JSON.stringify([betaBookmark]));
       }
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
@@ -66,14 +75,23 @@ describe("bookmarks fallback and backup sync", () => {
     await bookmarks.loadBookmarks();
 
     expect(bookmarks.getBookmarks()).toEqual([betaBookmark]);
+    // Degraded mode: the backup is usable but read-only until the primary is
+    // readable again, so a save can never overwrite the unreadable copy.
+    expect(bookmarks.getBookmarkLoadError()).toMatch(/corrupt|backup/i);
     expect(commandCalls("save_bookmarks")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
   });
 
-  it("falls back to backup when primary throws (vault locked)", async () => {
+  it("falls back to backup when primary cannot be decrypted", async () => {
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_bookmarks") throw new Error("vault locked");
-      if (command === "load_bookmarks_backup") {
-        return JSON.stringify([alphaBookmark]);
+      if (command === "load_bookmarks_state") {
+        const state = bookmarkState(null, JSON.stringify([alphaBookmark]));
+        state.primary = {
+          present: true,
+          contents: "",
+          error: "vault locked",
+        };
+        return state;
       }
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
@@ -85,10 +103,9 @@ describe("bookmarks fallback and backup sync", () => {
     expect(commandCalls("save_bookmarks")).toHaveLength(0);
   });
 
-  it("falls back to empty when both primary and backup fail", async () => {
+  it("treats both absent files as a fresh empty install", async () => {
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_bookmarks") throw new Error("vault locked");
-      if (command === "load_bookmarks_backup") return '{"not":"array"}';
+      if (command === "load_bookmarks_state") return bookmarkState(null, null);
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
 
@@ -96,12 +113,53 @@ describe("bookmarks fallback and backup sync", () => {
     await bookmarks.loadBookmarks();
 
     expect(bookmarks.getBookmarks()).toEqual([]);
+    expect(bookmarks.getBookmarkLoadError()).toBeNull();
+  });
+
+  it("keeps a load error when primary is corrupt and backup is missing", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "load_bookmarks_state") {
+        return bookmarkState("{broken", null);
+      }
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    expect(bookmarks.getBookmarks()).toEqual([]);
+    expect(bookmarks.getBookmarkLoadError()).toMatch(/corrupt/);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
+    expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
+  });
+
+  it("falls back to empty when both primary and backup fail", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "load_bookmarks_state") {
+        const state = bookmarkState(null, '{"not":"array"}');
+        state.primary = {
+          present: true,
+          contents: "",
+          error: "vault locked",
+        };
+        return state;
+      }
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    expect(bookmarks.getBookmarks()).toEqual([]);
+    expect(bookmarks.getBookmarkLoadError()).not.toBeNull();
   });
 
   it("persists bookmark changes to primary and backup", async () => {
     let primaryPayload: unknown[] = [];
     mockInvoke.mockImplementation(async (command, args) => {
-      if (command === "load_bookmarks") return JSON.stringify(primaryPayload);
+      if (command === "load_bookmarks_state") {
+        return bookmarkState(JSON.stringify(primaryPayload));
+      }
       if (command === "save_bookmarks") {
         primaryPayload = JSON.parse((args as { json: string }).json);
         return undefined;
@@ -128,7 +186,9 @@ describe("bookmarks fallback and backup sync", () => {
 function standardMock(initial: unknown[] = []) {
   let primaryPayload: unknown[] = initial;
   mockInvoke.mockImplementation(async (command, args) => {
-    if (command === "load_bookmarks") return JSON.stringify(primaryPayload);
+    if (command === "load_bookmarks_state") {
+      return bookmarkState(JSON.stringify(primaryPayload));
+    }
     if (command === "save_bookmarks") {
       primaryPayload = JSON.parse((args as { json: string }).json);
       return undefined;
@@ -137,78 +197,6 @@ function standardMock(initial: unknown[] = []) {
     throw new Error(`Unexpected invoke command: ${String(command)}`);
   });
 }
-
-describe("renderBookmarkBar", () => {
-  it("creates bookmark chip buttons for loaded bookmarks", async () => {
-    standardMock([alphaBookmark, betaBookmark]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const container = document.createElement("div");
-    bookmarks.renderBookmarkBar(container, () => {});
-
-    const chips = container.querySelectorAll("button.bookmark-chip");
-    expect(chips).toHaveLength(2);
-  });
-
-  it("shows the bookmark name on each chip", async () => {
-    standardMock([alphaBookmark, betaBookmark]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const container = document.createElement("div");
-    bookmarks.renderBookmarkBar(container, () => {});
-
-    const chips = container.querySelectorAll("button.bookmark-chip");
-    expect(chips[0].textContent).toBe("alpha");
-    expect(chips[1].textContent).toBe("beta");
-  });
-
-  it("sets tooltip to endpoint and region without region label in chip text", async () => {
-    standardMock([alphaBookmark]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const container = document.createElement("div");
-    bookmarks.renderBookmarkBar(container, () => {});
-
-    const chip = container.querySelector(
-      "button.bookmark-chip",
-    ) as HTMLButtonElement;
-    expect(chip.querySelector(".bookmark-chip__region")).toBeNull();
-    expect(chip.textContent).toBe("alpha");
-    expect(chip.title).toBe("https://alpha.example.com (us-east-1)");
-  });
-
-  it("calls onSelect with the correct bookmark when a chip is clicked", async () => {
-    standardMock([alphaBookmark, betaBookmark]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const onSelect = vi.fn();
-    const container = document.createElement("div");
-    bookmarks.renderBookmarkBar(container, onSelect);
-
-    const chips = container.querySelectorAll("button.bookmark-chip");
-    (chips[1] as HTMLButtonElement).click();
-
-    expect(onSelect).toHaveBeenCalledTimes(1);
-    expect(onSelect).toHaveBeenCalledWith(betaBookmark);
-  });
-
-  it("renders nothing when the bookmarks array is empty", async () => {
-    standardMock([]);
-    const bookmarks = await loadBookmarksModule();
-    await bookmarks.loadBookmarks();
-
-    const container = document.createElement("div");
-    container.innerHTML = "<span>placeholder</span>";
-    bookmarks.renderBookmarkBar(container, () => {});
-
-    expect(container.innerHTML).toBe("");
-    expect(container.children).toHaveLength(0);
-  });
-});
 
 describe("setBookmarkChangeHandler", () => {
   it("invokes the handler when addBookmark is called", async () => {
@@ -266,6 +254,8 @@ describe("bookmark import/export/list rendering", () => {
     ).resolves.toEqual({
       imported: 0,
       skipped: 1,
+      duplicates: 0,
+      invalid: 1,
     });
 
     const handler = vi.fn();
@@ -276,7 +266,9 @@ describe("bookmark import/export/list rendering", () => {
       ),
     ).resolves.toEqual({
       imported: 1,
-      skipped: 1,
+      skipped: 2,
+      duplicates: 1,
+      invalid: 1,
     });
     expect(bookmarks.getBookmarks()).toEqual([alphaBookmark, betaBookmark]);
     expect(handler).toHaveBeenCalledTimes(1);
@@ -291,10 +283,33 @@ describe("bookmark import/export/list rendering", () => {
     await expect(bookmarks.importBookmarksJson(redacted)).resolves.toEqual({
       imported: 1,
       skipped: 0,
+      duplicates: 0,
+      invalid: 0,
     });
     expect(bookmarks.getBookmarks()).toEqual([
       { ...alphaBookmark, secret_key: "" },
     ]);
+  });
+
+  it("drops session tokens from an export without secrets", async () => {
+    const withToken = {
+      ...alphaBookmark,
+      session_token: "session-secret-token",
+    };
+    standardMock([withToken]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const redacted = JSON.parse(bookmarks.exportBookmarksJson()) as Array<
+      Record<string, unknown>
+    >;
+    expect(redacted).toEqual([{ ...alphaBookmark, secret_key: "" }]);
+    expect(redacted[0]).not.toHaveProperty("session_token");
+
+    const full = JSON.parse(bookmarks.exportBookmarksJson(true)) as Array<
+      Record<string, unknown>
+    >;
+    expect(full[0].session_token).toBe("session-secret-token");
   });
 
   it("rolls memory back when addBookmark persist fails", async () => {
@@ -411,9 +426,9 @@ describe("bookmark import/export/list rendering", () => {
 
   it("handles invalid primary and backup bookmark payloads", async () => {
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_bookmarks") return "[]";
-      if (command === "load_bookmarks_backup") return '{"not":"array"}';
-      if (command === "save_bookmarks_backup") return undefined;
+      if (command === "load_bookmarks_state") {
+        return bookmarkState("[]", '{"not":"array"}');
+      }
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
 
@@ -423,8 +438,15 @@ describe("bookmark import/export/list rendering", () => {
 
     mockInvoke.mockReset();
     mockInvoke.mockImplementation(async (command) => {
-      if (command === "load_bookmarks") throw new Error("vault locked");
-      if (command === "load_bookmarks_backup") return '{"not":"array"}';
+      if (command === "load_bookmarks_state") {
+        const state = bookmarkState(null, '{"not":"array"}');
+        state.primary = {
+          present: true,
+          contents: "",
+          error: "vault locked",
+        };
+        return state;
+      }
       throw new Error(`Unexpected invoke command: ${String(command)}`);
     });
     await bookmarks.loadBookmarks();
@@ -447,6 +469,8 @@ describe("bookmark import/export/list rendering", () => {
     ).resolves.toEqual({
       imported: 0,
       skipped: 1,
+      duplicates: 1,
+      invalid: 0,
     });
     expect(commandCalls("save_bookmarks")).toHaveLength(0);
     expect(commandCalls("save_bookmarks_backup")).toHaveLength(0);
@@ -461,12 +485,6 @@ describe("bookmark import/export/list rendering", () => {
     ]);
     const bookmarks = await loadBookmarksModule();
     await bookmarks.loadBookmarks();
-
-    const bar = document.createElement("div");
-    bookmarks.renderBookmarkBar(bar, () => {});
-    const chip = bar.querySelector("button.bookmark-chip") as HTMLButtonElement;
-    expect(chip.querySelector(".bookmark-chip__region")).toBeNull();
-    expect(chip.title).toBe(alphaBookmark.endpoint);
 
     const list = document.createElement("ul");
     bookmarks.renderBookmarkList(
@@ -508,5 +526,249 @@ describe("bookmark import/export/list rendering", () => {
 
     expect(onDelete).not.toHaveBeenCalled();
     expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+describe("saved connection naming, identity, and editing", () => {
+  it("suggests a provider, region, and masked access key as the name", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+
+    expect(
+      bookmarks.suggestBookmarkName(
+        "https://s3.us-east-1.amazonaws.com",
+        "us-east-1",
+        "AKIAABCDEFGH1234",
+      ),
+    ).toBe("AWS · us-east-1 · AKIA…1234");
+    expect(
+      bookmarks.suggestBookmarkName("http://localhost:9000", "", "minioadmin"),
+    ).toBe("Local · mini…dmin");
+    // Short keys are never shown in part: the name must not reveal them.
+    expect(
+      bookmarks.suggestBookmarkName(
+        "https://nyc3.digitaloceanspaces.com",
+        "nyc3",
+        "DO00ABC",
+      ),
+    ).toBe("Spaces · nyc3");
+  });
+
+  it("reports invalid and duplicate imports as separate counts", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    await expect(
+      bookmarks.importBookmarksJson(
+        JSON.stringify([alphaBookmark, { nope: true }, betaBookmark]),
+      ),
+    ).resolves.toEqual({
+      imported: 1,
+      skipped: 2,
+      duplicates: 1,
+      invalid: 1,
+    });
+  });
+
+  it("renames a saved connection and persists the change", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    await expect(
+      bookmarks.updateBookmark(alphaBookmark, { name: "Renamed" }),
+    ).resolves.toBe(true);
+
+    expect(bookmarks.getBookmarks()[0].name).toBe("Renamed");
+    const saves = commandCalls("save_bookmarks");
+    expect(
+      JSON.parse((saves.at(-1)![1] as { json: string }).json)[0].name,
+    ).toBe("Renamed");
+  });
+
+  it("stores a secret key for a connection that has none", async () => {
+    standardMock([{ ...alphaBookmark, secret_key: "" }]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    await bookmarks.updateBookmark(alphaBookmark, {
+      secret_key: "stored-now",
+    });
+
+    expect(bookmarks.getBookmarks()[0].secret_key).toBe("stored-now");
+  });
+
+  it("returns false when updating a connection that is no longer saved", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    await expect(
+      bookmarks.updateBookmark(alphaBookmark, { name: "gone" }),
+    ).resolves.toBe(false);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
+  });
+
+  it("refuses to edit saved connections while the stored copy is unreadable", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "load_bookmarks_state") {
+        const state = bookmarkState(null, '{"not":"array"}');
+        state.primary = {
+          present: true,
+          contents: "",
+          error: "vault locked",
+        };
+        return state;
+      }
+      throw new Error(`Unexpected invoke command: ${String(command)}`);
+    });
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    await expect(
+      bookmarks.updateBookmark(alphaBookmark, { name: "nope" }),
+    ).rejects.toThrow(/could not be loaded/);
+  });
+
+  it("names row controls and keeps row keys from triggering delete", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const list = document.createElement("ul");
+    const onSelect = vi.fn();
+    const onDelete = vi.fn();
+    bookmarks.renderBookmarkList(list, onSelect, onDelete, {
+      layout: "connection",
+      onRename: vi.fn(),
+    });
+
+    const row = list.querySelector(".bookmark-item") as HTMLLIElement;
+    // The row is a Connect button plus a ⋯ menu with per-row labels.
+    const connectBtn = row.querySelector(
+      ".bookmark-item__connect",
+    ) as HTMLButtonElement;
+    expect(connectBtn).not.toBeNull();
+    expect(connectBtn.textContent).toContain("alpha");
+    const menuButton = row.querySelector(
+      ".bookmark__menu",
+    ) as HTMLButtonElement;
+    expect(menuButton.getAttribute("aria-label")).toBe(
+      "More actions for alpha",
+    );
+    const deleteBtn = row.querySelector(
+      '[role="menuitem"][data-delete]',
+    ) as HTMLButtonElement;
+    expect(deleteBtn.getAttribute("aria-label")).toBe("Delete alpha");
+    expect(
+      row.querySelector('button[aria-label="Rename alpha"]'),
+    ).not.toBeNull();
+
+    deleteBtn.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+
+    connectBtn.dispatchEvent(
+      new KeyboardEvent("keydown", { key: " ", bubbles: true }),
+    );
+    expect(onSelect).toHaveBeenCalledWith(alphaBookmark);
+  });
+});
+
+describe("updateBookmark identity and validation", () => {
+  const alphaIdentity = {
+    endpoint: alphaBookmark.endpoint,
+    access_key: alphaBookmark.access_key,
+  };
+
+  it("changing endpoint and access key updates only the matched row", async () => {
+    standardMock([alphaBookmark, betaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    await expect(
+      bookmarks.updateBookmark(alphaIdentity, {
+        endpoint: "https://alpha-moved.example.com",
+        access_key: "AKIAMOVED",
+        secret_key: "rotated-secret",
+      }),
+    ).resolves.toBe(true);
+
+    const rows = bookmarks.getBookmarks();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      name: "alpha",
+      endpoint: "https://alpha-moved.example.com",
+      access_key: "AKIAMOVED",
+      secret_key: "rotated-secret",
+    });
+    expect(rows[1]).toEqual(betaBookmark);
+    const saves = commandCalls("save_bookmarks");
+    expect(
+      JSON.parse((saves.at(-1)![1] as { json: string }).json),
+    ).toHaveLength(2);
+  });
+
+  it("keeps the stored secret when a patch does not include one", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    await bookmarks.updateBookmark(alphaIdentity, { region: "eu-west-1" });
+
+    expect(bookmarks.getBookmarks()[0]).toMatchObject({
+      region: "eu-west-1",
+      secret_key: alphaBookmark.secret_key,
+    });
+  });
+
+  it("rejects an empty endpoint or access key and persists nothing", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockClear();
+
+    await expect(
+      bookmarks.updateBookmark(alphaIdentity, { endpoint: "" }),
+    ).rejects.toThrow();
+    await expect(
+      bookmarks.updateBookmark(alphaIdentity, { access_key: "" }),
+    ).rejects.toThrow();
+
+    expect(bookmarks.getBookmarks()[0]).toEqual(alphaBookmark);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
+  });
+
+  it("rejects a patch longer than the stored maximum so the row cannot vanish on reload", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockClear();
+
+    await expect(
+      bookmarks.updateBookmark(alphaIdentity, { name: "n".repeat(257) }),
+    ).rejects.toThrow();
+
+    expect(bookmarks.getBookmarks()[0]).toEqual(alphaBookmark);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
+  });
+
+  it("rejects an edit that would duplicate another saved endpoint and access key", async () => {
+    standardMock([alphaBookmark, betaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockClear();
+
+    await expect(
+      bookmarks.updateBookmark(alphaIdentity, {
+        endpoint: betaBookmark.endpoint,
+        access_key: betaBookmark.access_key,
+      }),
+    ).rejects.toThrow(/already uses this endpoint and access key/);
+
+    expect(bookmarks.getBookmarks()).toEqual([alphaBookmark, betaBookmark]);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
   });
 });

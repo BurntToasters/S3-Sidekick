@@ -34,6 +34,9 @@ function renderFixture(): void {
 describe("activity log with drawer", () => {
   beforeEach(() => {
     vi.resetModules();
+    localStorage.removeItem("drawer-open");
+    localStorage.removeItem("drawer-tab");
+    localStorage.removeItem("drawer-minimized");
     renderFixture();
   });
 

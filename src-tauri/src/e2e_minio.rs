@@ -112,9 +112,15 @@ fn save_plaintext_e2e_security_config(app: &tauri::App<tauri::test::MockRuntime>
             verifier: String::new(),
             lock_timeout_minutes: 0,
             pbkdf2_iterations: 0,
+            kdf: crate::security::KdfAlgorithm::Pbkdf2,
+            argon2_memory_kib: 0,
+            argon2_iterations: 1,
+            argon2_parallelism: 1,
+            policy_schema: 2,
             biometric_enrolled: false,
             legacy_plaintext_adopted: true,
             legacy_plaintext_adoption_proof: String::new(),
+            policy_mac: String::new(),
         },
     )
     .expect("save explicit plaintext test security configuration");
@@ -344,6 +350,99 @@ async fn e2e_keys_with_space_and_plus_stay_distinct() {
 
 #[tokio::test]
 #[ignore = "needs the MinIO E2E runner (npm run test:e2e:minio)"]
+async fn e2e_conditional_upload_part_copy_contract() {
+    let test = "conditional_part_copy";
+    let env = env();
+    let client = raw_client(&env.endpoint_minio, &env);
+    let bucket = fresh_bucket(&client, "conditional-part-copy").await;
+    let body = vec![b'a'; 5 * 1024 * 1024 + 1];
+    client
+        .put_object()
+        .bucket(&bucket)
+        .key("source.bin")
+        .body(ByteStream::from(body.clone()))
+        .send()
+        .await
+        .expect("seed conditional-part source");
+    let head = client
+        .head_object()
+        .bucket(&bucket)
+        .key("source.bin")
+        .send()
+        .await
+        .expect("head conditional-part source");
+    let etag = head.e_tag().expect("source ETag").to_string();
+    let size = body.len() as u64;
+    let upload = client
+        .create_multipart_upload()
+        .bucket(&bucket)
+        .key("destination.bin")
+        .send()
+        .await
+        .expect("initiate multipart copy");
+    let upload_id = upload.upload_id().expect("upload id").to_string();
+    let range = format!("bytes=0-{}", size - 1);
+
+    // The provider must honour a matching condition.
+    let matched = client
+        .upload_part_copy()
+        .bucket(&bucket)
+        .key("destination.bin")
+        .upload_id(&upload_id)
+        .copy_source(format!("{bucket}/source.bin"))
+        .copy_source_range(&range)
+        .copy_source_if_match(&etag)
+        .part_number(1)
+        .send()
+        .await;
+    record(
+        test,
+        "UploadPartCopy accepts a matching copy-source-if-match",
+        matched.is_ok(),
+        serde_json::json!({"result": format!("{:?}", matched.as_ref().err())}),
+    );
+
+    // A stale condition must be refused, not silently ignored. This is the
+    // provider behaviour the post-completion source recheck compensates for.
+    let stale = client
+        .upload_part_copy()
+        .bucket(&bucket)
+        .key("destination.bin")
+        .upload_id(&upload_id)
+        .copy_source(format!("{bucket}/source.bin"))
+        .copy_source_range(&range)
+        .copy_source_if_match("\"00000000000000000000000000000000\"")
+        .part_number(2)
+        .send()
+        .await;
+    let stale_refused = stale
+        .as_ref()
+        .err()
+        .is_some_and(|err| format!("{:?}", err).contains("PreconditionFailed"));
+    record(
+        test,
+        "UploadPartCopy refuses a stale copy-source-if-match",
+        stale_refused,
+        serde_json::json!({"result": format!("{:?}", stale.as_ref().err())}),
+    );
+
+    let _ = client
+        .abort_multipart_upload()
+        .bucket(&bucket)
+        .key("destination.bin")
+        .upload_id(&upload_id)
+        .send()
+        .await;
+    let _ = client
+        .delete_object()
+        .bucket(&bucket)
+        .key("source.bin")
+        .send()
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "needs the MinIO E2E runner (npm run test:e2e:minio)"]
 async fn e2e_create_only_contract_matches_frontend() {
     let test = "create_only_contract";
     let env = env();
@@ -506,8 +605,7 @@ async fn e2e_scratch_discard_tolerates_missing_destination_folder() {
     let missing = std::env::temp_dir()
         .join(format!("s3sk-e2e-unplugged-{}", std::process::id()))
         .join("download.bin");
-    let result =
-        crate::discard_download_scratch_for_destination(app.handle(), &missing.to_string_lossy());
+    let result = crate::discard_download_scratch_for_destination(app.handle(), &missing);
     record(
         test,
         "discarding scratch for a destination whose folder is gone succeeds (recovery is not blocked)",
@@ -531,7 +629,7 @@ async fn e2e_cancel_before_backend_registration_prevents_write() {
 
     // This ordering reproduces two IPC handlers being scheduled in the wrong
     // order: cancellation reaches Rust before the transfer command registers.
-    s3::cancel_transfer(transfer_id);
+    s3::cancel_transfer_in_registry(&session.connection_id, transfer_id);
     let result = s3::copy_object_to(
         app.state::<AppState>(),
         session.connection_id,
@@ -2030,5 +2128,94 @@ async fn e2e_versioned_prefix_overwrite_rolls_back_with_exact_version_authority(
             && backups.is_empty()
             && read(&raw, &bucket, "src/a.txt").await.as_deref() == Some("new A"),
         serde_json::json!({"result": format!("{:?}", result), "destination_a": destination_a, "destination_b": destination_b, "backup_keys": backups}),
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the MinIO E2E runner (npm run test:e2e:minio)"]
+async fn e2e_preview_bodies_follow_their_per_type_caps() {
+    use base64::Engine as _;
+    let test = "preview_body_caps";
+    let env = env();
+    let raw = raw_client(&env.endpoint_minio, &env);
+    let bucket = fresh_bucket(&raw, "preview-caps").await;
+    let image_size: usize = 3 * 1024 * 1024;
+    let text_size: usize = 2 * 1024 * 1024;
+    let image_body: Vec<u8> = (0..image_size).map(|i| (i % 251) as u8).collect();
+    let text_body: Vec<u8> = (0..text_size).map(|i| b'a' + (i % 26) as u8).collect();
+    raw.put_object()
+        .bucket(&bucket)
+        .key("photo.png")
+        .content_type("image/png")
+        .body(ByteStream::from(image_body.clone()))
+        .send()
+        .await
+        .expect("seed 3 MiB image");
+    raw.put_object()
+        .bucket(&bucket)
+        .key("log.txt")
+        .content_type("text/plain")
+        .body(ByteStream::from(text_body.clone()))
+        .send()
+        .await
+        .expect("seed 2 MiB text");
+
+    let app = make_app();
+    let session = connect(&app, &env.endpoint_minio, &env).await;
+    let image = s3::preview_object(
+        app.state::<AppState>(),
+        session.connection_id.clone(),
+        bucket.clone(),
+        "photo.png".to_string(),
+    )
+    .await;
+    let image_json = image
+        .as_ref()
+        .map(|response| serde_json::to_value(response).expect("serialize preview"))
+        .unwrap_or(serde_json::Value::Null);
+    let decoded_image = image_json["data"]
+        .as_str()
+        .map(|data| base64::engine::general_purpose::STANDARD.decode(data))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    record(
+        test,
+        "a 3 MiB image is returned whole, byte-for-byte, with truncated false",
+        decoded_image == image_body
+            && image_json["truncated"] == serde_json::json!(false)
+            && image_json["total_size"] == serde_json::json!(image_size),
+        serde_json::json!({
+            "error": image.as_ref().err(),
+            "decoded_len": decoded_image.len(),
+            "truncated": image_json["truncated"],
+            "total_size": image_json["total_size"],
+        }),
+    );
+
+    let text = s3::preview_object(
+        app.state::<AppState>(),
+        session.connection_id,
+        bucket.clone(),
+        "log.txt".to_string(),
+    )
+    .await;
+    let text_json = text
+        .as_ref()
+        .map(|response| serde_json::to_value(response).expect("serialize preview"))
+        .unwrap_or(serde_json::Value::Null);
+    let text_len = text_json["data"].as_str().map(str::len).unwrap_or(0);
+    let one_mib = 1024 * 1024;
+    record(
+        test,
+        "a 2 MiB text/plain object is cut to its first 1 MiB and flagged truncated",
+        text_len == one_mib
+            && text_json["truncated"] == serde_json::json!(true)
+            && text_json["total_size"] == serde_json::json!(text_size),
+        serde_json::json!({
+            "error": text.as_ref().err(),
+            "data_len": text_len,
+            "truncated": text_json["truncated"],
+            "total_size": text_json["total_size"],
+        }),
     );
 }

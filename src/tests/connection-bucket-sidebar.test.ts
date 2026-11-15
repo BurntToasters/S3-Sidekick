@@ -21,19 +21,26 @@ const showConfirmMock = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const recoverPendingTransfersMock = vi.fn<() => Promise<void>>();
 const resumeRecoveredTransfersAfterConnectMock = vi.fn<() => Promise<void>>();
 
-vi.mock("../connection.ts", () => ({
-  connect: connectMock,
-  disconnect: disconnectMock,
-  saveConnection: saveConnectionMock,
-  refreshBuckets: refreshBucketsMock,
-  refreshObjects: refreshObjectsMock,
-  currentConnectionGeneration: () => 1,
-  finishConnecting: finishConnectingMock,
-  MAX_ACCUMULATED_LISTING_ITEMS: 10000,
-}));
+vi.mock("../connection.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../connection.ts")>();
+  return {
+    ...actual,
+    connect: connectMock,
+    disconnect: disconnectMock,
+    saveConnection: saveConnectionMock,
+    refreshBuckets: refreshBucketsMock,
+    refreshObjects: refreshObjectsMock,
+    currentConnectionGeneration: () => 1,
+    finishConnecting: finishConnectingMock,
+    MAX_ACCUMULATED_LISTING_ITEMS: 10000,
+  };
+});
 
 vi.mock("../bookmarks.ts", () => ({
   addBookmark: saveBookmarkMock,
+  clearBookmarks: vi.fn(),
+  getBookmarks: vi.fn(() => []),
+  getBookmarkLoadError: vi.fn(() => null),
   renderBookmarkBar: renderBookmarkBarMock,
   isEndpointBookmarked: isEndpointBookmarkedMock,
   renderBookmarkList: renderBookmarkListMock,
@@ -54,10 +61,12 @@ vi.mock("../app-layout.ts", () => ({
 }));
 
 vi.mock("../inspector.ts", () => ({
+  refreshInspectorEmptySummary: vi.fn(),
   closeInspectorOnMobile: vi.fn(),
   isInspectorOpen: () => false,
   markInspectorHasContent: vi.fn(),
   setInspectorOpen: setInspectorOpenMock,
+  resetInspectorSelectionSync: vi.fn(),
   syncInspectorFromSelection: vi.fn(async () => {}),
 }));
 
@@ -73,7 +82,7 @@ vi.mock("../transfers.ts", () => ({
 
 function renderFixture(): void {
   document.body.innerHTML = `
-    <span id="connection-status" class="connection-badge"></span>
+    <span id="connection-status"></span>
     <button id="connect-btn">Connect</button>
     <button id="disconnect-btn" style="display:none">Disconnect</button>
     <div id="main-layout" style="display:none"></div>
@@ -96,7 +105,7 @@ function renderFixture(): void {
     <table><tbody id="object-tbody"></tbody></table>
     <span id="statusbar-count"></span>
     <input id="location-omnibar-edit" />
-    <button id="btn-download"></button>
+    <button id="batch-download"></button>
     <button id="nav-back"></button>
     <button id="nav-forward"></button>
     <button id="nav-up"></button>
@@ -206,13 +215,19 @@ describe("connection bucket sidebar regression", () => {
     expect(
       document.querySelector('.list__item-btn[data-bucket="bucket-a"]'),
     ).not.toBeNull();
+    // A failed last-bucket restore shows the listing error state instead of
+    // the "empty bucket" state, so the empty state stays hidden.
     expect(
       (document.getElementById("empty-state") as HTMLDivElement).style.display,
-    ).toBe("");
-    expect(setStatusMock).toHaveBeenCalledWith(
-      expect.stringContaining('failed to list "bucket-a"'),
-      8000,
+    ).toBe("none");
+    // Same failure surface as every other navigation error: the status line
+    // names the bucket and the listing area offers an inline Retry row.
+    expect(document.getElementById("status")?.textContent).toContain(
+      'failed to list "bucket-a"',
     );
+    expect(
+      document.querySelector('#object-tbody [data-nav-error="true"]'),
+    ).not.toBeNull();
     expect(logActivityMock).toHaveBeenCalledWith(
       expect.stringContaining('failed to list "bucket-a"'),
       "warning",

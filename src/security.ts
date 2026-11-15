@@ -2,6 +2,29 @@ import { invoke } from "./ipc.ts";
 import { showConfirm, showPrompt, showAlert } from "./dialogs.ts";
 import { state } from "./state.ts";
 import { setConnectionAccessLocked } from "./connection.ts";
+import { codePointLength, friendlyError, plural } from "./utils.ts";
+import { getIconHtml } from "./icons.ts";
+
+/**
+ * The same locked-vault explanation the connect screen and switcher use.
+ * Keep the wording in sync with app-connection.ts.
+ */
+const LOCKED_SAVED_CONNECTIONS_MESSAGE =
+  "Saved connections stay unavailable until you unlock encrypted storage with your password.";
+
+const NEW_PASSWORD_WARNING =
+  "Set a password to encrypt saved connections and your last-used connection with AES-256.\n\nThis password can't be recovered. If you forget it, the only way back is a factory reset, which deletes saved connections.";
+
+/** Shown in the lock view and the unlock path when the password is wrong. */
+const INCORRECT_PASSWORD_MESSAGE =
+  "That password is incorrect. Check caps lock and try again.";
+
+/** Runs the reset flow for "Forgot password?"; registered by the app wiring. */
+let forgotPasswordHandler: (() => void) | null = null;
+
+export function setForgotPasswordHandler(handler: () => void): void {
+  forgotPasswordHandler = handler;
+}
 
 export interface SecurityStatus {
   initialized: boolean;
@@ -10,11 +33,17 @@ export interface SecurityStatus {
   lock_timeout_minutes: number;
   biometric_available: boolean;
   biometric_enrolled: boolean;
+  /** A legacy zero/missing auto-lock was migrated to the 15-minute default. */
+  lock_timeout_defaulted?: boolean;
+  /** The operation succeeded but secondary cleanup still needs a retry. */
+  cleanup_warning?: string | null;
 }
 
 type StatusSetter = (text: string) => void;
 const WINDOWS_STARTUP_BIOMETRIC_DELAY_MS = 800;
 const WINDOWS_STARTUP_FOCUS_WAIT_MS = 2500;
+/** Show the legacy auto-lock migration notice once per app run. */
+let legacyLockTimeoutNoticeShown = false;
 
 async function getSecurityStatus(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>("get_security_status");
@@ -23,6 +52,12 @@ async function getSecurityStatus(): Promise<SecurityStatus> {
 function announceSecurityReady(status: SecurityStatus): void {
   if (!status.encryption_enabled || status.unlocked) {
     window.dispatchEvent(new Event("s3-sidekick:security-ready"));
+  }
+}
+
+async function surfaceCleanupWarning(status: SecurityStatus): Promise<void> {
+  if (status.cleanup_warning) {
+    await showAlert("Security cleanup pending", status.cleanup_warning);
   }
 }
 
@@ -44,6 +79,7 @@ async function unlockSecurity(
 ): Promise<SecurityStatus> {
   const status = await invoke<SecurityStatus>("unlock_security", { password });
   if (announce) announceSecurityReady(status);
+  await surfaceCleanupWarning(status);
   return status;
 }
 
@@ -58,6 +94,7 @@ async function setSecurityEncryption(
     newPassword,
   });
   announceSecurityReady(status);
+  await surfaceCleanupWarning(status);
   return status;
 }
 
@@ -70,6 +107,7 @@ async function changeSecurityPassword(
     newPassword,
   });
   announceSecurityReady(status);
+  await surfaceCleanupWarning(status);
   return status;
 }
 
@@ -114,6 +152,34 @@ function errorText(err: unknown): string {
   return String(err);
 }
 
+/**
+ * User-facing text for a failed vault operation. Backend strings are kept as
+ * detail only when nothing more specific applies, and each common cause says
+ * what the user can do next.
+ */
+export function securityErrorMessage(err: unknown): string {
+  const text = errorText(err);
+  if (/invalid password|incorrect password/i.test(text)) {
+    return "That password is incorrect. Check caps lock and try again.";
+  }
+  if (/too many failed unlock attempts/i.test(text)) {
+    return text;
+  }
+  if (/keychain/i.test(text) && /denied|refus|access/i.test(text)) {
+    return "The system keychain denied access. Allow S3 Sidekick to use the keychain (or unlock it), then try again.";
+  }
+  if (/locked/i.test(text) && /unlock/i.test(text)) {
+    return "Encrypted storage is locked. Unlock it with your password first.";
+  }
+  return friendlyError(text);
+}
+
+/** Convenience-gate caveat shown wherever biometric unlock is offered. */
+export function biometricCaveat(platform: string): string {
+  const label = biometricLabel(platform);
+  return `${label} is a convenience gate, not hardware-bound. A process running as your operating-system user can read the stored key without completing the prompt.`;
+}
+
 export function isCancellationError(err: unknown): boolean {
   const text = errorText(err).toLowerCase();
   return text.includes("canceled") || text.includes("cancelled");
@@ -140,7 +206,7 @@ export function isSecurityUpgradeRequiredError(err: unknown): boolean {
 function unlockFailureMessage(err: unknown): false | string {
   const text = errorText(err);
   if (/invalid password/i.test(text)) return false;
-  return `Unlock failed: ${text}`;
+  return `Unlock failed: ${securityErrorMessage(err)}`;
 }
 
 function extractErrorCode(err: unknown): string | null {
@@ -182,35 +248,45 @@ async function waitForWindowFocus(timeoutMs: number): Promise<void> {
   });
 }
 
+/**
+ * Ask for a new password twice. Length and match problems are reported
+ * inline by the dialog, so the user corrects the field instead of restarting.
+ */
 async function promptForNewPassword(): Promise<string | null> {
-  const first = await showPrompt(
-    "Set Password",
-    "Set a password to encrypt saved credentials (AES-256):",
-    { inputType: "password", inputPlaceholder: "Password (8+ characters)" },
-  );
+  const first = await showPrompt("Set password", NEW_PASSWORD_WARNING, {
+    inputType: "password",
+    inputPlaceholder: "Password (12+ characters)",
+    validationMessage: "Password must be at least 12 characters.",
+    validate: async (value) => codePointLength(value) >= 12,
+  });
   if (first === null) return null;
-  if (first.length < 8) {
-    await showAlert(
-      "Invalid Password",
-      "Password must be at least 8 characters.",
-    );
-    return null;
-  }
 
   const confirmed = await showPrompt(
-    "Confirm Password",
-    "Confirm your password:",
+    "Confirm password",
+    "Type the same password again.",
     {
       inputType: "password",
       inputPlaceholder: "Confirm password",
+      validationMessage: "Passwords do not match.",
+      validate: async (value) => value === first,
     },
   );
   if (confirmed === null) return null;
-  if (first !== confirmed) {
-    await showAlert("Password Mismatch", "Passwords do not match.");
-    return null;
-  }
   return first;
+}
+
+/**
+ * Check the current password before the flow asks for anything else. Uses
+ * the backend unlock verifier, which is idempotent for an unlocked vault.
+ */
+async function verifyCurrentPassword(value: string): Promise<boolean | string> {
+  if (!value) return "Enter your current password.";
+  try {
+    await unlockSecurity(value, false);
+    return true;
+  } catch (err) {
+    return unlockFailureMessage(err);
+  }
 }
 
 export async function ensureSecurityReady(): Promise<boolean> {
@@ -218,14 +294,17 @@ export async function ensureSecurityReady(): Promise<boolean> {
   try {
     status = await getSecurityStatus();
   } catch (err) {
-    await showAlert("Error", `Failed to read security status: ${err}`);
+    await showAlert(
+      "Error",
+      `Could not read the security status. ${securityErrorMessage(err)}`,
+    );
     return false;
   }
 
   if (!status.initialized) {
     const enableEncryption = await showConfirm(
-      "Credential Encryption",
-      "Enable credential encryption?\n\nRecommended: Yes.\nCredentials and bookmarks will be encrypted with AES-256 and protected by your password.",
+      "Credential encryption",
+      "Enable credential encryption?\n\nRecommended: Yes.\nSaved connections and your last-used connection will be encrypted with AES-256 and protected by your password.",
       { okLabel: "Enable", cancelLabel: "Skip" },
     );
 
@@ -240,14 +319,20 @@ export async function ensureSecurityReady(): Promise<boolean> {
         try {
           status = await initializeSecurity(false, null);
         } catch (err) {
-          await showAlert("Error", `Failed to initialize security: ${err}`);
+          await showAlert(
+            "Error",
+            `Could not finish setup. ${securityErrorMessage(err)}`,
+          );
           return false;
         }
       } else {
         try {
           status = await initializeSecurity(true, password);
         } catch (err) {
-          await showAlert("Error", `Failed to enable encryption: ${err}`);
+          await showAlert(
+            "Error",
+            `Could not turn on encryption. ${securityErrorMessage(err)}`,
+          );
           return false;
         }
       }
@@ -255,7 +340,10 @@ export async function ensureSecurityReady(): Promise<boolean> {
       try {
         status = await initializeSecurity(false, null);
       } catch (err) {
-        await showAlert("Error", `Failed to initialize security: ${err}`);
+        await showAlert(
+          "Error",
+          `Could not finish setup. ${securityErrorMessage(err)}`,
+        );
         return false;
       }
     }
@@ -270,89 +358,396 @@ export async function ensureSecurityReady(): Promise<boolean> {
     return true;
   }
 
-  let biometricAttempted = false;
-  let biometricErrorCode: string | null = null;
-  let biometricCanceled = false;
-  let biometricCredentialRemoved = false;
-  let biometricUpgradeRequired = false;
   const platform = await invoke<string>("get_platform_info").catch(
     () => "unknown",
   );
-  if (status.biometric_available && status.biometric_enrolled) {
-    if (platform === "windows") {
-      await waitForWindowFocus(WINDOWS_STARTUP_FOCUS_WAIT_MS);
-      await delay(WINDOWS_STARTUP_BIOMETRIC_DELAY_MS);
-    }
-    const biometricOverlay = document.getElementById("biometric-overlay");
-    if (biometricOverlay) {
-      biometricOverlay.hidden = false;
-      void biometricOverlay.offsetWidth;
-    }
-    await delay(150);
-    try {
-      status = await unlockBiometric();
-      if (biometricOverlay) biometricOverlay.hidden = true;
-      if (status.unlocked) return true;
-    } catch (err) {
-      if (biometricOverlay) biometricOverlay.hidden = true;
-      biometricAttempted = true;
-      biometricErrorCode = extractErrorCode(err);
-      biometricCanceled = isCancellationError(err);
-      biometricCredentialRemoved = isCredentialRemovedError(err);
-      biometricUpgradeRequired = isSecurityUpgradeRequiredError(err);
-      console.error("Biometric unlock failed");
-    }
+  const biometricReady =
+    status.biometric_available && status.biometric_enrolled;
+  if (biometricReady && platform === "windows") {
+    await waitForWindowFocus(WINDOWS_STARTUP_FOCUS_WAIT_MS);
+    await delay(WINDOWS_STARTUP_BIOMETRIC_DELAY_MS);
   }
+  return promptLockView(platform, biometricReady, null);
+}
 
-  const label = biometricLabel(platform);
-  const unlockMessage = biometricAttempted
-    ? biometricUpgradeRequired
-      ? "A one-time password unlock is required to upgrade encrypted credentials after updating S3 Sidekick."
-      : biometricCredentialRemoved
-        ? `${label} credential was removed from the system.\nPlease unlock with your password, then re-enable ${label} in Settings.`
-        : biometricCanceled
-          ? "Biometric authentication was canceled.\nEnter your password to unlock encrypted credentials:"
-          : biometricErrorCode
-            ? `Biometric authentication was not completed (${biometricErrorCode}).\nEnter your password to unlock encrypted credentials:`
-            : "Biometric authentication was not completed.\nEnter your password to unlock encrypted credentials:"
-    : "Enter your password to unlock encrypted credentials:";
-  // An unlock can still be running when the user presses Cancel. The backend
-  // may then finish unlocking; report that state rather than claiming the
-  // vault is locked while it is not.
-  let pendingUnlock: Promise<unknown> | null = null;
-  await showPrompt("Unlock", unlockMessage, {
-    inputType: "password",
-    inputPlaceholder: "Password",
-    validationMessage: "Incorrect password. Try again.",
-    validate: async (value) => {
-      if (!value) return false;
-      const attempt = unlockSecurity(value);
-      pendingUnlock = attempt;
-      try {
-        status = await attempt;
-        return status.unlocked;
-      } catch (err) {
-        return unlockFailureMessage(err);
-      }
-    },
-  });
-  if (pendingUnlock) {
-    await (pendingUnlock as Promise<unknown>).catch(() => undefined);
+/** Biometric failure text for the lock view, keeping the existing wording. */
+function biometricFailureNotice(err: unknown, label: string): string {
+  if (isSecurityUpgradeRequiredError(err)) {
+    return "A one-time password unlock is required to upgrade encrypted credentials after updating S3 Sidekick.";
   }
-  return status.unlocked;
+  if (isCredentialRemovedError(err)) {
+    return `${label} credential was removed from the system. Please unlock with your password, then re-enable ${label} in settings.`;
+  }
+  if (isCancellationError(err)) {
+    return "Biometric authentication was canceled. Enter your password to unlock encrypted credentials.";
+  }
+  const code = extractErrorCode(err);
+  if (code) {
+    return `Biometric authentication was not completed (${code}). Enter your password to unlock encrypted credentials.`;
+  }
+  return "Biometric authentication was not completed. Enter your password to unlock encrypted credentials.";
+}
+
+/**
+ * Full-window lock view. Resolves true once the vault is unlocked and false
+ * when the user picks "Continue locked". Escape is swallowed and Tab stays
+ * inside the view, so a mandatory lock cannot be dismissed by accident. While
+ * a Touch ID / Windows Hello wait is open, Cancel returns to the password
+ * field; a late biometric success still unlocks. A missing view resolves
+ * false, which keeps saved connections locked.
+ */
+function promptLockView(
+  platform: string,
+  biometricReady: boolean,
+  notice: string | null,
+): Promise<boolean> {
+  const view = document.getElementById("lock-view");
+  const password = document.getElementById(
+    "lock-view-password",
+  ) as HTMLInputElement | null;
+  const reveal = document.getElementById(
+    "lock-view-reveal",
+  ) as HTMLButtonElement | null;
+  const form = document.getElementById(
+    "lock-view-form",
+  ) as HTMLFormElement | null;
+  const errorEl = document.getElementById("lock-view-error");
+  const noticeEl = document.getElementById("lock-view-notice");
+  const unlockBtn = document.getElementById(
+    "lock-view-unlock",
+  ) as HTMLButtonElement | null;
+  const biometricBtn = document.getElementById(
+    "lock-view-biometric",
+  ) as HTMLButtonElement | null;
+  const forgotBtn = document.getElementById(
+    "lock-view-forgot",
+  ) as HTMLButtonElement | null;
+  const continueBtn = document.getElementById(
+    "lock-view-continue",
+  ) as HTMLButtonElement | null;
+  const overlay = document.getElementById("biometric-overlay");
+  const overlayTitle = document.getElementById("biometric-overlay-title");
+  const overlayDesc = document.getElementById("biometric-overlay-desc");
+  const overlayCancel = document.getElementById(
+    "biometric-overlay-cancel",
+  ) as HTMLButtonElement | null;
+  const viewDesc = document.getElementById("lock-view-desc");
+  if (viewDesc) viewDesc.textContent = LOCKED_SAVED_CONNECTIONS_MESSAGE;
+  if (
+    !view ||
+    !password ||
+    !reveal ||
+    !form ||
+    !errorEl ||
+    !noticeEl ||
+    !unlockBtn ||
+    !biometricBtn ||
+    !forgotBtn ||
+    !continueBtn ||
+    !overlay ||
+    !overlayTitle ||
+    !overlayDesc ||
+    !overlayCancel
+  ) {
+    return Promise.resolve(false);
+  }
+  const lockView = view;
+  const passwordInput = password;
+  const revealBtn = reveal;
+  const lockForm = form;
+  const error = errorEl;
+  const noticeText = noticeEl;
+  const unlock = unlockBtn;
+  const bioBtn = biometricBtn;
+  const forgot = forgotBtn;
+  const cont = continueBtn;
+  const bioOverlay = overlay;
+  const bioTitle = overlayTitle;
+  const bioDesc = overlayDesc;
+  const bioCancel = overlayCancel;
+  const label = biometricLabel(platform);
+
+  return new Promise<boolean>((resolve) => {
+    const returnFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    let settled = false;
+    let passwordBusy = false;
+    let biometricWaiting = false;
+    let cancelWait: (() => void) | null = null;
+
+    const refreshControls = (): void => {
+      unlock.disabled = passwordBusy;
+      passwordInput.disabled = passwordBusy;
+      cont.disabled = passwordBusy || biometricWaiting;
+      bioBtn.disabled = passwordBusy || biometricWaiting;
+    };
+    const setError = (text: string | null): void => {
+      error.textContent = text ?? "";
+      error.hidden = !text;
+    };
+    const setNotice = (text: string | null): void => {
+      noticeText.textContent = text ?? "";
+      noticeText.hidden = !text;
+    };
+    const dialogOpen = (): boolean =>
+      document.getElementById("dialog-overlay")?.classList.contains("active") ??
+      false;
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      // A dialog opened from the lock view (Forgot password?) keeps its own keys.
+      if (settled || dialogOpen()) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        lockView.querySelectorAll<HTMLElement>(
+          "button, input, select, textarea, a[href]",
+        ),
+      ).filter((el) => !el.hasAttribute("disabled") && !el.closest("[hidden]"));
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) return;
+      // Step through the list here rather than letting the browser Tab, since
+      // WebKit skips buttons and would otherwise leave the view.
+      event.preventDefault();
+      const current = focusable.indexOf(document.activeElement as HTMLElement);
+      if (current === -1) {
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      const step = event.shiftKey ? -1 : 1;
+      const next =
+        focusable[(current + step + focusable.length) % focusable.length];
+      next?.focus();
+    };
+
+    const finish = (unlocked: boolean): void => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("keydown", onKeyDown, true);
+      lockForm.removeEventListener("submit", onSubmit);
+      revealBtn.removeEventListener("click", onReveal);
+      bioBtn.removeEventListener("click", onBiometricClick);
+      forgot.removeEventListener("click", onForgot);
+      cont.removeEventListener("click", onContinue);
+      bioCancel.removeEventListener("click", onOverlayCancel);
+      passwordInput.value = "";
+      passwordInput.type = "password";
+      revealBtn.textContent = "Show";
+      revealBtn.setAttribute("aria-pressed", "false");
+      revealBtn.setAttribute("aria-label", "Show password");
+      bioOverlay.hidden = true;
+      lockView.hidden = true;
+      setError(null);
+      setNotice(null);
+      if (returnFocus?.isConnected) returnFocus.focus();
+      resolve(unlocked);
+    };
+
+    const runBiometric = async (): Promise<void> => {
+      if (settled || biometricWaiting || passwordBusy) return;
+      biometricWaiting = true;
+      setError(null);
+      setNotice(null);
+      bioTitle.textContent = `Waiting for ${label}`;
+      bioDesc.textContent = `Approve the ${label} prompt to unlock, or cancel and type your password.`;
+      bioOverlay.hidden = false;
+      refreshControls();
+      bioCancel.focus();
+      const attempt = (async (): Promise<{
+        unlocked: boolean;
+        error: unknown;
+      }> => {
+        await delay(150);
+        try {
+          const unlockStatus = await unlockBiometric();
+          return { unlocked: unlockStatus.unlocked, error: null };
+        } catch (err) {
+          console.error("Biometric unlock failed");
+          return { unlocked: false, error: err };
+        }
+      })();
+      const canceled = new Promise<"canceled">((done) => {
+        cancelWait = () => done("canceled");
+      });
+      const outcome = await Promise.race([attempt, canceled]);
+      cancelWait = null;
+      if (settled) return;
+      bioOverlay.hidden = true;
+      if (outcome === "canceled") {
+        // The OS prompt may still finish. Keep Continue disabled until it
+        // settles, and accept a late success rather than dropping it.
+        setNotice(
+          `${label} was canceled. Enter your password to unlock encrypted credentials.`,
+        );
+        refreshControls();
+        passwordInput.focus();
+        void attempt.then((late) => {
+          biometricWaiting = false;
+          if (late.unlocked) {
+            finish(true);
+            return;
+          }
+          refreshControls();
+        });
+        return;
+      }
+      biometricWaiting = false;
+      if (outcome.unlocked) {
+        finish(true);
+        return;
+      }
+      setNotice(biometricFailureNotice(outcome.error, label));
+      refreshControls();
+      passwordInput.focus();
+    };
+
+    const onSubmit = (event: Event): void => {
+      event.preventDefault();
+      if (settled || passwordBusy) return;
+      const value = passwordInput.value;
+      if (!value) {
+        setError("Enter your password to unlock encrypted credentials.");
+        passwordInput.focus();
+        return;
+      }
+      passwordBusy = true;
+      setError(null);
+      setNotice(null);
+      refreshControls();
+      void unlockSecurity(value)
+        .then(
+          (unlockStatus) => {
+            if (unlockStatus.unlocked) {
+              finish(true);
+              return;
+            }
+            setError(INCORRECT_PASSWORD_MESSAGE);
+          },
+          (err: unknown) => {
+            const message = unlockFailureMessage(err);
+            setError(message === false ? INCORRECT_PASSWORD_MESSAGE : message);
+          },
+        )
+        .finally(() => {
+          if (settled) return;
+          passwordBusy = false;
+          refreshControls();
+          passwordInput.select();
+          passwordInput.focus();
+        });
+    };
+    const onReveal = (): void => {
+      const showing = passwordInput.type === "text";
+      passwordInput.type = showing ? "password" : "text";
+      revealBtn.textContent = showing ? "Show" : "Hide";
+      revealBtn.setAttribute("aria-pressed", String(!showing));
+      revealBtn.setAttribute(
+        "aria-label",
+        showing ? "Show password" : "Hide password",
+      );
+      passwordInput.focus();
+    };
+    const onBiometricClick = (): void => {
+      void runBiometric();
+    };
+    const onForgot = (): void => {
+      forgotPasswordHandler?.();
+    };
+    const onContinue = (): void => {
+      if (settled || passwordBusy || biometricWaiting) return;
+      finish(false);
+    };
+    const onOverlayCancel = (): void => {
+      cancelWait?.();
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    lockForm.addEventListener("submit", onSubmit);
+    revealBtn.addEventListener("click", onReveal);
+    bioBtn.addEventListener("click", onBiometricClick);
+    forgot.addEventListener("click", onForgot);
+    cont.addEventListener("click", onContinue);
+    bioCancel.addEventListener("click", onOverlayCancel);
+
+    bioBtn.textContent = `Use ${label}`;
+    bioBtn.hidden = !biometricReady;
+    bioOverlay.hidden = true;
+    lockView.hidden = false;
+    setNotice(notice);
+    refreshControls();
+    if (biometricReady) {
+      void runBiometric();
+    } else {
+      passwordInput.focus();
+    }
+  });
+}
+
+/** Set a control's visibility with the hidden attribute. */
+function setHidden(el: HTMLElement | null, hidden: boolean): void {
+  if (el) el.hidden = hidden;
+}
+
+/** Status-card copy and icon for the vault state. */
+function describeVault(status: SecurityStatus): {
+  title: string;
+  detail: string;
+  icon: string;
+} {
+  if (!status.initialized) {
+    return {
+      title: "Not initialized",
+      detail:
+        "The vault has not been set up yet. Set up encryption to protect saved credentials with AES-256 and your password.",
+      icon: "alert-triangle",
+    };
+  }
+  if (!status.encryption_enabled) {
+    return {
+      title: "Not encrypted",
+      detail:
+        "Saved credentials are stored unencrypted on this device. Set up encryption to protect them with AES-256 and your password.",
+      icon: "alert-triangle",
+    };
+  }
+  if (status.unlocked) {
+    return {
+      title: "Encrypted (AES-256) and unlocked",
+      detail:
+        "Saved connections are encrypted with AES-256. Lock now clears the keys from memory and disconnects the current session.",
+      icon: "check-circle",
+    };
+  }
+  return {
+    title: "Encrypted (AES-256) and locked",
+    detail: LOCKED_SAVED_CONNECTIONS_MESSAGE,
+    icon: "lock",
+  };
 }
 
 export async function refreshSecuritySettingsUI(): Promise<void> {
   const statusText = document.getElementById("security-status-text");
-  const toggleBtn = document.getElementById(
-    "security-toggle",
-  ) as HTMLButtonElement | null;
-  const changeBtn = document.getElementById(
-    "security-change-password",
-  ) as HTMLButtonElement | null;
+  const detailEl = document.getElementById("security-status-detail");
+  const iconHost = document.getElementById("security-status-icon");
+  const setupBtn = document.getElementById("security-setup-btn");
+  const unlockBtn = document.getElementById("security-unlock-btn");
+  const lockBtn = document.getElementById("security-lock-btn");
+  const changeBtn = document.getElementById("security-change-password");
+  const disableBtn = document.getElementById("security-disable-btn");
   const warning = document.getElementById("security-warning");
   const lockSettings = document.getElementById("security-lock-settings");
-  const lockAction = document.getElementById("security-lock-action");
+  const lockNeverWarning = document.getElementById(
+    "security-lock-never-warning",
+  );
+  const retryBtn = document.getElementById(
+    "security-status-retry",
+  ) as HTMLButtonElement | null;
   const lockTimeoutSelect = document.getElementById(
     "security-lock-timeout",
   ) as HTMLSelectElement | null;
@@ -363,96 +758,129 @@ export async function refreshSecuritySettingsUI(): Promise<void> {
     "biometric-toggle",
   ) as HTMLButtonElement | null;
   const biometricNote = document.getElementById("biometric-security-note");
-  if (!statusText || !toggleBtn || !changeBtn || !warning) return;
+  if (!statusText) return;
+  if (retryBtn && retryBtn.dataset.wired !== "true") {
+    retryBtn.dataset.wired = "true";
+    retryBtn.addEventListener("click", () => {
+      retryBtn.hidden = true;
+      retryBtn.disabled = true;
+      statusText.textContent = "Loading…";
+      void refreshSecuritySettingsUI().finally(() => {
+        retryBtn.disabled = false;
+      });
+    });
+  }
 
   try {
     const status = await getSecurityStatus();
     const platform = await invoke<string>("get_platform_info");
     const label = biometricLabel(platform);
+    const view = describeVault(status);
+    const unlocked = status.encryption_enabled && status.unlocked;
 
-    if (!status.initialized) {
-      statusText.textContent = "Not initialized";
-      toggleBtn.textContent = "Initialize Security";
-      changeBtn.style.display = "none";
-      warning.style.display = "";
-      if (lockSettings) lockSettings.style.display = "none";
-      if (lockAction) lockAction.style.display = "none";
-      if (biometricSettings) biometricSettings.style.display = "none";
-    } else if (status.encryption_enabled) {
-      if (status.unlocked) {
-        statusText.textContent = "Encrypted (AES-256) and unlocked";
-        toggleBtn.textContent = "Disable Encryption";
-        changeBtn.style.display = "";
-        if (lockSettings) lockSettings.style.display = "";
-        if (lockAction) lockAction.style.display = "";
-      } else {
-        statusText.textContent = "Encrypted (locked)";
-        toggleBtn.textContent = "Unlock";
-        changeBtn.style.display = "none";
-        if (lockSettings) lockSettings.style.display = "none";
-        if (lockAction) lockAction.style.display = "none";
+    statusText.textContent = view.title;
+    if (retryBtn) retryBtn.hidden = true;
+    if (detailEl) detailEl.textContent = view.detail;
+    if (iconHost) {
+      iconHost.innerHTML = getIconHtml(view.icon, {
+        className: "lucide-icon security-status-card__svg",
+      });
+    }
+    setHidden(setupBtn, status.encryption_enabled);
+    setHidden(unlockBtn, !status.encryption_enabled || status.unlocked);
+    setHidden(lockBtn, !unlocked);
+    setHidden(changeBtn, !unlocked);
+    setHidden(disableBtn, !unlocked);
+    setHidden(warning, status.encryption_enabled);
+    setHidden(lockSettings, !unlocked);
+    setHidden(lockNeverWarning, !unlocked || status.lock_timeout_minutes > 0);
+    if (status.encryption_enabled && lockTimeoutSelect) {
+      lockTimeoutSelect.value = String(status.lock_timeout_minutes);
+    }
+    if (status.lock_timeout_defaulted && !legacyLockTimeoutNoticeShown) {
+      legacyLockTimeoutNoticeShown = true;
+      const lockStatus = document.getElementById("security-lock-status");
+      if (lockStatus) {
+        lockStatus.textContent =
+          "Auto-lock was defaulted to 15 minutes for this vault. Choose a different value if needed.";
       }
-      warning.style.display = "none";
-      if (lockTimeoutSelect) {
-        lockTimeoutSelect.value = String(status.lock_timeout_minutes);
+    }
+
+    const biometricShown = unlocked && status.biometric_available;
+    setHidden(biometricSettings, !biometricShown);
+    if (biometricShown) {
+      const biometricLabelEl =
+        biometricSettings?.querySelector(".setting-label") ?? null;
+      if (biometricLabelEl) biometricLabelEl.textContent = `${label} Unlock`;
+      if (biometricToggle) {
+        // The visible text is the accessible name, so it starts the name.
+        biometricToggle.textContent = status.biometric_enrolled
+          ? `Disable ${label}`
+          : `Enable ${label}`;
       }
-      if (biometricSettings && biometricToggle) {
-        if (status.biometric_available && status.unlocked) {
-          biometricSettings.style.display = "";
-          const biometricLabelEl = biometricSettings.querySelector("label");
-          if (biometricLabelEl)
-            biometricLabelEl.textContent = `${label} Unlock`;
-          biometricToggle.textContent = status.biometric_enrolled
-            ? `Disable ${label}`
-            : `Enable ${label}`;
-          biometricToggle.setAttribute(
-            "aria-label",
-            status.biometric_enrolled
-              ? `Disable ${label} unlock`
-              : `Enable ${label} unlock`,
-          );
-          if (biometricNote) {
-            biometricNote.textContent = `${label} is a convenience gate and defense-in-depth; the stored key is not hardware-bound.`;
-          }
-        } else {
-          biometricSettings.style.display = "none";
-        }
-      }
-    } else {
-      statusText.textContent = "Unencrypted";
-      toggleBtn.textContent = "Enable Encryption";
-      changeBtn.style.display = "none";
-      warning.style.display = "";
-      if (lockSettings) lockSettings.style.display = "none";
-      if (lockAction) lockAction.style.display = "none";
-      if (biometricSettings) biometricSettings.style.display = "none";
+      if (biometricNote) biometricNote.textContent = biometricCaveat(platform);
     }
   } catch (err) {
-    statusText.textContent = `Security status error: ${err}`;
+    statusText.textContent = `Could not read encryption status. ${securityErrorMessage(err)}`;
+    if (detailEl) detailEl.textContent = "";
+    if (retryBtn) {
+      retryBtn.hidden = false;
+      retryBtn.disabled = false;
+    }
   }
 }
 
+/** The Security tab action a button stands for. */
+export type SecurityAction = "setup" | "unlock" | "disable";
+
+const SECURITY_ACTION_BUTTON: Record<SecurityAction, string> = {
+  setup: "security-setup-btn",
+  unlock: "security-unlock-btn",
+  disable: "security-disable-btn",
+};
+
+/**
+ * Run the action a Security tab button names. The live vault state is read
+ * first, so a button whose action no longer applies (for example after the
+ * vault was locked in another window) refreshes the view and does nothing.
+ */
 export async function handleSecurityToggle(
   setStatus: StatusSetter,
+  action: SecurityAction,
 ): Promise<boolean> {
-  const toggleBtn = document.getElementById(
-    "security-toggle",
+  const btn = document.getElementById(
+    SECURITY_ACTION_BUTTON[action],
   ) as HTMLButtonElement | null;
-  if (toggleBtn) toggleBtn.disabled = true;
+  if (btn) btn.disabled = true;
 
   let status: SecurityStatus;
   try {
     status = await getSecurityStatus();
   } catch (err) {
-    if (toggleBtn) toggleBtn.disabled = false;
-    await showAlert("Error", `Failed to read security status: ${err}`);
+    if (btn) btn.disabled = false;
+    await showAlert(
+      "Error",
+      `Could not read encryption status. ${securityErrorMessage(err)}`,
+    );
+    return false;
+  }
+
+  const applies =
+    action === "setup"
+      ? !status.encryption_enabled
+      : action === "unlock"
+        ? status.encryption_enabled && !status.unlocked
+        : status.encryption_enabled && status.unlocked;
+  if (!applies) {
+    if (btn) btn.disabled = false;
+    await refreshSecuritySettingsUI();
     return false;
   }
 
   try {
-    if (!status.initialized) {
+    if (action === "setup" && !status.initialized) {
       const enable = await showConfirm(
-        "Initialize Security",
+        "Initialize security",
         "Security is not initialized yet. Enable encryption now?",
         { okLabel: "Enable", cancelLabel: "Skip" },
       );
@@ -465,65 +893,40 @@ export async function handleSecurityToggle(
         await initializeSecurity(false, null);
         setStatus("Security initialized without encryption.");
       }
-      await refreshSecuritySettingsUI();
-      return true;
-    }
-
-    if (status.encryption_enabled && !status.unlocked) {
-      if (status.biometric_available && status.biometric_enrolled) {
-        try {
-          await unlockBiometric();
-          setStatus("Credentials unlocked.");
-          await refreshSecuritySettingsUI();
-          return true;
-        } catch {
-          // biometric failed — fall through to password
-        }
-      }
-
-      let pendingUnlock: Promise<SecurityStatus> | null = null;
-      let unlockResult: SecurityStatus | null = null;
-      const password = await showPrompt(
-        "Unlock",
-        "Enter your password to unlock encrypted credentials:",
-        {
-          inputType: "password",
-          inputPlaceholder: "Password",
-          validationMessage: "Incorrect password. Try again.",
-          validate: async (value) => {
-            if (!value) return false;
-            try {
-              const attempt = unlockSecurity(value, false);
-              pendingUnlock = attempt;
-              unlockResult = await attempt;
-              return unlockResult.unlocked;
-            } catch (err) {
-              return unlockFailureMessage(err);
-            }
-          },
-        },
+    } else if (action === "setup") {
+      const newPassword = await promptForNewPassword();
+      if (!newPassword) return false;
+      await setSecurityEncryption(true, null, newPassword);
+      setStatus("Credential encryption enabled.");
+    } else if (action === "unlock") {
+      const platform = await invoke<string>("get_platform_info").catch(
+        () => "unknown",
       );
-      if (password === null) {
-        const completed = pendingUnlock
-          ? await (pendingUnlock as Promise<SecurityStatus>).catch(() => null)
-          : null;
-        if (completed?.unlocked) await lockSecurity();
+      const biometricReady =
+        status.biometric_available && status.biometric_enrolled;
+      const unlocked = await promptLockView(platform, biometricReady, null);
+      if (!unlocked) {
+        await refreshSecuritySettingsUI();
         return false;
       }
-      if (unlockResult) announceSecurityReady(unlockResult);
       setStatus("Credentials unlocked.");
-    } else if (status.encryption_enabled) {
+    } else {
       const shouldDisable = await showConfirm(
-        "Disable Encryption",
-        "Disable encryption?\n\nSaved credentials and bookmarks will be stored unencrypted.",
+        "Disable encryption",
+        "Disable encryption?\n\nSaved connections and your last-used connection will be stored unencrypted.",
         { okLabel: "Disable", okDanger: true },
       );
       if (!shouldDisable) return false;
 
       const currentPassword = await showPrompt(
-        "Current Password",
+        "Current password",
         "Enter your current password to decrypt stored credentials:",
-        { inputType: "password", inputPlaceholder: "Current password" },
+        {
+          inputType: "password",
+          inputPlaceholder: "Current password",
+          validationMessage: "That password is incorrect. Try again.",
+          validate: verifyCurrentPassword,
+        },
       );
       if (currentPassword === null) return false;
       if (!currentPassword) {
@@ -535,48 +938,72 @@ export async function handleSecurityToggle(
       setStatus(
         "Credential encryption disabled. Saved credentials are unencrypted.",
       );
-    } else {
-      const newPassword = await promptForNewPassword();
-      if (!newPassword) return false;
-
-      await setSecurityEncryption(true, null, newPassword);
-      setStatus("Credential encryption enabled.");
     }
 
     await refreshSecuritySettingsUI();
     return true;
   } catch (err) {
-    await showAlert("Error", `Security update failed: ${err}`);
+    // A declined native confirmation is a deliberate no-op, not a failure.
+    if (isCancellationError(err)) {
+      await refreshSecuritySettingsUI();
+      return false;
+    }
+    await showAlert(
+      "Error",
+      `Could not update encryption. ${securityErrorMessage(err)}`,
+    );
     return false;
   } finally {
-    if (toggleBtn) toggleBtn.disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 
 export async function handleSecurityChangePassword(
   setStatus: StatusSetter,
 ): Promise<void> {
-  const currentPassword = await showPrompt(
-    "Current Password",
-    "Enter your current password:",
-    { inputType: "password", inputPlaceholder: "Current password" },
-  );
-  if (currentPassword === null) return;
-  if (!currentPassword) {
-    await showAlert("Error", "Current password is required.");
-    return;
-  }
-
-  const newPassword = await promptForNewPassword();
-  if (!newPassword) return;
-
+  const changeBtn = document.getElementById(
+    "security-change-password",
+  ) as HTMLButtonElement | null;
+  if (changeBtn) changeBtn.disabled = true;
   try {
+    // The current password is verified inline, before the new one is typed.
+    const currentPassword = await showPrompt(
+      "Current password",
+      "Enter your current password:",
+      {
+        inputType: "password",
+        inputPlaceholder: "Current password",
+        validationMessage: "That password is incorrect. Try again.",
+        validate: verifyCurrentPassword,
+      },
+    );
+    if (currentPassword === null) return;
+    if (!currentPassword) {
+      await showAlert("Error", "Current password is required.");
+      return;
+    }
+
+    const newPassword = await promptForNewPassword();
+    if (!newPassword) return;
+
     await changeSecurityPassword(currentPassword, newPassword);
     setStatus("Credential encryption password updated.");
     await refreshSecuritySettingsUI();
   } catch (err) {
-    await showAlert("Error", `Failed to change password: ${err}`);
+    await showAlert(
+      "Error",
+      `Could not change the password. ${securityErrorMessage(err)}`,
+    );
+  } finally {
+    if (changeBtn) changeBtn.disabled = false;
   }
+}
+
+/** Visible confirmation for an immediately applied auto-lock change. */
+export function autoLockLabel(minutes: number): string {
+  if (minutes <= 0) return "Auto-lock turned off";
+  if (minutes >= 60) return "Auto-lock set to 1 hour";
+  return `Auto-lock set to ${plural(minutes, "minute")}`;
 }
 
 export async function handleLockNow(setStatus: StatusSetter): Promise<boolean> {
@@ -587,7 +1014,10 @@ export async function handleLockNow(setStatus: StatusSetter): Promise<boolean> {
     await refreshSecuritySettingsUI();
     return true;
   } catch (err) {
-    await showAlert("Error", `Failed to lock: ${err}`);
+    await showAlert(
+      "Error",
+      `Could not lock encrypted storage. ${securityErrorMessage(err)}`,
+    );
     return false;
   }
 }
@@ -596,12 +1026,25 @@ export async function handleLockTimeoutChange(): Promise<void> {
   const select = document.getElementById(
     "security-lock-timeout",
   ) as HTMLSelectElement | null;
+  const statusEl = document.getElementById("security-lock-status");
+  const neverWarning = document.getElementById("security-lock-never-warning");
   if (!select) return;
 
+  const minutes = Number(select.value);
+  if (neverWarning) neverWarning.hidden = minutes > 0;
   try {
-    await setLockTimeoutMinutes(Number(select.value));
+    await setLockTimeoutMinutes(minutes);
+    if (statusEl) statusEl.textContent = autoLockLabel(minutes);
   } catch (err) {
-    await showAlert("Error", `Failed to set lock timeout: ${err}`);
+    if (statusEl) statusEl.textContent = "";
+    if (isCancellationError(err)) {
+      await refreshSecuritySettingsUI();
+      return;
+    }
+    await showAlert(
+      "Error",
+      `Could not change auto-lock. ${securityErrorMessage(err)}`,
+    );
   }
 }
 
@@ -627,7 +1070,14 @@ export async function handleBiometricToggle(
     }
     await refreshSecuritySettingsUI();
   } catch (err) {
-    await showAlert("Error", `Biometric update failed: ${err}`);
+    if (isCancellationError(err)) {
+      await refreshSecuritySettingsUI();
+      return;
+    }
+    await showAlert(
+      "Error",
+      `Could not change biometric unlock. ${securityErrorMessage(err)}`,
+    );
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -636,6 +1086,8 @@ export async function handleBiometricToggle(
 const AUTO_LOCK_POLL_MS = 15_000;
 const ACTIVITY_TOUCH_INTERVAL_MS = 30_000;
 let autoLockTimer: ReturnType<typeof setInterval> | null = null;
+let removeAutoLockListeners: (() => void) | null = null;
+let stopAutoLockChecks: (() => void) | null = null;
 /** Last lock state the watcher saw; null until the first poll. */
 let lastSeenUnlocked: boolean | null = null;
 
@@ -659,8 +1111,13 @@ export function noteManualLock(): void {
  */
 export function startAutoLockWatcher(onLocked: () => Promise<boolean>): void {
   if (autoLockTimer !== null) return;
+  let stopped = false;
+  stopAutoLockChecks = () => {
+    stopped = true;
+  };
   let lastTouch = 0;
   let handling = false;
+  let checking = false;
   let pendingAutoLockCleanup = false;
   const touch = (): void => {
     const now = Date.now();
@@ -668,65 +1125,142 @@ export function startAutoLockWatcher(onLocked: () => Promise<boolean>): void {
     lastTouch = now;
     void invoke("touch_security_activity").catch(() => undefined);
   };
+  const onWindowActive = (): void => {
+    // A focus or pageshow event while the window is hidden must not skip the
+    // check the next visible poll would have run.
+    if (document.visibilityState !== "visible") return;
+    void checkAutoLockNow().catch(() => undefined);
+  };
   document.addEventListener("pointerdown", touch, true);
   document.addEventListener("keydown", touch, true);
+  window.addEventListener("focus", onWindowActive);
+  window.addEventListener("pageshow", onWindowActive);
+  document.addEventListener("visibilitychange", onWindowActive);
+  removeAutoLockListeners = () => {
+    document.removeEventListener("pointerdown", touch, true);
+    document.removeEventListener("keydown", touch, true);
+    window.removeEventListener("focus", onWindowActive);
+    window.removeEventListener("pageshow", onWindowActive);
+    document.removeEventListener("visibilitychange", onWindowActive);
+  };
+
+  const verifyNativeLock = async (): Promise<boolean> => {
+    // The status read can fail while the backend still holds the key. Force a
+    // lock before any reconnect path runs, then verify the result. A lock call
+    // that fails is not evidence; never reopen on an unverified state.
+    try {
+      const locked = await lockSecurity();
+      if (!locked.encryption_enabled || !locked.unlocked) return true;
+    } catch {
+      // Fall through to the status check.
+    }
+    try {
+      const status = await getSecurityStatus();
+      return !status.encryption_enabled || !status.unlocked;
+    } catch {
+      return false;
+    }
+  };
 
   const retryLockedCleanup = async (): Promise<void> => {
     if (handling || !pendingAutoLockCleanup) return;
     handling = true;
     try {
+      if (!(await verifyNativeLock())) {
+        setConnectionAccessLocked(true);
+        return;
+      }
       if (await onLocked()) {
         pendingAutoLockCleanup = false;
         lastSeenUnlocked = false;
       }
     } catch {
-      // Keep the fail-closed state and retry on the next poll.
+      // Keep the fail-closed state and retry on the next check.
+      setConnectionAccessLocked(true);
     } finally {
       handling = false;
     }
   };
 
-  autoLockTimer = setInterval(() => {
-    if (handling) return;
-    // A running transfer counts as activity. Locking would disconnect the
-    // session and interrupt it (uploads restart from zero); the timeout
-    // starts once the queue is idle.
-    const keepAlive: Promise<unknown> =
-      state.runningTransferCount > 0
-        ? invoke("touch_security_activity").catch(() => undefined)
-        : Promise.resolve();
-    void keepAlive
-      .then(async () => {
-        let status: SecurityStatus;
-        try {
-          status = await getSecurityStatus();
-        } catch {
-          if (lastSeenUnlocked === true) {
-            pendingAutoLockCleanup = true;
-            setConnectionAccessLocked(true);
-            await retryLockedCleanup();
-          }
-          return;
-        }
+  /**
+   * One shared lock check. The 15s poll and the focus/pageshow/visibility
+   * wakeups all run this, so a returned window locks at once instead of
+   * waiting for the next tick. `checking` keeps a focus burst from stacking
+   * status reads; `handling` keeps cleanup single-flight.
+   */
+  const checkAutoLockNow = async (): Promise<void> => {
+    if (checking || handling || stopped) return;
+    checking = true;
+    try {
+      // A running transfer counts as activity. Locking would disconnect the
+      // session and interrupt it (uploads restart from zero); the timeout
+      // starts once the queue is idle.
+      if (state.runningTransferCount > 0) {
+        await invoke("touch_security_activity").catch(() => undefined);
+      }
 
-        const unlocked = !status.encryption_enabled || status.unlocked;
-        const wasUnlocked = lastSeenUnlocked;
-        if (unlocked) {
-          lastSeenUnlocked = true;
-        } else if (
-          wasUnlocked === true ||
-          (wasUnlocked === null &&
-            (state.connected || Boolean(state.connectionId)))
+      let status: SecurityStatus;
+      try {
+        status = await getSecurityStatus();
+      } catch {
+        // Unknown is not unlocked. Keep any pending cleanup and fail closed
+        // whenever a session could still be open.
+        if (
+          pendingAutoLockCleanup ||
+          lastSeenUnlocked === true ||
+          state.connected ||
+          Boolean(state.connectionId)
         ) {
           pendingAutoLockCleanup = true;
           setConnectionAccessLocked(true);
-        } else if (!pendingAutoLockCleanup) {
-          lastSeenUnlocked = false;
-          return;
+          await retryLockedCleanup();
         }
+        return;
+      }
 
+      const unlocked = !status.encryption_enabled || status.unlocked;
+      const wasUnlocked = lastSeenUnlocked;
+      if (unlocked) {
+        lastSeenUnlocked = true;
+        // A fresh unlock means no lock cleanup is due. Without this, the
+        // retry below re-forces an access lock on an already-unlocked vault
+        // and the UI stays locked until the next successful cleanup.
+        pendingAutoLockCleanup = false;
         await retryLockedCleanup();
-      })
-      .catch(() => undefined);
+        return;
+      } else if (
+        wasUnlocked === true ||
+        (wasUnlocked === null &&
+          (state.connected || Boolean(state.connectionId)))
+      ) {
+        pendingAutoLockCleanup = true;
+        setConnectionAccessLocked(true);
+      } else if (!pendingAutoLockCleanup) {
+        lastSeenUnlocked = false;
+        return;
+      }
+
+      await retryLockedCleanup();
+    } finally {
+      checking = false;
+    }
+  };
+
+  autoLockTimer = setInterval(() => {
+    void checkAutoLockNow().catch(() => undefined);
   }, AUTO_LOCK_POLL_MS);
+}
+
+/**
+ * Stop the auto-lock watcher and drop its listeners. Idempotent; the next
+ * `startAutoLockWatcher` starts a fresh poll and watcher state.
+ */
+export function stopAutoLockWatcher(): void {
+  stopAutoLockChecks?.();
+  stopAutoLockChecks = null;
+  if (autoLockTimer !== null) clearInterval(autoLockTimer);
+  autoLockTimer = null;
+  removeAutoLockListeners?.();
+  removeAutoLockListeners = null;
+  lastSeenUnlocked = null;
 }

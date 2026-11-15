@@ -1,43 +1,44 @@
 #!/usr/bin/env node
 
-import console from 'node:console';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { basename, extname, relative, resolve } from 'node:path';
-import process from 'node:process';
+import console from "node:console";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { basename, extname, relative, resolve } from "node:path";
+import process from "node:process";
 
 const SOURCE_EXTENSIONS = new Set([
-  '.cjs',
-  '.css',
-  '.dart',
-  '.html',
-  '.js',
-  '.jsx',
-  '.mjs',
-  '.rs',
-  '.svelte',
-  '.ts',
-  '.tsx',
+  ".cjs",
+  ".css",
+  ".dart",
+  ".html",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".rs",
+  ".svelte",
+  ".ts",
+  ".tsx",
 ]);
 const IGNORED_DIRECTORIES = new Set([
-  '.dart_tool',
-  '.git',
-  '.next',
-  '.svelte-kit',
-  'build',
-  'coverage',
-  'coverage-headless',
-  'dist',
-  'node_modules',
-  'out',
-  'release',
-  'target',
-  'vendor',
+  ".dart_tool",
+  ".git",
+  ".next",
+  ".svelte-kit",
+  "build",
+  "coverage",
+  "coverage-headless",
+  "dist",
+  "node_modules",
+  "out",
+  "release",
+  "target",
+  "vendor",
 ]);
 const EXEMPT_BLOCK_PATTERN =
   /(?:@license|copyright|eslint|prettier|@ts-|istanbul|\bc8\b|coverage|rustfmt|clippy|dart\s+format|SPDX|commentlint-disable)/i;
 const GENERIC_LABEL_PATTERN =
   /^(?:imports?|exports?|constants?|variables?|types?|interfaces?|constructors?|getters?|setters?|methods?|helpers?|utilities?)\s*[:.]?$/i;
-const GENERATED_FILE_PATTERN = /(?:generated (?:code|file)|do not edit|\/\/\s*node_modules\/)/i;
+const GENERATED_FILE_PATTERN =
+  /(?:generated (?:code|file)|do not edit|\/\/\s*node_modules\/)/i;
 const URL_PATTERN = /\b(?:https?|file):\/\/\S+/gi;
 
 function parseArguments(argv) {
@@ -49,7 +50,9 @@ function parseArguments(argv) {
   };
 
   for (const argument of argv) {
-    const match = argument.match(/^--(max-length|max-prose-lines|max-doc-lines)=(\d+)$/);
+    const match = argument.match(
+      /^--(max-length|max-prose-lines|max-doc-lines)=(\d+)$/,
+    );
     if (!match) {
       options.paths.push(argument);
       continue;
@@ -60,12 +63,12 @@ function parseArguments(argv) {
       throw new Error(`Invalid value for ${match[1]}: ${match[2]}`);
     }
 
-    if (match[1] === 'max-length') options.maxLength = value;
-    if (match[1] === 'max-prose-lines') options.maxProseLines = value;
-    if (match[1] === 'max-doc-lines') options.maxDocLines = value;
+    if (match[1] === "max-length") options.maxLength = value;
+    if (match[1] === "max-prose-lines") options.maxProseLines = value;
+    if (match[1] === "max-doc-lines") options.maxDocLines = value;
   }
 
-  if (options.paths.length === 0) options.paths.push('src');
+  if (options.paths.length === 0) options.paths.push("src");
   return options;
 }
 
@@ -75,7 +78,7 @@ async function collectFiles(inputPath, files) {
   try {
     entryStats = await stat(absolutePath);
   } catch (error) {
-    if (error?.code === 'ENOENT') return;
+    if (error?.code === "ENOENT") return;
     throw error;
   }
 
@@ -95,46 +98,49 @@ async function collectFiles(inputPath, files) {
 function stripCommentMarker(line, state) {
   const trimmed = line.trim();
 
-  if (state.kind === 'block') {
-    const closes = trimmed.includes('*/');
-    const text = trimmed.replace(/^\*?\s?/, '').replace(/\s*\*\/.*$/, '');
+  if (state.kind === "block") {
+    const closes = trimmed.includes("*/");
+    const text = trimmed.replace(/^\*?\s?/, "").replace(/\s*\*\/.*$/, "");
     if (closes) state.kind = null;
     return { isDoc: state.isDoc, text };
   }
 
-  if (state.kind === 'html') {
-    const closes = trimmed.includes('-->');
-    const text = trimmed.replace(/\s*-->.*$/, '');
+  if (state.kind === "html") {
+    const closes = trimmed.includes("-->");
+    const text = trimmed.replace(/\s*-->.*$/, "");
     if (closes) state.kind = null;
     return { isDoc: false, text };
   }
 
-  if (trimmed.startsWith('//')) {
-    const marker = trimmed.match(/^\/\/+!?/)?.[0] ?? '//';
+  if (trimmed.startsWith("//")) {
+    const marker = trimmed.match(/^\/\/+!?/)?.[0] ?? "//";
     return {
-      isDoc: marker.startsWith('///') || marker.startsWith('//!'),
+      isDoc: marker.startsWith("///") || marker.startsWith("//!"),
       text: trimmed.slice(marker.length).trim(),
     };
   }
 
-  if (trimmed.startsWith('/*')) {
-    const isDoc = trimmed.startsWith('/**');
-    const closes = trimmed.slice(2).includes('*/');
+  if (trimmed.startsWith("/*")) {
+    const isDoc = trimmed.startsWith("/**");
+    const closes = trimmed.slice(2).includes("*/");
     const text = trimmed
-      .replace(/^\/\*+!?\s?/, '')
-      .replace(/\s*\*\/.*$/, '')
+      .replace(/^\/\*+!?\s?/, "")
+      .replace(/\s*\*\/.*$/, "")
       .trim();
     if (!closes) {
-      state.kind = 'block';
+      state.kind = "block";
       state.isDoc = isDoc;
     }
     return { isDoc, text };
   }
 
-  if (trimmed.startsWith('<!--')) {
-    const closes = trimmed.includes('-->');
-    const text = trimmed.replace(/^<!--\s?/, '').replace(/\s*-->.*$/, '').trim();
-    if (!closes) state.kind = 'html';
+  if (trimmed.startsWith("<!--")) {
+    const closes = trimmed.includes("-->");
+    const text = trimmed
+      .replace(/^<!--\s?/, "")
+      .replace(/\s*-->.*$/, "")
+      .trim();
+    if (!closes) state.kind = "html";
     return { isDoc: false, text };
   }
 
@@ -144,8 +150,10 @@ function stripCommentMarker(line, state) {
 function lintSource(filePath, source, options) {
   const fileName = basename(filePath);
   if (
-    /^(?:app_localizations(?:_[a-z]+)?|.+\.(?:freezed|g))\.dart$/i.test(fileName) ||
-    GENERATED_FILE_PATTERN.test(source.split('\n').slice(0, 8).join('\n'))
+    /^(?:app_localizations(?:_[a-z]+)?|.+\.(?:freezed|g))\.dart$/i.test(
+      fileName,
+    ) ||
+    GENERATED_FILE_PATTERN.test(source.split("\n").slice(0, 8).join("\n"))
   ) {
     return [];
   }
@@ -158,14 +166,14 @@ function lintSource(filePath, source, options) {
   const flushGroup = () => {
     if (group.length === 0) return;
 
-    const combinedText = group.map((entry) => entry.text).join(' ');
+    const combinedText = group.map((entry) => entry.text).join(" ");
     if (!EXEMPT_BLOCK_PATTERN.test(combinedText)) {
       const isDoc = group.some((entry) => entry.isDoc);
       const maxLines = isDoc ? options.maxDocLines : options.maxProseLines;
       if (group.length > maxLines) {
         findings.push({
           line: group[0].line,
-          message: `${isDoc ? 'Documentation' : 'Prose'} comment has ${group.length} lines (maximum ${maxLines}); keep it focused or move detail to documentation`,
+          message: `${isDoc ? "Documentation" : "Prose"} comment has ${group.length} lines (maximum ${maxLines}); keep it focused or move detail to documentation`,
         });
       }
 
@@ -187,7 +195,7 @@ function lintSource(filePath, source, options) {
       continue;
     }
 
-    const normalizedText = parsed.text.replace(URL_PATTERN, '<url>');
+    const normalizedText = parsed.text.replace(URL_PATTERN, "<url>");
     if (
       normalizedText.length > options.maxLength &&
       !EXEMPT_BLOCK_PATTERN.test(parsed.text)
@@ -211,15 +219,19 @@ async function main() {
 
   let findingCount = 0;
   for (const filePath of [...files].sort()) {
-    const source = await readFile(filePath, 'utf8');
+    const source = await readFile(filePath, "utf8");
     for (const finding of lintSource(filePath, source, options)) {
       findingCount += 1;
-      console.error(`${relative(process.cwd(), filePath)}:${finding.line}: ${finding.message}`);
+      console.error(
+        `${relative(process.cwd(), filePath)}:${finding.line}: ${finding.message}`,
+      );
     }
   }
 
   if (findingCount > 0) {
-    console.error(`\n${findingCount} concise-comment lint ${findingCount === 1 ? 'error' : 'errors'}.`);
+    console.error(
+      `\n${findingCount} concise-comment lint ${findingCount === 1 ? "error" : "errors"}.`,
+    );
     process.exitCode = 1;
     return;
   }

@@ -1,12 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDirectExecution } from "./direct-execution.js";
+import { licenseProblems, ownPackagePrefix } from "./license-policy.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(scriptDir);
 const cargoManifestPath = join(repoRoot, "src-tauri", "Cargo.toml");
 const outputPath = join(repoRoot, "public", "licenses-cargo.json");
+const npmOutputPath = join(repoRoot, "public", "licenses.json");
 
 function runCargoMetadata() {
   const args = [
@@ -113,15 +116,85 @@ function buildCargoLicenses(metadata) {
   );
 }
 
-function main() {
-  const metadata = runCargoMetadata();
-  const licenses = buildCargoLicenses(metadata);
-
-  mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, `${JSON.stringify(licenses, null, 2)}\n`, "utf8");
-  console.log(
-    `[licenses:cargo] Wrote ${Object.keys(licenses).length} cargo entries to ${outputPath}`,
+/**
+ * Strip build-host absolute paths from both license feeds.
+ *
+ * `license-checker` records `path` and `licenseFile` as absolute paths under
+ * the build checkout. Those files are copied into the app bundle, so publishing
+ * them leaks the builder's home directory. The UI only needs the license
+ * identifier, repository, and optional license text.
+ */
+export function stripLicensePaths(licenses) {
+  if (!licenses || typeof licenses !== "object" || Array.isArray(licenses)) {
+    return licenses;
+  }
+  return Object.fromEntries(
+    Object.entries(licenses).map(([key, entry]) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return [key, entry];
+      }
+      const { path: _path, licenseFile: _licenseFile, ...rest } = entry;
+      return [key, rest];
+    }),
   );
 }
 
-main();
+function stripNpmLicensePaths() {
+  if (!existsSync(npmOutputPath)) return 0;
+  const raw = readFileSync(npmOutputPath, "utf8");
+  const parsed = JSON.parse(raw);
+  const sanitized = stripLicensePaths(parsed);
+  const next = `${JSON.stringify(sanitized, null, 2)}\n`;
+  if (next !== raw) writeFileSync(npmOutputPath, next, "utf8");
+  return Object.keys(sanitized).length;
+}
+
+function enforceLicensePolicy() {
+  const packageJson = JSON.parse(
+    readFileSync(join(repoRoot, "package.json"), "utf8"),
+  );
+  const prefix = ownPackagePrefix(packageJson);
+  const problems = [];
+  if (existsSync(npmOutputPath)) {
+    problems.push(
+      ...licenseProblems(JSON.parse(readFileSync(npmOutputPath, "utf8")), {
+        ownPackagePrefix: prefix,
+      }),
+    );
+  }
+  problems.push(
+    ...licenseProblems(JSON.parse(readFileSync(outputPath, "utf8")), {
+      ownPackagePrefix: prefix,
+    }),
+  );
+  if (problems.length > 0) {
+    console.error("Dependency license policy failed:");
+    for (const problem of problems) console.error(`  - ${problem}`);
+    process.exitCode = 1;
+    return false;
+  }
+  console.log("[licenses] Dependency license policy: ok");
+  return true;
+}
+
+function main() {
+  const metadata = runCargoMetadata();
+  const licenses = stripLicensePaths(buildCargoLicenses(metadata));
+
+  mkdirSync(dirname(outputPath), { recursive: true });
+  writeFileSync(outputPath, `${JSON.stringify(licenses, null, 2)}\n`, "utf8");
+  const npmEntries = stripNpmLicensePaths();
+  console.log(
+    `[licenses:cargo] Wrote ${Object.keys(licenses).length} cargo entries to ${outputPath}`,
+  );
+  if (npmEntries > 0) {
+    console.log(
+      `[licenses:cargo] Removed build-host paths from ${npmEntries} npm entries`,
+    );
+  }
+  enforceLicensePolicy();
+}
+
+if (isDirectExecution(import.meta.url)) {
+  main();
+}

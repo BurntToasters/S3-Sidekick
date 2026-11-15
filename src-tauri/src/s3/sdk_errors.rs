@@ -2,6 +2,111 @@
 
 use super::*;
 
+const SECRET_MARKERS: &[&str] = &[
+    "X-Amz-Security-Token",
+    "X-Amz-Credential",
+    "X-Amz-Signature",
+    "AWSAccessKeyId",
+    "secret_access_key",
+    "session_token",
+    "secret_key",
+    "access_key",
+    "Authorization",
+    "Signature",
+    "password",
+];
+
+/// Redact credentials from a diagnostic string before it reaches stderr.
+///
+/// S3 and the AWS SDK can echo presigned URLs, authorization headers, or
+/// request payloads in error text. Keep the diagnostic shape (status, error
+/// code, message) while replacing anything that looks like a credential value.
+pub(super) fn redact_sensitive(input: &str) -> String {
+    let mut redacted = input.to_string();
+    for marker in SECRET_MARKERS {
+        redacted = redact_marker(&redacted, marker);
+    }
+    redacted
+}
+
+/// Cap a pre-redacted service body for stderr diagnostics.
+///
+/// The body is written once per failed request; an unbounded XML `Debug`
+/// payload (or a provider echoing a large request) can flood a terminal or a
+/// CI log. 4,000 characters keeps the error code, message, and request id
+/// while bounding the line (M11).
+const MAX_DIAGNOSTIC_BODY_CHARS: usize = 4_000;
+
+fn diagnostic_body(body: &str) -> String {
+    let total = body.chars().count();
+    if total <= MAX_DIAGNOSTIC_BODY_CHARS {
+        return body.to_string();
+    }
+    let mut truncated: String = body.chars().take(MAX_DIAGNOSTIC_BODY_CHARS).collect();
+    truncated.push_str(&format!(
+        "… [truncated {} of {} characters]",
+        total - MAX_DIAGNOSTIC_BODY_CHARS,
+        total
+    ));
+    truncated
+}
+
+fn redact_marker(input: &str, marker: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let needle = marker.to_ascii_lowercase();
+    let bytes = input.as_bytes();
+    let authorization = marker.eq_ignore_ascii_case("Authorization");
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while let Some(offset) = lower[cursor..].find(&needle) {
+        let marker_start = cursor + offset;
+        let marker_end = marker_start + marker.len();
+        let mut separator = marker_end;
+        while separator < bytes.len() && matches!(bytes[separator], b' ' | b'\t' | b'"' | b'\'') {
+            separator += 1;
+        }
+        if separator >= bytes.len() || !matches!(bytes[separator], b':' | b'=') {
+            output.push_str(&input[cursor..marker_end]);
+            cursor = marker_end;
+            continue;
+        }
+
+        let mut value_start = separator + 1;
+        while value_start < bytes.len() && matches!(bytes[value_start], b' ' | b'\t') {
+            value_start += 1;
+        }
+        if value_start < bytes.len() && matches!(bytes[value_start], b'"' | b'\'') {
+            value_start += 1;
+        }
+
+        let mut value_end = value_start;
+        while value_end < bytes.len() {
+            let byte = bytes[value_end];
+            if authorization {
+                if byte == b'\r' || byte == b'\n' {
+                    break;
+                }
+            } else if matches!(
+                byte,
+                b'&' | b' ' | b'\t' | b'"' | b'\'' | b',' | b'}' | b']' | b'\r' | b'\n'
+            ) {
+                break;
+            }
+            value_end += 1;
+        }
+
+        output.push_str(&input[cursor..value_start]);
+        if value_end > value_start {
+            output.push_str("[REDACTED]");
+        }
+        cursor = value_end;
+    }
+
+    output.push_str(&input[cursor..]);
+    output
+}
+
 pub(super) fn format_sdk_error<E: std::fmt::Debug>(
     prefix: &str,
     err: &aws_sdk_s3::error::SdkError<E>,
@@ -11,17 +116,21 @@ pub(super) fn format_sdk_error<E: std::fmt::Debug>(
         SdkError::ServiceError(ctx) => {
             let raw = ctx.raw();
             let status = raw.status().as_u16();
-            let body = String::from_utf8_lossy(raw.body().bytes().unwrap_or(&[]));
-            // Service bodies can embed multi-kilobyte XML Debug payloads; keep
-            // the user-facing message to status plus a short excerpt and send
-            // the full body to stderr for diagnostics.
+            let body =
+                redact_sensitive(&String::from_utf8_lossy(raw.body().bytes().unwrap_or(&[])));
+            // Service bodies can embed multi-kilobyte XML Debug payloads. The
+            // user-facing message keeps status plus a short excerpt; stderr
+            // gets a bounded redacted body so one failing request cannot flood
+            // a terminal or a CI log (M11).
             let mut excerpt: String = body.chars().take(200).collect();
             if body.chars().count() > 200 {
                 excerpt.push('…');
             }
             eprintln!(
-                "S3 {} (HTTP {}): full service body: {}",
-                prefix, status, body
+                "S3 {} (HTTP {}): service body: {}",
+                prefix,
+                status,
+                diagnostic_body(&body)
             );
             let mut message = format!("{} (HTTP {}): {}", prefix, status, excerpt);
             // Wrong-region buckets answer 301/307 with the authoritative
@@ -38,21 +147,80 @@ pub(super) fn format_sdk_error<E: std::fmt::Debug>(
             message
         }
         SdkError::DispatchFailure(err) => {
-            eprintln!("S3 {} (dispatch): full error: {:?}", prefix, err);
-            let mut detail = format!("{:?}", err);
+            let detail = redact_sensitive(&format!("{:?}", err));
+            eprintln!("S3 {} (dispatch): full error: {}", prefix, detail);
+            let mut excerpt = detail.chars().take(200).collect::<String>();
             if detail.chars().count() > 200 {
-                detail = format!("{}…", detail.chars().take(200).collect::<String>());
+                excerpt.push('…');
             }
-            format!("{} (dispatch): {}", prefix, detail)
+            format!("{} (dispatch): {}", prefix, excerpt)
         }
         other => {
-            eprintln!("S3 {}: full error: {:?}", prefix, other);
-            let mut detail = format!("{:?}", other);
+            let detail = redact_sensitive(&format!("{:?}", other));
+            eprintln!("S3 {}: full error: {}", prefix, detail);
+            let mut excerpt = detail.chars().take(200).collect::<String>();
             if detail.chars().count() > 200 {
-                detail = format!("{}…", detail.chars().take(200).collect::<String>());
+                excerpt.push('…');
             }
-            format!("{}: {}", prefix, detail)
+            format!("{}: {}", prefix, excerpt)
         }
+    }
+}
+
+/// True only when the service explicitly answered 403 for this request.
+pub(super) fn is_access_denied<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    matches!(err, SdkError::ServiceError(ctx) if ctx.raw().status().as_u16() == 403)
+}
+
+/// True when CompleteMultipartUpload reports that the upload ID no longer
+/// exists. That can mean an earlier completion attempt committed after its
+/// response was lost.
+/// True only when the service explicitly says the *key* is gone.
+///
+/// The shared `is_not_found` helper accepts any 404, including `NoSuchBucket`
+/// and unknown provider bodies. Treating those as "source already deleted"
+/// would report a completed move while the bucket itself is missing.
+pub(super) fn is_no_such_key<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    let SdkError::ServiceError(ctx) = err else {
+        return false;
+    };
+    if ctx.raw().status().as_u16() != 404 {
+        return false;
+    }
+    let body =
+        String::from_utf8_lossy(ctx.raw().body().bytes().unwrap_or(&[])).to_ascii_lowercase();
+    body.contains("nosuchkey")
+}
+
+pub(super) fn is_no_such_upload<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    let SdkError::ServiceError(ctx) = err else {
+        return false;
+    };
+    if ctx.raw().status().as_u16() != 404 {
+        return false;
+    }
+    let body =
+        String::from_utf8_lossy(ctx.raw().body().bytes().unwrap_or(&[])).to_ascii_lowercase();
+    body.contains("nosuchupload")
+}
+
+/// Completion errors whose outcome is genuinely unknown: a timeout or transport
+/// failure may have delivered the request, and a 5xx can follow a committed
+/// write. Aborting after one of these can delete a live completion.
+pub(super) fn completion_outcome_is_ambiguous<E: std::fmt::Debug>(
+    err: &aws_sdk_s3::error::SdkError<E>,
+) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    match err {
+        SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) => true,
+        SdkError::ServiceError(ctx) => {
+            let status = ctx.raw().status().as_u16();
+            status == 200 || status == 408 || status >= 500
+        }
+        _ => false,
     }
 }
 
@@ -67,15 +235,20 @@ pub(super) fn structured_transfer_sdk_error<E: std::fmt::Debug>(
     match err {
         SdkError::ServiceError(ctx) => {
             let status = ctx.raw().status().as_u16();
+            // Only 408/425/429 and 5xx can be fixed by re-sending the same
+            // request. Every other 4xx is deterministic for this request; a
+            // retry just burns bandwidth before the same answer.
             let retryable = status == 408 || status == 425 || status == 429 || status >= 500;
-            let code = if status == 429 {
-                "throttled"
-            } else if status >= 500 {
-                "server"
-            } else if status == 403 {
-                "forbidden"
-            } else {
-                default_code
+            let code = match status {
+                400 => "bad_request",
+                403 => "forbidden",
+                404 => "not_found",
+                408 => "timeout",
+                412 => "precondition_failed",
+                425 => "too_early",
+                429 => "throttled",
+                500..=599 => "server",
+                _ => default_code,
             };
             encode_transfer_error(code, retryable, Some(status), message)
         }
@@ -161,4 +334,73 @@ pub(super) fn acls_are_unavailable(message: &str) -> bool {
         || message
             .to_ascii_lowercase()
             .contains("accesscontrollistnotsupported")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_presigned_query_credentials() {
+        let input = "GET https://bucket.s3.amazonaws.com/key?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE%2F20261023&X-Amz-Signature=deadbeef&X-Amz-Security-Token=session-token";
+        let redacted = redact_sensitive(input);
+
+        assert!(
+            redacted.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"),
+            "{redacted}"
+        );
+        assert!(!redacted.contains("AKIAEXAMPLE"), "{redacted}");
+        assert!(!redacted.contains("deadbeef"), "{redacted}");
+        assert!(!redacted.contains("session-token"), "{redacted}");
+        assert!(
+            redacted.contains("X-Amz-Signature=[REDACTED]"),
+            "{redacted}"
+        );
+    }
+
+    #[test]
+    fn redacts_authorization_headers() {
+        let input =
+            "request failed\r\nAuthorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20261023/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef\r\nx-amz-request-id: request-123";
+        let redacted = redact_sensitive(input);
+
+        assert!(!redacted.contains("AKIAEXAMPLE"), "{redacted}");
+        assert!(!redacted.contains("deadbeef"), "{redacted}");
+        assert!(
+            redacted.contains("x-amz-request-id: request-123"),
+            "{redacted}"
+        );
+    }
+
+    #[test]
+    fn bounds_the_diagnostic_body_written_to_stderr() {
+        let short = "Access Denied: no such key";
+        assert_eq!(diagnostic_body(short), short);
+
+        let exact = "x".repeat(MAX_DIAGNOSTIC_BODY_CHARS);
+        assert_eq!(diagnostic_body(&exact), exact);
+
+        let long = format!("{}TAIL", "é".repeat(MAX_DIAGNOSTIC_BODY_CHARS + 10));
+        let bounded = diagnostic_body(&long);
+        assert_eq!(
+            bounded.chars().filter(|c| *c == 'é').count(),
+            MAX_DIAGNOSTIC_BODY_CHARS
+        );
+        assert!(!bounded.contains("TAIL"), "the tail must be truncated");
+        assert!(
+            bounded.contains("truncated 14 of 4014 characters"),
+            "{bounded}"
+        );
+    }
+
+    #[test]
+    fn redacts_json_style_secret_fields() {
+        let input = r#"{"access_key":"AKIAEXAMPLE","secret_key":"super-secret-value","session_token":"session-token","message":"Access Denied"}"#;
+        let redacted = redact_sensitive(input);
+
+        assert!(!redacted.contains("AKIAEXAMPLE"), "{redacted}");
+        assert!(!redacted.contains("super-secret-value"), "{redacted}");
+        assert!(!redacted.contains("session-token"), "{redacted}");
+        assert!(redacted.contains("Access Denied"), "{redacted}");
+    }
 }

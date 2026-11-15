@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-connection-id"
+description = "Enables the get_connection_id command without any pre-configured scope."
+commands.allow = ["get_connection_id"]
+
+[[permission]]
+identifier = "deny-get-connection-id"
+description = "Denies the get_connection_id command without any pre-configured scope."
+commands.deny = ["get_connection_id"]

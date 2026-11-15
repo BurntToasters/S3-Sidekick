@@ -25,14 +25,36 @@ const {
 const {
   verifyReleaseAssetIntegrity,
 } = require("./release-asset-verification.cjs");
+const {
+  assertNoSignatureSkips,
+  assertProductionSignatureEnvironment,
+  verifyDownloadedArtifactSignature,
+} = require("./release-signature-gate.cjs");
+const { releaseTargetMatchesCommit } = require("./release-draft-target.cjs");
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const version = JSON.parse(
   fs.readFileSync(path.join(root, "package.json"), "utf8"),
 ).version;
 const tag = `v${version}`;
+const isPrerelease = /-beta\.\d+$/.test(version);
 const owner = process.env.GH_REPO_OWNER || "BurntToasters";
 const repository = process.env.GH_REPO_NAME || "S3-Sidekick";
+
+function currentCommit() {
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const commit = String(result.stdout || "").trim();
+  if (result.status !== 0 || !/^[0-9a-f]{40}$/i.test(commit)) {
+    throw new Error(
+      "Could not resolve an exact release commit from git HEAD; published release verification must bind to a commit.",
+    );
+  }
+  return commit;
+}
 
 function loadRelease() {
   const release = githubApi(
@@ -40,7 +62,7 @@ function loadRelease() {
     `/repos/${owner}/${repository}/releases/tags/${tag}`,
   );
   if (release.draft) throw new Error(`${tag} is still a draft.`);
-  if (Boolean(release.prerelease) !== /-beta\.\d+$/.test(version)) {
+  if (Boolean(release.prerelease) !== isPrerelease) {
     throw new Error(`${tag} has incorrect prerelease state.`);
   }
   return release;
@@ -77,6 +99,7 @@ async function verifyUpdaterAssets(assets) {
       const artifactPath = path.join(temp, artifactName);
       const signaturePath = path.join(temp, asset.name);
       downloadReleaseAsset(`${owner}/${repository}`, artifact.id, artifactPath);
+      verifyDownloadedArtifactSignature(artifactName, artifactPath);
       downloadReleaseAsset(`${owner}/${repository}`, asset.id, signaturePath);
       normalizeUpdaterSignature(signaturePath);
       verifyUpdaterSignature(artifactPath, signaturePath);
@@ -87,8 +110,21 @@ async function verifyUpdaterAssets(assets) {
 }
 
 async function main() {
+  assertProductionSignatureEnvironment(process.env);
+  assertNoSignatureSkips(process.env);
   assertGitHubCliAuthenticated();
+  const commit = currentCommit();
   const release = loadRelease();
+  if (
+    !releaseTargetMatchesCommit(release.target_commitish, commit, {
+      isPrerelease,
+      root,
+    })
+  ) {
+    throw new Error(
+      `Published release ${tag} targets ${release.target_commitish}, not verified commit ${commit}.`,
+    );
+  }
   const assets = listAssets(release.id);
   const names = new Set(assets.map((asset) => asset.name));
   for (const name of requiredDraftAssetNames()) {
@@ -103,6 +139,7 @@ async function main() {
     assets,
     repository: `${owner}/${repository}`,
     requiredNames: requiredDraftAssetNames(),
+    verifyArtifact: verifyDownloadedArtifactSignature,
   });
   await verifyUpdaterAssets(assets);
   const live = spawnSync(

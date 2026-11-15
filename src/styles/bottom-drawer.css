@@ -3,20 +3,22 @@
 .bottom-drawer {
   display: flex;
   flex-direction: column;
-  height: 240px;
-  min-height: 120px;
+  /* Cap the natural size against short windows; JS still writes an explicit
+     drag height, and min() keeps that height from overflowing the viewport. */
+  height: min(240px, 50vh);
+  min-height: min(120px, 50vh);
   max-height: 50vh;
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border-top: 1px solid var(--glass-border);
-  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--drawer-shadow);
 }
 .bottom-drawer[hidden] {
   display: none;
 }
 .bottom-drawer:not([hidden]) {
-  animation: drawer-slide-up 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  animation: drawer-slide-up 0.25s var(--ease-standard);
   flex-shrink: 0;
 }
 
@@ -45,7 +47,7 @@
 }
 
 .bottom-drawer__resize-handle {
-  height: 6px;
+  height: 8px;
   cursor: ns-resize;
   position: relative;
   flex-shrink: 0;
@@ -55,20 +57,18 @@
   content: "";
   position: absolute;
   left: 50%;
-  top: 2px;
+  top: var(--space-1);
   transform: translateX(-50%);
   width: 32px;
   height: 3px;
   border-radius: 2px;
-  background: var(--border);
-  opacity: 0.6;
+  background: var(--border-strong);
   transition:
     opacity var(--transition-smooth),
     background var(--transition-smooth);
 }
 
 .bottom-drawer__resize-handle:hover::after {
-  opacity: 1;
   background: var(--accent);
 }
 
@@ -79,27 +79,32 @@
 
 .bottom-drawer__header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  padding: 0 12px;
+  gap: var(--space-1);
+  padding: 0 var(--space-3);
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .bottom-drawer__tabs {
   display: flex;
   gap: 0;
+  min-width: 0;
 }
 
 .bottom-drawer__tab {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 10px 16px;
+  gap: var(--space-1-5);
+  min-height: 32px;
+  padding: var(--space-2-5) var(--space-4);
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
@@ -116,7 +121,7 @@
 }
 
 .bottom-drawer__tab--active {
-  color: var(--accent);
+  color: var(--accent-fg);
   border-bottom-color: var(--accent);
 }
 
@@ -131,19 +136,31 @@
   justify-content: center;
   min-width: 16px;
   height: 16px;
-  padding: 0 4px;
-  border-radius: 8px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius);
   background: var(--accent);
   color: var(--accent-text);
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-weight: 700;
   line-height: 1;
 }
 
 .bottom-drawer__actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+/* Icon-only header controls meet the 32px pointer target floor. */
+.bottom-drawer__actions .btn--icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
 }
 
 .bottom-drawer__body {
@@ -154,4 +171,18 @@
 .bottom-drawer__panel {
   height: 100%;
   overflow-y: auto;
+}
+
+@media (max-width: 480px) {
+  .bottom-drawer__header {
+    padding: 0 var(--space-2);
+  }
+
+  .bottom-drawer__tab {
+    padding: var(--space-2) var(--space-2);
+  }
+
+  .bottom-drawer__actions .btn--ghost {
+    padding-inline: var(--space-2);
+  }
 }

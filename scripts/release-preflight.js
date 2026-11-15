@@ -10,7 +10,6 @@ import { isDirectExecution } from "./direct-execution.js";
 const { assertStableReleaseOverridesAllowed } = createRequire(import.meta.url)(
   "./release-policy.cjs",
 );
-
 const root = fileURLToPath(new URL("..", import.meta.url));
 
 function expectedReleaseBranch(version) {

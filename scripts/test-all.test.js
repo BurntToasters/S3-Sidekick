@@ -24,10 +24,13 @@ test("createInitialResults includes cargo quality and frontend build keys", () =
   assert.equal(results.cargoSafeUpdate.status, "pending");
   assert.equal(results.cargoUpdatePolicy.status, "pending");
   assert.equal(results.tauriAlignment.status, "pending");
+  assert.equal(results.icons.status, "pending");
   assert.equal(results.cargoFmt.status, "pending");
   assert.equal(results.frontendBuild.status, "pending");
   assert.equal(results.nativeBuild.status, "pending");
   assert.equal(results.tauriBuild.status, "pending");
+  assert.equal(results.releaseAssets.status, "pending");
+  assert.equal(results.releaseAssetsE2e.status, "pending");
 });
 
 test("Rust failure summary lists test names, not panic detail lines", () => {
@@ -56,7 +59,7 @@ test("package.json scripts define cargo safe update test and policy check", () =
   const scripts = readPackageJsonScripts();
   assert.equal(
     scripts["test:cargo-safe-update"],
-    "node --test scripts/cargo-safe-update.test.mjs scripts/check-cargo-update-policy.test.mjs",
+    "node --test scripts/cargo-safe-update.test.mjs scripts/check-cargo-update-policy.test.mjs scripts/deps-majors.test.mjs",
   );
   assert.equal(
     scripts["check:cargo-update-policy"],
@@ -66,7 +69,10 @@ test("package.json scripts define cargo safe update test and policy check", () =
     scripts["check:tauri-alignment"],
     "node scripts/check-tauri-alignment.mjs",
   );
-  assert.match(scripts["test:all"], /node scripts\/test-all\.js/);
+  assert.match(
+    scripts["test:all"],
+    /node scripts\/test-all\.js --write-evidence && node scripts\/finalize-quality-gate\.js/,
+  );
 });
 
 test("main fails when tauriAlignment fails", () => {
@@ -148,6 +154,40 @@ test("main fails when cargoUpdatePolicy fails", () => {
 
   assert.ok(calls.includes("run:cargoUpdatePolicy"));
   assert.equal(exitCode, 1);
+});
+
+test("main runs icon validation and release-asset tests before evidence", () => {
+  const calls = [];
+  const exitCode = main({
+    root: repoRoot,
+    clearProof: () => calls.push("clearProof"),
+    writeEvidence: false,
+    runner: (name, _cmd, args, _parser, results) => {
+      calls.push(`run:${name}`);
+      if (name === "icons") assert.deepEqual(args, ["run", "icons:check"]);
+      if (name === "releaseAssets")
+        assert.deepEqual(args, ["run", "test:release-assets"]);
+      if (name === "releaseAssetsE2e")
+        assert.deepEqual(args, ["run", "test:e2e:release-assets"]);
+      results[name].status = "passed";
+      return true;
+    },
+  });
+
+  assert.ok(calls.includes("run:icons"));
+  assert.ok(calls.includes("run:releaseAssets"));
+  assert.ok(calls.indexOf("run:icons") < calls.indexOf("run:clippy"));
+  assert.ok(calls.indexOf("run:releaseAssets") < calls.indexOf("run:test"));
+  if (process.platform !== "win32") {
+    assert.ok(
+      calls.indexOf("run:releaseAssets") <
+        calls.indexOf("run:releaseAssetsE2e"),
+    );
+    assert.ok(
+      calls.indexOf("run:releaseAssetsE2e") < calls.indexOf("run:test"),
+    );
+  }
+  assert.equal(exitCode, 0);
 });
 
 test("main succeeds when all checks pass", () => {

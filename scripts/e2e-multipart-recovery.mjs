@@ -18,6 +18,11 @@ const outDir = path.join(
 const reportPath = path.join(outDir, "checks.jsonl");
 const testName =
   "e2e_multipart_lost_response_uses_ownership_marker_independent_of_checksum_mode";
+const expectedCheckNames = [
+  "default checksum-off multipart completion recovers the committed own write",
+  "checksum-on multipart recovery keeps remote checksum verification enabled",
+  "a competing same-size object remains a create-only conflict",
+];
 
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
@@ -66,10 +71,13 @@ try {
     },
   ];
 }
+const checksMatch =
+  checks.length === expectedCheckNames.length &&
+  expectedCheckNames.every((name, index) => checks[index]?.name === name);
 const passed =
   !result.error &&
   result.status === 0 &&
-  checks.length === 3 &&
+  checksMatch &&
   checks.every((check) => check.passed);
 const report = {
   suite: "multipart-lost-response-recovery",
@@ -80,6 +88,8 @@ const report = {
   timedOut: result.error?.code === "ETIMEDOUT",
   failure: result.error?.message ?? null,
   checkCount: checks.length,
+  expectedCheckCount: expectedCheckNames.length,
+  expectedCheckNames,
   checks,
 };
 fs.writeFileSync(

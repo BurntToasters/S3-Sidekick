@@ -6,6 +6,7 @@ import {
   readPackageVersion,
   shouldSkipBetaMirror,
 } from "./post-release-assets.js";
+import { verifyReleaseSession } from "./release-session.js";
 import { assertStableReleaseOverridesAllowed } from "./release-policy.cjs";
 
 function banner(message) {
@@ -19,6 +20,10 @@ banner(`releaseDir=${RELEASE_DIR}`);
 banner(`AFTER_PACK_LOC=${JSON.stringify(getAfterPackLocation())}`);
 
 try {
+  // Standalone mirroring requires the same local tree/commit proof as publishing.
+  const session = verifyReleaseSession();
+  banner(`commit=${session.commit}`);
+
   const skipBeta = shouldSkipBetaMirror(process.env, version);
   if (!skipBeta && !getAfterPackLocation()) {
     throw new Error(

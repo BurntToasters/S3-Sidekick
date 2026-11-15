@@ -31,6 +31,11 @@ import arrowDown from "lucide-static/icons/arrow-down.svg?raw";
 import file from "lucide-static/icons/file.svg?raw";
 import folderOpen from "lucide-static/icons/folder-open.svg?raw";
 import fileText from "lucide-static/icons/file-text.svg?raw";
+import fileImage from "lucide-static/icons/file-image.svg?raw";
+import fileCode from "lucide-static/icons/file-code.svg?raw";
+import fileArchive from "lucide-static/icons/file-archive.svg?raw";
+import fileVideo from "lucide-static/icons/file-video.svg?raw";
+import fileAudio from "lucide-static/icons/file-audio.svg?raw";
 import clock from "lucide-static/icons/clock.svg?raw";
 import skipForward from "lucide-static/icons/skip-forward.svg?raw";
 import compass from "lucide-static/icons/compass.svg?raw";
@@ -43,6 +48,28 @@ import moreHorizontal from "lucide-static/icons/more-horizontal.svg?raw";
 import minus from "lucide-static/icons/minus.svg?raw";
 import square from "lucide-static/icons/square.svg?raw";
 import plus from "lucide-static/icons/plus.svg?raw";
+import pause from "lucide-static/icons/pause.svg?raw";
+import play from "lucide-static/icons/play.svg?raw";
+import copy from "lucide-static/icons/copy.svg?raw";
+import rotateCcw from "lucide-static/icons/rotate-ccw.svg?raw";
+import pencil from "lucide-static/icons/pencil.svg?raw";
+import history from "lucide-static/icons/history.svg?raw";
+import keyboard from "lucide-static/icons/keyboard.svg?raw";
+import gripVertical from "lucide-static/icons/grip-vertical.svg?raw";
+import layers from "lucide-static/icons/layers.svg?raw";
+import filter from "lucide-static/icons/filter.svg?raw";
+import externalLink from "lucide-static/icons/external-link.svg?raw";
+import columns3 from "lucide-static/icons/columns-3.svg?raw";
+import chevronRight from "lucide-static/icons/chevron-right.svg?raw";
+import chevronLeft from "lucide-static/icons/chevron-left.svg?raw";
+import chevronsUpDown from "lucide-static/icons/chevrons-up-down.svg?raw";
+import sun from "lucide-static/icons/sun.svg?raw";
+import moon from "lucide-static/icons/moon.svg?raw";
+import rows3 from "lucide-static/icons/rows-3.svg?raw";
+import share2 from "lucide-static/icons/share-2.svg?raw";
+import folderInput from "lucide-static/icons/folder-input.svg?raw";
+import unlock from "lucide-static/icons/unlock.svg?raw";
+import fingerprint from "lucide-static/icons/fingerprint.svg?raw";
 
 const registry: Record<string, string> = {
   settings,
@@ -78,6 +105,11 @@ const registry: Record<string, string> = {
   file,
   "folder-open": folderOpen,
   "file-text": fileText,
+  "file-image": fileImage,
+  "file-code": fileCode,
+  "file-archive": fileArchive,
+  "file-video": fileVideo,
+  "file-audio": fileAudio,
   clock,
   "skip-forward": skipForward,
   compass,
@@ -91,6 +123,28 @@ const registry: Record<string, string> = {
   minus,
   square,
   plus,
+  pause,
+  play,
+  copy,
+  "rotate-ccw": rotateCcw,
+  pencil,
+  history,
+  keyboard,
+  "grip-vertical": gripVertical,
+  layers,
+  filter,
+  "external-link": externalLink,
+  "columns-3": columns3,
+  "chevron-right": chevronRight,
+  "chevron-left": chevronLeft,
+  "chevrons-up-down": chevronsUpDown,
+  sun,
+  moon,
+  "rows-3": rows3,
+  "share-2": share2,
+  "folder-input": folderInput,
+  unlock,
+  fingerprint,
 };
 
 export function getIconHtml(

@@ -117,6 +117,7 @@ function verifyReleaseAssetIntegrity({
   repository,
   requiredNames,
   environment = process.env,
+  verifyArtifact = null,
 }) {
   const fingerprint = approvedFingerprint(environment);
   const byName = new Map();
@@ -143,6 +144,9 @@ function verifyReleaseAssetIntegrity({
       downloadReleaseAsset(repository, asset.id, file);
       if (fs.statSync(file).size === 0)
         throw new Error(`Release asset ${name} is empty.`);
+      if (typeof verifyArtifact === "function") {
+        verifyArtifact(name, file);
+      }
     }
     for (const signature of requiredNames.filter((name) =>
       name.endsWith(".asc"),
@@ -214,4 +218,9 @@ function verifyReleaseAssetIntegrity({
   }
 }
 
-module.exports = { verifyReleaseAssetIntegrity };
+module.exports = {
+  approvedFingerprint,
+  sha256,
+  verifyGpgSignature,
+  verifyReleaseAssetIntegrity,
+};

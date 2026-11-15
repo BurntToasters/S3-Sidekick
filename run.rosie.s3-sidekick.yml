@@ -1,6 +1,6 @@
 app-id: run.rosie.s3-sidekick
 runtime: org.gnome.Platform
-runtime-version: "49"
+runtime-version: "51"
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.node24
@@ -35,20 +35,34 @@ modules:
       # npm dependencies and Cargo sources remain locked and offline.
       build-args:
         - --share=network
-      append-path: /run/build/s3-sidekick/npm-global/bin:/usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
+      # Prepend so the extension Node wins over any older SDK /usr/bin/node.
+      prepend-path: /run/build/s3-sidekick/cargo/bin:/run/build/s3-sidekick/npm-global/bin:/usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
       env:
+        CARGO_HOME: /run/build/s3-sidekick/cargo
+        RUSTUP_HOME: /run/build/s3-sidekick/rustup
         CARGO_NET_OFFLINE: "true"
         HUSKY: "0"
         npm_config_ignore_scripts: "true"
         npm_config_offline: "true"
     build-commands:
-      - node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major !== 24 || minor < 18) { console.error('Node 24.18+ required, found', process.version); process.exit(1); }"
-      # The Node 24 SDK ships npm 11.x, while packageManager requires npm 12.0.2.
+      # Build-only exception: the node24 SDK ships Node 24.18, below the
+      # package.json/CI floor (^24.22.1 || >=26.13.0). The sandbox only needs
+      # a build toolchain; local dev, CI, and release hosts follow package.json.
+      - node -e "const [major, minor] = process.versions.node.split('.').map((n) => Number.parseInt(n, 10)); const ok = (major === 24 && minor >= 18) || (major === 26 && minor >= 13) || major > 26; if (!ok) { console.error('Node ^24.22.1 || >=26.13.0 is the supported floor (Flatpak SDK 24.18 build exception), found', process.version, 'at', process.execPath); process.exit(1); }"
+      # The Node 24 SDK ships npm 11.x, while packageManager requires npm 12.2.1.
       # npm_config_offline stays on for later lockfile-only commands; --no-offline
       # is required here or the CLI uses only-if-cached and fails with ENOTCACHED.
-      - npm install --global npm@12.0.2 --no-offline --ignore-scripts --engine-strict=false --no-audit --no-fund --prefix /run/build/s3-sidekick/npm-global
-      - test "$(npm --version)" = "12.0.2"
-      - rustc --version
+      - npm install --global npm@12.2.1 --no-offline --ignore-scripts --engine-strict=false --no-audit --no-fund --prefix /run/build/s3-sidekick/npm-global
+      - test "$(npm --version)" = "12.2.1"
+      # The Flathub rust-stable SDK extension lags the pinned toolchain, so
+      # install rustup and the exact compiler pinned in rust-toolchain.toml.
+      # One shell keeps the extracted pin alive through the assertion.
+      - |
+        set -eu
+        PINNED="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"[[:space:]]*$/\1/p' rust-toolchain.toml | tr -d '\r' | head -n 1)"
+        test -n "$PINNED"
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$PINNED" --profile minimal
+        test "$(rustc --version | cut -d' ' -f2)" = "$PINNED"
       - test ! -e .env && test ! -e .env.local && test ! -e .env.production
       - npm run sync-version
       - npm run licenses

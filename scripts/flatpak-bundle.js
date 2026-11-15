@@ -258,6 +258,23 @@ function runFlatpakBuild({
       "flatpak-build",
       "run.rosie.s3-sidekick.yml",
     ]);
+    // Sign the repository refs before bundling when a release key is
+    // configured, so the offline bundle carries a verifiable signature
+    // (M14). Local/dev builds without GPG_KEY_ID stay unsigned and say so.
+    if (environment.GPG_KEY_ID) {
+      execute("flatpak", [
+        "build-sign",
+        `--gpg-sign=${environment.GPG_KEY_ID}`,
+        "flatpak-repo",
+      ]);
+      console.log(
+        `Signed Flatpak repository refs with ${environment.GPG_KEY_ID}.`,
+      );
+    } else {
+      console.log(
+        "GPG_KEY_ID is unset; the Flatpak bundle is unsigned (release hosts must set it).",
+      );
+    }
     const distDir = path.join(root, "dist");
     fs.mkdirSync(distDir, { recursive: true });
     const bundlePath = path.join(distDir, "S3-Sidekick-Linux-x64.flatpak");

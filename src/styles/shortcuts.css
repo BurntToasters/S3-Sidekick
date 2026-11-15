@@ -1,0 +1,107 @@
+/* Keyboard shortcuts dialog: a wider content dialog whose grouped rows scroll
+   inside the box. Key chips mirror the .shortcut-chip look from browser.css,
+   without its statusbar-only hiding rule in responsive.css. */
+
+.dialog-box--content {
+  width: min(560px, 92vw);
+}
+
+.dialog-box--content .dialog-box__message {
+  max-height: min(68vh, 640px);
+  color: var(--text-secondary);
+}
+
+.dialog-box--content .dialog-box__message:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.shortcut-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.shortcut-group__title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.shortcut-group__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.shortcut-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.shortcut-row:last-child {
+  border-bottom: none;
+}
+
+.shortcut-row__action {
+  flex: 1 1 200px;
+  min-width: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.shortcut-row__keys {
+  display: inline-flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+.shortcut-combo {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-0-5);
+}
+
+.shortcut-row__or {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.shortcut-key {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 1px var(--space-1);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+}
+
+/* Forced colors drop background and most borders, so the chip keeps an
+   explicit system-colour outline to stay legible. */
+@media (forced-colors: active) {
+  .shortcut-key {
+    color: CanvasText;
+    background: Canvas;
+    border: 1px solid CanvasText;
+  }
+
+  .shortcut-row {
+    border-bottom-color: CanvasText;
+  }
+}

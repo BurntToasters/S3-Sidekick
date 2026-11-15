@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-rollback-backups"
+description = "Enables the list_rollback_backups command without any pre-configured scope."
+commands.allow = ["list_rollback_backups"]
+
+[[permission]]
+identifier = "deny-list-rollback-backups"
+description = "Denies the list_rollback_backups command without any pre-configured scope."
+commands.deny = ["list_rollback_backups"]

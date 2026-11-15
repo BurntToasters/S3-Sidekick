@@ -11,6 +11,7 @@ let persistTimeout: number | undefined;
 
 type WindowHandle = {
   setSize: (size: LogicalSize) => Promise<void>;
+  maximize?: () => Promise<void>;
   unmaximize?: () => Promise<void>;
   isMaximized?: () => Promise<boolean>;
   innerSize?: () => Promise<{ width: number; height: number }>;
@@ -71,22 +72,32 @@ export async function readLogicalWindowSize(): Promise<{
   return roundWindowSize(window.innerWidth, window.innerHeight);
 }
 
+async function isWindowMaximized(): Promise<boolean> {
+  try {
+    const win = currentWindow();
+    return typeof win.isMaximized === "function"
+      ? await win.isMaximized()
+      : false;
+  } catch {
+    return false;
+  }
+}
+
 async function persistCurrentWindowSize(): Promise<void> {
   if (!persistEnabled) return;
+  // Stored in the settings extras so the maximized state survives launches
+  // without a new settings field. The normal size is kept separately below.
+  state.settingsExtras.windowMaximized = await isWindowMaximized();
+  const size = await readLogicalWindowSize();
+  if (size) {
+    state.currentSettings.windowWidth = size.width;
+    state.currentSettings.windowHeight = size.height;
+  }
   if (
     document.getElementById("settings-overlay")?.classList.contains("active")
   ) {
-    const size = await readLogicalWindowSize();
-    if (size) {
-      state.currentSettings.windowWidth = size.width;
-      state.currentSettings.windowHeight = size.height;
-    }
     return;
   }
-  const size = await readLogicalWindowSize();
-  if (!size) return;
-  state.currentSettings.windowWidth = size.width;
-  state.currentSettings.windowHeight = size.height;
   try {
     await saveSettings();
   } catch (err) {
@@ -134,6 +145,9 @@ export async function restoreWindowSize(): Promise<void> {
       // Best effort: still apply the saved size if unmaximize is unavailable.
     }
     await win.setSize(new LogicalSize(windowWidth, windowHeight));
+    if (state.settingsExtras.windowMaximized === true) {
+      await win.maximize?.();
+    }
   } catch (err) {
     console.warn("Failed to restore window size:", err);
   } finally {

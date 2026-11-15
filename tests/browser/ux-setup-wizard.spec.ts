@@ -1,0 +1,143 @@
+// Failure modes covered (UI overhaul 0.12.0, P3b setup wizard):
+// - The wizard has five steps; the Welcome and Theme steps are split.
+// - Steps are not numbered, so the user cannot tell how far setup goes.
+// - The vault-initialized flag is read once at the start. Skip -> Back -> Back
+//   -> Next -> Enable calls initialize_security on an already-initialized vault.
+// - "Skip" on the encryption step does not say that saved connections are
+//   stored unencrypted.
+// - Enabling encryption after a skip does not re-read the vault status, so it
+//   cannot take the "already initialized" branch.
+import { expect, test } from "@playwright/test";
+import { installLayoutTauriMock, readMockCallLog } from "./tauri-layout";
+
+const FIRST_RUN = {
+  objectCount: 0,
+  prefixes: [],
+  settings: { _setupComplete: false },
+  security: { initialized: false, encryption_enabled: false },
+};
+
+test("the wizard has three numbered steps", async ({ page }) => {
+  await installLayoutTauriMock(page, FIRST_RUN);
+  await page.goto("/");
+  await expect(page.locator("#setup-step-count")).toHaveText("Step 1 of 3");
+  await page.locator("#setup-welcome-next").click();
+  await page.locator("#setup-theme-next").click();
+  await expect(page.locator("#setup-step-count")).toHaveText("Step 2 of 3");
+  await page.locator("#setup-enc-skip").click();
+  await expect(page.locator("#setup-step-count")).toHaveText("Step 3 of 3");
+  await expect(page.locator("#setup-done-btn")).toBeHidden();
+  await page.locator("#setup-updates-next").click();
+  await expect(page.locator("#setup-done-btn")).toHaveText(
+    "Connect to storage",
+  );
+});
+
+test("skip, back, back, next, enable never re-initializes the vault", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, FIRST_RUN);
+  await page.goto("/");
+  await page.locator("#setup-welcome-next").click();
+  await page.locator("#setup-theme-next").click();
+  await page.locator("#setup-enc-skip").click();
+  await expect(page.locator("#setup-step-updates")).toBeVisible();
+  await page.locator("#setup-updates-back").click();
+  await expect(page.locator("#setup-step-encryption")).toBeVisible();
+  await page.locator("#setup-enc-back").click();
+  await page.locator("#setup-theme-next").click();
+  await expect(page.locator("#setup-step-encryption")).toBeVisible();
+
+  await page.locator("#setup-enc-password").fill("correct-horse-1");
+  await page.locator("#setup-enc-confirm").fill("correct-horse-1");
+  await page.locator("#setup-enc-next").click();
+  await expect(page.locator("#setup-step-updates")).toBeVisible();
+
+  const calls = await readMockCallLog(page);
+  const inits = calls.filter((call) => call.command === "initialize_security");
+  expect(inits).toHaveLength(1);
+  expect(inits[0]?.args).toMatchObject({ enableEncryption: false });
+  const enable = calls.find(
+    (call) => call.command === "set_security_encryption",
+  );
+  expect(enable?.args).toMatchObject({
+    enableEncryption: true,
+    newPassword: "correct-horse-1",
+  });
+});
+
+test("skipping says that saved connections are stored unencrypted", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, FIRST_RUN);
+  await page.goto("/");
+  await page.locator("#setup-welcome-next").click();
+  await page.locator("#setup-theme-next").click();
+  await expect(page.locator("#setup-enc-skip-note")).toContainText(
+    /unencrypted.*not recommended/is,
+  );
+  await expect(page.locator("#setup-enc-skip")).toHaveText(
+    "Continue without encryption",
+  );
+});
+
+test("the theme choices form one radio group that arrow keys move through", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, FIRST_RUN);
+  await page.goto("/");
+  await page.locator("#setup-welcome-next").click();
+  await page.locator("#setup-theme-system").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#setup-theme-light")).toBeChecked();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.locator("#setup-theme-system")).toBeChecked();
+});
+
+test("Home and End move between theme cards", async ({ page }) => {
+  await installLayoutTauriMock(page, FIRST_RUN);
+  await page.goto("/");
+  await page.locator("#setup-welcome-next").click();
+  await page.locator("#setup-theme-light").focus();
+  await page.keyboard.press("End");
+  await expect(page.locator("#setup-theme-dark")).toBeChecked();
+  await expect(page.locator("#setup-theme-dark")).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(page.locator("#setup-theme-system")).toBeChecked();
+  await expect(page.locator("#setup-theme-system")).toBeFocused();
+});
+
+// Failure modes: a wizard boolean stays a left-aligned checkbox, so it does not
+// line up with the update channel select beneath it; or clicking its label text
+// or pressing Space no longer toggles it.
+test("the wizard's boolean options are switches that toggle from their label text", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, FIRST_RUN);
+  await page.goto("/");
+  await page.locator("#setup-welcome-next").click();
+  await page.locator("#setup-theme-next").click();
+  await expect(page.locator("#setup-enc-biometric")).toHaveClass(/\bswitch\b/);
+  await page.locator("#setup-enc-skip").click();
+
+  const auto = page.locator("#setup-auto-updates");
+  await expect(auto).toHaveClass(/\bswitch\b/);
+  await expect(auto).toBeChecked();
+  const rights = await page.evaluate(() => ({
+    switch: document
+      .getElementById("setup-auto-updates")
+      ?.getBoundingClientRect().right,
+    select: document
+      .getElementById("setup-update-channel")
+      ?.getBoundingClientRect().right,
+  }));
+  expect(
+    Math.abs((rights.switch ?? 0) - (rights.select ?? 1)),
+  ).toBeLessThanOrEqual(1);
+
+  await page.locator("label:has(#setup-auto-updates) > span").click();
+  await expect(auto).not.toBeChecked();
+  await auto.focus();
+  await page.keyboard.press("Space");
+  await expect(auto).toBeChecked();
+});

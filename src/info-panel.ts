@@ -13,9 +13,13 @@ import {
   basename,
   getIconHtml,
   friendlyError,
+  plural,
 } from "./utils.ts";
 import { state } from "./state.ts";
+import type { SelectionEntry } from "./app-selection.ts";
 import { showConfirm } from "./dialogs.ts";
+import { restoreTableSelectionFromInspector } from "./layout-render-bridge.ts";
+import type { InspectorInfoTab } from "./inspector.ts";
 import {
   getInfoTitleEl,
   getInfoBodyEl,
@@ -26,9 +30,10 @@ import {
 } from "./inspector-mount.ts";
 import {
   ensureInspectorOpenForPane,
-  focusInspectorPropertiesPane,
+  focusInspectorInfoPane,
   markInspectorHasContent,
-} from "./inspector.ts";
+  setInspectorTitle,
+} from "./inspector-host.ts";
 
 interface HeadObjectResponse {
   content_type: string;
@@ -56,13 +61,23 @@ interface AclResponse {
 type ObjectVisibility = "private" | "public-read";
 type VisibilitySelection = "unchanged" | ObjectVisibility;
 
+/** Fired after the Properties pane closes, so the inspector can re-render. */
+export const INFO_PANEL_CLOSED_EVENT = "s3-sidekick:info-panel-closed";
+
 let currentKey = "";
 let batchKeys: string[] = [];
+// The selection the pane was opened for; Keep editing selects it again.
+let shownEntries: SelectionEntry[] = [];
+let batchFolderCount = 0;
 let headData: HeadObjectResponse | null = null;
 let aclData: AclResponse | null = null;
 let metadataRows: { key: string; value: string }[] = [];
-let activeTab = "general";
+// `general` and `s3` exist only for the legacy overlay tabs; the inspector
+// shows the merged `details` view instead.
+let activeTab: InspectorInfoTab | "general" | "s3" = "details";
 let panelRequestToken = 0;
+/** Latest URL build; a superseded render must not append a second block. */
+let urlBuildToken = 0;
 let metadataDirty = false;
 let aclDirty = false;
 let selectedVisibility: VisibilitySelection = "unchanged";
@@ -156,16 +171,63 @@ function setInspectorFooterVisible(visible: boolean): void {
   }
 }
 
+/**
+ * Inspector footer rule: the footer appears only on the Metadata or
+ * Permissions view, and only while an edit is unsaved. A batch has no
+ * sub-tabs and edits both sections on one screen, so it counts as editable.
+ * The legacy overlay footer always shows and is unaffected.
+ */
+function updateInspectorFooter(): void {
+  if (!shouldUseInspectorMount()) return;
+  const onEditableTab =
+    batchKeys.length > 0 ||
+    activeTab === "metadata" ||
+    activeTab === "permissions";
+  setInspectorFooterVisible(onEditableTab && (metadataDirty || aclDirty));
+}
+
 function resetEditorState(): void {
   metadataDirty = false;
   aclDirty = false;
   selectedVisibility = "unchanged";
   initialSingleVisibility = null;
+  updateInspectorFooter();
 }
 
-function isShowingKeys(keys: string[]): boolean {
-  if (keys.length === 1) return currentKey !== "" && currentKey === keys[0];
-  const files = keys.filter((k) => !k.startsWith("prefix:"));
+/**
+ * Forget fetched HEAD and ACL responses so the next render re-reads them.
+ * Manual Refresh calls this; unsaved edits stay intact.
+ */
+export function invalidateInfoPanelCaches(): void {
+  headData = null;
+  aclData = null;
+  // Invalidate an in-flight HEAD/ACL read so it cannot repopulate the cache
+  // with the pre-refresh response.
+  panelRequestToken += 1;
+  urlBuildToken += 1;
+}
+
+function fileKeysOf(entries: readonly SelectionEntry[]): string[] {
+  return entries
+    .filter((entry) => entry.kind === "file")
+    .map((entry) => entry.key);
+}
+
+/**
+ * Whether the Properties pane already shows these entries, so a re-selection
+ * of the same object does not ask to discard edits.
+ */
+export function infoPanelShowsEntries(
+  entries: readonly SelectionEntry[],
+): boolean {
+  if (entries.length === 1) {
+    return (
+      currentKey !== "" &&
+      entries[0].kind === "file" &&
+      currentKey === entries[0].key
+    );
+  }
+  const files = fileKeysOf(entries);
   return (
     currentKey === "" &&
     files.length === batchKeys.length &&
@@ -173,87 +235,105 @@ function isShowingKeys(keys: string[]): boolean {
   );
 }
 
-export async function openInfoPanel(keys: string[]): Promise<void> {
+/** The entries the Properties pane was last opened for. */
+export function getInfoPanelEntries(): SelectionEntry[] {
+  return shownEntries.map((entry) => ({ ...entry }));
+}
+
+export async function openInfoPanel(
+  entries: readonly SelectionEntry[],
+  tab: InspectorInfoTab = "details",
+): Promise<void> {
   // Switching to another object would reset the editor; ask first instead of
   // silently dropping unsaved metadata or visibility edits.
-  if (!isShowingKeys(keys) && !(await confirmDiscardInfoProperties())) {
+  if (
+    !infoPanelShowsEntries(entries) &&
+    !(await confirmDiscardInfoProperties())
+  ) {
+    restoreTableSelectionFromInspector(getInfoPanelEntries());
     return;
   }
-  ensureInspectorOpenForPane("properties");
+  shownEntries = entries.map((entry) => ({ ...entry }));
+  ensureInspectorOpenForPane(tab);
   if (shouldUseInspectorMount()) {
-    focusInspectorPropertiesPane();
+    focusInspectorInfoPane(tab);
     markInspectorHasContent();
+    showHeaderFor(entries);
   }
 
   const title = getInfoTitleEl();
   const saveBtn = getInfoSaveBtn();
   saveBtn.textContent = "Save";
 
-  if (keys.length > 1) {
+  if (entries.length > 1) {
     panelRequestToken += 1;
     currentKey = "";
-    batchKeys = keys.filter((k) => !k.startsWith("prefix:"));
+    batchKeys = fileKeysOf(entries);
     metadataRows = [{ key: "", value: "" }];
     headData = null;
     aclData = null;
     resetEditorState();
 
+    const folderCount = entries.length - batchKeys.length;
+    batchFolderCount = folderCount;
     if (batchKeys.length === 0) {
-      title.textContent = `${keys.length} items selected`;
+      title.textContent = `${folderCount} folder${folderCount === 1 ? "" : "s"}`;
       setInfoOverlayActive(true);
       saveBtn.style.display = "none";
-      setInspectorFooterVisible(false);
       setTabsVisible(false);
+      updateInspectorFooter();
       const body = getInfoBodyEl();
+      body.setAttribute("aria-busy", "false");
       body.innerHTML =
         `<div class="metadata-batch-info">` +
-        `<p>Selected ${keys.length} folder(s). Properties editing applies to files only.</p>` +
+        `<p><strong>${folderCount} folder${folderCount === 1 ? "" : "s"}</strong> selected.</p>` +
+        `<p class="metadata-batch-hint">Properties editing applies to files only.</p>` +
         `</div>`;
       return;
     }
 
-    title.textContent = `${batchKeys.length} items selected`;
+    title.textContent =
+      folderCount > 0
+        ? `${batchKeys.length} file${batchKeys.length === 1 ? "" : "s"}, ${folderCount} folder${folderCount === 1 ? "" : "s"}`
+        : `${batchKeys.length} item${batchKeys.length === 1 ? "" : "s"}`;
     setInfoOverlayActive(true);
     saveBtn.style.display = "";
-    setInspectorFooterVisible(true);
+    setInspectorFooterVisible(false);
     saveBtn.disabled = false;
     setTabsVisible(false);
-    renderBatchView(getInfoBodyEl(), batchKeys);
+    renderBatchView(getInfoBodyEl(), batchKeys, folderCount);
     return;
   }
 
   batchKeys = [];
 
-  if (keys.length === 1 && keys[0].startsWith("prefix:")) {
+  if (entries.length === 1 && entries[0].kind === "folder") {
     panelRequestToken += 1;
     currentKey = "";
     headData = null;
     aclData = null;
     metadataRows = [];
     resetEditorState();
-    const folderPrefix = keys[0].slice("prefix:".length);
+    const folderPrefix = entries[0].key;
     title.textContent = basename(folderPrefix) || folderPrefix;
     setInfoOverlayActive(true);
     saveBtn.style.display = "none";
-    setInspectorFooterVisible(false);
     setTabsVisible(false);
-    getInfoBodyEl().innerHTML =
-      `<div class="metadata-batch-info">` +
-      `<p>Folder selected. Properties editing applies to files only.</p>` +
-      `</div>`;
+    updateInspectorFooter();
+    renderFolderProperties(getInfoBodyEl(), folderPrefix);
     return;
   }
 
   const requestToken = ++panelRequestToken;
-  currentKey = keys[0];
+  currentKey = entries[0].key;
   const selectedKey = currentKey;
   title.textContent = basename(currentKey);
   setInfoOverlayActive(true);
   saveBtn.style.display = "";
-  setInspectorFooterVisible(true);
+  setInspectorFooterVisible(false);
   saveBtn.disabled = true;
   setTabsVisible(true);
-  activeTab = "general";
+  activeTab = tab;
   updateTabUI();
 
   headData = null;
@@ -262,7 +342,8 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
   resetEditorState();
 
   const body = getInfoBodyEl();
-  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
+  body.setAttribute("aria-busy", "true");
+  body.innerHTML = `<div class="metadata-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading&#8230;</div>`;
 
   try {
     const nextHeadData = await invokeS3<HeadObjectResponse>("head_object", {
@@ -280,13 +361,97 @@ export async function openInfoPanel(keys: string[]): Promise<void> {
     }
 
     saveBtn.disabled = false;
+    body.setAttribute("aria-busy", "false");
     renderTab();
   } catch (err) {
     if (requestToken !== panelRequestToken || currentKey !== selectedKey) {
       return;
     }
-    body.innerHTML = `<div class="metadata-loading">Failed to load: ${escapeHtml(friendlyError(err))}</div>`;
+    body.setAttribute("aria-busy", "false");
+    renderLoadError(body, `Failed to load: ${escapeHtml(friendlyError(err))}`);
   }
+}
+
+/**
+ * Names the opened selection in the inspector header, the one place the
+ * inspector shows a file name. Matches what a selection sync shows, so a
+ * direct Properties open does not leave the header on a stale title.
+ */
+function showHeaderFor(entries: readonly SelectionEntry[]): void {
+  if (entries.length === 1) {
+    setInspectorTitle(basename(entries[0].key), entries[0]);
+  } else {
+    setInspectorTitle(`${entries.length} selected`, null);
+  }
+}
+
+/**
+ * Load-error state: an alert with a Retry that re-issues the same request.
+ * Shown for HEAD and ACL failures alike.
+ */
+function renderLoadError(body: HTMLElement, message: string): void {
+  body.setAttribute("aria-busy", "false");
+  body.innerHTML =
+    `<div class="metadata-loading" role="alert">` +
+    `${message} ` +
+    `<button type="button" class="btn btn--sm" data-info-retry>Retry</button>` +
+    `</div>`;
+  body
+    .querySelector<HTMLButtonElement>("[data-info-retry]")
+    ?.addEventListener("click", () => {
+      void retryInfoLoad();
+    });
+}
+
+/** Re-runs the load that failed, for the entries the pane was opened for. */
+function retryInfoLoad(): void {
+  const tab: InspectorInfoTab =
+    activeTab === "permissions"
+      ? "permissions"
+      : activeTab === "metadata"
+        ? "metadata"
+        : "details";
+  const reportOpenFailure = (err: unknown): void => {
+    setStatus(`Failed to reopen properties: ${friendlyError(err)}`);
+  };
+  if (batchKeys.length > 0) {
+    void openInfoPanel(
+      shownEntries.map((entry) => ({ ...entry })),
+      tab,
+    ).catch(reportOpenFailure);
+    return;
+  }
+  if (currentKey) {
+    void openInfoPanel([{ kind: "file", key: currentKey }], tab).catch(
+      reportOpenFailure,
+    );
+    return;
+  }
+  if (shownEntries.length === 1 && shownEntries[0].kind === "folder") {
+    void openInfoPanel([{ ...shownEntries[0] }], tab).catch(reportOpenFailure);
+  }
+}
+
+/**
+ * Explicit inspector tab switch (Details/Permissions/Metadata). Renders from
+ * the already loaded object when possible instead of refetching.
+ */
+export function showInfoPanelTab(tab: InspectorInfoTab): void {
+  activeTab = tab;
+  updateTabUI();
+  updateInspectorFooter();
+  if (!headData && currentKey) {
+    const entry: SelectionEntry = { kind: "file", key: currentKey };
+    void openInfoPanel([entry], tab).catch((err) => {
+      setStatus(`Failed to show ${tab}: ${friendlyError(err)}`);
+    });
+    return;
+  }
+  if (batchKeys.length > 0) {
+    renderBatchView(getInfoBodyEl(), batchKeys, batchFolderCount);
+    return;
+  }
+  renderTab();
 }
 
 function infoTabRoot(): ParentNode | null {
@@ -313,19 +478,45 @@ function updateTabUI(): void {
     tab.setAttribute("aria-selected", String(isActive));
     tab.setAttribute("tabindex", isActive ? "0" : "-1");
   }
+  if (!shouldUseInspectorMount()) {
+    // The legacy overlay has one panel that all four tabs control. Point its
+    // aria-labelledby at whichever tab is active so the relationship is valid.
+    document
+      .getElementById("info-body")
+      ?.setAttribute("aria-labelledby", `info-tab-${activeTab}`);
+  }
+}
+
+const INFO_TAB_KEYS: readonly string[] = [
+  "details",
+  "permissions",
+  "metadata",
+  "general",
+  "s3",
+];
+
+function isInfoTabKey(
+  value: string,
+): value is InspectorInfoTab | "general" | "s3" {
+  return INFO_TAB_KEYS.includes(value);
 }
 
 export function switchTab(tab: string): void {
+  if (!isInfoTabKey(tab)) return;
   activeTab = tab;
   updateTabUI();
+  updateInspectorFooter();
   renderTab();
 }
 
 function renderTab(): void {
   if (!headData) return;
   const body = getInfoBodyEl();
+  body.setAttribute("aria-busy", "false");
 
-  if (activeTab === "general") {
+  if (activeTab === "details") {
+    renderDetails(body);
+  } else if (activeTab === "general") {
     renderGeneral(body);
   } else if (activeTab === "permissions") {
     void renderPermissions(body);
@@ -336,16 +527,16 @@ function renderTab(): void {
   }
 }
 
-function renderGeneral(body: HTMLElement): void {
+/**
+ * The merged Details view: the old General and S3 tabs combined, with the
+ * rows that appeared in both (Storage Class, Encryption, ETag) shown once.
+ * The file name lives in the inspector header, so only the path repeats here.
+ */
+function renderDetails(body: HTMLElement): void {
   if (!headData) return;
 
-  body.innerHTML = [
-    infoRow("Name", basename(currentKey)),
-    infoRow("Path", currentKey),
-    infoRow("Size", formatSize(headData.content_length)),
-    infoRow("Content Type", headData.content_type),
-    infoRow("Last Modified", formatDate(headData.last_modified)),
-    infoRow("ETag", headData.etag, true),
+  const httpHeaderRows = [
+    infoRow("Content type", headData.content_type),
     headData.cache_control
       ? infoRow("Cache-Control", headData.cache_control)
       : "",
@@ -355,17 +546,77 @@ function renderGeneral(body: HTMLElement): void {
     headData.content_encoding
       ? infoRow("Content-Encoding", headData.content_encoding)
       : "",
-  ]
-    .filter(Boolean)
-    .join("");
+  ].filter(Boolean);
 
-  void buildUrlAsync(body, currentKey, panelRequestToken);
+  body.innerHTML =
+    infoSection("Name & path") +
+    infoRowCopyable("Path", currentKey, true) +
+    infoSection("Size & dates") +
+    infoRow("Size", formatSize(headData.content_length)) +
+    infoRow("Last modified", formatDate(headData.last_modified)) +
+    infoRow("Storage class", headData.storage_class || "STANDARD") +
+    infoRow("Encryption", headData.server_side_encryption || "None") +
+    infoRowCopyable("ETag", headData.etag, true) +
+    (httpHeaderRows.length > 0
+      ? infoSection("HTTP headers") + httpHeaderRows.join("")
+      : "");
+
+  attachCopyButtons(body);
+  void buildUrlAsync(body, currentKey, panelRequestToken, ++urlBuildToken);
+}
+
+function renderGeneral(body: HTMLElement): void {
+  if (!headData) return;
+
+  const storageClass = headData.storage_class || "STANDARD";
+  const encryption = headData.server_side_encryption || "None";
+  const httpHeaderRows = [
+    infoRow("Content type", headData.content_type),
+    headData.cache_control
+      ? infoRow("Cache-Control", headData.cache_control)
+      : "",
+    headData.content_disposition
+      ? infoRow("Content-Disposition", headData.content_disposition)
+      : "",
+    headData.content_encoding
+      ? infoRow("Content-Encoding", headData.content_encoding)
+      : "",
+  ].filter(Boolean);
+
+  body.innerHTML =
+    infoSection("Name & path") +
+    infoRow("Name", basename(currentKey)) +
+    infoRowCopyable("Path", currentKey, true) +
+    infoSection("Size & dates") +
+    infoRow("Size", formatSize(headData.content_length)) +
+    infoRow("Last modified", formatDate(headData.last_modified)) +
+    infoRow("Storage class", storageClass) +
+    infoRow("Encryption", encryption) +
+    infoRowCopyable("ETag", headData.etag, true) +
+    (httpHeaderRows.length > 0
+      ? infoSection("HTTP headers") + httpHeaderRows.join("")
+      : "");
+
+  attachCopyButtons(body);
+  void buildUrlAsync(body, currentKey, panelRequestToken, ++urlBuildToken);
+}
+
+function renderFolderProperties(body: HTMLElement, folderPrefix: string): void {
+  const displayName = basename(folderPrefix) || folderPrefix;
+  body.setAttribute("aria-busy", "false");
+  body.innerHTML =
+    infoSection("Location") +
+    infoRow("Name", displayName) +
+    infoRowCopyable("Path", folderPrefix, true) +
+    `<p class="metadata-batch-hint">Folder selected. Property editing applies to files only.</p>`;
+  attachCopyButtons(body);
 }
 
 async function buildUrlAsync(
   body: HTMLElement,
   expectedKey: string,
   requestToken: number,
+  buildToken: number,
 ): Promise<void> {
   try {
     const url = await invokeS3<string>("build_object_url", {
@@ -373,17 +624,24 @@ async function buildUrlAsync(
       key: expectedKey,
     });
     if (
+      buildToken === urlBuildToken &&
       requestToken === panelRequestToken &&
-      activeTab === "general" &&
+      (activeTab === "details" || activeTab === "general") &&
       currentKey === expectedKey &&
       url
     ) {
-      const urlRow = document.createElement("div");
-      urlRow.className = "metadata-info-row";
-      urlRow.innerHTML =
+      body.querySelector(".metadata-url-block")?.remove();
+      const urlBlock = document.createElement("div");
+      urlBlock.className = "metadata-url-block";
+      urlBlock.innerHTML =
+        infoSection("Link") +
+        `<div class="metadata-info-row metadata-info-row--copyable">` +
         `<span class="metadata-label">URL</span>` +
-        `<span class="metadata-value-url" title="${escapeHtml(url)}">${escapeHtml(url)}</span>`;
-      body.appendChild(urlRow);
+        `<span class="metadata-info-row__value metadata-value-url" title="${escapeHtml(url)}">${escapeHtml(url)}</span>` +
+        `<button type="button" class="btn btn--ghost btn--sm metadata-copy-btn" data-copy-encoded="${encodeURIComponent(url)}" data-copy-label="URL" aria-label="Copy URL">Copy</button>` +
+        `</div>`;
+      body.appendChild(urlBlock);
+      attachCopyButtons(urlBlock);
     }
   } catch {
     return;
@@ -393,7 +651,8 @@ async function buildUrlAsync(
 async function renderPermissions(body: HTMLElement): Promise<void> {
   const requestToken = panelRequestToken;
   const selectedKey = currentKey;
-  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading permissions&#8230;</div>`;
+  body.setAttribute("aria-busy", "true");
+  body.innerHTML = `<div class="metadata-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading permissions&#8230;</div>`;
 
   if (!aclData) {
     try {
@@ -417,7 +676,10 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
       ) {
         return;
       }
-      body.innerHTML = `<div class="metadata-loading">Failed to load permissions: ${escapeHtml(friendlyError(err))}</div>`;
+      renderLoadError(
+        body,
+        `Failed to load permissions: ${escapeHtml(friendlyError(err))}`,
+      );
       return;
     }
   }
@@ -451,9 +713,10 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
     }
     html += `</tbody></table>`;
   } else {
-    html += `<div class="metadata-loading">No ACL grants found.</div>`;
+    html += `<div class="acl-empty" role="status">No ACL grants found.</div>`;
   }
 
+  body.setAttribute("aria-busy", "false");
   body.innerHTML = html;
 
   const visibilitySelect = body.querySelector<HTMLSelectElement>(
@@ -469,16 +732,22 @@ async function renderPermissions(body: HTMLElement): Promise<void> {
       : selectedVisibility;
   visibilitySelect.value = effectiveSelection;
   aclDirty = effectiveSelection !== initialSingleVisibility;
+  updateInspectorFooter();
 
   visibilitySelect.addEventListener("change", () => {
     const next = normalizeVisibility(visibilitySelect.value);
     if (!next || !initialSingleVisibility) return;
     selectedVisibility = next;
     aclDirty = next !== initialSingleVisibility;
+    updateInspectorFooter();
   });
 }
 
-function renderBatchView(body: HTMLElement, keys: string[]): void {
+function renderBatchView(
+  body: HTMLElement,
+  keys: string[],
+  folderCount: number,
+): void {
   // Ctrl+A on a capped listing can select thousands of keys; rendering one
   // list item each froze the panel. It is informational, so cap the preview.
   const MAX_LISTED = 100;
@@ -490,9 +759,15 @@ function renderBatchView(body: HTMLElement, keys: string[]): void {
     keys.length > shown.length
       ? `<li class="metadata-batch-more">+${keys.length - shown.length} more…</li>`
       : "";
+  const folderNote =
+    folderCount > 0
+      ? `<p class="metadata-batch-hint">Folder selections are not edited; changes below apply to files only.</p>`
+      : "";
+  body.setAttribute("aria-busy", "false");
   body.innerHTML =
     `<div class="metadata-batch-info">` +
-    `<p>Selected ${keys.length} file(s):</p>` +
+    `<p><strong>${escapeHtml(plural(keys.length, "file"))}</strong> in this selection.</p>` +
+    folderNote +
     `<ul class="metadata-batch-list">${listItems}${more}</ul>` +
     `</div>` +
     `<div class="setting-section">Permissions</div>` +
@@ -500,15 +775,15 @@ function renderBatchView(body: HTMLElement, keys: string[]): void {
     `<label for="batch-visibility" class="metadata-label">Access</label>` +
     `<select id="batch-visibility" class="field metadata-visibility-select">` +
     `<option value="unchanged">Keep unchanged</option>` +
-    `<option value="private">Set Private</option>` +
-    `<option value="public-read">Set Public (read-only)</option>` +
+    `<option value="private">Set private</option>` +
+    `<option value="public-read">Set public (read-only)</option>` +
     `</select>` +
     `<p class="metadata-batch-hint">Use this to set all selected files to private or publicly readable.</p>` +
     `</div>` +
     `<div class="setting-section">Metadata</div>` +
     `<p class="metadata-batch-hint">Headers below will be merged into each file's existing metadata.</p>` +
     `<div id="metadata-entries"></div>` +
-    `<button id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
+    `<button type="button" id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
 
   const visibilitySelect =
     body.querySelector<HTMLSelectElement>("#batch-visibility");
@@ -526,6 +801,7 @@ function renderBatchView(body: HTMLElement, keys: string[]): void {
         selectedVisibility = "unchanged";
       }
       aclDirty = selectedVisibility !== "unchanged";
+      updateInspectorFooter();
     });
   }
 
@@ -541,8 +817,15 @@ function renderBatchView(body: HTMLElement, keys: string[]): void {
 }
 
 function renderMetadata(body: HTMLElement): void {
-  let html = `<div id="metadata-entries"></div>`;
-  html += `<button id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
+  let html = "";
+  if (batchKeys.length === 0) {
+    // Row 0 is the system Content-Type header; the rest are user metadata.
+    html += `<div class="metadata-section-heading">System metadata</div>`;
+    html += `<div data-metadata-section="system" id="metadata-system-entries"></div>`;
+    html += `<div class="metadata-section-heading">User metadata</div>`;
+  }
+  html += `<div data-metadata-section="${batchKeys.length === 0 ? "user" : "all"}" id="metadata-entries"></div>`;
+  html += `<button type="button" id="metadata-add-row" class="btn btn--ghost metadata-add-btn">+ Add header</button>`;
   body.innerHTML = html;
   renderEntryRows();
   const addRowBtn = body.querySelector<HTMLButtonElement>("#metadata-add-row");
@@ -550,6 +833,7 @@ function renderMetadata(body: HTMLElement): void {
     addRowBtn.addEventListener("click", () => {
       metadataRows.push({ key: "", value: "" });
       metadataDirty = true;
+      updateInspectorFooter();
       renderEntryRows();
     });
   }
@@ -574,6 +858,8 @@ function renderEntryRows(): void {
   const container = $("metadata-entries");
   container.innerHTML = "";
   const isBatch = batchKeys.length > 0;
+  const systemContainer = document.getElementById("metadata-system-entries");
+  if (systemContainer) systemContainer.innerHTML = "";
 
   const keyDatalist = document.createElement("datalist");
   keyDatalist.id = "metadata-header-names";
@@ -587,6 +873,9 @@ function renderEntryRows(): void {
   for (let i = 0; i < metadataRows.length; i++) {
     const row = document.createElement("div");
     row.className = "metadata-entry";
+    // Single-file row 0 is the system Content-Type header; it renders in the
+    // system section instead of the user metadata list.
+    const isSystemRow = !isBatch && i === 0 && systemContainer !== null;
 
     const keyInput = document.createElement("input");
     keyInput.type = "text";
@@ -600,7 +889,7 @@ function renderEntryRows(): void {
 
     const valDatalistId = `metadata-val-${i}`;
     const valDatalist = buildValueDatalist(valDatalistId, metadataRows[i].key);
-    container.appendChild(valDatalist);
+    (isSystemRow ? systemContainer : container).appendChild(valDatalist);
 
     const valInput = document.createElement("input");
     valInput.type = "text";
@@ -612,6 +901,7 @@ function renderEntryRows(): void {
     keyInput.addEventListener("input", () => {
       metadataRows[i].key = keyInput.value;
       metadataDirty = true;
+      updateInspectorFooter();
       const newDatalist = buildValueDatalist(valDatalistId, keyInput.value);
       const old = document.getElementById(valDatalistId);
       if (old) old.replaceWith(newDatalist);
@@ -620,6 +910,7 @@ function renderEntryRows(): void {
     valInput.addEventListener("input", () => {
       metadataRows[i].value = valInput.value;
       metadataDirty = true;
+      updateInspectorFooter();
     });
 
     row.appendChild(keyInput);
@@ -627,6 +918,7 @@ function renderEntryRows(): void {
 
     if (isBatch || i > 0) {
       const delBtn = document.createElement("button");
+      delBtn.type = "button";
       delBtn.className = "btn btn--icon metadata-entry__delete";
       delBtn.innerHTML = getIconHtml("x", {
         className: "lucide-icon",
@@ -637,26 +929,35 @@ function renderEntryRows(): void {
       delBtn.addEventListener("click", () => {
         metadataRows.splice(i, 1);
         metadataDirty = true;
+        updateInspectorFooter();
         renderEntryRows();
       });
       row.appendChild(delBtn);
     } else {
+      // Matches the 32px delete button so single-file rows align with
+      // multi-row entries (the old 30px spacer left a 2px misalignment).
       const spacer = document.createElement("span");
-      spacer.style.width = "30px";
-      spacer.style.flexShrink = "0";
+      spacer.className = "metadata-entry__spacer";
       row.appendChild(spacer);
     }
 
-    container.appendChild(row);
+    (isSystemRow ? systemContainer : container).appendChild(row);
   }
+  if (!isBatch && !container.querySelector(".metadata-entry")) {
+    const hint = document.createElement("p");
+    hint.className = "metadata-empty";
+    hint.textContent = "No user metadata yet.";
+    container.appendChild(hint);
+  }
+  updateInspectorFooter();
 }
 
 function renderS3(body: HTMLElement): void {
   if (!headData) return;
   body.innerHTML = [
-    infoRow("Storage Class", headData.storage_class || "STANDARD"),
+    infoRow("Storage class", headData.storage_class || "STANDARD"),
     infoRow(
-      "Server-Side Encryption",
+      "Server-side encryption",
       headData.server_side_encryption || "None",
     ),
     infoRow("ETag", headData.etag, true),
@@ -668,9 +969,53 @@ function infoRow(label: string, value: string, mono = false): string {
   return (
     `<div class="metadata-info-row">` +
     `<span class="metadata-label">${escapeHtml(label)}</span>` +
-    `<span class="${cls}">${escapeHtml(value)}</span>` +
+    `<span class="metadata-info-row__value ${cls}">${escapeHtml(value)}</span>` +
     `</div>`
   );
+}
+
+function infoSection(title: string): string {
+  return `<div class="metadata-section-heading">${escapeHtml(title)}</div>`;
+}
+
+/**
+ * Escaped text with a line-break opportunity after each slash, so long paths
+ * wrap between segments. The copy button still copies the raw value.
+ */
+function wrappableText(value: string): string {
+  return escapeHtml(value).replace(/\//g, "/<wbr>");
+}
+
+function infoRowCopyable(label: string, value: string, mono = false): string {
+  const cls = mono ? "metadata-value-mono" : "";
+  return (
+    `<div class="metadata-info-row metadata-info-row--copyable">` +
+    `<span class="metadata-label">${escapeHtml(label)}</span>` +
+    `<span class="metadata-info-row__value ${cls}" title="${escapeHtml(value)}">${wrappableText(value)}</span>` +
+    `<button type="button" class="btn btn--ghost btn--sm metadata-copy-btn" data-copy-encoded="${encodeURIComponent(value)}" data-copy-label="${escapeHtml(label)}" aria-label="Copy ${escapeHtml(label)}">Copy</button>` +
+    `</div>`
+  );
+}
+
+async function copyPropertyValue(value: string, label: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(value);
+    setStatus(`${label} copied to clipboard.`, 5000);
+  } catch (err) {
+    setStatus(`Failed to copy: ${friendlyError(err)}`);
+  }
+}
+
+function attachCopyButtons(root: ParentNode): void {
+  root
+    .querySelectorAll<HTMLButtonElement>(".metadata-copy-btn")
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const encoded = btn.dataset.copyEncoded ?? "";
+        const label = btn.dataset.copyLabel ?? "Value";
+        void copyPropertyValue(decodeURIComponent(encoded), label);
+      });
+    });
 }
 
 function errorText(err: unknown): string {
@@ -738,6 +1083,29 @@ export async function saveInfoPanel(): Promise<void> {
   await saveSingleChanges();
 }
 
+/**
+ * Removed keys: the pane may still edit an object the listing no longer has.
+ * Pass the same discard gate as navigation, then close instead of saving into
+ * a dangling row or re-adding it.
+ */
+async function confirmEditedObjectsStillListed(
+  keys: string[],
+): Promise<boolean> {
+  if (keys.length === 0) return true;
+  const listed = new Set(
+    state.objects.filter((object) => !object.is_folder).map((o) => o.key),
+  );
+  if (keys.every((key) => listed.has(key))) return true;
+  const discard = await confirmDiscardInfoProperties();
+  if (!discard) return false;
+  closeInfoPanel();
+  setStatus(
+    "The edited object is no longer in the listing. Properties were closed.",
+    5000,
+  );
+  return false;
+}
+
 async function saveSingleChanges(): Promise<void> {
   const selectedKey = currentKey;
   let target: ConnectionSnapshot;
@@ -749,6 +1117,8 @@ async function saveSingleChanges(): Promise<void> {
   }
   const requestToken = panelRequestToken;
   if (!selectedKey) return;
+  if (!(await confirmEditedObjectsStillListed([selectedKey]))) return;
+  if (requestToken !== panelRequestToken) return;
 
   const isCurrentRequest = () =>
     requestToken === panelRequestToken &&
@@ -821,7 +1191,7 @@ async function saveSingleChanges(): Promise<void> {
     if (!isCurrentRequest()) return;
 
     if (!metadataError && !aclError) {
-      closeInfoPanel();
+      finishSaveSingle(selectedKey);
       if (shouldApplyMetadata && shouldApplyAcl) {
         setStatus("Properties updated.", 5000);
       } else if (shouldApplyAcl) {
@@ -865,6 +1235,8 @@ async function saveBatchChanges(): Promise<void> {
   const targetKeys = [...batchKeys];
   const isCurrentRequest = () =>
     requestToken === panelRequestToken && !connectionIdentityChanged(target);
+  if (!(await confirmEditedObjectsStillListed(targetKeys))) return;
+  if (requestToken !== panelRequestToken) return;
   const requestedVisibility = normalizeVisibility(selectedVisibility);
   const shouldApplyAcl = aclDirty && requestedVisibility !== null;
 
@@ -895,69 +1267,90 @@ async function saveBatchChanges(): Promise<void> {
   let succeeded = 0;
   let failed = 0;
   let partial = 0;
+  let firstError: string | null = null;
+  let stoppedEarly = false;
 
   const BATCH_CONCURRENCY = 6;
   let processed = 0;
 
-  for (let i = 0; i < targetKeys.length; i += BATCH_CONCURRENCY) {
-    if (!isCurrentRequest()) return;
-    const chunk = targetKeys.slice(i, i + BATCH_CONCURRENCY);
-    const results = await Promise.allSettled(
-      chunk.map(async (key) => {
-        let metadataFailed = false;
-        let aclFailed = false;
+  const actionLabel =
+    shouldApplyMetadata && shouldApplyAcl
+      ? "properties"
+      : shouldApplyAcl
+        ? "permissions"
+        : "metadata";
+  const capitalized = `${actionLabel[0].toUpperCase()}${actionLabel.slice(1)}`;
 
-        if (shouldApplyMetadata) {
-          try {
-            const head = await invokeS3For<HeadObjectResponse>(
-              target.connectionId,
-              "head_object",
-              {
+  try {
+    for (let i = 0; i < targetKeys.length; i += BATCH_CONCURRENCY) {
+      if (!isCurrentRequest()) {
+        stoppedEarly = true;
+        break;
+      }
+      const chunk = targetKeys.slice(i, i + BATCH_CONCURRENCY);
+      const results = await Promise.allSettled(
+        chunk.map(async (key) => {
+          let metadataFailed = false;
+          let aclFailed = false;
+          let error: string | null = null;
+
+          if (shouldApplyMetadata) {
+            try {
+              const head = await invokeS3For<HeadObjectResponse>(
+                target.connectionId,
+                "head_object",
+                {
+                  bucket: target.bucket,
+                  key,
+                },
+              );
+              const merged: Record<string, string> = {
+                ...head.metadata,
+                ...newMeta,
+              };
+              await invokeS3For(target.connectionId, "update_metadata", {
                 bucket: target.bucket,
                 key,
-              },
-            );
-            const merged: Record<string, string> = {
-              ...head.metadata,
-              ...newMeta,
-            };
-            await invokeS3For(target.connectionId, "update_metadata", {
-              bucket: target.bucket,
-              key,
-              contentType: head.content_type,
-              metadata: merged,
-            });
-          } catch {
-            metadataFailed = true;
+                contentType: head.content_type,
+                metadata: merged,
+              });
+            } catch (err) {
+              metadataFailed = true;
+              error = errorText(err);
+            }
           }
-        }
 
-        if (shouldApplyAcl && requestedVisibility) {
-          try {
-            await invokeS3For(target.connectionId, "set_object_acl", {
-              bucket: target.bucket,
-              key,
-              visibility: requestedVisibility,
-            });
-          } catch {
-            aclFailed = true;
+          if (shouldApplyAcl && requestedVisibility) {
+            try {
+              await invokeS3For(target.connectionId, "set_object_acl", {
+                bucket: target.bucket,
+                key,
+                visibility: requestedVisibility,
+              });
+            } catch (err) {
+              aclFailed = true;
+              error ??= errorText(err);
+            }
           }
+
+          return { metadataFailed, aclFailed, error };
+        }),
+      );
+
+      for (const result of results) {
+        processed++;
+        if (requestToken === panelRequestToken) {
+          saveBtn.textContent = `Saving ${processed}/${targetKeys.length}\u2026`;
         }
-
-        return { metadataFailed, aclFailed };
-      }),
-    );
-
-    if (!isCurrentRequest()) return;
-    for (const result of results) {
-      processed++;
-      saveBtn.textContent = `Saving ${processed}/${targetKeys.length}\u2026`;
-      if (result.status === "rejected") {
-        failed++;
-      } else {
-        const { metadataFailed, aclFailed } = result.value;
+        if (result.status === "rejected") {
+          failed++;
+          firstError ??= errorText(result.reason);
+          continue;
+        }
+        const { metadataFailed, aclFailed, error } = result.value;
         if (metadataFailed || aclFailed) {
           failed++;
+          firstError ??= error ?? "Unknown error";
           if (
             shouldApplyMetadata &&
             shouldApplyAcl &&
@@ -969,33 +1362,105 @@ async function saveBatchChanges(): Promise<void> {
           succeeded++;
         }
       }
+
+      if (!isCurrentRequest()) {
+        stoppedEarly = true;
+        break;
+      }
+    }
+  } finally {
+    // Keep Save usable for a retry. A newer panel generation owns its own
+    // button state, so never overwrite that one from a stale save.
+    if (requestToken === panelRequestToken) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save";
     }
   }
 
-  if (!isCurrentRequest()) return;
-  saveBtn.disabled = false;
-  saveBtn.textContent = "Save";
-
-  const actionLabel =
-    shouldApplyMetadata && shouldApplyAcl
-      ? "properties"
-      : shouldApplyAcl
-        ? "permissions"
-        : "metadata";
+  if (stoppedEarly) {
+    if (requestToken === panelRequestToken && processed > 0) {
+      const suffix = firstError ? ` First error: ${firstError}` : "";
+      setStatus(
+        `${capitalized} saved on ${succeeded} of ${targetKeys.length} files before stopping, ${failed} failed.${suffix}`,
+      );
+    }
+    return;
+  }
 
   if (failed === 0) {
-    closeInfoPanel();
-    setStatus(
-      `${actionLabel[0].toUpperCase()}${actionLabel.slice(1)} updated on ${succeeded} file(s).`,
-      5000,
-    );
+    if (requestToken !== panelRequestToken) return;
+    finishSaveBatch();
+    setStatus(`${capitalized} updated on ${plural(succeeded, "file")}.`, 5000);
   } else {
+    if (requestToken !== panelRequestToken) return;
     const partialSuffix =
       shouldApplyMetadata && shouldApplyAcl && partial > 0
         ? ` (${partial} partial)`
         : "";
+    const errorSuffix = firstError ? ` First error: ${firstError}` : "";
     setStatus(
-      `${actionLabel[0].toUpperCase()}${actionLabel.slice(1)} updated on ${succeeded} file(s), ${failed} failed${partialSuffix}.`,
+      `${capitalized} saved on ${succeeded} of ${targetKeys.length} files, ${failed} failed${partialSuffix}.${errorSuffix}`,
+    );
+  }
+}
+
+/**
+ * Inspector mode keeps the Properties pane on the object after a save: the
+ * object is re-read so the saved values and new ETag show, and the active tab
+ * stays where the user left it. Legacy overlays still close after saving.
+ */
+function finishSaveSingle(savedKey: string): void {
+  if (!shouldUseInspectorMount()) {
+    closeInfoPanel();
+    return;
+  }
+  void refreshInfoAfterSave(savedKey);
+}
+
+function finishSaveBatch(): void {
+  if (!shouldUseInspectorMount()) {
+    closeInfoPanel();
+    return;
+  }
+  resetEditorState();
+  metadataRows = [{ key: "", value: "" }];
+  const body = getInfoBodyEl();
+  const saveBtn = getInfoSaveBtn();
+  saveBtn.textContent = "Save";
+  saveBtn.disabled = false;
+  renderBatchView(body, batchKeys, batchFolderCount);
+}
+
+async function refreshInfoAfterSave(savedKey: string): Promise<void> {
+  const requestToken = ++panelRequestToken;
+  resetEditorState();
+  headData = null;
+  aclData = null;
+  metadataRows = [];
+  const saveBtn = getInfoSaveBtn();
+  saveBtn.textContent = "Save";
+  saveBtn.disabled = true;
+  updateInspectorFooter();
+  const body = getInfoBodyEl();
+  body.innerHTML = `<div class="metadata-loading"><span class="spinner"></span>Loading&#8230;</div>`;
+  try {
+    const nextHeadData = await invokeS3<HeadObjectResponse>("head_object", {
+      bucket: state.currentBucket,
+      key: savedKey,
+    });
+    if (requestToken !== panelRequestToken || currentKey !== savedKey) return;
+    headData = nextHeadData;
+    metadataRows = [{ key: "Content-Type", value: headData.content_type }];
+    for (const [k, v] of Object.entries(headData.metadata)) {
+      metadataRows.push({ key: k, value: v });
+    }
+    saveBtn.disabled = false;
+    renderTab();
+  } catch (err) {
+    if (requestToken !== panelRequestToken || currentKey !== savedKey) return;
+    renderLoadError(
+      body,
+      `Saved, but failed to reload: ${escapeHtml(friendlyError(err))}`,
     );
   }
 }
@@ -1019,6 +1484,9 @@ export function closeInfoPanel(): void {
       saveBtn.textContent = "Save";
     }
   }
+  // The inspector caches the last completed selection. Closing this pane
+  // removes what that selection rendered, so the next sync must run again.
+  document.dispatchEvent(new Event(INFO_PANEL_CLOSED_EVENT));
 }
 
 function setStatus(text: string, autoResetMs?: number): void {

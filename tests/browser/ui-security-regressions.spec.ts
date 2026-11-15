@@ -99,26 +99,19 @@ async function switchInspectorSelection(
       "2 selected",
     );
   } else {
-    const deselectAll = page.locator("#batch-deselect");
-    if (await deselectAll.isVisible()) {
-      await deselectAll.click();
-    } else {
-      await page.locator("#batch-more").click();
-      await page
-        .locator('.context-menu [role="menuitem"]', { hasText: "Deselect All" })
-        .click();
-    }
+    // The × deselect button is always visible while items are selected.
+    await page.locator("#batch-deselect").click();
     await expect(page.locator("#inspector-empty")).toBeVisible();
   }
 
   if (scenario !== "empty selection") {
     await expect(
-      page.locator('[data-inspector-tab="properties"]'),
+      page.locator('[data-inspector-tab="details"]'),
     ).toHaveAttribute("aria-selected", "true");
   }
 
-  // Unavailable tabs carry aria-disabled for accessibility, while the
-  // production click handler still renders the selection explanation.
+  // The Preview tab is truly inert while the selection cannot preview: even a
+  // forced click reaches nothing, and no unavailable copy is rendered.
   await page.locator('[data-inspector-tab="preview"]').click({ force: true });
 }
 
@@ -185,17 +178,15 @@ for (const scenario of [
 
     await switchInspectorSelection(page, scenario);
     if (scenario === "folder") {
-      await expect(
-        page.locator("#inspector-preview-body .inspector-preview-unavailable"),
-      ).toHaveText("Preview is available for files only.");
+      // The Preview tab is disabled for a folder; the pane stays hidden and
+      // no explanation card is rendered into it.
+      await expect(page.locator("#inspector-pane-preview")).toBeHidden();
     } else if (scenario === "multiple files") {
-      await expect(
-        page.locator("#inspector-preview-body .inspector-preview-unavailable"),
-      ).toHaveText("Preview is available for a single previewable file.");
+      await expect(page.locator("#inspector-pane-preview")).toBeHidden();
     } else {
-      await expect(page.locator("#inspector-empty")).toHaveText(
-        "Select an object to inspect.",
-      );
+      await expect(
+        page.locator("#inspector-empty .inspector-empty__summary"),
+      ).toBeVisible();
     }
 
     const beforeRelease = await inspectorSnapshot(page);
@@ -256,18 +247,19 @@ for (const scenario of [
     ).toHaveLength(1);
     if (scenario === "folder") {
       expect(afterRelease.selectedKeys).toEqual(["prefix:archive/"]);
-      expect(afterRelease.previewBody).toBe(
-        "Preview is available for files only.",
-      );
+      // The preview pane never opens for a folder, so the released body
+      // cannot leak into it.
+      expect(afterRelease.previewBody).toBe("");
+      expect(afterRelease.previewPaneVisible).toBe(false);
     } else if (scenario === "multiple files") {
       expect(afterRelease.selectedKeys).toHaveLength(2);
-      expect(afterRelease.previewBody).toBe(
-        "Preview is available for a single previewable file.",
-      );
+      expect(afterRelease.previewBody).toBe("");
+      expect(afterRelease.previewPaneVisible).toBe(false);
     } else {
       expect(afterRelease.selectedKeys).toHaveLength(0);
       expect(afterRelease.emptyVisible).toBe(true);
-      expect(afterRelease.emptyMessage).toBe("Select an object to inspect.");
+      // The empty state now summarises the loaded folder.
+      expect(afterRelease.emptyMessage).toContain("layout-test-bucket");
     }
   });
 }
@@ -282,9 +274,16 @@ test("retries a pathless browser File after upload and verification failures", a
     const file = new File([new Uint8Array(1024)], "browser-only.txt", {
       type: "text/plain",
     });
-    const transfers = (await import(
-      /* @vite-ignore */ new URL("/transfers.ts", window.location.href).href
-    )) as {
+    // Import the transfers module instance the app itself loaded. The dev
+    // server can append an HMR `?t=` to the app's URL, so a plain
+    // "/transfers.ts" import would create a second, unrelated queue.
+    const appTransfersUrl =
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .find((name) => /\/transfers\.ts(\?|$)/.test(name)) ??
+      new URL("/transfers.ts", window.location.href).href;
+    const transfers = (await import(/* @vite-ignore */ appTransfersUrl)) as {
       enqueueFiles(files: File[], targetPrefix: string): void;
     };
     transfers.enqueueFiles([file], "browser-upload/");
@@ -302,7 +301,11 @@ test("retries a pathless browser File after upload and verification failures", a
   });
 
   const row = page.locator("#transfer-list .transfer-item").first();
-  await expect(row.locator(".transfer-error")).toContainText(byteUploadError);
+  // The row shows a friendly message; the raw error is kept on its title.
+  await expect(row.locator(".transfer-error")).toHaveAttribute(
+    "title",
+    byteUploadError,
+  );
   await showTransferList(page);
   await setMockCommandError(page, "upload_object_bytes", null);
   await setMockCommandError(page, "head_object", verificationError);
@@ -310,7 +313,10 @@ test("retries a pathless browser File after upload and verification failures", a
   await page
     .locator('.context-menu [role="menuitem"]', { hasText: "Retry failed" })
     .click();
-  await expect(row.locator(".transfer-error")).toContainText(verificationError);
+  await expect(row.locator(".transfer-error")).toHaveAttribute(
+    "title",
+    verificationError,
+  );
 
   const afterVerificationFailure = await readMockCallLog(page);
   expect(
@@ -323,6 +329,15 @@ test("retries a pathless browser File after upload and verification failures", a
   await page.locator("#transfer-more").click();
   await page
     .locator('.context-menu [role="menuitem"]', { hasText: "Retry failed" })
+    .click();
+  // A completed row stays listed until "Clear completed" removes it.
+  await expect(page.locator("#transfer-list .transfer-item")).toHaveCount(1);
+  await expect(page.locator("#transfer-list .transfer-item")).toContainText(
+    "Completed",
+  );
+  await page.locator("#transfer-more").click();
+  await page
+    .locator('.context-menu [role="menuitem"]', { hasText: "Clear completed" })
     .click();
   await expect(page.locator("#transfer-list .transfer-item")).toHaveCount(0);
 

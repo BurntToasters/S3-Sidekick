@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-bookmarks-state"
+description = "Enables the load_bookmarks_state command without any pre-configured scope."
+commands.allow = ["load_bookmarks_state"]
+
+[[permission]]
+identifier = "deny-load-bookmarks-state"
+description = "Denies the load_bookmarks_state command without any pre-configured scope."
+commands.deny = ["load_bookmarks_state"]

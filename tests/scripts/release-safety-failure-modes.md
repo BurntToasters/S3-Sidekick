@@ -21,6 +21,18 @@ Release scripts must not require releaseToolchain metadata or exact Node/npm
 versions. Preflight must accept npm patch/minor changes and missing toolchain
 metadata while continuing to reject invalid origins and stable overrides.
 
+Release preflight does not gate on the GitHub `CI` workflow. It must not call
+the GitHub API, so a queued, missing, or failed run cannot block a release and
+cannot be mistaken for release authority. Release argument parsing must reject
+`--skip-e2e`; `release:prepare` must not advertise a flag that the quality gate
+ignores.
+
+Linux releases ship only the AppImage and the Flatpak; DEB and RPM are retired.
+A stale `.deb` or `.rpm` left in a bundle directory by an older build must not
+be collected, signed, checksummed, or uploaded. The Linux x64 package set must
+pass with only the AppImage and Flatpak and must still fail when either is
+missing. The draft matrix must not require a DEB or RPM asset.
+
 The AWS-null-version runner must bound frontend build and Cargo execution, record
 timeout/error status, preserve readable failure logs, clean its isolated app-data
 directory, reject a missing/failed/malformed check artifact, and pass a complete
@@ -29,3 +41,27 @@ positive fixture. A stalled command must never turn into a successful report.
 The script E2E fixtures use disposable files, generated signing keys, fake GitHub/Git
 processes, and a copied production runner. They do not publish releases or modify
 the real repository configuration. Their JSON reports record the fixture boundary.
+
+The quality-gate proof binds the exact commit and working tree that `test:all`
+ran on. Test evidence records the working-tree SHA-256 at suite start and end;
+finalize and every release-session verification reject a tree that changed
+during the suite, a tree that differs from the evidence, or evidence whose
+commit is not HEAD. `release:publish` and `release:mirror` require the verified
+build session and the local quality-gate proof even when run
+standalone.
+
+Release commands must not query GitHub Actions status.
+Published-release verification requires
+`target_commitish` to match the verified commit. Beta-manifest recovery verifies
+the detached GPG signatures and signed checksum coverage of every manifest
+before copying it onto the stable feed; any mismatch aborts.
+
+The Playwright gate requires the manifest in `tests/browser/required-specs.json`:
+every spec and project must run with its expected count, and skipped, retried,
+flaky, or unexpected results fail the release gate. AWS-null, multipart, and
+release-cleanup suites require exact check names and counts.
+
+Release cleanup safety is executed against disposable real Git repositories:
+dirty refusal must preserve bytes and HEAD, the explicit stash path must
+fast-forward to upstream and leave the stash recoverable, and no call may issue
+`reset --hard`, `checkout`, or `clean -fd`.

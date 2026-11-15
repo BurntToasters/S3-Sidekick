@@ -3,17 +3,24 @@
 .support-overlay {
   position: fixed;
   inset: 0;
-  z-index: 450;
+  z-index: var(--z-support);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--support-scrim);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  animation: support-overlay-in 0.2s ease;
+  animation: support-overlay-in var(--duration-base) ease;
 }
 .support-overlay[hidden] {
   display: none;
+}
+
+/* Same title-bar offset as the modal and dialog overlays. */
+body.titlebar-custom .support-overlay {
+  top: var(--titlebar-height);
+  bottom: 0;
+  height: auto;
 }
 
 @keyframes support-overlay-in {
@@ -27,17 +34,15 @@
 
 .support-card {
   width: min(400px, 90vw);
-  background: var(--glass-bg-heavy);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
+  background: var(--bg-elevated);
   border: 1px solid var(--glass-border);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--glass-shadow-elevated), var(--glass-inset-highlight);
-  padding: 32px 28px 24px;
+  padding: var(--space-7) 28px var(--space-6);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   text-align: center;
   animation: support-card-in 0.25s var(--transition-bounce);
 }
@@ -59,7 +64,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-1);
 }
 
 .support-card__icon-svg {
@@ -68,14 +73,14 @@
 }
 
 .support-card__title {
-  font-size: 18px;
+  font-size: var(--text-xl);
   font-weight: 600;
   color: var(--text);
   margin: 0;
 }
 
 .support-card__body {
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
   line-height: 1.6;
   margin: 0;
@@ -84,8 +89,8 @@
 
 .support-card__actions {
   display: flex;
-  gap: 10px;
-  margin-top: 8px;
+  gap: var(--space-2-5);
+  margin-top: var(--space-2);
   width: 100%;
   justify-content: center;
 }
@@ -94,5 +99,5 @@
   flex: 1;
   max-width: 160px;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-1-5);
 }

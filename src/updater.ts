@@ -1,5 +1,4 @@
 import { check } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { message, ask } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import {
@@ -28,6 +27,7 @@ const REPO_RELEASES_API =
   "https://api.github.com/repos/BurntToasters/S3-Sidekick/releases";
 const DEFAULT_RELEASE_URL =
   "https://github.com/BurntToasters/S3-Sidekick/releases/latest";
+const TRUSTED_RELEASE_HOST = "github.com";
 
 let updaterEnabled = true;
 let updateChannel: UpdateChannel = "release";
@@ -102,6 +102,8 @@ export function isUpdaterEnabled(): boolean {
 }
 
 async function notify(title: string, body: string): Promise<void> {
+  // Off means no OS prompt either: asking for permission is itself a notification.
+  if (!state.currentSettings.desktopNotifications) return;
   let granted = await isPermissionGranted();
   if (!granted) {
     const permission = await requestPermission();
@@ -115,6 +117,62 @@ async function notify(title: string, body: string): Promise<void> {
 function setStatus(text: string): void {
   const el = document.getElementById("status");
   if (el) el.textContent = text;
+  // The status bar sits behind the Settings overlay, so mirror progress there.
+  if (settingsOpen()) setInlineUpdateStatus(text, false);
+}
+
+function settingsOpen(): boolean {
+  return (
+    document
+      .getElementById("settings-overlay")
+      ?.classList.contains("active") === true
+  );
+}
+
+function setInlineUpdateStatus(text: string, isError: boolean): void {
+  const el = document.getElementById("settings-update-status");
+  if (!el) return;
+  el.textContent = text;
+  el.dataset.tone = isError ? "error" : "";
+}
+
+/**
+ * Report a check outcome. With Settings open the result stays in that panel;
+ * other entry points (startup, tray, flatpak) keep the native dialog.
+ */
+async function reportUpdateResult(
+  title: string,
+  text: string,
+  options: { kind?: "error" } = {},
+): Promise<void> {
+  if (settingsOpen()) {
+    setInlineUpdateStatus(text, options.kind === "error");
+    return;
+  }
+  await message(text, { title, ...options });
+}
+
+/** Release-page link for the package-manager and fallback install paths. */
+export function getReleasePageUrl(): string {
+  return updaterSupport.release_url || DEFAULT_RELEASE_URL;
+}
+
+/** Friendly copy for a failed release-feed request. */
+function releaseFeedError(status: number): Error {
+  if (status === 403 || status === 429) {
+    return new Error(
+      "GitHub is limiting update checks right now. Try again in a few minutes.",
+    );
+  }
+  if (status === 404) {
+    return new Error("The release feed could not be found.");
+  }
+  if (status >= 500) {
+    return new Error("GitHub is unavailable right now. Try again later.");
+  }
+  return new Error(
+    `Could not read the release feed (HTTP ${status}). Check your connection and try again.`,
+  );
 }
 
 function updaterTargetBase(): string {
@@ -135,8 +193,12 @@ function parseReleaseVersion(value: unknown): string {
   return value.replace(/^v/i, "").trim();
 }
 
-function isBetaVersion(version: string): boolean {
-  return /-beta\.\d+/i.test(version);
+/**
+ * The downloaded bytes live only in memory, so "Later" does not install
+ * anything on a later restart. The copy says what actually happens next.
+ */
+function notInstalledText(version: string): string {
+  return `Version ${version} was not installed. Choose check now in settings to install it.`;
 }
 
 async function promptInstallAndRestart(
@@ -167,23 +229,17 @@ Restart anyway?`,
       },
     );
     if (!interrupt) {
-      await notify(
-        "S3 Sidekick",
-        "Update downloaded. Restart the app when your transfers finish.",
-      );
+      await notify("S3 Sidekick", notInstalledText(version));
       setStatus("");
       return;
     }
   }
   if (restart) {
-    setStatus("Installing update...");
+    setStatus("Installing update…");
     await install();
-    await relaunch();
+    await invoke("relaunch_app");
   } else {
-    await notify(
-      "S3 Sidekick",
-      "Update downloaded. Restart the app when you're ready.",
-    );
+    await notify("S3 Sidekick", notInstalledText(version));
     setStatus("");
   }
 }
@@ -250,6 +306,17 @@ function isNewerVersion(candidate: string, current: string): boolean {
   return compareVersions(candidate, current) > 0;
 }
 
+/** Only open a release page that parses to the expected HTTPS host. */
+function isTrustedReleaseUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === TRUSTED_RELEASE_HOST;
+  } catch {
+    return false;
+  }
+}
+
 async function fetchLatestReleaseInfo(
   channel: UpdateChannel,
 ): Promise<LatestReleaseInfo> {
@@ -258,7 +325,7 @@ async function fetchLatestReleaseInfo(
       headers: { Accept: "application/vnd.github+json" },
     });
     if (!response.ok) {
-      throw new Error(`GitHub API returned ${response.status}`);
+      throw releaseFeedError(response.status);
     }
 
     const payload = (await response.json()) as Record<string, unknown>;
@@ -269,19 +336,19 @@ async function fetchLatestReleaseInfo(
       throw new Error("Latest release did not include a valid version.");
     }
 
-    const htmlUrl =
-      typeof payload.html_url === "string" &&
-      payload.html_url.startsWith("https://github.com/")
-        ? payload.html_url
-        : updaterSupport.release_url || DEFAULT_RELEASE_URL;
+    const htmlUrl = isTrustedReleaseUrl(payload.html_url)
+      ? payload.html_url
+      : updaterSupport.release_url || DEFAULT_RELEASE_URL;
     return { version, releaseUrl: htmlUrl };
   }
 
+  // Beta installs compare against stable releases too, so a finished 0.x.0
+  // is offered to people on its betas.
   const response = await fetch(`${REPO_RELEASES_API}?per_page=50`, {
     headers: { Accept: "application/vnd.github+json" },
   });
   if (!response.ok) {
-    throw new Error(`GitHub API returned ${response.status}`);
+    throw releaseFeedError(response.status);
   }
 
   const payload = (await response.json()) as unknown;
@@ -298,33 +365,32 @@ async function fetchLatestReleaseInfo(
     const version =
       parseReleaseVersion(release.tag_name) ||
       parseReleaseVersion(release.name);
-    if (!version || !isBetaVersion(version)) continue;
+    if (!version) continue;
 
-    const htmlUrl =
-      typeof release.html_url === "string" &&
-      release.html_url.startsWith("https://github.com/")
-        ? release.html_url
-        : DEFAULT_RELEASE_URL;
+    const htmlUrl = isTrustedReleaseUrl(release.html_url)
+      ? release.html_url
+      : DEFAULT_RELEASE_URL;
     if (!latest || isNewerVersion(version, latest.version)) {
       latest = { version, releaseUrl: htmlUrl };
     }
   }
 
   if (!latest) {
-    throw new Error("No beta release is currently available.");
+    throw new Error("No published releases were found.");
   }
   return latest;
 }
 
 async function checkFlatpakUpdates(channel: UpdateChannel): Promise<void> {
   try {
-    setStatus("Checking for updates...");
+    setStatus("Checking for updates…");
     const currentVersion = await getVersion();
     const latest = await fetchLatestReleaseInfo(channel);
     if (!isNewerVersion(latest.version, currentVersion)) {
-      await message("You are running the latest version.", {
-        title: "No updates",
-      });
+      await reportUpdateResult(
+        "No updates",
+        "You are running the latest version.",
+      );
       setStatus("");
       return;
     }
@@ -347,10 +413,11 @@ async function checkFlatpakUpdates(channel: UpdateChannel): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     setStatus("");
-    await message(`Failed to check for updates.\n\n${msg}`, {
-      title: "Update error",
-      kind: "error",
-    });
+    await reportUpdateResult(
+      "Update error",
+      `Failed to check for updates.\n\n${msg}`,
+      { kind: "error" },
+    );
   }
 }
 
@@ -367,6 +434,14 @@ async function promptOpenReleasePage(
   mode: UpdaterMode,
 ): Promise<void> {
   setStatus("Update available");
+  if (settingsOpen()) {
+    // The Settings panel shows the release-page button for these installs.
+    setInlineUpdateStatus(
+      `Version ${latest.version} is available. Use open release page to download it.`,
+      false,
+    );
+    return;
+  }
   const modeText =
     mode === "flatpak"
       ? "Flatpak packages are updated outside the app."
@@ -390,13 +465,14 @@ async function checkReleasePageUpdate(
   channel: UpdateChannel,
   mode: UpdaterMode,
 ): Promise<void> {
-  setStatus("Checking for updates...");
+  setStatus("Checking for updates…");
   const currentVersion = await getVersion();
   const latest = await fetchLatestReleaseInfo(channel);
   if (!isNewerVersion(latest.version, currentVersion)) {
-    await message("You are running the latest version.", {
-      title: "No updates",
-    });
+    await reportUpdateResult(
+      "No updates",
+      "You are running the latest version.",
+    );
     setStatus("");
     return;
   }
@@ -427,29 +503,31 @@ async function checkUpdatesImpl(): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setStatus("");
-      await message(`Failed to check for updates.\n\n${msg}`, {
-        title: "Update error",
-        kind: "error",
-      });
+      await reportUpdateResult(
+        "Update error",
+        `Failed to check for updates.\n\n${msg}`,
+        { kind: "error" },
+      );
     }
     return;
   }
 
   try {
-    setStatus("Checking for updates...");
+    setStatus("Checking for updates…");
     const update = await checkNativeUpdate(channel);
     if (!update) {
       if (channel === "beta") {
         await checkReleasePageUpdate(channel, "manual");
       } else {
-        await message("You are running the latest version.", {
-          title: "No updates",
-        });
+        await reportUpdateResult(
+          "No updates",
+          "You are running the latest version.",
+        );
         setStatus("");
       }
       return;
     }
-    setStatus(`Downloading update v${update.version}...`);
+    setStatus(`Downloading update v${update.version}…`);
     await update.download();
     await promptInstallAndRestart(update.version, () => update.install());
   } catch (err) {
@@ -466,10 +544,11 @@ async function checkUpdatesImpl(): Promise<void> {
       }
     }
     setStatus("");
-    await message(`Failed to check for updates.\n\n${msg}`, {
-      title: "Update error",
-      kind: "error",
-    });
+    await reportUpdateResult(
+      "Update error",
+      `Failed to check for updates.\n\n${msg}`,
+      { kind: "error" },
+    );
   }
 }
 
@@ -497,9 +576,9 @@ async function autoCheckUpdatesImpl(): Promise<void> {
     if (update) {
       await notify(
         "S3 Sidekick",
-        `Version ${update.version} is available. Downloading...`,
+        `Version ${update.version} is available. Downloading…`,
       );
-      setStatus(`Downloading update v${update.version}...`);
+      setStatus(`Downloading update v${update.version}…`);
       await update.download();
       await promptInstallAndRestart(update.version, () => update.install());
       return;

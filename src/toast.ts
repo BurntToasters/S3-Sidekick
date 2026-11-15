@@ -2,6 +2,12 @@ import { escapeHtml, getIconHtml } from "./utils.ts";
 
 export type ToastType = "info" | "success" | "warning" | "error";
 
+export interface ToastAction {
+  label: string;
+  /** Runs when the button is pressed; the toast is dismissed afterwards. */
+  onClick: () => void;
+}
+
 export interface ToastOptions {
   type?: ToastType;
   /** Auto-dismiss delay in ms. Pass 0 to keep the toast until dismissed. */
@@ -9,6 +15,8 @@ export interface ToastOptions {
   /** Optional inline action button (e.g. "Undo", "View"). */
   actionLabel?: string;
   onAction?: () => void;
+  /** Ordered action buttons, e.g. "Show failed" and "Retry failed". */
+  actions?: ToastAction[];
 }
 
 const DEFAULT_DURATION: Record<ToastType, number> = {
@@ -26,11 +34,18 @@ const TYPE_ICON: Record<ToastType, string> = {
 };
 
 const MAX_VISIBLE = 4;
+/**
+ * A burst of identical errors must not keep resetting its own auto-dismiss
+ * timer forever. The badge still counts every repeat, but only the first few
+ * repeats refresh the countdown.
+ */
+const MAX_DEDUP_REFRESHES = 5;
 
 interface ActiveToast {
   el: HTMLElement;
   key: string;
   count: number;
+  refreshCount: number;
   countEl: HTMLElement;
   /** 0 = sticky (persistent): exempt from auto-eviction so errors survive. */
   duration: number;
@@ -131,10 +146,24 @@ export function dismissToast(el: HTMLElement): void {
   setTimeout(finish, 240);
 }
 
-export function clearToasts(): void {
+export interface ClearToastOptions {
+  /** Keep sticky (duration 0) toasts mounted; transient toasts still leave. */
+  preserveSticky?: boolean;
+}
+
+export function clearToasts(options: ClearToastOptions = {}): void {
   for (const toast of active.slice()) {
+    if (options.preserveSticky && toast.duration <= 0) continue;
     dismissToast(toast.el);
   }
+}
+
+function actionList(options: ToastOptions): ToastAction[] {
+  const actions: ToastAction[] = [...(options.actions ?? [])];
+  if (options.actionLabel && options.onAction) {
+    actions.push({ label: options.actionLabel, onClick: options.onAction });
+  }
+  return actions;
 }
 
 export function showToast(message: string, options: ToastOptions = {}): void {
@@ -153,7 +182,11 @@ export function showToast(message: string, options: ToastOptions = {}): void {
   const duration = Number.isFinite(requestedDuration)
     ? Math.max(0, requestedDuration)
     : DEFAULT_DURATION[type];
-  const key = `${type}:${message}`;
+  const actions = actionList(options);
+  // Actions are part of the identity: "Retry" and "Show failed" on the same
+  // message are different user choices and must not be merged.
+  const actionSignature = JSON.stringify(actions.map((action) => action.label));
+  const key = `${type}:${message}:${actionSignature}`;
 
   // Collapse repeats of the same message instead of stacking duplicates.
   const existing = active.find((t) => t.key === key);
@@ -161,30 +194,36 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     existing.count += 1;
     existing.countEl.textContent = `\u00d7${existing.count}`;
     existing.countEl.hidden = false;
-    existing.duration = duration;
-    existing.remaining = duration;
     region.appendChild(existing.el);
-    armTimer(existing);
+    if (existing.refreshCount < MAX_DEDUP_REFRESHES) {
+      existing.refreshCount += 1;
+      existing.duration = duration;
+      existing.remaining = duration;
+      armTimer(existing);
+    }
     return;
   }
 
   const el = document.createElement("div");
   el.className = `toast toast--${type}`;
+  if (duration === 0) el.classList.add("toast--persistent");
   if (type === "error" || type === "warning") {
     el.setAttribute("role", "alert");
   } else {
     el.setAttribute("role", "status");
   }
 
-  const action =
-    options.actionLabel && options.onAction
-      ? `<button type="button" class="toast__action">${escapeHtml(options.actionLabel)}</button>`
-      : "";
+  const actionButtons = actions
+    .map(
+      (action) =>
+        `<button type="button" class="toast__action">${escapeHtml(action.label)}</button>`,
+    )
+    .join("");
 
   el.innerHTML =
     `<span class="toast__icon" aria-hidden="true">${getIconHtml(TYPE_ICON[type], { className: "lucide-icon toast__icon-svg", decorative: true })}</span>` +
     `<span class="toast__msg">${escapeHtml(message)}<span class="toast__count" hidden></span></span>` +
-    action +
+    `<span class="toast__actions">${actionButtons}</span>` +
     `<button type="button" class="toast__close" aria-label="Dismiss notification">${getIconHtml("x", { className: "lucide-icon toast__close-svg", decorative: true })}</button>`;
 
   const countEl = el.querySelector<HTMLElement>(".toast__count")!;
@@ -192,23 +231,24 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     "click",
     () => dismissToast(el),
   );
-  if (options.actionLabel && options.onAction) {
-    el.querySelector<HTMLButtonElement>(".toast__action")!.addEventListener(
-      "click",
-      () => {
+  el.querySelectorAll<HTMLButtonElement>(".toast__action").forEach(
+    (button, index) => {
+      const action = actions[index];
+      button.addEventListener("click", () => {
         try {
-          options.onAction?.();
+          action.onClick();
         } finally {
           dismissToast(el);
         }
-      },
-    );
-  }
+      });
+    },
+  );
 
   const toast: ActiveToast = {
     el,
     key,
     count: 1,
+    refreshCount: 0,
     countEl,
     duration,
     remaining: duration,
@@ -239,10 +279,11 @@ export function showToast(message: string, options: ToastOptions = {}): void {
     }
   };
 
+  // One pointer family only. Registering both mouseenter and pointerenter
+  // made a leave from one family resume the timer while the other still held
+  // the toast hovered.
   el.addEventListener("mouseenter", () => pause("hover"));
   el.addEventListener("mouseleave", () => resume("hover"));
-  el.addEventListener("pointerenter", () => pause("hover"));
-  el.addEventListener("pointerleave", () => resume("hover"));
   el.addEventListener("focusin", () => pause("focus"));
   el.addEventListener("focusout", (event) => {
     const related = event.relatedTarget;

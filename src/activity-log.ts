@@ -1,9 +1,10 @@
 import { escapeHtml, getIconHtml } from "./utils.ts";
-import { toggleDrawer } from "./bottom-drawer.ts";
+import { isActivityPanelVisible, toggleDrawer } from "./bottom-drawer.ts";
 
 export type ActivityType = "info" | "success" | "error" | "warning";
 
 interface ActivityEntry {
+  seq: number;
   time: Date;
   message: string;
   type: ActivityType;
@@ -13,17 +14,22 @@ const MAX_ENTRIES = 200;
 let entries: ActivityEntry[] = [];
 let renderScheduled = false;
 let unseenCount = 0;
+let nextSeq = 1;
+/** Sequence number of the newest entry already appended to the list. */
+let renderedSeq = 0;
 
 export function logActivity(
   message: string,
   type: ActivityType = "info",
 ): void {
   const capped = message.length > 5000 ? message.slice(0, 5000) + "…" : message;
-  entries.push({ time: new Date(), message: capped, type });
+  entries.push({ seq: nextSeq++, time: new Date(), message: capped, type });
   if (entries.length > MAX_ENTRIES) {
     entries = entries.slice(entries.length - MAX_ENTRIES);
   }
-  unseenCount++;
+  // Entries written while the user is reading the Activity tab are already
+  // seen; counting them would leave a badge that never clears.
+  if (!isActivityPanelVisible()) unseenCount++;
   updateBadge();
   if (!renderScheduled) {
     renderScheduled = true;
@@ -61,11 +67,16 @@ export function exportActivityLogText(): string {
     .join("\n");
 }
 
+/**
+ * Append only the entries the list has not shown yet. Rebuilding the whole
+ * list would make a screen reader re-announce rows it already read.
+ */
 function renderActivityLog(): void {
   const list = document.getElementById("activity-list");
   if (!list) return;
 
   if (entries.length === 0) {
+    renderedSeq = 0;
     list.innerHTML =
       `<div class="activity-empty">` +
       `${getIconHtml("clipboard-list", { className: "lucide-icon empty-state__icon", decorative: true })}` +
@@ -74,22 +85,33 @@ function renderActivityLog(): void {
     return;
   }
 
-  list.innerHTML = entries
-    .slice()
-    .reverse()
-    .map((entry) => {
-      const timeStr = formatTime(entry.time);
-      const icon = typeIcon(entry.type);
-      const iconClass = `activity-icon activity-icon--${entry.type}`;
-      return (
-        `<div class="activity-entry">` +
-        `<span class="activity-time">${timeStr}</span>` +
-        `<span class="${iconClass}">${icon}</span>` +
-        `<span class="activity-msg">${escapeHtml(entry.message)}</span>` +
-        `</div>`
-      );
-    })
-    .join("");
+  const fresh = entries.filter((entry) => entry.seq > renderedSeq);
+  if (fresh.length === 0) return;
+
+  if (list.querySelector(":scope > .activity-empty")) list.replaceChildren();
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+
+  list.insertAdjacentHTML("beforeend", fresh.map(entryHtml).join(""));
+  renderedSeq = entries[entries.length - 1].seq;
+
+  // Drop rows that fell out of the retained history so the DOM stays bounded.
+  while (list.children.length > MAX_ENTRIES) {
+    list.firstElementChild?.remove();
+  }
+  if (atBottom) list.scrollTop = list.scrollHeight;
+}
+
+function entryHtml(entry: ActivityEntry): string {
+  const timeStr = formatTime(entry.time);
+  const icon = typeIcon(entry.type);
+  const iconClass = `activity-icon activity-icon--${entry.type}`;
+  return (
+    `<div class="activity-entry">` +
+    `<span class="activity-time">${timeStr}</span>` +
+    `<span class="${iconClass}">${icon}</span>` +
+    `<span class="activity-msg">${escapeHtml(entry.message)}</span>` +
+    `</div>`
+  );
 }
 
 function updateBadge(): void {

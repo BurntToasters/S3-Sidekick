@@ -1,15 +1,47 @@
 import { $, escapeHtml, safeHref } from "./utils.ts";
+import { invoke } from "./ipc.ts";
+import { logActivity } from "./activity-log.ts";
 
 export interface LicenseEntry {
   licenses: string;
   repository?: string;
   licenseUrl?: string;
+  licenseText?: string;
   parents?: string;
 }
 
+/** The overlay element the delegated listener is attached to (re-wired if replaced). */
+let wiredOverlay: HTMLElement | null = null;
+
 export function openLicensesModal() {
   $("licenses-overlay").classList.add("active");
+  wireLicensesModal();
   void renderLicenses();
+}
+
+/**
+ * Repository links open in the system browser through the same native
+ * command as the rest of the app. Retry re-fetches after a failed load.
+ */
+function wireLicensesModal(): void {
+  const overlay = $("licenses-overlay");
+  if (wiredOverlay === overlay) return;
+  wiredOverlay = overlay;
+  overlay.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const link = target.closest<HTMLAnchorElement>("a[data-external-url]");
+    if (link) {
+      event.preventDefault();
+      const url = link.getAttribute("href") ?? "";
+      invoke("open_external_url", { url }).catch((err: unknown) => {
+        logActivity(`Failed to open ${url}: ${String(err)}`, "warning");
+      });
+      return;
+    }
+    if (target.closest("[data-retry]")) {
+      void renderLicenses();
+    }
+  });
 }
 
 export function closeLicensesModal() {
@@ -55,17 +87,25 @@ async function renderLicenses() {
       const href = entry.repository ? safeHref(entry.repository) : "";
       const repoLink =
         href && href !== "#"
-          ? `<a href="${href}" target="_blank" rel="noopener">${escapeHtml(entry.repository!)}</a>`
+          ? `<a href="${href}" data-external-url rel="noopener">${escapeHtml(entry.repository!)}</a>`
           : "N/A";
+      const licenseText =
+        typeof entry.licenseText === "string" && entry.licenseText.trim()
+          ? `<pre class="license-card__text">${escapeHtml(entry.licenseText)}</pre>`
+          : "";
 
       card.innerHTML =
         `<summary class="license-card__header">` +
         `<strong>${escapeHtml(key)}</strong><span class="license-card__tag">${escapeHtml(entry.licenses)}</span>` +
         `</summary>` +
-        `<div class="license-card__body">${repoLink}</div>`;
+        `<div class="license-card__body">${repoLink}${licenseText}</div>`;
       container.appendChild(card);
     }
   } catch {
-    container.textContent = "Failed to load licenses.";
+    container.innerHTML =
+      `<div class="license-load-error">` +
+      `<p>Failed to load licenses.</p>` +
+      `<button type="button" class="btn btn--sm" data-retry>Retry</button>` +
+      `</div>`;
   }
 }

@@ -2,7 +2,12 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { clearQualityGateProof } from "./release-session.js";
+import {
+  clearQualityGateEvidence,
+  clearQualityGateProof,
+  sha256WorkingTree,
+  writeQualityGateEvidence,
+} from "./release-session.js";
 import { isDirectExecution } from "./direct-execution.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -10,7 +15,7 @@ const __dirname = dirname(__filename);
 const packageJsonPath = resolve(__dirname, "..", "package.json");
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
 const appVersion = packageJson.version ?? "unknown";
-const scriptVersion = "1.1.1";
+const scriptVersion = "1.2.0";
 
 const colors = {
   reset: "\x1b[0m",
@@ -30,12 +35,15 @@ function createInitialResults() {
     cargoSafeUpdate: { status: "pending" },
     cargoUpdatePolicy: { status: "pending" },
     tauriAlignment: { status: "pending" },
+    icons: { status: "pending" },
     clippy: { status: "pending" },
     cargoFmt: { status: "pending" },
     frontendBuild: { status: "pending" },
     nativeBuild: { status: "pending" },
     tauriBuild: { status: "pending" },
     scriptTests: { status: "pending" },
+    releaseAssets: { status: "pending" },
+    releaseAssetsE2e: { status: "pending" },
     test: { status: "pending", passed: null, failed: null, files: null },
     rust: { status: "pending", passed: null, failed: null },
   };
@@ -175,9 +183,22 @@ function printSummary(results) {
 ╚══════════════════════════════════════╝
 ${colors.reset}`);
 
-  const allPassed = Object.values(results).every(
-    (result) => result.status === "passed",
-  );
+  // A skipped check counts as passed only when it carries the explicit
+  // waiver reason it was given by the runner (H11). Blank reasons fail the
+  // gate: a skip without a recorded waiver cannot read as green.
+  const allPassed = Object.entries(results).every(([name, result]) => {
+    if (result.status === "passed") return true;
+    if (
+      name === "releaseAssetsE2e" &&
+      process.platform === "win32" &&
+      result.status === "skipped" &&
+      typeof result.reason === "string" &&
+      result.reason.trim().length > 0
+    ) {
+      return true;
+    }
+    return false;
+  });
 
   console.log(
     `${colors.bold}TypeCheck:${colors.reset}  ${
@@ -217,6 +238,13 @@ ${colors.reset}`);
   console.log(
     `${colors.bold}Tauri Alignment:${colors.reset}   ${
       results.tauriAlignment?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Icons:${colors.reset}     ${
+      results.icons?.status === "passed"
         ? `${colors.green}✓ PASS`
         : `${colors.red}✗ FAIL`
     }${colors.reset}`,
@@ -264,6 +292,22 @@ ${colors.reset}`);
     }${colors.reset}`,
   );
   console.log(
+    `${colors.bold}Release assets:${colors.reset} ${
+      results.releaseAssets?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
+    `${colors.bold}Release assets E2E:${colors.reset} ${
+      results.releaseAssetsE2e?.status === "passed"
+        ? `${colors.green}✓ PASS`
+        : results.releaseAssetsE2e?.status === "skipped"
+          ? `${colors.blue}SKIP`
+          : `${colors.red}✗ FAIL`
+    }${colors.reset}`,
+  );
+  console.log(
     `${colors.bold}Tests:${colors.reset}      ${
       results.test.status === "passed"
         ? `${colors.green}✓ PASS`
@@ -303,9 +347,24 @@ ${colors.reset}`);
 function main({
   root = resolve(__dirname, ".."),
   clearProof = clearQualityGateProof,
+  clearEvidence = clearQualityGateEvidence,
+  writeEvidence = false,
   runner = runCommand,
 } = {}) {
+  const startedAt = Date.now();
+  let workingTreeSha256Start = null;
+  if (writeEvidence) {
+    try {
+      workingTreeSha256Start = sha256WorkingTree(root);
+    } catch (error) {
+      console.error(
+        `Could not hash the working tree before test:all: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return 1;
+    }
+  }
   clearProof(root);
+  if (writeEvidence) clearEvidence(root);
   const results = createInitialResults();
   const npm = getNpmCommand();
   printBanner();
@@ -334,6 +393,7 @@ function main({
     null,
     results,
   );
+  runner("icons", npm, ["run", "icons:check"], null, results);
   runner(
     "clippy",
     "cargo",
@@ -391,10 +451,32 @@ function main({
   runner(
     "scriptTests",
     "node",
-    ["--test", "scripts/github-cli.test.cjs", "scripts/test-all.test.js"],
+    [
+      "--test",
+      "scripts/github-cli.test.cjs",
+      "scripts/test-all.test.js",
+      "scripts/license-policy.test.mjs",
+    ],
     null,
     results,
   );
+  runner("releaseAssets", npm, ["run", "test:release-assets"], null, results);
+  if (process.platform === "win32") {
+    results.releaseAssetsE2e.status = "skipped";
+    results.releaseAssetsE2e.reason =
+      "The release-assets E2E uses a Unix GPG/Git/GitHub transport fixture; CI runs it on Linux.";
+    console.log(
+      `${colors.blue}Release assets E2E skipped on Windows; CI runs it on Linux.${colors.reset}\n`,
+    );
+  } else {
+    runner(
+      "releaseAssetsE2e",
+      npm,
+      ["run", "test:e2e:release-assets"],
+      null,
+      results,
+    );
+  }
   runner("test", npm, ["run", "test:cov"], parseTest, results);
   runner(
     "rust",
@@ -406,11 +488,53 @@ function main({
   );
 
   const exitCode = printSummary(results);
+  if (writeEvidence) {
+    const commit = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const sha = String(commit.stdout || "").trim();
+    if (commit.status !== 0 || !/^[0-9a-f]{40}$/i.test(sha)) {
+      console.error(
+        "Could not bind release quality-gate evidence to an exact git commit.",
+      );
+      return 1;
+    }
+    let workingTreeSha256End;
+    try {
+      workingTreeSha256End = sha256WorkingTree(root);
+    } catch (error) {
+      console.error(
+        `Could not hash the working tree after test:all: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return 1;
+    }
+    const treeStable = workingTreeSha256Start === workingTreeSha256End;
+    if (!treeStable) {
+      console.error(
+        "Working tree changed while test:all ran; the release quality-gate proof will be rejected.",
+      );
+    }
+    const evidencePath = writeQualityGateEvidence(root, {
+      commit: sha,
+      startedAt,
+      completedAt: Date.now(),
+      checks: results,
+      passed: exitCode === 0 && treeStable,
+      workingTreeSha256Start,
+      workingTreeSha256End,
+    });
+    console.log(`Release quality-gate evidence: ${evidencePath}`);
+    if (!treeStable) return 1;
+  }
   return exitCode;
 }
 
 if (isDirectExecution(import.meta.url)) {
-  process.exit(main());
+  process.exit(
+    main({ writeEvidence: process.argv.includes("--write-evidence") }),
+  );
 }
 
 export {

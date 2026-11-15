@@ -3,7 +3,6 @@ import { SETTING_DEFAULTS } from "../settings-model.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
-const mockRelaunch = vi.fn<() => Promise<void>>();
 const mockSetSize = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockGetCurrentWindow = vi.fn();
 
@@ -13,6 +12,7 @@ const mockMarkSupportPromptDismissed = vi.fn<() => Promise<void>>();
 const mockIsSupportPromptDismissed = vi.fn<() => boolean>();
 
 const mockLoadConnection = vi.fn<() => Promise<unknown>>();
+const mockGetConnectionLoadError = vi.fn<() => string | null>(() => null);
 const mockLoadBookmarks = vi.fn<() => Promise<void>>();
 const mockSetBookmarkChangeHandler = vi.fn();
 const mockInitUpdater = vi.fn<() => Promise<void>>();
@@ -47,10 +47,6 @@ vi.mock("@tauri-apps/api/app", () => ({
   getVersion: mockGetVersion,
 }));
 
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: mockRelaunch,
-}));
-
 vi.mock("@tauri-apps/api/dpi", () => ({
   LogicalSize: class {
     width: number;
@@ -76,6 +72,8 @@ vi.mock("../settings.ts", () => ({
 
 vi.mock("../connection.ts", () => ({
   loadConnection: mockLoadConnection,
+  getConnectionLoadError: mockGetConnectionLoadError,
+  setConnectionAccessLocked: vi.fn(),
 }));
 
 vi.mock("../bookmarks.ts", () => ({
@@ -127,6 +125,10 @@ vi.mock("../app-connection.ts", () => ({
   setConnectionInputs: mockSetConnectionInputs,
   refreshBookmarkBar: mockRefreshBookmarkBar,
   setConnectionUI: mockSetConnectionUI,
+  setSavedConnectionsLocked: vi.fn(),
+  setUnlockSavedConnectionsHandler: vi.fn(),
+  cancelPendingConnect: vi.fn(),
+  cancelPendingTestConnection: vi.fn(),
 }));
 
 vi.mock("../app-events.ts", () => ({
@@ -158,7 +160,6 @@ describe("app-init startup waterfall", () => {
     vi.resetModules();
     mockInvoke.mockReset();
     mockGetVersion.mockReset();
-    mockRelaunch.mockReset();
     mockSetSize.mockReset();
     mockGetCurrentWindow.mockReset();
     mockLoadSettings.mockReset();
@@ -166,6 +167,7 @@ describe("app-init startup waterfall", () => {
     mockMarkSupportPromptDismissed.mockReset();
     mockIsSupportPromptDismissed.mockReset();
     mockLoadConnection.mockReset();
+    mockGetConnectionLoadError.mockReset().mockReturnValue(null);
     mockLoadBookmarks.mockReset();
     mockSetBookmarkChangeHandler.mockReset();
     mockInitUpdater.mockReset();
@@ -223,7 +225,6 @@ describe("app-init startup waterfall", () => {
     mockShouldShowSetupWizard.mockReturnValue(false);
     mockShowSetupWizard.mockResolvedValue(null);
     mockMarkSetupComplete.mockResolvedValue(undefined);
-    mockRelaunch.mockResolvedValue(undefined);
     const idle = window as unknown as {
       requestIdleCallback?: unknown;
     };
@@ -334,19 +335,23 @@ describe("app-init startup waterfall", () => {
     await flushMicrotasks();
 
     expect(mockShowAlert).toHaveBeenCalledWith(
-      "Settings Corrupted",
-      expect.stringContaining("bookmarks"),
+      "Settings corrupted",
+      expect.stringContaining("saved connections"),
     );
     expect(mockInvoke).toHaveBeenCalledWith("save_settings", {
       json: "{}",
     });
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
     expect(mockEnsureSecurityReady).not.toHaveBeenCalled();
   });
 
   it("falls back to location reload when corrupt-recovery relaunch fails", async () => {
     mockLoadSettings.mockResolvedValue(false);
-    mockRelaunch.mockRejectedValue(new Error("no relaunch"));
+    const baseInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (...args) => {
+      if (args[0] === "relaunch_app") throw new Error("no relaunch");
+      return baseInvoke ? baseInvoke(...args) : undefined;
+    });
     const assignMock = vi.fn();
     const locationValue = window.location;
     Object.defineProperty(window, "location", {
@@ -467,8 +472,8 @@ describe("app-init startup waterfall", () => {
       expect.stringContaining("Secure storage is locked"),
     );
     expect(mockLoadBookmarks).not.toHaveBeenCalled();
-    // Wizard path still attempts the saved connection.
-    expect(mockLoadConnection).toHaveBeenCalledTimes(1);
+    // The wizard path must not load a saved connection over the lock message.
+    expect(mockLoadConnection).not.toHaveBeenCalled();
   });
 
   it("defers transfer recovery failures to the activity log", async () => {
@@ -533,6 +538,28 @@ describe("app-init startup waterfall", () => {
       "sk2",
       "",
     );
+  });
+
+  it("warns about a corrupt saved connection but keeps startup usable", async () => {
+    mockLoadConnection.mockResolvedValueOnce(null);
+    mockGetConnectionLoadError.mockReturnValueOnce(
+      "the saved connection file is corrupt.",
+    );
+    const { init } = await import("../app-init.ts");
+
+    await init();
+    await flushMicrotasks();
+
+    expect(mockSetConnectionInputs).not.toHaveBeenCalled();
+    expect(mockSetStatus).toHaveBeenCalledWith(
+      expect.stringContaining("Saved connection could not be loaded"),
+      10000,
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.stringContaining("Saved connection could not be loaded"),
+      "warning",
+    );
+    expect(mockInitUpdater).toHaveBeenCalledTimes(1);
   });
 
   it("skips window restore for empty sizes and warns on failure", async () => {

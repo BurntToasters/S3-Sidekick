@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCheck = vi.fn<() => Promise<unknown>>();
-const mockRelaunch = vi.fn<() => Promise<void>>();
 const mockMessage = vi.fn<(...args: unknown[]) => Promise<void>>();
 const mockAsk = vi.fn<(...args: unknown[]) => Promise<boolean>>();
 const mockGetVersion = vi.fn<() => Promise<string>>();
@@ -13,10 +12,6 @@ const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 
 vi.mock("@tauri-apps/plugin-updater", () => ({
   check: mockCheck,
-}));
-
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: mockRelaunch,
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -44,7 +39,6 @@ describe("updater", () => {
     vi.unstubAllGlobals();
     document.body.innerHTML = `<div id="status"></div>`;
     mockCheck.mockReset();
-    mockRelaunch.mockReset();
     mockMessage.mockReset();
     mockAsk.mockReset();
     mockGetVersion.mockReset();
@@ -144,10 +138,10 @@ describe("updater", () => {
 
     expect(download).toHaveBeenCalledTimes(1);
     expect(install).not.toHaveBeenCalled();
-    expect(mockRelaunch).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith("relaunch_app");
     expect(mockSendNotification).toHaveBeenCalledWith({
       title: "S3 Sidekick",
-      body: "Update downloaded. Restart the app when you're ready.",
+      body: "Version 0.7.0 was not installed. Choose check now in settings to install it.",
     });
   });
 
@@ -192,8 +186,9 @@ describe("updater", () => {
     await updater.checkUpdates();
 
     expect(mockAsk).toHaveBeenCalledTimes(1);
+    // Beta installs compare against stable too, so the newest release wins.
     expect(mockInvoke).toHaveBeenCalledWith("open_external_url", {
-      url: "https://github.com/BurntToasters/S3-Sidekick/releases/tag/v0.6.0-beta.4",
+      url: "https://github.com/BurntToasters/S3-Sidekick/releases/tag/v0.6.0",
     });
   });
 
@@ -258,7 +253,7 @@ describe("updater", () => {
 
     expect(download).toHaveBeenCalledTimes(1);
     expect(install).toHaveBeenCalledTimes(1);
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("shows update error in manual mode when release API fails", async () => {
@@ -375,11 +370,11 @@ describe("updater", () => {
 
     expect(mockSendNotification).toHaveBeenCalledWith({
       title: "S3 Sidekick",
-      body: "Version 0.8.1 is available. Downloading...",
+      body: "Version 0.8.1 is available. Downloading…",
     });
     expect(download).toHaveBeenCalledTimes(1);
     expect(install).toHaveBeenCalledTimes(1);
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("swallows beta auto-check fallback failures after native check throws", async () => {
@@ -501,10 +496,11 @@ describe("updater", () => {
         json: async () => [{ draft: false, tag_name: "v0.6.0" }],
       }),
     );
+    // A stable-only feed is a valid answer for beta installs, not an error.
     await updater.checkUpdates();
-    expect(mockMessage).toHaveBeenCalledWith(
+    expect(mockMessage).not.toHaveBeenCalledWith(
       expect.stringContaining("Failed to check for updates"),
-      expect.objectContaining({ title: "Update error", kind: "error" }),
+      expect.anything(),
     );
   });
 
@@ -965,6 +961,86 @@ describe("updater", () => {
     );
   });
 
+  it("beta channel offers a newer stable release to beta installs", async () => {
+    mockInvoke.mockResolvedValueOnce({
+      mode: "manual",
+      release_url:
+        "https://github.com/BurntToasters/S3-Sidekick/releases/latest",
+    });
+    mockGetVersion.mockResolvedValue("0.6.0-beta.3");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          {
+            draft: false,
+            tag_name: "v0.6.0-beta.3",
+            html_url:
+              "https://github.com/BurntToasters/S3-Sidekick/releases/tag/v0.6.0-beta.3",
+          },
+          {
+            draft: false,
+            tag_name: "v0.6.0",
+            html_url:
+              "https://github.com/BurntToasters/S3-Sidekick/releases/tag/v0.6.0",
+          },
+        ],
+      }),
+    );
+    mockAsk.mockResolvedValueOnce(true);
+
+    const updater = await import("../updater.ts");
+    await updater.initUpdater();
+    updater.setUpdateChannel("beta");
+    await updater.checkUpdates();
+
+    expect(mockAsk).toHaveBeenCalledWith(
+      expect.stringContaining("Version 0.6.0 is available"),
+      expect.anything(),
+    );
+    expect(mockInvoke).toHaveBeenCalledWith("open_external_url", {
+      url: "https://github.com/BurntToasters/S3-Sidekick/releases/tag/v0.6.0",
+    });
+  });
+
+  it("beta channel reports nothing newer as the normal no-updates message", async () => {
+    mockInvoke.mockResolvedValueOnce({
+      mode: "manual",
+      release_url:
+        "https://github.com/BurntToasters/S3-Sidekick/releases/latest",
+    });
+    mockGetVersion.mockResolvedValue("0.6.0");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          {
+            draft: false,
+            tag_name: "v0.6.0-beta.3",
+            html_url:
+              "https://github.com/BurntToasters/S3-Sidekick/releases/tag/v0.6.0-beta.3",
+          },
+        ],
+      }),
+    );
+
+    const updater = await import("../updater.ts");
+    await updater.initUpdater();
+    updater.setUpdateChannel("beta");
+    await updater.checkUpdates();
+
+    expect(mockMessage).toHaveBeenCalledWith(
+      "You are running the latest version.",
+      expect.objectContaining({ title: "No updates" }),
+    );
+    expect(mockMessage).not.toHaveBeenCalledWith(
+      expect.stringContaining("No beta release"),
+      expect.anything(),
+    );
+  });
+
   it("skips deferred-update notification when notification permission is denied", async () => {
     const download = vi.fn(async () => undefined);
     const install = vi.fn(async () => undefined);
@@ -989,5 +1065,51 @@ describe("updater", () => {
 
     expect(download).toHaveBeenCalledTimes(1);
     expect(mockSendNotification).not.toHaveBeenCalled();
+  });
+
+  it("requests no OS notification permission when desktop notifications are off", async () => {
+    const { state } = await import("../state.ts");
+    state.currentSettings.desktopNotifications = false;
+    mockInvoke.mockResolvedValueOnce({
+      mode: "native",
+      release_url:
+        "https://github.com/BurntToasters/S3-Sidekick/releases/latest",
+    });
+    mockCheck.mockResolvedValueOnce({
+      version: "0.9.0",
+      download: vi.fn(async () => undefined),
+      install: vi.fn(async () => undefined),
+    });
+    mockAsk.mockResolvedValueOnce(false);
+
+    const updater = await import("../updater.ts");
+    await updater.initUpdater();
+    await updater.autoCheckUpdates();
+
+    expect(mockIsPermissionGranted).not.toHaveBeenCalled();
+    expect(mockRequestPermission).not.toHaveBeenCalled();
+    expect(mockSendNotification).not.toHaveBeenCalled();
+  });
+
+  it("sends the OS notification when desktop notifications are on", async () => {
+    const { state } = await import("../state.ts");
+    state.currentSettings.desktopNotifications = true;
+    mockInvoke.mockResolvedValueOnce({
+      mode: "native",
+      release_url:
+        "https://github.com/BurntToasters/S3-Sidekick/releases/latest",
+    });
+    mockCheck.mockResolvedValueOnce({
+      version: "0.9.0",
+      download: vi.fn(async () => undefined),
+      install: vi.fn(async () => undefined),
+    });
+    mockAsk.mockResolvedValueOnce(false);
+
+    const updater = await import("../updater.ts");
+    await updater.initUpdater();
+    await updater.autoCheckUpdates();
+
+    expect(mockSendNotification).toHaveBeenCalled();
   });
 });

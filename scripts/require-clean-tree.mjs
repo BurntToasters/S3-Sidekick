@@ -31,6 +31,8 @@ process.stderr.write(
   `require-clean-tree: refusing to reset a checkout with local changes:\n${changes
     .slice(0, 20)
     .map((line) => `  ${line}`)
-    .join("\n")}${changes.length > 20 ? `\n  ...and ${changes.length - 20} more` : ""}\nCommit or stash them, or rerun with ALLOW_DISCARD_LOCAL_CHANGES=1 to discard.\n`,
+    .join(
+      "\n",
+    )}${changes.length > 20 ? `\n  ...and ${changes.length - 20} more` : ""}\nCommit or stash them, or rerun with ALLOW_DISCARD_LOCAL_CHANGES=1 to discard.\n`,
 );
 process.exit(1);

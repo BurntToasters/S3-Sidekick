@@ -367,3 +367,49 @@ describe("settings model", () => {
     expect(over.settings.windowHeight).toBe(SETTING_DEFAULTS.windowHeight);
   });
 });
+
+describe("appearance display preferences", () => {
+  it("defaults to today's density, size units and date format", () => {
+    expect(SETTING_DEFAULTS.density).toBe("comfortable");
+    expect(SETTING_DEFAULTS.sizeUnits).toBe("binary");
+    expect(SETTING_DEFAULTS.dateFormat).toBe("locale");
+    const normalized = normalizeUserSettings({});
+    expect(normalized.density).toBe("comfortable");
+    expect(normalized.sizeUnits).toBe("binary");
+    expect(normalized.dateFormat).toBe("locale");
+  });
+
+  it("keeps every known display preference value", () => {
+    const normalized = normalizeUserSettings({
+      density: "compact",
+      sizeUnits: "iec",
+      dateFormat: "relative",
+    });
+    expect(normalized.density).toBe("compact");
+    expect(normalized.sizeUnits).toBe("iec");
+    expect(normalized.dateFormat).toBe("relative");
+  });
+
+  it("replaces unknown or mistyped display preferences with defaults", () => {
+    const normalized = normalizeUserSettings({
+      density: "huge" as never,
+      sizeUnits: 3 as never,
+      dateFormat: "yesterday" as never,
+    });
+    expect(normalized.density).toBe("comfortable");
+    expect(normalized.sizeUnits).toBe("binary");
+    expect(normalized.dateFormat).toBe("locale");
+  });
+
+  it("round-trips display preferences through the saved payload", () => {
+    const settings = normalizeUserSettings({
+      density: "compact",
+      sizeUnits: "decimal",
+      dateFormat: "iso",
+    });
+    const parsed = parseSettingsRaw(mergeSettingsPayload(settings, {}));
+    expect(parsed.settings.density).toBe("compact");
+    expect(parsed.settings.sizeUnits).toBe("decimal");
+    expect(parsed.settings.dateFormat).toBe("iso");
+  });
+});

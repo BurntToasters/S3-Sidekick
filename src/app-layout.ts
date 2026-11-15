@@ -1,6 +1,15 @@
 import { state } from "./state.ts";
-import { hideContextMenu } from "./context-menu.ts";
-import { renderObjectTable } from "./browser.ts";
+import {
+  hideContextMenu,
+  showContextMenu,
+  type MenuItem,
+} from "./context-menu.ts";
+import { handleCreateFolder, handleRefresh } from "./app-objects.ts";
+import { handleUploadButton, handleUploadFolderButton } from "./app-upload.ts";
+import {
+  registerFilterRenderCanceller,
+  renderObjectTableFromLayout,
+} from "./layout-render-bridge.ts";
 
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 420;
@@ -27,6 +36,15 @@ const sidebarBackgroundInert = new Map<HTMLElement, boolean>();
 // window can restore the requested layout.
 let preferredSidebarWidth = 240;
 let preferredInspectorWidth = 360;
+let desktopSidebarCollapsed = false;
+let mobileSidebarOpenHandler: (() => void) | null = null;
+
+/** Lets the inspector close itself when the mobile bucket sidebar opens. */
+export function registerMobileSidebarOpenHandler(
+  handler: (() => void) | null,
+): void {
+  mobileSidebarOpenHandler = handler;
+}
 
 export function clearFilterInputDebounce(): void {
   if (filterInputDebounce !== undefined) {
@@ -39,6 +57,8 @@ export function disposeFilterInputDebounce(): void {
   clearFilterInputDebounce();
 }
 
+registerFilterRenderCanceller(clearFilterInputDebounce);
+
 export function wireObjectFilterInput(): void {
   const filterInput = document.getElementById(
     "filter-input",
@@ -49,7 +69,7 @@ export function wireObjectFilterInput(): void {
     // only pruned against the full listing inside updateSelectionUI.
     clearFilterInputDebounce();
     filterInputDebounce = setTimeout(() => {
-      renderObjectTable();
+      renderObjectTableFromLayout();
       filterInputDebounce = undefined;
     }, FILTER_INPUT_DEBOUNCE_MS);
   });
@@ -91,11 +111,8 @@ function setTitle(id: string, title: string): void {
 
 function updateToolbarShortcutTitles(isMac: boolean): void {
   const accel = isMac ? "⌘" : "Ctrl+";
-  const accelShift = isMac ? "⌘⇧" : "Ctrl+Shift+";
-  setTitle("btn-new-folder", `New Folder (${accel}N)`);
-  setTitle("btn-upload", `Upload Files (${accel}U)`);
-  setTitle("btn-upload-folder", `Upload Folder (${accelShift}U)`);
-  setTitle("btn-palette", `Commands (${accel}K)`);
+  setTitle("btn-new-folder", `New folder (${accel}N)`);
+  setTitle("btn-upload", `Upload (${accel}U)`);
   setTitle("palette-hint", `Commands (${accel}K)`);
 }
 
@@ -187,11 +204,24 @@ export function setSidebarOpen(open: boolean): void {
       active instanceof HTMLElement && !sidebar.contains(active)
         ? active
         : toggle;
+    // Only one mobile panel may be on screen at a time.
+    mobileSidebarOpenHandler?.();
   }
 
   layout.classList.toggle("main-layout--sidebar-open", open);
-  backdrop.hidden = !open;
-  toggle?.setAttribute("aria-expanded", String(mobile && open));
+  if (mobile) {
+    layout.classList.remove("main-layout--sidebar-collapsed");
+  } else {
+    layout.classList.toggle(
+      "main-layout--sidebar-collapsed",
+      desktopSidebarCollapsed,
+    );
+  }
+  backdrop.hidden = mobile ? !open : true;
+  toggle?.setAttribute(
+    "aria-expanded",
+    String(mobile ? open : !desktopSidebarCollapsed),
+  );
 
   if (mobile) {
     if (open) {
@@ -229,8 +259,18 @@ export function setSidebarOpen(open: boolean): void {
 function toggleSidebar(): void {
   const layout = document.getElementById("main-layout");
   if (!layout) return;
-  const open = !layout.classList.contains("main-layout--sidebar-open");
-  setSidebarOpen(open);
+  if (isMobileSidebarMode()) {
+    setSidebarOpen(!layout.classList.contains("main-layout--sidebar-open"));
+    return;
+  }
+  desktopSidebarCollapsed = !desktopSidebarCollapsed;
+  layout.classList.toggle(
+    "main-layout--sidebar-collapsed",
+    desktopSidebarCollapsed,
+  );
+  const toggle = document.getElementById("sidebar-toggle");
+  toggle?.setAttribute("aria-expanded", String(!desktopSidebarCollapsed));
+  syncPanelWidths();
 }
 
 export function closeSidebarOnMobile(): void {
@@ -269,6 +309,7 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
   return nodes.filter(
     (node) =>
       !node.hasAttribute("disabled") &&
+      node.getAttribute("tabindex") !== "-1" &&
       node.getAttribute("aria-hidden") !== "true" &&
       (node.offsetWidth > 0 ||
         node.offsetHeight > 0 ||
@@ -276,16 +317,103 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
   );
 }
 
+const MODAL_OVERLAY_SELECTOR =
+  ".modal-overlay, .dialog-overlay, .support-overlay, .setup-wizard-overlay, #palette-overlay";
+/// Titlebar controls that must stay usable while a modal is open. The drag
+/// handle keeps the window movable; the window buttons stay operable under
+/// the overlay, and everything else in the header is inert like the page.
+const MODAL_BACKDROP_EXEMPT_SELECTOR =
+  "#titlebar-win-controls, .titlebar-drag-handle";
+/// Most recent focusable control outside the modal layer. WebKit does not
+/// focus buttons on click, so a mouse-opened dialog would otherwise lose its
+/// opener.
+let lastOutsideFocus: HTMLElement | null = null;
+let modalInertTargets: HTMLElement[] = [];
+
+function isInsideModalOverlay(node: Element): boolean {
+  return node.closest(MODAL_OVERLAY_SELECTOR) !== null;
+}
+
+function rememberOutsideFocus(target: EventTarget | null): void {
+  if (!(target instanceof Element)) return;
+  const control = target.closest<HTMLElement>(FOCUSABLE_SELECTOR);
+  if (control && !isInsideModalOverlay(control)) lastOutsideFocus = control;
+}
+
+function onModalPointerDown(event: PointerEvent): void {
+  rememberOutsideFocus(event.target);
+}
+
+function onModalFocusIn(event: FocusEvent): void {
+  rememberOutsideFocus(event.target);
+}
+
+function resolveModalOpener(): HTMLElement | null {
+  const active = document.activeElement;
+  if (
+    active instanceof HTMLElement &&
+    active !== document.body &&
+    !isInsideModalOverlay(active)
+  ) {
+    return active;
+  }
+  return lastOutsideFocus?.isConnected ? lastOutsideFocus : null;
+}
+
+function collectBackgroundRoots(
+  container: HTMLElement,
+  roots: HTMLElement[],
+): void {
+  for (const child of Array.from(container.children)) {
+    if (!(child instanceof HTMLElement)) continue;
+    if (child.matches(MODAL_BACKDROP_EXEMPT_SELECTOR)) continue;
+    if (child.querySelector(MODAL_BACKDROP_EXEMPT_SELECTOR)) {
+      collectBackgroundRoots(child, roots);
+    } else {
+      roots.push(child);
+    }
+  }
+}
+
+/// Inerts the page behind a modal, leaving the titlebar window controls and
+/// drag handle reachable. Only elements this module inerts are released, so
+/// inert state owned by sidebar or inspector logic survives a modal.
+function setModalBackgroundInert(inert: boolean): void {
+  if (!inert) {
+    for (const element of modalInertTargets.splice(0)) {
+      setElementInert(element, false);
+    }
+    return;
+  }
+  const app = document.getElementById("app");
+  if (!app) return;
+  const roots: HTMLElement[] = [];
+  collectBackgroundRoots(app, roots);
+  for (const root of roots) {
+    if ((root as HTMLElement & { inert?: boolean }).inert) continue;
+    setElementInert(root, true);
+    modalInertTargets.push(root);
+  }
+}
+
 function focusFirstInOverlay(overlay: HTMLElement): void {
+  // Settings opens on the active tab (or search), not the close button, so
+  // keyboard users start where the settings content begins.
+  const preferred =
+    overlay.id === "settings-overlay"
+      ? overlay.querySelector<HTMLElement>(
+          ".settings-tab--active, #settings-search",
+        )
+      : null;
   const focusable = getFocusableElements(overlay);
-  const target = focusable[0] ?? overlay;
+  const target = preferred ?? focusable[0] ?? overlay;
   if (target === overlay && target.tabIndex < 0) {
     target.tabIndex = -1;
   }
   target.focus();
 }
 
-function syncModalLayerState(): void {
+export function syncModalLayerState(): void {
   const overlay = getActiveModalOverlay();
   const hasActiveOverlay = !!overlay;
 
@@ -295,30 +423,24 @@ function syncModalLayerState(): void {
   }
 
   if (hasActiveOverlay && !modalLayerActive) {
-    focusBeforeModal =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
+    focusBeforeModal = resolveModalOpener();
+    setModalBackgroundInert(true);
   } else if (!hasActiveOverlay && modalLayerActive) {
+    // Release inert before restoring focus: focusing a control inside an inert
+    // subtree silently does nothing, so the restore would otherwise be lost.
+    setModalBackgroundInert(false);
     const restore = focusBeforeModal;
     focusBeforeModal = null;
-    if (restore && document.contains(restore)) {
+    const active = document.activeElement;
+    const focusLost =
+      !(active instanceof HTMLElement) ||
+      active === document.body ||
+      isInsideModalOverlay(active);
+    if (restore?.isConnected && focusLost) {
       restore.focus();
     }
   }
   modalLayerActive = hasActiveOverlay;
-
-  const appRoot = document.getElementById("app") as HTMLElement | null;
-  if (appRoot) {
-    if (hasActiveOverlay) {
-      appRoot.setAttribute("aria-hidden", "true");
-    } else {
-      appRoot.removeAttribute("aria-hidden");
-    }
-    if ("inert" in appRoot) {
-      (appRoot as HTMLElement & { inert: boolean }).inert = hasActiveOverlay;
-    }
-  }
 
   if (overlay) {
     const active = document.activeElement;
@@ -331,36 +453,29 @@ function syncModalLayerState(): void {
 function trapFocusInModalLayer(e: KeyboardEvent): void {
   if (e.key !== "Tab") return;
   const overlay = getActiveModalOverlay();
-  if (!overlay) return;
+  // Dialogs run their own trap, which also covers the dialog's buttons.
+  if (!overlay || overlay.id === "dialog-overlay") return;
 
   const focusable = getFocusableElements(overlay);
+  e.preventDefault();
   if (focusable.length === 0) {
-    e.preventDefault();
     if (overlay.tabIndex < 0) overlay.tabIndex = -1;
     overlay.focus();
     return;
   }
 
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  const active =
-    document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-
-  if (!active || !overlay.contains(active)) {
-    e.preventDefault();
-    first.focus();
-    return;
+  // Cycle explicitly rather than relying on native Tab order: WebKit (the
+  // macOS webview) skips checkboxes and some buttons, which let focus leak
+  // out of the modal.
+  const index = focusable.indexOf(document.activeElement as HTMLElement);
+  let nextIndex: number;
+  if (index === -1) {
+    nextIndex = e.shiftKey ? focusable.length - 1 : 0;
+  } else {
+    nextIndex =
+      (index + (e.shiftKey ? -1 : 1) + focusable.length) % focusable.length;
   }
-
-  if (e.shiftKey && active === first) {
-    e.preventDefault();
-    last.focus();
-  } else if (!e.shiftKey && active === last) {
-    e.preventDefault();
-    first.focus();
-  }
+  focusable[nextIndex].focus();
 }
 
 export function handleTabListArrowKey(
@@ -469,6 +584,9 @@ export function syncPanelWidths(): void {
   const inspectorResizer = document.getElementById("inspector-resizer");
   const contentMain = document.querySelector<HTMLElement>(".content-main");
   const inspectorOpen = Boolean(inspector && !inspector.hidden);
+  const sidebarCollapsed =
+    !isMobileSidebarMode() &&
+    layout.classList.contains("main-layout--sidebar-collapsed");
 
   const storedSidebar = Number.isFinite(preferredSidebarWidth)
     ? preferredSidebarWidth
@@ -489,11 +607,11 @@ export function syncPanelWidths(): void {
     layout,
     Number.isFinite(window.innerWidth) ? window.innerWidth : 0,
   );
-  const sidebarWidth = clampSidebarWidth(
-    readElementWidth(sidebar, requestedSidebar),
-  );
+  const sidebarWidth = sidebarCollapsed
+    ? 0
+    : clampSidebarWidth(readElementWidth(sidebar, requestedSidebar));
   const sidebarResizerWidth =
-    sidebarResizer && !sidebarResizer.hidden
+    !sidebarCollapsed && sidebarResizer && !sidebarResizer.hidden
       ? readElementWidth(sidebarResizer, RESIZER_WIDTH_FALLBACK)
       : 0;
   const inspectorWidth = inspectorOpen
@@ -539,7 +657,7 @@ export function syncPanelWidths(): void {
     deficit -= sidebarReduction;
   }
 
-  applySidebarWidth(effectiveSidebar);
+  if (!sidebarCollapsed) applySidebarWidth(effectiveSidebar);
   if (inspector) applyInspectorWidth(effectiveInspector || requestedInspector);
   setResizerAria(sidebarResizer, SIDEBAR_MIN, SIDEBAR_MAX, effectiveSidebar);
   setResizerAria(
@@ -646,6 +764,129 @@ export function wireInspectorControls(): void {
   syncPanelWidths();
 }
 
+/* Toolbar collapse: labels first (the 950px container query in layout.css and
+   browser.css), then whole buttons into the ⋯ overflow menu, so the toolbar
+   never wraps. Keep this slack in step with those two stylesheets. */
+const TOOLBAR_BREADCRUMB_MIN = 160;
+const TOOLBAR_SLACK_PX = 24;
+const TOOLBAR_COLLAPSE_ORDER = [
+  "btn-new-folder",
+  "btn-refresh",
+  "btn-upload",
+] as const;
+
+let toolbarOverflowObserver: ResizeObserver | null = null;
+
+function fitToolbarButtons(): void {
+  const toolbar = document.querySelector<HTMLElement>(".content-toolbar");
+  const overflowButton = document.getElementById("btn-toolbar-overflow");
+  if (!toolbar || !overflowButton) return;
+  if (toolbar.offsetWidth === 0) return;
+
+  const buttons = TOOLBAR_COLLAPSE_ORDER.map((id) =>
+    document.getElementById(id),
+  ).filter((button): button is HTMLButtonElement => button !== null);
+
+  const nav = toolbar.querySelector<HTMLElement>(".content-toolbar__nav");
+  const filter = toolbar.querySelector<HTMLElement>(".filter-control");
+  const actions = toolbar.querySelector<HTMLElement>(
+    ".content-toolbar__actions",
+  );
+
+  const actionsWidth = (): number => {
+    if (!actions) return 0;
+    const style = getComputedStyle(actions);
+    const gap = Number.parseFloat(style.columnGap || style.gap) || 0;
+    let width = 0;
+    let count = 0;
+    for (const child of Array.from(actions.children)) {
+      if (!(child instanceof HTMLElement)) continue;
+      const box = child.getBoundingClientRect();
+      if (box.width > 0) {
+        width += box.width;
+        count += 1;
+      }
+    }
+    return count > 1 ? width + gap * (count - 1) : width;
+  };
+
+  const requiredWidth = (): number =>
+    TOOLBAR_SLACK_PX +
+    (nav?.getBoundingClientRect().width ?? 0) +
+    TOOLBAR_BREADCRUMB_MIN +
+    (filter?.getBoundingClientRect().width ?? 0) +
+    actionsWidth();
+
+  const available = toolbar.getBoundingClientRect().width;
+
+  // Re-measure from the fully expanded state so widening the window
+  // restores buttons in the reverse order they were collapsed.
+  for (const button of buttons) button.hidden = false;
+  let hiddenCount = 0;
+  for (const button of buttons) {
+    if (requiredWidth() > available) {
+      button.hidden = true;
+      hiddenCount += 1;
+    }
+  }
+  overflowButton.hidden = hiddenCount === 0;
+}
+
+function wireToolbarOverflow(): void {
+  const toolbar = document.querySelector<HTMLElement>(".content-toolbar");
+  const overflowButton = document.getElementById("btn-toolbar-overflow");
+  if (!toolbar || !overflowButton || toolbarOverflowObserver) return;
+
+  const dismissOverflowMenu = (): void => {
+    overflowButton.setAttribute("aria-expanded", "false");
+  };
+  overflowButton.addEventListener("click", () => {
+    if (overflowButton.hidden) return;
+    dismissOverflowMenu();
+    const items: MenuItem[] = [];
+    const collapsed = (id: string): boolean =>
+      document.getElementById(id)?.hasAttribute("hidden") ?? false;
+    if (collapsed("btn-new-folder")) {
+      items.push({ label: "New folder", action: "new-folder" });
+    }
+    if (collapsed("btn-refresh")) {
+      items.push({ label: "Refresh", action: "refresh" });
+    }
+    if (collapsed("btn-upload")) {
+      items.push({ separator: true });
+      items.push({ label: "Files\u2026", action: "upload-files" });
+      items.push({ label: "Folder\u2026", action: "upload-folder" });
+    }
+    if (items.length === 0) return;
+    const rect = overflowButton.getBoundingClientRect();
+    showContextMenu(
+      rect.left,
+      rect.bottom,
+      items,
+      (action) => {
+        dismissOverflowMenu();
+        if (action === "new-folder") void handleCreateFolder();
+        else if (action === "refresh") void handleRefresh();
+        else if (action === "upload-files") void handleUploadButton();
+        else if (action === "upload-folder") void handleUploadFolderButton();
+      },
+      dismissOverflowMenu,
+    );
+    overflowButton.setAttribute("aria-expanded", "true");
+  });
+
+  // jsdom and very old webviews lack ResizeObserver; the toolbar then keeps
+  // every button visible and the overflow menu simply stays hidden.
+  if (typeof ResizeObserver === "function") {
+    toolbarOverflowObserver = new ResizeObserver(() => fitToolbarButtons());
+    toolbarOverflowObserver.observe(toolbar);
+  }
+  fitToolbarButtons();
+  // Icon injection and font loading change button widths without changing
+  // the toolbar's own size, so re-fit once the first frames have painted.
+  window.setTimeout(fitToolbarButtons, 300);
+}
+
 export function wireLayoutControls(): void {
   const toggleBtn = document.getElementById("sidebar-toggle");
   const backdrop = document.getElementById("sidebar-backdrop");
@@ -694,6 +935,7 @@ export function wireLayoutControls(): void {
   toggleBtn?.addEventListener("click", toggleSidebar);
   backdrop?.addEventListener("click", () => setSidebarOpen(false));
   window.addEventListener("resize", syncSidebarMode);
+  wireToolbarOverflow();
 
   let dragStartX = 0;
   let dragStartWidth = 0;
@@ -772,10 +1014,10 @@ export function initModalLayerObserver(): void {
   modalLayerObserver = new MutationObserver(() => {
     syncModalLayerState();
   });
+  document.addEventListener("pointerdown", onModalPointerDown, true);
+  document.addEventListener("focusin", onModalFocusIn, true);
   document
-    .querySelectorAll<HTMLElement>(
-      ".modal-overlay, .dialog-overlay, .support-overlay, .setup-wizard-overlay, #palette-overlay",
-    )
+    .querySelectorAll<HTMLElement>(MODAL_OVERLAY_SELECTOR)
     .forEach((overlay) => {
       modalLayerObserver!.observe(overlay, {
         attributes: true,
@@ -792,4 +1034,7 @@ export function disposeModalLayerObserver(): void {
     modalLayerObserver = null;
   }
   document.removeEventListener("keydown", trapFocusInModalLayer, true);
+  document.removeEventListener("pointerdown", onModalPointerDown, true);
+  document.removeEventListener("focusin", onModalFocusIn, true);
+  lastOutsideFocus = null;
 }

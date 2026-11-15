@@ -73,7 +73,9 @@ const passed =
     checks.some((check) => check.check === name && check.passed),
   );
 const checkNames = checks.map((check) => check.check);
-const missingChecks = requiredChecks.filter((name) => !checkNames.includes(name));
+const missingChecks = requiredChecks.filter(
+  (name) => !checkNames.includes(name),
+);
 const duplicateChecks = checkNames.filter(
   (name, index) => checkNames.indexOf(name) !== index,
 );

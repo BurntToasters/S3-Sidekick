@@ -3,8 +3,8 @@ use zeroize::Zeroizing;
 
 use crate::security::{
     constant_time_eq, ensure_migration_recovered, key_verifier, load_security_config,
-    require_unlocked_key, save_security_config, security_status, set_unlocked_key, SecurityStatus,
-    KEY_LEN, PBKDF2_ITERATIONS,
+    refresh_policy_mac_for_config, require_unlocked_key, save_security_config, security_status,
+    set_unlocked_key, verify_policy_integrity, KdfAlgorithm, SecurityStatus, KEY_LEN,
 };
 use crate::{
     atomic_write, fsync_parent, lock_storage_ops, security_journal_path, try_lock_storage_ops,
@@ -246,6 +246,7 @@ pub(crate) fn recover_pending_biometric_cleanup<R: tauri::Runtime, M: tauri::Man
         BiometricCleanupMode::ClearUnconditionally => {
             if config.biometric_enrolled {
                 config.biometric_enrolled = false;
+                refresh_policy_mac_for_config(&mut config);
                 save_security_config(app, &config)?;
             }
             clear_stored_key_verified()?;
@@ -299,7 +300,21 @@ fn refresh_key_persistence(key: &[u8; KEY_LEN]) -> Result<(), String> {
 // prompt, so they run on the blocking pool rather than a Tokio worker thread.
 #[tauri::command]
 pub(crate) async fn enable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
-    crate::security::run_blocking(move || enable_biometric_inner(&app)).await
+    crate::security::run_blocking(move || {
+        // Enabling stores the vault key in the OS credential store, exactly as
+        // disabling removes it. A renderer call alone must not be able to
+        // persist that key without a fresh native user decision.
+        if !crate::security::confirm_security_state_change(
+            &app,
+            "Enable Biometric Unlock",
+            "The vault key will be stored in the system credential store so this device can unlock encrypted storage. Continue?",
+            "Enable Biometric Unlock",
+        ) {
+            return Err(crate::security::SECURITY_CONFIRMATION_CANCELLED.to_string());
+        }
+        enable_biometric_inner(&app)
+    })
+    .await
 }
 
 fn enable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, String> {
@@ -321,6 +336,8 @@ fn enable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, Stri
     // the process dies before the config commit, startup removes the key; if the
     // committed config says enrolled, recovery knows the enrollment succeeded.
     let key = require_unlocked_key()?;
+    // Do not launder a policy file that was edited after this vault was opened.
+    verify_policy_integrity(&config, &key)?;
     write_biometric_cleanup_journal(&app, BiometricCleanupMode::ClearUnlessEnrolled)?;
     if let Err(store_error) = store_key(&key) {
         let cleanup = crate::security::recover_interrupted_migration(&app);
@@ -334,6 +351,7 @@ fn enable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, Stri
     }
 
     config.biometric_enrolled = true;
+    refresh_policy_mac_for_config(&mut config);
     let save_result = save_security_config(&app, &config);
     let cleanup_result = crate::security::recover_interrupted_migration(&app);
     if let Err(save_error) = save_result {
@@ -351,7 +369,21 @@ fn enable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, Stri
 
 #[tauri::command]
 pub(crate) async fn disable_biometric(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
-    crate::security::run_blocking(move || disable_biometric_inner(&app)).await
+    crate::security::run_blocking(move || {
+        // Disabling biometric unlock removes the stored vault key from the OS
+        // credential store. A renderer call alone must not be able to erase that
+        // security state, so ask for a fresh native decision first.
+        if !crate::security::confirm_security_state_change(
+            &app,
+            "Disable Biometric Unlock",
+            "The stored vault key will be removed from the system credential store. You will need your password to unlock encrypted storage. Continue?",
+            "Disable Biometric Unlock",
+        ) {
+            return Err(crate::security::SECURITY_CONFIRMATION_CANCELLED.to_string());
+        }
+        disable_biometric_inner(&app)
+    })
+    .await
 }
 
 fn disable_biometric_inner(app: &tauri::AppHandle) -> Result<SecurityStatus, String> {
@@ -377,9 +409,13 @@ fn check_biometric_unlock_config(config: &crate::security::SecurityConfig) -> Re
     if !config.encryption_enabled || !config.biometric_enrolled {
         return Err("Biometric unlock is not configured".to_string());
     }
-    if config.pbkdf2_iterations < PBKDF2_ITERATIONS {
+    // Argon2id rekeying needs the password, which a biometric unlock does not
+    // have. Refusing here (instead of deriving a new key from the biometric
+    // key) keeps the stored verifier honest: the vault is upgraded by one
+    // password unlock, after which biometric works normally again.
+    if config.kdf != KdfAlgorithm::Argon2id {
         return Err(
-            "A one-time password unlock is required to upgrade encrypted storage after updating S3 Sidekick."
+            "Biometric unlock requires a one-time password unlock to upgrade encrypted storage after updating S3 Sidekick. Unlock with your password once, then biometric unlock will work again."
                 .to_string(),
         );
     }
@@ -443,6 +479,10 @@ fn unlock_biometric_inner(
         );
     }
 
+    // The stored key proves vault possession the same way the password does,
+    // so the policy tag can be checked before any protected data is served.
+    verify_policy_integrity(&config, &key)?;
+
     refresh_key_persistence(&key)?;
     let timeout = config.lock_timeout_minutes as u64 * 60;
     set_unlocked_key(Some(*key), timeout)?;
@@ -454,6 +494,13 @@ fn unlock_biometric_inner(
     if let Err(err) = crate::security::adopt_legacy_plaintext_files(&app, &mut config) {
         let _ = set_unlocked_key(None, 0);
         return Err(err);
+    }
+    // Upgrade a legacy configuration and re-sign flags changed by adoption.
+    // Best-effort for the same reason as password unlock.
+    let previous_mac = config.policy_mac.clone();
+    refresh_policy_mac_for_config(&mut config);
+    if config.policy_mac != previous_mac {
+        let _ = save_security_config(&app, &config);
     }
     Ok(security_status(&config))
 }
@@ -769,11 +816,17 @@ mod platform {
                 let msg = match status {
                     -128 => "Authentication was canceled".to_string(),
                     -25293 => "Authentication failed".to_string(),
-                    // errSecItemNotFound, and errSecMissingEntitlement (-34018)
-                    // which an unsigned build hits when the item is unreadable.
-                    -25300 | -34018 => {
+                    // Only a stable item-not-found proves the credential was
+                    // removed. errSecMissingEntitlement (-34018) is a signing /
+                    // access-group configuration error; unenrolling on it would
+                    // delete a perfectly valid key.
+                    -25300 => {
                         format!("{} (OSStatus {})", super::BIOMETRIC_KEY_MISSING, status)
                     }
+                    -34018 => format!(
+                        "Biometric credential store is unavailable (missing entitlement, OSStatus {})",
+                        status
+                    ),
                     _ => format!("Biometric authentication failed (OSStatus {})", status),
                 };
                 return Err(msg);
@@ -1028,13 +1081,15 @@ mod platform {
             }
 
             let cred = &*pcred;
-            let blob =
-                std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize);
-
-            if blob.len() != KEY_LEN {
+            // `CredentialBlob` can be null even when `CredReadW` succeeded.
+            // Constructing a slice from it is undefined behaviour, so check the
+            // pointer and length before touching the memory.
+            if cred.CredentialBlob.is_null() || cred.CredentialBlobSize as usize != KEY_LEN {
                 CredFree(pcred as *const std::ffi::c_void);
                 return Err("Invalid credential length".to_string());
             }
+            let blob =
+                std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize);
 
             let mut key = [0u8; KEY_LEN];
             key.copy_from_slice(blob);
@@ -1053,38 +1108,51 @@ mod platform {
 
     /// Whether the credential still exists and is readable. Does not prompt.
     ///
-    /// Returns `Ok(false)` both when the item is missing and when the credential
-    /// store is unreachable for this process (no logon session). Presence checks
-    /// after delete only need to fail closed when the key is *still readable*;
-    /// an inaccessible store cannot hand the key to the app either.
+    /// Only an explicit "not found" proves removal. An unreachable credential
+    /// store (for example, no logon session) cannot prove the key is gone, so
+    /// it fails closed and the cleanup journal is retained for a later retry.
     pub fn has_stored_key() -> Result<bool, String> {
         let target_wide = to_wide(TARGET);
-        unsafe {
-            let mut pcred: *mut CREDENTIALW = ptr::null_mut();
-            match CredReadW(
-                PCWSTR(target_wide.as_ptr()),
-                CRED_TYPE_GENERIC,
-                0,
-                &mut pcred,
-            ) {
-                Ok(()) => {
-                    if !pcred.is_null() {
-                        CredFree(pcred as *const std::ffi::c_void);
+        for attempt in 0..2 {
+            unsafe {
+                let mut pcred: *mut CREDENTIALW = ptr::null_mut();
+                match CredReadW(
+                    PCWSTR(target_wide.as_ptr()),
+                    CRED_TYPE_GENERIC,
+                    0,
+                    &mut pcred,
+                ) {
+                    Ok(()) => {
+                        if !pcred.is_null() {
+                            CredFree(pcred as *const std::ffi::c_void);
+                        }
+                        return Ok(true);
                     }
-                    Ok(true)
+                    Err(err) if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT => {
+                        // A transient not-found immediately after CredDeleteW
+                        // must not be accepted as proof of removal.
+                        if attempt == 0 {
+                            thread::sleep(Duration::from_millis(WINDOWS_CREDREAD_RETRY_DELAY_MS));
+                            continue;
+                        }
+                        return Ok(false);
+                    }
+                    Err(err) if err.code().0 == WINDOWS_NO_SUCH_LOGON_SESSION_HRESULT => {
+                        return Err(format!(
+                            "Cannot verify biometric credential removal because the credential store is unavailable: {}",
+                            err
+                        ));
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "Failed to verify biometric credential removal: {}",
+                            err
+                        ));
+                    }
                 }
-                Err(err)
-                    if err.code().0 == WINDOWS_HELLO_NOT_FOUND_HRESULT
-                        || err.code().0 == WINDOWS_NO_SUCH_LOGON_SESSION_HRESULT =>
-                {
-                    Ok(false)
-                }
-                Err(err) => Err(format!(
-                    "Failed to verify biometric credential removal: {}",
-                    err
-                )),
             }
         }
+        Err("Failed to verify biometric credential removal after retry".to_string())
     }
 }
 
@@ -1111,5 +1179,47 @@ mod platform {
 
     pub fn has_stored_key() -> Result<bool, String> {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_biometric_unlock_config;
+    use crate::security::{KdfAlgorithm, SecurityConfig};
+
+    fn biometric_config(kdf: KdfAlgorithm) -> SecurityConfig {
+        SecurityConfig {
+            initialized: true,
+            encryption_enabled: true,
+            salt: "c2FsdA==".to_string(),
+            verifier: "dmVyaWZpZXI=".to_string(),
+            lock_timeout_minutes: 15,
+            pbkdf2_iterations: 600_000,
+            kdf,
+            argon2_memory_kib: 65_536,
+            argon2_iterations: 3,
+            argon2_parallelism: 4,
+            policy_schema: 3,
+            biometric_enrolled: true,
+            legacy_plaintext_adopted: true,
+            legacy_plaintext_adoption_proof: String::new(),
+            policy_mac: "dGFn".to_string(),
+        }
+    }
+
+    #[test]
+    fn biometric_refuses_a_pbkdf2_vault_until_password_unlock() {
+        let err = check_biometric_unlock_config(&biometric_config(KdfAlgorithm::Pbkdf2))
+            .expect_err("a PBKDF2 vault cannot be rekeyed without the password");
+        assert!(
+            err.contains("one-time password unlock"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn biometric_accepts_an_argon2id_vault() {
+        check_biometric_unlock_config(&biometric_config(KdfAlgorithm::Argon2id))
+            .expect("an Argon2id vault needs no key-only migration");
     }
 }

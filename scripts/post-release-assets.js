@@ -12,12 +12,10 @@ const RELEASE_DIR = path.join(REPOSITORY_ROOT, "release");
 const BUILD_ONLY_DIRECTORIES = [
   "app",
   "appimage",
-  "deb",
   "dmg",
   "macos",
   "msi",
   "nsis",
-  "rpm",
 ];
 const BUILD_ONLY_FILES = [
   "builder-debug.yml",
@@ -94,8 +92,16 @@ function shouldSkipConfiguredMirror(environment = process.env) {
   );
 }
 
+// DEB and RPM are retired. A stale package left in an old bundle directory
+// must never be mirrored into the post-release download location.
+const RETIRED_LINUX_PACKAGE_PATTERN = /\.(?:deb|rpm)$/i;
+
 function isMirrorableReleaseEntry(name) {
-  return Boolean(name) && !name.startsWith(".");
+  return (
+    Boolean(name) &&
+    !name.startsWith(".") &&
+    !RETIRED_LINUX_PACKAGE_PATTERN.test(name)
+  );
 }
 
 function getReleaseEntries(releaseDir) {
@@ -317,6 +323,7 @@ export {
   BUILD_ONLY_FILES,
   CLI_FLAG,
   RELEASE_DIR,
+  RETIRED_LINUX_PACKAGE_PATTERN,
   cleanReleaseArtifacts,
   copyReleaseAssets,
   finalizeReleaseAssets,
