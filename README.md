@@ -16,6 +16,12 @@ Download the installers for Windows, macOS, and Linux from [GitHub Releases](htt
 
 See [architecture and security notes](docs/ARCHITECTURE.md), [release runbook](docs/RELEASE.md), [settings glossary](docs/SETTINGS_GLOSSARY.md), and [support channels](docs/SUPPORT.md).
 
+## Features
+
+S3 Sidekick browses S3-compatible storage and, in this beta, SFTP servers.
+
+- **SFTP (beta):** connect with a password, a private key, or keyboard-interactive sign-in. Browse, upload, download with resume, rename and move, delete, and preview files. The beta's limits, such as RSA keys and host-key handling, are listed under **Settings > Security > SFTP (beta)**.
+
 ## Quickstart (development)
 
 Requirements: Node 24+ (26.13.0 is the tested CI line), the Rust version

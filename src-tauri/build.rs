@@ -1,3 +1,7 @@
+// A build script that cannot generate the Tauri context must stop the build;
+// the crate-wide `expect_used` lint is for app code, not this script.
+#![allow(clippy::expect_used)]
+
 // The app manifest turns on Tauri's access check for the app's own
 // commands: each one gets an `allow-<command>` permission, and only the
 // capabilities in capabilities/ grant them. Keep this list in step with
@@ -69,6 +73,7 @@ const COMMANDS: &[&str] = &[
     "set_security_encryption",
     "sftp_connect",
     "sftp_connect_cancel",
+    "sftp_connect_cancel_pending",
     "sftp_connect_continue",
     "sftp_create_dir",
     "sftp_delete",

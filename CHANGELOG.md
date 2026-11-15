@@ -19,6 +19,12 @@
 
 ## Changes in `v0.13.0-beta.1:`
 
+- **SFTP (beta):** Connect to an SFTP server with a password, a private key, or keyboard-interactive sign-in. Browse, upload, download with resume, rename and move, delete, and preview files. The first connection asks you to trust the server's host key, which is saved with the connection; a changed key is refused until you reset it.
+- **SFTP limits:** RSA host and user keys, SSH agent, and PuTTY `.ppk` keys are not supported. Transfers have no end-to-end checksum, replacing a file is not atomic (a replaced file keeps its permissions but not its owner), and symbolic links are shown but not followed or replaced by an upload. Imported private keys are saved inside the connection and follow vault encryption, so they are stored in plain text when encryption is off. Settings > Security lists the full set.
+- **Move on AWS-hosted endpoints:** Only Amazon S3 hostnames get AWS move and create-only behavior. An endpoint on another `amazonaws.com` host (an EC2 instance, a load balancer, API Gateway, S3 on Outposts, Object Lambda, access points or Express One Zone) is treated as a generic S3-compatible server, so Move is off and overwrite protection asks first.
+- **Opening links and folders:** Opening a link, a folder, or a finished download's folder no longer freezes the window on Linux while the browser or file manager stays open.
+- **Settings > Security:** A new note says what encryption does not cover: connection names, endpoints, last locations and recent folders stay in unencrypted web storage, survive a lock, and are deleted by a factory reset. The transfer queue is no longer copied into web storage before the backend queue loads.
+
 ## Changes in `v0.12.0:`
 
 - **Linux packages:** DEB and RPM packages are retired. Linux builds now ship as the AppImage, which updates itself, and the side-loaded Flatpak. If you installed the DEB or RPM, remove it (`sudo apt remove s3-sidekick` or `sudo dnf remove s3-sidekick`) and install the AppImage or Flatpak instead; the DEB and RPM will not receive further releases.

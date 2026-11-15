@@ -750,6 +750,15 @@ async fn e2e_minio_conditional_delete_is_unsupported_and_moves_refuse_early() {
     put(&raw, &bucket, "move/automatic-source.txt", "move bytes").await;
     let app = make_app();
     let session = connect(&app, &env.endpoint_minio, &env).await;
+    record(
+        test,
+        "connect reports conditional DELETE unsupported for the MinIO endpoint, so Move is disabled",
+        !session.conditional_delete_supported,
+        serde_json::json!({
+            "endpoint": env.endpoint_minio,
+            "conditional_delete_supported": session.conditional_delete_supported,
+        }),
+    );
     let object_move_copy = s3::copy_object_to(
         app.state::<AppState>(),
         session.connection_id.clone(),

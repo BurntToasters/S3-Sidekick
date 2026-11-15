@@ -28,6 +28,7 @@ import { handleUploadButton, handleUploadFolderButton } from "./app-upload.ts";
 import {
   currentActionContext,
   getObjectAction,
+  isOfferedFor,
   resolveActionLabel,
   runObjectAction,
   MOVE_UNSUPPORTED_REASON,
@@ -47,15 +48,19 @@ export function buildObjectMenuItems(
   const items: MenuItem[] = [];
   if (total === 0) return items;
 
+  // A registry entry's disabled reason (a non-UTF-8 name, for example) becomes
+  // the menu item's disabled state, so the menu and the bar agree.
   const entry = (id: string): MenuAction => {
     const action = getObjectAction(id);
     if (!action) throw new Error(`Unknown object action: ${id}`);
+    const blocked = action.disabledReason?.(selection) ?? null;
     return {
       label: resolveActionLabel(action, selection),
       action: id,
       icon: action.icon,
       shortcut: action.shortcut,
       danger: action.danger,
+      ...(blocked === null ? {} : { disabled: true, disabledReason: blocked }),
     };
   };
   const disabledEntry = (id: string, reason: string): MenuAction => ({
@@ -63,14 +68,22 @@ export function buildObjectMenuItems(
     disabled: true,
     disabledReason: reason,
   });
+  // The registry decides what the menu offers for this selection. S3-only
+  // entries are left out over SFTP; no menu keeps its own list of them.
+  const offer = (id: string): void => {
+    if (isOfferedFor(id, selection)) items.push(entry(id));
+  };
+  const offerDisabled = (id: string, reason: string): void => {
+    if (isOfferedFor(id, selection)) items.push(disabledEntry(id, reason));
+  };
   const moveUnsupported = !selection.moveSupported;
 
   if (total === 1 && folderPrefixes.length === 1) {
     items.push(entry("open-folder"));
     items.push(entry("properties"));
     items.push(entry("copy-keys"));
-    if (selection.arnSupported) items.push(entry("copy-arns"));
-    items.push(entry("copy-s3-uri"));
+    if (selection.arnSupported) offer("copy-arns");
+    offer("copy-s3-uri");
     items.push(entry("rename"));
     if (moveUnsupported) {
       // "Copy to…" stays usable; Move is listed disabled with the reason.
@@ -88,11 +101,11 @@ export function buildObjectMenuItems(
     if (selection.canPreviewSingle) items.push(entry("preview"));
     items.push(entry("properties"));
     items.push(entry("download"));
-    items.push(entry("copy-url"));
-    items.push(entry("share-link"));
+    offer("copy-url");
+    offer("share-link");
     items.push(entry("copy-keys"));
-    if (selection.arnSupported) items.push(entry("copy-arns"));
-    items.push(entry("copy-s3-uri"));
+    if (selection.arnSupported) offer("copy-arns");
+    offer("copy-s3-uri");
     items.push(entry("rename"));
     if (moveUnsupported) {
       // "Copy to…" stays usable; Move is listed disabled with the reason.
@@ -123,21 +136,17 @@ export function buildObjectMenuItems(
   items.push(entry("copy-keys"));
   if (fileKeys.length > 0) {
     if (mixed) {
-      items.push(
-        disabledEntry("copy-url", "Folders have no URL. Select files only."),
-      );
+      offerDisabled("copy-url", "Folders have no URL. Select files only.");
     } else {
-      items.push(entry("copy-url"));
+      offer("copy-url");
     }
-    items.push(
-      disabledEntry(
-        "share-link",
-        "Pre-signed URLs are made for one file at a time.",
-      ),
+    offerDisabled(
+      "share-link",
+      "Pre-signed URLs are made for one file at a time.",
     );
   }
-  if (selection.arnSupported) items.push(entry("copy-arns"));
-  items.push(entry("copy-s3-uri"));
+  if (selection.arnSupported) offer("copy-arns");
+  offer("copy-s3-uri");
   items.push(disabledEntry("rename", "Select one item to rename."));
   // "Copy to…" stays usable for multi-selection; Move is listed disabled
   // with the reason when the provider can't move objects.

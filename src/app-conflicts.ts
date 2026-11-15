@@ -1,6 +1,8 @@
 import { invoke } from "./ipc.ts";
 import { invokeS3For } from "./connection.ts";
 import { state } from "./state.ts";
+import { sftpExists } from "./sftp-commands.ts";
+import { sftpPathFromKey } from "./sftp.ts";
 import { showConfirm, showConfirmWithCheckbox } from "./dialogs.ts";
 import { saveSettings } from "./settings.ts";
 import { logActivity } from "./activity-log.ts";
@@ -264,10 +266,13 @@ export async function resolveObjectConflict(
   const conflictPolicy = state.currentSettings.conflictPolicy;
   let exists: boolean;
   try {
-    exists = await invokeS3For<boolean>(connectionId, "object_exists", {
-      bucket,
-      key,
-    });
+    exists =
+      state.protocol === "sftp"
+        ? await sftpExists(connectionId, sftpPathFromKey(key))
+        : await invokeS3For<boolean>(connectionId, "object_exists", {
+            bucket,
+            key,
+          });
   } catch (err) {
     // Fail closed. A transient error or a denied HeadObject must not be read as
     // "the object is absent", which would silently authorise an overwrite.

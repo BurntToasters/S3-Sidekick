@@ -194,3 +194,65 @@ describe("object context menu items", () => {
     }
   });
 });
+
+describe("object context menu over SFTP", () => {
+  const sftp = (overrides: Partial<ObjectActionContext> = {}) =>
+    selection({ protocol: "sftp", moveSupported: true, ...overrides });
+
+  it("offers no S3-only entry for a single file, a multi-selection, or a mixed one", () => {
+    const single = labels(
+      buildObjectMenuItems(sftp({ fileKeys: ["home/demo/a.txt"] })),
+    );
+    const many = labels(
+      buildObjectMenuItems(
+        sftp({ fileKeys: ["home/demo/a.txt", "home/demo/b.txt"] }),
+      ),
+    );
+    const mixed = labels(
+      buildObjectMenuItems(
+        sftp({
+          fileKeys: ["home/demo/a.txt"],
+          folderPrefixes: ["home/demo/d/"],
+        }),
+      ),
+    );
+    for (const list of [single, many, mixed]) {
+      expect(list).not.toContain("Copy URL");
+      expect(list).not.toContain("Copy URLs");
+      expect(list).not.toContain("Share link\u2026");
+      expect(list).not.toContain("Copy S3 URI");
+      expect(list).not.toContain("Copy to\u2026");
+    }
+    expect(single).toContain("Copy path");
+    expect(single).toContain("Move to\u2026");
+  });
+
+  it("keeps the S3 copy and share entries for an S3 selection", () => {
+    const s3 = labels(
+      buildObjectMenuItems(
+        selection({
+          protocol: "s3",
+          fileKeys: ["a.txt"],
+          moveSupported: true,
+          canPreviewSingle: true,
+        }),
+      ),
+    );
+    expect(s3).toContain("Copy URL");
+    expect(s3).toContain("Share link\u2026");
+    expect(s3).toContain("Copy S3 URI");
+  });
+
+  it("disables rename, delete and move for a non-UTF-8 selection", () => {
+    const items = buildObjectMenuItems(
+      sftp({ fileKeys: ["home/demo/bad\uFFFD.txt"], lossySelection: true }),
+    );
+    for (const label of ["Rename", "Delete", "Move to\u2026"]) {
+      const item = actions(items).find(
+        (candidate) => candidate.label === label,
+      );
+      expect(item?.disabled, label).toBe(true);
+      expect(item?.disabledReason).toMatch(/read-only/);
+    }
+  });
+});

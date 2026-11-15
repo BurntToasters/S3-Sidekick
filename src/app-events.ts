@@ -124,6 +124,7 @@ import {
   handleBookmarkSave,
   switchToBookmark,
   setConnectionInputs,
+  loadSftpSavedConnectionIntoForm,
   refreshBookmarkBar,
   updateBookmarkBtn,
   handleNewConnection,
@@ -692,13 +693,18 @@ function wireSecuritySettings(): void {
       try {
         const saved = await loadConnection();
         if (saved) {
-          setConnectionInputs(
-            saved.endpoint,
-            saved.region,
-            saved.access_key,
-            saved.secret_key,
-            saved.session_token ?? "",
-          );
+          // An SFTP record never goes through the S3 input setter.
+          if (saved.protocol === "sftp") {
+            loadSftpSavedConnectionIntoForm(saved);
+          } else {
+            setConnectionInputs(
+              saved.endpoint,
+              saved.region,
+              saved.access_key,
+              saved.secret_key,
+              saved.session_token ?? "",
+            );
+          }
         }
       } catch {
         /* connection unavailable */

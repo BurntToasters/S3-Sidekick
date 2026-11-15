@@ -772,3 +772,223 @@ describe("updateBookmark identity and validation", () => {
     expect(commandCalls("save_bookmarks")).toHaveLength(0);
   });
 });
+
+const sftpBookmark = {
+  name: "files",
+  endpoint: "sftp://example.com:22",
+  region: "",
+  access_key: "alice",
+  secret_key: "pw",
+  protocol: "sftp",
+  sftp: {
+    auth: "key",
+    private_key: "PRIVATE-KEY-TEXT",
+    host_key: "ssh-ed25519 AAAAC3",
+  },
+};
+
+describe("SFTP bookmark shape", () => {
+  it("loads SFTP bookmarks alongside S3 bookmarks", async () => {
+    standardMock([alphaBookmark, sftpBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    expect(bookmarks.getBookmarkLoadError()).toBeNull();
+    expect(bookmarks.getBookmarks()).toEqual([alphaBookmark, sftpBookmark]);
+  });
+
+  it("drops entries whose protocol or SFTP settings do not match their shape", async () => {
+    const invalid: unknown[] = [
+      { ...alphaBookmark, protocol: "ftp" },
+      { ...alphaBookmark, protocol: "s3" },
+      { ...alphaBookmark, protocol: "SFTP" },
+      { ...alphaBookmark, sftp: { auth: "password" } },
+      { ...alphaBookmark, endpoint: "sftp://example.com:22" },
+      { ...sftpBookmark, sftp: undefined },
+      { ...sftpBookmark, endpoint: "https://example.com" },
+      { ...sftpBookmark, endpoint: "sftp://example.com" },
+      { ...sftpBookmark, sftp: { auth: "agent" } },
+      { ...sftpBookmark, sftp: { auth: "password", private_key: 5 } },
+      {
+        ...sftpBookmark,
+        sftp: { auth: "key", private_key: "x".repeat(16385) },
+      },
+      {
+        ...sftpBookmark,
+        sftp: { auth: "key", host_key: "x".repeat(8193) },
+      },
+    ];
+    standardMock([alphaBookmark, ...invalid]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    expect(bookmarks.getBookmarks()).toEqual([alphaBookmark]);
+  });
+
+  it("accepts key material at the stored length limits", async () => {
+    const boundary = {
+      ...sftpBookmark,
+      sftp: {
+        auth: "key",
+        private_key: "x".repeat(16384),
+        host_key: "y".repeat(8192),
+      },
+    };
+    standardMock([boundary]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    expect(bookmarks.getBookmarks()).toEqual([boundary]);
+  });
+
+  it("exports SFTP bookmarks without the password or private key", async () => {
+    standardMock([sftpBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const redacted = bookmarks.exportBookmarksJson();
+    expect(redacted).not.toContain("PRIVATE-KEY-TEXT");
+    expect(redacted).not.toContain('"pw"');
+    expect(JSON.parse(redacted)).toEqual([
+      {
+        name: "files",
+        endpoint: "sftp://example.com:22",
+        region: "",
+        access_key: "alice",
+        secret_key: "",
+        protocol: "sftp",
+        sftp: { auth: "key", host_key: "ssh-ed25519 AAAAC3" },
+      },
+    ]);
+  });
+
+  it("exports the private key only when secrets are included", async () => {
+    standardMock([sftpBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    expect(JSON.parse(bookmarks.exportBookmarksJson(true))).toEqual([
+      sftpBookmark,
+    ]);
+  });
+
+  it("imports SFTP bookmarks through the same validator", async () => {
+    standardMock([]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    const redacted = { ...sftpBookmark, secret_key: "" };
+
+    await expect(
+      bookmarks.importBookmarksJson(
+        JSON.stringify([
+          redacted,
+          { ...sftpBookmark, name: "bad", sftp: { auth: "agent" } },
+        ]),
+      ),
+    ).resolves.toEqual({ imported: 1, skipped: 1, duplicates: 0, invalid: 1 });
+    expect(bookmarks.getBookmarks()).toEqual([redacted]);
+  });
+
+  it("names SFTP endpoints with the SFTP provider label", async () => {
+    const bookmarks = await loadBookmarksModule();
+
+    expect(
+      bookmarks.deriveProviderLabelFromEndpoint("sftp://example.com:22"),
+    ).toBe("SFTP");
+    expect(
+      bookmarks.deriveProviderLabelFromEndpoint("SFTP://example.com:22"),
+    ).toBe("SFTP");
+    expect(
+      bookmarks.deriveProviderLabelFromEndpoint("https://s3.amazonaws.com"),
+    ).toBe("AWS");
+  });
+
+  it("renders SFTP bookmarks in the connection layout with an SFTP badge", async () => {
+    standardMock([sftpBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    const list = document.createElement("ul");
+    bookmarks.renderBookmarkList(
+      list,
+      () => {},
+      () => {},
+      { layout: "connection" },
+    );
+    expect(list.querySelector(".bookmark__provider")?.textContent).toBe("SFTP");
+  });
+});
+
+describe("SFTP host key edits", () => {
+  const sftpIdentity = {
+    endpoint: "sftp://example.com:22",
+    access_key: "alice",
+  };
+
+  it("sets and clears the pinned host key without touching other SFTP settings", async () => {
+    standardMock([sftpBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+
+    await expect(
+      bookmarks.updateBookmark(sftpIdentity, {
+        sftp: { host_key: "ssh-ed25519 NEWKEY" },
+      }),
+    ).resolves.toBe(true);
+    expect(bookmarks.getBookmarks()[0].sftp).toEqual({
+      auth: "key",
+      private_key: "PRIVATE-KEY-TEXT",
+      host_key: "ssh-ed25519 NEWKEY",
+    });
+
+    await expect(
+      bookmarks.updateBookmark(sftpIdentity, { sftp: { host_key: null } }),
+    ).resolves.toBe(true);
+    expect(bookmarks.getBookmarks()[0].sftp).toEqual({
+      auth: "key",
+      private_key: "PRIVATE-KEY-TEXT",
+    });
+    const saves = commandCalls("save_bookmarks");
+    const persisted = JSON.parse(
+      (saves.at(-1)![1] as { json: string }).json,
+    ) as Array<{ sftp?: Record<string, unknown> }>;
+    expect(persisted[0].sftp).toEqual({
+      auth: "key",
+      private_key: "PRIVATE-KEY-TEXT",
+    });
+  });
+
+  it("refuses a host key change on a bookmark that is not SFTP", async () => {
+    standardMock([alphaBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockClear();
+
+    await expect(
+      bookmarks.updateBookmark(
+        {
+          endpoint: alphaBookmark.endpoint,
+          access_key: alphaBookmark.access_key,
+        },
+        { sftp: { host_key: "ssh-ed25519 NEWKEY" } },
+      ),
+    ).rejects.toThrow("Only SFTP connections have a host key.");
+    expect(bookmarks.getBookmarks()).toEqual([alphaBookmark]);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
+  });
+
+  it("refuses an oversized host key and persists nothing", async () => {
+    standardMock([sftpBookmark]);
+    const bookmarks = await loadBookmarksModule();
+    await bookmarks.loadBookmarks();
+    mockInvoke.mockClear();
+
+    await expect(
+      bookmarks.updateBookmark(sftpIdentity, {
+        sftp: { host_key: "k".repeat(8193) },
+      }),
+    ).rejects.toThrow("Those details are not valid");
+    expect(bookmarks.getBookmarks()).toEqual([sftpBookmark]);
+    expect(commandCalls("save_bookmarks")).toHaveLength(0);
+  });
+});

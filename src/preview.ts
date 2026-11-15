@@ -1,4 +1,7 @@
 import { invokeS3 } from "./connection.ts";
+import { sftpPathFromKey } from "./sftp.ts";
+import { sftpPreview } from "./sftp-commands.ts";
+import { reportSftpConnectionLost } from "./sftp-move.ts";
 import { setStatus } from "./app-status.ts";
 import { escapeHtml, formatSize, basename, friendlyError } from "./utils.ts";
 import { state } from "./state.ts";
@@ -499,10 +502,13 @@ export async function openPreview(key: string): Promise<void> {
   body.innerHTML = `<div class="metadata-loading" role="status" data-preview-loading><span class="spinner" aria-hidden="true"></span>Loading preview&#8230;</div>`;
 
   try {
-    const resp = await invokeS3<PreviewResponse>("preview_object", {
-      bucket,
-      key,
-    });
+    const resp =
+      state.protocol === "sftp"
+        ? await sftpPreview(connectionId, sftpPathFromKey(key))
+        : await invokeS3<PreviewResponse>("preview_object", {
+            bucket,
+            key,
+          });
 
     if (
       seq !== previewSeq ||
@@ -572,6 +578,7 @@ export async function openPreview(key: string): Promise<void> {
       state.connectionIdentity !== connectionIdentity
     )
       return;
+    if (await reportSftpConnectionLost(err)) return;
     body.setAttribute("aria-busy", "false");
     body.innerHTML =
       `<div class="metadata-loading" role="alert">Failed to load preview: ${escapeHtml(friendlyError(err))} ` +

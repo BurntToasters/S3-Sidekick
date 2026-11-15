@@ -182,6 +182,12 @@
                   class="reconnect-card__endpoint"
                 ></span>
                 <span
+                  id="reconnect-card-protocol"
+                  class="bookmark__provider"
+                  hidden
+                  >SFTP</span
+                >
+                <span
                   id="reconnect-card-locked"
                   class="conn-saved-empty__text"
                   hidden
@@ -196,13 +202,43 @@
               </button>
             </div>
             <div class="connection-screen__form-card">
-              <h2 class="connection-screen__title">Connect to S3 storage</h2>
+              <h2 id="conn-screen-title" class="connection-screen__title">
+                Connect to S3 storage
+              </h2>
               <p class="connection-screen__subtitle">
                 Enter credentials, or pick a saved connection to connect
                 instantly.
               </p>
 
               <div class="connection-form">
+                <fieldset class="conn-protocol" id="conn-protocol">
+                  <legend class="conn-protocol__legend">Protocol</legend>
+                  <div class="conn-protocol__options">
+                    <label class="conn-protocol__option" for="conn-protocol-s3">
+                      <input
+                        type="radio"
+                        id="conn-protocol-s3"
+                        name="conn-protocol"
+                        value="s3"
+                        checked
+                      />
+                      <span>S3</span>
+                    </label>
+                    <label
+                      class="conn-protocol__option"
+                      for="conn-protocol-sftp"
+                    >
+                      <input
+                        type="radio"
+                        id="conn-protocol-sftp"
+                        name="conn-protocol"
+                        value="sftp"
+                      />
+                      <span>SFTP</span>
+                    </label>
+                  </div>
+                </fieldset>
+
                 <div class="form-row">
                   <div class="form-group">
                     <label for="conn-name">Name</label>
@@ -221,7 +257,7 @@
                   </div>
                 </div>
 
-                <div class="form-row">
+                <div class="form-row" id="conn-preset-row">
                   <div class="form-group">
                     <label for="conn-provider-preset"
                       >Provider preset (optional)</label
@@ -260,7 +296,7 @@
                   </div>
                 </div>
 
-                <div class="form-row">
+                <div class="form-row" id="conn-endpoint-row">
                   <div class="form-group form-group--wide">
                     <label for="conn-endpoint">Endpoint URL</label>
                     <input
@@ -293,7 +329,7 @@
                   </div>
                 </div>
 
-                <div class="form-row">
+                <div class="form-row" id="conn-access-row">
                   <div class="form-group">
                     <label for="conn-access-key">Access key</label>
                     <input
@@ -311,7 +347,7 @@
                   </div>
                 </div>
 
-                <div class="form-row">
+                <div class="form-row" id="conn-secret-row">
                   <div class="form-group">
                     <label for="conn-secret-key">Secret key</label>
                     <div class="field-with-toggle field-with-toggle--full">
@@ -341,7 +377,7 @@
                   </div>
                 </div>
 
-                <div class="form-row">
+                <div class="form-row" id="conn-token-row">
                   <div class="form-group">
                     <label for="conn-session-token"
                       >Session token
@@ -373,6 +409,135 @@
                   </div>
                 </div>
 
+                <div class="form-row" id="conn-sftp-host-row" hidden>
+                  <div class="form-group form-group--wide">
+                    <label for="conn-sftp-host">Host</label>
+                    <input
+                      id="conn-sftp-host"
+                      class="field field--full"
+                      type="text"
+                      placeholder="files.example.com"
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      maxlength="253"
+                    />
+                  </div>
+                  <div class="form-group form-group--narrow">
+                    <label for="conn-sftp-port">Port</label>
+                    <input
+                      id="conn-sftp-port"
+                      class="field field--full"
+                      type="text"
+                      inputmode="numeric"
+                      value="22"
+                      spellcheck="false"
+                      autocomplete="off"
+                      maxlength="5"
+                    />
+                  </div>
+                </div>
+
+                <div class="form-row" id="conn-sftp-user-row" hidden>
+                  <div class="form-group">
+                    <label for="conn-sftp-username">Username</label>
+                    <input
+                      id="conn-sftp-username"
+                      class="field field--full"
+                      type="text"
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="username"
+                      maxlength="256"
+                    />
+                  </div>
+                </div>
+
+                <div class="form-row" id="conn-sftp-auth-row" hidden>
+                  <div class="form-group">
+                    <label for="conn-sftp-auth">Authentication</label>
+                    <select id="conn-sftp-auth" class="field field--full">
+                      <option value="password">Password</option>
+                      <option value="key">Private key</option>
+                      <option value="keyboard-interactive">
+                        Keyboard-interactive
+                      </option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-row" id="conn-sftp-password-row" hidden>
+                  <div class="form-group">
+                    <label for="conn-sftp-password">Password</label>
+                    <div class="field-with-toggle field-with-toggle--full">
+                      <input
+                        id="conn-sftp-password"
+                        class="field field--full"
+                        type="password"
+                        spellcheck="false"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        autocomplete="off"
+                        maxlength="4096"
+                      />
+                      <button
+                        id="sftp-password-toggle"
+                        type="button"
+                        class="field-toggle-btn field-toggle-btn--text"
+                        aria-label="Show password"
+                        aria-pressed="false"
+                      >
+                        Show
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="form-row" id="conn-sftp-key-row" hidden>
+                  <div class="form-group">
+                    <span class="conn-sftp-key__label">Private key file</span>
+                    <div class="conn-sftp-key">
+                      <button
+                        id="conn-sftp-key-choose"
+                        type="button"
+                        class="btn"
+                      >
+                        Choose key file…
+                      </button>
+                      <p
+                        id="conn-sftp-key-status"
+                        class="conn-sftp-key__status"
+                        aria-live="polite"
+                      >
+                        No key chosen.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="form-row" id="conn-sftp-passphrase-row" hidden>
+                  <div class="form-group">
+                    <label for="conn-sftp-passphrase">Passphrase</label>
+                    <input
+                      id="conn-sftp-passphrase"
+                      class="field field--full"
+                      type="password"
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      maxlength="4096"
+                      aria-describedby="conn-sftp-passphrase-hint"
+                      disabled
+                    />
+                    <p id="conn-sftp-passphrase-hint" class="field-hint">
+                      Needed only when the key is encrypted.
+                    </p>
+                  </div>
+                </div>
+
                 <div class="form-actions">
                   <button
                     type="button"
@@ -386,6 +551,15 @@
                       data-icon="bookmark"
                     ></span>
                     Save connection
+                  </button>
+                  <button
+                    type="button"
+                    id="conn-sftp-reset-hostkey"
+                    class="btn btn--ghost"
+                    title="Forget the saved host key for this server"
+                    hidden
+                  >
+                    Reset host key
                   </button>
                   <div class="form-actions__end">
                     <button
@@ -2141,6 +2315,41 @@
                     maxlength="16384"
                   />
                 </div>
+                <div id="bookmark-edit-sftp" class="bookmark-edit__sftp" hidden>
+                  <div class="bookmark-edit__field">
+                    <span class="bookmark-edit__label">Host</span>
+                    <span id="bookmark-edit-sftp-host"></span>
+                  </div>
+                  <div class="bookmark-edit__field">
+                    <span class="bookmark-edit__label">Port</span>
+                    <span id="bookmark-edit-sftp-port"></span>
+                  </div>
+                  <div class="bookmark-edit__field">
+                    <span class="bookmark-edit__label">Username</span>
+                    <span id="bookmark-edit-sftp-username"></span>
+                  </div>
+                  <div class="bookmark-edit__field">
+                    <span class="bookmark-edit__label">Authentication</span>
+                    <span id="bookmark-edit-sftp-auth"></span>
+                  </div>
+                  <div class="bookmark-edit__field">
+                    <span class="bookmark-edit__label">Host key</span>
+                    <span id="bookmark-edit-sftp-hostkey"></span>
+                  </div>
+                  <p class="setting-note">
+                    To change the authentication method or key, re-save this
+                    connection from the connection form.
+                  </p>
+                  <div class="bookmark-edit__actions">
+                    <button
+                      type="button"
+                      id="bookmark-edit-reset-hostkey"
+                      class="btn btn--ghost"
+                    >
+                      Reset host key
+                    </button>
+                  </div>
+                </div>
                 <p
                   id="bookmark-edit-error"
                   class="form-error"
@@ -2311,6 +2520,71 @@
                   Enable
                 </button>
               </div>
+              <div class="setting-item setting-item--stacked">
+                <span class="setting-label">What encryption covers</span>
+                <p id="security-web-storage-note" class="setting-description">
+                  Encryption protects saved credentials, connections and
+                  bookmarks. Some history is kept in the app's web storage and
+                  is not encrypted: connection names and endpoints with the last
+                  bucket and folder, recent folders for downloads, uploads,
+                  copies and moves, and the last bucket. Locking does not clear
+                  it. A factory reset (Reset all settings without keeping saved
+                  connections) deletes it.
+                </p>
+              </div>
+              <section
+                class="settings-group"
+                aria-labelledby="sftp-note-heading"
+              >
+                <h3 id="sftp-note-heading" class="setting-section">
+                  SFTP (beta)
+                </h3>
+                <p class="setting-description">
+                  These limits apply to SFTP connections in this beta.
+                </p>
+                <ul class="setting-description">
+                  <li>
+                    RSA host keys and RSA private keys are not supported. Use
+                    Ed25519 or ECDSA keys.
+                  </li>
+                  <li>
+                    SSH agent and PuTTY .ppk keys are not supported. Convert a
+                    .ppk key with PuTTYgen first.
+                  </li>
+                  <li>
+                    The server's host key is shown for you to confirm on the
+                    first connection, then saved with the connection. A changed
+                    key is refused until you choose Reset host key for that
+                    connection.
+                  </li>
+                  <li>
+                    Private keys you import are saved inside the saved
+                    connection. They follow vault encryption, so with encryption
+                    off they are stored in plain text.
+                  </li>
+                  <li>
+                    SFTP transfers have no end-to-end checksum. Only the file
+                    size and modification time are checked.
+                  </li>
+                  <li>
+                    Replacing an existing file is not atomic. The old file moves
+                    to a hidden backup (.name.s3sk-bak-…), which is restored if
+                    the replacement fails. If the app stops in between, rename
+                    that backup to restore the file. A backup that cannot be
+                    removed afterwards is reported, with its path.
+                  </li>
+                  <li>
+                    A replaced file keeps its permissions but not its owner: the
+                    new file belongs to your login. New files get the server's
+                    default permissions.
+                  </li>
+                  <li>
+                    Symbolic links are shown but not followed, and an upload
+                    never replaces one. File names that are not valid UTF-8 are
+                    read-only.
+                  </li>
+                </ul>
+              </section>
             </div>
 
             <div
@@ -2670,6 +2944,108 @@
             </button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div
+      id="sftp-trust-overlay"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sftp-trust-title"
+      aria-describedby="sftp-trust-explain"
+    >
+      <div class="modal modal--sftp">
+        <div class="modal__header">
+          <h2 id="sftp-trust-title">Trust this server?</h2>
+          <button
+            type="button"
+            id="sftp-trust-close"
+            class="btn btn--icon"
+            aria-label="Close"
+          >
+            <span class="lucide-icon" data-icon="x"></span>
+          </button>
+        </div>
+        <div class="modal__body">
+          <p id="sftp-trust-explain" class="sftp-trust__explain">
+            The server at
+            <span id="sftp-trust-endpoint" class="sftp-trust__endpoint"></span>
+            presented a host key this app has not seen before. Check the
+            fingerprint with your server administrator before you trust it.
+          </p>
+          <dl class="sftp-trust__facts">
+            <dt>Key type</dt>
+            <dd id="sftp-trust-key-type"></dd>
+            <dt>Fingerprint (SHA-256)</dt>
+            <dd>
+              <pre
+                class="sftp-trust__fingerprint"
+              ><code id="sftp-trust-fingerprint"></code></pre>
+            </dd>
+          </dl>
+          <p class="setting-note">
+            A trusted key is remembered for saved connections, so a later
+            connection is refused if the server presents a different key.
+          </p>
+        </div>
+        <div class="modal__footer">
+          <button type="button" id="sftp-trust-cancel" class="btn btn--ghost">
+            Cancel
+          </button>
+          <button
+            type="button"
+            id="sftp-trust-confirm"
+            class="btn btn--primary"
+          >
+            Trust and connect
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="sftp-prompt-overlay"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sftp-prompt-title"
+    >
+      <div class="modal modal--sftp">
+        <div class="modal__header">
+          <h2 id="sftp-prompt-title">Server sign-in</h2>
+          <button
+            type="button"
+            id="sftp-prompt-close"
+            class="btn btn--icon"
+            aria-label="Close"
+          >
+            <span class="lucide-icon" data-icon="x"></span>
+          </button>
+        </div>
+        <form id="sftp-prompt-form" class="sftp-prompt">
+          <div class="modal__body">
+            <p id="sftp-prompt-name" class="sftp-prompt__name" hidden></p>
+            <p id="sftp-prompt-instructions" class="setting-note" hidden></p>
+            <div id="sftp-prompt-fields" class="sftp-prompt__fields"></div>
+          </div>
+          <div class="modal__footer">
+            <button
+              type="button"
+              id="sftp-prompt-cancel"
+              class="btn btn--ghost"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              id="sftp-prompt-continue"
+              class="btn btn--primary"
+            >
+              Continue
+            </button>
+          </div>
+        </form>
       </div>
     </div>
 

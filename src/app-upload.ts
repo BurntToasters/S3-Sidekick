@@ -243,6 +243,7 @@ function enqueueTargetFromSnapshot(
     bucket: snap.bucket,
     connectionId: snap.connectionId,
     connectionIdentity: snap.connectionIdentity,
+    protocol: state.protocol,
   };
 }
 

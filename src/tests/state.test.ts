@@ -34,3 +34,11 @@ describe("state dom getters", () => {
     expect(dom.bucketPanel.id).toBe("bucket-panel");
   });
 });
+
+describe("protocol state defaults", () => {
+  it("starts on the S3 protocol with no SFTP home path", async () => {
+    const { state } = await import("../state.ts");
+    expect(state.protocol).toBe("s3");
+    expect(state.sftpHomePath).toBe("");
+  });
+});

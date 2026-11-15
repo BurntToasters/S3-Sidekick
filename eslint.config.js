@@ -26,8 +26,10 @@ export default [
       "@typescript-eslint/prefer-nullish-coalescing": "warn",
       // Prefer optional chaining
       "@typescript-eslint/prefer-optional-chain": "warn",
-      // No explicit any
-      "@typescript-eslint/no-explicit-any": "warn",
+      // No explicit any, and no comments that switch the type checker off
+      // (AGENTS.md: no `as any` or `ts-ignore` in src/).
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/ban-ts-comment": "error",
       // Unused vars (backup for tsc)
       "@typescript-eslint/no-unused-vars": [
         "error",
@@ -94,7 +96,7 @@ export default [
       ],
       "@typescript-eslint/prefer-nullish-coalescing": "warn",
       "@typescript-eslint/prefer-optional-chain": "warn",
-      "@typescript-eslint/no-explicit-any": "warn",
+      "@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/no-unused-vars": [
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },

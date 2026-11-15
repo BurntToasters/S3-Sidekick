@@ -37,6 +37,14 @@ export default defineConfig({
         "src/app-connection.ts": { lines: 50 },
         "src/path-grants.ts": { lines: 35 },
         "src/transfer-state.ts": { lines: 50 },
+        // Credential, SFTP and transfer modules: set just below the measured
+        // value (0.13.0-beta.1) so the aggregate surplus cannot hide a drop.
+        "src/security.ts": { lines: 85 },
+        "src/sftp.ts": { lines: 96 },
+        "src/sftp-commands.ts": { lines: 98 },
+        "src/sftp-connect-dialogs.ts": { lines: 95 },
+        "src/sftp-move.ts": { lines: 98 },
+        "src/transfers.ts": { lines: 76 },
       },
     },
   },

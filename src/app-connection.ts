@@ -2,16 +2,40 @@ import { state, dom } from "./state.ts";
 import { invoke } from "./ipc.ts";
 import {
   connect,
+  connectSftp,
   disconnect,
   saveConnection,
+  saveSftpConnection,
   refreshBuckets,
   currentConnectionGeneration,
   finishConnecting,
+  cancelSftpConnectInFlight,
   CONNECTION_MEMORY_STORAGE_KEY,
   connectionMemoryKey,
   forgetConnectionLocation,
   setConnectionAccessLocked,
+  type SftpConnectCallbacks,
+  type SftpConnectOutcome,
+  type SftpConnectParams,
+  type SftpSavedConnectionInput,
 } from "./connection.ts";
+import {
+  formatSftpEndpoint,
+  isSftpAuthMethod,
+  isSftpConnectionLost,
+  looksLikeSftpEndpoint,
+  parseSftpEndpoint,
+  sftpKeyFromPath,
+  sftpVirtualBucket,
+  type SftpAuthMethod,
+  type SftpSettings,
+} from "./sftp.ts";
+import { pickSshPrivateKey } from "./sftp-commands.ts";
+import {
+  closeSftpConnectDialogs,
+  promptSftpHostKeyTrust,
+  promptSftpKeyboardInteractive,
+} from "./sftp-connect-dialogs.ts";
 import {
   renderBucketList,
   renderBucketListSkeleton,
@@ -72,6 +96,58 @@ let connectedAccessKey = "";
 let savedConnectionsLocked = false;
 let unlockHandler: (() => Promise<boolean>) | null = null;
 
+/** Which backend the connect form is set up for. S3 is the default. */
+export type ConnectionProtocol = "s3" | "sftp";
+
+/**
+ * A private key held for the SFTP form. The key text lives in memory only: it
+ * is never written to the DOM, a log, or a status line. `encrypted` is null for
+ * a saved key, whose encryption the form cannot read back.
+ */
+interface SftpFormKey {
+  keyText: string;
+  label: string;
+  algorithm: string;
+  encrypted: boolean | null;
+}
+
+/** Everything the SFTP part of the form holds, read or written as one unit. */
+interface SftpFormValues {
+  host: string;
+  port: string;
+  username: string;
+  auth: SftpAuthMethod;
+  password: string;
+  passphrase: string;
+  key: SftpFormKey | null;
+}
+
+/** The host key this view last learned for one SFTP endpoint and user. */
+export interface LastSftpPin {
+  endpoint: string;
+  username: string;
+  hostKey: string;
+}
+
+/** Shape of a saved connection, as loadConnection() returns it. */
+export interface SavedConnectionRecord {
+  endpoint: string;
+  region: string;
+  access_key: string;
+  secret_key: string;
+  session_token?: string;
+  protocol?: "sftp";
+  sftp?: SftpSettings;
+}
+
+/** The key the SFTP form holds right now, or null. Cleared on protocol switch and lock. */
+let sftpFormKey: SftpFormKey | null = null;
+/** The host key pinned by the last saved SFTP record, when it is still in view. */
+let lastSftpPin: LastSftpPin | null = null;
+/** True while the form is disabled by a connect, test, or save in flight. */
+let formDisabledByWork = false;
+const USER_CANCELLED_CONNECT = "Connection cancelled";
+
 /**
  * One explanation for locked saved connections. The connect screen sidebar,
  * header switcher and reconnect card all use this copy.
@@ -122,17 +198,548 @@ export function setConnectionInputs(
     "conn-session-token",
   ) as HTMLInputElement | null;
   if (sessionInput) sessionInput.value = sessionToken;
+  // An S3 record or a reset returns the form to S3 and drops any SFTP fields and
+  // the picked key text, so an SFTP record never reaches this setter.
+  clearSftpFormFields();
+  setFormProtocol("s3");
   updateBookmarkBtn();
 }
 
 export function updateBookmarkBtn(): void {
   const btn = document.getElementById("bookmark-save-btn");
   if (!btn) return;
-  const { endpoint, accessKey } = getConnectionInputs();
-  const active = endpoint
-    ? isEndpointBookmarked(endpoint, accessKey || undefined)
+  const identity = currentFormIdentity();
+  const active = identity
+    ? isEndpointBookmarked(identity.endpoint, identity.accessKey || undefined)
     : false;
   btn.classList.toggle("bookmark-save-btn--active", active);
+  refreshSftpResetButton();
+}
+
+/* ==========================================================================
+ * SFTP form: protocol switch, key picker, identity, pins, and validation.
+ *
+ * The form shows one protocol at a time. S3 keeps every field it had; SFTP
+ * adds host, port, username, authentication, and the password or key rows.
+ * The picked key text lives in `sftpFormKey` only, never in the DOM.
+ * ========================================================================== */
+
+const S3_FORM_ROW_IDS = [
+  "conn-preset-row",
+  "conn-endpoint-row",
+  "conn-access-row",
+  "conn-secret-row",
+  "conn-token-row",
+];
+
+/** A form draft as validation sees it. Pure: no DOM reads. */
+export interface SftpDraft {
+  host: string;
+  port: string;
+  username: string;
+  auth: SftpAuthMethod;
+  password: string;
+  keyChosen: boolean;
+  /** null when the form cannot tell (a saved key). */
+  keyEncrypted: boolean | null;
+  passphrase: string;
+}
+
+/** Why a draft cannot be used, and the field to point at. */
+export interface SftpDraftError {
+  fieldId: string;
+  message: string;
+}
+
+function formElement<T extends HTMLElement>(id: string): T | null {
+  return document.getElementById(id) as T | null;
+}
+
+function formInput(id: string): HTMLInputElement | null {
+  return formElement<HTMLInputElement>(id);
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** The backend's refusal of an encrypted key with no passphrase. */
+export function isEncryptedKeyError(message: string): boolean {
+  return /private key is encrypted/i.test(message);
+}
+
+/** `user@host:port` for an SFTP row, with IPv6 hosts bracketed. */
+export function sftpRowLabel(endpoint: string, username: string): string {
+  try {
+    const { host, port } = parseSftpEndpoint(endpoint);
+    const shown = host.includes(":") ? `[${host}]` : host;
+    return `${username}@${shown}:${port}`;
+  } catch {
+    return `${username}@${endpoint}`;
+  }
+}
+
+/**
+ * The host key to pin for one SFTP endpoint and user. A saved SFTP bookmark for
+ * that identity is authoritative, including when it has no pin. Only without a
+ * bookmark does the last saved record apply, and only for the same host and user.
+ */
+export function pinnedHostKeyFor(
+  bookmarks: readonly Bookmark[],
+  lastPin: LastSftpPin | null,
+  endpoint: string,
+  username: string,
+): string | undefined {
+  const bookmark = bookmarks.find(
+    (b) =>
+      b.protocol === "sftp" &&
+      b.endpoint === endpoint &&
+      b.access_key === username,
+  );
+  if (bookmark) {
+    const pin = bookmark.sftp?.host_key ?? "";
+    return pin === "" ? undefined : pin;
+  }
+  if (lastPin?.endpoint === endpoint && lastPin.username === username) {
+    return lastPin.hostKey;
+  }
+  return undefined;
+}
+
+/**
+ * Validate an SFTP draft in form order. `requireSecret` is false when saving,
+ * so a password or passphrase can be left for the connect-time prompt. A key is
+ * always needed to save a key connection.
+ */
+export function validateSftpDraft(
+  draft: SftpDraft,
+  options: { requireSecret?: boolean } = {},
+): SftpDraftError | null {
+  const requireSecret = options.requireSecret ?? true;
+  const host = draft.host.trim();
+  if (host === "") {
+    return { fieldId: "conn-sftp-host", message: "Host is required." };
+  }
+  try {
+    formatSftpEndpoint(host, 22);
+  } catch (err) {
+    return { fieldId: "conn-sftp-host", message: errorText(err) };
+  }
+  const port = draft.port.trim();
+  if (!/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535) {
+    return {
+      fieldId: "conn-sftp-port",
+      message: "Port must be a number from 1 to 65535.",
+    };
+  }
+  if (draft.username.trim() === "") {
+    return { fieldId: "conn-sftp-username", message: "Username is required." };
+  }
+  if (draft.auth === "password") {
+    if (requireSecret && draft.password === "") {
+      return {
+        fieldId: "conn-sftp-password",
+        message: "Password is required.",
+      };
+    }
+  } else if (draft.auth === "key") {
+    if (!draft.keyChosen) {
+      return {
+        fieldId: "conn-sftp-key-choose",
+        message: "Choose a private key file.",
+      };
+    }
+    if (
+      requireSecret &&
+      draft.keyEncrypted === true &&
+      draft.passphrase === ""
+    ) {
+      return {
+        fieldId: "conn-sftp-passphrase",
+        message: "Enter the passphrase for this key.",
+      };
+    }
+  }
+  return null;
+}
+
+function sftpDraftFromForm(form: SftpFormValues): SftpDraft {
+  return {
+    host: form.host,
+    port: form.port,
+    username: form.username,
+    auth: form.auth,
+    password: form.password,
+    keyChosen: form.key !== null,
+    keyEncrypted: form.key?.encrypted ?? null,
+    passphrase: form.passphrase,
+  };
+}
+
+/** The protocol the connect form is set up for, from the radio group. */
+export function currentFormProtocol(): ConnectionProtocol {
+  return formElement<HTMLInputElement>("conn-protocol-sftp")?.checked
+    ? "sftp"
+    : "s3";
+}
+
+function currentSftpAuth(): SftpAuthMethod {
+  const value = formElement<HTMLSelectElement>("conn-sftp-auth")?.value ?? "";
+  return isSftpAuthMethod(value) ? value : "password";
+}
+
+function readSftpForm(): SftpFormValues {
+  return {
+    host: (formInput("conn-sftp-host")?.value ?? "").trim(),
+    port: (formInput("conn-sftp-port")?.value ?? "").trim(),
+    username: (formInput("conn-sftp-username")?.value ?? "").trim(),
+    auth: currentSftpAuth(),
+    password: formInput("conn-sftp-password")?.value ?? "",
+    passphrase: formInput("conn-sftp-passphrase")?.value ?? "",
+    key: sftpFormKey,
+  };
+}
+
+function writeSftpForm(values: SftpFormValues): void {
+  const setValue = (id: string, value: string): void => {
+    const input = formInput(id);
+    if (input) input.value = value;
+  };
+  setValue("conn-sftp-host", values.host);
+  setValue("conn-sftp-port", values.port);
+  setValue("conn-sftp-username", values.username);
+  setValue("conn-sftp-password", values.password);
+  setValue("conn-sftp-passphrase", values.passphrase);
+  const auth = formElement<HTMLSelectElement>("conn-sftp-auth");
+  if (auth) auth.value = values.auth;
+  sftpFormKey = values.key;
+  renderSftpKeyStatus();
+}
+
+function clearSftpFormFields(): void {
+  writeSftpForm({
+    host: "",
+    port: "22",
+    username: "",
+    auth: "password",
+    password: "",
+    passphrase: "",
+    key: null,
+  });
+}
+
+/** Status line beside the key button: file name, algorithm, and encryption. */
+function renderSftpKeyStatus(): void {
+  const status = formElement("conn-sftp-key-status");
+  if (!status) return;
+  const key = sftpFormKey;
+  if (!key) {
+    status.textContent = "No key chosen.";
+    return;
+  }
+  const parts = [key.label];
+  if (key.algorithm) parts.push(key.algorithm);
+  if (key.encrypted === true) parts.push("encrypted");
+  status.textContent = parts.join(" · ");
+}
+
+/**
+ * The passphrase field is usable only for a key that reports encryption. A saved
+ * key cannot report it, so the field stays usable for that key.
+ */
+function refreshSftpKeyControls(): void {
+  const passphrase = formInput("conn-sftp-passphrase");
+  if (passphrase) {
+    const usable =
+      currentSftpAuth() === "key" &&
+      sftpFormKey !== null &&
+      sftpFormKey.encrypted !== false;
+    passphrase.disabled = formDisabledByWork || !usable;
+  }
+  const chooseKey = formElement<HTMLButtonElement>("conn-sftp-key-choose");
+  if (chooseKey) chooseKey.disabled = formDisabledByWork;
+}
+
+function setRowHidden(id: string, hidden: boolean): void {
+  const row = formElement(id);
+  if (row) row.hidden = hidden;
+}
+
+/** Show the rows for one protocol, and the SFTP auth rows for the chosen method. */
+function applyProtocolLayout(protocol: ConnectionProtocol): void {
+  const sftp = protocol === "sftp";
+  for (const id of S3_FORM_ROW_IDS) setRowHidden(id, sftp);
+  const preset = formElement<HTMLSelectElement>("conn-provider-preset");
+  setRowHidden("conn-r2-account-row", sftp || preset?.value !== "cloudflare");
+  setRowHidden("conn-sftp-host-row", !sftp);
+  setRowHidden("conn-sftp-user-row", !sftp);
+  setRowHidden("conn-sftp-auth-row", !sftp);
+  const auth = currentSftpAuth();
+  setRowHidden("conn-sftp-password-row", !sftp || auth !== "password");
+  setRowHidden("conn-sftp-key-row", !sftp || auth !== "key");
+  setRowHidden("conn-sftp-passphrase-row", !sftp || auth !== "key");
+  const title = formElement("conn-screen-title");
+  if (title) {
+    title.textContent = sftp
+      ? "Connect to SFTP server"
+      : "Connect to S3 storage";
+  }
+  refreshSftpKeyControls();
+  refreshSftpResetButton();
+}
+
+function setFormProtocol(protocol: ConnectionProtocol): void {
+  const radio = formElement<HTMLInputElement>(
+    protocol === "sftp" ? "conn-protocol-sftp" : "conn-protocol-s3",
+  );
+  if (radio) radio.checked = true;
+  applyProtocolLayout(protocol);
+}
+
+function setProtocolRadiosDisabled(disabled: boolean): void {
+  for (const radio of document.querySelectorAll<HTMLInputElement>(
+    'input[name="conn-protocol"]',
+  )) {
+    radio.disabled = disabled;
+  }
+}
+
+/** Switching protocol drops the picked key: it belonged to the other view. */
+function handleProtocolChange(): void {
+  sftpFormKey = null;
+  const passphrase = formInput("conn-sftp-passphrase");
+  if (passphrase) passphrase.value = "";
+  renderSftpKeyStatus();
+  setConnectionFormError(null);
+  applyProtocolLayout(currentFormProtocol());
+  updateBookmarkBtn();
+}
+
+/** The endpoint and user the form points at, for the save button and pins. */
+function currentFormIdentity(): { endpoint: string; accessKey: string } | null {
+  if (currentFormProtocol() === "sftp") {
+    const form = readSftpForm();
+    if (form.username === "") return null;
+    try {
+      return {
+        endpoint: formatSftpEndpoint(form.host, Number(form.port)),
+        accessKey: form.username,
+      };
+    } catch {
+      return null;
+    }
+  }
+  const { endpoint, accessKey } = getConnectionInputs();
+  return endpoint ? { endpoint, accessKey } : null;
+}
+
+/** The SFTP identity an inline edit or the form points at, or null. */
+function currentSftpIdentity(): { endpoint: string; username: string } | null {
+  if (inlineEditingBookmark?.protocol === "sftp") {
+    return {
+      endpoint: inlineEditingBookmark.endpoint,
+      username: inlineEditingBookmark.access_key,
+    };
+  }
+  const form = readSftpForm();
+  try {
+    return {
+      endpoint: formatSftpEndpoint(form.host, Number(form.port)),
+      username: form.username,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sftpPinFor(endpoint: string, username: string): string | undefined {
+  return pinnedHostKeyFor(getBookmarks(), lastSftpPin, endpoint, username);
+}
+
+/** Show "Reset host key" only when a pin applies to the identity on screen. */
+function refreshSftpResetButton(): void {
+  const btn = formElement<HTMLButtonElement>("conn-sftp-reset-hostkey");
+  if (!btn) return;
+  let visible = false;
+  if (currentFormProtocol() === "sftp") {
+    const identity = currentSftpIdentity();
+    visible =
+      identity !== null &&
+      sftpPinFor(identity.endpoint, identity.username) !== undefined;
+  }
+  btn.hidden = !visible;
+}
+
+/** Form values for a saved SFTP record or bookmark. The secret is the password or the passphrase. */
+function sftpFormValuesFrom(
+  endpoint: string,
+  username: string,
+  secret: string,
+  sftp: SftpSettings,
+): SftpFormValues {
+  const { host, port } = parseSftpEndpoint(endpoint);
+  const key: SftpFormKey | null =
+    sftp.auth === "key" && sftp.private_key
+      ? {
+          keyText: sftp.private_key,
+          label: "Saved private key",
+          algorithm: "",
+          encrypted: null,
+        }
+      : null;
+  return {
+    host,
+    port: String(port),
+    username,
+    auth: sftp.auth,
+    password: sftp.auth === "password" ? secret : "",
+    passphrase: sftp.auth === "key" ? secret : "",
+    key,
+  };
+}
+
+function sftpValuesFromBookmark(bookmark: Bookmark): SftpFormValues {
+  return sftpFormValuesFrom(
+    bookmark.endpoint,
+    bookmark.access_key,
+    bookmark.secret_key,
+    bookmark.sftp ?? { auth: "password" },
+  );
+}
+
+function setSftpConnectionInputs(values: SftpFormValues): void {
+  writeSftpForm(values);
+  setFormProtocol("sftp");
+  updateBookmarkBtn();
+}
+
+/**
+ * Load a saved SFTP record (the last connection) into the form. Its host key is
+ * kept as the pin for that identity, so the next connect is checked against it.
+ */
+export function loadSftpSavedConnectionIntoForm(
+  record: SavedConnectionRecord,
+): void {
+  const sftp = record.sftp;
+  if (record.protocol !== "sftp" || !sftp) return;
+  lastSftpPin = sftp.host_key
+    ? {
+        endpoint: record.endpoint,
+        username: record.access_key,
+        hostKey: sftp.host_key,
+      }
+    : null;
+  setSftpConnectionInputs(
+    sftpFormValuesFrom(
+      record.endpoint,
+      record.access_key,
+      record.secret_key,
+      sftp,
+    ),
+  );
+}
+
+async function chooseSftpKey(): Promise<void> {
+  let picked: Awaited<ReturnType<typeof pickSshPrivateKey>>;
+  try {
+    picked = await pickSshPrivateKey();
+  } catch (err) {
+    setConnectionFormError(friendlyError(err));
+    return;
+  }
+  // A cancelled picker keeps whichever key the form already holds.
+  if (picked === null) return;
+  sftpFormKey = {
+    keyText: picked.key_text,
+    label: picked.file_name,
+    algorithm: picked.algorithm,
+    encrypted: picked.encrypted,
+  };
+  const passphrase = formInput("conn-sftp-passphrase");
+  if (passphrase) passphrase.value = "";
+  renderSftpKeyStatus();
+  refreshSftpKeyControls();
+  setConnectionFormError(null);
+}
+
+/** Forget the pinned host key for one identity, after the user confirms. */
+async function resetSftpHostKey(): Promise<void> {
+  const identity = currentSftpIdentity();
+  if (!identity) return;
+  const label = sftpRowLabel(identity.endpoint, identity.username);
+  const confirmed = await showConfirm(
+    "Reset host key?",
+    `Reset the saved host key for ${label}? Only do this if the server was reinstalled or its key was replaced on purpose. Until the next key is trusted, a man-in-the-middle could impersonate the server and capture your credentials.`,
+    { okLabel: "Reset", okDanger: true },
+  );
+  if (!confirmed) return;
+  const bookmark = getBookmarks().find(
+    (b) =>
+      b.protocol === "sftp" &&
+      b.endpoint === identity.endpoint &&
+      b.access_key === identity.username,
+  );
+  try {
+    if (bookmark?.sftp?.host_key) {
+      await updateBookmark(bookmark, { sftp: { host_key: null } });
+    }
+  } catch (err) {
+    setConnectionFormError(
+      `Could not reset the host key: ${friendlyError(err)}`,
+    );
+    return;
+  }
+  if (
+    lastSftpPin?.endpoint === identity.endpoint &&
+    lastSftpPin.username === identity.username
+  ) {
+    lastSftpPin = null;
+  }
+  refreshSftpResetButton();
+  logActivity(`Reset the saved host key for ${label}.`, "warning");
+  showToast(
+    `Reset the host key for ${label}. The next connection asks you to trust the server.`,
+    { type: "success" },
+  );
+}
+
+/**
+ * A live SFTP session lost its connection. Disconnect through the usual flow and
+ * say so. Resolves false for anything else, so callers keep their own handling.
+ */
+export async function handleSftpConnectionLost(
+  error: unknown,
+): Promise<boolean> {
+  if (state.protocol !== "sftp" || !isSftpConnectionLost(error)) return false;
+  await handleDisconnect();
+  const message = "The SFTP connection was lost. Reconnect to continue.";
+  setStatus(message, 8000);
+  logActivity(message, "warning");
+  showToast(message, { type: "warning", duration: 8000 });
+  return true;
+}
+
+/** Store a host key learned by a trusted connect in the saved bookmark that has none. */
+async function pinSftpBookmarkHostKey(
+  endpoint: string,
+  username: string,
+  hostKey: string,
+): Promise<void> {
+  const bookmark = getBookmarks().find(
+    (b) =>
+      b.protocol === "sftp" &&
+      b.endpoint === endpoint &&
+      b.access_key === username,
+  );
+  if (!bookmark || bookmark.sftp?.host_key) return;
+  try {
+    await updateBookmark(bookmark, { sftp: { host_key: hostKey } });
+  } catch (err) {
+    logActivity(
+      `Could not store the host key for "${bookmark.name}": ${friendlyError(err)}`,
+      "warning",
+    );
+  }
 }
 
 /** Whether saved connections are hidden behind an Unlock action. */
@@ -416,6 +1023,9 @@ export function refreshConnectionSwitcher(): void {
     const rawHost = endpointHost(state.endpoint);
     name = active?.name ?? rawHost;
     host = active && active.name !== rawHost ? rawHost : "";
+    if (state.protocol === "sftp") {
+      host = sftpRowLabel(state.endpoint, connectedAccessKey);
+    }
   } else if (state.connecting) {
     name = "Connecting…";
   }
@@ -456,10 +1066,15 @@ function renderSwitcherMenu(): void {
         active !== null &&
         active.endpoint === bookmark.endpoint &&
         active.access_key === bookmark.access_key;
+      const isSftp = bookmark.protocol === "sftp";
+      const hostLabel = isSftp
+        ? sftpRowLabel(bookmark.endpoint, bookmark.access_key)
+        : endpointHost(bookmark.endpoint);
       return (
         `<button type="button" role="menuitem" class="conn-switcher__connection"${current ? ' aria-current="true"' : ""} data-index="${bookmarks.indexOf(bookmark)}">` +
         `<span class="conn-switcher__connection-name">${escapeHtml(bookmark.name)}</span>` +
-        `<span class="conn-switcher__connection-host">${escapeHtml(endpointHost(bookmark.endpoint))}</span>` +
+        (isSftp ? `<span class="bookmark__provider">SFTP</span>` : "") +
+        `<span class="conn-switcher__connection-host">${escapeHtml(hostLabel)}</span>` +
         `</button>`
       );
     })
@@ -672,6 +1287,7 @@ export function resetSecretRevealState(): void {
   for (const [toggleId, inputId] of [
     ["secret-key-toggle", "conn-secret-key"],
     ["session-token-toggle", "conn-session-token"],
+    ["sftp-password-toggle", "conn-sftp-password"],
   ] as const) {
     const toggle = document.getElementById(
       toggleId,
@@ -688,6 +1304,8 @@ function setInlineEditBookmark(bookmark: Bookmark | null): void {
   inlineEditRevision += 1;
   inlineEditingBookmark = bookmark;
   duplicateDraft = false;
+  // A saved connection keeps its protocol: the radios stay put while editing.
+  setProtocolRadiosDisabled(bookmark !== null || formDisabledByWork);
   const saveBtn = document.getElementById("bookmark-save-btn");
   if (saveBtn)
     saveBtn.textContent = bookmark ? "Update connection" : "Save connection";
@@ -700,13 +1318,17 @@ function setInlineEditBookmark(bookmark: Bookmark | null): void {
 /** Open the connect form prefilled for editing one saved connection. */
 export function editSavedConnectionInline(bookmark: Bookmark): void {
   setInlineEditBookmark(bookmark);
-  setConnectionInputs(
-    bookmark.endpoint,
-    bookmark.region,
-    bookmark.access_key,
-    bookmark.secret_key,
-    bookmark.session_token ?? "",
-  );
+  if (bookmark.protocol === "sftp" && bookmark.sftp) {
+    setSftpConnectionInputs(sftpValuesFromBookmark(bookmark));
+  } else {
+    setConnectionInputs(
+      bookmark.endpoint,
+      bookmark.region,
+      bookmark.access_key,
+      bookmark.secret_key,
+      bookmark.session_token ?? "",
+    );
+  }
   setConnectionFormError(null);
   if (state.connected) {
     void (async () => {
@@ -718,20 +1340,28 @@ export function editSavedConnectionInline(bookmark: Bookmark): void {
   const endpoint = document.getElementById(
     "conn-endpoint",
   ) as HTMLInputElement | null;
-  endpoint?.focus();
+  if (bookmark.protocol === "sftp") {
+    formElement<HTMLInputElement>("conn-sftp-host")?.focus();
+  } else {
+    endpoint?.focus();
+  }
   setStatus(`Editing "${bookmark.name}". Save to keep your changes.`, 5000);
 }
 
 /** Load a copy of a saved connection into the form as a new connection. */
 function duplicateSavedConnection(bookmark: Bookmark): void {
   setInlineEditBookmark(null);
-  setConnectionInputs(
-    bookmark.endpoint,
-    bookmark.region,
-    bookmark.access_key,
-    bookmark.secret_key,
-    bookmark.session_token ?? "",
-  );
+  if (bookmark.protocol === "sftp" && bookmark.sftp) {
+    setSftpConnectionInputs(sftpValuesFromBookmark(bookmark));
+  } else {
+    setConnectionInputs(
+      bookmark.endpoint,
+      bookmark.region,
+      bookmark.access_key,
+      bookmark.secret_key,
+      bookmark.session_token ?? "",
+    );
+  }
   duplicateDraft = true;
   const nameInput = document.getElementById(
     "conn-name",
@@ -743,6 +1373,32 @@ function duplicateSavedConnection(bookmark: Bookmark): void {
     `Duplicated "${bookmark.name}". Adjust the details and save.`,
     5000,
   );
+}
+
+/**
+ * The shared row renderer shows an SFTP row's endpoint URL. Replace it with
+ * user@host:port here, using the same filter the renderer applied.
+ */
+function labelSftpSavedRows(list: HTMLElement, filterText: string): void {
+  const filter = filterText.trim().toLowerCase();
+  const all = getBookmarks();
+  const visible = filter
+    ? all.filter(
+        (b) =>
+          b.name.toLowerCase().includes(filter) ||
+          b.endpoint.toLowerCase().includes(filter),
+      )
+    : all;
+  list
+    .querySelectorAll<HTMLElement>(".bookmark-item[data-index]")
+    .forEach((item) => {
+      const bookmark = visible[Number(item.dataset.index)];
+      if (bookmark?.protocol !== "sftp") return;
+      const label = sftpRowLabel(bookmark.endpoint, bookmark.access_key);
+      const endpointEl = item.querySelector<HTMLElement>(".bookmark__endpoint");
+      if (endpointEl) endpointEl.textContent = label;
+      item.title = label;
+    });
 }
 
 export function refreshSavedConnectionsList(): void {
@@ -813,6 +1469,7 @@ export function refreshSavedConnectionsList(): void {
       },
     },
   );
+  labelSftpSavedRows(savedList, filterInput?.value ?? "");
   const loadError = getBookmarkLoadError();
   if (loadError) {
     // The list may be the readable backup, but it is read-only. Say so where
@@ -878,6 +1535,7 @@ function refreshReconnectCard(): void {
   const titleEl = document.getElementById("reconnect-card-title");
   const nameEl = document.getElementById("reconnect-card-name");
   const endpointEl = document.getElementById("reconnect-card-endpoint");
+  const protocolEl = document.getElementById("reconnect-card-protocol");
   const lockedEl = document.getElementById("reconnect-card-locked");
   const button = document.getElementById(
     "reconnect-card-btn",
@@ -885,6 +1543,7 @@ function refreshReconnectCard(): void {
   if (locked) {
     if (titleEl) titleEl.hidden = true;
     if (endpointEl) endpointEl.hidden = true;
+    if (protocolEl) protocolEl.hidden = true;
     if (lockedEl) {
       lockedEl.textContent = LOCKED_SAVED_CONNECTIONS_MESSAGE;
       lockedEl.hidden = false;
@@ -897,8 +1556,18 @@ function refreshReconnectCard(): void {
     if (titleEl) titleEl.hidden = false;
     if (endpointEl) endpointEl.hidden = false;
     if (lockedEl) lockedEl.hidden = true;
+    const saved = getBookmarks().find(
+      (b) => b.name === recent.name && b.endpoint === recent.endpoint,
+    );
+    const isSftp = saved?.protocol === "sftp";
     if (nameEl) nameEl.textContent = recent.name;
-    if (endpointEl) endpointEl.textContent = endpointHost(recent.endpoint);
+    if (endpointEl) {
+      endpointEl.textContent =
+        isSftp && saved
+          ? sftpRowLabel(saved.endpoint, saved.access_key)
+          : endpointHost(recent.endpoint);
+    }
+    if (protocolEl) protocolEl.hidden = !isSftp;
     if (button) {
       button.textContent = "Reconnect";
       button.setAttribute("aria-label", `Reconnect to ${recent.name}`);
@@ -927,18 +1596,51 @@ export async function handleNewConnection(): Promise<void> {
   setStatus("Ready for a new connection.", 5000);
 }
 
-async function promptForMissingSecret(name: string): Promise<string | null> {
-  const entered = await showPrompt(
-    "Secret key needed",
-    `"${name}" was saved without its secret key. Enter it to connect.`,
-    {
-      inputType: "password",
-      inputPlaceholder: "Secret key",
-      okLabel: "Connect",
-      validate: async (value: string) =>
-        value.trim().length > 0 || "Enter the secret key.",
-    },
-  );
+type MissingSecretKind = "secret" | "password" | "passphrase";
+
+const MISSING_SECRET_COPY: Record<
+  MissingSecretKind,
+  {
+    title: string;
+    placeholder: string;
+    empty: string;
+    body: (name: string) => string;
+  }
+> = {
+  secret: {
+    title: "Secret key needed",
+    placeholder: "Secret key",
+    empty: "Enter the secret key.",
+    body: (name) =>
+      `"${name}" was saved without its secret key. Enter it to connect.`,
+  },
+  password: {
+    title: "Password needed",
+    placeholder: "Password",
+    empty: "Enter the password.",
+    body: (name) =>
+      `"${name}" was saved without its password. Enter it to connect.`,
+  },
+  passphrase: {
+    title: "Passphrase needed",
+    placeholder: "Passphrase",
+    empty: "Enter the passphrase for this key.",
+    body: (name) =>
+      `"${name}" uses an encrypted key. Enter its passphrase to connect.`,
+  },
+};
+
+async function promptForMissingSecret(
+  name: string,
+  kind: MissingSecretKind = "secret",
+): Promise<string | null> {
+  const copy = MISSING_SECRET_COPY[kind];
+  const entered = await showPrompt(copy.title, copy.body(name), {
+    inputType: "password",
+    inputPlaceholder: copy.placeholder,
+    okLabel: "Connect",
+    validate: async (value: string) => value.trim().length > 0 || copy.empty,
+  });
   if (entered === null) {
     setStatus("Connection cancelled.", 5000);
     return null;
@@ -982,6 +1684,22 @@ export async function switchToBookmark(
   secretKey: string,
   sessionToken = "",
 ): Promise<void> {
+  if (looksLikeSftpEndpoint(endpoint)) {
+    // An SFTP entry connects with its own host key and authentication settings,
+    // found by identity. The S3 path below never receives an SFTP endpoint.
+    const saved = getBookmarks().find(
+      (b) =>
+        b.protocol === "sftp" &&
+        b.endpoint === endpoint &&
+        b.access_key === accessKey,
+    );
+    if (!saved) {
+      setStatus("That SFTP connection is no longer saved.", 5000);
+      return;
+    }
+    await switchToSftpBookmark(saved);
+    return;
+  }
   // A switch supersedes any inline edit of the form.
   setInlineEditBookmark(null);
   let secret = secretKey;
@@ -1008,6 +1726,51 @@ export async function switchToBookmark(
     connectedAccessKey === accessKey
   ) {
     await offerToStoreSecret(name, endpoint, accessKey, secret);
+  }
+}
+
+/**
+ * Connect a saved SFTP entry. A password entry with no stored password asks for
+ * it first, as S3 does. A key entry with an encrypted key asks for the
+ * passphrase during the connect and offers to store it afterwards.
+ */
+async function switchToSftpBookmark(bookmark: Bookmark): Promise<void> {
+  setInlineEditBookmark(null);
+  const values = sftpValuesFromBookmark(bookmark);
+  let secret = values.auth === "key" ? values.passphrase : values.password;
+  let secretWasPrompted = false;
+  if (values.auth === "password" && secret === "") {
+    const entered = await promptForMissingSecret(bookmark.name, "password");
+    if (entered === null) return;
+    secret = entered;
+    secretWasPrompted = true;
+  }
+  if (state.connected) {
+    if (!(await confirmSessionTeardown("Switching connections"))) return;
+    if (!(await handleDisconnect())) return;
+  }
+  setSftpConnectionInputs(
+    values.auth === "key"
+      ? { ...values, passphrase: secret }
+      : { ...values, password: secret },
+  );
+  setStatus(`Connecting to "${bookmark.name}"…`, 5000);
+  const passphraseSink: { value: string | null } = { value: null };
+  await handleConnect({ promptForPassphrase: true, passphraseSink });
+  const enteredSecret =
+    passphraseSink.value ?? (secretWasPrompted ? secret : null);
+  if (
+    enteredSecret !== null &&
+    state.connected &&
+    state.endpoint === bookmark.endpoint &&
+    connectedAccessKey === bookmark.access_key
+  ) {
+    await offerToStoreSecret(
+      bookmark.name,
+      bookmark.endpoint,
+      bookmark.access_key,
+      enteredSecret,
+    );
   }
 }
 
@@ -1068,6 +1831,7 @@ function setConnectButtonBusy(busy: boolean): void {
 }
 
 function setConnectionFormDisabled(disabled: boolean): void {
+  formDisabledByWork = disabled;
   const ids = [
     "conn-provider-preset",
     "conn-name",
@@ -1077,6 +1841,14 @@ function setConnectionFormDisabled(disabled: boolean): void {
     "conn-access-key",
     "conn-secret-key",
     "conn-session-token",
+    "conn-sftp-host",
+    "conn-sftp-port",
+    "conn-sftp-username",
+    "conn-sftp-auth",
+    "conn-sftp-password",
+    "sftp-password-toggle",
+    "conn-sftp-key-choose",
+    "conn-sftp-reset-hostkey",
     "conn-new-btn",
     "conn-saved-filter",
     "bookmark-save-btn",
@@ -1093,6 +1865,8 @@ function setConnectionFormDisabled(disabled: boolean): void {
   if (testBtn) {
     testBtn.disabled = disabled || state.connected || testConnectionInFlight;
   }
+  setProtocolRadiosDisabled(disabled || isInlineEditing());
+  refreshSftpKeyControls();
   const savedList = document.getElementById("conn-saved-list");
   if (savedList) {
     savedList.classList.toggle("conn-saved-list--disabled", disabled);
@@ -1109,6 +1883,11 @@ export function cancelPendingConnect(): void {
   const attempt = pendingConnectAttempt;
   if (!attempt && !state.connecting) return;
   if (attempt) attempt.cancelled = true;
+  // The backend attempt may not have reported a step yet, so the webview has
+  // no attempt ID to cancel; this reaches it anyway.
+  cancelSftpConnectInFlight();
+  // A host key or sign-in dialog would otherwise hold the SFTP attempt open.
+  closeSftpConnectDialogs();
   pendingConnectAttempt = null;
   state.connecting = false;
   // Begin teardown now rather than waiting for a slow save/listing await to
@@ -1210,11 +1989,63 @@ function touchActiveConnectionUse(): void {
   );
 }
 
+/**
+ * Open the SFTP location after connect: the remembered folder for this saved
+ * connection when there is one, otherwise the server's home directory. The
+ * single virtual bucket is the server host.
+ */
+async function restoreSftpLocation(
+  generation: number,
+  connectionId: string,
+): Promise<void> {
+  const bucket = sftpVirtualBucket(state.endpoint);
+  const active = activeSavedConnection();
+  const memory = active
+    ? readConnectionLocation(active.name, active.endpoint)
+    : null;
+  const remembered = memory?.bucket === bucket ? memory : null;
+  const restoreLocation = async (): Promise<void> => {
+    const prefix = remembered
+      ? remembered.prefix
+      : sftpKeyFromPath(state.sftpHomePath, true);
+    // selectBucket would list the root first. SFTP has one virtual bucket, and
+    // listing ignores it, so name the bucket and list the target folder directly:
+    // the server is never asked for "/" on the way.
+    state.currentBucket = bucket;
+    await navigateToFolder(prefix);
+    renderBucketList();
+    rememberActiveConnectionLocation();
+  };
+  try {
+    await restoreLocation();
+  } catch (restoreError) {
+    if (!isGenerationCurrent(generation, connectionId)) return;
+    if (await handleSftpConnectionLost(restoreError)) return;
+    const message = `Connected, but failed to open the folder: ${friendlyError(restoreError)}`;
+    const retry = (): void => {
+      restoreLocation().catch((err: unknown) => {
+        if (!isGenerationCurrent(generation, connectionId)) return;
+        reportNavFailure(
+          `Failed to open the folder: ${friendlyError(err)}`,
+          retry,
+        );
+      });
+    };
+    reportNavFailure(message, retry);
+    logActivity(message, "warning");
+    renderBucketList();
+  }
+}
+
 /** Restore the remembered bucket and prefix after the layout is visible. */
 async function restoreLastBucket(
   generation: number,
   connectionId: string,
 ): Promise<void> {
+  if (state.protocol === "sftp") {
+    await restoreSftpLocation(generation, connectionId);
+    return;
+  }
   // Per-connection memory wins; the global last bucket is the fallback for
   // connections that were never saved.
   const active = activeSavedConnection();
@@ -1298,7 +2129,100 @@ async function confirmCleartextEndpoint(endpoint: string): Promise<boolean> {
   );
 }
 
-export async function handleConnect(): Promise<void> {
+/** Options for one connect. Only the SFTP passphrase retry reads them. */
+export interface ConnectOptions {
+  /** Ask for the passphrase when the server refuses an encrypted key with none. */
+  promptForPassphrase?: boolean;
+  /** Receives a passphrase the user typed for that prompt, so it can be offered for storage. */
+  passphraseSink?: { value: string | null };
+}
+
+/** True when the connect ended because the user cancelled a dialog, not because of a failure. */
+function isUserCancelledConnect(err: unknown): boolean {
+  return errorText(err).replace(/\.$/, "") === USER_CANCELLED_CONNECT;
+}
+
+/** Secret stored with an SFTP record: the password, or the passphrase of a key. */
+function sftpSaveInput(
+  form: SftpFormValues,
+  endpoint: string,
+  hostKey: string,
+  passphrase: string,
+): SftpSavedConnectionInput {
+  const input: SftpSavedConnectionInput = {
+    endpoint,
+    username: form.username,
+    secret:
+      form.auth === "password"
+        ? form.password
+        : form.auth === "key"
+          ? passphrase
+          : "",
+    auth: form.auth,
+    hostKey,
+  };
+  if (form.auth === "key" && form.key) input.privateKey = form.key.keyText;
+  return input;
+}
+
+/**
+ * Open the SFTP session for the form. The trust and sign-in dialogs answer the
+ * server's steps. `trackGeneration` receives each connection generation this
+ * attempt takes, so the caller's guards follow a passphrase retry. Resolves the
+ * outcome, or rejects with the reason the connect ended.
+ */
+async function connectSftpForForm(
+  form: SftpFormValues,
+  endpoint: string,
+  options: ConnectOptions,
+  isCancelled: () => boolean,
+  trackGeneration: (generation: number) => void,
+): Promise<SftpConnectOutcome> {
+  const callbacks: SftpConnectCallbacks = {
+    onHostKeyUnknown: (info) => promptSftpHostKeyTrust(endpoint, info),
+    onPrompt: (info) => promptSftpKeyboardInteractive(info),
+    isCancelled,
+  };
+  let passphrase = form.passphrase;
+  for (;;) {
+    const params: SftpConnectParams = {
+      host: form.host,
+      port: Number(form.port),
+      username: form.username,
+      authMethod: form.auth,
+      pinnedHostKey: sftpPinFor(endpoint, form.username),
+    };
+    if (form.auth === "password") params.password = form.password;
+    if (form.auth === "key") {
+      params.privateKey = form.key?.keyText ?? "";
+      if (passphrase !== "") params.passphrase = passphrase;
+    }
+    const pending = connectSftp(params, callbacks);
+    trackGeneration(currentConnectionGeneration());
+    try {
+      return await pending;
+    } catch (err) {
+      const retryable =
+        options.promptForPassphrase === true &&
+        passphrase === "" &&
+        form.auth === "key" &&
+        isEncryptedKeyError(errorText(err)) &&
+        !isCancelled();
+      if (!retryable) throw err;
+      const entered = await promptForMissingSecret(
+        sftpRowLabel(endpoint, form.username),
+        "passphrase",
+      );
+      if (entered === null) throw new Error(USER_CANCELLED_CONNECT);
+      passphrase = entered;
+      if (options.passphraseSink) options.passphraseSink.value = entered;
+    }
+  }
+}
+
+export async function handleConnect(
+  options: ConnectOptions = {},
+): Promise<void> {
   if (testConnectionInFlight) {
     setStatus(
       "Wait for the connection test to finish before connecting.",
@@ -1308,24 +2232,45 @@ export async function handleConnect(): Promise<void> {
   }
   // Allow superseding connects: rapid bookmark switches start a newer
   // generation in connect() that wins; stale flows exit via generation checks.
-  const { endpoint, region, accessKey, secretKey, sessionToken } =
-    getConnectionInputs();
-  if (!endpoint || !accessKey || !secretKey) {
-    const message = "Endpoint, access key, and secret key are required.";
-    const invalidField = !endpoint
-      ? "conn-endpoint"
-      : !accessKey
-        ? "conn-access-key"
-        : "conn-secret-key";
-    setConnectionFormError(message, invalidField);
-    setStatus(message);
-    return;
-  }
-  if (!/^https?:\/\/.+/i.test(endpoint)) {
-    const message = "Endpoint must start with http:// or https://.";
-    setConnectionFormError(message, "conn-endpoint");
-    setStatus(message);
-    return;
+  const sftpForm = currentFormProtocol() === "sftp" ? readSftpForm() : null;
+  let endpoint: string;
+  let region = "";
+  let accessKey: string;
+  let secretKey = "";
+  let sessionToken = "";
+  if (sftpForm) {
+    const invalid = validateSftpDraft(sftpDraftFromForm(sftpForm));
+    if (invalid) {
+      setConnectionFormError(invalid.message, invalid.fieldId);
+      setStatus(invalid.message);
+      return;
+    }
+    endpoint = formatSftpEndpoint(sftpForm.host, Number(sftpForm.port));
+    accessKey = sftpForm.username;
+  } else {
+    const inputs = getConnectionInputs();
+    endpoint = inputs.endpoint;
+    region = inputs.region;
+    accessKey = inputs.accessKey;
+    secretKey = inputs.secretKey;
+    sessionToken = inputs.sessionToken;
+    if (!endpoint || !accessKey || !secretKey) {
+      const message = "Endpoint, access key, and secret key are required.";
+      const invalidField = !endpoint
+        ? "conn-endpoint"
+        : !accessKey
+          ? "conn-access-key"
+          : "conn-secret-key";
+      setConnectionFormError(message, invalidField);
+      setStatus(message);
+      return;
+    }
+    if (!/^https?:\/\/.+/i.test(endpoint)) {
+      const message = "Endpoint must start with http:// or https://.";
+      setConnectionFormError(message, "conn-endpoint");
+      setStatus(message);
+      return;
+    }
   }
 
   setConnectionFormError(null);
@@ -1347,16 +2292,27 @@ export async function handleConnect(): Promise<void> {
     if (attempt.cancelled) return;
 
     setStatus("Connecting…");
-    const connectionAttempt = connect(
-      endpoint,
-      region,
-      accessKey,
-      secretKey,
-      sessionToken,
-    );
-    workflowGeneration = currentConnectionGeneration();
-    const generation = workflowGeneration;
-    const resolvedRegion = await connectionAttempt;
+    const connectionAttempt: Promise<{
+      region: string;
+      sftp: SftpConnectOutcome | null;
+    }> = sftpForm
+      ? connectSftpForForm(
+          sftpForm,
+          endpoint,
+          options,
+          () => attempt.cancelled,
+          (generation) => {
+            workflowGeneration = generation;
+          },
+        ).then((sftp) => ({ region: "", sftp }))
+      : connect(endpoint, region, accessKey, secretKey, sessionToken).then(
+          (resolved) => ({ region: resolved, sftp: null }),
+        );
+    if (!sftpForm) workflowGeneration = currentConnectionGeneration();
+    let generation = workflowGeneration;
+    const resolved = await connectionAttempt;
+    // A passphrase retry takes a newer generation; follow the latest one.
+    generation = workflowGeneration;
     establishedConnectionId = state.connectionId;
     attempt.sessionId = establishedConnectionId;
     if (attempt.cancelled) {
@@ -1365,17 +2321,31 @@ export async function handleConnect(): Promise<void> {
       await releaseEstablishedSession(establishedConnectionId);
       return;
     }
-    (document.getElementById("conn-region") as HTMLInputElement).value =
-      resolvedRegion;
+    if (!sftpForm) {
+      (document.getElementById("conn-region") as HTMLInputElement).value =
+        resolved.region;
+    }
     try {
-      await saveConnection(
-        establishedConnectionId,
-        endpoint,
-        resolvedRegion,
-        accessKey,
-        secretKey,
-        sessionToken,
-      );
+      if (sftpForm && resolved.sftp) {
+        await saveSftpConnection(
+          establishedConnectionId,
+          sftpSaveInput(
+            sftpForm,
+            endpoint,
+            resolved.sftp.hostKey,
+            options.passphraseSink?.value ?? sftpForm.passphrase,
+          ),
+        );
+      } else {
+        await saveConnection(
+          establishedConnectionId,
+          endpoint,
+          resolved.region,
+          accessKey,
+          secretKey,
+          sessionToken,
+        );
+      }
     } catch (saveErr) {
       if (attempt.cancelled) {
         await releaseEstablishedSession(establishedConnectionId);
@@ -1398,6 +2368,15 @@ export async function handleConnect(): Promise<void> {
     }
     if (!isGenerationCurrent(generation, establishedConnectionId)) {
       return;
+    }
+    if (sftpForm && resolved.sftp) {
+      // The host key was trusted for this connect: pin it for the identity.
+      lastSftpPin = {
+        endpoint,
+        username: accessKey,
+        hostKey: resolved.sftp.hostKey,
+      };
+      await pinSftpBookmarkHostKey(endpoint, accessKey, resolved.sftp.hostKey);
     }
     renderBucketListSkeleton();
     await refreshBuckets();
@@ -1471,6 +2450,12 @@ export async function handleConnect(): Promise<void> {
       return;
     }
     renderBucketList();
+    if (sftpForm && isUserCancelledConnect(e)) {
+      // The user declined the host key or a prompt: that is not a failure.
+      setConnectionUI(wasConnected && state.connected);
+      setStatus("Connection cancelled.", 5000);
+      return;
+    }
     const message = `Connection failed: ${friendlyError(e)}`;
     setConnectionFormError(message);
     setStatus(message);
@@ -1478,7 +2463,11 @@ export async function handleConnect(): Promise<void> {
     logActivity(message, "error");
     // Move focus off the (re-enabled) Connect button to the form so the
     // error is announced where the user is working.
-    focusAfterFailure = "conn-endpoint";
+    focusAfterFailure = sftpForm
+      ? isEncryptedKeyError(errorText(e))
+        ? "conn-sftp-passphrase"
+        : "conn-sftp-host"
+      : "conn-endpoint";
   } finally {
     if (pendingConnectAttempt === attempt) pendingConnectAttempt = null;
     if (workflowGeneration) {
@@ -1493,6 +2482,7 @@ export async function handleConnect(): Promise<void> {
       setConnectButtonBusy(false);
     }
     if (focusAfterFailure) focusConnectionField(focusAfterFailure);
+    refreshSftpResetButton();
   }
 }
 
@@ -1625,6 +2615,8 @@ export function cancelPendingTestConnection(): void {
   const attempt = pendingTestAttempt;
   if (!attempt && !testConnectionInFlight) return;
   if (attempt) attempt.cancelled = true;
+  cancelSftpConnectInFlight();
+  closeSftpConnectDialogs();
   pendingTestAttempt = null;
   testConnectionInFlight = false;
   dom.connectBtn.disabled = false;
@@ -1642,6 +2634,10 @@ export function cancelPendingTestConnection(): void {
  */
 export async function handleTestConnection(): Promise<void> {
   if (state.connected || state.connecting || testConnectionInFlight) return;
+  if (currentFormProtocol() === "sftp") {
+    await handleSftpTestConnection();
+    return;
+  }
   const { endpoint, region, accessKey, secretKey, sessionToken } =
     getConnectionInputs();
   const missingField = !endpoint
@@ -1734,6 +2730,70 @@ export async function handleTestConnection(): Promise<void> {
   }
 }
 
+/**
+ * Test an SFTP connection: the same connect and dialogs as Connect, then the
+ * session it created is disconnected. Nothing is saved or pinned by a test.
+ */
+async function handleSftpTestConnection(): Promise<void> {
+  const form = readSftpForm();
+  const invalid = validateSftpDraft(sftpDraftFromForm(form));
+  if (invalid) {
+    setConnectionFormError(invalid.message, invalid.fieldId);
+    setStatus(invalid.message);
+    return;
+  }
+  const endpoint = formatSftpEndpoint(form.host, Number(form.port));
+  testConnectionInFlight = true;
+  dom.connectBtn.disabled = true;
+  setTestButtonBusy(true);
+  setConnectionFormDisabled(true);
+  const attempt: TestConnectionAttempt = {
+    cancelled: false,
+    sessionId: null,
+    generation: 0,
+  };
+  pendingTestAttempt = attempt;
+  try {
+    setStatus("Testing connection…");
+    await connectSftpForForm(
+      form,
+      endpoint,
+      {},
+      () => attempt.cancelled,
+      (generation) => {
+        attempt.generation = generation;
+      },
+    );
+    attempt.sessionId = state.connectionId;
+    attempt.generation = currentConnectionGeneration();
+    if (attempt.cancelled) return;
+    setStatus("Connection test succeeded.", 5000);
+    logActivity(`Connection test to ${endpoint} succeeded.`, "success");
+  } catch (err) {
+    if (attempt.cancelled) return;
+    if (isUserCancelledConnect(err)) {
+      setStatus("Connection test cancelled.", 5000);
+      return;
+    }
+    const message = `Connection test failed: ${friendlyError(err)}`;
+    setStatus(message, 8000);
+    logActivity(message, "error");
+  } finally {
+    try {
+      await endTestSession(attempt.sessionId, attempt.generation);
+    } catch {
+      // Already reported through the catch path above when relevant.
+    }
+    if (pendingTestAttempt === attempt) pendingTestAttempt = null;
+    testConnectionInFlight = false;
+    dom.connectBtn.disabled = false;
+    if (!state.connecting && !inlineEditSaving)
+      setConnectionFormDisabled(false);
+    setTestButtonBusy(false);
+    refreshConnectionSwitcher();
+  }
+}
+
 /* ==========================================================================
  * Provider presets, per-field blur validation, and form wiring.
  * ========================================================================== */
@@ -1801,6 +2861,18 @@ function validateConnectionField(fieldId: string): string | null {
   const input = document.getElementById(fieldId) as HTMLInputElement | null;
   const value = input?.value.trim() ?? "";
   switch (fieldId) {
+    case "conn-sftp-host":
+    case "conn-sftp-port": {
+      const error = validateSftpDraft(
+        fieldId === "conn-sftp-host"
+          ? { ...readSftpDraftForBlur(), host: value }
+          : { ...readSftpDraftForBlur(), port: value },
+        { requireSecret: false },
+      );
+      return error?.fieldId === fieldId ? error.message : null;
+    }
+    case "conn-sftp-username":
+      return value ? null : "Username is required.";
     case "conn-endpoint":
       if (!value) return "Endpoint is required.";
       if (!/^https?:\/\/.+/i.test(value)) {
@@ -1818,6 +2890,11 @@ function validateConnectionField(fieldId: string): string | null {
   }
 }
 
+/** The SFTP draft as the form holds it now, for one field's blur check. */
+function readSftpDraftForBlur(): SftpDraft {
+  return sftpDraftFromForm(readSftpForm());
+}
+
 let connectionScreenExtrasWired = false;
 
 /**
@@ -1833,6 +2910,60 @@ export function wireConnectionScreenExtras(): void {
   document.getElementById("conn-test-btn")?.addEventListener("click", () => {
     void handleTestConnection();
   });
+
+  // SFTP form: the protocol switch, the auth method, the key picker, the
+  // password reveal, Enter to connect, and the host key reset.
+  for (const radio of document.querySelectorAll<HTMLInputElement>(
+    'input[name="conn-protocol"]',
+  )) {
+    radio.addEventListener("change", handleProtocolChange);
+  }
+  formElement<HTMLSelectElement>("conn-sftp-auth")?.addEventListener(
+    "change",
+    () => {
+      setConnectionFormError(null);
+      applyProtocolLayout(currentFormProtocol());
+    },
+  );
+  formElement<HTMLButtonElement>("conn-sftp-key-choose")?.addEventListener(
+    "click",
+    () => {
+      void chooseSftpKey();
+    },
+  );
+  formElement<HTMLButtonElement>("conn-sftp-reset-hostkey")?.addEventListener(
+    "click",
+    () => {
+      void resetSftpHostKey();
+    },
+  );
+  const passwordToggle = formElement<HTMLButtonElement>("sftp-password-toggle");
+  const passwordInput = formInput("conn-sftp-password");
+  passwordToggle?.addEventListener("click", () => {
+    if (!passwordInput) return;
+    const revealed = passwordInput.type === "text";
+    passwordInput.type = revealed ? "password" : "text";
+    if (passwordToggle) {
+      passwordToggle.textContent = revealed ? "Show" : "Hide";
+      passwordToggle.setAttribute("aria-pressed", String(!revealed));
+    }
+  });
+  for (const id of [
+    "conn-sftp-host",
+    "conn-sftp-port",
+    "conn-sftp-username",
+    "conn-sftp-password",
+    "conn-sftp-passphrase",
+  ]) {
+    formElement(id)?.addEventListener("keydown", (event) => {
+      if ((event as KeyboardEvent).key !== "Enter") return;
+      event.preventDefault();
+      void handleConnect();
+    });
+  }
+  for (const id of ["conn-sftp-host", "conn-sftp-port", "conn-sftp-username"]) {
+    formElement(id)?.addEventListener("input", updateBookmarkBtn);
+  }
 
   const filterInput = document.getElementById("conn-saved-filter");
   filterInput?.addEventListener("input", () => {
@@ -1922,6 +3053,9 @@ export function wireConnectionScreenExtras(): void {
     "conn-access-key",
     "conn-secret-key",
     "conn-name",
+    "conn-sftp-host",
+    "conn-sftp-port",
+    "conn-sftp-username",
   ]) {
     const input = document.getElementById(fieldId);
     input?.addEventListener("blur", () => reportBlurError(fieldId));
@@ -2022,35 +3156,55 @@ async function saveInlineBookmarkEdit(
   }
 }
 
-export async function handleBookmarkSave(): Promise<void> {
-  if (inlineEditSaving) return;
-  const { endpoint, region, accessKey, secretKey, sessionToken } =
-    getConnectionInputs();
-  const nameInput = document.getElementById(
-    "conn-name",
-  ) as HTMLInputElement | null;
-  const providedName = nameInput?.value.trim() ?? "";
-
-  if (inlineEditingBookmark) {
-    await saveInlineBookmarkEdit(inlineEditingBookmark, inlineEditRevision, {
-      endpoint,
-      region,
-      accessKey,
-      secretKey,
-      sessionToken,
-      providedName,
-    });
+/** Save an SFTP connection from the form, pinning the host key this view knows. */
+async function saveSftpBookmarkFromForm(providedName: string): Promise<void> {
+  const form = readSftpForm();
+  const invalid = validateSftpDraft(sftpDraftFromForm(form), {
+    requireSecret: false,
+  });
+  if (invalid) {
+    setConnectionFormError(invalid.message, invalid.fieldId);
+    setStatus(invalid.message);
     return;
   }
+  const endpoint = formatSftpEndpoint(form.host, Number(form.port));
+  const sftp: SftpSettings = { auth: form.auth };
+  if (form.auth === "key" && form.key) sftp.private_key = form.key.keyText;
+  const hostKey = sftpPinFor(endpoint, form.username);
+  if (hostKey) sftp.host_key = hostKey;
+  const secretKey =
+    form.auth === "password"
+      ? form.password
+      : form.auth === "key"
+        ? form.passphrase
+        : "";
+  await saveDraftAsBookmark({
+    endpoint,
+    region: "",
+    accessKey: form.username,
+    secretKey,
+    sessionToken: "",
+    providedName,
+    sftp,
+  });
+}
 
-  if (!endpoint || !accessKey) {
-    const invalidField = endpoint ? "conn-access-key" : "conn-endpoint";
-    const message = "Fill in endpoint and access key to save a connection.";
-    setConnectionFormError(message, invalidField);
-    setStatus(message);
-    return;
-  }
-
+/**
+ * Save a new saved connection from a draft. An identical endpoint and access
+ * key is treated as the same connection; a duplicate draft is refused. The S3
+ * and SFTP drafts share the name prompt and the duplicate rules.
+ */
+async function saveDraftAsBookmark(draft: {
+  endpoint: string;
+  region: string;
+  accessKey: string;
+  secretKey: string;
+  sessionToken: string;
+  providedName: string;
+  sftp?: SftpSettings;
+}): Promise<void> {
+  const { endpoint, region, accessKey, secretKey, sessionToken, providedName } =
+    draft;
   const existing = getBookmarks().find(
     (b) => b.endpoint === endpoint && b.access_key === accessKey,
   );
@@ -2113,6 +3267,7 @@ export async function handleBookmarkSave(): Promise<void> {
       access_key: accessKey,
       secret_key: secretKey,
       ...(sessionToken ? { session_token: sessionToken } : {}),
+      ...(draft.sftp ? { protocol: "sftp" as const, sftp: draft.sftp } : {}),
     });
     if (added) {
       showToast(`Saved connection "${name}".`, { type: "success" });
@@ -2125,4 +3280,159 @@ export async function handleBookmarkSave(): Promise<void> {
     );
   }
   updateBookmarkBtn();
+}
+
+/**
+ * Apply an inline edit of an SFTP saved connection. The protocol, the
+ * authentication method, and the key cannot change in place; those need a new
+ * saved connection. A changed host clears its pin, because the pin belonged to
+ * the old server.
+ */
+async function saveInlineSftpEdit(
+  target: Bookmark,
+  revision: number,
+  providedName: string,
+): Promise<void> {
+  if (inlineEditSaving || !target.sftp) return;
+  const form = readSftpForm();
+  const invalid = validateSftpDraft(sftpDraftFromForm(form), {
+    requireSecret: false,
+  });
+  if (invalid) {
+    setConnectionFormError(invalid.message, invalid.fieldId);
+    setStatus(invalid.message);
+    return;
+  }
+  const refuse = (message: string, fieldId?: string): void => {
+    setConnectionFormError(message, fieldId);
+    setStatus(message);
+  };
+  if (form.auth !== target.sftp.auth) {
+    refuse(
+      "Changing the authentication method needs a new saved connection. Delete this one and save it again.",
+    );
+    return;
+  }
+  if (form.auth === "key" && form.key?.keyText !== target.sftp.private_key) {
+    refuse(
+      "Choosing a different key needs a new saved connection. Delete this one and save it again.",
+      "conn-sftp-key-choose",
+    );
+    return;
+  }
+  const endpoint = formatSftpEndpoint(form.host, Number(form.port));
+  const secret =
+    form.auth === "password"
+      ? form.password
+      : form.auth === "key"
+        ? form.passphrase
+        : "";
+  // The old password belongs to the old username, as with an S3 access key.
+  if (
+    form.username !== target.access_key &&
+    form.auth === "password" &&
+    secret === ""
+  ) {
+    refuse("Enter the password for the new username.", "conn-sftp-password");
+    return;
+  }
+  const name = providedName || target.name;
+  const patch: BookmarkPatch = {
+    name,
+    endpoint,
+    region: "",
+    access_key: form.username,
+  };
+  if (secret !== "") patch.secret_key = secret;
+  if (endpoint !== target.endpoint) patch.sftp = { host_key: null };
+
+  inlineEditSaving = true;
+  setConnectionFormDisabled(true);
+  try {
+    const updated = await updateBookmark(
+      { endpoint: target.endpoint, access_key: target.access_key },
+      patch,
+    );
+    const stillEditing =
+      inlineEditRevision === revision && inlineEditingBookmark === target;
+    if (!stillEditing) return;
+    if (!updated) {
+      setStatus("That saved connection is no longer saved.", 5000);
+    } else {
+      if (name !== target.name || endpoint !== target.endpoint) {
+        forgetConnectionLocation(target.name, target.endpoint);
+      }
+      showToast(`Updated "${name}".`, { type: "success" });
+      setSftpConnectionInputs(form);
+    }
+    setInlineEditBookmark(null);
+    updateBookmarkBtn();
+  } catch (err) {
+    if (inlineEditRevision === revision && inlineEditingBookmark === target) {
+      setConnectionFormError(
+        `Could not update "${name}": ${friendlyError(err)}`,
+      );
+    }
+  } finally {
+    inlineEditSaving = false;
+    // Leave the form disabled only while a connect/test owns it.
+    if (!state.connecting && !testConnectionInFlight) {
+      setConnectionFormDisabled(false);
+    }
+    refreshBookmarkBar();
+  }
+}
+
+export async function handleBookmarkSave(): Promise<void> {
+  if (inlineEditSaving) return;
+  const nameInput = document.getElementById(
+    "conn-name",
+  ) as HTMLInputElement | null;
+  const providedName = nameInput?.value.trim() ?? "";
+
+  if (inlineEditingBookmark) {
+    if (inlineEditingBookmark.protocol === "sftp") {
+      await saveInlineSftpEdit(
+        inlineEditingBookmark,
+        inlineEditRevision,
+        providedName,
+      );
+      return;
+    }
+    const { endpoint, region, accessKey, secretKey, sessionToken } =
+      getConnectionInputs();
+    await saveInlineBookmarkEdit(inlineEditingBookmark, inlineEditRevision, {
+      endpoint,
+      region,
+      accessKey,
+      secretKey,
+      sessionToken,
+      providedName,
+    });
+    return;
+  }
+
+  if (currentFormProtocol() === "sftp") {
+    await saveSftpBookmarkFromForm(providedName);
+    return;
+  }
+
+  const { endpoint, region, accessKey, secretKey, sessionToken } =
+    getConnectionInputs();
+  if (!endpoint || !accessKey) {
+    const invalidField = endpoint ? "conn-access-key" : "conn-endpoint";
+    const message = "Fill in endpoint and access key to save a connection.";
+    setConnectionFormError(message, invalidField);
+    setStatus(message);
+    return;
+  }
+
+  await saveDraftAsBookmark({
+    endpoint,
+    region,
+    accessKey,
+    secretKey,
+    sessionToken,
+    providedName,
+  });
 }

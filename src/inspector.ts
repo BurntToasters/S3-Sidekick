@@ -439,11 +439,19 @@ function syncInspectorPaneVisibility(): void {
   if (activeInfoPane) moveSharedInfoContent(activeInfoPane);
 
   const tabs = document.querySelectorAll<HTMLElement>("[data-inspector-tab]");
+  const sftp = state.protocol === "sftp";
   for (const tab of tabs) {
     const active = tab.dataset.inspectorTab === inspectorTab;
     tab.classList.toggle("inspector-tab--active", active);
     tab.setAttribute("aria-selected", String(active));
     tab.setAttribute("tabindex", active ? "0" : "-1");
+    // Permissions (ACL) and Metadata are S3 panes; SFTP shows Details only.
+    if (
+      tab.dataset.inspectorTab === "permissions" ||
+      tab.dataset.inspectorTab === "metadata"
+    ) {
+      tab.hidden = sftp;
+    }
   }
 }
 
@@ -724,6 +732,12 @@ async function performInspectorSync(
   syncGen: number,
   syncWasInFlight: boolean,
 ): Promise<void> {
+  if (
+    state.protocol === "sftp" &&
+    (inspectorTab === "permissions" || inspectorTab === "metadata")
+  ) {
+    inspectorTab = "details";
+  }
   // Opening the inspector syncs immediately and the browser's following
   // selection tick repeats it. Skip only that duplicate when nothing else is
   // in flight; an empty selection must always sync so Deselect All can show

@@ -97,6 +97,21 @@ pub(crate) struct SftpDeleteResult {
     pub(crate) failed: Vec<SftpDeleteFailure>,
 }
 
+/// Outcome of an upload. `warning` names a leftover file on the server when the
+/// upload succeeded but its cleanup did not, so the user is not left believing
+/// the old content is gone.
+#[derive(serde::Serialize)]
+pub(crate) struct SftpUploadOutcome {
+    pub(crate) bytes_written: u64,
+    pub(crate) warning: Option<String>,
+}
+
+/// Outcome of a rename, with the same cleanup `warning` as an upload.
+#[derive(serde::Serialize)]
+pub(crate) struct SftpRenameOutcome {
+    pub(crate) warning: Option<String>,
+}
+
 /// Metadata of a private key file chosen through the native dialog.
 ///
 /// The key text is held so the connect command can use it without a second

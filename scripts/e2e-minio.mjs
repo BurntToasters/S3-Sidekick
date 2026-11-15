@@ -53,6 +53,7 @@ const EXPECTED_CHECKS = Object.freeze([
   "a cancel arriving before registration rejects the transfer and commits no object",
   "no copy receipt exists that can authorize rollback of the external objects",
   "the pinned MinIO server ignores a stale If-Match DELETE after external replacement",
+  "connect reports conditional DELETE unsupported for the MinIO endpoint, so Move is disabled",
   "automatic object-move copy refuses before mutation when conditional DELETE is unverified",
   "rename_object refuses before destination mutation when conditional DELETE is unverified",
   "explicit overwrite copy replaces an existing destination without deleting its source",

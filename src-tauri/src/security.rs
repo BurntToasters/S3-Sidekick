@@ -431,43 +431,21 @@ fn key_check_value(key: &[u8; KEY_LEN]) -> String {
     B64.encode(&verifier[..KEY_CHECK_LEN])
 }
 
-/// HMAC-SHA256 (RFC 2104) without adding another dependency.
+/// HMAC-SHA256 (RFC 2104) from the `hmac` crate.
 ///
-/// Every production caller uses a 32-byte domain-separated key, but the helper
-/// is implemented for arbitrary key lengths so test vectors from RFC 4231,
-/// including the block-size boundary and keys longer than one block, are
-/// meaningful. Long keys are hashed first; they are never folded with XOR.
-fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut normalized = Zeroizing::new([0u8; BLOCK]);
-    if key.len() > BLOCK {
-        let digest = Sha256::digest(key);
-        normalized[..digest.len()].copy_from_slice(&digest);
-    } else {
-        normalized[..key.len()].copy_from_slice(key);
-    }
-    let mut inner_pad = [0x36u8; BLOCK];
-    let mut outer_pad = [0x5cu8; BLOCK];
-    for (pad, byte) in inner_pad.iter_mut().zip(normalized.iter()) {
-        *pad ^= byte;
-    }
-    for (pad, byte) in outer_pad.iter_mut().zip(normalized.iter()) {
-        *pad ^= byte;
-    }
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
+/// Every caller passes a 32-byte domain-separated key. The key is placed at
+/// the start of one zeroed 64-byte block, which is exactly what HMAC does with
+/// any key no longer than the SHA-256 block size, so construction goes through
+/// the infallible `KeyInit::new` and needs no error path.
+fn hmac_sha256(key: &[u8; KEY_LEN], parts: &[&[u8]]) -> [u8; 32] {
+    use hmac::Mac;
+    let mut block = Zeroizing::new([0u8; 64]);
+    block[..KEY_LEN].copy_from_slice(key);
+    let mut mac = <hmac::Hmac<Sha256> as KeyInit>::new(&(*block).into());
     for part in parts {
-        inner.update(part);
+        mac.update(part);
     }
-    let inner_digest = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner_digest);
-    let mut tag = [0u8; 32];
-    tag.copy_from_slice(&outer.finalize()[..32]);
-    inner_pad.zeroize();
-    outer_pad.zeroize();
-    tag
+    mac.finalize().into_bytes().into()
 }
 
 fn payload_mac_key(key: &[u8; KEY_LEN]) -> Zeroizing<[u8; KEY_LEN]> {
@@ -483,7 +461,7 @@ fn payload_mac_key(key: &[u8; KEY_LEN]) -> Zeroizing<[u8; KEY_LEN]> {
 fn payload_mac(key: &[u8; KEY_LEN], v: u8, nonce: &str, ciphertext: &str, kv: &str) -> String {
     let mac_key = payload_mac_key(key);
     let mut tag = hmac_sha256(
-        mac_key.as_slice(),
+        &mac_key,
         &[
             b"s3-sidekick-payload-metadata",
             &[v],
@@ -1403,7 +1381,7 @@ fn policy_mac_tag(config: &SecurityConfig, key: &[u8; KEY_LEN]) -> [u8; 32] {
             ),
         ),
     };
-    let mut tag = hmac_sha256(mac_key.as_slice(), &[domain, payload.as_bytes()]);
+    let mut tag = hmac_sha256(&mac_key, &[domain, payload.as_bytes()]);
     let out = tag;
     tag.zeroize();
     out
@@ -1940,10 +1918,7 @@ fn factory_reset_mac(journal: &FactoryResetJournal, key: &[u8; KEY_LEN]) -> Resu
     };
     let mut encoded = serde_json::to_vec(&payload)
         .map_err(|err| format!("Factory-reset journal could not be serialized: {}", err))?;
-    let mut tag = hmac_sha256(
-        mac_key.as_slice(),
-        &[b"s3-sidekick-factory-reset-journal", &encoded],
-    );
+    let mut tag = hmac_sha256(&mac_key, &[b"s3-sidekick-factory-reset-journal", &encoded]);
     let out = B64.encode(tag);
     tag.zeroize();
     encoded.zeroize();
@@ -4212,34 +4187,62 @@ mod tests {
             .collect()
     }
 
-    /// RFC 4231 test vectors 2, 6, and 7. The long-key cases catch an
-    /// implementation that folds key bytes with XOR instead of hashing keys
-    /// larger than the SHA-256 block size.
+    /// RFC 4231 test vectors 2, 6, and 7 against the `hmac` + `sha2`
+    /// configuration `hmac_sha256` uses. The long-key cases catch a build that
+    /// folds key bytes instead of hashing keys longer than one block.
     #[test]
     fn hmac_sha256_matches_rfc_4231_vectors() {
-        let case2 = hmac_sha256(b"Jefe", &[b"what do ya want for nothing?"]);
+        use hmac::Mac;
+        let rfc = |key: &[u8], data: &[u8]| -> Vec<u8> {
+            let mut mac = <hmac::Hmac<Sha256> as Mac>::new_from_slice(key).unwrap();
+            mac.update(data);
+            mac.finalize().into_bytes().to_vec()
+        };
         assert_eq!(
-            case2.as_slice(),
+            rfc(b"Jefe", b"what do ya want for nothing?"),
             hex_bytes("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
         );
-
         let long_key = [0xaau8; 131];
-        let case6 = hmac_sha256(
-            &long_key,
-            &[b"Test Using Larger Than Block-Size Key - Hash Key First"],
-        );
         assert_eq!(
-            case6.as_slice(),
+            rfc(
+                &long_key,
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
             hex_bytes("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
         );
-
-        let case7 = hmac_sha256(
-            &long_key,
-            &[b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm."],
-        );
         assert_eq!(
-            case7.as_slice(),
+            rfc(
+                &long_key,
+                b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm."
+            ),
             hex_bytes("9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2")
+        );
+    }
+
+    /// Existing vaults carry tags made by the hand-written HMAC this crate
+    /// used before 0.13.0. These outputs (cross-checked with Python's `hmac`)
+    /// must not change, or stored policy, payload and journal tags stop
+    /// verifying.
+    #[test]
+    fn hmac_sha256_keeps_the_tags_existing_vaults_were_written_with() {
+        let tag = hmac_sha256(&[7u8; KEY_LEN], &[b"a", b"bc"]);
+        assert_eq!(
+            tag.as_slice(),
+            hex_bytes("127da4ced6a839b8f6118bc244684d2663e70cb5ff0adeefca89d7e74d5a0525")
+        );
+        let mut key = [0u8; KEY_LEN];
+        for (index, byte) in key.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        let tag = hmac_sha256(&key, &[b"s3-sidekick-factory-reset-journal", b"{\"x\":1}"]);
+        assert_eq!(
+            tag.as_slice(),
+            hex_bytes("3619d8288662cac520fa64c529b2de3463f5eece230e2cd64a56c35b854691b8")
+        );
+        // Splitting the message across parts never changes the tag.
+        assert_eq!(
+            hmac_sha256(&key, &[b"ab", b"", b"c"]),
+            hmac_sha256(&key, &[b"abc"])
         );
     }
 

@@ -15,6 +15,7 @@ import {
   parseJsonObject,
 } from "./utils.ts";
 import { refreshObjects, MAX_ACCUMULATED_LISTING_ITEMS } from "./connection.ts";
+import { isSftpNameLossy, SFTP_LOSSY_REASON } from "./sftp-move.ts";
 import { iconForFileName, type FileIconName } from "./icon-map.ts";
 import {
   closeInspectorOnMobile,
@@ -1338,6 +1339,10 @@ interface ObjectTableEntry {
   name: string;
   size: number;
   lastModified: string;
+  /** SFTP files: the kind the listing reported. */
+  sftpKind?: "file" | "symlink" | "other";
+  /** SFTP files: the name was sent as non-UTF-8. */
+  nameLossy?: boolean;
 }
 
 export interface ObjectVirtualRange {
@@ -1376,7 +1381,7 @@ function createObjectRow(): HTMLTableRowElement {
   row.setAttribute("role", "row");
   // The row itself is the Tab stop (roving); its checkbox stays clickable.
   row.innerHTML = `<td role="gridcell" class="col-check"><input type="checkbox" class="row-check" tabindex="-1" /></td>
-    <td role="gridcell" class="object-name"><div class="object-name__inner"><span class="object-kind-icon"></span><span class="object-name__text"></span></div></td>
+    <td role="gridcell" class="object-name"><div class="object-name__inner"><span class="object-kind-icon"></span><span class="object-name__text"></span><span class="object-badge" hidden></span></div></td>
     <td role="gridcell" class="object-size"></td>
     <td role="gridcell" class="object-modified"></td>`;
   return row;
@@ -1420,6 +1425,7 @@ function updateObjectRow(
     nameText.textContent = entry.name;
     nameText.title = entry.name;
   }
+  applySftpRowMarks(row, entry);
   if (icon) {
     icon.className = `object-kind-icon icon-${entry.kind}`;
     if (entry.kind === "folder") {
@@ -1459,6 +1465,42 @@ function createVirtualSpacer(
   cell.style.height = `${Math.max(0, height)}px`;
   row.appendChild(cell);
   return row;
+}
+
+/**
+ * Link and non-UTF-8 badges on an SFTP row, from the kind and name flag the
+ * listing carried. Folders carry no metadata, so their name is checked. S3
+ * rows never show either badge.
+ */
+function applySftpRowMarks(
+  row: HTMLTableRowElement,
+  entry: ObjectTableEntry,
+): void {
+  const sftpRow = state.protocol === "sftp";
+  const kind = sftpRow && entry.kind === "file" ? entry.sftpKind : undefined;
+  const link = kind === "symlink";
+  const lossy =
+    sftpRow &&
+    (entry.kind === "folder"
+      ? isSftpNameLossy(entry.name)
+      : entry.nameLossy === true);
+  if (kind !== undefined) {
+    row.dataset.sftpKind = kind;
+  } else {
+    delete row.dataset.sftpKind;
+  }
+  row.classList.toggle("object-row--link", link);
+  row.classList.toggle("object-row--lossy", lossy);
+  const badge = row.querySelector<HTMLElement>(".object-badge");
+  if (!badge) return;
+  const label = lossy ? "Non-UTF-8" : link ? "Link" : "";
+  badge.hidden = label === "";
+  badge.textContent = label;
+  badge.title = lossy
+    ? SFTP_LOSSY_REASON
+    : link
+      ? "Symbolic link. Links are shown but not followed in this beta."
+      : "";
 }
 
 function renderCurrentObjectWindow(
@@ -1920,6 +1962,8 @@ export function renderObjectTable(): void {
       name: basename(object.key),
       size: object.size,
       lastModified: object.last_modified,
+      sftpKind: object.sftp_kind,
+      nameLossy: object.name_lossy === true,
     })),
   ];
   objectRowHeight = readObjectRowHeight();
@@ -2001,11 +2045,14 @@ export function renderBreadcrumb(): void {
 
   // The segment for the current location is not a navigation control: it
   // is marked aria-current="page" and rendered as plain text.
+  // SFTP shows the remote path from "/"; the host is the sidebar bucket only.
+  const sftp = state.protocol === "sftp";
+  const rootLabel = sftp ? "/" : state.currentBucket;
   const rootIsCurrent = !state.currentPrefix;
   parts.push(
     rootIsCurrent
-      ? `<span class="breadcrumb__segment breadcrumb__segment--root breadcrumb__segment--current" aria-current="page">${escapeHtml(state.currentBucket)}</span>`
-      : `<button type="button" class="breadcrumb__segment breadcrumb__segment--root" data-prefix="" aria-label="Open bucket root ${escapeHtml(state.currentBucket)}">${escapeHtml(state.currentBucket)}</button>`,
+      ? `<span class="breadcrumb__segment breadcrumb__segment--root breadcrumb__segment--current" aria-current="page">${escapeHtml(rootLabel)}</span>`
+      : `<button type="button" class="breadcrumb__segment breadcrumb__segment--root" data-prefix="" aria-label="${sftp ? "Open root folder" : `Open bucket root ${escapeHtml(state.currentBucket)}`}">${escapeHtml(rootLabel)}</button>`,
   );
 
   if (state.currentPrefix) {
@@ -2017,10 +2064,13 @@ export function renderBreadcrumb(): void {
       accumulated += seg + "/";
       const label = seg === "" ? "(empty)" : seg;
       const isCurrent = index === segments.length - 1;
+      // The root already reads "/", so the first crumb has no separator.
+      const separator =
+        sftp && index === 0 ? "" : `<span class="breadcrumb__sep">/</span>`;
       parts.push(
         isCurrent
-          ? `<span class="breadcrumb__sep">/</span><span class="breadcrumb__segment breadcrumb__segment--current" aria-current="page" title="${escapeHtml(accumulated)}">${escapeHtml(label)}</span>`
-          : `<span class="breadcrumb__sep">/</span><button type="button" class="breadcrumb__segment" data-prefix="${escapeHtml(accumulated)}" title="${escapeHtml(accumulated)}" aria-label="Open folder ${escapeHtml(label)}">${escapeHtml(label)}</button>`,
+          ? `${separator}<span class="breadcrumb__segment breadcrumb__segment--current" aria-current="page" title="${escapeHtml(accumulated)}">${escapeHtml(label)}</span>`
+          : `${separator}<button type="button" class="breadcrumb__segment" data-prefix="${escapeHtml(accumulated)}" title="${escapeHtml(accumulated)}" aria-label="Open folder ${escapeHtml(label)}">${escapeHtml(label)}</button>`,
       );
     });
   }

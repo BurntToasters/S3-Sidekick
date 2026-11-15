@@ -2,6 +2,27 @@ import { invoke } from "./ipc.ts";
 import { pickTextExport } from "./path-grants.ts";
 import { state } from "./state.ts";
 import {
+  isSftpAlreadyExists,
+  sftpKeyFromPath,
+  sftpPathFromKey,
+} from "./sftp.ts";
+import {
+  sftpCreateDir,
+  sftpDelete,
+  sftpDeleteDir,
+  sftpRename,
+} from "./sftp-commands.ts";
+import {
+  isSftpNameLossy,
+  reportSftpConnectionLost,
+  sftpChildNameProblem,
+  sftpDeleteConfirmation,
+  sftpJoinPath,
+  sftpLeafName,
+  sftpParentPath,
+  SFTP_LOSSY_REASON,
+} from "./sftp-move.ts";
+import {
   captureConnectionSnapshot,
   connectionIdentityChanged,
   connectionSnapshotChanged,
@@ -256,6 +277,7 @@ async function performDelete(): Promise<void> {
   const prefixes = getSelectedPrefixes();
 
   if (keys.length === 0 && prefixes.length === 0) return;
+  if (state.protocol === "sftp") return performSftpDelete(keys, prefixes);
 
   let target: ConnectionSnapshot;
   try {
@@ -436,6 +458,358 @@ async function performDelete(): Promise<void> {
   }
 }
 
+/* SFTP object operations. The server is the source of truth: each action is a
+   native command on the session's connection id, and a lost connection is
+   handed to reportSftpConnectionLost before any generic message. */
+
+/** The last name of a listing key, without a folder's trailing slash. */
+function keyLeaf(key: string): string {
+  return sftpLeafName(key.replace(/\/$/, ""));
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+  const raw = error instanceof Error ? error.message : String(error);
+  return isSftpAlreadyExists(raw);
+}
+
+/** Re-list the folder the user is in, after an SFTP change. */
+async function refreshSftpListing(target: ConnectionSnapshot): Promise<void> {
+  if (connectionSnapshotChanged(target)) return;
+  const committed = await refreshObjects(target.bucket, target.prefix, {
+    supersedePending: false,
+  });
+  if (committed && !connectionSnapshotChanged(target)) {
+    renderObjectTable();
+    renderBreadcrumb();
+  }
+}
+
+async function performSftpDelete(
+  keys: string[],
+  prefixes: string[],
+): Promise<void> {
+  if ([...keys, ...prefixes].some((key) => isSftpNameLossy(keyLeaf(key)))) {
+    setStatus(SFTP_LOSSY_REASON, 5000);
+    return;
+  }
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch (err) {
+    setStatus(`Delete cancelled: ${friendlyError(err)}`, 5000);
+    return;
+  }
+
+  const names = [...prefixes, ...keys].map(keyLeaf);
+  const shown = names.slice(0, 5);
+  const remaining = names.length - shown.length;
+  const nameList =
+    shown.length > 0
+      ? `\n${shown.join(", ")}${remaining > 0 ? `, and ${remaining} more` : ""}`
+      : "";
+  const message =
+    `${sftpDeleteConfirmation(keys.length, prefixes.length)}${nameList}\n` +
+    "This cannot be undone. Items are removed permanently on the server.";
+  const confirmed = await showConfirm("Delete", message, {
+    okLabel: "Delete",
+    okDanger: true,
+  });
+  if (!confirmed) return;
+  if (
+    connectionSnapshotChanged(target) ||
+    keys.join("\n") !== getSelectedFileKeys().join("\n") ||
+    prefixes.join("\n") !== getSelectedPrefixes().join("\n")
+  ) {
+    setStatus(
+      "Delete cancelled because connection or selection changed.",
+      5000,
+    );
+    return;
+  }
+
+  const focusIndex = renderedIndexOfSelection();
+  const failures: string[] = [];
+  // Entries whose delete the server has not confirmed. A failure keeps them.
+  let pending: SelectionEntry[] = [
+    ...keys.map((key) => fileEntry(key)),
+    ...prefixes.map((prefix) => folderEntry(prefix)),
+  ];
+  let deleted = 0;
+  setStatus("Deleting…");
+  try {
+    if (keys.length > 0) {
+      const result = await sftpDelete(
+        target.connectionId,
+        keys.map((key) => sftpPathFromKey(key)),
+      );
+      const removed = new Set(result.deleted);
+      deleted += result.deleted.length;
+      pending = pending.filter(
+        (entry) =>
+          entry.kind === "folder" || !removed.has(sftpPathFromKey(entry.key)),
+      );
+      for (const failure of result.failed) {
+        failures.push(`${failure.path}: ${failure.error}`);
+      }
+    }
+    for (const prefix of prefixes) {
+      const result = await sftpDeleteDir(
+        target.connectionId,
+        sftpPathFromKey(prefix),
+        null,
+      );
+      if (result.failed.length === 0) {
+        deleted += 1;
+        pending = pending.filter(
+          (entry) => entry.kind !== "folder" || entry.key !== prefix,
+        );
+      } else {
+        // A partly removed folder stays selected: the server may still hold
+        // some of its contents.
+        for (const failure of result.failed) {
+          failures.push(`${failure.path}: ${failure.error}`);
+        }
+      }
+    }
+  } catch (err) {
+    if (await reportSftpConnectionLost(err)) return;
+    failures.push(friendlyError(err));
+  }
+
+  const succeeded = failures.length === 0;
+  let remainingSelection: SelectionEntry[] = pending;
+  if (!connectionSnapshotChanged(target)) {
+    if (succeeded) clearSelection();
+    try {
+      const committed = await refreshObjects(target.bucket, target.prefix, {
+        supersedePending: false,
+      });
+      if (committed && !connectionSnapshotChanged(target)) {
+        remainingSelection = stillListed(pending);
+        renderObjectTable();
+        renderBreadcrumb();
+        if (!succeeded) {
+          clearAllSelection();
+          for (const entry of remainingSelection) addSelection(entry);
+          updateSelectionUI();
+          renderObjectTable();
+        } else {
+          restoreFocusAfterDelete(focusIndex);
+        }
+      }
+    } catch (err) {
+      if (await reportSftpConnectionLost(err)) return;
+      logActivity(
+        `Listing refresh after delete failed: ${friendlyError(err)}`,
+        "warning",
+      );
+    }
+  }
+
+  if (succeeded) {
+    setStatus(`Deleted ${plural(deleted, "item")}.`, 8000);
+    logActivity(`Deleted ${plural(deleted, "item")}.`, "success");
+    return;
+  }
+  const detail = failures.slice(0, 3).join("; ");
+  setStatus(
+    `Delete failed; deleted ${plural(deleted, "item")}. See the notice for details.`,
+    8000,
+  );
+  logActivity(`Delete partially failed: ${failures.join("; ")}`, "warning");
+  const total = keys.length + prefixes.length;
+  showToast(
+    total === 1
+      ? `Couldn't delete "${names[0]}": ${detail}`
+      : `Couldn't delete ${Math.max(1, remainingSelection.length)} of ${plural(total, "item")}`,
+    {
+      type: "error",
+      duration: 0,
+      actionLabel: "Details",
+      onAction: () => openDrawer("activity"),
+    },
+  );
+}
+
+async function handleSftpRename(): Promise<void> {
+  const keys = getSelectedFileKeys();
+  const prefixes = getSelectedPrefixes();
+  const isFolder = prefixes.length === 1 && keys.length === 0;
+  const isFile = keys.length === 1 && prefixes.length === 0;
+  if (!isFolder && !isFile) return;
+  const oldKey = isFolder ? prefixes[0] : keys[0];
+  const oldName = keyLeaf(oldKey);
+  if (isSftpNameLossy(oldName)) {
+    setStatus(SFTP_LOSSY_REASON, 5000);
+    return;
+  }
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch (err) {
+    setStatus(`Rename cancelled: ${friendlyError(err)}`, 5000);
+    return;
+  }
+  const kind = isFolder ? "folder" : "file";
+  const locationChanged = (): boolean => connectionSnapshotChanged(target);
+
+  const rawName = await showPrompt(
+    isFolder ? "Rename folder" : "Rename",
+    isFolder ? "Enter new folder name:" : "Enter new name:",
+    {
+      inputDefault: oldName,
+      validate: async (value) =>
+        objectNameProblem(value, oldName, kind) ??
+        sftpChildNameProblem(value.trim(), kind) ??
+        true,
+    },
+  );
+  if (!rawName) return;
+  const newName = rawName.trim();
+  if (newName === oldName) return;
+  const problem =
+    sftpChildNameProblem(newName, kind) ??
+    objectNameProblem(newName, oldName, kind);
+  if (problem) {
+    setStatus(problem, 5000);
+    return;
+  }
+  if (locationChanged()) {
+    setStatus("Rename cancelled because location changed.", 5000);
+    return;
+  }
+
+  let oldPath: string;
+  let newPath: string;
+  let newKey: string;
+  try {
+    oldPath = sftpPathFromKey(oldKey);
+    newPath = sftpJoinPath(sftpParentPath(oldPath), newName);
+    newKey = sftpKeyFromPath(newPath, isFolder);
+  } catch (err) {
+    setStatus(`Rename failed for "${oldName}": ${friendlyError(err)}`, 5000);
+    return;
+  }
+  const renameTo = (overwrite: boolean): Promise<void> =>
+    sftpRename(target.connectionId, oldPath, newPath, overwrite);
+
+  try {
+    setStatus("Renaming…");
+    try {
+      await renameTo(false);
+    } catch (err) {
+      if (await reportSftpConnectionLost(err)) return;
+      if (!isAlreadyExistsError(err)) throw err;
+      // The server refuses to replace a folder, so only a file can be replaced.
+      if (isFolder) {
+        setStatus(
+          `A folder named "${newName}" already exists. Folders are not replaced.`,
+          8000,
+        );
+        return;
+      }
+      const replace = await showConfirm(
+        "Replace file?",
+        `"${newName}" already exists in this folder. Replace it?`,
+        { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
+      );
+      if (locationChanged()) {
+        setStatus("Rename cancelled because location changed.", 5000);
+        return;
+      }
+      if (!replace) {
+        setStatus(`Rename cancelled: "${newName}" was kept.`, 5000);
+        return;
+      }
+      await renameTo(true);
+    }
+    if (locationChanged()) return;
+    setStatus(`Renamed to "${newName}".`, 5000);
+    logActivity(`Renamed "${oldName}" to "${newName}".`, "success");
+    clearSelection();
+    await refreshSftpListing(target);
+    if (!locationChanged()) {
+      clearAllSelection();
+      addSelection(isFolder ? folderEntry(newKey) : fileEntry(newKey));
+      updateSelectionUI();
+      revealRow(newKey, isFolder ? "folder" : "file");
+    }
+  } catch (err) {
+    if (await reportSftpConnectionLost(err)) return;
+    if (locationChanged()) return;
+    setStatus(`Rename failed for "${oldName}": ${friendlyError(err)}`);
+    logActivity(
+      `Rename failed for "${oldName}": ${friendlyError(err)}`,
+      "error",
+    );
+  }
+}
+
+async function handleSftpCreateFolder(): Promise<void> {
+  let target: ConnectionSnapshot;
+  try {
+    target = captureConnectionSnapshot();
+  } catch (err) {
+    setStatus(`Folder creation cancelled: ${friendlyError(err)}`, 5000);
+    return;
+  }
+  const name = await showPrompt("New folder", "Enter folder name:", {
+    inputPlaceholder: "Folder name",
+  });
+  if (!name) return;
+  if (connectionSnapshotChanged(target)) {
+    setStatus("Folder creation cancelled because location changed.", 5000);
+    return;
+  }
+  const trimmed = name.trim();
+  const problem = sftpChildNameProblem(trimmed, "folder");
+  if (problem) {
+    setStatus(problem, 5000);
+    return;
+  }
+  let path: string;
+  try {
+    path = sftpJoinPath(sftpPathFromKey(target.prefix), trimmed);
+  } catch (err) {
+    setStatus(`Failed to create folder: ${friendlyError(err)}`, 5000);
+    return;
+  }
+  try {
+    setStatus("Creating folder…");
+    await sftpCreateDir(target.connectionId, path);
+    if (connectionSnapshotChanged(target)) return;
+    setStatus(`Created folder "${trimmed}".`, 5000);
+    logActivity(`Created folder ${trimmed}.`, "success");
+    await refreshSftpListing(target);
+  } catch (err) {
+    if (await reportSftpConnectionLost(err)) return;
+    if (connectionSnapshotChanged(target)) return;
+    setStatus(`Failed to create folder: ${friendlyError(err)}`);
+    logActivity(
+      `Failed to create folder ${trimmed}: ${friendlyError(err)}`,
+      "error",
+    );
+  }
+}
+
+/** Copy the absolute remote paths of the selection. SFTP has no S3 URL. */
+async function copySftpPaths(keys: string[]): Promise<void> {
+  try {
+    const paths = keys.map((key) => sftpPathFromKey(key));
+    await navigator.clipboard.writeText(paths.join("\n"));
+    if (paths.length === 1) {
+      setStatus("Path copied to clipboard.", 5000);
+      logActivity(`Copied path: ${paths[0]}`, "success");
+    } else {
+      setStatus(`Copied ${paths.length} paths to clipboard.`, 5000);
+      logActivity(`Copied ${paths.length} paths.`, "success");
+    }
+  } catch (err) {
+    setStatus(`Failed to copy path: ${friendlyError(err)}`);
+    logActivity(`Failed to copy path: ${friendlyError(err)}`, "error");
+  }
+}
+
 export async function handleCopyUrl(): Promise<void> {
   const keys = getSelectedFileKeys();
   if (keys.length === 0) return;
@@ -505,6 +879,7 @@ export async function handleCopyKey(): Promise<void> {
   const prefixes = getSelectedPrefixes();
   const allKeys = [...fileKeys, ...prefixes];
   if (allKeys.length === 0) return;
+  if (state.protocol === "sftp") return copySftpPaths(allKeys);
 
   try {
     await navigator.clipboard.writeText(allKeys.join("\n"));
@@ -550,6 +925,7 @@ export async function handleCopyArn(): Promise<void> {
 }
 
 export async function handleRename(): Promise<void> {
+  if (state.protocol === "sftp") return handleSftpRename();
   const keys = getSelectedFileKeys();
   const prefixes = getSelectedPrefixes();
   let target: ConnectionSnapshot;
@@ -823,6 +1199,7 @@ export async function handleRename(): Promise<void> {
 }
 
 export async function handleCreateFolder(): Promise<void> {
+  if (state.protocol === "sftp") return handleSftpCreateFolder();
   if (!state.connected || !state.currentBucket) {
     setStatus("Connect to a bucket first.");
     return;

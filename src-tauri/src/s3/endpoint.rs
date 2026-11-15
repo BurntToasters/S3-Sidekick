@@ -196,7 +196,7 @@ const BLOCKED_METADATA_HOSTS: &[&str] = &[
     "metadata.azure.com",
 ];
 
-fn is_blocked_metadata_host(host: &str) -> bool {
+pub(crate) fn is_blocked_metadata_host(host: &str) -> bool {
     let host = host.trim_end_matches('.');
     BLOCKED_METADATA_HOSTS.iter().any(|blocked| {
         host == *blocked
@@ -208,7 +208,7 @@ fn is_blocked_metadata_host(host: &str) -> bool {
 
 /// Describe why an IP literal is unsafe as an S3 endpoint host. Loopback and
 /// private LAN ranges stay allowed because MinIO and local gateways use them.
-fn blocked_ip_kind(ip: std::net::IpAddr) -> Option<&'static str> {
+pub(crate) fn blocked_ip_kind(ip: std::net::IpAddr) -> Option<&'static str> {
     match ip {
         std::net::IpAddr::V4(v4) => {
             let octets = v4.octets();
@@ -263,7 +263,7 @@ fn blocked_ip_kind(ip: std::net::IpAddr) -> Option<&'static str> {
 /// an address. Parsing only the canonical dotted-quad form keeps the address
 /// classification below authoritative for every numeric host, instead of letting
 /// a non-canonical spelling reach the resolver unclassified.
-fn is_non_canonical_ipv4(host: &str) -> bool {
+pub(crate) fn is_non_canonical_ipv4(host: &str) -> bool {
     let host = host.trim_end_matches('.');
     if host.is_empty()
         || !host
@@ -389,7 +389,9 @@ pub(super) async fn validate_endpoint_resolution(endpoint: &str) -> Result<(), S
     Ok(())
 }
 
-fn parse_endpoint_port(endpoint: &str) -> Option<u16> {
+/// The one port parser for endpoints. Provider detection and the address
+/// check must agree on the port, so there is no second copy.
+pub(super) fn parse_endpoint_port(endpoint: &str) -> Option<u16> {
     let trimmed = endpoint.trim();
     let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
     let authority_end = after_scheme

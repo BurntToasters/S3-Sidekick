@@ -300,7 +300,7 @@ pub(super) fn detect_storage_provider(endpoint: &str) -> StorageProviderKind {
     if is_domain("r2.cloudflarestorage.com") {
         return StorageProviderKind::CloudflareR2;
     }
-    if is_domain("amazonaws.com") || is_domain("amazonaws.com.cn") {
+    if is_aws_s3_service_host(&host) {
         return StorageProviderKind::Aws;
     }
     if is_domain("wasabisys.com") {
@@ -327,17 +327,56 @@ pub(super) fn detect_storage_provider(endpoint: &str) -> StorageProviderKind {
     StorageProviderKind::Generic
 }
 
-pub(super) fn parse_endpoint_port(endpoint: &str) -> Option<u16> {
-    let trimmed = endpoint.trim();
-    let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
-    let authority = after_scheme.split('/').next()?.trim();
-    let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    let port = if let Some(rest) = host_port.strip_prefix('[') {
-        rest.split_once("]:")?.1
-    } else {
-        host_port.split_once(':')?.1
+/// AWS authority (conditional DELETE and the full create-only matrix) is
+/// granted only to hostnames of the S3 object API itself. Many other
+/// AWS-operated names share the `amazonaws.com` suffix (EC2 public DNS, load
+/// balancers, API Gateway) and can front any S3-compatible server, and S3 on
+/// Outposts, Object Lambda, access points and Express One Zone have no
+/// verified move contract. Those stay Generic and fail closed.
+///
+/// The host must end in one of these label sequences before the partition
+/// suffix; any labels in front of it are a virtual-hosted bucket name:
+/// `s3`, `s3.<region>`, `s3-<region>`, `s3-external-1`,
+/// `s3.dualstack.<region>`, `s3-fips.<region>`, `s3-fips.dualstack.<region>`,
+/// `s3-accelerate`, `s3-accelerate.dualstack`, and the interface endpoint form
+/// `vpce-<id>.s3.<region>.vpce`.
+fn is_aws_s3_service_host(host: &str) -> bool {
+    let Some(rest) = [".amazonaws.com", ".amazonaws.com.cn"]
+        .into_iter()
+        .find_map(|suffix| host.strip_suffix(suffix))
+    else {
+        return false;
     };
-    port.parse().ok()
+    let labels: Vec<&str> = rest.split('.').collect();
+    if labels.iter().any(|label| label.is_empty()) {
+        return false;
+    }
+    let ends_with = |pattern: &[&str]| -> bool {
+        labels.len() >= pattern.len()
+            && labels[labels.len() - pattern.len()..]
+                .iter()
+                .zip(pattern)
+                .all(|(label, expected)| match *expected {
+                    "<region>" => is_region_like_label(label),
+                    "<vpce>" => label.strip_prefix("vpce-").is_some_and(|id| !id.is_empty()),
+                    literal => *label == literal,
+                })
+    };
+    let legacy_dash_region = labels.last().is_some_and(|label| {
+        *label == "s3-external-1"
+            || label
+                .strip_prefix("s3-")
+                .is_some_and(|region| region != "fips" && is_region_like_label(region))
+    });
+    legacy_dash_region
+        || ends_with(&["s3"])
+        || ends_with(&["s3", "<region>"])
+        || ends_with(&["s3", "dualstack", "<region>"])
+        || ends_with(&["s3-fips", "<region>"])
+        || ends_with(&["s3-fips", "dualstack", "<region>"])
+        || ends_with(&["s3-accelerate"])
+        || ends_with(&["s3-accelerate", "dualstack"])
+        || ends_with(&["<vpce>", "s3", "<region>", "vpce"])
 }
 
 pub(super) fn apply_aws_copy_create_only_guard(

@@ -282,6 +282,7 @@ export interface IpcCommandArgs {
   sftp_connect_cancel: {
     attemptId: string;
   };
+  sftp_connect_cancel_pending: Record<never, never>;
   sftp_connect_continue: {
     attemptId: string;
     trustHostKey?: boolean | null;
@@ -309,6 +310,7 @@ export interface IpcCommandArgs {
     overwrite: boolean;
     attempt?: number | null;
     checkpointId?: string | null;
+    recoverySession: string;
     enableResume?: boolean | null;
     bandwidthLimitMbps?: number | null;
   };

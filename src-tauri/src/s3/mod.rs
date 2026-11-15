@@ -699,6 +699,84 @@ mod tests {
         );
     }
 
+    /// Only S3 service hostnames carry AWS move and create-only authority.
+    /// Other AWS-operated hosts (EC2 public DNS, load balancers, API Gateway,
+    /// S3 on Outposts, Object Lambda, Express One Zone) can front a server
+    /// without verified conditional semantics, so they stay Generic.
+    #[test]
+    fn detect_storage_provider_grants_aws_only_to_s3_service_hosts() {
+        for endpoint in [
+            "https://s3.amazonaws.com",
+            "https://s3.us-east-1.amazonaws.com",
+            "https://s3.us-gov-west-1.amazonaws.com",
+            "https://s3-us-west-2.amazonaws.com",
+            "https://s3-external-1.amazonaws.com",
+            "https://s3.dualstack.eu-central-1.amazonaws.com",
+            "https://s3-fips.us-east-2.amazonaws.com",
+            "https://s3-fips.dualstack.us-east-2.amazonaws.com",
+            "https://s3-accelerate.amazonaws.com",
+            "https://s3-accelerate.dualstack.amazonaws.com",
+            "https://my.dotted.bucket.s3.us-east-1.amazonaws.com",
+            "https://bucket.vpce-0a1b2c3d4e5f-abcdefgh.s3.us-east-1.vpce.amazonaws.com",
+            "https://vpce-0a1b2c3d4e5f-abcdefgh.s3.us-east-1.vpce.amazonaws.com",
+            "https://s3.cn-north-1.amazonaws.com.cn",
+            "https://s3.dualstack.cn-northwest-1.amazonaws.com.cn",
+            "https://S3.US-EAST-1.AMAZONAWS.COM.",
+        ] {
+            assert_eq!(
+                detect_storage_provider(endpoint),
+                StorageProviderKind::Aws,
+                "{endpoint} is an S3 service host"
+            );
+        }
+        for endpoint in [
+            "http://ec2-203-0-113-10.compute-1.amazonaws.com:9000",
+            "https://ec2-203-0-113-10.us-west-2.compute.amazonaws.com",
+            "https://internal-minio-123456.us-east-1.elb.amazonaws.com",
+            "https://abc123.execute-api.us-east-1.amazonaws.com",
+            "https://ap-123456789012.op-01234567890123456.s3-outposts.us-east-1.amazonaws.com",
+            "https://olap-123456789012.s3-object-lambda.us-east-1.amazonaws.com",
+            "https://bucket--use1-az4--x-s3.s3express-use1-az4.us-east-1.amazonaws.com",
+            "https://s3express-control.us-east-1.amazonaws.com",
+            "https://ap-123456789012.s3-accesspoint.us-east-1.amazonaws.com",
+            "https://s3-website-us-east-1.amazonaws.com",
+            "https://123456789012.s3-control.us-east-1.amazonaws.com",
+            "https://amazonaws.com",
+            "https://s3.us-east-1.amazonaws.com.example.invalid",
+            "https://s3.amazonaws.com.example.invalid",
+            "https://s3.notaregion.amazonaws.com",
+            "https://s3.us-east-1.compute.amazonaws.com",
+        ] {
+            assert_eq!(
+                detect_storage_provider(endpoint),
+                StorageProviderKind::Generic,
+                "{endpoint} must not carry AWS authority"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_detection_and_address_checks_share_one_port_parser() {
+        assert_eq!(parse_endpoint_port("http://localhost:9000"), Some(9000));
+        assert_eq!(parse_endpoint_port("http://localhost:9000?x=1"), Some(9000));
+        assert_eq!(
+            parse_endpoint_port("http://localhost:9000#frag"),
+            Some(9000)
+        );
+        assert_eq!(
+            parse_endpoint_port("http://user:secret@localhost:9000/bucket"),
+            Some(9000)
+        );
+        assert_eq!(parse_endpoint_port("http://user:secret@localhost"), None);
+        assert_eq!(parse_endpoint_port("http://[::1]:9000"), Some(9000));
+        assert_eq!(parse_endpoint_port("https://example.invalid"), None);
+        // A query string must not hide MinIO's loopback port from detection.
+        assert_eq!(
+            detect_storage_provider("http://localhost:9000?x=1"),
+            StorageProviderKind::Minio
+        );
+    }
+
     #[test]
     fn validate_mutating_prefix_rejects_empty() {
         // An empty prefix means "every object in the bucket" for delete, move and

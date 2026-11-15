@@ -153,7 +153,19 @@ Perform clean-machine checks before publishing:
 2. Launch app and verify basic connection UI.
 3. Update from immediately previous public version.
 4. Verify x64 Linux Flatpak installation and launch.
-5. Biometric unlock (CI only compiles these paths; the OS credential stores
+5. Flatpak file access outside the granted folders. The manifest grants only
+   Downloads, Documents and Desktop, and CI only builds the bundle, so no
+   automated test proves the file portal path. In the installed Flatpak:
+   - Import an SFTP private key from `~/.ssh` through the key file picker.
+   - Upload a file picked from outside the three folders (for example a
+     second disk or `~/Pictures`).
+   - Download to a folder outside the three folders.
+
+   If any step fails, state the limit in Settings and the README, or widen
+   `run.rosie.s3-sidekick.yml` with a recorded reason, before publishing.
+   Record the result in the release checklist.
+
+6. Biometric unlock (CI only compiles these paths; the OS credential stores
    are never exercised automatically). On macOS (Touch ID) and Windows
    (Windows Hello), with encryption on:
    - Enable biometric unlock; confirm the OS prompt appears.

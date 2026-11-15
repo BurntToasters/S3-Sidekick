@@ -16,7 +16,6 @@ tauri = { version = "=2.12.5", features = [] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tauri-plugin-dialog = "=2.8.0"
-tauri-plugin-process = "=2.4.0"
 tauri-plugin-notification = "=2.5.0"
 aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = [
     "default-https-client",
@@ -28,10 +27,16 @@ tokio = { version = "=1.53.1", features = ["full"] }
 aes-gcm = "=0.10.3"
 argon2 = "=0.6.0"
 base64 = "=0.22.1"
+# Already in the graph through `pbkdf2`; used directly for vault tags
+# instead of a hand-written RFC 2104 implementation.
+hmac = "=0.12.1"
 pbkdf2 = "=0.12.2"
 rand = "=0.8.7"
 sha2 = "=0.10.9"
 subtle = "=2.6.1"
+# NFC for upload keys and the case-fold collision check. Replaces ~3,500 lines
+# of embedded Unicode tables that had no generator or recorded version.
+unicode-normalization = "=0.1.25"
 urlencoding = "=2.1.3"
 zeroize = "=1.9.0"
 fs2 = "=0.4.3"
@@ -67,11 +72,27 @@ windows = { version = "=0.58.0", features = [
     "Win32_Storage_FileSystem",
 ] }
 
+[features]
+# Test-only startup hooks: the startup trace and the app-data override read
+# from S3_SIDEKICK_E2E_STARTUP_TRACE and S3_SIDEKICK_TEST_APP_DATA. Only the
+# Windows startup E2E and the full-stack CI build enable it; release builds
+# never do, so two environment variables cannot redirect a shipped app.
+e2e-hooks = []
+
 [dev-dependencies]
 tauri = { version = "=2.12.5", features = ["test"] }
 # Parses the command signatures for the generated IPC contract. Already in
 # the graph through the Tauri macros; pinned to the locked version.
 syn = { version = "=2.0.119", features = ["full"] }
+
+# AGENTS.md: no raw unwrap, expect or panic in production Rust. With
+# `panic = "abort"` one panic ends the app mid-transfer with no cleanup, so the
+# rule is a Clippy error, not a review item. Test builds are allowed these in
+# `main.rs`; the build script allows its one `expect` in `build.rs`.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
 
 [profile.release]
 panic = "abort"

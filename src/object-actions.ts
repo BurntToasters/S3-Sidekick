@@ -8,6 +8,7 @@ import {
 import { canPreview, openPreview } from "./preview.ts";
 import { openInfoPanel } from "./info-panel.ts";
 import { basename, friendlyError, plural } from "./utils.ts";
+import { isSftpNameLossy, SFTP_LOSSY_REASON } from "./sftp-move.ts";
 import {
   captureConnectionSnapshot,
   connectionIdentityChanged,
@@ -44,11 +45,15 @@ export interface ObjectActionContext {
   fileKeys: string[];
   folderPrefixes: string[];
   total: number;
+  /** The live session's backend. Absent means S3. S3-only actions hide for SFTP. */
+  protocol?: "s3" | "sftp";
   arnSupported: boolean;
   moveSupported: boolean;
   canPreviewSingle: boolean;
   listingLoading: boolean;
   deleteInFlight: boolean;
+  /** SFTP: the selection holds a name the server sent as non-UTF-8 (read-only). */
+  lossySelection?: boolean;
 }
 
 export type ObjectActionGroup =
@@ -69,29 +74,75 @@ export interface ObjectAction {
   keywords?: string[];
   /** Whether the palette lists this action (default true). */
   palette?: boolean;
+  /** S3-only: never offered over SFTP (no server-side copy, URLs or ARNs). */
+  s3Only?: boolean;
   isAvailable: (context: ObjectActionContext) => boolean;
+  /** Set when the action is listed but cannot run; the reason is its tooltip. */
+  disabledReason?: (context: ObjectActionContext) => string | null;
   run: (context: ObjectActionContext) => void;
 }
 
 const MOVE_UNSUPPORTED_REASON =
   "This provider can't safely delete the source. Use copy, then delete.";
 
+/** True when the selection is SFTP. Absent `protocol` is the S3 default. */
+export function isSftpContext(context: ObjectActionContext): boolean {
+  return context.protocol === "sftp";
+}
+
+/**
+ * Whether a menu may list the action for this selection. Every menu asks here,
+ * so the S3-only rule lives in the registry and not in each menu.
+ */
+export function isOfferedFor(
+  id: string,
+  context: ObjectActionContext,
+): boolean {
+  const action = getObjectAction(id);
+  if (!action) return false;
+  return !(action.s3Only === true && isSftpContext(context));
+}
+
+/** The last segment of a listing key, with a folder's trailing slash removed. */
+function leafName(key: string): string {
+  return basename(key.replace(/\/$/, ""));
+}
+
 export function currentActionContext(): ObjectActionContext {
   const fileKeys = getSelectedFileKeys();
   const folderPrefixes = getSelectedPrefixes();
   const objectPanel = document.getElementById("object-panel");
   const deleteButton = document.getElementById("batch-delete");
+  const sftp = state.protocol === "sftp";
+  // A file's flag comes from the listing. A folder carries only its name, so
+  // its non-UTF-8 flag is the same name rule the native side applies.
+  const lossyFiles = sftp
+    ? new Set(
+        state.objects.filter((object) => object.name_lossy).map((o) => o.key),
+      )
+    : null;
   return {
     fileKeys,
     folderPrefixes,
     total: fileKeys.length + folderPrefixes.length,
-    arnSupported: isAwsEndpoint(state.endpoint),
-    moveSupported: state.conditionalDeleteSupported,
+    protocol: state.protocol,
+    arnSupported: !sftp && isAwsEndpoint(state.endpoint),
+    // A move over SFTP is a rename, which the server always supports.
+    moveSupported: sftp || state.conditionalDeleteSupported,
     canPreviewSingle:
       fileKeys.length === 1 && canPreview(basename(fileKeys[0])),
     listingLoading: objectPanel?.getAttribute("aria-busy") === "true",
     deleteInFlight: deleteButton?.dataset.operationInFlight === "true",
+    lossySelection:
+      lossyFiles !== null &&
+      (fileKeys.some((key) => lossyFiles.has(key)) ||
+        folderPrefixes.some((prefix) => isSftpNameLossy(leafName(prefix)))),
   };
+}
+
+/** The reason a mutating action is listed but disabled for a non-UTF-8 name. */
+function lossyReason(context: ObjectActionContext): string | null {
+  return context.lossySelection ? SFTP_LOSSY_REASON : null;
 }
 
 export function getObjectAction(id: string): ObjectAction | undefined {
@@ -136,6 +187,11 @@ function copyUrlLabel(context: ObjectActionContext): string {
 }
 
 function copyKeysLabel(context: ObjectActionContext): string {
+  if (isSftpContext(context)) {
+    return context.total > 1
+      ? `Copy ${plural(context.total, "path")}`
+      : "Copy path";
+  }
   return context.total > 1
     ? `Copy ${plural(context.total, "key")}`
     : "Copy keys";
@@ -249,12 +305,15 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
   },
   {
     id: "copy-move",
-    label: (context) =>
-      context.moveSupported ? "Copy / move\u2026" : "Copy to\u2026",
+    label: (context) => {
+      if (isSftpContext(context)) return "Move to\u2026";
+      return context.moveSupported ? "Copy / move\u2026" : "Copy to\u2026";
+    },
     icon: "folder",
     group: "transfer",
     keywords: ["duplicate", "destination"],
     isAvailable: (context) => context.total > 0,
+    disabledReason: lossyReason,
     run: () => openCopyMoveDialog(),
   },
   {
@@ -274,6 +333,7 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     shortcut: shortcutLabelFor("Rename selected item"),
     keywords: ["move", "name"],
     isAvailable: (context) => context.total === 1 && !context.listingLoading,
+    disabledReason: lossyReason,
     run: () => void handleRename(),
   },
   {
@@ -282,7 +342,9 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     icon: "external-link",
     group: "clipboard",
     keywords: ["link", "url"],
-    isAvailable: (context) => context.fileKeys.length > 0,
+    s3Only: true,
+    isAvailable: (context) =>
+      context.fileKeys.length > 0 && !isSftpContext(context),
     run: () => void handleCopyUrl(),
   },
   {
@@ -291,8 +353,11 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     icon: "share-2",
     group: "clipboard",
     keywords: ["presigned", "url", "link", "share"],
+    s3Only: true,
     isAvailable: (context) =>
-      context.total === 1 && context.fileKeys.length === 1,
+      context.total === 1 &&
+      context.fileKeys.length === 1 &&
+      !isSftpContext(context),
     run: () => openShareLinkDialog(),
   },
   {
@@ -310,6 +375,7 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     icon: "copy",
     group: "clipboard",
     keywords: ["amazon resource name"],
+    s3Only: true,
     isAvailable: (context) => context.total > 0 && context.arnSupported,
     run: () => void handleCopyArn(),
   },
@@ -319,7 +385,11 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     icon: "copy",
     group: "clipboard",
     keywords: ["uri", "bucket"],
-    isAvailable: (context) => context.total > 0 && state.currentBucket !== "",
+    s3Only: true,
+    isAvailable: (context) =>
+      context.total > 0 &&
+      state.currentBucket !== "" &&
+      !isSftpContext(context),
     run: (context) => void copyS3Uris(context),
   },
   {
@@ -331,6 +401,7 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     shortcut: shortcutLabelFor("Delete selected items"),
     keywords: ["trash", "remove"],
     isAvailable: (context) => context.total > 0 && !context.listingLoading,
+    disabledReason: lossyReason,
     run: () => void handleDelete(),
   },
   {
@@ -388,6 +459,61 @@ export function syncSelectionBar(): void {
   if (renameButton) {
     renameButton.hidden = context.total !== 1;
     renameButton.disabled = context.listingLoading;
+  }
+
+  syncSftpBarState(context);
+}
+
+const BAR_TITLE_KEY = "registryTitle";
+const BAR_DISABLED_KEY = "registryDisabled";
+
+/**
+ * Disables a bar button for a registry reason and restores it when the reason
+ * clears. The button keeps its own title (for example Delete's busy label).
+ */
+function setBarDisabledReason(
+  button: HTMLButtonElement,
+  reason: string | null,
+): void {
+  if (reason !== null) {
+    if (button.dataset[BAR_DISABLED_KEY] !== "true") {
+      button.dataset[BAR_TITLE_KEY] = button.title;
+      button.dataset[BAR_DISABLED_KEY] = "true";
+    }
+    button.disabled = true;
+    button.title = reason;
+    return;
+  }
+  if (button.dataset[BAR_DISABLED_KEY] === "true") {
+    button.disabled = false;
+    button.title = button.dataset[BAR_TITLE_KEY] ?? "";
+    delete button.dataset[BAR_DISABLED_KEY];
+    delete button.dataset[BAR_TITLE_KEY];
+  }
+}
+
+/** SFTP has no server-side copy, so the bar drops Copy URLs; reasons come from the registry. */
+function syncSftpBarState(context: ObjectActionContext): void {
+  const sftp = isSftpContext(context);
+  const copyUrls = document.getElementById(
+    "batch-copy-urls",
+  ) as HTMLButtonElement | null;
+  if (copyUrls) {
+    if (sftp) {
+      copyUrls.hidden = true;
+      copyUrls.dataset.sftpHidden = "true";
+    } else if (copyUrls.dataset.sftpHidden === "true") {
+      copyUrls.hidden = false;
+      delete copyUrls.dataset.sftpHidden;
+    }
+  }
+  for (const [id, buttonId] of Object.entries(BAR_BUTTON_BY_ACTION)) {
+    const entry = getObjectAction(id);
+    const button = document.getElementById(
+      buttonId,
+    ) as HTMLButtonElement | null;
+    if (!entry || !button) continue;
+    setBarDisabledReason(button, entry.disabledReason?.(context) ?? null);
   }
 }
 

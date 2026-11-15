@@ -30,6 +30,7 @@ permissions = [
   "allow-sftp-connect",
   "allow-sftp-connect-continue",
   "allow-sftp-connect-cancel",
+  "allow-sftp-connect-cancel-pending",
   "allow-sftp-list-dir",
   "allow-sftp-stat",
   "allow-sftp-exists",
