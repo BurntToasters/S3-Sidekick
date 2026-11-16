@@ -906,14 +906,14 @@ mod tests {
 
     // ---- Launchers must not hold the command until the opened app exits ----
 
+    /// Launcher stub run through `/bin/sh -c` rather than written to disk and
+    /// executed: on Linux, exec'ing a freshly written file races with other
+    /// test threads forking while its write fd is open (`ETXTBSY`).
     #[cfg(unix)]
-    fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let script = dir.join(name);
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write stub script");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod stub script");
-        script
+    fn stub_launcher(body: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(body);
+        command
     }
 
     #[cfg(unix)]
@@ -921,11 +921,9 @@ mod tests {
     fn launcher_that_stays_in_the_foreground_does_not_block_the_command() {
         // `xdg-open` in generic mode runs the handler in the foreground and
         // exits only when the browser or file manager exits.
-        let scratch = RelaunchScratch::new("foreground-launcher");
-        let stub = write_script(&scratch.0, "stub-xdg-open", "exec /bin/sleep 10");
         let started = std::time::Instant::now();
         let result = launch_and_reap(
-            Command::new(&stub),
+            stub_launcher("exec /bin/sleep 10"),
             std::time::Duration::from_millis(300),
             "open",
         );
@@ -940,10 +938,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launcher_that_fails_at_once_still_reports_its_status() {
-        let scratch = RelaunchScratch::new("failing-launcher");
-        let stub = write_script(&scratch.0, "stub-xdg-open", "exit 3");
         let err = launch_and_reap(
-            Command::new(&stub),
+            stub_launcher("exit 3"),
             std::time::Duration::from_secs(5),
             "open",
         )
@@ -954,10 +950,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launcher_that_succeeds_at_once_is_ok() {
-        let scratch = RelaunchScratch::new("ok-launcher");
-        let stub = write_script(&scratch.0, "stub-xdg-open", "exit 0");
         assert!(launch_and_reap(
-            Command::new(&stub),
+            stub_launcher("exit 0"),
             std::time::Duration::from_secs(5),
             "open",
         )
