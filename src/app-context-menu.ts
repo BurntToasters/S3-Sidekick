@@ -1,4 +1,5 @@
 import { state } from "./state.ts";
+import { protocolLabels, sessionProtocol } from "./protocol-labels.ts";
 import {
   reportNavFailure,
   selectBucket,
@@ -28,6 +29,8 @@ import { handleUploadButton, handleUploadFolderButton } from "./app-upload.ts";
 import {
   currentActionContext,
   getObjectAction,
+  isOfferedFor,
+  isSftpContext,
   resolveActionLabel,
   runObjectAction,
   MOVE_UNSUPPORTED_REASON,
@@ -47,15 +50,19 @@ export function buildObjectMenuItems(
   const items: MenuItem[] = [];
   if (total === 0) return items;
 
+  // A registry entry's disabled reason (a non-UTF-8 name, for example) becomes
+  // the menu item's disabled state, so the menu and the bar agree.
   const entry = (id: string): MenuAction => {
     const action = getObjectAction(id);
     if (!action) throw new Error(`Unknown object action: ${id}`);
+    const blocked = action.disabledReason?.(selection) ?? null;
     return {
       label: resolveActionLabel(action, selection),
       action: id,
       icon: action.icon,
       shortcut: action.shortcut,
       danger: action.danger,
+      ...(blocked === null ? {} : { disabled: true, disabledReason: blocked }),
     };
   };
   const disabledEntry = (id: string, reason: string): MenuAction => ({
@@ -63,14 +70,24 @@ export function buildObjectMenuItems(
     disabled: true,
     disabledReason: reason,
   });
+  // The registry decides what the menu offers for this selection. S3-only
+  // entries are left out over SFTP; no menu keeps its own list of them.
+  const offer = (id: string): void => {
+    if (isOfferedFor(id, selection)) items.push(entry(id));
+  };
+  const offerDisabled = (id: string, reason: string): void => {
+    if (isOfferedFor(id, selection)) items.push(disabledEntry(id, reason));
+  };
   const moveUnsupported = !selection.moveSupported;
 
   if (total === 1 && folderPrefixes.length === 1) {
     items.push(entry("open-folder"));
     items.push(entry("properties"));
+    // SFTP only: a folder downloads the files directly inside it.
+    if (isSftpContext(selection)) items.push(entry("download"));
     items.push(entry("copy-keys"));
-    if (selection.arnSupported) items.push(entry("copy-arns"));
-    items.push(entry("copy-s3-uri"));
+    if (selection.arnSupported) offer("copy-arns");
+    offer("copy-s3-uri");
     items.push(entry("rename"));
     if (moveUnsupported) {
       // "Copy to…" stays usable; Move is listed disabled with the reason.
@@ -88,11 +105,11 @@ export function buildObjectMenuItems(
     if (selection.canPreviewSingle) items.push(entry("preview"));
     items.push(entry("properties"));
     items.push(entry("download"));
-    items.push(entry("copy-url"));
-    items.push(entry("share-link"));
+    offer("copy-url");
+    offer("share-link");
     items.push(entry("copy-keys"));
-    if (selection.arnSupported) items.push(entry("copy-arns"));
-    items.push(entry("copy-s3-uri"));
+    if (selection.arnSupported) offer("copy-arns");
+    offer("copy-s3-uri");
     items.push(entry("rename"));
     if (moveUnsupported) {
       // "Copy to…" stays usable; Move is listed disabled with the reason.
@@ -108,7 +125,11 @@ export function buildObjectMenuItems(
 
   const mixed = fileKeys.length > 0 && folderPrefixes.length > 0;
   items.push(entry("properties"));
-  if (fileKeys.length > 0) {
+  if (isSftpContext(selection)) {
+    // SFTP downloads files and folders alike (a folder's own files), so a
+    // mixed or folder-only selection offers Download.
+    items.push(entry("download"));
+  } else if (fileKeys.length > 0) {
     if (mixed) {
       items.push(
         disabledEntry(
@@ -123,21 +144,17 @@ export function buildObjectMenuItems(
   items.push(entry("copy-keys"));
   if (fileKeys.length > 0) {
     if (mixed) {
-      items.push(
-        disabledEntry("copy-url", "Folders have no URL. Select files only."),
-      );
+      offerDisabled("copy-url", "Folders have no URL. Select files only.");
     } else {
-      items.push(entry("copy-url"));
+      offer("copy-url");
     }
-    items.push(
-      disabledEntry(
-        "share-link",
-        "Pre-signed URLs are made for one file at a time.",
-      ),
+    offerDisabled(
+      "share-link",
+      "Pre-signed URLs are made for one file at a time.",
     );
   }
-  if (selection.arnSupported) items.push(entry("copy-arns"));
-  items.push(entry("copy-s3-uri"));
+  if (selection.arnSupported) offer("copy-arns");
+  offer("copy-s3-uri");
   items.push(disabledEntry("rename", "Select one item to rename."));
   // "Copy to…" stays usable for multi-selection; Move is listed disabled
   // with the reason when the provider can't move objects.
@@ -206,15 +223,16 @@ export function handleBucketContextMenu(e: MouseEvent): void {
 
   if (bucketButton?.dataset.bucket) {
     const bucket = bucketButton.dataset.bucket;
+    const labels = protocolLabels(sessionProtocol(state));
     const menuItems: MenuItem[] = [
-      { label: "Open bucket", action: "open-bucket" },
-      { label: "Copy bucket name", action: "copy-bucket-name" },
+      { label: labels.openAction, action: "open-bucket" },
+      { label: labels.copyNameAction, action: "copy-bucket-name" },
     ];
     if (isAwsEndpoint(state.endpoint)) {
       menuItems.push({ label: "Copy bucket ARN", action: "copy-bucket-arn" });
     }
     menuItems.push({ separator: true });
-    menuItems.push({ label: "Refresh buckets", action: "refresh-buckets" });
+    menuItems.push({ label: labels.refreshAction, action: "refresh-buckets" });
 
     showContextMenu(e.clientX, e.clientY, menuItems, (action) => {
       if (action === "open-bucket") {
@@ -223,7 +241,7 @@ export function handleBucketContextMenu(e: MouseEvent): void {
             .then(() => closeSidebarOnMobile())
             .catch((err) => {
               reportNavFailure(
-                `Failed to open bucket "${bucket}": ${friendlyError(err)}`,
+                `${labels.openFailed} "${bucket}": ${friendlyError(err)}`,
                 open,
               );
             });
@@ -232,8 +250,8 @@ export function handleBucketContextMenu(e: MouseEvent): void {
       } else if (action === "copy-bucket-name") {
         void navigator.clipboard
           .writeText(bucket)
-          .then(() => setStatus(`Copied bucket name "${bucket}".`, 3000))
-          .catch((err) => setStatus(`Failed to copy bucket name: ${err}`));
+          .then(() => setStatus(`${labels.copiedName} "${bucket}".`, 3000))
+          .catch((err) => setStatus(`${labels.copyNameFailed}: ${err}`));
       } else if (action === "copy-bucket-arn") {
         const arn = `arn:aws:s3:::${bucket}`;
         void navigator.clipboard
@@ -250,7 +268,12 @@ export function handleBucketContextMenu(e: MouseEvent): void {
   showContextMenu(
     e.clientX,
     e.clientY,
-    [{ label: "Refresh buckets", action: "refresh-buckets" }],
+    [
+      {
+        label: protocolLabels(sessionProtocol(state)).refreshAction,
+        action: "refresh-buckets",
+      },
+    ],
     () => {
       void handleRefreshBuckets();
     },

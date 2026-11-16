@@ -1,6 +1,17 @@
 import { invoke } from "./ipc.ts";
+import {
+  isSftpSettings,
+  isValidSftpEndpoint,
+  looksLikeSftpEndpoint,
+  type SftpSettings,
+} from "./sftp.ts";
 import { escapeHtml, getIconHtml, parseJsonArray } from "./utils.ts";
 
+/**
+ * A saved connection. An S3 bookmark has no protocol. An SFTP bookmark sets
+ * `protocol: "sftp"` and `sftp`; there `access_key` is the username and
+ * `secret_key` is the password or the key passphrase.
+ */
 export interface Bookmark {
   name: string;
   endpoint: string;
@@ -8,6 +19,8 @@ export interface Bookmark {
   access_key: string;
   secret_key: string;
   session_token?: string;
+  protocol?: "sftp";
+  sftp?: SftpSettings;
 }
 
 let bookmarks: Bookmark[] = [];
@@ -87,9 +100,28 @@ export function isEndpointBookmarked(
   return bookmarks.some((b) => b.endpoint === endpoint);
 }
 
+/**
+ * The protocol and its settings must agree with the endpoint. An S3 bookmark
+ * (no protocol) carries no SFTP settings and no sftp:// endpoint. An SFTP
+ * bookmark needs a parseable SFTP endpoint and valid settings. Any other
+ * protocol value is refused.
+ */
+function hasConsistentProtocol(
+  row: Bookmark & Record<string, unknown>,
+): boolean {
+  if (row.protocol === undefined) {
+    return row.sftp === undefined && !looksLikeSftpEndpoint(row.endpoint);
+  }
+  return (
+    row.protocol === "sftp" &&
+    isValidSftpEndpoint(row.endpoint) &&
+    isSftpSettings(row.sftp)
+  );
+}
+
 function isBookmark(value: unknown): value is Bookmark {
   if (typeof value !== "object" || value === null) return false;
-  const row = value as Bookmark;
+  const row = value as Bookmark & Record<string, unknown>;
   return (
     typeof row.name === "string" &&
     row.name.length > 0 &&
@@ -106,7 +138,8 @@ function isBookmark(value: unknown): value is Bookmark {
     row.secret_key.length <= MAX_BOOKMARK_SECRET_KEY_LENGTH &&
     (row.session_token === undefined ||
       (typeof row.session_token === "string" &&
-        row.session_token.length <= MAX_BOOKMARK_SESSION_TOKEN_LENGTH))
+        row.session_token.length <= MAX_BOOKMARK_SESSION_TOKEN_LENGTH)) &&
+    hasConsistentProtocol(row)
   );
 }
 
@@ -292,6 +325,11 @@ export function suggestBookmarkName(
   return parts.join(" · ");
 }
 
+/** SFTP settings a patch may change. `null` clears the pinned host key. */
+export interface SftpBookmarkPatch {
+  host_key?: string | null;
+}
+
 export type BookmarkPatch = Partial<
   Pick<
     Bookmark,
@@ -302,7 +340,26 @@ export type BookmarkPatch = Partial<
     | "secret_key"
     | "session_token"
   >
->;
+> & { sftp?: SftpBookmarkPatch };
+
+function applyBookmarkPatch(
+  bookmark: Bookmark,
+  patch: BookmarkPatch,
+): Bookmark {
+  const { sftp: sftpPatch, ...fields } = patch;
+  const next: Bookmark = { ...bookmark, ...fields };
+  if (sftpPatch === undefined) return next;
+  if (bookmark.sftp === undefined) {
+    throw new Error("Only SFTP connections have a host key.");
+  }
+  const sftp: SftpSettings = { ...bookmark.sftp };
+  if (sftpPatch.host_key === null) {
+    delete sftp.host_key;
+  } else if (sftpPatch.host_key !== undefined) {
+    sftp.host_key = sftpPatch.host_key;
+  }
+  return { ...next, sftp };
+}
 
 /**
  * Edit a saved connection in place, matched by identity like removeBookmark.
@@ -319,7 +376,7 @@ export async function updateBookmark(
     if (!bookmarks.some((b) => sameBookmark(b, target))) return false;
     const edited = bookmarks
       .filter((b) => sameBookmark(b, target))
-      .map((b) => ({ ...b, ...patch }));
+      .map((b) => applyBookmarkPatch(b, patch));
     if (!edited.every(isBookmark)) {
       throw new Error(
         "Those details are not valid for a saved connection. Check the name, endpoint, and access key.",
@@ -336,7 +393,7 @@ export async function updateBookmark(
       }
     }
     const next = bookmarks.map((b) =>
-      sameBookmark(b, target) ? { ...b, ...patch } : b,
+      sameBookmark(b, target) ? applyBookmarkPatch(b, patch) : b,
     );
     await persistBookmarksSnapshot(next);
     bookmarks = next;
@@ -363,6 +420,20 @@ export function exportBookmarksJson(includeSecrets = false): string {
     };
     if (includeSecrets && bookmark.session_token !== undefined) {
       row.session_token = bookmark.session_token;
+    }
+    if (bookmark.protocol !== undefined) {
+      row.protocol = bookmark.protocol;
+    }
+    if (bookmark.sftp !== undefined) {
+      // The private key is secret material; the host key is public.
+      const sftp: SftpSettings = { auth: bookmark.sftp.auth };
+      if (bookmark.sftp.host_key !== undefined) {
+        sftp.host_key = bookmark.sftp.host_key;
+      }
+      if (includeSecrets && bookmark.sftp.private_key !== undefined) {
+        sftp.private_key = bookmark.sftp.private_key;
+      }
+      row.sftp = sftp;
     }
     return row;
   });
@@ -454,6 +525,7 @@ export async function importBookmarksJson(
 export function deriveProviderLabelFromEndpoint(endpoint: string): string {
   const trimmed = endpoint.trim();
   if (!trimmed) return "Custom";
+  if (looksLikeSftpEndpoint(trimmed)) return "SFTP";
   try {
     const url = new URL(
       trimmed.includes("://") ? trimmed : `https://${trimmed}`,
@@ -550,6 +622,7 @@ export function renderBookmarkList(
         const rawProvider = deriveProviderLabelFromEndpoint(b.endpoint);
         const isNamedProvider =
           rawProvider === "AWS" ||
+          rawProvider === "SFTP" ||
           rawProvider === "Spaces" ||
           rawProvider === "B2" ||
           rawProvider === "R2" ||

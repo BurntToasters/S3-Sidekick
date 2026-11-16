@@ -96,9 +96,9 @@ pub(super) fn lock_transfer_registry(
 /// The frontend ID is only a cancellation label. Every operation receives a
 /// unique backend registration so a reloaded webview or failed localStorage
 /// write cannot displace an older operation that happens to reuse the same ID.
-pub(super) struct TransferGuard {
-    pub(super) registration_id: u64,
-    pub(super) token: CancelToken,
+pub(crate) struct TransferGuard {
+    pub(crate) registration_id: u64,
+    pub(crate) token: CancelToken,
 }
 
 impl TransferGuard {
@@ -107,7 +107,7 @@ impl TransferGuard {
         Self::register_optional(Some("test-connection"), Some(transfer_id))
     }
 
-    pub(super) fn register_optional(
+    pub(crate) fn register_optional(
         connection_id: Option<&str>,
         transfer_id: Option<u32>,
     ) -> Result<Self, String> {
@@ -160,17 +160,17 @@ impl TransferGuard {
         })
     }
 
-    pub(super) fn token(&self) -> CancelToken {
+    pub(crate) fn token(&self) -> CancelToken {
         Arc::clone(&self.token)
     }
 
-    pub(super) fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
     }
 
     /// Run a short commit while registration remains open. Holding the registry
     /// lock makes the final connect install atomic with respect to gate closure.
-    pub(super) fn with_open_registration<T>(
+    pub(crate) fn with_open_registration<T>(
         &self,
         action: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
@@ -268,7 +268,7 @@ fn connection_tokens(registry: &TransferRegistryState, connection_id: &str) -> V
 /// unfences the session; a successful replacement calls `release()` so the
 /// fence survives until the new session is installed (or is deliberately kept
 /// when a newer connect has already taken over).
-pub(super) struct RetirementFence {
+pub(crate) struct RetirementFence {
     connection_id: String,
     armed: bool,
 }
@@ -310,7 +310,7 @@ impl Drop for RetirementFence {
 /// closed while it installs the replacement. Any error (including the drain
 /// timeout) drops the fence and unfences the session, because no replacement was
 /// installed and that session is still current.
-pub(super) async fn retire_connection_transfers(
+pub(crate) async fn retire_connection_transfers(
     connection_id: &str,
     context: &str,
 ) -> Result<RetirementFence, String> {
@@ -380,7 +380,7 @@ impl Drop for TransferRegistryGate {
     }
 }
 
-pub(super) async fn acquire_transfer_storage_cancellable(
+pub(crate) async fn acquire_transfer_storage_cancellable(
     cancel: &CancelToken,
 ) -> Result<crate::StorageTransferGuard, String> {
     tokio::select! {
@@ -449,7 +449,7 @@ pub(crate) async fn stop_all_transfers_for_reset() -> Result<TransferRegistryGat
 }
 
 /// Error returned when a transfer observes cancellation.
-pub(super) fn cancelled_error() -> String {
+pub(crate) fn cancelled_error() -> String {
     "Transfer cancelled".to_string()
 }
 

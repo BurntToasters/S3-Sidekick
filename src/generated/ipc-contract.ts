@@ -199,6 +199,7 @@ export interface IpcCommandArgs {
     title?: string | null;
     defaultDirectory?: string | null;
   };
+  pick_ssh_private_key: Record<never, never>;
   pick_text_export: {
     fileName?: string | null;
     title?: string | null;
@@ -267,6 +268,90 @@ export interface IpcCommandArgs {
     enableEncryption: boolean;
     currentPassword?: string | null;
     newPassword?: string | null;
+  };
+  sftp_connect: {
+    host: string;
+    port: number;
+    username: string;
+    authMethod: string;
+    password?: string | null;
+    privateKey?: string | null;
+    passphrase?: string | null;
+    pinnedHostKey?: string | null;
+  };
+  sftp_connect_cancel: {
+    attemptId: string;
+  };
+  sftp_connect_cancel_pending: Record<never, never>;
+  sftp_connect_continue: {
+    attemptId: string;
+    trustHostKey?: boolean | null;
+    responses?: string[] | null;
+  };
+  sftp_create_dir: {
+    connectionId: string;
+    path: string;
+  };
+  sftp_delete: {
+    connectionId: string;
+    paths: string[];
+  };
+  sftp_delete_dir: {
+    connectionId: string;
+    path: string;
+    transferId?: number | null;
+  };
+  sftp_download: {
+    connectionId: string;
+    path: string;
+    destinationToken: string;
+    destinationName?: string | null;
+    transferId: number;
+    overwrite: boolean;
+    attempt?: number | null;
+    checkpointId?: string | null;
+    recoverySession: string;
+    enableResume?: boolean | null;
+    bandwidthLimitMbps?: number | null;
+  };
+  sftp_exists: {
+    connectionId: string;
+    path: string;
+  };
+  sftp_list_dir: {
+    connectionId: string;
+    path: string;
+  };
+  sftp_preview: {
+    connectionId: string;
+    path: string;
+  };
+  sftp_rename: {
+    connectionId: string;
+    fromPath: string;
+    toPath: string;
+    overwrite: boolean;
+  };
+  sftp_stat: {
+    connectionId: string;
+    path: string;
+  };
+  sftp_upload: {
+    connectionId: string;
+    path: string;
+    uploadToken: string;
+    transferId: number;
+    attempt?: number | null;
+    overwrite: boolean;
+    bandwidthLimitMbps?: number | null;
+  };
+  sftp_upload_bytes: {
+    connectionId: string;
+    path: string;
+    bytesBase64: string;
+    transferId: number;
+    attempt?: number | null;
+    overwrite?: boolean | null;
   };
   take_dropped_upload_grants: Record<never, never>;
   touch_security_activity: Record<never, never>;

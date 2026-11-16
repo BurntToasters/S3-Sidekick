@@ -1,7 +1,7 @@
 # AppStream screenshots
 
-Capture version: 0.12.0-beta.2
-Captured: 2026-11-12
+Capture version: 0.13.0-beta.1
+Captured: 2026-11-14
 
 | File                 | Viewport | Source state                     |
 | -------------------- | -------- | -------------------------------- |
@@ -17,15 +17,19 @@ segment and `scripts/screenshots.test.js` enforces it.
 ## Regenerate
 
 ```sh
-npx playwright test tests/browser/ux-visual-tour.spec.ts --project=chromium
-cp test-results/ux-visual-tour/chromium/current/light/browse-1280x800.png docs/screenshots/browse-light.png
-cp test-results/ux-visual-tour/chromium/current/dark/inspector-preview-text-docked.png docs/screenshots/inspector-dark.png
-cp test-results/ux-visual-tour/chromium/current/dark/settings-transfers.png docs/screenshots/settings-dark.png
+npm run screenshots
 ```
 
+`scripts/screenshots.mjs` runs the Chromium visual tour, checks each capture
+against the sizes in `run.rosie.s3-sidekick.metainfo.xml`, copies the three
+files here, and rewrites the capture version and date above. If the tour fails
+or a size differs, nothing in this directory changes. The run writes
+`test-results/screenshots/report.json` and keeps its Playwright report there
+too, so the quality gate's `test-results/playwright-report.json` is untouched.
+
 The visual tour freezes the clock and disables animations, so the copies are
-repeatable. Update the capture version line above and `run.rosie.s3-sidekick.metainfo.xml`
-in the same change. `scripts/screenshots.test.js` fails when the capture version
+repeatable. If a viewport changes, update the sizes in the metainfo file in the
+same change. `scripts/screenshots.test.js` fails when the capture version
 falls behind the app's major/minor version, when an AppStream URL points at a
 branch that does not contain the file, or when an image size differs from the
 metadata.

@@ -58,9 +58,10 @@ function runNpm(script, extraArgs = [], environment = {}) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
+// The flag alone is the beta recovery override; stable releases refuse it.
 export function assertSkipCheckAllowed(
   skipCheck,
-  { environment = process.env, version = readPackageVersion() } = {},
+  { version = readPackageVersion() } = {},
 ) {
   if (!skipCheck) return false;
   if (isStableReleaseVersion(version)) {
@@ -68,17 +69,8 @@ export function assertSkipCheckAllowed(
       `--skip-check is not allowed for stable release ${version}; stable releases must use release:prepare and the CI release gate.`,
     );
   }
-  if (
-    !/^(1|true|yes|on)$/i.test(
-      String(environment.ALLOW_RELEASE_SKIP_CHECK || "").trim(),
-    )
-  ) {
-    throw new Error(
-      "--skip-check is an explicit beta recovery override; set ALLOW_RELEASE_SKIP_CHECK=1 to confirm it.",
-    );
-  }
   console.warn(
-    `WARNING: ALLOW_RELEASE_SKIP_CHECK=1 set for beta ${version}; this run sets FORCE_UPLOAD=1 and bypasses the draft target check.`,
+    `WARNING: --skip-check on beta ${version}; this run sets FORCE_UPLOAD=1 and bypasses the draft target check.`,
   );
   return true;
 }

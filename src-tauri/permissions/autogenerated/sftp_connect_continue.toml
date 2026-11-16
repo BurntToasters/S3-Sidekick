@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sftp-connect-continue"
+description = "Enables the sftp_connect_continue command without any pre-configured scope."
+commands.allow = ["sftp_connect_continue"]
+
+[[permission]]
+identifier = "deny-sftp-connect-continue"
+description = "Denies the sftp_connect_continue command without any pre-configured scope."
+commands.deny = ["sftp_connect_continue"]

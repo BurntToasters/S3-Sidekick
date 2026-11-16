@@ -442,7 +442,9 @@ describe("transfers queue UI", () => {
     );
   });
 
-  it("falls back to legacy manifest persistence when backend manifest load is unavailable", async () => {
+  // The queue manifest names buckets, keys and local paths. Web storage is
+  // never encrypted, so an unhydrated queue must not write it there.
+  it("never writes the queue manifest to web storage when backend manifest load is unavailable", async () => {
     const transfers = await loadTransfersModule();
     const { state } = await import("../state.ts");
     state.currentSettings.maxConcurrentTransfers = 1;
@@ -475,15 +477,10 @@ describe("transfers queue UI", () => {
     ]);
     await flushMicrotasks(8);
 
-    const raw = localStorage.getItem("s3-sidekick.transfer-manifest.v1");
-    expect(raw).toBeTruthy();
-    const parsed = JSON.parse(raw ?? "{}") as {
-      version?: unknown;
-      items?: unknown[];
-    };
-    expect(parsed.version).toBe(6);
-    expect(Array.isArray(parsed.items)).toBe(true);
-    expect((parsed.items ?? []).length).toBeGreaterThan(0);
+    expect(localStorage.getItem("s3-sidekick.transfer-manifest.v1")).toBeNull();
+    expect(JSON.stringify({ ...localStorage })).not.toContain(
+      "docs/persist.txt",
+    );
 
     resolveDownload(0);
     await flushMicrotasks(8);
@@ -495,9 +492,12 @@ describe("transfers queue UI", () => {
     state.currentSettings.maxConcurrentTransfers = 1;
 
     let resolveUpload = () => {};
-    mockInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "load_transfer_manifest") {
-        throw new Error("unknown command");
+    const savedManifests: string[] = [];
+    mockInvoke.mockImplementation(async (cmd, payload) => {
+      if (cmd === "load_transfer_manifest") return EMPTY_HYDRATION;
+      if (cmd === "save_transfer_manifest") {
+        savedManifests.push(String((payload as { json?: unknown }).json));
+        return undefined;
       }
       if (cmd === "transfer_checkpoint_gc") return undefined;
       if (cmd === "object_exists") return false;
@@ -512,6 +512,7 @@ describe("transfers queue UI", () => {
     });
 
     await transfers.initTransferQueueUI();
+    await transfers.recoverPendingTransfers();
     transfers.enqueuePaths(
       [uploadSelection("C:\\tmp\\persist.txt")],
       "uploads/",
@@ -521,7 +522,7 @@ describe("transfers queue UI", () => {
     // The upload is now in-flight ("uploading"). It is persisted as queued +
     // paused so an app kill surfaces the row for explicit retry instead of
     // silently vanishing (M2); it is never offered as an automatic resume.
-    const raw = localStorage.getItem("s3-sidekick.transfer-manifest.v1");
+    const raw = savedManifests.at(-1);
     const parsed = JSON.parse(raw ?? "{}") as {
       items?: Array<{ status?: string; paused?: boolean; operation?: string }>;
     };

@@ -30,6 +30,11 @@ import {
 } from "./bookmarks.ts";
 import { isUpdaterEnabled, setUpdateChannel } from "./updater.ts";
 import { forgetConnectionLocation } from "./connection.ts";
+import {
+  parseSftpEndpoint,
+  type SftpAuthMethod,
+  type SftpSettings,
+} from "./sftp.ts";
 import { refreshSecuritySettingsUI, isCancellationError } from "./security.ts";
 import {
   showConfirm,
@@ -1697,9 +1702,99 @@ function showBookmarkEdit(bookmark: Bookmark): void {
       ? "Leave blank to keep the current session token"
       : "Optional";
   }
+  renderBookmarkEditSftp(bookmark);
   const form = document.getElementById("bookmark-edit");
   if (form) form.hidden = false;
   bookmarkEditField("name")?.focus();
+}
+
+const SFTP_AUTH_LABELS: Record<SftpAuthMethod, string> = {
+  password: "Password",
+  key: "Private key",
+  "keyboard-interactive": "Keyboard-interactive",
+};
+
+function setBookmarkEditText(id: string, text: string): void {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+/** `user@host:port` for the reset confirmation, with IPv6 hosts bracketed. */
+function sftpEditorLabel(bookmark: Bookmark): string {
+  const { host, port } = parseSftpEndpoint(bookmark.endpoint);
+  const shownHost = host.includes(":") ? `[${host}]` : host;
+  return `${bookmark.access_key}@${shownHost}:${port}`;
+}
+
+/**
+ * An SFTP entry shows its host, port, user, auth method and pinned host key,
+ * and the S3 endpoint and key fields are hidden. The host key can be reset.
+ */
+function renderBookmarkEditSftp(bookmark: Bookmark): void {
+  const sftp = bookmark.protocol === "sftp" ? bookmark.sftp : undefined;
+  for (const field of [
+    "endpoint",
+    "region",
+    "accessKey",
+    "secretKey",
+    "sessionToken",
+  ] as const) {
+    const row = bookmarkEditField(field)?.closest<HTMLElement>(
+      ".bookmark-edit__field",
+    );
+    if (row) row.hidden = sftp !== undefined;
+  }
+  const panel = document.getElementById("bookmark-edit-sftp");
+  if (panel) panel.hidden = sftp === undefined;
+  if (sftp === undefined) return;
+  const { host, port } = parseSftpEndpoint(bookmark.endpoint);
+  setBookmarkEditText("bookmark-edit-sftp-host", host);
+  setBookmarkEditText("bookmark-edit-sftp-port", String(port));
+  setBookmarkEditText("bookmark-edit-sftp-username", bookmark.access_key);
+  setBookmarkEditText("bookmark-edit-sftp-auth", SFTP_AUTH_LABELS[sftp.auth]);
+  setBookmarkEditText(
+    "bookmark-edit-sftp-hostkey",
+    sftp.host_key ? "Pinned" : "Not pinned yet",
+  );
+  const reset = document.getElementById(
+    "bookmark-edit-reset-hostkey",
+  ) as HTMLButtonElement | null;
+  if (reset) reset.disabled = !sftp.host_key;
+}
+
+/** Forget the pinned host key of the SFTP entry being edited, after confirmation. */
+async function resetEditedSftpHostKey(): Promise<void> {
+  const target = editingBookmark;
+  const current = target?.sftp;
+  if (target?.protocol !== "sftp" || !current?.host_key) return;
+  const label = sftpEditorLabel(target);
+  const confirmed = await showConfirm(
+    "Reset host key?",
+    `Reset the saved host key for ${label}? Only do this if the server was reinstalled or its key was replaced on purpose. Until the next key is trusted, a man-in-the-middle could impersonate the server and capture your credentials.`,
+    { okLabel: "Reset", okDanger: true },
+  );
+  if (!confirmed || editingBookmark !== target) return;
+  setBookmarkEditError(null);
+  try {
+    const updated = await updateBookmark(
+      { endpoint: target.endpoint, access_key: target.access_key },
+      { sftp: { host_key: null } },
+    );
+    if (!updated) {
+      setBookmarkEditError("That saved connection is no longer saved.");
+      return;
+    }
+    const sftp: SftpSettings = { ...current };
+    delete sftp.host_key;
+    editingBookmark = { ...target, sftp };
+    renderBookmarkEditSftp(editingBookmark);
+    setBookmarkStatus(
+      `Reset the host key for ${label}. The next connection asks you to trust the server.`,
+    );
+    await refreshBookmarkListUI();
+  } catch (err) {
+    setBookmarkEditError(`Could not reset the host key: ${friendlyError(err)}`);
+  }
 }
 
 function setBookmarkStatus(message: string): void {
@@ -1718,6 +1813,23 @@ async function saveBookmarkEdit(): Promise<void> {
   const secretKey = bookmarkEditField("secretKey")?.value.trim() ?? "";
   const sessionToken = bookmarkEditField("sessionToken")?.value.trim() ?? "";
   const accessKeyChanged = accessKey !== target.access_key;
+
+  // SFTP entries change their name here. Host, port, user, auth and key stay as
+  // saved; the connection form is where those are re-entered.
+  if (target.protocol === "sftp") {
+    if (!name) {
+      setBookmarkEditError("Enter a name for this connection.");
+      return;
+    }
+    await commitBookmarkEdit(
+      target,
+      editRevision,
+      { name },
+      name,
+      target.endpoint,
+    );
+    return;
+  }
 
   // Same rules as the connect form. A changed access key cannot reuse the old
   // secret, so it must come with a new one.
@@ -1754,6 +1866,17 @@ async function saveBookmarkEdit(): Promise<void> {
   if (sessionToken) patch.session_token = sessionToken;
   else if (accessKeyChanged) patch.session_token = undefined;
 
+  await commitBookmarkEdit(target, editRevision, patch, name, endpoint);
+}
+
+/** Write one saved-connection edit. It closes the form only while it still shows `target`. */
+async function commitBookmarkEdit(
+  target: Bookmark,
+  editRevision: number,
+  patch: BookmarkPatch,
+  name: string,
+  endpoint: string,
+): Promise<void> {
   bookmarkEditSaving = true;
   setBookmarkEditBusy(true);
   setBookmarkEditError(null);
@@ -1808,6 +1931,9 @@ function wireBookmarkEdit(): void {
   document
     .getElementById("bookmark-edit-cancel")
     ?.addEventListener("click", () => hideBookmarkEdit());
+  document
+    .getElementById("bookmark-edit-reset-hostkey")
+    ?.addEventListener("click", () => void resetEditedSftpHostKey());
 }
 
 /**

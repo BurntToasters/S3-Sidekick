@@ -9,7 +9,7 @@
 // - /STACK never reaches the exe (wrong target check): PE header still 1 MiB.
 // - Dispatcher frame outgrows the reserve: exit 0xC00000FD after first invoke.
 // - Early exit 0 from single-instance hand-off or setup error must not pass.
-// - Stale exe tested: S3_SIDEKICK_EXE is opt-in; otherwise this builds it.
+// - Stale exe tested: S3_SIDEKICK_EXE (built with e2e-hooks) is opt-in.
 // - A stalled build or app launch must time out instead of hanging CI.
 
 import { spawn, spawnSync } from "node:child_process";
@@ -109,7 +109,9 @@ try {
   if (!exe) {
     run("npm run build", root);
     run(
-      "cargo build --release --features tauri/custom-protocol",
+      // `e2e-hooks` turns on the startup trace and the app-data override
+      // this check relies on; shipped builds never enable it.
+      "cargo build --release --features tauri/custom-protocol,e2e-hooks",
       path.join(root, "src-tauri"),
     );
     exe = path.join(root, "src-tauri", "target", "release", "s3-sidekick.exe");

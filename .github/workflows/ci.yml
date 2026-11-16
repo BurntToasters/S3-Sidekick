@@ -23,6 +23,7 @@ jobs:
   verify:
     name: Test + Format
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -155,6 +156,7 @@ jobs:
   browser-layout:
     name: Browser layout (Chromium + WebKit)
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -232,6 +234,7 @@ jobs:
   minio-e2e:
     name: S3 command layer E2E (MinIO)
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -305,9 +308,82 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  sftp-e2e:
+    name: SFTP command layer E2E (OpenSSH)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install pinned npm
+        run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+
+      - name: Resolve pinned Rust toolchain
+        id: rust-pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/rust-toolchain.mjs)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ steps.rust-pin.outputs.version }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          cache-targets: false
+          prefix-key: v2-sftp-e2e
+          key: ${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libdbus-1-dev
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # The Tauri context embeds the built frontend at compile time.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run SFTP E2E suite
+        run: npm run test:e2e:sftp
+
+      - name: Upload SFTP E2E report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sftp-e2e-report
+          path: test-results/sftp-e2e/
+          if-no-files-found: ignore
+          retention-days: 14
+
   fullstack-e2e:
     name: Full-stack E2E (real app + MinIO)
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -368,7 +444,8 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Build debug app
-        run: npm run tauri -- build --debug --no-bundle -- --locked
+        # `e2e-hooks` enables the startup trace that the run below logs.
+        run: npm run tauri -- build --debug --no-bundle --features e2e-hooks -- --locked
 
       - name: Warm font cache for first GTK paint
         run: |
@@ -392,6 +469,7 @@ jobs:
   rust-coverage:
     name: Rust coverage (report only)
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -464,6 +542,7 @@ jobs:
   windows-arm64-smoke:
     name: Windows arm64 build (unsigned smoke)
     runs-on: windows-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -511,6 +590,7 @@ jobs:
   macos-universal-smoke:
     name: macOS universal build (unsigned smoke)
     runs-on: macos-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -561,6 +641,7 @@ jobs:
     # apply. 22.04's flatpak-builder 1.2 calls appstream-compose, which the 49
     # SDK no longer ships; 24.04's 1.4 uses appstreamcli compose.
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -675,6 +756,7 @@ jobs:
       - verify
       - browser-layout
       - minio-e2e
+      - sftp-e2e
       - fullstack-e2e
       - windows-startup-e2e
       - windows-arm64-smoke
@@ -688,6 +770,7 @@ jobs:
           VERIFY: ${{ needs.verify.result }}
           BROWSER: ${{ needs.browser-layout.result }}
           MINIO: ${{ needs.minio-e2e.result }}
+          SFTP: ${{ needs.sftp-e2e.result }}
           FULLSTACK: ${{ needs.fullstack-e2e.result }}
           WINDOWS_STARTUP: ${{ needs.windows-startup-e2e.result }}
           WINDOWS_SMOKE: ${{ needs.windows-arm64-smoke.result }}
@@ -699,6 +782,7 @@ jobs:
             "verify=$VERIFY" \
             "browser-layout=$BROWSER" \
             "minio-e2e=$MINIO" \
+            "sftp-e2e=$SFTP" \
             "fullstack-e2e=$FULLSTACK" \
             "windows-startup-e2e=$WINDOWS_STARTUP" \
             "windows-arm64-smoke=$WINDOWS_SMOKE" \

@@ -37,6 +37,16 @@ Run `npm run test:e2e:cargo-security` to resolve all target dependencies with `-
 
 `scripts/cargo-safe-update.mjs` and `scripts/check-cargo-update-policy.mjs` are a temporary stand-in for a minimum publish age in Cargo itself. Remove both (and restore direct `cargo update` call sites) once the supported stable Cargo ships a global minimum publish age.
 
+## SFTP dependencies
+
+`russh` is pinned exactly (`=0.65.1`) with `default-features = false` and `features = ["aws-lc-rs"]`. The `rsa` feature stays off because it pulls in the `rsa` crate, which carries unpatched RUSTSEC-2023-0071. The `flate2` feature (SSH compression) also stays off. The comment beside the dependency in `src-tauri/Cargo.toml` records both reasons, so do not re-enable either feature to make an update build.
+
+`russh-sftp` is pinned exactly (`=3.0.1`). Its lossy decoding of non-UTF-8 names is the basis for the read-only rule in [ARCHITECTURE.md](ARCHITECTURE.md#sftp-sessions), so review that behavior whenever it changes.
+
+`BSD-1-Clause` is on the license allowlist in `scripts/license-policy.mjs` for `fiat-crypto`, which reaches the graph through `curve25519-dalek` 5.0.0. Add a license only with the crate that needs it named in the change.
+
+Updating `russh` requires re-running `npm run test:e2e:sftp`. The handshake, host-key, and authentication checks are `#[ignore]` tests that need the OpenSSH container, so `cargo test` alone does not exercise them. CI runs the same suite as the `sftp-e2e` job.
+
 ## CI tool installation
 
 CI installs Rust helper binaries (`cargo-audit`, `cargo-llvm-cov`,

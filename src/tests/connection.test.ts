@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { SftpConnectCallbacks } from "../connection.ts";
 
 const mockInvoke = vi.fn<(...args: unknown[]) => Promise<unknown>>();
 
@@ -935,5 +936,800 @@ describe("connection module", () => {
     await expect(connection.refreshObjects("bucket-a", "")).rejects.toThrow(
       "fresh list boom",
     );
+  });
+});
+
+describe("SFTP connection flow and state", () => {
+  const SFTP_PARAMS = {
+    host: "Example.com",
+    port: 22,
+    username: "alice",
+    authMethod: "password" as const,
+    password: "pw",
+  };
+  const SFTP_CONNECTED = {
+    step: "connected",
+    connection_id: "sftp-1",
+    connection_identity: "sftp-ident-1",
+    endpoint: "sftp://example.com:22",
+    home_path: "/home/alice",
+    host_key: "ssh-ed25519 AAAAC3",
+    host_key_fingerprint: "SHA256:abc",
+    create_only_supported: true,
+  };
+  const HOST_KEY_STEP = {
+    step: "host_key_unknown",
+    attempt_id: "att-1",
+    key_type: "ssh-ed25519",
+    fingerprint_sha256: "SHA256:abc",
+    host_key: "ssh-ed25519 AAAAC3",
+  };
+  const PROMPT_STEP = {
+    step: "prompt",
+    attempt_id: "att-2",
+    name: "",
+    instructions: "",
+    prompts: [{ text: "Password: ", echo: false }],
+  };
+  const S3_RESULT = {
+    region: "us-west-2",
+    connection_id: "s3-1",
+    connection_identity: "s3-ident-1",
+    create_only_capabilities: {
+      put_object: true,
+      complete_multipart: false,
+      copy_object: true,
+    },
+  };
+  const SFTP_LISTING = {
+    path: "/docs",
+    truncated: true,
+    entries: [
+      {
+        name: "a.txt",
+        path: "/docs/a.txt",
+        kind: "file",
+        size: 3,
+        mtime: 0,
+        permissions: null,
+        uid: null,
+        gid: null,
+        owner: null,
+        group: null,
+        name_lossy: false,
+      },
+      {
+        name: "sub",
+        path: "/docs/sub",
+        kind: "dir",
+        size: null,
+        mtime: null,
+        permissions: null,
+        uid: null,
+        gid: null,
+        owner: null,
+        group: null,
+        name_lossy: false,
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.resetModules();
+    mockInvoke.mockReset();
+  });
+
+  function callbacks(overrides: Partial<SftpConnectCallbacks> = {}) {
+    return {
+      onHostKeyUnknown: vi.fn(async (): Promise<boolean> => true),
+      onPrompt: vi.fn(async (): Promise<string[] | null> => ["pw"]),
+      ...overrides,
+    };
+  }
+
+  function commandCalls(command: string): unknown[][] {
+    return mockInvoke.mock.calls.filter(([cmd]) => cmd === command);
+  }
+
+  function savedPayload(): string {
+    const args: unknown = commandCalls("save_connection")[0]?.[1];
+    if (
+      typeof args !== "object" ||
+      args === null ||
+      !("json" in args) ||
+      typeof args.json !== "string"
+    ) {
+      throw new Error("save_connection was not called");
+    }
+    return args.json;
+  }
+
+  function freshState(state: typeof import("../state.ts").state): void {
+    state.connected = false;
+    state.connecting = false;
+    state.protocol = "s3";
+    state.sftpHomePath = "";
+    state.endpoint = "";
+    state.region = "";
+    state.connectionId = "";
+    state.connectionIdentity = "";
+    state.currentBucket = "";
+    state.currentPrefix = "";
+    state.buckets = [];
+    state.objects = [];
+    state.prefixes = [];
+    state.selectedKeys.clear();
+    state.selectedPrefixes.clear();
+    state.continuationToken = "";
+    state.hasMore = false;
+    state.listingCapped = false;
+  }
+
+  function route(replies: Record<string, unknown>): void {
+    mockInvoke.mockImplementation(async (command) => {
+      if (typeof command === "string" && command in replies) {
+        const reply = replies[command];
+        if (reply instanceof Error) throw reply;
+        return reply;
+      }
+      return undefined;
+    });
+  }
+
+  it("connectSftp publishes the SFTP session and returns the trusted host key", async () => {
+    mockInvoke.mockResolvedValueOnce(SFTP_CONNECTED);
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks();
+
+    const outcome = await connection.connectSftp(SFTP_PARAMS, cb);
+
+    expect(mockInvoke).toHaveBeenCalledWith("sftp_connect", {
+      host: "Example.com",
+      port: 22,
+      username: "alice",
+      authMethod: "password",
+      password: "pw",
+      privateKey: null,
+      passphrase: null,
+      pinnedHostKey: null,
+    });
+    expect(outcome).toEqual({
+      endpoint: "sftp://example.com:22",
+      hostKey: "ssh-ed25519 AAAAC3",
+      hostKeyFingerprint: "SHA256:abc",
+      homePath: "/home/alice",
+    });
+    expect(cb.onHostKeyUnknown).not.toHaveBeenCalled();
+    expect(cb.onPrompt).not.toHaveBeenCalled();
+    expect(state.connected).toBe(true);
+    expect(state.connecting).toBe(true);
+    connection.finishConnecting(connection.currentConnectionGeneration());
+    expect(state.connecting).toBe(false);
+    expect(state.protocol).toBe("sftp");
+    expect(state.endpoint).toBe("sftp://example.com:22");
+    expect(state.region).toBe("");
+    expect(state.connectionId).toBe("sftp-1");
+    expect(state.connectionIdentity).toBe("sftp-ident-1");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: true,
+      complete_multipart: true,
+      copy_object: false,
+    });
+    expect(state.conditionalDeleteSupported).toBe(false);
+    expect(state.sftpHomePath).toBe("/home/alice");
+  });
+
+  it("sends a trusted host key only through sftp_connect_continue", async () => {
+    route({
+      sftp_connect: HOST_KEY_STEP,
+      sftp_connect_continue: SFTP_CONNECTED,
+    });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks();
+
+    const outcome = await connection.connectSftp(SFTP_PARAMS, cb);
+
+    expect(cb.onHostKeyUnknown).toHaveBeenCalledWith(HOST_KEY_STEP);
+    expect(commandCalls("sftp_connect_continue")).toEqual([
+      ["sftp_connect_continue", { attemptId: "att-1", trustHostKey: true }],
+    ]);
+    expect(commandCalls("sftp_connect_cancel")).toHaveLength(0);
+    expect(outcome.endpoint).toBe("sftp://example.com:22");
+    expect(state.connected).toBe(true);
+  });
+
+  it("answers a prompt with the callback responses", async () => {
+    route({ sftp_connect: PROMPT_STEP, sftp_connect_continue: SFTP_CONNECTED });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks({
+      onPrompt: vi.fn(async () => ["hunter2"]),
+    });
+
+    await connection.connectSftp(SFTP_PARAMS, cb);
+
+    expect(cb.onPrompt).toHaveBeenCalledWith(PROMPT_STEP);
+    expect(commandCalls("sftp_connect_continue")).toEqual([
+      ["sftp_connect_continue", { attemptId: "att-2", responses: ["hunter2"] }],
+    ]);
+    expect(state.connected).toBe(true);
+  });
+
+  it("a declined host key cancels the pending attempt and never continues", async () => {
+    route({ sftp_connect: HOST_KEY_STEP, sftp_connect_cancel: undefined });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks({ onHostKeyUnknown: vi.fn(async () => false) });
+
+    await expect(connection.connectSftp(SFTP_PARAMS, cb)).rejects.toThrow(
+      "Connection cancelled",
+    );
+
+    expect(commandCalls("sftp_connect_cancel")).toEqual([
+      ["sftp_connect_cancel", { attemptId: "att-1" }],
+    ]);
+    expect(commandCalls("sftp_connect_continue")).toHaveLength(0);
+    expect(state.connected).toBe(false);
+    expect(state.connecting).toBe(false);
+  });
+
+  it("a cancelled prompt cancels the pending attempt and never continues", async () => {
+    route({ sftp_connect: PROMPT_STEP, sftp_connect_cancel: undefined });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks({ onPrompt: vi.fn(async () => null) });
+
+    await expect(connection.connectSftp(SFTP_PARAMS, cb)).rejects.toThrow(
+      "Connection cancelled",
+    );
+
+    expect(commandCalls("sftp_connect_cancel")).toEqual([
+      ["sftp_connect_cancel", { attemptId: "att-2" }],
+    ]);
+    expect(commandCalls("sftp_connect_continue")).toHaveLength(0);
+    expect(state.connecting).toBe(false);
+  });
+
+  it("refuses prompt answers that do not match the prompts and cancels the attempt", async () => {
+    route({ sftp_connect: PROMPT_STEP, sftp_connect_cancel: undefined });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks({ onPrompt: vi.fn(async () => ["one", "two"]) });
+
+    await expect(connection.connectSftp(SFTP_PARAMS, cb)).rejects.toThrow(
+      "answers",
+    );
+
+    expect(commandCalls("sftp_connect_cancel")).toEqual([
+      ["sftp_connect_cancel", { attemptId: "att-2" }],
+    ]);
+    expect(commandCalls("sftp_connect_continue")).toHaveLength(0);
+    expect(state.connected).toBe(false);
+  });
+
+  it("a connect cancelled before its first step opens no dialog and cancels the attempt", async () => {
+    route({ sftp_connect: HOST_KEY_STEP, sftp_connect_cancel: undefined });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks({ isCancelled: () => true });
+
+    await expect(connection.connectSftp(SFTP_PARAMS, cb)).rejects.toThrow(
+      "Connection cancelled",
+    );
+
+    expect(cb.onHostKeyUnknown).not.toHaveBeenCalled();
+    expect(commandCalls("sftp_connect_continue")).toHaveLength(0);
+    expect(commandCalls("sftp_connect_cancel")).toEqual([
+      ["sftp_connect_cancel", { attemptId: "att-1" }],
+    ]);
+    expect(state.connected).toBe(false);
+  });
+
+  it("a trust answer given after the user cancelled is never sent", async () => {
+    route({ sftp_connect: HOST_KEY_STEP, sftp_connect_cancel: undefined });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    let cancelled = false;
+    const cb = callbacks({
+      onHostKeyUnknown: vi.fn(async () => {
+        cancelled = true;
+        return true;
+      }),
+      isCancelled: () => cancelled,
+    });
+
+    await expect(connection.connectSftp(SFTP_PARAMS, cb)).rejects.toThrow(
+      "Connection cancelled",
+    );
+
+    expect(commandCalls("sftp_connect_continue")).toHaveLength(0);
+    expect(commandCalls("sftp_connect_cancel")).toEqual([
+      ["sftp_connect_cancel", { attemptId: "att-1" }],
+    ]);
+  });
+
+  it("cancelSftpConnectInFlight reaches the backend only while an SFTP connect runs", async () => {
+    let releaseConnect: ((value: unknown) => void) | undefined;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "sftp_connect") {
+        return new Promise((resolve) => {
+          releaseConnect = resolve;
+        });
+      }
+      return undefined;
+    });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+
+    connection.cancelSftpConnectInFlight();
+    expect(commandCalls("sftp_connect_cancel_pending")).toHaveLength(0);
+
+    const connecting = connection.connectSftp(SFTP_PARAMS, callbacks());
+    await vi.waitFor(() => expect(releaseConnect).toBeDefined());
+    connection.cancelSftpConnectInFlight();
+    expect(commandCalls("sftp_connect_cancel_pending")).toEqual([
+      ["sftp_connect_cancel_pending"],
+    ]);
+
+    releaseConnect?.(SFTP_CONNECTED);
+    await connecting;
+    connection.cancelSftpConnectInFlight();
+    expect(commandCalls("sftp_connect_cancel_pending")).toHaveLength(1);
+  });
+
+  it("a host key reply that arrives after the connect was superseded is never sent", async () => {
+    route({ sftp_connect: HOST_KEY_STEP, sftp_connect_cancel: undefined });
+    let resolveTrust: ((value: boolean) => void) | undefined;
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks({
+      onHostKeyUnknown: vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveTrust = resolve;
+          }),
+      ),
+    });
+
+    const connecting = connection.connectSftp(SFTP_PARAMS, cb);
+    await vi.waitFor(() => expect(cb.onHostKeyUnknown).toHaveBeenCalled());
+    connection.setConnectionAccessLocked(true);
+    resolveTrust?.(true);
+
+    try {
+      await expect(connecting).rejects.toThrow("superseded");
+      expect(commandCalls("sftp_connect_continue")).toHaveLength(0);
+      expect(commandCalls("sftp_connect_cancel")).toEqual([
+        ["sftp_connect_cancel", { attemptId: "att-1" }],
+      ]);
+      expect(state.connected).toBe(false);
+    } finally {
+      connection.setConnectionAccessLocked(false);
+    }
+  });
+
+  it("a prompt reply that arrives after a disconnect is never sent", async () => {
+    route({ sftp_connect: PROMPT_STEP, sftp_connect_cancel: undefined });
+    let resolvePrompt: ((value: string[] | null) => void) | undefined;
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks({
+      onPrompt: vi.fn(
+        () =>
+          new Promise<string[] | null>((resolve) => {
+            resolvePrompt = resolve;
+          }),
+      ),
+    });
+
+    const connecting = connection.connectSftp(SFTP_PARAMS, cb);
+    await vi.waitFor(() => expect(cb.onPrompt).toHaveBeenCalled());
+    const disconnecting = connection.disconnect();
+    resolvePrompt?.(["hunter2"]);
+
+    await expect(connecting).rejects.toThrow("superseded");
+    await expect(disconnecting).resolves.toBe(true);
+    expect(commandCalls("sftp_connect_continue")).toHaveLength(0);
+    expect(commandCalls("sftp_connect_cancel")).toEqual([
+      ["sftp_connect_cancel", { attemptId: "att-2" }],
+    ]);
+    expect(state.connected).toBe(false);
+  });
+
+  it("a callback that throws cancels the pending attempt and rethrows", async () => {
+    route({ sftp_connect: HOST_KEY_STEP, sftp_connect_cancel: undefined });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks({
+      onHostKeyUnknown: vi.fn(async (): Promise<boolean> => {
+        throw new Error("dialog failed");
+      }),
+    });
+
+    await expect(connection.connectSftp(SFTP_PARAMS, cb)).rejects.toThrow(
+      "dialog failed",
+    );
+    expect(commandCalls("sftp_connect_cancel")).toEqual([
+      ["sftp_connect_cancel", { attemptId: "att-1" }],
+    ]);
+    expect(commandCalls("sftp_connect_continue")).toHaveLength(0);
+  });
+
+  it("a failed cancel does not replace the original cancellation", async () => {
+    route({
+      sftp_connect: HOST_KEY_STEP,
+      sftp_connect_cancel: new Error("cancel failed"),
+    });
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    const cb = callbacks({ onHostKeyUnknown: vi.fn(async () => false) });
+
+    await expect(connection.connectSftp(SFTP_PARAMS, cb)).rejects.toThrow(
+      "Connection cancelled",
+    );
+    expect(state.connecting).toBe(false);
+  });
+
+  it("a malformed backend step is refused without publishing or cancelling", async () => {
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+
+    mockInvoke.mockResolvedValueOnce({ ...SFTP_CONNECTED, connection_id: "" });
+    await expect(
+      connection.connectSftp(SFTP_PARAMS, callbacks()),
+    ).rejects.toThrow();
+    expect(state.connected).toBe(false);
+    expect(state.connecting).toBe(false);
+
+    mockInvoke.mockResolvedValueOnce({ step: "password" });
+    await expect(
+      connection.connectSftp(SFTP_PARAMS, callbacks()),
+    ).rejects.toThrow();
+
+    const cb = callbacks();
+    mockInvoke.mockResolvedValueOnce({ ...HOST_KEY_STEP, attempt_id: "" });
+    await expect(connection.connectSftp(SFTP_PARAMS, cb)).rejects.toThrow();
+    expect(cb.onHostKeyUnknown).not.toHaveBeenCalled();
+    expect(commandCalls("sftp_connect_cancel")).toHaveLength(0);
+  });
+
+  it("refuses to connect while encrypted storage is locked", async () => {
+    const connection = await import("../connection.ts");
+    connection.setConnectionAccessLocked(true);
+    try {
+      await expect(
+        connection.connectSftp(SFTP_PARAMS, callbacks()),
+      ).rejects.toThrow("Encrypted storage is locked");
+      expect(mockInvoke).not.toHaveBeenCalled();
+    } finally {
+      connection.setConnectionAccessLocked(false);
+    }
+  });
+
+  it("a rejected sftp_connect clears the connecting flag and publishes nothing", async () => {
+    mockInvoke.mockRejectedValueOnce("Authentication failed");
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+
+    await expect(connection.connectSftp(SFTP_PARAMS, callbacks())).rejects.toBe(
+      "Authentication failed",
+    );
+    expect(state.connecting).toBe(false);
+    expect(state.connected).toBe(false);
+    expect(state.protocol).toBe("s3");
+  });
+
+  it("SFTP and S3 session state do not leak across disconnect and reconnect", async () => {
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+
+    mockInvoke.mockResolvedValueOnce(S3_RESULT);
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    expect(state.protocol).toBe("s3");
+    expect(state.sftpHomePath).toBe("");
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await connection.disconnect();
+
+    mockInvoke.mockResolvedValueOnce({
+      ...SFTP_CONNECTED,
+      create_only_supported: false,
+    });
+    await connection.connectSftp(SFTP_PARAMS, callbacks());
+    expect(state.protocol).toBe("sftp");
+    expect(state.sftpHomePath).toBe("/home/alice");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: false,
+      complete_multipart: false,
+      copy_object: false,
+    });
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await connection.disconnect();
+    expect(state.protocol).toBe("s3");
+    expect(state.sftpHomePath).toBe("");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: true,
+      complete_multipart: true,
+      copy_object: true,
+    });
+
+    mockInvoke.mockResolvedValueOnce(S3_RESULT);
+    await connection.connect("https://s3.example.com", "", "k", "s");
+    expect(state.protocol).toBe("s3");
+    expect(state.createOnlyCapabilities).toEqual({
+      put_object: true,
+      complete_multipart: false,
+      copy_object: true,
+    });
+  });
+
+  it("an S3 connect after an SFTP session clears the protocol and home path", async () => {
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+
+    mockInvoke.mockResolvedValueOnce(SFTP_CONNECTED);
+    await connection.connectSftp(SFTP_PARAMS, callbacks());
+    mockInvoke.mockResolvedValueOnce(S3_RESULT);
+    await connection.connect("https://s3.example.com", "", "k", "s");
+
+    expect(state.protocol).toBe("s3");
+    expect(state.sftpHomePath).toBe("");
+  });
+
+  it("refreshBuckets lists the single virtual bucket without a backend call", async () => {
+    mockInvoke.mockResolvedValueOnce(SFTP_CONNECTED);
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    await connection.connectSftp(SFTP_PARAMS, callbacks());
+    mockInvoke.mockClear();
+
+    await connection.refreshBuckets();
+
+    expect(state.buckets).toEqual([{ name: "example.com", creation_date: "" }]);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("refreshObjects lists an SFTP directory and maps it onto the object model", async () => {
+    mockInvoke.mockResolvedValueOnce(SFTP_CONNECTED);
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    await connection.connectSftp(SFTP_PARAMS, callbacks());
+    mockInvoke.mockResolvedValueOnce(SFTP_LISTING);
+
+    await expect(
+      connection.refreshObjects("example.com", "docs/"),
+    ).resolves.toBe(true);
+
+    expect(mockInvoke).toHaveBeenLastCalledWith("sftp_list_dir", {
+      connectionId: "sftp-1",
+      path: "/docs",
+    });
+    expect(state.currentBucket).toBe("example.com");
+    expect(state.currentPrefix).toBe("docs/");
+    expect(state.objects).toEqual([
+      {
+        key: "docs/a.txt",
+        size: 3,
+        last_modified: "1970-01-01T00:00:00.000Z",
+        is_folder: false,
+        sftp_kind: "file",
+        name_lossy: false,
+      },
+    ]);
+    expect(state.prefixes).toEqual(["docs/sub/"]);
+    expect(state.listingCapped).toBe(true);
+    expect(state.hasMore).toBe(false);
+    expect(state.continuationToken).toBe("");
+  });
+
+  it("drops an SFTP listing that finishes after its session was disconnected", async () => {
+    mockInvoke.mockResolvedValueOnce(SFTP_CONNECTED);
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    await connection.connectSftp(SFTP_PARAMS, callbacks());
+    let resolveListing: ((value: unknown) => void) | undefined;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "sftp_list_dir") {
+        return new Promise((resolve) => {
+          resolveListing = resolve;
+        });
+      }
+      return undefined;
+    });
+
+    const pending = connection.refreshObjects("example.com", "");
+    await connection.disconnect();
+    resolveListing?.(SFTP_LISTING);
+
+    await expect(pending).resolves.toBe(false);
+    expect(state.objects).toEqual([]);
+    expect(state.protocol).toBe("s3");
+  });
+
+  it("keeps the previous listing when the SFTP listing is malformed", async () => {
+    mockInvoke.mockResolvedValueOnce(SFTP_CONNECTED);
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    await connection.connectSftp(SFTP_PARAMS, callbacks());
+    state.currentBucket = "example.com";
+    state.currentPrefix = "docs/";
+    state.objects = [
+      { key: "docs/keep.txt", size: 1, last_modified: "", is_folder: false },
+    ];
+    mockInvoke.mockResolvedValueOnce({
+      ...SFTP_LISTING,
+      entries: [{ ...SFTP_LISTING.entries[0], name: "x/y", path: "/docs/x/y" }],
+    });
+
+    await expect(
+      connection.refreshObjects("example.com", "docs/"),
+    ).rejects.toThrow();
+    expect(state.objects.map((object) => object.key)).toEqual([
+      "docs/keep.txt",
+    ]);
+  });
+
+  it("loadMoreObjects is a no-op for SFTP even when a token is present", async () => {
+    const connection = await import("../connection.ts");
+    const { state } = await import("../state.ts");
+    freshState(state);
+    state.connected = true;
+    state.protocol = "sftp";
+    state.connectionId = "sftp-1";
+    state.hasMore = true;
+    state.continuationToken = "token";
+
+    await connection.loadMoreObjects();
+
+    expect(mockInvoke).not.toHaveBeenCalled();
+    expect(state.hasMore).toBe(true);
+    expect(state.continuationToken).toBe("token");
+  });
+
+  it("saveSftpConnection stores the password shape bound to the session", async () => {
+    mockInvoke.mockResolvedValueOnce(undefined);
+    const connection = await import("../connection.ts");
+
+    await connection.saveSftpConnection("sftp-1", {
+      endpoint: "sftp://Example.com:22",
+      username: "alice",
+      secret: "pw",
+      auth: "password",
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("save_connection", {
+      connectionId: "sftp-1",
+      json: expect.any(String),
+    });
+    expect(JSON.parse(savedPayload())).toEqual({
+      protocol: "sftp",
+      endpoint: "sftp://example.com:22",
+      region: "",
+      access_key: "alice",
+      secret_key: "pw",
+      sftp: { auth: "password" },
+    });
+  });
+
+  it("saveSftpConnection stores the key path and pinned host key", async () => {
+    mockInvoke.mockResolvedValueOnce(undefined);
+    const connection = await import("../connection.ts");
+
+    await connection.saveSftpConnection("sftp-1", {
+      endpoint: "sftp://example.com:22",
+      username: "alice",
+      secret: "phrase",
+      auth: "key",
+      privateKey: "KEYTEXT",
+      hostKey: "ssh-ed25519 AAA",
+    });
+
+    expect(JSON.parse(savedPayload())).toEqual({
+      protocol: "sftp",
+      endpoint: "sftp://example.com:22",
+      region: "",
+      access_key: "alice",
+      secret_key: "phrase",
+      sftp: {
+        auth: "key",
+        private_key: "KEYTEXT",
+        host_key: "ssh-ed25519 AAA",
+      },
+    });
+  });
+
+  it("saveSftpConnection refuses bad input before anything is saved", async () => {
+    const connection = await import("../connection.ts");
+
+    await expect(
+      connection.saveSftpConnection("", {
+        endpoint: "sftp://example.com:22",
+        username: "alice",
+        secret: "pw",
+        auth: "password",
+      }),
+    ).rejects.toThrow("Connection id is required");
+    await expect(
+      connection.saveSftpConnection("sftp-1", {
+        endpoint: "https://example.com",
+        username: "alice",
+        secret: "pw",
+        auth: "password",
+      }),
+    ).rejects.toThrow();
+    await expect(
+      connection.saveSftpConnection("sftp-1", {
+        endpoint: "sftp://example.com:22",
+        username: "alice",
+        secret: "pw",
+        auth: "key",
+        privateKey: "x".repeat(16385),
+      }),
+    ).rejects.toThrow();
+    expect(commandCalls("save_connection")).toHaveLength(0);
+  });
+
+  it("loadConnection accepts a saved SFTP connection and reports every other shape as corrupt", async () => {
+    const connection = await import("../connection.ts");
+    const SAVED_SFTP = {
+      protocol: "sftp",
+      endpoint: "sftp://example.com:22",
+      region: "",
+      access_key: "alice",
+      secret_key: "pw",
+      sftp: { auth: "password" },
+    };
+    mockInvoke.mockResolvedValueOnce(JSON.stringify(SAVED_SFTP));
+    await expect(connection.loadConnection()).resolves.toEqual(SAVED_SFTP);
+    expect(connection.getConnectionLoadError()).toBeNull();
+
+    const corrupt: unknown[] = [
+      { ...SAVED_SFTP, protocol: "ftp" },
+      { ...SAVED_SFTP, endpoint: "https://example.com" },
+      { ...SAVED_SFTP, sftp: undefined },
+      { ...SAVED_SFTP, sftp: { auth: "agent" } },
+      {
+        endpoint: "https://s3.example.com",
+        region: "",
+        access_key: "k",
+        secret_key: "s",
+        sftp: { auth: "password" },
+      },
+      {
+        endpoint: "sftp://example.com:22",
+        region: "",
+        access_key: "k",
+        secret_key: "s",
+      },
+    ];
+    for (const row of corrupt) {
+      mockInvoke.mockResolvedValueOnce(JSON.stringify(row));
+      await expect(connection.loadConnection()).resolves.toBeNull();
+      expect(connection.getConnectionLoadError()).toContain("corrupt");
+    }
   });
 });

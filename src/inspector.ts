@@ -32,6 +32,7 @@ import {
   showInfoPanelTab,
 } from "./info-panel.ts";
 import { state } from "./state.ts";
+import { displayLocation, sessionProtocol } from "./protocol-labels.ts";
 import { setStatus } from "./app-status.ts";
 
 export type InspectorInfoTab = "details" | "permissions" | "metadata";
@@ -439,11 +440,19 @@ function syncInspectorPaneVisibility(): void {
   if (activeInfoPane) moveSharedInfoContent(activeInfoPane);
 
   const tabs = document.querySelectorAll<HTMLElement>("[data-inspector-tab]");
+  const sftp = state.protocol === "sftp";
   for (const tab of tabs) {
     const active = tab.dataset.inspectorTab === inspectorTab;
     tab.classList.toggle("inspector-tab--active", active);
     tab.setAttribute("aria-selected", String(active));
     tab.setAttribute("tabindex", active ? "0" : "-1");
+    // Permissions (ACL) and Metadata are S3 panes; SFTP shows Details only.
+    if (
+      tab.dataset.inspectorTab === "permissions" ||
+      tab.dataset.inspectorTab === "metadata"
+    ) {
+      tab.hidden = sftp;
+    }
   }
 }
 
@@ -588,9 +597,11 @@ function renderInspectorEmpty(): void {
   const fileCount = fileObjects.length;
   const folderCount = state.prefixes.length;
   const loadedBytes = fileObjects.reduce((sum, object) => sum + object.size, 0);
-  const location = prefix
-    ? `${state.currentBucket}/${prefix}`
-    : `${state.currentBucket}/`;
+  const location = displayLocation(
+    sessionProtocol(state),
+    state.currentBucket,
+    prefix,
+  );
   const stats = [
     `<div class="inspector-empty__stat"><dt>Files</dt><dd>${escapeHtml(plural(fileCount, "file"))}</dd></div>`,
     `<div class="inspector-empty__stat"><dt>Folders</dt><dd>${escapeHtml(plural(folderCount, "folder"))}</dd></div>`,
@@ -724,6 +735,12 @@ async function performInspectorSync(
   syncGen: number,
   syncWasInFlight: boolean,
 ): Promise<void> {
+  if (
+    state.protocol === "sftp" &&
+    (inspectorTab === "permissions" || inspectorTab === "metadata")
+  ) {
+    inspectorTab = "details";
+  }
   // Opening the inspector syncs immediately and the browser's following
   // selection tick repeats it. Skip only that duplicate when nothing else is
   // in flight; an empty selection must always sync so Deselect All can show

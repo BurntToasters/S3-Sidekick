@@ -24,6 +24,30 @@ permissions = [
 ]
 
 [[set]]
+identifier = "sftp-session"
+description = "Connect to and browse an SFTP server."
+permissions = [
+  "allow-sftp-connect",
+  "allow-sftp-connect-continue",
+  "allow-sftp-connect-cancel",
+  "allow-sftp-connect-cancel-pending",
+  "allow-sftp-list-dir",
+  "allow-sftp-stat",
+  "allow-sftp-exists",
+  "allow-sftp-preview",
+]
+
+[[set]]
+identifier = "sftp-mutation"
+description = "Change files on an SFTP server."
+permissions = [
+  "allow-sftp-create-dir",
+  "allow-sftp-rename",
+  "allow-sftp-delete",
+  "allow-sftp-delete-dir",
+]
+
+[[set]]
 identifier = "s3-mutation"
 description = "Change objects in a bucket."
 permissions = [
@@ -49,6 +73,9 @@ permissions = [
   "allow-upload-object-bytes",
   "allow-download-object",
   "allow-download-object-parallel",
+  "allow-sftp-upload",
+  "allow-sftp-upload-bytes",
+  "allow-sftp-download",
   "allow-cancel-transfer",
   "allow-discard-download-scratch",
   "allow-transfer-checkpoint-remove",
@@ -68,6 +95,7 @@ permissions = [
   "allow-pick-download-file",
   "allow-pick-download-directory",
   "allow-pick-text-export",
+  "allow-pick-ssh-private-key",
   "allow-take-dropped-upload-grants",
   "allow-export-text-file",
 ]

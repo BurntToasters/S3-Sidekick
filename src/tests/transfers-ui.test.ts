@@ -5,6 +5,7 @@ import {
   computeQueueAggregates,
   patchTransferRowElement,
   renderTransferRow,
+  transferRowLocations,
   updateQueueSummary,
 } from "../transfer-render.ts";
 import { isClaimable, markCancelled } from "../transfer-state.ts";
@@ -609,5 +610,112 @@ describe("transfer row contracts (UX audit 0.12.0)", () => {
         .querySelector(".transfer-copy-error svg")
         ?.getAttribute("data-icon"),
     ).toBe("copy");
+  });
+});
+
+/*
+ * Failure modes, written before the change:
+ * - An SFTP row shows its remote path without the leading slash
+ *   (`home/demo/x` for `/home/demo/x`), on upload, download, move.
+ * - An S3 row changes text: bucket/key form, or the bare key for an upload.
+ * - The row reads the session protocol rather than its own, so a row from
+ *   another session shows the wrong form.
+ */
+describe("transfer row locations", () => {
+  it("shows an SFTP upload target as the absolute remote path", () => {
+    const item = transferFixture({
+      operation: "upload",
+      protocol: "sftp",
+      bucket: "files.example.test",
+      key: "home/demo/final.txt",
+      fileName: "final.txt",
+      filePath: "/Users/demo/final.txt",
+    });
+    expect(transferRowLocations(item)).toEqual({
+      source: "/Users/demo/final.txt",
+      target: "/home/demo/final.txt",
+    });
+  });
+
+  it("shows SFTP download and move paths with a leading slash", () => {
+    const download = transferFixture({
+      operation: "download",
+      protocol: "sftp",
+      bucket: "files.example.test",
+      key: "home/demo/notes.txt",
+      destination: "/Users/demo/Downloads/notes.txt",
+    });
+    expect(transferRowLocations(download)).toEqual({
+      source: "/home/demo/notes.txt",
+      target: "/Users/demo/Downloads/notes.txt",
+    });
+
+    const move = transferFixture({
+      operation: "move",
+      protocol: "sftp",
+      bucket: "files.example.test",
+      sourceBucket: "files.example.test",
+      sourceKey: "home/demo/a.txt",
+      destinationBucket: "files.example.test",
+      destinationKey: "home/demo/b/a.txt",
+    });
+    expect(transferRowLocations(move)).toEqual({
+      source: "/home/demo/a.txt",
+      target: "/home/demo/b/a.txt",
+    });
+  });
+
+  it("renders the SFTP upload target with its leading slash", () => {
+    const item = transferFixture({
+      operation: "upload",
+      protocol: "sftp",
+      bucket: "files.example.test",
+      key: "home/demo/final.txt",
+      fileName: "final.txt",
+      filePath: "/Users/demo/final.txt",
+    });
+    const template = document.createElement("template");
+    template.innerHTML = renderTransferRow(item);
+    expect(template.content.querySelector(".transfer-key")?.textContent).toBe(
+      "/home/demo/final.txt",
+    );
+  });
+
+  it("keeps S3 rows in their bucket/key form", () => {
+    const upload = transferFixture({
+      operation: "upload",
+      bucket: "reports",
+      key: "2024/q1.csv",
+      fileName: "q1.csv",
+      filePath: "/Users/demo/q1.csv",
+    });
+    expect(transferRowLocations(upload)).toEqual({
+      source: "/Users/demo/q1.csv",
+      target: "2024/q1.csv",
+    });
+
+    const download = transferFixture({
+      operation: "download",
+      bucket: "reports",
+      key: "2024/q1.csv",
+      destination: "/Users/demo/Downloads/q1.csv",
+    });
+    expect(transferRowLocations(download)).toEqual({
+      source: "reports/2024/q1.csv",
+      target: "/Users/demo/Downloads/q1.csv",
+    });
+
+    const copy = transferFixture({
+      operation: "copy",
+      bucket: "source-bucket",
+      sourceBucket: "source-bucket",
+      sourceKey: "reports/report.csv",
+      destinationBucket: "destination-bucket",
+      destinationKey: "archive/report.csv",
+    });
+    expect(transferRowLocations(copy)).toEqual({
+      source: "source-bucket/reports/report.csv",
+      target: "destination-bucket/archive/report.csv",
+    });
   });
 });

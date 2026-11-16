@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) fn normalize_attempt(attempt: Option<u32>) -> u32 {
+pub(crate) fn normalize_attempt(attempt: Option<u32>) -> u32 {
     attempt.unwrap_or(1).max(1)
 }
 
@@ -99,7 +99,7 @@ pub(super) fn clamp_concurrency_for_budget(
     requested.clamp(1, cap)
 }
 
-pub(super) fn clamp_bandwidth_limit_bps(value: Option<u32>) -> u64 {
+pub(crate) fn clamp_bandwidth_limit_bps(value: Option<u32>) -> u64 {
     let mbps = value.unwrap_or(0);
     if mbps == 0 {
         return 0;
@@ -116,7 +116,7 @@ pub(super) struct TransferErrorEnvelope {
     pub(super) message: String,
 }
 
-pub(super) fn encode_transfer_error(
+pub(crate) fn encode_transfer_error(
     code: &str,
     retryable: bool,
     http_status: Option<u16>,
@@ -162,14 +162,14 @@ pub(super) fn choose_upload_part_size_bytes(
     Ok(part_size as usize)
 }
 
-pub(super) fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
-pub(super) fn compute_speed_eta(
+pub(crate) fn compute_speed_eta(
     bytes_sent: u64,
     total_bytes: u64,
     started_at: Instant,
@@ -220,7 +220,7 @@ impl Drop for ProgressBaseline {
     }
 }
 
-pub(super) fn emit_transfer_progress<R: tauri::Runtime>(
+pub(crate) fn emit_transfer_progress<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     event: &str,
     transfer_id: u32,

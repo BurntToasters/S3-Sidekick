@@ -11,6 +11,7 @@ import {
   type NativePathGrant,
 } from "./path-grants.ts";
 import { state } from "./state.ts";
+import { protocolLabels, sessionProtocol } from "./protocol-labels.ts";
 import {
   enqueueDownloads,
   type EnqueueResult,
@@ -28,8 +29,11 @@ import {
   basename,
 } from "./utils.ts";
 import { setStatus } from "./app-status.ts";
-import { getSelectedFileKeys } from "./app-selection.ts";
+import { getSelectedFileKeys, getSelectedPrefixes } from "./app-selection.ts";
 import { resolveDownloadEntriesWithConflicts } from "./app-conflicts.ts";
+import { sftpListDir, sftpStat } from "./sftp-commands.ts";
+import { sftpPathFromKey, type SftpListResponse } from "./sftp.ts";
+import { isSftpNameLossy, reportSftpConnectionLost } from "./sftp-move.ts";
 import type { ConflictPolicy } from "./settings-model.ts";
 
 export interface DownloadQueueEntry {
@@ -41,6 +45,8 @@ export interface DownloadQueueEntry {
   /** File name when the grant is a folder. */
   destinationName?: string;
   conflictResolution?: Exclude<ConflictPolicy, "ask">;
+  /** Byte size already known from a listing; skips the size probe. */
+  size?: number;
 }
 
 interface HeadObjectSummary {
@@ -238,6 +244,84 @@ async function uniqueDownloadEntries(
   return entries;
 }
 
+/** One file a folder download queues: a direct child that is a regular file. */
+export interface SftpFolderFile {
+  key: string;
+  name: string;
+  /** Null when the server reported no size; the disk check then refuses. */
+  size: number | null;
+}
+
+/** One entry a folder download leaves out, with the reason shown to the user. */
+export interface SftpSkippedEntry {
+  name: string;
+  reason: string;
+}
+
+export interface SftpFolderPlan {
+  files: SftpFolderFile[];
+  skipped: SftpSkippedEntry[];
+}
+
+/**
+ * Which entries of one remote folder a download queues. Only regular files
+ * directly inside the folder are queued. A subfolder needs a local folder that
+ * the destination grant cannot create, so it is reported rather than flattened.
+ * Symlinks are never followed, and a name that is not UTF-8 cannot be addressed
+ * on the server, so both are reported.
+ */
+export function planSftpFolderDownload(
+  listing: SftpListResponse,
+  folderKey: string,
+): SftpFolderPlan {
+  if (listing.truncated) {
+    throw new Error(
+      "This folder has more entries than can be listed at once, so nothing was queued.",
+    );
+  }
+  const files: SftpFolderFile[] = [];
+  const skipped: SftpSkippedEntry[] = [];
+  for (const entry of listing.entries) {
+    if (entry.kind === "symlink") {
+      skipped.push({ name: entry.name, reason: "symbolic link" });
+    } else if (entry.name_lossy || isSftpNameLossy(entry.name)) {
+      skipped.push({ name: entry.name, reason: "name is not valid UTF-8" });
+    } else if (entry.kind === "dir") {
+      skipped.push({ name: entry.name, reason: "subfolder" });
+    } else if (entry.kind === "file") {
+      files.push({
+        key: `${folderKey}${entry.name}`,
+        name: entry.name,
+        size: entry.size,
+      });
+    } else {
+      skipped.push({ name: entry.name, reason: "not a regular file" });
+    }
+  }
+  return { files, skipped };
+}
+
+async function planSftpFolderForDownload(
+  connectionId: string,
+  folderKey: string,
+): Promise<SftpFolderPlan> {
+  const listing = await sftpListDir(connectionId, sftpPathFromKey(folderKey));
+  return planSftpFolderDownload(listing, folderKey);
+}
+
+/** One status line for skipped entries, or null when nothing was skipped. */
+export function describeSftpSkips(
+  skipped: readonly SftpSkippedEntry[],
+): string | null {
+  if (skipped.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const row of skipped) {
+    counts.set(row.reason, (counts.get(row.reason) ?? 0) + 1);
+  }
+  const parts = [...counts].map(([reason, count]) => `${reason} (${count})`);
+  return `Skipped ${plural(skipped.length, "entry", "entries")}: ${parts.join(", ")}.`;
+}
+
 function estimateKnownObjectSize(entry: DownloadQueueEntry): number | null {
   if (entry.bucket !== state.currentBucket) return null;
   const match = state.objects.find((obj) => obj.key === entry.key);
@@ -249,8 +333,17 @@ async function estimateDownloadEntryBytes(
   entry: DownloadQueueEntry,
   connectionId: string,
 ): Promise<number | null> {
+  if (typeof entry.size === "number") return entry.size;
   const known = estimateKnownObjectSize(entry);
   if (known !== null) return known;
+  if (state.protocol === "sftp") {
+    try {
+      const stat = await sftpStat(connectionId, sftpPathFromKey(entry.key));
+      return stat.kind === "file" && stat.size !== null ? stat.size : null;
+    } catch {
+      return null;
+    }
+  }
   try {
     const head = await invokeS3For<HeadObjectSummary>(
       connectionId,
@@ -370,6 +463,7 @@ function enqueueTargetFromSnapshot(
     bucket: snap.bucket,
     connectionId: snap.connectionId,
     connectionIdentity: snap.connectionIdentity,
+    protocol: state.protocol,
   };
 }
 
@@ -382,17 +476,22 @@ function enqueueDownloadTransfers(
 
 export async function handleDownload(): Promise<void> {
   const keys = getSelectedFileKeys();
-  if (keys.length === 0) return;
+  // Folders download only on SFTP. An S3 folder selection is not a download.
+  const folders = state.protocol === "sftp" ? getSelectedPrefixes() : [];
+  if (keys.length === 0 && folders.length === 0) return;
   let snap: ConnectionSnapshot;
   try {
     snap = captureConnectionSnapshot();
   } catch {
-    setStatus("Connect to a bucket first.", 5000);
+    setStatus(protocolLabels(sessionProtocol(state)).connectFirst, 5000);
     return;
   }
   const capturedKeys = [...keys];
+  const capturedFolders = [...folders];
+  const singleFile = capturedKeys.length === 1 && capturedFolders.length === 0;
   const entries: DownloadQueueEntry[] = [];
-  if (capturedKeys.length === 1) {
+  let skipNote: string | null = null;
+  if (singleFile) {
     const fileName = safeFileName(capturedKeys[0], state.platformName);
     let grant: NativePathGrant | null;
     try {
@@ -461,17 +560,44 @@ export async function handleDownload(): Promise<void> {
     }
     saveRememberedDownloadDirectoryValue(grant.path);
     rememberDirectoryGrant(grant);
-    entries.push(
-      ...(await uniqueDownloadEntries(
-        capturedKeys,
-        grant.path,
-        snap.bucket,
-        grant.token,
-      )),
+    let folderFiles: SftpFolderFile[] = [];
+    let skipped: SftpSkippedEntry[] = [];
+    try {
+      for (const folder of capturedFolders) {
+        const plan = await planSftpFolderForDownload(snap.connectionId, folder);
+        folderFiles = [...folderFiles, ...plan.files];
+        skipped = [...skipped, ...plan.skipped];
+      }
+    } catch (err) {
+      if (await reportSftpConnectionLost(err)) return;
+      setStatus(`Download not queued: ${friendlyError(err)}`, 8000);
+      return;
+    }
+    const sizeByKey = new Map(folderFiles.map((file) => [file.key, file.size]));
+    const folderEntries = await uniqueDownloadEntries(
+      [...capturedKeys, ...folderFiles.map((file) => file.key)],
+      grant.path,
+      snap.bucket,
+      grant.token,
     );
+    for (const entry of folderEntries) {
+      const size = sizeByKey.get(entry.key);
+      if (typeof size === "number") entry.size = size;
+    }
+    entries.push(...folderEntries);
+    skipNote = describeSftpSkips(skipped);
+    if (skipNote) {
+      const folderNames = capturedFolders
+        .map((folder) => basename(folder.replace(/\/$/, "")))
+        .join(", ");
+      logActivity(`${folderNames}: ${skipNote}`, "warning");
+    }
   }
 
-  if (entries.length === 0) return;
+  if (entries.length === 0) {
+    if (skipNote) setStatus(`Nothing to download. ${skipNote}`, 8000);
+    return;
+  }
   if (connectionSnapshotChanged(snap)) {
     setStatus(
       "Download cancelled because connection or location changed.",
@@ -479,10 +605,9 @@ export async function handleDownload(): Promise<void> {
     );
     return;
   }
-  let resolvedEntries =
-    capturedKeys.length === 1
-      ? entries
-      : await resolveDownloadEntriesWithConflicts(entries);
+  let resolvedEntries = singleFile
+    ? entries
+    : await resolveDownloadEntriesWithConflicts(entries);
   if (connectionSnapshotChanged(snap)) {
     setStatus(
       "Download cancelled because connection or location changed.",
@@ -559,7 +684,11 @@ export async function handleDownload(): Promise<void> {
     setStatus(result.reason ?? "Download not queued.", 8000);
     return;
   }
-  setStatus(`Queued ${plural(result.count, "download")}.`, 5000);
+  const queuedNote = `Queued ${plural(result.count, "download")}.`;
+  setStatus(
+    skipNote ? `${queuedNote} ${skipNote}` : queuedNote,
+    skipNote ? 8000 : 5000,
+  );
 }
 
 export async function handleOpenLastDownloadFolder(): Promise<void> {

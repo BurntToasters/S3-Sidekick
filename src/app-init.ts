@@ -35,6 +35,7 @@ import {
 } from "./app-layout.ts";
 import {
   setConnectionInputs,
+  loadSftpSavedConnectionIntoForm,
   refreshBookmarkBar,
   setConnectionUI,
   setSavedConnectionsLocked,
@@ -247,13 +248,18 @@ async function loadSavedConnectionIntoInputs(): Promise<void> {
   try {
     const saved = await loadConnection();
     if (saved) {
-      setConnectionInputs(
-        saved.endpoint,
-        saved.region,
-        saved.access_key,
-        saved.secret_key,
-        saved.session_token ?? "",
-      );
+      // An SFTP record never goes through the S3 input setter.
+      if (saved.protocol === "sftp") {
+        loadSftpSavedConnectionIntoForm(saved);
+      } else {
+        setConnectionInputs(
+          saved.endpoint,
+          saved.region,
+          saved.access_key,
+          saved.secret_key,
+          saved.session_token ?? "",
+        );
+      }
       return;
     }
     const loadError = getConnectionLoadError();

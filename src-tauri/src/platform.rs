@@ -58,6 +58,50 @@ fn launcher_command(program: &str) -> Result<Command, String> {
     }
 }
 
+/// How long a Unix launcher may take to report an immediate failure (no
+/// handler, bad target) before it is treated as having handed off.
+#[cfg(unix)]
+const LAUNCHER_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Spawn a Unix launcher and return once it has exited or `grace` has passed.
+///
+/// `xdg-open` in generic mode (no desktop environment detected) runs the
+/// handler in the foreground and exits only when the browser or file manager
+/// exits, so waiting on it would hold the command, and the window, for as
+/// long as that app stays open. A failure inside the grace period is still
+/// reported. A launcher that is still running afterwards is reaped on a
+/// helper thread so it never becomes a zombie.
+#[cfg(unix)]
+fn launch_and_reap(
+    mut command: Command,
+    grace: std::time::Duration,
+    action: &str,
+) -> Result<(), String> {
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to {action}: {e}"))?;
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "Launcher used to {action} exited with status {status}"
+                ))
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return Ok(());
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(e) => return Err(format!("Failed to {action}: {e}")),
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct UpdaterSupportInfo {
     mode: String,
@@ -152,7 +196,9 @@ pub(crate) fn is_app_translocated() -> Result<bool, String> {
     }
 }
 
-#[tauri::command]
+/// Runs off the main thread (`async`): a launcher that waits for the opened
+/// app must not freeze the window.
+#[tauri::command(async)]
 pub(crate) fn open_external_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://") {
         return Err("Only https:// URLs are allowed".to_string());
@@ -166,24 +212,32 @@ pub(crate) fn open_external_url(url: String) -> Result<(), String> {
         return Err("URL must not contain whitespace or control characters".to_string());
     }
 
-    let status = if cfg!(target_os = "windows") {
-        launcher_command("rundll32")?
+    #[cfg(windows)]
+    {
+        let status = launcher_command("rundll32")?
             .args(["url.dll,FileProtocolHandler", &url])
             .status()
-    } else if cfg!(target_os = "macos") {
-        launcher_command("open")?.arg(&url).status()
-    } else {
-        launcher_command("xdg-open")?.arg(&url).status()
+            .map_err(|e| format!("Failed to launch external URL: {}", e))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "External URL launcher exited with status {}",
+                status
+            ))
+        }
     }
-    .map_err(|e| format!("Failed to launch external URL: {}", e))?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "External URL launcher exited with status {}",
-            status
-        ))
+    #[cfg(unix)]
+    {
+        let program = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let mut command = launcher_command(program)?;
+        command.arg(&url);
+        launch_and_reap(command, LAUNCHER_GRACE, "launch external URL")
     }
 }
 
@@ -250,7 +304,7 @@ fn resolve_launch_target(path: &std::path::Path) -> Result<std::path::PathBuf, S
     Ok(canonical)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn open_local_path(token: String) -> Result<(), String> {
     // Only a path the user chose in a native picker (or a completed download's
     // destination grant) may be opened. A raw renderer path has no grant and
@@ -289,7 +343,8 @@ pub(crate) fn open_local_path(token: String) -> Result<(), String> {
         ));
     }
 
-    if cfg!(target_os = "windows") {
+    #[cfg(windows)]
+    {
         // `explorer.exe` is widely observed to return a non-zero exit code even
         // when it opened the window successfully, so its status is not a usable
         // signal. Only a spawn failure is treated as an error here.
@@ -297,29 +352,28 @@ pub(crate) fn open_local_path(token: String) -> Result<(), String> {
             .arg(&parsed)
             .status()
             .map_err(|e| format!("Failed to open local path: {}", e))?;
-        return Ok(());
-    }
-
-    // On macOS a bundle (e.g. `Foo.app`) is a directory, and `open` launches
-    // it instead of showing it. Refuse bundles so this cannot run code.
-    if cfg!(target_os = "macos") && is_macos_bundle(&parsed) {
-        return Err(format!(
-            "Refusing to open an application or bundle: {}",
-            parsed.display()
-        ));
-    }
-
-    let status = if cfg!(target_os = "macos") {
-        launcher_command("open")?.arg(&parsed).status()
-    } else {
-        launcher_command("xdg-open")?.arg(&parsed).status()
-    }
-    .map_err(|e| format!("Failed to open local path: {}", e))?;
-
-    if status.success() {
         Ok(())
-    } else {
-        Err(format!("Local path launcher exited with status {}", status))
+    }
+
+    #[cfg(unix)]
+    {
+        // On macOS a bundle (e.g. `Foo.app`) is a directory, and `open`
+        // launches it instead of showing it. Refuse bundles so this cannot run
+        // code.
+        if cfg!(target_os = "macos") && is_macos_bundle(&parsed) {
+            return Err(format!(
+                "Refusing to open an application or bundle: {}",
+                parsed.display()
+            ));
+        }
+        let program = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let mut command = launcher_command(program)?;
+        command.arg(&parsed);
+        launch_and_reap(command, LAUNCHER_GRACE, "open local path")
     }
 }
 
@@ -423,7 +477,7 @@ fn reveal_plan(platform: RevealPlatform, raw: &str) -> Result<RevealPlan, String
 
 /// Show a completed download in the system file manager, selecting the file
 /// where the platform supports it. The file is never run.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn reveal_local_path(token: String, name: Option<String>) -> Result<(), String> {
     let granted = crate::path_authority::resolve(
         &token,
@@ -432,20 +486,22 @@ pub(crate) fn reveal_local_path(token: String, name: Option<String>) -> Result<(
     )?;
     let platform = host_reveal_platform();
     let plan = reveal_plan(platform, &granted.path.to_string_lossy())?;
-    let status = launcher_command(plan.program)?
-        .args(&plan.args)
-        .status()
-        .map_err(|e| format!("Failed to reveal local path: {}", e))?;
+    let mut command = launcher_command(plan.program)?;
+    command.args(&plan.args);
 
-    // Same as open_local_path: explorer.exe can exit non-zero after it has
-    // opened the window, so only a spawn failure is an error on Windows.
-    if platform == RevealPlatform::Windows {
-        return Ok(());
-    }
-    if status.success() {
+    #[cfg(windows)]
+    {
+        // Same as open_local_path: explorer.exe can exit non-zero after it
+        // has opened the window, so only a spawn failure is an error.
+        command
+            .status()
+            .map_err(|e| format!("Failed to reveal local path: {}", e))?;
         Ok(())
-    } else {
-        Err(format!("Local path reveal exited with status {}", status))
+    }
+
+    #[cfg(unix)]
+    {
+        launch_and_reap(command, LAUNCHER_GRACE, "reveal local path")
     }
 }
 
@@ -846,6 +902,66 @@ mod tests {
                 "{exe}"
             );
         }
+    }
+
+    // ---- Launchers must not hold the command until the opened app exits ----
+
+    #[cfg(unix)]
+    fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join(name);
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write stub script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub script");
+        script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_that_stays_in_the_foreground_does_not_block_the_command() {
+        // `xdg-open` in generic mode runs the handler in the foreground and
+        // exits only when the browser or file manager exits.
+        let scratch = RelaunchScratch::new("foreground-launcher");
+        let stub = write_script(&scratch.0, "stub-xdg-open", "exec /bin/sleep 10");
+        let started = std::time::Instant::now();
+        let result = launch_and_reap(
+            Command::new(&stub),
+            std::time::Duration::from_millis(300),
+            "open",
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "launcher blocked for {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_that_fails_at_once_still_reports_its_status() {
+        let scratch = RelaunchScratch::new("failing-launcher");
+        let stub = write_script(&scratch.0, "stub-xdg-open", "exit 3");
+        let err = launch_and_reap(
+            Command::new(&stub),
+            std::time::Duration::from_secs(5),
+            "open",
+        )
+        .expect_err("an immediate failure must be reported");
+        assert!(err.contains("exited with status"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_that_succeeds_at_once_is_ok() {
+        let scratch = RelaunchScratch::new("ok-launcher");
+        let stub = write_script(&scratch.0, "stub-xdg-open", "exit 0");
+        assert!(launch_and_reap(
+            Command::new(&stub),
+            std::time::Duration::from_secs(5),
+            "open",
+        )
+        .is_ok());
     }
 
     #[test]

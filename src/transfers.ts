@@ -1,6 +1,14 @@
 import { invoke } from "./ipc.ts";
 import { invokeS3For } from "./connection.ts";
 import {
+  isSftpAlreadyExists,
+  isSftpConnectionLost,
+  parseSftpUploadOutcome,
+  sftpPathFromKey,
+} from "./sftp.ts";
+import { reportSftpCleanupWarning } from "./sftp-commands.ts";
+import { reportSftpConnectionLost } from "./sftp-move.ts";
+import {
   pickDownloadDirectory,
   pickDownloadFile,
   pickUploadFiles,
@@ -157,6 +165,8 @@ export interface TransferItem {
   receipts?: CopyReceipt[];
   connectionId?: string;
   connectionIdentity?: string;
+  /** Protocol of the session the row was created in; absent means S3. */
+  protocol?: "s3" | "sftp";
   /** Set only while beta.4-or-earlier recovery awaits explicit account binding. */
   legacyConnectionUnbound?: boolean;
   /**
@@ -282,6 +292,8 @@ interface PersistedTransferItem {
   receipts?: CopyReceipt[];
   connectionId?: string;
   connectionIdentity?: string;
+  /** Written only for SFTP rows, so S3 manifests keep their existing bytes. */
+  protocol?: "sftp";
   /** Persist terminal failures so recovery ownership survives a restart. */
   failed?: boolean;
   error?: string;
@@ -305,6 +317,8 @@ const RECOVERY_UNRESOLVED_MESSAGE =
   "Pending transfers from the last session are not resolved yet. Resume or discard them before starting new transfers.";
 // Backend refusal from create_only.rs require_conditional_delete_support.
 const PROVIDER_CANNOT_DELETE_PATTERN = /cannot enforce conditional DELETE/i;
+// Backend refusal when the remote file moved while a download read it.
+const REMOTE_CHANGED_PATTERN = /The remote file changed during download/;
 const SESSION_REPLACEMENT_PATTERN =
   /connection changed|connection superseded|session (?:changed|closed|replaced|expired)|not connected/i;
 const RECOVERY_DAMAGED_MESSAGE =
@@ -1145,6 +1159,7 @@ function serializeManifestItem(item: TransferItem): PersistedTransferItem {
     receipts: item.receipts,
     connectionId: item.connectionId,
     connectionIdentity: item.connectionIdentity,
+    protocol: item.protocol === "sftp" ? "sftp" : undefined,
     failed: item.status === "error",
     error: item.status === "error" ? item.error : undefined,
     retryable:
@@ -1182,17 +1197,14 @@ function buildQueueManifestJson(): string | null {
   return JSON.stringify(payload);
 }
 
-function persistLegacyQueueManifest(forceClear = false): void {
-  if (forceClear) {
-    localStorage.removeItem(LEGACY_QUEUE_MANIFEST_KEY);
-    return;
-  }
-  const json = buildQueueManifestJson();
-  if (json) {
-    localStorage.setItem(LEGACY_QUEUE_MANIFEST_KEY, json);
-  } else {
-    localStorage.removeItem(LEGACY_QUEUE_MANIFEST_KEY);
-  }
+/**
+ * Remove the pre-backend queue manifest from web storage. It is only ever
+ * read (once, for import) and removed; nothing writes it any more, because
+ * web storage is never encrypted and the manifest names buckets, keys and
+ * local paths.
+ */
+function clearLegacyQueueManifest(): void {
+  localStorage.removeItem(LEGACY_QUEUE_MANIFEST_KEY);
 }
 
 async function persistQueueManifestNow(
@@ -1201,7 +1213,9 @@ async function persistQueueManifestNow(
   capturedRecoverySession = recoverySession,
 ): Promise<void> {
   if (!hydrated) {
-    persistLegacyQueueManifest(forceClear);
+    // Until the backend manifest is hydrated there is no durable store to
+    // write to. Queue entry points stay refused while recovery is unresolved.
+    if (forceClear) clearLegacyQueueManifest();
     return;
   }
   if (!capturedRecoverySession) {
@@ -1588,6 +1602,7 @@ function parseQueueManifest(
           row.connectionIdentity.length > 0
             ? row.connectionIdentity
             : undefined,
+        protocol: row.protocol === "sftp" ? "sftp" : undefined,
         failed: row.failed === true,
         error: typeof row.error === "string" ? row.error : undefined,
         retryable: row.retryable === false ? false : undefined,
@@ -1785,6 +1800,7 @@ function restoreItemFromManifest(item: PersistedTransferItem): TransferItem {
     receipts: item.receipts,
     connectionId: item.connectionId,
     connectionIdentity: item.connectionIdentity,
+    protocol: item.protocol,
     legacyConnectionUnbound: item.legacyConnectionUnbound,
     recovered: true,
     retryable: item.retryable === false ? false : undefined,
@@ -1895,7 +1911,7 @@ export async function discardMalformedRecovery(): Promise<void> {
     );
   }
   try {
-    persistLegacyQueueManifest(true);
+    clearLegacyQueueManifest();
     await invoke("clear_transfer_manifest", { recoverySession: session });
     completeRecoveryHydration(session, null);
     const message =
@@ -2000,7 +2016,7 @@ async function recoverPendingQueueIfNeeded(): Promise<void> {
     !legacyManifestRaw
   ) {
     try {
-      persistLegacyQueueManifest(true);
+      clearLegacyQueueManifest();
     } catch (err) {
       logQueueManifestWriteError(err);
     }
@@ -2290,7 +2306,11 @@ async function resumeRecoveredTransfersOnce(): Promise<void> {
     return;
   }
 
-  const legacyItems = queue.filter((item) => item.legacyConnectionUnbound);
+  const legacyItems = queue.filter(
+    (item) =>
+      item.legacyConnectionUnbound &&
+      transferProtocolOf(item) === state.protocol,
+  );
   if (
     legacyItems.length > 0 &&
     legacyBindingPromptedConnectionId !== state.connectionId
@@ -2368,8 +2388,9 @@ async function resumeRecoveredTransfersOnce(): Promise<void> {
   for (const item of queue) {
     if (item.status !== "queued") continue;
     const identityMatches =
-      !item.connectionIdentity ||
-      item.connectionIdentity === state.connectionIdentity;
+      transferProtocolOf(item) === state.protocol &&
+      (!item.connectionIdentity ||
+        item.connectionIdentity === state.connectionIdentity);
     if (isAutoParked(item) && identityMatches) {
       // A disconnect/session-replacement hold is not a user pause. Rebind it
       // to the fresh session and let the queue resume automatically.
@@ -3120,11 +3141,13 @@ export interface TransferEnqueueTarget {
   bucket: string;
   connectionId: string;
   connectionIdentity: string;
+  protocol?: "s3" | "sftp";
 }
 
 function transferConnectionFields(): {
   connectionId: string;
   connectionIdentity: string;
+  protocol: "s3" | "sftp";
 } {
   if (!state.connectionId || !state.connectionIdentity) {
     throw new Error("Not connected");
@@ -3132,6 +3155,7 @@ function transferConnectionFields(): {
   return {
     connectionId: state.connectionId,
     connectionIdentity: state.connectionIdentity,
+    protocol: state.protocol,
   };
 }
 
@@ -3142,7 +3166,7 @@ function resolveEnqueueTarget(
     if (!target.bucket || !target.connectionId || !target.connectionIdentity) {
       throw new Error("Not connected");
     }
-    return target;
+    return { ...target, protocol: target.protocol ?? state.protocol };
   }
   return {
     bucket: state.currentBucket,
@@ -3160,6 +3184,11 @@ function bindTransferConnection(item: TransferItem): string {
     );
   }
   if (item.connectionIdentity !== state.connectionIdentity) {
+    throw new Error("Connection changed");
+  }
+  // The protocol is part of the session: an S3 row never runs on an SFTP
+  // session, or the reverse, even when the identities happen to match.
+  if (transferProtocolOf(item) !== state.protocol) {
     throw new Error("Connection changed");
   }
   // Rebind the session for this attempt so queued work can continue after a
@@ -3193,6 +3222,7 @@ export function enqueueFiles(
       id: allocateTransferId(),
       connectionId: enqueueTarget.connectionId,
       connectionIdentity: enqueueTarget.connectionIdentity,
+      protocol: enqueueTarget.protocol,
       operation: "upload",
       bucket,
       fileName: file.name,
@@ -3257,6 +3287,7 @@ export function enqueuePaths(
       id: allocateTransferId(),
       connectionId: enqueueTarget.connectionId,
       connectionIdentity: enqueueTarget.connectionIdentity,
+      protocol: enqueueTarget.protocol,
       operation: "upload",
       bucket,
       fileName,
@@ -3331,6 +3362,7 @@ export function enqueueFolderEntries(
       id: allocateTransferId(),
       connectionId: enqueueTarget.connectionId,
       connectionIdentity: enqueueTarget.connectionIdentity,
+      protocol: enqueueTarget.protocol,
       operation: "upload",
       bucket,
       fileName,
@@ -3402,6 +3434,7 @@ export function enqueueDownloads(
       id: allocateTransferId(),
       connectionId: enqueueTarget.connectionId,
       connectionIdentity: enqueueTarget.connectionIdentity,
+      protocol: enqueueTarget.protocol,
       operation: "download",
       bucket: entry.bucket,
       fileName,
@@ -3465,6 +3498,7 @@ export function enqueueCopyMoveEntries(
       id: allocateTransferId(),
       connectionId: enqueueTarget.connectionId,
       connectionIdentity: enqueueTarget.connectionIdentity,
+      protocol: enqueueTarget.protocol,
       operation: entry.operation,
       bucket: entry.sourceBucket,
       fileName: entry.fileName,
@@ -3634,6 +3668,13 @@ async function processQueue(): Promise<void> {
               }
             }
           }
+        } else if (isSftpTransfer(item) && isSftpConnectionLost(err)) {
+          // The SFTP session is gone. The disconnect flow takes over, and the
+          // row waits for the next connection instead of failing.
+          await reportSftpConnectionLost(err).catch(() => false);
+          park(item, "disconnected");
+          item.paused = true;
+          item.pauseCancelInFlight = false;
         } else if (
           (state.transfersHeldForDisconnect ||
             !state.connected ||
@@ -3665,6 +3706,11 @@ async function processQueue(): Promise<void> {
             item.operation === "move" &&
             PROVIDER_CANNOT_DELETE_PATTERN.test(errorText);
           if (refusedByProvider) item.retryable = false;
+          // A download whose remote file changed is refused for good: the
+          // partial copy was discarded, and the user must choose again.
+          if (isSftpTransfer(item) && REMOTE_CHANGED_PATTERN.test(errorText)) {
+            item.retryable = false;
+          }
           markFailed(
             item,
             refusedByProvider ? PROVIDER_CANNOT_DELETE_MESSAGE : errorText,
@@ -3806,21 +3852,30 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
         try {
           await executeTransfer(item, attempt, outcome.overwrite, connectionId);
         } catch (err) {
-          // The backend refused a create-only write it cannot guard (e.g. a
-          // large object inside a prefix copy). Ask, then write unguarded.
-          if (outcome.overwrite || !isCreateOnlyUnsupportedError(err)) {
-            throw err;
-          }
-          const authorized = await withConflictPromptLock(() =>
-            confirmUnguardedTransferWrite(item, connectionId),
-          );
-          ensureTransferActive(item);
-          outcome = authorized ? { overwrite: true } : "cancel";
-          if (authorized) {
-            item.overwrite = true;
-            item.overwriteScope =
-              unguardedAuthorizationKey(item, connectionId) ?? undefined;
-            await executeTransfer(item, attempt, true, connectionId);
+          if (isSftpCreateOnlyRefusal(item, outcome.overwrite, err)) {
+            // The target appeared after the existence check. Ask as a conflict.
+            outcome = await resolveLateSftpConflict(
+              item,
+              connectionId,
+              attempt,
+            );
+          } else {
+            // The backend refused a create-only write it cannot guard (e.g. a
+            // large object inside a prefix copy). Ask, then write unguarded.
+            if (outcome.overwrite || !isCreateOnlyUnsupportedError(err)) {
+              throw err;
+            }
+            const authorized = await withConflictPromptLock(() =>
+              confirmUnguardedTransferWrite(item, connectionId),
+            );
+            ensureTransferActive(item);
+            outcome = authorized ? { overwrite: true } : "cancel";
+            if (authorized) {
+              item.overwrite = true;
+              item.overwriteScope =
+                unguardedAuthorizationKey(item, connectionId) ?? undefined;
+              await executeTransfer(item, attempt, true, connectionId);
+            }
           }
         }
       }
@@ -3853,6 +3908,8 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
       }
 
       markDone(item);
+      // SFTP has no integrity checksum, so a finished row never claims one.
+      if (isSftpTransfer(item)) item.verified = false;
 
       if (item.operation === "download") {
         logActivity(`Downloaded ${describeTransfer(item)}.`, "success");
@@ -3875,6 +3932,8 @@ async function runItemWithRetry(item: TransferItem): Promise<boolean> {
       // A disconnect is not a transient failure to back off from; the worker
       // parks the item until the next connection.
       if (state.transfersHeldForDisconnect || !state.connected) throw err;
+      // A lost SFTP session is parked by the worker, never retried in place.
+      if (isSftpTransfer(item) && isSftpConnectionLost(err)) throw err;
       if (isInvalidLocalGrantError(err) && grantRepicked) {
         clearInvalidLocalGrant(item);
         throw new Error(
@@ -3934,6 +3993,10 @@ async function executeTransfer(
   const effective = getEffectiveTransferSettings();
   const transferRecoverySession = recoverySession;
   ensureTransferActive(item);
+  if (isSftpTransfer(item)) {
+    await executeSftpTransfer(item, attempt, overwrite, connectionId);
+    return;
+  }
 
   if (item.operation === "download") {
     if (!item.destination) {
@@ -4218,10 +4281,227 @@ async function executeTransfer(
   }
 }
 
+/** A row belongs to the SFTP session only when it says so; anything else is S3. */
+function transferProtocolOf(
+  item: Pick<TransferItem, "protocol">,
+): "s3" | "sftp" {
+  return item.protocol === "sftp" ? "sftp" : "s3";
+}
+
+function isSftpTransfer(item: Pick<TransferItem, "protocol">): boolean {
+  return transferProtocolOf(item) === "sftp";
+}
+
+/**
+ * The remote folders above a key, outermost first: `docs/a/b.txt` needs
+ * `/docs` and `/docs/a`. Throws when the key does not name a remote path.
+ */
+export function sftpAncestorPaths(key: string): string[] {
+  const segments = sftpPathFromKey(key)
+    .split("/")
+    .filter((segment) => segment !== "");
+  const ancestors: string[] = [];
+  let current = "";
+  for (const segment of segments.slice(0, -1)) {
+    current = `${current}/${segment}`;
+    ancestors.push(current);
+  }
+  return ancestors;
+}
+
+/**
+ * Remote folders this session has created or confirmed. A folder upload
+ * reaches the same parents for every file, so each folder is checked once.
+ */
+let knownSftpFolders = { connectionId: "", paths: new Set<string>() };
+
+/** Create each missing remote parent of `key`. A folder that exists already is fine. */
+async function ensureSftpParentFolders(
+  connectionId: string,
+  key: string,
+): Promise<void> {
+  if (knownSftpFolders.connectionId !== connectionId) {
+    knownSftpFolders = { connectionId, paths: new Set<string>() };
+  }
+  for (const folder of sftpAncestorPaths(key)) {
+    if (knownSftpFolders.paths.has(folder)) continue;
+    try {
+      await invokeS3For(connectionId, "sftp_create_dir", { path: folder });
+    } catch (err) {
+      if (!isSftpAlreadyExists(normalizeError(err))) throw err;
+    }
+    knownSftpFolders.paths.add(folder);
+  }
+}
+
+/** A create-only upload refused because the target appeared after the existence check. */
+function isSftpCreateOnlyRefusal(
+  item: TransferItem,
+  overwrite: boolean,
+  err: unknown,
+): boolean {
+  return (
+    isSftpTransfer(item) &&
+    item.operation === "upload" &&
+    !overwrite &&
+    isSftpAlreadyExists(normalizeError(err))
+  );
+}
+
+/**
+ * Decide a conflict the existence check did not see. The policy, the prompt
+ * and the batch rules are the ones a destination found by the check gets.
+ */
+async function resolveLateSftpConflict(
+  item: TransferItem,
+  connectionId: string,
+  attempt: number,
+): Promise<"skip" | "cancel" | { overwrite: boolean }> {
+  const decision = await resolveConflict(item, connectionId, {
+    knownExists: true,
+  });
+  ensureTransferActive(item);
+  if (decision === "cancel") return "cancel";
+  if (decision === "skip" || !decision.overwrite) return "skip";
+  item.overwrite = true;
+  item.overwriteScope =
+    unguardedAuthorizationKey(item, connectionId) ?? undefined;
+  await executeTransfer(item, attempt, true, connectionId);
+  return { overwrite: true };
+}
+
+/**
+ * SFTP downloads and uploads. The backend names the bytes, the grant and the
+ * checkpoint; the webview never supplies a local or remote path beyond the key.
+ */
+async function executeSftpTransfer(
+  item: TransferItem,
+  attempt: number,
+  overwrite: boolean,
+  connectionId: string,
+): Promise<void> {
+  const effective = getEffectiveTransferSettings();
+  const transferRecoverySession = recoverySession;
+  ensureTransferActive(item);
+
+  if (item.operation === "copy" || item.operation === "move") {
+    // An SFTP move is a rename issued from the browser, never a queued
+    // copy-then-delete pair.
+    throw new Error("Copy and move are not queued transfers on SFTP.");
+  }
+
+  if (item.operation === "download") {
+    if (!item.destination) {
+      throw new Error("No destination available for download transfer.");
+    }
+    const destinationToken = item.destinationToken;
+    if (!destinationToken) {
+      throw new Error(
+        "Download destination must be re-selected before this transfer can continue.",
+      );
+    }
+    const checkpointId =
+      item.checkpointId ??
+      (item.resumable
+        ? buildCheckpointId({
+            operation: item.operation,
+            bucket: item.bucket,
+            key: item.key,
+            destination: item.destination,
+          })
+        : undefined);
+    item.checkpointId = checkpointId;
+    // The byte count comes back from the transfer itself; SFTP has no HEAD.
+    const size = await invokeS3For<number>(connectionId, "sftp_download", {
+      path: sftpPathFromKey(item.key),
+      destinationToken,
+      destinationName: item.destinationName ?? null,
+      transferId: item.id,
+      overwrite,
+      attempt,
+      checkpointId: checkpointId ?? null,
+      recoverySession: transferRecoverySession ?? "",
+      enableResume:
+        Boolean(transferRecoverySession) &&
+        item.resumable &&
+        effective.enableTransferResume,
+      bandwidthLimitMbps: effective.bandwidthLimitMbps,
+    });
+    if (Number.isFinite(size) && size >= 0) item.totalBytes = size;
+    item.progress = 100;
+    item.completedParts = item.totalParts || item.completedParts;
+    return;
+  }
+
+  // Uploads are not resumable: a retry writes the whole file again.
+  item.resumable = false;
+  item.checkpointId = undefined;
+  const path = sftpPathFromKey(item.key);
+  try {
+    await ensureSftpParentFolders(connectionId, item.key);
+    ensureTransferActive(item);
+    if (item.filePath) {
+      const uploadToken = item.uploadToken;
+      if (!uploadToken) {
+        throw new Error(
+          "Upload needs its local file re-selected before this transfer can continue.",
+        );
+      }
+      const outcome = parseSftpUploadOutcome(
+        await invokeS3For<unknown>(connectionId, "sftp_upload", {
+          path,
+          uploadToken,
+          transferId: item.id,
+          attempt,
+          overwrite,
+          bandwidthLimitMbps: effective.bandwidthLimitMbps,
+        }),
+      );
+      if (outcome.bytesWritten > 0) {
+        item.totalBytes = outcome.bytesWritten;
+        item.size = outcome.bytesWritten;
+      }
+      reportSftpCleanupWarning(outcome.warning);
+      return;
+    }
+    if (item.browserFile) {
+      if (item.browserFile.size > BROWSER_UPLOAD_BYTES_LIMIT) {
+        throw new Error(
+          `Browser upload fallback is limited to ${Math.floor(BROWSER_UPLOAD_BYTES_LIMIT / (1024 * 1024))}MB. ` +
+            "Use file-path based upload for larger files.",
+        );
+      }
+      const bytesBase64 = arrayBufferToBase64(
+        await item.browserFile.arrayBuffer(),
+      );
+      ensureTransferActive(item);
+      const outcome = parseSftpUploadOutcome(
+        await invokeS3For<unknown>(connectionId, "sftp_upload_bytes", {
+          path,
+          bytesBase64,
+          transferId: item.id,
+          attempt,
+          overwrite,
+        }),
+      );
+      reportSftpCleanupWarning(outcome.warning);
+      return;
+    }
+    throw new Error("No upload source available for transfer item.");
+  } catch (err) {
+    // The folder check is only a cache. A failed write can mean a folder was
+    // removed or replaced, so the next attempt checks again.
+    knownSftpFolders.paths.clear();
+    throw err;
+  }
+}
+
 async function verifyUploadedObject(
   item: TransferItem,
   connectionId: string,
 ): Promise<void> {
+  // SFTP has no object HEAD. The backend checks the staged byte count before it publishes.
+  if (isSftpTransfer(item)) return;
   const expected = item.totalBytes > 0 ? item.totalBytes : 0;
   if (expected <= 0) return;
 
@@ -4252,6 +4532,7 @@ function withConflictPromptLock<T>(work: () => Promise<T>): Promise<T> {
 async function resolveConflict(
   item: TransferItem,
   connectionId: string,
+  options: { knownExists?: boolean } = {},
 ): Promise<"skip" | "cancel" | { overwrite: boolean }> {
   await ensureLocalPathGrant(item);
   const effectivePolicy =
@@ -4266,7 +4547,9 @@ async function resolveConflict(
 
   let conflictExists: boolean;
   try {
-    conflictExists = await checkConflictExists(item, connectionId);
+    conflictExists =
+      options.knownExists === true ||
+      (await checkConflictExists(item, connectionId));
   } catch (err) {
     // The probe failed, so we do not know whether the destination is occupied.
     // Assume it is and let the normal conflict handling below decide, rather
@@ -4312,7 +4595,9 @@ async function resolveConflict(
           ? `${
               item.destinationBucket ?? item.bucket
             }/${item.destinationKey ?? item.destinationPrefix ?? item.fileName}`
-          : `${item.bucket}/${item.key}`;
+          : isSftpTransfer(item)
+            ? sftpPathFromKey(item.key)
+            : `${item.bucket}/${item.key}`;
     void notifyIfUnfocused(
       "S3 Sidekick needs a decision",
       `${target} already exists.`,
@@ -4378,6 +4663,11 @@ async function checkConflictExists(
     return invoke<boolean>("path_exists", {
       token: item.destinationToken,
       name: item.destinationName ?? null,
+    });
+  }
+  if (isSftpTransfer(item) && item.operation === "upload") {
+    return invokeS3For<boolean>(connectionId, "sftp_exists", {
+      path: sftpPathFromKey(item.key),
     });
   }
   if (item.operation === "copy" || item.operation === "move") {

@@ -6,12 +6,14 @@
 // - The settings overlay does not open on one of its tabs.
 // - A selected row, or the row context menu, is missing at the tour viewport.
 // - The browse screen stops rendering rows at the narrow tour widths.
+// - The IPC mock reports a stale app version, so the AppStream screenshots
+//   show an old version number.
 // The tour asserts only that each screen rendered. Screenshots are written to
 // test-results/ux-visual-tour/<project>/<phase>/<theme>/<name>.png, where phase
 // comes from TOUR_PHASE (default "current"). Run it with TOUR_PHASE=before before
 // styling changes and TOUR_PHASE=after afterwards.
 import { expect, test, type Page } from "@playwright/test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { openCopyMoveFromRow } from "./helpers.ts";
 import { installLayoutTauriMock, openMockListing } from "./tauri-layout.ts";
@@ -19,6 +21,9 @@ import { installLayoutTauriMock, openMockListing } from "./tauri-layout.ts";
 const THEMES = ["light", "dark"] as const;
 type TourTheme = (typeof THEMES)[number];
 const PHASE = process.env.TOUR_PHASE ?? "current";
+const APP_VERSION = (
+  JSON.parse(readFileSync("package.json", "utf8")) as { version: string }
+).version;
 const TOUR_PREFIXES = ["archive/", "logs/", "images/"];
 const SETTINGS_TABS = [
   "appearance",
@@ -193,6 +198,7 @@ async function openTour(
     transferBackend: options.holdCopies ? { holdCopies: true } : undefined,
   });
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expect(page.locator("#version-label")).toHaveText(`v${APP_VERSION}`);
 }
 
 /** Open the docked inspector when the tour viewport has it closed. */

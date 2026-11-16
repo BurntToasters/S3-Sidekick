@@ -143,6 +143,31 @@ test("the biometric note describes the gate and is linked to its toggle", async 
   await expect(page.locator("#biometric-toggle")).toHaveText("Enable Touch ID");
 });
 
+// Failure mode: with encryption on, a user assumes everything the app keeps is
+// encrypted, but connection names, endpoints, last locations and recent
+// folders stay in unencrypted web storage and survive a lock.
+test("the Security tab states what stays unencrypted in web storage", async ({
+  page,
+}) => {
+  await installLayoutTauriMock(page, {
+    objectCount: 0,
+    prefixes: [],
+    security: { encryption_enabled: true, unlocked: true },
+  });
+  await page.goto("/");
+  await openSecurityTab(page);
+
+  const note = page.locator("#security-web-storage-note");
+  await expect(note).toBeVisible();
+  await expect(note).toHaveClass(/setting-description/);
+  await expect(note).toContainText(/not encrypted/i);
+  await expect(note).toContainText(/connection names/i);
+  await expect(note).toContainText(/endpoints/i);
+  await expect(note).toContainText(/recent folders/i);
+  await expect(note).toContainText(/locking does not clear/i);
+  await expect(note).toContainText(/factory reset/i);
+});
+
 test("Set up encryption on an unencrypted vault calls the existing enable path", async ({
   page,
 }) => {

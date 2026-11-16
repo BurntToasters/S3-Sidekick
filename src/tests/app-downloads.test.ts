@@ -119,6 +119,7 @@ describe("download chooser account binding", () => {
         bucket: "bucket-a",
         connectionId: "conn-1",
         connectionIdentity: "ident-1",
+        protocol: "s3",
       },
     );
   });

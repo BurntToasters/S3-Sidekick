@@ -296,6 +296,45 @@ body.titlebar-custom #context-menu {
   gap: var(--space-2);
 }
 
+/* SFTP details read as a label/value grid. Each field's label and value
+   become grid items, so the labels share one column and the values another. */
+.bookmark-edit__sftp {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1-5) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.bookmark-edit__sftp[hidden] {
+  display: none;
+}
+
+.bookmark-edit__sftp > .bookmark-edit__field {
+  display: contents;
+}
+
+.bookmark-edit__label {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.bookmark-edit__sftp > .bookmark-edit__field > span:last-child {
+  min-width: 0;
+  font-weight: 400;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.bookmark-edit__sftp > .setting-note {
+  grid-column: 1 / -1;
+  margin: var(--space-1) 0 0;
+}
+
+.bookmark-edit__sftp > .bookmark-edit__actions {
+  grid-column: 2;
+  justify-content: flex-start;
+}
+
 .bookmark-empty {
   font-size: var(--text-sm);
   color: var(--text-secondary);

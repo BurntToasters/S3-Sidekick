@@ -18,6 +18,13 @@ import {
 import { state } from "./state.ts";
 import type { SelectionEntry } from "./app-selection.ts";
 import { showConfirm } from "./dialogs.ts";
+import { sftpPathFromKey, type SftpEntry, type SftpEntryKind } from "./sftp.ts";
+import { sftpStat } from "./sftp-commands.ts";
+import {
+  formatSftpPermissions,
+  reportSftpConnectionLost,
+  SFTP_LOSSY_REASON,
+} from "./sftp-move.ts";
 import { restoreTableSelectionFromInspector } from "./layout-render-bridge.ts";
 import type { InspectorInfoTab } from "./inspector.ts";
 import {
@@ -265,6 +272,12 @@ export async function openInfoPanel(
   const saveBtn = getInfoSaveBtn();
   saveBtn.textContent = "Save";
 
+  // SFTP properties are read-only and come from lstat, never from head_object.
+  if (state.protocol === "sftp") {
+    await openSftpProperties(entries);
+    return;
+  }
+
   if (entries.length > 1) {
     panelRequestToken += 1;
     currentKey = "";
@@ -368,6 +381,111 @@ export async function openInfoPanel(
       return;
     }
     body.setAttribute("aria-busy", "false");
+    renderLoadError(body, `Failed to load: ${escapeHtml(friendlyError(err))}`);
+  }
+}
+
+function sftpKindLabel(kind: SftpEntryKind): string {
+  switch (kind) {
+    case "file":
+      return "File";
+    case "dir":
+      return "Folder";
+    case "symlink":
+      return "Symbolic link";
+    case "other":
+      return "Other";
+  }
+}
+
+/** Owner or group: the name when the server sent one, else the numeric id. */
+function sftpOwnerLabel(name: string | null, id: number | null): string {
+  if (name) return name;
+  return id === null ? "—" : String(id);
+}
+
+function sftpDetailsHtml(stat: SftpEntry, path: string): string {
+  const sizeText =
+    stat.kind === "dir" || stat.size === null ? "—" : formatSize(stat.size);
+  const modifiedText =
+    stat.mtime === null
+      ? "—"
+      : formatDate(new Date(stat.mtime * 1000).toISOString());
+  const notes = [
+    stat.kind === "symlink"
+      ? "Symbolic link. Links are shown but not followed in this beta."
+      : "",
+    stat.name_lossy ? SFTP_LOSSY_REASON : "",
+  ].filter(Boolean);
+  return (
+    `<div data-sftp-details>` +
+    infoSection("Name & path") +
+    infoRow("Name", stat.name) +
+    infoRowCopyable("Path", path, true) +
+    infoSection("Type & size") +
+    infoRow("Kind", sftpKindLabel(stat.kind)) +
+    infoRow("Size", sizeText) +
+    infoRow("Last modified", modifiedText) +
+    infoSection("Permissions & owner") +
+    infoRow("Permissions", formatSftpPermissions(stat.permissions), true) +
+    infoRow("Owner", sftpOwnerLabel(stat.owner, stat.uid)) +
+    infoRow("Group", sftpOwnerLabel(stat.group, stat.gid)) +
+    notes
+      .map((note) => `<p class="metadata-batch-hint">${escapeHtml(note)}</p>`)
+      .join("") +
+    `</div>`
+  );
+}
+
+/**
+ * Properties of the SFTP selection. One item is read with `sftp_stat`; several
+ * items get a count. Tabs and Save stay hidden: S3 metadata does not apply.
+ */
+async function openSftpProperties(
+  entries: readonly SelectionEntry[],
+): Promise<void> {
+  const title = getInfoTitleEl();
+  const saveBtn = getInfoSaveBtn();
+  const body = getInfoBodyEl();
+  const requestToken = ++panelRequestToken;
+  currentKey = "";
+  batchKeys = [];
+  headData = null;
+  aclData = null;
+  metadataRows = [];
+  resetEditorState();
+  setInfoOverlayActive(true);
+  saveBtn.style.display = "none";
+  setInspectorFooterVisible(false);
+  setTabsVisible(false);
+  updateInspectorFooter();
+
+  if (entries.length > 1) {
+    title.textContent = `${plural(entries.length, "item")} selected`;
+    body.setAttribute("aria-busy", "false");
+    body.innerHTML =
+      `<div class="metadata-batch-info">` +
+      `<p><strong>${entries.length} items</strong> selected.</p>` +
+      `<p class="metadata-batch-hint">Open one item to see its properties.</p>` +
+      `</div>`;
+    return;
+  }
+
+  const entry = entries[0];
+  const path = sftpPathFromKey(entry.key);
+  title.textContent = basename(entry.key.replace(/\/$/, ""));
+  if (entry.kind === "file") currentKey = entry.key;
+  body.setAttribute("aria-busy", "true");
+  body.innerHTML = `<div class="metadata-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading&#8230;</div>`;
+  try {
+    const stat = await sftpStat(state.connectionId, path);
+    if (requestToken !== panelRequestToken) return;
+    body.innerHTML = sftpDetailsHtml(stat, path);
+    attachCopyButtons(body);
+    body.setAttribute("aria-busy", "false");
+  } catch (err) {
+    if (requestToken !== panelRequestToken) return;
+    if (await reportSftpConnectionLost(err)) return;
     renderLoadError(body, `Failed to load: ${escapeHtml(friendlyError(err))}`);
   }
 }

@@ -2,10 +2,28 @@ import {
   invokeS3For,
   captureConnectionSnapshot,
   connectionIdentityChanged,
+  refreshObjects,
   type ConnectionSnapshot,
 } from "./connection.ts";
 import { state } from "./state.ts";
-import { clearSelection } from "./browser.ts";
+import { clearSelection, renderObjectTable } from "./browser.ts";
+import { isSftpConnectionLost, sftpPathFromKey } from "./sftp.ts";
+import {
+  displayLocation,
+  protocolLabels,
+  sessionProtocol,
+} from "./protocol-labels.ts";
+import { sftpListDir, sftpRename } from "./sftp-commands.ts";
+import {
+  describeSftpMoveSummary,
+  isSftpNameLossy,
+  planSftpMove,
+  reportSftpConnectionLost,
+  runSftpMove,
+  setSftpConnectionLostHandler,
+  sftpLeafName,
+} from "./sftp-move.ts";
+import { handleSftpConnectionLost } from "./app-connection.ts";
 import {
   enqueueCopyMoveEntries,
   type CopyMoveQueueEntry,
@@ -47,6 +65,10 @@ const SELF_COPY_MESSAGE =
   "Can't copy onto itself: the source and destination are the same. Choose a different destination.";
 const INTO_ITSELF_MESSAGE =
   "Can't copy a folder into itself. Choose a destination outside it.";
+
+// The disconnect flow handles a lost SFTP connection for every SFTP module.
+// Object actions load this module at startup, so the handler is set once here.
+setSftpConnectionLostHandler(handleSftpConnectionLost);
 
 /// Closes the open Copy/Move dialog through its own close path, so an
 /// in-flight destination check is cancelled with it.
@@ -128,12 +150,14 @@ export function openCopyMoveDialog(): void {
   const prefixes = getSelectedPrefixes();
   if (fileKeys.length === 0 && prefixes.length === 0) return;
   const dialogGeneration = ++copyMoveDialogGeneration;
+  // SFTP has no server-side copy: the dialog only moves, by renaming.
+  const sftp = state.protocol === "sftp";
 
   let sourceSnap: ConnectionSnapshot;
   try {
     sourceSnap = captureConnectionSnapshot();
   } catch {
-    setStatus("Connect to a bucket first.", 5000);
+    setStatus(protocolLabels(sessionProtocol(state)).connectFirst, 5000);
     return;
   }
   const capturedFileKeys = [...fileKeys];
@@ -213,6 +237,8 @@ export function openCopyMoveDialog(): void {
   /// Fill the path input from a destination location (a browsed folder or a
   /// recent entry) in the shape the current mode expects.
   function pathForLocation(location: string): string {
+    // An SFTP move names a destination folder; each item keeps its own name.
+    if (sftp) return location;
     if (isSingleFile) return location + basename(fileKeys[0]);
     if (isSingleFolder) return location + singleFolderName + "/";
     return location;
@@ -221,6 +247,8 @@ export function openCopyMoveDialog(): void {
   /// Returns the inline error when the destination would copy an item onto
   /// itself (or a folder into its own subtree), or null when it is allowed.
   function findSelfDestinationError(dstPath: string): string | null {
+    // The SFTP move plan reports the same refusals with the remote paths.
+    if (sftp) return null;
     if (isSingleFile) {
       return dstPath === fileKeys[0] ? SELF_COPY_MESSAGE : null;
     }
@@ -263,6 +291,16 @@ export function openCopyMoveDialog(): void {
     pathLabel.textContent = "Destination prefix";
   }
 
+  // SFTP has one virtual bucket (the host), so the bucket selector is hidden
+  // and the destination is a folder on the server.
+  const bucketField = bucketSelect.closest<HTMLElement>(".setting-item");
+  if (bucketField) bucketField.hidden = sftp;
+  if (sftp) {
+    descEl.textContent = `Move ${plural(fileKeys.length + prefixes.length, "item")} into a folder on the server. Each item is renamed; nothing is copied.`;
+    pathInput.value = "";
+    pathLabel.textContent = "Destination folder on the server";
+  }
+
   function showDestinationError(message: string | null): void {
     if (errorEl) {
       errorEl.textContent = message ?? "";
@@ -287,7 +325,8 @@ export function openCopyMoveDialog(): void {
 
   // Move needs a provider that verifies DeleteObject If-Match. Without it the
   // button stays visible with the reason, so the limit is explained.
-  const moveSupported = state.conditionalDeleteSupported;
+  const moveSupported = state.conditionalDeleteSupported || sftp;
+  copyBtn.hidden = sftp;
   if (moveReasonEl) {
     moveReasonEl.hidden = moveSupported;
     moveReasonEl.textContent = moveSupported ? "" : MOVE_UNSUPPORTED_REASON;
@@ -359,6 +398,23 @@ export function openCopyMoveDialog(): void {
     prefix: string,
     token: string,
   ): Promise<FolderPage> {
+    if (sftp) {
+      // A folder is a directory entry. Links are not followed, and a folder
+      // whose name the server sent as non-UTF-8 cannot be a destination.
+      const listing = await sftpListDir(
+        sourceSnap.connectionId,
+        sftpPathFromKey(prefix),
+      );
+      return {
+        prefixes: listing.entries
+          .filter(
+            (entry) => entry.kind === "dir" && !isSftpNameLossy(entry.name),
+          )
+          .map((entry) => `${prefix}${entry.name}/`),
+        truncated: listing.truncated,
+        nextToken: "",
+      };
+    }
     const resp = await invokeS3For<{
       prefixes: string[];
       truncated: boolean;
@@ -535,7 +591,7 @@ export function openCopyMoveDialog(): void {
   // even while a copy runs or after the dialog resets.
   const setOperationBusy = (busy: boolean): void => {
     copyBtn.disabled = busy;
-    moveBtn.disabled = busy || !state.conditionalDeleteSupported;
+    moveBtn.disabled = busy || !moveSupported;
   };
 
   const closeFn = () => {
@@ -553,8 +609,117 @@ export function openCopyMoveDialog(): void {
   const conflictSession: ConflictPromptSession = { applyAll: null };
   let operationInFlight = false;
 
+  /// SFTP move: each item is renamed into the chosen folder. No transfer rows
+  /// and no copy receipts; a failed item is listed in one summary.
+  const runSftpMoveFromDialog = async (): Promise<void> => {
+    if (operationInFlight) return;
+    if (sourceChanged()) {
+      setStatus(
+        "Move cancelled because connection or selection changed.",
+        5000,
+      );
+      closeFn();
+      return;
+    }
+    const typed = pathInput.value.trim();
+    if (!typed) {
+      setStatus("Destination folder is required.", 5000);
+      pathInput.focus();
+      return;
+    }
+    const folderKey = typed.replace(/^\/+/, "").replace(/\/+$/, "");
+    let destination: string;
+    let sources: string[];
+    try {
+      destination = sftpPathFromKey(folderKey);
+      sources = [...fileKeys, ...prefixes].map((key) => sftpPathFromKey(key));
+    } catch (err) {
+      showDestinationError(friendlyError(err));
+      pathInput.focus();
+      return;
+    }
+    const plan = planSftpMove(sources, destination);
+    if (plan.refusal !== null) {
+      showDestinationError(plan.refusal);
+      pathInput.focus();
+      return;
+    }
+
+    operationInFlight = true;
+    setOperationBusy(true);
+    const connectionId = sourceSnap.connectionId;
+    try {
+      setStatus("Moving…");
+      const summary = await runSftpMove(plan.items, {
+        rename: (fromPath, toPath) =>
+          sftpRename(connectionId, fromPath, toPath, false),
+        isConnectionLost: isSftpConnectionLost,
+      });
+      if (summary.lostError !== null) {
+        await reportSftpConnectionLost(summary.lostError);
+        closeFn();
+        return;
+      }
+      clearSelection();
+      const folderName = destination === "/" ? "/" : sftpLeafName(destination);
+      const sentence = describeSftpMoveSummary(
+        summary,
+        plan.items.length,
+        folderName,
+      );
+      rememberCopyMoveDestination(
+        sourceSnap.bucket,
+        folderKey === "" ? "" : `${folderKey}/`,
+      );
+      try {
+        const committed = await refreshObjects(
+          sourceSnap.bucket,
+          sourceSnap.prefix,
+          { supersedePending: false },
+        );
+        if (committed && !connectionIdentityChanged(sourceSnap)) {
+          renderObjectTable();
+        }
+      } catch (refreshErr) {
+        if (await reportSftpConnectionLost(refreshErr)) {
+          closeFn();
+          return;
+        }
+        logActivity(
+          `Listing refresh after move failed: ${friendlyError(refreshErr)}`,
+          "warning",
+        );
+      }
+      setStatus(
+        sentence.message,
+        sentence.tone === "success" ? 8000 : undefined,
+      );
+      logActivity(
+        sentence.message,
+        sentence.tone === "success" ? "success" : "warning",
+      );
+      closeFn();
+    } catch (err) {
+      if (await reportSftpConnectionLost(err)) {
+        closeFn();
+        return;
+      }
+      setStatus(`Move failed: ${friendlyError(err)}`);
+      logActivity(`Move failed: ${friendlyError(err)}`, "error");
+    } finally {
+      operationInFlight = false;
+      if (dialogGeneration === copyMoveDialogGeneration) {
+        setOperationBusy(false);
+      }
+    }
+  };
+
   const runCopy = async (move: boolean) => {
     if (operationInFlight) return;
+    if (sftp) {
+      if (move) await runSftpMoveFromDialog();
+      return;
+    }
     if (move && !state.conditionalDeleteSupported) return;
     const runGeneration = ++operationGeneration;
     if (sourceChanged()) {
@@ -697,7 +862,7 @@ export function openCopyMoveDialog(): void {
             if (!runIsCurrent(runGeneration)) return;
             folderHasConflict = true;
             logActivity(
-              `Could not check whether ${dstBucket}/${dstPrefix} exists (${friendlyError(err)}). ` +
+              `Could not check whether ${displayLocation(state.protocol, dstBucket, dstPrefix)} exists (${friendlyError(err)}). ` +
                 "Treating it as a conflict.",
               "warning",
             );
@@ -712,7 +877,7 @@ export function openCopyMoveDialog(): void {
               decision = "skip";
             } else {
               decision = await resolveConflictChoice(
-                `${dstBucket}/${dstPrefix}`,
+                displayLocation(state.protocol, dstBucket, dstPrefix),
                 conflictSession,
                 true,
                 { remainingCount: prefixes.length - prefixIndex - 1 },
@@ -813,7 +978,7 @@ export function openCopyMoveDialog(): void {
         5000,
       );
       logActivity(
-        `Queued ${plural(queueResult.count, `${action} transfer`)} to "${dstBucket}/${dstPath}".${skippedLabel}${cancelledLabel}`,
+        `Queued ${plural(queueResult.count, `${action} transfer`)} to "${displayLocation(state.protocol, dstBucket, dstPath)}".${skippedLabel}${cancelledLabel}`,
         "success",
       );
       closeFn();

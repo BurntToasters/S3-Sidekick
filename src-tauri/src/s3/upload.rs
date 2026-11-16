@@ -563,6 +563,23 @@ pub(super) async fn upload_part_with_retry(
     Err(last_error)
 }
 
+/// The composite SHA-256 for CompleteMultipartUpload, or `None` when checksum
+/// verification is off. A missing part checksum is an error, never a
+/// completion without the checksum.
+fn multipart_composite_checksum(
+    checksum_verification: bool,
+    part_checksums: Vec<Option<Sha256Checksum>>,
+) -> Result<Option<(String, String)>, String> {
+    if !checksum_verification {
+        return Ok(None);
+    }
+    let checksums = part_checksums
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "Multipart upload completed without every part checksum".to_string())?;
+    sha256_composite_checksum(&checksums).map(Some)
+}
+
 pub(super) async fn upload_multipart<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     client: &Client,
@@ -820,15 +837,17 @@ pub(super) async fn upload_multipart<R: tauri::Runtime>(
         );
     }
 
-    let composite_checksum = if checksum_verification {
-        let checksums = part_checksums
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| "Multipart upload completed without every part checksum".to_string())?;
-        Some(sha256_composite_checksum(&checksums)?)
-    } else {
-        None
-    };
+    // Part checksums are computed locally, so this cannot fail today; if it
+    // ever does, the upload ID must still be aborted, never left with billed
+    // orphan parts.
+    let composite_checksum =
+        match multipart_composite_checksum(checksum_verification, part_checksums) {
+            Ok(checksum) => checksum,
+            Err(err) => {
+                abort_multipart_upload_bounded(client, bucket, key, &upload_id).await;
+                return Err(err);
+            }
+        };
     let final_parts: Vec<aws_sdk_s3::types::CompletedPart> =
         completed_parts.into_iter().flatten().collect();
 
@@ -1231,6 +1250,22 @@ mod e2e_multipart_recovery {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
+
+    #[test]
+    fn multipart_composite_checksum_refuses_a_missing_part_checksum() {
+        let part = sha256_checksum_bytes(b"part");
+        assert_eq!(
+            super::multipart_composite_checksum(false, vec![None]),
+            Ok(None)
+        );
+        let err = super::multipart_composite_checksum(true, vec![Some(part.clone()), None])
+            .expect_err("a missing part checksum must not complete");
+        assert!(err.contains("without every part checksum"), "got: {err}");
+        assert!(super::multipart_composite_checksum(true, vec![])
+            .is_err_and(|err| err.contains("without parts")));
+        assert!(super::multipart_composite_checksum(true, vec![Some(part)])
+            .is_ok_and(|checksum| checksum.is_some()));
+    }
 
     #[test]
     fn multipart_completion_accepts_composite_full_object_and_untyped_checksums() {

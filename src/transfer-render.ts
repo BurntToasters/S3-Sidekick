@@ -1,6 +1,7 @@
 import { escapeHtml, friendlyError, getIconHtml, plural } from "./utils.ts";
 import { MULTIPART_UPLOAD_THRESHOLD_BYTES } from "./create-only-capabilities.ts";
 import type { TransferItem } from "./transfers.ts";
+import { displayLocation } from "./protocol-labels.ts";
 
 const STALLED_AFTER_MS = 15_000;
 
@@ -328,6 +329,42 @@ function rowControl(
   );
 }
 
+/**
+ * The source and target text a row shows. An SFTP row shows the absolute
+ * remote path (`/home/demo/x`); an S3 row keeps `bucket/key` and the bare key
+ * of an upload. The protocol is the row's own, not the session's. Display
+ * only: the bucket, key and path values the row carries are never changed.
+ */
+export function transferRowLocations(t: TransferItem): {
+  source: string;
+  target: string;
+} {
+  const sftp = t.protocol === "sftp";
+  const remote = (bucket: string, key: string): string =>
+    sftp ? displayLocation("sftp", bucket, key) : `${bucket}/${key}`;
+  const target =
+    t.operation === "download"
+      ? (t.destination ?? "")
+      : t.operation === "copy" || t.operation === "move"
+        ? remote(
+            t.destinationBucket ?? t.bucket,
+            t.destinationKey ?? t.destinationPrefix ?? "",
+          )
+        : sftp
+          ? displayLocation("sftp", t.bucket, t.key)
+          : t.key;
+  const source =
+    t.operation === "copy" || t.operation === "move"
+      ? remote(
+          t.sourceBucket ?? t.bucket,
+          t.sourceKey ?? t.sourcePrefix ?? t.key,
+        )
+      : t.operation === "download"
+        ? remote(t.bucket, t.key)
+        : t.filePath || t.fileName;
+  return { source, target };
+}
+
 export function renderTransferRow(
   t: TransferItem,
   options: TransferRenderOptions = {},
@@ -416,18 +453,7 @@ export function renderTransferRow(
         : t.operation === "move"
           ? "Move"
           : "Upload";
-  const target =
-    t.operation === "download"
-      ? (t.destination ?? "")
-      : t.operation === "copy" || t.operation === "move"
-        ? `${t.destinationBucket ?? t.bucket}/${t.destinationKey ?? t.destinationPrefix ?? ""}`
-        : t.key;
-  const source =
-    t.operation === "copy" || t.operation === "move"
-      ? `${t.sourceBucket ?? t.bucket}/${t.sourceKey ?? t.sourcePrefix ?? t.key}`
-      : t.operation === "download"
-        ? `${t.bucket}/${t.key}`
-        : t.filePath || t.fileName;
+  const { source, target } = transferRowLocations(t);
   const arrow =
     t.operation === "download"
       ? getIconHtml("arrow-left", {

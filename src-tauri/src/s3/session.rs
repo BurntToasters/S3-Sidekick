@@ -29,7 +29,7 @@ fn build_connect_result(
     }
 }
 
-pub(super) fn mint_connection_id() -> String {
+pub(crate) fn mint_connection_id() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -68,17 +68,36 @@ impl Drop for ConnectSecrets {
 /// The persisted endpoint is normalized the same way `connect` normalizes it,
 /// so a valid save cannot be rejected merely for spelling the endpoint with a
 /// trailing slash while a payload for a different endpoint or access key is.
+///
+/// An absent or `"s3"` protocol takes the S3 path. An `"sftp"` payload uses the
+/// strict SFTP endpoint parser, and its `access_key` field holds the SSH
+/// username. Any other protocol is refused.
 pub(crate) fn persisted_connection_identity(json: &str) -> Result<String, String> {
     #[derive(serde::Deserialize)]
     struct PersistedConnection {
+        #[serde(default)]
+        protocol: Option<String>,
         endpoint: String,
         access_key: String,
     }
 
     let persisted: PersistedConnection = serde_json::from_str(json)
         .map_err(|err| format!("Saved connection payload is invalid: {}", err))?;
-    let (normalized, _) = super::endpoint::normalize_endpoint(&persisted.endpoint)?;
-    Ok(connection_identity(&normalized, &persisted.access_key))
+    match persisted.protocol.as_deref() {
+        None | Some("s3") => {
+            let (normalized, _) = super::endpoint::normalize_endpoint(&persisted.endpoint)?;
+            Ok(connection_identity(&normalized, &persisted.access_key))
+        }
+        Some("sftp") => {
+            let (host, port) = crate::sftp::path::parse_sftp_endpoint(&persisted.endpoint)?;
+            let normalized = crate::sftp::path::format_sftp_endpoint(&host, port)?;
+            Ok(connection_identity(&normalized, &persisted.access_key))
+        }
+        Some(other) => Err(format!(
+            "Saved connection protocol '{}' is not supported",
+            other
+        )),
+    }
 }
 
 /// Refusal for a reset whose caller still holds an older connection id.
@@ -125,6 +144,7 @@ pub(crate) fn invalidate_connection_session(s3: &mut crate::S3State) {
     s3.connection_id = None;
     s3.connection_identity = None;
     s3.storage_provider = StorageProviderKind::default();
+    s3.sftp = None;
     super::clear_listed_encoding_cache();
 }
 
@@ -264,6 +284,122 @@ pub(super) fn require_endpoint(
     }
 }
 
+/// A pending connection attempt, registered before any credential is handled.
+///
+/// The attempt holds an anonymous transfer registration, so disconnect and reset
+/// can cancel it, and the generation and previous session ID captured when it
+/// began. A newer connect or a disconnect advances the generation, which makes
+/// this attempt's install fail as superseded. Shared by the S3 and SFTP connects.
+pub(crate) struct ConnectAttempt {
+    guard: TransferGuard,
+    connection_generation: u64,
+    previous_connection_id: Option<String>,
+}
+
+/// Start a connect attempt: register it as anonymous session activity, refuse
+/// when the vault or a retiring session forbids a new connection, and advance
+/// the generation so any older attempt is superseded.
+pub(crate) fn begin_connect_attempt(
+    state: &tauri::State<'_, AppState>,
+) -> Result<ConnectAttempt, String> {
+    // Register before touching credentials or S3State so disconnect/reset can
+    // cancel and drain the attempt without leaving a credential-bearing client
+    // behind.
+    let guard = TransferGuard::register_optional(None, None)?;
+    let (connection_generation, previous_connection_id) = {
+        let mut s3 = lock_s3_state(state)?;
+        if guard.is_cancelled() {
+            return Err(cancelled_error());
+        }
+        crate::security::prepare_s3_connect(s3.connection_id.is_some())?;
+        s3.connection_generation = s3.connection_generation.wrapping_add(1);
+        (s3.connection_generation, s3.connection_id.clone())
+    };
+    Ok(ConnectAttempt {
+        guard,
+        connection_generation,
+        previous_connection_id,
+    })
+}
+
+impl ConnectAttempt {
+    /// Cancellation token for the attempt's network work.
+    pub(crate) fn token(&self) -> CancelToken {
+        self.guard.token()
+    }
+
+    /// True once disconnect, reset, or a newer connect has cancelled the attempt.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.guard.is_cancelled()
+    }
+}
+
+/// Install a verified session as the live one and return its minted ID.
+///
+/// The previous session is retired first: its transfers are cancelled and
+/// drained behind a fence. The ID is then minted, and `install` runs under the
+/// registry gate and the S3State lock. `install` sets the protocol-specific
+/// fields and must replace every field the previous session set, because this
+/// helper clears none of them. `install` must finish all its checks before it
+/// changes a field: the ID is only written after it returns Ok, so a failure
+/// after a partial change would keep the previous ID over new fields.
+pub(crate) async fn install_connection(
+    state: &tauri::State<'_, AppState>,
+    attempt: &ConnectAttempt,
+    install: impl FnOnce(&mut crate::S3State) -> Result<(), String> + Send,
+) -> Result<String, String> {
+    // Replacing a live session must retire its registered clients before the
+    // new credentials are installed. The previous session ID is pinned before
+    // the network work: a connect that has since been superseded returns here
+    // without touching the newer session's registrations.
+    let mut retirement_fence = None;
+    if let Some(previous_id) = attempt.previous_connection_id.as_deref() {
+        {
+            let s3 = lock_s3_state(state)?;
+            if s3.connection_generation != attempt.connection_generation
+                || s3.connection_id.as_deref() != Some(previous_id)
+            {
+                return Err("Connection attempt superseded".to_string());
+            }
+        }
+        // On a drain timeout this returns Err and drops the fence, leaving the
+        // still current session able to register transfers again.
+        let fence = retire_connection_transfers(previous_id, "connection replacement").await?;
+        if attempt.is_cancelled() {
+            return Err(cancelled_error());
+        }
+        retirement_fence = Some(fence);
+    }
+
+    let connection_id = mint_connection_id();
+    let install_result = attempt.guard.with_open_registration(|| {
+        let mut s3 = lock_s3_state(state)?;
+        if s3.connection_generation != attempt.connection_generation {
+            return Err("Connection attempt superseded".to_string());
+        }
+        crate::security::require_s3_access()?;
+        install(&mut s3)?;
+        s3.connection_id = Some(connection_id.clone());
+        Ok(())
+    });
+    if let Err(err) = install_result {
+        // A failed replacement must not leave the still-active previous session
+        // permanently unable to register new work. The fence is refcounted, so
+        // dropping this attempt's hold leaves the entry armed for any newer
+        // attempt that is still retiring the same session.
+        drop(retirement_fence);
+        return Err(err);
+    }
+    // The replacement is installed, so the retired session can never become
+    // current again. Dropping the fence removes its retirement entry.
+    drop(retirement_fence);
+    // A different endpoint may reuse the same bucket names with a different
+    // URL-encoding style; learned styles must not cross sessions.
+    clear_listed_encoding_cache();
+
+    Ok(connection_id)
+}
+
 #[tauri::command]
 pub(crate) async fn connect(
     state: tauri::State<'_, AppState>,
@@ -285,27 +421,18 @@ pub(crate) async fn connect(
         return Err("Endpoint is required".to_string());
     }
 
-    // Pending connection attempts are anonymous session activity. Register
-    // before touching credentials or S3State so disconnect/reset can cancel and
-    // drain the attempt without leaving a credential-bearing client behind.
-    let connect_guard = TransferGuard::register_optional(None, None)?;
-    let cancel = connect_guard.token();
-    let (connection_generation, previous_connection_id) = {
-        let mut s3 = lock_s3_state(&state)?;
-        if connect_guard.is_cancelled() {
-            return Err(cancelled_error());
-        }
-        crate::security::prepare_s3_connect(s3.connection_id.is_some())?;
-        s3.connection_generation = s3.connection_generation.wrapping_add(1);
-        (s3.connection_generation, s3.connection_id.clone())
-    };
+    // Pending connection attempts are anonymous session activity. The attempt
+    // registers before touching credentials or S3State so disconnect/reset can
+    // cancel and drain it without leaving a credential-bearing client behind.
+    let attempt = begin_connect_attempt(&state)?;
+    let cancel = attempt.token();
     let resolved_region = resolve_region(&endpoint, &region)?;
     let (normalized, bucket_hint) = normalize_endpoint(&endpoint)?;
     // Normalisation only classifies an IP literal. A hostname can still resolve
     // to a cloud metadata address, so resolve it now and reject if any answer
     // names one.
     validate_endpoint_resolution(&normalized).await?;
-    if connect_guard.is_cancelled() {
+    if attempt.is_cancelled() {
         return Err(cancelled_error());
     }
     let identity = connection_identity(&normalized, &secrets.access_key);
@@ -382,60 +509,19 @@ pub(crate) async fn connect(
         }
     }
 
-    // Replacing a live session must retire its registered clients before the
-    // new credentials are installed. The previous session ID is pinned before
-    // the network work: a connect that has since been superseded returns here
-    // without touching the newer session's registrations.
-    let mut retirement_fence = None;
-    if let Some(previous_id) = previous_connection_id.as_deref() {
-        {
-            let s3 = lock_s3_state(&state)?;
-            if s3.connection_generation != connection_generation
-                || s3.connection_id.as_deref() != Some(previous_id)
-            {
-                return Err("Connection attempt superseded".to_string());
-            }
-        }
-        // On a drain timeout this returns Err and drops the fence, leaving the
-        // still current session able to register transfers again.
-        let fence = retire_connection_transfers(previous_id, "connection replacement").await?;
-        if connect_guard.is_cancelled() {
-            return Err(cancelled_error());
-        }
-        retirement_fence = Some(fence);
-    }
-
-    let connection_id = mint_connection_id();
     let storage_provider = detect_storage_provider(&normalized);
-    let install_result = connect_guard.with_open_registration(|| {
-        let mut s3 = lock_s3_state(&state)?;
-        if s3.connection_generation != connection_generation {
-            return Err("Connection attempt superseded".to_string());
-        }
-        crate::security::require_s3_access()?;
+    let connection_id = install_connection(&state, &attempt, |s3| {
         s3.client = Some(client);
         s3.endpoint = normalized;
         s3.region = resolved_region.clone();
         s3.bucket_hint = bucket_hint;
-        s3.connection_id = Some(connection_id.clone());
         s3.connection_identity = Some(identity.clone());
         s3.storage_provider = storage_provider;
+        // An S3 session never carries an SFTP session alongside it.
+        s3.sftp = None;
         Ok(())
-    });
-    if let Err(err) = install_result {
-        // A failed replacement must not leave the still-active previous session
-        // permanently unable to register new work. The fence is refcounted, so
-        // dropping this attempt's hold leaves the entry armed for any newer
-        // attempt that is still retiring the same session.
-        drop(retirement_fence);
-        return Err(err);
-    }
-    // The replacement is installed, so the retired session can never become
-    // current again. Dropping the fence removes its retirement entry.
-    drop(retirement_fence);
-    // A different endpoint may reuse the same bucket names with a different
-    // URL-encoding style; learned styles must not cross sessions.
-    clear_listed_encoding_cache();
+    })
+    .await?;
 
     Ok(build_connect_result(
         resolved_region,
@@ -547,6 +633,70 @@ mod tests {
         )
         .expect("persisted payload should parse");
         assert_eq!(identity, connection_identity("https://example.com", "AKIA"));
+    }
+
+    // Failure modes for the protocol-aware identity, written before the change:
+    // - an SFTP endpoint without a port is accepted by the S3 normalizer and
+    //   gets an S3-shaped identity instead of being refused
+    // - an SFTP endpoint with a trailing slash or path is normalized away by the
+    //   S3 path and forks from the identity of the same server
+    // - an SFTP spelling that differs only by case or IPv6 form forks the identity
+    //   if the endpoint is not re-formatted
+    // - an absent or explicit "s3" protocol drifts from the S3 identity
+    // - an unknown or differently-cased protocol falls through to the S3 path
+    #[test]
+    fn persisted_identity_for_sftp_uses_the_normalized_endpoint() {
+        let identity = persisted_connection_identity(
+            r#"{"protocol":"sftp","endpoint":"sftp://Example.COM:22","access_key":"alice"}"#,
+        )
+        .expect("sftp payload should parse");
+        assert_eq!(
+            identity,
+            connection_identity("sftp://example.com:22", "alice")
+        );
+    }
+
+    #[test]
+    fn persisted_identity_for_sftp_ipv6_matches_the_formatted_endpoint() {
+        let identity = persisted_connection_identity(
+            r#"{"protocol":"sftp","endpoint":"sftp://[2001:DB8::1]:2022","access_key":"bob"}"#,
+        )
+        .expect("bracketed ipv6 payload should parse");
+        assert_eq!(
+            identity,
+            connection_identity("sftp://[2001:db8::1]:2022", "bob")
+        );
+    }
+
+    #[test]
+    fn persisted_identity_without_protocol_or_with_s3_is_the_s3_identity() {
+        let absent = persisted_connection_identity(
+            r#"{"endpoint":"https://example.com/","access_key":"AKIA"}"#,
+        )
+        .expect("legacy payload should parse");
+        let explicit = persisted_connection_identity(
+            r#"{"protocol":"s3","endpoint":"https://example.com/","access_key":"AKIA"}"#,
+        )
+        .expect("explicit s3 payload should parse");
+        assert_eq!(absent, connection_identity("https://example.com", "AKIA"));
+        assert_eq!(explicit, absent);
+    }
+
+    #[test]
+    fn persisted_identity_rejects_unknown_protocols_and_malformed_sftp_endpoints() {
+        for json in [
+            r#"{"protocol":"ftp","endpoint":"ftp://example.com:21","access_key":"u"}"#,
+            r#"{"protocol":"SFTP","endpoint":"sftp://example.com:22","access_key":"u"}"#,
+            r#"{"protocol":"","endpoint":"https://example.com","access_key":"u"}"#,
+            r#"{"protocol":"sftp","endpoint":"sftp://example.com","access_key":"u"}"#,
+            r#"{"protocol":"sftp","endpoint":"sftp://example.com:22/","access_key":"u"}"#,
+            r#"{"protocol":"sftp","endpoint":"https://example.com:22","access_key":"u"}"#,
+        ] {
+            assert!(
+                persisted_connection_identity(json).is_err(),
+                "payload must be refused: {json}"
+            );
+        }
     }
 
     #[test]

@@ -6,6 +6,8 @@
   "permissions": [
     "s3-session",
     "s3-mutation",
+    "sftp-session",
+    "sftp-mutation",
     "transfers",
     "path-grants",
     "local-files",

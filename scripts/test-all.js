@@ -456,6 +456,7 @@ function main({
       "scripts/github-cli.test.cjs",
       "scripts/test-all.test.js",
       "scripts/license-policy.test.mjs",
+      "scripts/screenshots.test.mjs",
     ],
     null,
     results,

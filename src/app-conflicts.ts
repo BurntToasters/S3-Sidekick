@@ -1,6 +1,9 @@
 import { invoke } from "./ipc.ts";
 import { invokeS3For } from "./connection.ts";
 import { state } from "./state.ts";
+import { sftpExists } from "./sftp-commands.ts";
+import { sftpPathFromKey } from "./sftp.ts";
+import { displayLocation } from "./protocol-labels.ts";
 import { showConfirm, showConfirmWithCheckbox } from "./dialogs.ts";
 import { saveSettings } from "./settings.ts";
 import { logActivity } from "./activity-log.ts";
@@ -264,16 +267,19 @@ export async function resolveObjectConflict(
   const conflictPolicy = state.currentSettings.conflictPolicy;
   let exists: boolean;
   try {
-    exists = await invokeS3For<boolean>(connectionId, "object_exists", {
-      bucket,
-      key,
-    });
+    exists =
+      state.protocol === "sftp"
+        ? await sftpExists(connectionId, sftpPathFromKey(key))
+        : await invokeS3For<boolean>(connectionId, "object_exists", {
+            bucket,
+            key,
+          });
   } catch (err) {
     // Fail closed. A transient error or a denied HeadObject must not be read as
     // "the object is absent", which would silently authorise an overwrite.
     const reason = friendlyError(err).replace(/\.$/, "");
     logActivity(
-      `Could not check whether ${bucket}/${key} exists (${reason}). ` +
+      `Could not check whether ${displayLocation(state.protocol, bucket, key)} exists (${reason}). ` +
         "Treating it as a conflict.",
       "warning",
     );
@@ -282,7 +288,7 @@ export async function resolveObjectConflict(
     }
     if (conflictPolicy === "skip" || session.applyAll === "skip") return "skip";
     const unknownDecision = await resolveUnknownDestination(
-      `${bucket}/${key}`,
+      displayLocation(state.protocol, bucket, key),
       reason,
     );
     return unknownDecision === "replace" ? { overwrite: true } : "skip";
@@ -296,7 +302,7 @@ export async function resolveObjectConflict(
   if (conflictPolicy === "replace") return { overwrite: true };
   if (conflictPolicy === "skip") return "skip";
   const decision = await resolveConflictChoice(
-    `${bucket}/${key}`,
+    displayLocation(state.protocol, bucket, key),
     session,
     hasBatchRemainder,
     { remainingCount: options.remainingCount },

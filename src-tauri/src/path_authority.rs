@@ -33,6 +33,9 @@ const TOKEN_HEX_LEN: usize = TOKEN_BYTES * 2;
 /// Grants survive a long working session but not forever. Expiry is a second
 /// line of defence; the process boundary is the primary one.
 const GRANT_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// Minimum time between sweeps of expired grants. Expired grants are refused
+/// at use whether or not a sweep has run; the sweep only bounds table growth.
+const GRANT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A single drag can carry a folder tree. The paths themselves are minted on
 /// demand during the scan, so only the drop roots are queued here.
@@ -236,12 +239,29 @@ fn insert_grant(
     };
     if let Ok(mut table) = grants().lock() {
         table.insert(token.clone(), grant);
-        // Expired entries are never spendable, but drop them opportunistically
-        // so a long session does not grow the table without bound.
+        // Expired entries are never spendable, but drop them now and then so
+        // a long session does not grow the table without bound. A sweep per
+        // insert made a large folder scan quadratic under this lock.
         let now = Instant::now();
-        table.retain(|_, entry| entry.expires_at > now);
+        if let Ok(mut last_sweep) = last_grant_sweep().lock() {
+            if sweep_due(*last_sweep, now) {
+                table.retain(|_, entry| entry.expires_at > now);
+                *last_sweep = Some(now);
+            }
+        }
     }
     token
+}
+
+/// When the last expired-grant sweep ran. Only taken while the grant table
+/// lock is held, so it adds no lock-order edge of its own.
+fn last_grant_sweep() -> &'static Mutex<Option<Instant>> {
+    static LAST_SWEEP: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    LAST_SWEEP.get_or_init(|| Mutex::new(None))
+}
+
+fn sweep_due(last_sweep: Option<Instant>, now: Instant) -> bool {
+    last_sweep.is_none_or(|last| now.saturating_duration_since(last) >= GRANT_SWEEP_INTERVAL)
 }
 
 /// Mint a grant for a path the user chose in a native dialog.
@@ -617,6 +637,21 @@ mod tests {
         assert!(authorize(&"0".repeat(TOKEN_HEX_LEN), GrantUse::QueryPath)
             .expect_err("random token must not authorize")
             .contains("no longer valid"));
+    }
+
+    /// A 20,000-file folder scan mints 20,000 grants that live 12 hours. A
+    /// full-table sweep on every insert made each mint walk the whole table
+    /// while holding the lock running uploads need, so sweeps are rate-limited.
+    #[test]
+    fn expired_grant_sweeps_run_at_most_once_per_interval() {
+        let base = Instant::now();
+        assert!(sweep_due(None, base));
+        assert!(!sweep_due(Some(base), base));
+        assert!(!sweep_due(
+            Some(base),
+            base + GRANT_SWEEP_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(sweep_due(Some(base), base + GRANT_SWEEP_INTERVAL));
     }
 
     #[test]

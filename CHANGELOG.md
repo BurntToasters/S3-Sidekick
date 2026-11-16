@@ -1,13 +1,12 @@
-<!-- > [!NOTE]
+> [!NOTE]
 > 🅱️ This is a beta build.
--->
 
 # ⬇️ Downloads
 
 | <img height="20" src="https://github.com/user-attachments/assets/340d360e-79b1-4c70-bfab-d944085f75df" /> Windows                                                                                                                                | <img height="20" src="https://github.com/user-attachments/assets/42d7e887-4616-4e8c-b1d3-e44e01340f8c" /> macOS          | <img height="20" src="https://github.com/user-attachments/assets/e0cc4f33-4516-408b-9c5c-be71a3ac316b" /> Linux                                                                                                                                                      |
 | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Linux-arm64.AppImage) --> |
-| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> -->                                          | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-macOS.zip)** | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.12.0/S3-Sidekick-Linux-arm64.flatpak) -->    |
+| **EXE:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.13.0-beta.1/S3-Sidekick-Windows-x64.exe) / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.13.0-beta.1/S3-Sidekick-Windows-arm64.exe) | **[Universal DMG](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.13.0-beta.1/S3-Sidekick-macOS.dmg)** | **AppImage:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.13.0-beta.1/S3-Sidekick-Linux-x64.AppImage) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.13.0-beta.1/S3-Sidekick-Linux-arm64.AppImage) --> |
+| <!-- <div align="center"><a href="https://apps.microsoft.com/detail/9pkgd6lkcl5j?referrer=appbadge&mode=full"><img src="https://get.microsoft.com/images/en-us%20light.svg" width="150"/></a></div> -->                                          | **[Universal ZIP](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.13.0-beta.1/S3-Sidekick-macOS.zip)** | **Flatpak:** [x64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.13.0-beta.1/S3-Sidekick-Linux-x64.flatpak) <!-- / [arm64](https://github.com/BurntToasters/S3-Sidekick/releases/download/v0.13.0-beta.1/S3-Sidekick-Linux-arm64.flatpak) -->    |
 
 > [!IMPORTANT]
 > The `.sig` files in this repo are NOT normal gpg signatures — they are for Tauri V2's updater to verify the integrity of updates before downloading and installing.
@@ -17,6 +16,26 @@
 > ⚠️ Arm64 Linux Binaries are _NOT_ available at the moment. It's something I may get around to in the future but it's not a priority. I do have the logic set up in the repo in case people would like to build their own :)
 
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
+
+## Changes in `v0.13.0-beta.1:`
+
+- **SFTP (beta):** Connect to an SFTP server with a password, a private key, or keyboard-interactive sign-in. Browse, upload, download with resume, rename and move, delete, and preview files. The first connection asks you to trust the server's host key, which is saved with the connection; a changed key is refused until you reset it.
+- **SFTP limits:** RSA host and user keys, SSH agent, and PuTTY `.ppk` keys are not supported. Transfers have no end-to-end checksum, replacing a file is not atomic (a replaced file keeps its permissions but not its owner), and symbolic links are shown but not followed or replaced by an upload. Imported private keys are saved inside the connection and follow vault encryption, so they are stored in plain text when encryption is off. Settings > Security lists the full set.
+- **SFTP previews:** A remote file's type comes from its extension. Common text, config, log, and source extensions (such as `.md`, `.yml`, `.toml`, `.sh`, `.rs`, and `.sql`) preview as text. A file with no extension or an unknown one, such as `README` or `.bashrc`, previews as text only when its first 1 MiB is valid UTF-8 without NUL bytes. Known binary extensions are never tested this way.
+- **SFTP connect:** Resolved addresses are tried in order within one 10 second TCP budget, and each address gets an equal share of it. A refused address moves on at once, so a dual-stack host whose first address does not answer now connects.
+- **SFTP sign-in errors:** When the server does not accept the method you chose, the error names the methods it does accept.
+- **SFTP overwrites:** If the server refuses to copy the existing file's permissions to an upload, the upload fails, the existing file is kept unchanged, and the message says to delete the remote file and upload again.
+- **SFTP browsing:** The path bar accepts absolute remote paths such as `/var/log`, `sftp://host/path`, and `host/path` for the connected host; `.` and `..` are refused. The sidebar, menus, and messages use server and folder wording. The command palette has **Go to path** and **Go to home folder**. Rows show **Link** and **Non-UTF-8** badges.
+- **SFTP reconnect:** If the remembered folder is missing or cannot be opened, the app opens your home folder and says that the folder is no longer available. A lost connection still reports as lost.
+- **SFTP host key trust:** The trust dialog has a **Copy fingerprint** button, and its confirm button reads **Trust and test** during **Test connection**.
+- **SFTP passphrase:** The passphrase field has a **Show** toggle.
+- **SFTP saved connections:** The SFTP details in the saved-connection editor are laid out as a label and value grid.
+- **SFTP focus:** After a failed connect, focus moves to the field that fixes the error, such as the passphrase, password, or host field.
+- **SFTP paths:** Transfer rows show remote paths with a leading slash. Conflict and queue messages do too.
+- **SFTP downloads:** A selection of only folders can be downloaded on SFTP, from the selection bar and the row menu. Each folder queues the files directly inside it, one level deep.
+- **Move on AWS-hosted endpoints:** Only Amazon S3 hostnames get AWS move and create-only behavior. An endpoint on another `amazonaws.com` host (an EC2 instance, a load balancer, API Gateway, S3 on Outposts, Object Lambda, access points or Express One Zone) is treated as a generic S3-compatible server, so Move is off and overwrite protection asks first.
+- **Opening links and folders:** Opening a link, a folder, or a finished download's folder no longer freezes the window on Linux while the browser or file manager stays open.
+- **Settings > Security:** A new note says what encryption does not cover: connection names, endpoints, last locations and recent folders stay in unencrypted web storage, survive a lock, and are deleted by a factory reset. The transfer queue is no longer copied into web storage before the backend queue loads.
 
 ## Changes in `v0.12.0:`
 

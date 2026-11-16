@@ -15,6 +15,10 @@ export interface ObjectInfo {
   size: number;
   last_modified: string;
   is_folder: boolean;
+  /** SFTP only: the entry kind the server reported (lstat). Absent for S3. */
+  sftp_kind?: "file" | "symlink" | "other";
+  /** SFTP only: the server sent a name that is not valid UTF-8 (read-only). */
+  name_lossy?: boolean;
 }
 
 export const state = {
@@ -41,6 +45,10 @@ export const state = {
    * Fails closed: false until a connect result says otherwise.
    */
   conditionalDeleteSupported: false,
+  /** Backend of the live session; "s3" until an SFTP connect succeeds. */
+  protocol: "s3" as "s3" | "sftp",
+  /** Remote home directory of the live SFTP session; empty for S3. */
+  sftpHomePath: "",
   currentBucket: "",
   currentPrefix: "",
   buckets: [] as BucketInfo[],

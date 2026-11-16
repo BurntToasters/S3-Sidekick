@@ -2,7 +2,7 @@
 
 S3 Sidekick is your buddy for quick GUI S3-compatible storage management! I made this app because I couldn't find any S3 GUI clients for Linux that I preferred so I decided to make my own!
 
-> **Package version in this checkout: 0.12.0.** See [GitHub Releases](https://github.com/BurntToasters/S3-Sidekick/releases) for currently available installers and release status, and [CHANGELOG.md](CHANGELOG.md) for the changes in this checkout.
+> **Package version in this checkout: 0.13.0-beta.1.** See [GitHub Releases](https://github.com/BurntToasters/S3-Sidekick/releases) for currently available installers and release status, and [CHANGELOG.md](CHANGELOG.md) for the changes in this checkout.
 
 ## ⬇️ Downloads
 
@@ -15,6 +15,12 @@ Download the installers for Windows, macOS, and Linux from [GitHub Releases](htt
 ### ℹ️ Enjoying S3 Sidekick? Consider [❤️ Supporting Me! ❤️](https://rosie.run/support)
 
 See [architecture and security notes](docs/ARCHITECTURE.md), [release runbook](docs/RELEASE.md), [settings glossary](docs/SETTINGS_GLOSSARY.md), and [support channels](docs/SUPPORT.md).
+
+## Features
+
+S3 Sidekick browses S3-compatible storage and, in this beta, SFTP servers.
+
+- **SFTP (beta):** connect with a password, a private key, or keyboard-interactive sign-in. Browse, upload, download with resume, rename and move, delete, and preview files. The beta's limits, such as RSA keys and host-key handling, are listed under **Settings > Security > SFTP (beta)**.
 
 ## Quickstart (development)
 
