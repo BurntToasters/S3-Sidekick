@@ -1,4 +1,5 @@
 import { state } from "./state.ts";
+import { protocolLabels, sessionProtocol } from "./protocol-labels.ts";
 import {
   reportNavFailure,
   selectBucket,
@@ -29,6 +30,7 @@ import {
   currentActionContext,
   getObjectAction,
   isOfferedFor,
+  isSftpContext,
   resolveActionLabel,
   runObjectAction,
   MOVE_UNSUPPORTED_REASON,
@@ -81,6 +83,8 @@ export function buildObjectMenuItems(
   if (total === 1 && folderPrefixes.length === 1) {
     items.push(entry("open-folder"));
     items.push(entry("properties"));
+    // SFTP only: a folder downloads the files directly inside it.
+    if (isSftpContext(selection)) items.push(entry("download"));
     items.push(entry("copy-keys"));
     if (selection.arnSupported) offer("copy-arns");
     offer("copy-s3-uri");
@@ -121,7 +125,11 @@ export function buildObjectMenuItems(
 
   const mixed = fileKeys.length > 0 && folderPrefixes.length > 0;
   items.push(entry("properties"));
-  if (fileKeys.length > 0) {
+  if (isSftpContext(selection)) {
+    // SFTP downloads files and folders alike (a folder's own files), so a
+    // mixed or folder-only selection offers Download.
+    items.push(entry("download"));
+  } else if (fileKeys.length > 0) {
     if (mixed) {
       items.push(
         disabledEntry(
@@ -215,15 +223,16 @@ export function handleBucketContextMenu(e: MouseEvent): void {
 
   if (bucketButton?.dataset.bucket) {
     const bucket = bucketButton.dataset.bucket;
+    const labels = protocolLabels(sessionProtocol(state));
     const menuItems: MenuItem[] = [
-      { label: "Open bucket", action: "open-bucket" },
-      { label: "Copy bucket name", action: "copy-bucket-name" },
+      { label: labels.openAction, action: "open-bucket" },
+      { label: labels.copyNameAction, action: "copy-bucket-name" },
     ];
     if (isAwsEndpoint(state.endpoint)) {
       menuItems.push({ label: "Copy bucket ARN", action: "copy-bucket-arn" });
     }
     menuItems.push({ separator: true });
-    menuItems.push({ label: "Refresh buckets", action: "refresh-buckets" });
+    menuItems.push({ label: labels.refreshAction, action: "refresh-buckets" });
 
     showContextMenu(e.clientX, e.clientY, menuItems, (action) => {
       if (action === "open-bucket") {
@@ -232,7 +241,7 @@ export function handleBucketContextMenu(e: MouseEvent): void {
             .then(() => closeSidebarOnMobile())
             .catch((err) => {
               reportNavFailure(
-                `Failed to open bucket "${bucket}": ${friendlyError(err)}`,
+                `${labels.openFailed} "${bucket}": ${friendlyError(err)}`,
                 open,
               );
             });
@@ -241,8 +250,8 @@ export function handleBucketContextMenu(e: MouseEvent): void {
       } else if (action === "copy-bucket-name") {
         void navigator.clipboard
           .writeText(bucket)
-          .then(() => setStatus(`Copied bucket name "${bucket}".`, 3000))
-          .catch((err) => setStatus(`Failed to copy bucket name: ${err}`));
+          .then(() => setStatus(`${labels.copiedName} "${bucket}".`, 3000))
+          .catch((err) => setStatus(`${labels.copyNameFailed}: ${err}`));
       } else if (action === "copy-bucket-arn") {
         const arn = `arn:aws:s3:::${bucket}`;
         void navigator.clipboard
@@ -259,7 +268,12 @@ export function handleBucketContextMenu(e: MouseEvent): void {
   showContextMenu(
     e.clientX,
     e.clientY,
-    [{ label: "Refresh buckets", action: "refresh-buckets" }],
+    [
+      {
+        label: protocolLabels(sessionProtocol(state)).refreshAction,
+        action: "refresh-buckets",
+      },
+    ],
     () => {
       void handleRefreshBuckets();
     },

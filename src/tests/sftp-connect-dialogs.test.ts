@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SftpHostKeyUnknownStep, SftpPromptStep } from "../sftp.ts";
 
 /**
@@ -12,6 +12,10 @@ import type { SftpHostKeyUnknownStep, SftpPromptStep } from "../sftp.ts";
  * - Answers stay in the inputs after the dialog resolves.
  * - A pending dialog outlives the attempt that opened it, so the connect never
  *   reaches its cancel path.
+ * - Test connection reads "Trust and connect", or Connect reads "Trust and test".
+ * - Copy fingerprint copies a different string, confirms before the copy
+ *   finishes, or reports success when the clipboard refuses.
+ * - A keyboard-interactive prompt with no text has no accessible name.
  */
 
 const trustStep: SftpHostKeyUnknownStep = {
@@ -43,6 +47,8 @@ function mountDialogs(): void {
         <p id="sftp-trust-endpoint"></p>
         <dd id="sftp-trust-key-type"></dd>
         <code id="sftp-trust-fingerprint"></code>
+        <button type="button" id="sftp-trust-copy">Copy fingerprint</button>
+        <span id="sftp-trust-copy-status" role="status"></span>
         <button type="button" id="sftp-trust-cancel">Cancel</button>
         <button type="button" id="sftp-trust-confirm">Trust and connect</button>
       </div>
@@ -287,5 +293,133 @@ describe("closeSftpConnectDialogs", () => {
   it("is a no-op when nothing is open", async () => {
     const dialogs = await import("../sftp-connect-dialogs.ts");
     expect(() => dialogs.closeSftpConnectDialogs()).not.toThrow();
+  });
+});
+
+describe("SFTP connect dialog labels", () => {
+  it("names the trust button for the action that opened it", async () => {
+    const dialogs = await import("../sftp-connect-dialogs.ts");
+    expect(dialogs.sftpTrustConfirmLabel("connect")).toBe("Trust and connect");
+    expect(dialogs.sftpTrustConfirmLabel("test")).toBe("Trust and test");
+  });
+
+  it("gives an unlabeled keyboard-interactive prompt the name Response", async () => {
+    const dialogs = await import("../sftp-connect-dialogs.ts");
+    expect(dialogs.sftpPromptLabel("")).toBe("Response");
+    expect(dialogs.sftpPromptLabel("   ")).toBe("Response");
+    expect(dialogs.sftpPromptLabel("  Code: ")).toBe("Code:");
+  });
+});
+
+describe("SFTP trust dialog actions", () => {
+  beforeEach(() => {
+    mountDialogs();
+  });
+
+  afterEach(async () => {
+    const dialogs = await import("../sftp-connect-dialogs.ts");
+    dialogs.closeSftpConnectDialogs();
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  it("reads Trust and test when the dialog was opened from Test connection", async () => {
+    const dialogs = await import("../sftp-connect-dialogs.ts");
+    const pending = dialogs.promptSftpHostKeyTrust(
+      "sftp://a.test:22",
+      trustStep,
+      "test",
+    );
+    expect(document.getElementById("sftp-trust-confirm")?.textContent).toBe(
+      "Trust and test",
+    );
+    click("sftp-trust-cancel");
+    await pending;
+  });
+
+  it("reads Trust and connect for a connect by default", async () => {
+    const dialogs = await import("../sftp-connect-dialogs.ts");
+    const pending = dialogs.promptSftpHostKeyTrust(
+      "sftp://a.test:22",
+      trustStep,
+    );
+    expect(document.getElementById("sftp-trust-confirm")?.textContent).toBe(
+      "Trust and connect",
+    );
+    click("sftp-trust-cancel");
+    await pending;
+  });
+
+  it("copies the shown fingerprint and confirms the copy", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const dialogs = await import("../sftp-connect-dialogs.ts");
+    const pending = dialogs.promptSftpHostKeyTrust(
+      "sftp://a.test:22",
+      trustStep,
+    );
+    click("sftp-trust-copy");
+    await vi.waitFor(() =>
+      expect(
+        document.getElementById("sftp-trust-copy-status")?.textContent,
+      ).toBe("Fingerprint copied."),
+    );
+    expect(writeText).toHaveBeenCalledWith("SHA256:fingerprint-under-test");
+    expect(overlayActive("sftp-trust-overlay")).toBe(true);
+    click("sftp-trust-cancel");
+    await pending;
+  });
+
+  it("says the copy failed when the clipboard refuses, and does not confirm", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: vi.fn(async () => {
+          throw new Error("denied");
+        }),
+      },
+      configurable: true,
+    });
+    const dialogs = await import("../sftp-connect-dialogs.ts");
+    const pending = dialogs.promptSftpHostKeyTrust(
+      "sftp://a.test:22",
+      trustStep,
+    );
+    click("sftp-trust-copy");
+    await vi.waitFor(() =>
+      expect(
+        document.getElementById("sftp-trust-copy-status")?.textContent,
+      ).toBe("Could not copy the fingerprint."),
+    );
+    expect(overlayActive("sftp-trust-overlay")).toBe(true);
+    click("sftp-trust-cancel");
+    await pending;
+  });
+});
+
+describe("SFTP keyboard-interactive prompt labels", () => {
+  beforeEach(() => {
+    mountDialogs();
+  });
+
+  afterEach(async () => {
+    const dialogs = await import("../sftp-connect-dialogs.ts");
+    dialogs.closeSftpConnectDialogs();
+    document.body.innerHTML = "";
+  });
+
+  it("labels an empty prompt Response, so the input has an accessible name", async () => {
+    const dialogs = await import("../sftp-connect-dialogs.ts");
+    const pending = dialogs.promptSftpKeyboardInteractive(
+      promptStep({ prompts: [{ text: "", echo: true }] }),
+    );
+    const input = document.querySelector<HTMLInputElement>(
+      "#sftp-prompt-fields input",
+    );
+    expect(input?.labels?.[0]?.textContent).toBe("Response");
+    dialogs.closeSftpConnectDialogs();
+    await pending;
   });
 });

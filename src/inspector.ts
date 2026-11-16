@@ -32,6 +32,7 @@ import {
   showInfoPanelTab,
 } from "./info-panel.ts";
 import { state } from "./state.ts";
+import { displayLocation, sessionProtocol } from "./protocol-labels.ts";
 import { setStatus } from "./app-status.ts";
 
 export type InspectorInfoTab = "details" | "permissions" | "metadata";
@@ -596,9 +597,11 @@ function renderInspectorEmpty(): void {
   const fileCount = fileObjects.length;
   const folderCount = state.prefixes.length;
   const loadedBytes = fileObjects.reduce((sum, object) => sum + object.size, 0);
-  const location = prefix
-    ? `${state.currentBucket}/${prefix}`
-    : `${state.currentBucket}/`;
+  const location = displayLocation(
+    sessionProtocol(state),
+    state.currentBucket,
+    prefix,
+  );
   const stats = [
     `<div class="inspector-empty__stat"><dt>Files</dt><dd>${escapeHtml(plural(fileCount, "file"))}</dd></div>`,
     `<div class="inspector-empty__stat"><dt>Folders</dt><dd>${escapeHtml(plural(folderCount, "folder"))}</dd></div>`,

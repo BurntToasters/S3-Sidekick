@@ -8,6 +8,11 @@ import {
 import { state } from "./state.ts";
 import { clearSelection, renderObjectTable } from "./browser.ts";
 import { isSftpConnectionLost, sftpPathFromKey } from "./sftp.ts";
+import {
+  displayLocation,
+  protocolLabels,
+  sessionProtocol,
+} from "./protocol-labels.ts";
 import { sftpListDir, sftpRename } from "./sftp-commands.ts";
 import {
   describeSftpMoveSummary,
@@ -152,7 +157,7 @@ export function openCopyMoveDialog(): void {
   try {
     sourceSnap = captureConnectionSnapshot();
   } catch {
-    setStatus("Connect to a bucket first.", 5000);
+    setStatus(protocolLabels(sessionProtocol(state)).connectFirst, 5000);
     return;
   }
   const capturedFileKeys = [...fileKeys];
@@ -857,7 +862,7 @@ export function openCopyMoveDialog(): void {
             if (!runIsCurrent(runGeneration)) return;
             folderHasConflict = true;
             logActivity(
-              `Could not check whether ${dstBucket}/${dstPrefix} exists (${friendlyError(err)}). ` +
+              `Could not check whether ${displayLocation(state.protocol, dstBucket, dstPrefix)} exists (${friendlyError(err)}). ` +
                 "Treating it as a conflict.",
               "warning",
             );
@@ -872,7 +877,7 @@ export function openCopyMoveDialog(): void {
               decision = "skip";
             } else {
               decision = await resolveConflictChoice(
-                `${dstBucket}/${dstPrefix}`,
+                displayLocation(state.protocol, dstBucket, dstPrefix),
                 conflictSession,
                 true,
                 { remainingCount: prefixes.length - prefixIndex - 1 },
@@ -973,7 +978,7 @@ export function openCopyMoveDialog(): void {
         5000,
       );
       logActivity(
-        `Queued ${plural(queueResult.count, `${action} transfer`)} to "${dstBucket}/${dstPath}".${skippedLabel}${cancelledLabel}`,
+        `Queued ${plural(queueResult.count, `${action} transfer`)} to "${displayLocation(state.protocol, dstBucket, dstPath)}".${skippedLabel}${cancelledLabel}`,
         "success",
       );
       closeFn();

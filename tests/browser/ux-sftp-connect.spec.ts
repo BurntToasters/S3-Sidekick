@@ -35,6 +35,11 @@ import {
  * - Cancel before the server answers leaves the backend attempt running, or
  *   a late step still opens the trust dialog.
  * - S3 connect stops working.
+ * - Test connection shows "Trust and connect", or Copy fingerprint copies
+ *   nothing, or a passphrase or Show toggle does not flip the field.
+ * - An unlabeled keyboard-interactive prompt has no accessible name.
+ * - A refused password leaves focus on Connect, not the password field.
+ * - A disabled protocol switch looks the same as an enabled one.
  */
 
 const SUITE = "ux-sftp-connect";
@@ -766,7 +771,7 @@ test.describe("SFTP connection form", () => {
     await openConnectScreen(page, { hostKey: "unknown" });
     await fillSftpPassword(page);
     await page.locator("#conn-test-btn").click();
-    await page.getByRole("button", { name: "Trust and connect" }).click();
+    await page.getByRole("button", { name: "Trust and test" }).click();
 
     await expect(page.getByText("Connection test succeeded.")).toBeVisible();
     await expect(page.locator("#connection-screen")).toBeVisible();
@@ -801,5 +806,167 @@ test.describe("SFTP connection form", () => {
       "s3-smoke",
       redactSftpSecrets(calls),
     );
+  });
+});
+
+test.describe("SFTP connect dialog and form polish", () => {
+  test("Test connection asks to trust the host with Trust and test", async ({
+    page,
+  }) => {
+    await openConnectScreen(page, { hostKey: "unknown" });
+    await fillSftpPassword(page);
+    await page.locator("#conn-test-btn").click();
+
+    await expect(trustDialog(page)).toHaveClass(/active/);
+    await expect(
+      trustDialog(page).getByRole("button", { name: "Trust and test" }),
+    ).toBeVisible();
+    await expect(
+      trustDialog(page).getByRole("button", { name: "Trust and connect" }),
+    ).toHaveCount(0);
+    await trustDialog(page).getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByText("Connection test cancelled.")).toBeVisible();
+  });
+
+  test("Copy fingerprint copies the fingerprint shown in the trust dialog", async ({
+    page,
+  }, testInfo) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: (text: string) => {
+            (window as unknown as { __copied?: string }).__copied = text;
+            return Promise.resolve();
+          },
+        },
+      });
+    });
+    await openConnectScreen(page, { hostKey: "unknown" });
+    await fillSftpPassword(page);
+    await page.locator("#connect-btn").click();
+    await expect(trustDialog(page)).toHaveClass(/active/);
+
+    await trustDialog(page)
+      .getByRole("button", { name: "Copy fingerprint" })
+      .click();
+    await expect(page.locator("#sftp-trust-copy-status")).toHaveText(
+      "Fingerprint copied.",
+    );
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as unknown as { __copied?: string }).__copied,
+        ),
+      )
+      .toBe(MOCK_SFTP_SERVER_FINGERPRINT);
+    await expect(trustDialog(page)).toHaveClass(/active/);
+    await saveSftpArtifact(page, testInfo, "trust-copy-fingerprint");
+    await trustDialog(page).getByRole("button", { name: "Cancel" }).click();
+  });
+
+  test("the passphrase Show toggle flips the field between masked and plain", async ({
+    page,
+  }) => {
+    await openConnectScreen(page, {
+      hostKey: "pinned-ok",
+      privateKey: {
+        file_name: "id_ed25519",
+        algorithm: "ssh-ed25519",
+        encrypted: true,
+        key_text:
+          "-----BEGIN OPENSSH PRIVATE KEY-----\nPlaywrightOnlyFakeKeyMaterial\n-----END OPENSSH PRIVATE KEY-----",
+      },
+    });
+    await chooseProtocol(page, "SFTP");
+    await page.locator("#conn-sftp-auth").selectOption("key");
+    await page.getByRole("button", { name: "Choose key file…" }).click();
+    await expect(page.locator("#conn-sftp-passphrase")).toBeEnabled();
+
+    const toggle = page.locator("#sftp-passphrase-toggle");
+    const passphrase = page.locator("#conn-sftp-passphrase");
+    await expect(passphrase).toHaveAttribute("type", "password");
+    await toggle.click();
+    await expect(passphrase).toHaveAttribute("type", "text");
+    await expect(toggle).toHaveText("Hide");
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await toggle.click();
+    await expect(passphrase).toHaveAttribute("type", "password");
+    await expect(toggle).toHaveText("Show");
+  });
+
+  test("an unlabeled keyboard-interactive prompt is named Response", async ({
+    page,
+  }) => {
+    await openConnectScreen(page, {
+      hostKey: "unknown",
+      auth: "keyboard-interactive",
+      keyboardInteractive: {
+        instructions: "Answer the question.",
+        prompts: [{ text: "   ", echo: true }],
+        answers: ["blue"],
+      },
+    });
+    await chooseProtocol(page, "SFTP");
+    await page.locator("#conn-sftp-host").fill(HOST);
+    await page.locator("#conn-sftp-username").fill("demo");
+    await page
+      .getByLabel("Authentication", { exact: true })
+      .selectOption("keyboard-interactive");
+    await page.locator("#connect-btn").click();
+    await trustDialog(page)
+      .getByRole("button", { name: "Trust and connect" })
+      .click();
+
+    await expect(promptDialog(page)).toHaveClass(/active/);
+    const answer = promptDialog(page).getByRole("textbox", {
+      name: "Response",
+    });
+    await expect(answer).toBeVisible();
+    await answer.fill("blue");
+    await promptDialog(page).getByRole("button", { name: "Continue" }).click();
+    await expect(page.locator("#main-layout")).toBeVisible();
+  });
+
+  test("a refused password moves focus to the password field", async ({
+    page,
+  }) => {
+    await openConnectScreen(page, {
+      hostKey: "unknown",
+      auth: "wrong-password",
+    });
+    await fillSftpPassword(page);
+    await page.locator("#conn-sftp-password").fill("wrong-password");
+    await page.locator("#connect-btn").click();
+    await trustDialog(page)
+      .getByRole("button", { name: "Trust and connect" })
+      .click();
+    await expect(page.locator("#conn-form-error")).toContainText(
+      "Authentication failed.",
+    );
+    await expect(page.locator("#conn-sftp-password")).toBeFocused();
+  });
+
+  test("the disabled protocol switch reads as disabled while a connect runs", async ({
+    page,
+  }) => {
+    await openConnectScreen(page, { hostKey: "unknown", holdConnect: true });
+    await fillSftpPassword(page);
+    await page.locator("#connect-btn").click();
+
+    const s3Option = page.locator(".conn-protocol__option", {
+      hasText: "S3",
+    });
+    await expect(
+      page.getByRole("radio", { name: "S3", exact: true }),
+    ).toBeDisabled();
+    await expect(s3Option).toHaveCSS("cursor", "not-allowed");
+    // The unchecked option uses the muted text token (#66666f in light mode).
+    await expect(s3Option.locator("span")).toHaveCSS(
+      "color",
+      "rgb(102, 102, 111)",
+    );
+    await page.locator("#connect-btn").click();
+    await expect(page.locator("#connect-btn")).toBeEnabled();
   });
 });

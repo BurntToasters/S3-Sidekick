@@ -25,6 +25,8 @@ import {
   isSftpConnectionLost,
   looksLikeSftpEndpoint,
   parseSftpEndpoint,
+  sftpFailureFocusTarget,
+  sftpHomeFallbackMessage,
   sftpKeyFromPath,
   sftpVirtualBucket,
   type SftpAuthMethod,
@@ -35,6 +37,7 @@ import {
   closeSftpConnectDialogs,
   promptSftpHostKeyTrust,
   promptSftpKeyboardInteractive,
+  type SftpConnectPurpose,
 } from "./sftp-connect-dialogs.ts";
 import {
   renderBucketList,
@@ -455,6 +458,10 @@ function refreshSftpKeyControls(): void {
       sftpFormKey !== null &&
       sftpFormKey.encrypted !== false;
     passphrase.disabled = formDisabledByWork || !usable;
+    const passphraseToggle = formElement<HTMLButtonElement>(
+      "sftp-passphrase-toggle",
+    );
+    if (passphraseToggle) passphraseToggle.disabled = passphrase.disabled;
   }
   const chooseKey = formElement<HTMLButtonElement>("conn-sftp-key-choose");
   if (chooseKey) chooseKey.disabled = formDisabledByWork;
@@ -1288,6 +1295,7 @@ export function resetSecretRevealState(): void {
     ["secret-key-toggle", "conn-secret-key"],
     ["session-token-toggle", "conn-session-token"],
     ["sftp-password-toggle", "conn-sftp-password"],
+    ["sftp-passphrase-toggle", "conn-sftp-passphrase"],
   ] as const) {
     const toggle = document.getElementById(
       toggleId,
@@ -1992,22 +2000,22 @@ function touchActiveConnectionUse(): void {
 /**
  * Open the SFTP location after connect: the remembered folder for this saved
  * connection when there is one, otherwise the server's home directory. The
- * single virtual bucket is the server host.
+ * single virtual bucket is the server host. A remembered folder that cannot be
+ * opened (missing, or refused) falls back to home with a notice. Only a lost
+ * connection, a stale generation, or a failing home ends in the retry banner.
  */
 async function restoreSftpLocation(
   generation: number,
   connectionId: string,
 ): Promise<void> {
+  if (!isGenerationCurrent(generation, connectionId)) return;
   const bucket = sftpVirtualBucket(state.endpoint);
   const active = activeSavedConnection();
   const memory = active
     ? readConnectionLocation(active.name, active.endpoint)
     : null;
   const remembered = memory?.bucket === bucket ? memory : null;
-  const restoreLocation = async (): Promise<void> => {
-    const prefix = remembered
-      ? remembered.prefix
-      : sftpKeyFromPath(state.sftpHomePath, true);
+  const openFolder = async (prefix: string): Promise<void> => {
     // selectBucket would list the root first. SFTP has one virtual bucket, and
     // listing ignores it, so name the bucket and list the target folder directly:
     // the server is never asked for "/" on the way.
@@ -2016,24 +2024,40 @@ async function restoreSftpLocation(
     renderBucketList();
     rememberActiveConnectionLocation();
   };
-  try {
-    await restoreLocation();
-  } catch (restoreError) {
-    if (!isGenerationCurrent(generation, connectionId)) return;
-    if (await handleSftpConnectionLost(restoreError)) return;
-    const message = `Connected, but failed to open the folder: ${friendlyError(restoreError)}`;
+  const reportRestoreFailure = (error: unknown): void => {
+    const message = `Connected, but failed to open the folder: ${friendlyError(error)}`;
+    // A retry restores again, so it follows the same remembered-then-home order.
     const retry = (): void => {
-      restoreLocation().catch((err: unknown) => {
-        if (!isGenerationCurrent(generation, connectionId)) return;
-        reportNavFailure(
-          `Failed to open the folder: ${friendlyError(err)}`,
-          retry,
-        );
-      });
+      void restoreSftpLocation(generation, connectionId);
     };
     reportNavFailure(message, retry);
     logActivity(message, "warning");
     renderBucketList();
+  };
+  let home: string | null = null;
+  try {
+    home = sftpKeyFromPath(state.sftpHomePath, true);
+    await openFolder(remembered ? remembered.prefix : home);
+    return;
+  } catch (restoreError) {
+    if (!isGenerationCurrent(generation, connectionId)) return;
+    if (await handleSftpConnectionLost(restoreError)) return;
+    if (!remembered || home === null || remembered.prefix === home) {
+      reportRestoreFailure(restoreError);
+      return;
+    }
+    try {
+      await openFolder(home);
+    } catch (homeError) {
+      if (!isGenerationCurrent(generation, connectionId)) return;
+      if (await handleSftpConnectionLost(homeError)) return;
+      reportRestoreFailure(homeError);
+      return;
+    }
+    if (!isGenerationCurrent(generation, connectionId)) return;
+    const notice = sftpHomeFallbackMessage(remembered.prefix);
+    setStatus(notice, 8000);
+    logActivity(notice, "warning");
   }
 }
 
@@ -2169,7 +2193,8 @@ function sftpSaveInput(
  * Open the SFTP session for the form. The trust and sign-in dialogs answer the
  * server's steps. `trackGeneration` receives each connection generation this
  * attempt takes, so the caller's guards follow a passphrase retry. Resolves the
- * outcome, or rejects with the reason the connect ended.
+ * outcome, or rejects with the reason the connect ended. `purpose` only names
+ * the trust button.
  */
 async function connectSftpForForm(
   form: SftpFormValues,
@@ -2177,9 +2202,10 @@ async function connectSftpForForm(
   options: ConnectOptions,
   isCancelled: () => boolean,
   trackGeneration: (generation: number) => void,
+  purpose: SftpConnectPurpose = "connect",
 ): Promise<SftpConnectOutcome> {
   const callbacks: SftpConnectCallbacks = {
-    onHostKeyUnknown: (info) => promptSftpHostKeyTrust(endpoint, info),
+    onHostKeyUnknown: (info) => promptSftpHostKeyTrust(endpoint, info, purpose),
     onPrompt: (info) => promptSftpKeyboardInteractive(info),
     isCancelled,
   };
@@ -2464,9 +2490,11 @@ export async function handleConnect(
     // Move focus off the (re-enabled) Connect button to the form so the
     // error is announced where the user is working.
     focusAfterFailure = sftpForm
-      ? isEncryptedKeyError(errorText(e))
-        ? "conn-sftp-passphrase"
-        : "conn-sftp-host"
+      ? sftpFailureFocusTarget(
+          errorText(e),
+          sftpForm.auth,
+          formElement("conn-sftp-reset-hostkey")?.hidden === false,
+        )
       : "conn-endpoint";
   } finally {
     if (pendingConnectAttempt === attempt) pendingConnectAttempt = null;
@@ -2763,6 +2791,7 @@ async function handleSftpTestConnection(): Promise<void> {
       (generation) => {
         attempt.generation = generation;
       },
+      "test",
     );
     attempt.sessionId = state.connectionId;
     attempt.generation = currentConnectionGeneration();
@@ -2937,17 +2966,22 @@ export function wireConnectionScreenExtras(): void {
       void resetSftpHostKey();
     },
   );
-  const passwordToggle = formElement<HTMLButtonElement>("sftp-password-toggle");
-  const passwordInput = formInput("conn-sftp-password");
-  passwordToggle?.addEventListener("click", () => {
-    if (!passwordInput) return;
-    const revealed = passwordInput.type === "text";
-    passwordInput.type = revealed ? "password" : "text";
-    if (passwordToggle) {
-      passwordToggle.textContent = revealed ? "Show" : "Hide";
-      passwordToggle.setAttribute("aria-pressed", String(!revealed));
-    }
-  });
+  for (const [toggleId, inputId] of [
+    ["sftp-password-toggle", "conn-sftp-password"],
+    ["sftp-passphrase-toggle", "conn-sftp-passphrase"],
+  ] as const) {
+    const toggle = formElement<HTMLButtonElement>(toggleId);
+    const input = formInput(inputId);
+    toggle?.addEventListener("click", () => {
+      if (!input) return;
+      const revealed = input.type === "text";
+      input.type = revealed ? "password" : "text";
+      if (toggle) {
+        toggle.textContent = revealed ? "Show" : "Hide";
+        toggle.setAttribute("aria-pressed", String(!revealed));
+      }
+    });
+  }
   for (const id of [
     "conn-sftp-host",
     "conn-sftp-port",

@@ -2,6 +2,11 @@ import { invoke } from "./ipc.ts";
 import { pickTextExport } from "./path-grants.ts";
 import { state } from "./state.ts";
 import {
+  displayLocation,
+  protocolLabels,
+  sessionProtocol,
+} from "./protocol-labels.ts";
+import {
   isSftpAlreadyExists,
   sftpKeyFromPath,
   sftpPathFromKey,
@@ -37,6 +42,7 @@ import {
   renderBreadcrumb,
   renderBucketList,
   navigateToFolder,
+  navigateToLocationPath,
   clearSelection,
   updateSelectionUI,
   invalidateInspectorSelectionSync,
@@ -1082,7 +1088,7 @@ export async function handleRename(): Promise<void> {
     } catch (err) {
       folderHasConflict = true;
       logActivity(
-        `Could not check whether ${targetBucket}/${newPrefix} exists (${friendlyError(err)}). ` +
+        `Could not check whether ${displayLocation(state.protocol, targetBucket, newPrefix)} exists (${friendlyError(err)}). ` +
           "Treating it as a conflict.",
         "warning",
       );
@@ -1104,7 +1110,7 @@ export async function handleRename(): Promise<void> {
         return;
       } else {
         decision = await resolveConflictChoice(
-          `${targetBucket}/${newPrefix}`,
+          displayLocation(state.protocol, targetBucket, newPrefix),
           conflictSession,
           false,
         );
@@ -1201,7 +1207,7 @@ export async function handleRename(): Promise<void> {
 export async function handleCreateFolder(): Promise<void> {
   if (state.protocol === "sftp") return handleSftpCreateFolder();
   if (!state.connected || !state.currentBucket) {
-    setStatus("Connect to a bucket first.");
+    setStatus(protocolLabels(sessionProtocol(state)).connectFirst);
     return;
   }
   let target: ConnectionSnapshot;
@@ -1304,7 +1310,7 @@ export async function handleCreateFolder(): Promise<void> {
         ? (await promptUnguardedWrite()).proceed
         : await showConfirm(
             "Folder exists",
-            `${targetBucket}/${folderKey} already exists. Replace it?`,
+            `${displayLocation(state.protocol, targetBucket, folderKey)} already exists. Replace it?`,
             { okLabel: "Replace", cancelLabel: "Cancel", okDanger: true },
           );
       if (targetLocationChanged()) return;
@@ -1399,10 +1405,11 @@ function showBucketRefreshBanner(
   const retryBtn = document.createElement("button");
   retryBtn.type = "button";
   retryBtn.className = "btn btn--sm";
-  retryBtn.textContent = "Retry bucket refresh";
+  const labels = protocolLabels(sessionProtocol(state));
+  retryBtn.textContent = labels.retryRefresh;
   retryBtn.addEventListener("click", () => {
     void handleRefreshBuckets().catch((err) => {
-      setStatus(`Failed to refresh buckets: ${friendlyError(err)}`);
+      setStatus(`${labels.refreshFailed}: ${friendlyError(err)}`);
     });
   });
   banner.replaceChildren(text, retryBtn);
@@ -1433,18 +1440,19 @@ export async function handleRefreshBuckets(): Promise<void> {
   const connectionId = state.connectionId;
   const bucketList = document.getElementById("bucket-list");
   bucketRefreshInFlight = true;
+  const labels = protocolLabels(sessionProtocol(state));
   try {
-    setStatus("Refreshing buckets…");
+    setStatus(labels.refreshing);
     bucketList?.setAttribute("aria-busy", "true");
     await refreshBuckets();
     // Ignore stale completions after disconnect/reconnect.
     if (!state.connected || state.connectionId !== connectionId) return;
     renderBucketList();
     clearBucketRefreshBanner(bucketList);
-    setStatus("Buckets refreshed.", 3000);
+    setStatus(labels.refreshed, 3000);
   } catch (err) {
     if (!state.connected || state.connectionId !== connectionId) return;
-    const message = `Failed to refresh buckets: ${friendlyError(err)}`;
+    const message = `${labels.refreshFailed}: ${friendlyError(err)}`;
     setStatus(message);
     logActivity(message, "error");
     // The last good list stays visible; the banner says it may be stale.
@@ -1503,12 +1511,20 @@ export async function handleGoToKeyOrPrefix(): Promise<void> {
   } catch {
     return;
   }
-  const raw = await showPrompt("Go to", "Enter key or prefix:", {
-    inputPlaceholder: "e.g. folder/file.txt or folder/subfolder/",
+  const labels = protocolLabels(sessionProtocol(state));
+  const raw = await showPrompt("Go to", labels.goToPrompt, {
+    inputPlaceholder: labels.goToPlaceholder,
   });
   if (!raw) return;
   if (connectionIdentityChanged(target)) {
     setStatus("Go to cancelled because connection changed.", 5000);
+    return;
+  }
+  if (state.protocol === "sftp") {
+    // SFTP paths are absolute remote paths: the omnibar parser and navigation
+    // handle `/abs`, `host/path`, `sftp://host/path`, and refuse `..`.
+    if (!raw.trim()) return;
+    await navigateToLocationPath(raw);
     return;
   }
 

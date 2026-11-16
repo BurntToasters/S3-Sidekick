@@ -3,7 +3,7 @@
     "chromium",
     "webkit"
   ],
-  "testCount": 956,
+  "testCount": 1008,
   "specs": {
     "a01-lock-security.spec.ts": 6,
     "first-run.spec.ts": 4,
@@ -34,13 +34,13 @@
     "ux-settings-p3a.spec.ts": 32,
     "ux-settings.spec.ts": 46,
     "ux-setup-wizard.spec.ts": 12,
-    "ux-sftp-browse.spec.ts": 30,
-    "ux-sftp-connect.spec.ts": 36,
-    "ux-sftp-transfers.spec.ts": 22,
+    "ux-sftp-browse.spec.ts": 62,
+    "ux-sftp-connect.spec.ts": 48,
+    "ux-sftp-transfers.spec.ts": 30,
     "ux-theme-tokens.spec.ts": 56,
     "ux-toolbar-actions.spec.ts": 16,
     "ux-transfer-engine.spec.ts": 16,
     "ux-visual-tour.spec.ts": 100
   },
-  "titlesSha256": "8d44536ab0b4e5376f4456fbd27263ba37237df18a55362c843a28cc261a2db0"
+  "titlesSha256": "921a938f72aa1e452e2836e67d93da66e5a6b7ce0769f59e0bd8740c5d68ea5c"
 }

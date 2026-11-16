@@ -772,12 +772,12 @@ export function sftpListingToObjects(
   return { objects, prefixes };
 }
 
-/** True when the error is the lost-connection error from the native side. */
 /** True when the native side refused because the target already exists. */
 export function isSftpAlreadyExists(message: string): boolean {
   return message.startsWith(SFTP_ALREADY_EXISTS);
 }
 
+/** True when the error is the lost-connection error from the native side. */
 export function isSftpConnectionLost(error: unknown): boolean {
   const message =
     typeof error === "string"
@@ -786,4 +786,40 @@ export function isSftpConnectionLost(error: unknown): boolean {
         ? error.message
         : "";
   return message.startsWith(SFTP_CONNECTION_LOST);
+}
+
+const ENCRYPTED_KEY_MESSAGE = /private key is encrypted/i;
+const AUTH_FAILED_MESSAGE = "Authentication failed.";
+const CHANGED_HOST_KEY_MESSAGE = /^The SSH host key for .+ changed\./;
+
+/**
+ * Control to focus after a failed SFTP connect. The error decides the field,
+ * and a changed host key uses Reset only when the caller says it is shown.
+ */
+export function sftpFailureFocusTarget(
+  errorText: string,
+  auth: SftpAuthMethod,
+  resetHostKeyVisible = false,
+): string {
+  if (ENCRYPTED_KEY_MESSAGE.test(errorText)) return "conn-sftp-passphrase";
+  if (errorText.startsWith(AUTH_FAILED_MESSAGE)) {
+    if (auth === "password") return "conn-sftp-password";
+    if (auth === "key") return "conn-sftp-key-choose";
+    return "conn-sftp-auth";
+  }
+  if (CHANGED_HOST_KEY_MESSAGE.test(errorText) && resetHostKeyVisible) {
+    return "conn-sftp-reset-hostkey";
+  }
+  return "conn-sftp-host";
+}
+
+/** Notice shown when the remembered folder is gone and home opened instead. */
+export function sftpHomeFallbackMessage(rememberedPrefix: string): string {
+  let label = "The remembered folder";
+  try {
+    label = sftpPathFromKey(rememberedPrefix);
+  } catch {
+    // Keep the generic label for a key that does not map to a valid path.
+  }
+  return `${label} is no longer available. Opened your home folder.`;
 }

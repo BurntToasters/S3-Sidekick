@@ -22,6 +22,11 @@
  *   against an S3 session, even when the connection identity happens to match.
  * - An SFTP row shows a checksum or verified state, or runs a size probe
  *   that the SFTP backend does not provide.
+ * - A folder-only, single-folder or mixed SFTP selection has no Download in
+ *   the selection bar or the context menu, or the mixed menu still refuses
+ *   folders with the S3 wording.
+ * - An SFTP transfer row shows its remote path without the leading slash
+ *   (`home/demo/x` instead of `/home/demo/x`).
  */
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { commandCalls, countOf, saveArtifact } from "./helpers";
@@ -587,5 +592,103 @@ test.describe("SFTP transfers", () => {
     expect(countOf(calls, "object_exists")).toBe(0);
     expect(countOf(calls, "head_object")).toBe(0);
     await saveSftpArtifact(page, testInfo, "transfer-drawer-sftp");
+  });
+
+  test("a folder-only selection enables the bar Download and downloads the files directly inside it", async ({
+    page,
+  }, testInfo) => {
+    await connectSftp(page, {});
+    await selectOnly(page, folderRow(page, "bundle"));
+
+    const download = page.locator("#batch-download");
+    await expect(download).toBeEnabled();
+    await expect(download).toHaveAttribute(
+      "title",
+      /folders download the files directly inside them/,
+    );
+    await download.click();
+
+    await expect
+      .poll(async () => countOf(await readMockCallLog(page), "sftp_download"))
+      .toBe(1);
+    const downloaded = commandCalls(
+      await readMockCallLog(page),
+      "sftp_download",
+    ).map((call) => (call.args as { path: string }).path);
+    expect(downloaded).toEqual([`${HOME}/bundle/a.txt`]);
+    await saveSftpArtifact(page, testInfo, "folder-only-download");
+  });
+
+  test("a single folder's context menu offers Download and downloads its files", async ({
+    page,
+  }, testInfo) => {
+    await connectSftp(page, {});
+    await folderRow(page, "bundle").click({ button: "right" });
+
+    const menu = page.locator(".context-menu");
+    const download = menu.getByRole("menuitem", {
+      name: "Download",
+      exact: true,
+    });
+    await expect(download).toBeVisible();
+    await expect(download).not.toHaveAttribute("aria-disabled", "true");
+    await download.click();
+
+    await expect
+      .poll(async () => countOf(await readMockCallLog(page), "sftp_download"))
+      .toBe(1);
+    await saveSftpArtifact(page, testInfo, "single-folder-menu-download");
+  });
+
+  test("a mixed selection's context menu offers Download and no longer refuses folders", async ({
+    page,
+  }, testInfo) => {
+    await connectSftp(page, {});
+    await selectOnly(page, fileRow(page, "notes.txt"));
+    await folderRow(page, "bundle").locator(".row-check").check();
+
+    await fileRow(page, "notes.txt").click({ button: "right" });
+    const menu = page.locator(".context-menu");
+    const download = menu.getByRole("menuitem", {
+      name: "Download",
+      exact: true,
+    });
+    await expect(download).toBeVisible();
+    await expect(download).not.toHaveAttribute("aria-disabled", "true");
+    await expect(menu).not.toContainText("Folders can't be downloaded");
+    await download.click();
+
+    await expect
+      .poll(async () => countOf(await readMockCallLog(page), "sftp_download"))
+      .toBe(2);
+    const downloaded = commandCalls(
+      await readMockCallLog(page),
+      "sftp_download",
+    ).map((call) => (call.args as { path: string }).path);
+    expect(downloaded.sort()).toEqual([
+      `${HOME}/bundle/a.txt`,
+      `${HOME}/notes.txt`,
+    ]);
+    await saveSftpArtifact(page, testInfo, "mixed-menu-download");
+  });
+
+  test("an SFTP transfer row shows the remote path with its leading slash", async ({
+    page,
+  }, testInfo) => {
+    await connectSftp(page, {
+      uploadFiles: [{ name: "final.txt", size: 2048 }],
+    });
+    await chooseUploadMenu(page, "Files");
+    await expect
+      .poll(async () => countOf(await readMockCallLog(page), "sftp_upload"))
+      .toBe(1);
+
+    await showTransferList(page);
+    const row = page.locator("#transfer-list .transfer-item").first();
+    await expect(row).toContainText("Completed");
+    await expect(row.locator(".transfer-key")).toHaveText(
+      "/home/demo/final.txt",
+    );
+    await saveSftpArtifact(page, testInfo, "transfer-row-remote-path");
   });
 });

@@ -1,6 +1,8 @@
 import { invoke } from "./ipc.ts";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { state, dom } from "./state.ts";
+import { sftpKeyFromPath } from "./sftp.ts";
+import { protocolLabels, sessionProtocol } from "./protocol-labels.ts";
 import {
   openSettingsModal,
   closeSettingsModal,
@@ -991,7 +993,7 @@ function wireBucketList(): void {
 
 /** A bucket that fails to open must not look like an empty bucket. */
 function reportBucketOpenFailure(bucket: string, err: unknown): void {
-  const message = `Failed to open bucket "${bucket}": ${friendlyError(err)}`;
+  const message = `${protocolLabels(sessionProtocol(state)).openFailed} "${bucket}": ${friendlyError(err)}`;
   reportNavFailure(message, () => {
     void selectBucket(bucket).catch((retryErr) =>
       reportBucketOpenFailure(bucket, retryErr),
@@ -1278,7 +1280,7 @@ function wireDropUpload(): void {
           return;
         }
         if (!state.connected || !state.currentBucket) {
-          setStatus("Connect to a bucket first.", 5000);
+          setStatus(protocolLabels(sessionProtocol(state)).connectFirst, 5000);
           return;
         }
 
@@ -1475,12 +1477,17 @@ function wireCommandPalette(): void {
     },
     {
       id: "refresh-buckets",
-      label: "Refresh buckets",
+      get label() {
+        return protocolLabels(sessionProtocol(state)).refreshAction;
+      },
       icon: "refresh-cw",
       keywords: ["bucket list", "reload buckets"],
       action: () => {
         void handleRefreshBuckets().catch((err) =>
-          reportAsyncActionFailure("Refresh buckets", err),
+          reportAsyncActionFailure(
+            protocolLabels(sessionProtocol(state)).refreshAction,
+            err,
+          ),
         );
       },
       available: () => state.connected,
@@ -1523,13 +1530,33 @@ function wireCommandPalette(): void {
       available: () => state.connected,
     },
     {
+      id: "go-to-home-folder",
+      label: "Go to home folder",
+      icon: "folder-open",
+      keywords: ["home", "sftp", "home directory"],
+      action: () => {
+        void navigateToFolder(sftpKeyFromPath(state.sftpHomePath, true)).catch(
+          (err) => reportAsyncActionFailure("Go to home folder", err),
+        );
+      },
+      available: () =>
+        state.connected &&
+        state.protocol === "sftp" &&
+        state.sftpHomePath !== "",
+    },
+    {
       id: "go-to-key-prefix",
-      label: "Go to key/prefix",
+      get label() {
+        return protocolLabels(sessionProtocol(state)).goToLabel;
+      },
       icon: "compass",
       keywords: ["jump", "path", "prefix"],
       action: () => {
         void handleGoToKeyOrPrefix().catch((err) =>
-          reportAsyncActionFailure("Go to key or prefix", err),
+          reportAsyncActionFailure(
+            protocolLabels(sessionProtocol(state)).goToLabel,
+            err,
+          ),
         );
       },
       available: () => state.connected,

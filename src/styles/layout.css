@@ -802,6 +802,21 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
   color: var(--accent-text);
 }
 
+/* A disabled switch keeps its shape but reads as inert: muted text and the
+   not-allowed cursor. The checked option keeps the selected fill. */
+.conn-protocol__option:has(input:disabled) {
+  cursor: not-allowed;
+}
+
+.conn-protocol__option input:disabled + span {
+  color: var(--text-muted);
+}
+
+.conn-protocol__option input:checked:disabled + span {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
 .conn-protocol__option input:focus-visible + span {
   outline: var(--focus-ring-width) solid var(--focus-ring-color);
   outline-offset: var(--focus-ring-offset);
@@ -876,6 +891,19 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
   font-size: var(--text-xs);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.sftp-trust__copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+}
+
+.sftp-trust__copy-status {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
 }
 
 .sftp-prompt__name {

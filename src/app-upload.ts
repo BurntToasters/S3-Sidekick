@@ -12,6 +12,7 @@ import {
   type ConnectionSnapshot,
 } from "./connection.ts";
 import { state } from "./state.ts";
+import { protocolLabels, sessionProtocol } from "./protocol-labels.ts";
 import {
   enqueuePaths,
   enqueueFolderEntries,
@@ -251,7 +252,7 @@ function captureUploadSnapshot(): ConnectionSnapshot | null {
   try {
     return captureConnectionSnapshot();
   } catch {
-    setStatus("Connect to a bucket first.");
+    setStatus(protocolLabels(sessionProtocol(state)).connectFirst);
     return null;
   }
 }

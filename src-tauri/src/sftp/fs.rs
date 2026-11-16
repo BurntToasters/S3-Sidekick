@@ -1,8 +1,6 @@
-//! Remote filesystem commands: listing, metadata, create, rename, delete, and
-//! bounded preview.
+//! Remote filesystem commands: list, stat, create, rename, delete, and preview.
 //!
-//! Each command that takes `tauri::State` returns a boxed future, as the S3
-//! commands do, so the future is not held inline on the Windows main thread.
+//! Commands that take `tauri::State` return a boxed future, as S3 commands do.
 //!
 //! Failure modes, enumerated before the bodies:
 //! - A path reaches the server unvalidated, or a lossy (U+FFFD) name addresses
@@ -20,6 +18,8 @@
 //!   races the cancel token, and a dead transport carries the lost-connection prefix.
 //! - A preview opens a FIFO or device and blocks, or reads without a cap. Only
 //!   regular files are opened, and reads go through `read_preview_body`.
+//! - An unknown-type file is shown as text only when `looks_like_text` accepts its
+//!   bytes. Known binary extensions are never read this way.
 //! - Two mutations of one path interleave. Renames and folder deletes take prefix
 //!   leases; other mutations take key leases through the S3 lease registry.
 
@@ -847,22 +847,21 @@ async fn sftp_preview_inner(
         )
     })?;
     let total = i64::try_from(total_size).unwrap_or(i64::MAX);
-    let content_type = guess_content_type(&leaf_name(&path)).to_string();
-    if plan_preview(&content_type, total) != PreviewPlan::Read {
-        return Ok(PreviewResponse {
-            content_type,
-            data: String::new(),
-            is_text: false,
-            truncated: false,
-            total_size: total,
-        });
+    let name = leaf_name(&path);
+    let guessed = guess_content_type(&name);
+    // A file of unknown type is read as text, and answered as text only when its
+    // bytes look like text. A known binary extension is never read this way.
+    let probe = guessed == "application/octet-stream" && !is_known_binary_name(&name);
+    let read_type = if probe { "text/plain" } else { guessed };
+    if plan_preview(read_type, total) != PreviewPlan::Read {
+        return Ok(unsupported_preview(guessed, total));
     }
     let mut file = call(handle, &token, &context, handle.sftp.open(path.clone()))
         .await
         .map_err(|err| err.into_message(&path))?;
     // The file handle closes when `file` drops. read_preview_body enforces the
     // per-type cap and honours the cancel token.
-    let body = read_preview_body(&mut file, &content_type, &token)
+    let body = read_preview_body(&mut file, read_type, &token)
         .await
         .map_err(|message| {
             if message == cancelled_error() || !handle.is_lost() {
@@ -871,6 +870,10 @@ async fn sftp_preview_inner(
                 format!("{}: preview {}", SFTP_CONNECTION_LOST, path)
             }
         })?;
+    if probe && !looks_like_text(&body.bytes, body.truncated) {
+        return Ok(unsupported_preview(guessed, total));
+    }
+    let content_type = read_type.to_string();
     let is_text = is_text_content_type(&content_type);
     let data = if is_text {
         String::from_utf8_lossy(&body.bytes).into_owned()
@@ -1046,9 +1049,10 @@ fn block_parent(blocked: &mut [bool], parent: Option<usize>) {
     }
 }
 
-/// The content type the webview's upload path gives an object, from the file
-/// name. This mirrors `guessContentType` in `src/transfers.ts`, because SFTP
-/// has no stored content type to read as S3 does.
+/// The content type a preview gives a file, from its name. It starts from the
+/// webview's upload table in `guessContentType` (`src/transfers.ts`) and adds
+/// text extensions for preview. SFTP stores no content type, so the two tables
+/// can differ for the text extensions added here.
 fn guess_content_type(name: &str) -> &'static str {
     let extension = name
         .rsplit_once('.')
@@ -1062,6 +1066,14 @@ fn guess_content_type(name: &str) -> &'static str {
         "xml" => "application/xml",
         "txt" => "text/plain",
         "csv" => "text/csv",
+        "md" | "markdown" => "text/markdown",
+        "tsv" => "text/tab-separated-values",
+        // Source, config, and log files. Each is plain text, so a text/* type
+        // lets the preview read it.
+        "log" | "yaml" | "yml" | "toml" | "ini" | "conf" | "cfg" | "env" | "properties" | "sh"
+        | "bash" | "zsh" | "py" | "rb" | "pl" | "php" | "rs" | "go" | "c" | "h" | "cpp" | "hpp"
+        | "java" | "kt" | "swift" | "ts" | "tsx" | "jsx" | "mjs" | "cjs" | "sql" | "diff"
+        | "patch" | "rst" | "tex" => "text/plain",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
@@ -1080,6 +1092,48 @@ fn guess_content_type(name: &str) -> &'static str {
         "ttf" => "font/ttf",
         "otf" => "font/otf",
         _ => "application/octet-stream",
+    }
+}
+
+/// Extensions whose files are binary by convention. A name with one of these is
+/// never read as a possible text file, even when its bytes happen to be text.
+const KNOWN_BINARY_EXTENSIONS: &[&str] = &[
+    "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "tar", "exe", "dll", "so", "dylib", "bin", "iso",
+    "img", "dmg", "deb", "rpm", "jar", "class", "o", "a", "pyc", "mp3", "mp4", "mov", "avi", "mkv",
+    "wav", "flac", "ogg", "woff", "woff2", "ttf", "otf", "sqlite", "sqlite3", "db", "pdf", "png",
+    "jpg", "jpeg", "gif", "webp", "ico", "webm", "bmp", "tif", "tiff", "heic", "avif", "wasm",
+];
+
+/// Whether a name's extension is one of the known binary extensions.
+fn is_known_binary_name(name: &str) -> bool {
+    name.rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .is_some_and(|extension| KNOWN_BINARY_EXTENSIONS.contains(&extension.as_str()))
+}
+
+/// Whether bytes read from a file of unknown type are text. A NUL byte means
+/// binary. The bytes must be valid UTF-8, except that when `truncated` is true
+/// the read stopped at the preview cap, so an incomplete character at the very
+/// end is allowed. An empty file is text.
+fn looks_like_text(bytes: &[u8], truncated: bool) -> bool {
+    if bytes.contains(&0) {
+        return false;
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(_) => true,
+        // `error_len() == None` means the input ended inside a character.
+        Err(err) => truncated && err.error_len().is_none(),
+    }
+}
+
+/// The answer for a file the preview cannot show: no data and the type the name gives.
+fn unsupported_preview(content_type: &str, total_size: i64) -> PreviewResponse {
+    PreviewResponse {
+        content_type: content_type.to_string(),
+        data: String::new(),
+        is_text: false,
+        truncated: false,
+        total_size,
     }
 }
 
@@ -1107,6 +1161,83 @@ mod tests {
         assert_eq!(guess_content_type("README"), "application/octet-stream");
         assert_eq!(guess_content_type("bundle.bmp"), "application/octet-stream");
         assert_eq!(guess_content_type(".png"), "image/png");
+    }
+
+    #[test]
+    fn text_extensions_are_typed_as_text_in_any_case() {
+        assert_eq!(guess_content_type("NOTES.md"), "text/markdown");
+        assert_eq!(guess_content_type("guide.Markdown"), "text/markdown");
+        assert_eq!(guess_content_type("app.log"), "text/plain");
+        assert_eq!(guess_content_type("ci.YAML"), "text/plain");
+        assert_eq!(guess_content_type("deploy.sh"), "text/plain");
+        assert_eq!(guess_content_type("main.rs"), "text/plain");
+        assert_eq!(guess_content_type("Component.TSX"), "text/plain");
+        assert_eq!(guess_content_type("patch.diff"), "text/plain");
+        assert_eq!(
+            guess_content_type("export.tsv"),
+            "text/tab-separated-values"
+        );
+        assert_eq!(guess_content_type(".env"), "text/plain");
+    }
+
+    #[test]
+    fn names_without_a_known_text_type_stay_octet_stream() {
+        assert_eq!(guess_content_type("README"), "application/octet-stream");
+        assert_eq!(guess_content_type(".bashrc"), "application/octet-stream");
+        assert_eq!(
+            guess_content_type("notes.weird"),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn known_binary_names_are_never_probed_as_text() {
+        assert!(is_known_binary_name("data.bin"));
+        assert!(is_known_binary_name("backup.SQLITE"));
+        assert!(is_known_binary_name("disk.iso"));
+        assert!(is_known_binary_name("photo.bmp"));
+        assert!(!is_known_binary_name("notes.weird"));
+        assert!(!is_known_binary_name(".bashrc"));
+        assert!(!is_known_binary_name("README"));
+    }
+
+    #[test]
+    fn plain_ascii_and_utf8_multibyte_text_looks_like_text() {
+        assert!(looks_like_text(b"hello world\n", false));
+        assert!(looks_like_text("héllo 名前 🦀\n".as_bytes(), false));
+        assert!(looks_like_text("héllo 名前 🦀\n".as_bytes(), true));
+    }
+
+    #[test]
+    fn a_nul_byte_is_never_text() {
+        assert!(!looks_like_text(b"abc\0def", false));
+        assert!(!looks_like_text(b"\0", true));
+    }
+
+    #[test]
+    fn invalid_utf8_is_not_text() {
+        assert!(!looks_like_text(&[0x66, 0xff, 0x67], false));
+        // A lead byte followed by a non-continuation byte is invalid, not incomplete.
+        assert!(!looks_like_text(&[0xc3, 0x28], false));
+        assert!(!looks_like_text(&[0xc3, 0x28], true));
+    }
+
+    #[test]
+    fn a_character_cut_at_the_read_cap_is_text_only_when_truncated() {
+        let cut = &"名".as_bytes()[..2];
+        assert!(looks_like_text(cut, true));
+        assert!(!looks_like_text(cut, false));
+    }
+
+    #[test]
+    fn an_invalid_byte_before_the_cut_is_not_excused_by_truncation() {
+        assert!(!looks_like_text(&[0x61, 0xff, 0xe5, 0x90], true));
+    }
+
+    #[test]
+    fn empty_content_is_text() {
+        assert!(looks_like_text(&[], false));
+        assert!(looks_like_text(&[], true));
     }
 
     #[test]

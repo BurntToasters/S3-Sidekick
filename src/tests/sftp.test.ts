@@ -22,6 +22,8 @@ import {
   parseSshPrivateKeyInfo,
   parseSftpVoid,
   sftpCreateOnlyCapabilities,
+  sftpFailureFocusTarget,
+  sftpHomeFallbackMessage,
   sftpKeyFromPath,
   sftpListingToObjects,
   sftpPathFromKey,
@@ -47,6 +49,9 @@ import { NO_CREATE_ONLY_CAPABILITIES } from "../create-only-capabilities.ts";
  *   name, an unknown kind, or a fractional or negative size is accepted.
  * - A key or password is copied into an error message.
  * - An unrelated message is treated as a lost SFTP connection.
+ * - A failed connect moves focus to a control that is not on screen, or to
+ *   the wrong one for the chosen auth method or the error.
+ * - The fallback notice shows an empty or unparseable remembered folder.
  */
 
 function entry(
@@ -859,6 +864,79 @@ describe("SFTP wire types match the Rust structs", () => {
     ).toEqual([...variantFields("HostKeyUnknown")].sort());
     expect([...tsStep("SftpPromptStep", "prompt")].sort()).toEqual(
       [...variantFields("Prompt")].sort(),
+    );
+  });
+});
+
+describe("SFTP focus after a failed connect", () => {
+  const changed =
+    "The SSH host key for files.example.test:22 changed. The server presented SHA256:new, which does not match the saved host key. Reset it only if the server changed.";
+
+  it("focuses the passphrase for an encrypted key, whatever the method", () => {
+    expect(
+      sftpFailureFocusTarget(
+        "The private key is encrypted and needs a passphrase.",
+        "key",
+      ),
+    ).toBe("conn-sftp-passphrase");
+    expect(sftpFailureFocusTarget("Private key is encrypted", "password")).toBe(
+      "conn-sftp-passphrase",
+    );
+  });
+
+  it("focuses the credential of the chosen method after a refused sign-in", () => {
+    const refused = "Authentication failed. This server does not accept.";
+    expect(sftpFailureFocusTarget(refused, "password")).toBe(
+      "conn-sftp-password",
+    );
+    expect(sftpFailureFocusTarget(refused, "key")).toBe("conn-sftp-key-choose");
+    expect(sftpFailureFocusTarget(refused, "keyboard-interactive")).toBe(
+      "conn-sftp-auth",
+    );
+  });
+
+  it("only matches Authentication failed. at the start of the message", () => {
+    expect(
+      sftpFailureFocusTarget("Connect: Authentication failed.", "password"),
+    ).toBe("conn-sftp-host");
+  });
+
+  it("focuses Reset host key for a changed key only when that control is shown", () => {
+    expect(sftpFailureFocusTarget(changed, "password", true)).toBe(
+      "conn-sftp-reset-hostkey",
+    );
+    expect(sftpFailureFocusTarget(changed, "password", false)).toBe(
+      "conn-sftp-host",
+    );
+    expect(sftpFailureFocusTarget(changed, "password")).toBe("conn-sftp-host");
+  });
+
+  it("focuses the host for every other failure", () => {
+    expect(sftpFailureFocusTarget("SFTP host unreachable", "password")).toBe(
+      "conn-sftp-host",
+    );
+    expect(sftpFailureFocusTarget("", "keyboard-interactive")).toBe(
+      "conn-sftp-host",
+    );
+  });
+});
+
+describe("SFTP home fallback notice", () => {
+  it("names the remembered folder as a remote path and says home opened", () => {
+    expect(sftpHomeFallbackMessage("var/log/")).toBe(
+      "/var/log is no longer available. Opened your home folder.",
+    );
+  });
+
+  it("names the root for the empty key", () => {
+    expect(sftpHomeFallbackMessage("")).toBe(
+      "/ is no longer available. Opened your home folder.",
+    );
+  });
+
+  it("falls back to a generic name for a key that is not a valid path", () => {
+    expect(sftpHomeFallbackMessage("a/../../b/")).toBe(
+      "The remembered folder is no longer available. Opened your home folder.",
     );
   });
 });

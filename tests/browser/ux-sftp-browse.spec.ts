@@ -36,6 +36,33 @@ import {
  *   disconnecting with the reconnect message.
  * - The saved-connection editor shows S3 endpoint and key fields for an SFTP
  *   entry, or Reset host key clears the pin without confirmation.
+ *
+ * Failure-mode inventory for the location path and SFTP wording (written
+ * before the fix):
+ * - The location editor shows the S3 "host/path/" form, or an empty value.
+ * - Typing an absolute path, a path without a leading slash, "host/path", or
+ *   "sftp://host/path" fails, or opens a different folder.
+ * - A path on another host is accepted, or fails without naming the host.
+ * - A missing path reports "Unknown bucket" instead of a not-found message.
+ * - A "." or ".." segment reaches the server as a listing request.
+ * - The sidebar title, filter, empty-folder text or path hint says "bucket"
+ *   while an SFTP session is open.
+ * - The command palette lacks "Go to home folder", or it navigates elsewhere.
+ * - The Link and Non-UTF-8 badges are transparent, or sit against the name.
+ * - After an SFTP session ends, the sidebar keeps the SFTP words.
+ * - The palette "Go to path" entry is missing on SFTP, keeps the S3 key/prefix
+ *   label and prompt, or does not navigate to a typed absolute path.
+ *
+ * Failure-mode inventory for restoring the remembered SFTP folder (written
+ * before the fix):
+ * - A missing or refused remembered folder leaves the user on an error row
+ *   with no way to reach a folder, instead of opening the home folder.
+ * - The fallback is silent, or it names the wrong folder.
+ * - A lost connection during restore opens home anyway, instead of the
+ *   reconnect message.
+ * - A home folder that also fails loops, or loses the Retry banner.
+ * - The saved-connection editor's SFTP block has no grid, so its labels and
+ *   values stack without columns.
  */
 
 const SUITE = "ux-sftp-browse";
@@ -719,5 +746,423 @@ test.describe("SFTP saved connection editor", () => {
     ) as Array<{ sftp?: Record<string, unknown> }>;
     expect(saved[0]?.sftp?.host_key).toBeUndefined();
     expect(saved[0]?.sftp?.auth).toBe("password");
+  });
+});
+
+/** Type a location into the omnibar editor and submit it. */
+async function typeLocation(page: Page, value: string): Promise<void> {
+  await page.keyboard.press("Control+l");
+  await expect(page.locator("#location-omnibar-edit")).toBeFocused();
+  await page.locator("#location-omnibar-edit").fill(value);
+  await page.keyboard.press("Enter");
+}
+
+/** Every status line the page shows, including the navigation error row. */
+async function visibleMessages(page: Page): Promise<string> {
+  return page.evaluate(() =>
+    [
+      document.getElementById("status")?.textContent ?? "",
+      document.getElementById("object-tbody")?.textContent ?? "",
+    ].join("\n"),
+  );
+}
+
+test.describe("SFTP location path and wording", () => {
+  test("editing the location shows the absolute remote folder with a trailing slash", async ({
+    page,
+  }) => {
+    await connectSftp(page);
+    await page.keyboard.press("Control+l");
+    await expect(page.locator("#location-omnibar-edit")).toBeFocused();
+    await expect(page.locator("#location-omnibar-edit")).toHaveValue(
+      `${HOME}/`,
+    );
+    await expect(page.locator("#location-omnibar-edit")).toHaveAttribute(
+      "placeholder",
+      "/path/to/folder",
+    );
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#location-omnibar-edit")).toBeHidden();
+  });
+
+  test("typing an absolute folder path opens that folder, with no unknown-bucket error", async ({
+    page,
+  }) => {
+    await connectSftp(page);
+    await typeLocation(page, `${HOME}/archive`);
+
+    await expect(fileRow(page, "2019.txt")).toBeVisible();
+    await expect(page.locator("#location-omnibar-browse")).toContainText(
+      "archive",
+    );
+    const calls = await readMockCallLog(page);
+    expect(callsTo(calls, "sftp_list_dir")).toContainEqual(
+      expect.objectContaining({ path: `${HOME}/archive` }),
+    );
+    await expect(page.locator("#status")).not.toContainText("Unknown bucket");
+  });
+
+  test("a path without a leading slash, host/path, and sftp:// URL reach the same folder", async ({
+    page,
+  }) => {
+    await connectSftp(page);
+
+    await typeLocation(page, "home/demo/archive/");
+    await expect(fileRow(page, "2019.txt")).toBeVisible();
+
+    await typeLocation(page, `${HOST}/home/demo/`);
+    await expect(fileRow(page, "notes.txt")).toBeVisible();
+
+    await typeLocation(page, `sftp://${HOST}/home/demo/archive/`);
+    await expect(fileRow(page, "2019.txt")).toBeVisible();
+
+    await typeLocation(page, "/");
+    await expect(folderRow(page, "home")).toBeVisible();
+    await expect(page.locator("#status")).not.toContainText("Unknown bucket");
+  });
+
+  test("a path on another host is refused and the message names the connected host", async ({
+    page,
+  }) => {
+    await connectSftp(page);
+    await typeLocation(page, "sftp://elsewhere.example.test/home/demo/");
+
+    await expect(page.locator("#status")).toContainText(HOST);
+    await expect(page.locator("#status")).not.toContainText("Unknown bucket");
+    const calls = await readMockCallLog(page);
+    expect(
+      callsTo(calls, "sftp_list_dir").filter((args) =>
+        String((args as { path?: unknown }).path).includes("elsewhere"),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("a missing folder reports not-found, never Unknown bucket", async ({
+    page,
+  }, testInfo) => {
+    await connectSftp(page);
+    await typeLocation(page, "/var/log/");
+
+    await expect(page.locator("#object-tbody")).toContainText(
+      "No such file or directory",
+    );
+    const messages = await visibleMessages(page);
+    expect(messages).not.toContain("Unknown bucket");
+    await saveSftpArtifact(page, testInfo, "location-not-found");
+  });
+
+  test("dot segments are refused with a clear message and never reach the server", async ({
+    page,
+  }) => {
+    await connectSftp(page);
+    await typeLocation(page, `${HOME}/../etc/`);
+
+    await expect(page.locator("#status")).toContainText('"."');
+    await expect(page.locator("#status")).not.toContainText("Unknown bucket");
+    const calls = await readMockCallLog(page);
+    for (const args of callsTo(calls, "sftp_list_dir")) {
+      expect(String((args as { path?: unknown }).path)).not.toMatch(/\.\./);
+    }
+    await expect(fileRow(page, "notes.txt")).toBeVisible();
+  });
+
+  test("the sidebar and an empty folder use server and folder words, never bucket", async ({
+    page,
+  }, testInfo) => {
+    await connectSftp(page);
+    const panel = page.locator("#bucket-panel");
+    await expect(panel.locator(".sidebar__header > span").first()).toHaveText(
+      "Servers",
+    );
+    await expect(page.locator("#bucket-filter-input")).toHaveAttribute(
+      "placeholder",
+      "Filter…",
+    );
+    await expect(panel).not.toContainText(/bucket/i);
+    await expect(page.locator("#bucket-list")).toHaveAttribute(
+      "aria-label",
+      "Servers",
+    );
+
+    await typeLocation(page, `${HOME}/photos/`);
+    await expect(page.locator("#object-tbody .browse-empty__title")).toHaveText(
+      "Empty folder",
+    );
+    await expect(page.locator("#object-tbody .browse-empty__text")).toHaveText(
+      "This folder is empty",
+    );
+    await expect(page.locator("#object-tbody")).not.toContainText(/bucket/i);
+    await saveSftpArtifact(page, testInfo, "empty-folder-wording");
+  });
+
+  test("the command palette offers Go to home folder and runs it", async ({
+    page,
+  }, testInfo) => {
+    await connectSftp(page);
+    await folderRow(page, "archive").dblclick();
+    await expect(fileRow(page, "2019.txt")).toBeVisible();
+
+    await page.locator("#palette-hint").click();
+    await expect(page.locator("#palette-overlay")).toBeVisible();
+    await page.locator("#palette-input").fill("Go to home");
+    const item = page.locator("#palette-results .palette__item", {
+      hasText: "Go to home folder",
+    });
+    await expect(item).toBeVisible();
+    await saveSftpArtifact(page, testInfo, "palette-home-folder");
+    await page.keyboard.press("Enter");
+
+    await expect(fileRow(page, "notes.txt")).toBeVisible();
+    await expect(fileRow(page, "2019.txt")).toHaveCount(0);
+  });
+
+  test("the Link and Non-UTF-8 badges have a background and a gap from the file name", async ({
+    page,
+  }) => {
+    await connectSftp(page);
+    const rows = [
+      fileRow(page, "latest.txt"),
+      page.locator(".object-row--file", { hasText: "�" }),
+    ];
+    for (const row of rows) {
+      const badge = row.locator(".object-badge");
+      const name = row.locator(".object-name__text");
+      await expect(badge).toBeVisible();
+
+      const background = await badge.evaluate(
+        (el) => getComputedStyle(el).backgroundColor,
+      );
+      expect(background).not.toBe("rgba(0, 0, 0, 0)");
+      expect(background).not.toBe("transparent");
+
+      const badgeBox = await badge.boundingBox();
+      const nameBox = await name.boundingBox();
+      expect(badgeBox).not.toBeNull();
+      expect(nameBox).not.toBeNull();
+      expect(
+        (badgeBox?.x ?? 0) - ((nameBox?.x ?? 0) + (nameBox?.width ?? 0)),
+      ).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  test("the sidebar and location words return to bucket words after the SFTP session ends", async ({
+    page,
+  }) => {
+    await connectSftp(page);
+    await expect(page.locator("#bucket-panel")).toContainText("Servers");
+
+    await page.locator("#conn-switcher-btn").click();
+    await page.locator("#conn-switcher-disconnect").click();
+    await expect(page.locator("#connection-screen")).toBeVisible();
+
+    await expect(page.locator("#bucket-panel")).toHaveAttribute(
+      "aria-label",
+      "Buckets",
+    );
+    await expect(page.locator("#bucket-list")).toHaveAttribute(
+      "aria-label",
+      "Buckets",
+    );
+    await expect(page.locator("#bucket-filter-input")).toHaveAttribute(
+      "placeholder",
+      "Filter buckets…",
+    );
+    await expect(page.locator("#location-omnibar-edit")).toHaveAttribute(
+      "placeholder",
+      "bucket/prefix/",
+    );
+  });
+
+  test("the palette Go to path entry on SFTP prompts for a path and navigates to it", async ({
+    page,
+  }) => {
+    await connectSftp(page);
+    await page.locator("#palette-hint").click();
+    await expect(page.locator("#palette-overlay")).toBeVisible();
+    await page.locator("#palette-input").fill("Go to path");
+    const item = page.locator("#palette-results .palette__item", {
+      hasText: "Go to path",
+    });
+    await expect(item).toBeVisible();
+    await expect(
+      page.locator("#palette-results .palette__item", {
+        hasText: "Go to key/prefix",
+      }),
+    ).toHaveCount(0);
+    await page.keyboard.press("Enter");
+
+    await expect(page.locator("#dialog-message")).toContainText(
+      "/path/to/folder",
+    );
+    await expect(page.locator("#dialog-message")).not.toContainText(
+      "key or prefix",
+    );
+    await page.locator("#dialog-input").fill(`${HOME}/archive`);
+    await page.locator("#dialog-ok").click();
+    await expect(fileRow(page, "2019.txt")).toBeVisible();
+    await expect(page.locator("#status")).not.toContainText("Unknown bucket");
+
+    await page.keyboard.press("Control+k");
+    await expect(page.locator("#palette-overlay")).toBeVisible();
+    await page.locator("#palette-input").fill("Go to path");
+    await page.keyboard.press("Enter");
+    await page.locator("#dialog-input").fill(`${HOME}/../etc`);
+    await page.locator("#dialog-ok").click();
+    await expect(page.locator("#status")).toContainText('"."');
+    await expect(fileRow(page, "2019.txt")).toBeVisible();
+    const calls = await readMockCallLog(page);
+    for (const args of callsTo(calls, "sftp_list_dir")) {
+      expect(String((args as { path?: unknown }).path)).not.toMatch(/\.\./);
+    }
+  });
+});
+
+/** Connect the pinned saved SFTP bookmark, with a remembered folder seeded. */
+async function openSavedSftp(
+  page: Page,
+  rememberedPrefix: string,
+  sftp: Partial<MockSftpOptions> = {},
+): Promise<void> {
+  await installLayoutTauriMock(page, {
+    bookmarks: [pinnedBookmark],
+    sftp: {
+      hostKey: "pinned-ok",
+      homePath: HOME,
+      files: seedFiles(),
+      ...sftp,
+    },
+  });
+  await page.addInitScript(
+    ({ key, bucket, prefix }) => {
+      window.localStorage.setItem(
+        "s3-sidekick.connection-memory",
+        JSON.stringify({
+          [key]: { bucket, prefix, lastUsedAt: 1_700_000_000_000 },
+        }),
+      );
+    },
+    {
+      key: `${pinnedBookmark.name}\n${pinnedBookmark.endpoint}`,
+      bucket: HOST,
+      prefix: rememberedPrefix,
+    },
+  );
+  await page.goto("/");
+  await expect(page.locator("#connection-screen")).toBeVisible();
+}
+
+/** Paths of every `sftp_list_dir` call, in the order they were made. */
+async function listedDirs(page: Page): Promise<string[]> {
+  return callsTo(await readMockCallLog(page), "sftp_list_dir").map((args) =>
+    String((args as { path?: unknown }).path),
+  );
+}
+
+test.describe("SFTP remembered folder restore", () => {
+  test("a remembered folder that is missing on connect opens the home folder with a notice", async ({
+    page,
+  }, testInfo) => {
+    await openSavedSftp(page, "var/gone/");
+    await page.locator("#conn-saved-list .bookmark-item__connect").click();
+
+    await expect(fileRow(page, "notes.txt")).toBeVisible();
+    await expect(page.locator("#status")).toHaveText(
+      "/var/gone is no longer available. Opened your home folder.",
+    );
+    expect(await listedDirs(page)).toEqual(["/var/gone", HOME]);
+    await expect(page.locator("#object-tbody")).not.toContainText("etc");
+    await saveSftpArtifact(page, testInfo, "remembered-folder-missing");
+  });
+
+  test("a remembered folder that is refused on connect also opens home", async ({
+    page,
+  }) => {
+    await openSavedSftp(page, "archive/");
+    await armFailure(page, "sftp_list_dir", "Permission denied");
+    await page.locator("#conn-saved-list .bookmark-item__connect").click();
+
+    await expect(fileRow(page, "notes.txt")).toBeVisible();
+    await expect(page.locator("#status")).toHaveText(
+      "/archive is no longer available. Opened your home folder.",
+    );
+    expect(await listedDirs(page)).toEqual(["/archive", HOME]);
+  });
+
+  test("a home folder that also fails keeps the retry banner", async ({
+    page,
+  }) => {
+    await openSavedSftp(page, "var/gone/", { homePath: "/home/nobody" });
+    await page.locator("#conn-saved-list .bookmark-item__connect").click();
+
+    const banner = page.locator("#object-tbody [data-nav-error]");
+    await expect(banner).toContainText(
+      "Connected, but failed to open the folder",
+    );
+    await expect(banner.getByRole("button", { name: "Retry" })).toBeVisible();
+    expect(await listedDirs(page)).toEqual(["/var/gone", "/home/nobody"]);
+  });
+
+  test("a lost connection while restoring uses the reconnect message, not home", async ({
+    page,
+  }) => {
+    await openSavedSftp(page, "archive/");
+    await armFailure(
+      page,
+      "sftp_list_dir",
+      "SFTP connection lost: keepalive timed out",
+    );
+    await page.locator("#conn-saved-list .bookmark-item__connect").click();
+
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    await expect(page.locator("#status")).toHaveText(
+      "The SFTP connection was lost. Reconnect to continue.",
+    );
+    expect(await listedDirs(page)).toEqual(["/archive"]);
+  });
+});
+
+test.describe("SFTP saved connection editor layout", () => {
+  test("the SFTP details lay out as a label and value grid", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {
+      bookmarks: [pinnedBookmark],
+      sftp: { hostKey: "pinned-ok", homePath: HOME, files: seedFiles() },
+    });
+    await page.goto("/");
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    await page.locator("#settings-btn").click();
+    await page.locator("#settings-tab-bookmarks").click();
+    await page
+      .locator("#bookmark-list")
+      .getByRole("button", { name: /^Edit/ })
+      .click();
+
+    const block = page.locator("#bookmark-edit-sftp");
+    await expect(block).toBeVisible();
+    await expect(block).toHaveCSS("display", "grid");
+    const hostLabel = await page
+      .locator(".bookmark-edit__label", { hasText: /^Host$/ })
+      .boundingBox();
+    const portLabel = await page
+      .locator(".bookmark-edit__label", { hasText: "Port" })
+      .boundingBox();
+    const hostValue = await page
+      .locator("#bookmark-edit-sftp-host")
+      .boundingBox();
+    expect(hostLabel && portLabel && hostValue).toBeTruthy();
+    // Every label shares a column, and each value sits to the right of it.
+    expect(Math.round(hostLabel!.x)).toBe(Math.round(portLabel!.x));
+    expect(hostValue!.x).toBeGreaterThan(hostLabel!.x + hostLabel!.width);
+    await expect(page.locator(".bookmark-edit__label").first()).toHaveCSS(
+      "color",
+      "rgb(102, 102, 111)",
+    );
+    const hostKey = page.locator("#bookmark-edit-sftp-hostkey");
+    const fits = await hostKey.evaluate(
+      (el) => el.scrollWidth <= el.clientWidth + 1,
+    );
+    expect(fits).toBe(true);
+    await expect(page.locator("#bookmark-edit-reset-hostkey")).toBeVisible();
   });
 });

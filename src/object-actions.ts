@@ -300,7 +300,11 @@ const OBJECT_ACTIONS: readonly ObjectAction[] = [
     label: downloadLabel,
     icon: "download",
     group: "transfer",
-    isAvailable: (context) => context.fileKeys.length > 0,
+    // SFTP downloads a folder as the files directly inside it, so a folder
+    // counts. S3 folders are not downloadable.
+    isAvailable: (context) =>
+      context.fileKeys.length > 0 ||
+      (isSftpContext(context) && context.folderPrefixes.length > 0),
     run: () => void handleDownload(),
   },
   {

@@ -16,11 +16,12 @@
 //!   by the delete_dir checks.
 //! - Cancellation is ignored, or a FIFO is opened and blocks. Guarded by the
 //!   cancellation and preview checks.
+//! - An unknown-extension UTF-8 file is refused, or a NUL-byte file is shown as
+//!   text. Guarded by the unknown-extension preview checks.
 //! - A stale connection ID or a dead transport goes unnoticed. Guarded by the
 //!   session guard checks.
 //!
-//! Every observed value is read from the server with `docker exec`, never copied
-//! from the code under test.
+//! Observed values come from the server via `docker exec`, not the code under test.
 
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
@@ -116,6 +117,10 @@ const CHECK_PREVIEW_REFUSED: &str =
     "preview refuses folders, symlinks to folders and FIFOs without reading them";
 const CHECK_PREVIEW_LARGE: &str =
     "preview of an image above 16 MiB or an unsupported type returns no data without reading the body";
+const CHECK_PREVIEW_UNKNOWN_TEXT: &str =
+    "preview of a UTF-8 file with an unknown extension returns its text as text/plain";
+const CHECK_PREVIEW_UNKNOWN_BINARY: &str =
+    "preview of a file with an unknown extension that holds a NUL byte stays unsupported";
 const CHECK_STALE: &str =
     "every command refuses a stale connection id and changes nothing on the server";
 const CHECK_LOST: &str =
@@ -1218,6 +1223,8 @@ async fn e2e_preview() {
                 "cd \"$ROOT\" && head -c 2097152 /dev/zero | tr '\\0' a > big.txt",
                 " && printf '%s' '{}' | base64 -d > pixel.png",
                 " && head -c 16777217 /dev/zero > huge.png && printf xxxx > data.bin",
+                " && printf 'héllo 名前\\n' > notes.weird && printf abc > blob.unknown",
+                " && head -c 4 /dev/zero >> blob.unknown",
                 " && mkdir sub && ln -s sub link-dir && mkfifo fifo"
             ),
             PNG_B64
@@ -1302,6 +1309,41 @@ async fn e2e_preview() {
             "huge_png_error": huge.as_ref().err(),
             "binary": binary.as_ref().ok().map(|p| json!({"data_bytes": p.data.len(), "content_type": p.content_type})),
             "binary_error": binary.as_ref().err(),
+        }),
+    );
+
+    let unknown_text =
+        crate::sftp::sftp_preview(state(&app), id.clone(), fixture.path("notes.weird")).await;
+    record(
+        test,
+        CHECK_PREVIEW_UNKNOWN_TEXT,
+        matches!(&unknown_text, Ok(preview) if preview.content_type == "text/plain"
+            && preview.is_text
+            && !preview.truncated
+            && preview.data == "héllo 名前\n"),
+        json!({
+            "content_type": unknown_text.as_ref().ok().map(|p| p.content_type.clone()),
+            "is_text": unknown_text.as_ref().ok().map(|p| p.is_text),
+            "data": unknown_text.as_ref().ok().map(|p| p.data.clone()),
+            "error": unknown_text.as_ref().err(),
+        }),
+    );
+
+    let unknown_binary =
+        crate::sftp::sftp_preview(state(&app), id.clone(), fixture.path("blob.unknown")).await;
+    record(
+        test,
+        CHECK_PREVIEW_UNKNOWN_BINARY,
+        matches!(&unknown_binary, Ok(preview) if preview.content_type == "application/octet-stream"
+            && preview.data.is_empty()
+            && !preview.is_text
+            && !preview.truncated
+            && preview.total_size == 7),
+        json!({
+            "content_type": unknown_binary.as_ref().ok().map(|p| p.content_type.clone()),
+            "data_bytes": unknown_binary.as_ref().ok().map(|p| p.data.len()),
+            "total_size": unknown_binary.as_ref().ok().map(|p| p.total_size),
+            "error": unknown_binary.as_ref().err(),
         }),
     );
 }

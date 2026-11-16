@@ -1001,6 +1001,15 @@ async fn commit_overwrite(
     }
 }
 
+/// The refusal when the server will not copy the target's permissions onto the upload. The
+/// target is untouched at that point, so the message says it was kept and how to replace it.
+fn mode_copy_refused(path: &str, detail: &str) -> String {
+    format!(
+        "The server would not copy the permissions of {} to the upload ({}). The existing file was kept unchanged. Delete the remote file and upload again to replace it.",
+        path, detail
+    )
+}
+
 /// Give the temp the permission bits of the file it will replace, through the open handle, so
 /// the swap keeps the target's mode. A target that is gone keeps the temp's own mode.
 async fn keep_target_mode(
@@ -1030,13 +1039,7 @@ async fn keep_target_mode(
             ..FileAttributes::empty()
         })
         .await
-        .map_err(|err| {
-            format!(
-                "Could not give the upload the permissions of {}: {}",
-                path,
-                map_sftp_error(handle, context, err)
-            )
-        })
+        .map_err(|err| mode_copy_refused(path, &map_sftp_error(handle, context, err)))
 }
 
 /// Make the temp file durable, check its size, and publish it. Any error here leaves the target
@@ -1970,6 +1973,17 @@ mod tests {
         assert_eq!(
             throttle_delay(10 * 1024 * 1024, 0, Duration::from_secs(0)),
             None
+        );
+    }
+
+    #[test]
+    fn a_refused_mode_copy_says_the_existing_file_was_kept_and_how_to_replace_it() {
+        let message = mode_copy_refused("/home/u/report.txt", "permission denied");
+        assert_eq!(
+            message,
+            "The server would not copy the permissions of /home/u/report.txt to the upload \
+             (permission denied). The existing file was kept unchanged. Delete the remote \
+             file and upload again to replace it."
         );
     }
 }

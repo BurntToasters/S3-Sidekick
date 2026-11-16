@@ -16,6 +16,14 @@ import {
 } from "./utils.ts";
 import { refreshObjects, MAX_ACCUMULATED_LISTING_ITEMS } from "./connection.ts";
 import { isSftpNameLossy, SFTP_LOSSY_REASON } from "./sftp-move.ts";
+import { sftpKeyFromPath, sftpVirtualBucket } from "./sftp.ts";
+import {
+  displayLocation,
+  protocolLabels,
+  sessionProtocol,
+  type LocationProtocol,
+  type ProtocolLabels,
+} from "./protocol-labels.ts";
 import { iconForFileName, type FileIconName } from "./icon-map.ts";
 import {
   closeInspectorOnMobile,
@@ -577,7 +585,12 @@ function formatItemCounts(folderCount: number, fileCount: number): string {
   if (fileCount > 0) {
     parts.push(`${fileCount} file${fileCount === 1 ? "" : "s"}`);
   }
-  return parts.length > 0 ? parts.join(", ") : "0 objects";
+  return parts.length > 0 ? parts.join(", ") : `0 ${itemNoun()}`;
+}
+
+/** The word for a listing entry: SFTP shows items, S3 keeps objects. */
+function itemNoun(): string {
+  return sessionProtocol(state) === "sftp" ? "items" : "objects";
 }
 
 function getLoadedListingCounts(): { folders: number; files: number } {
@@ -610,7 +623,7 @@ function getLoadedSummaryText(): string {
   const prefix =
     sortedPrefixes.length + sortedFiles.length > 0
       ? `${matchingText} matching`
-      : "No objects match filter";
+      : `No ${itemNoun()} match filter`;
   return `${prefix} · ${loadedText} loaded · Filter searches loaded listing only`;
 }
 
@@ -838,16 +851,24 @@ export function updateSelectionUI(): void {
     ) as HTMLButtonElement | null;
     const canDownloadFiles = selectedFileCount > 0;
     const hasOnlyFolders = selectedFolderCount > 0 && selectedFileCount === 0;
+    // SFTP downloads a folder as the files directly inside it, so a folder counts.
+    const sftpSelection = sessionProtocol(state) === "sftp";
+    const canDownload =
+      canDownloadFiles || (sftpSelection && selectedFolderCount > 0);
 
     if (batchDownload) {
-      batchDownload.disabled = !canDownloadFiles || listingLoading;
-      batchDownload.title = canDownloadFiles
+      batchDownload.disabled = !canDownload || listingLoading;
+      batchDownload.title = canDownload
         ? listingLoading
           ? "Download unavailable while listing loads"
-          : `Download ${selectedFileCount} selected file${selectedFileCount === 1 ? "" : "s"}`
+          : sftpSelection && selectedFolderCount > 0
+            ? "Download — folders download the files directly inside them"
+            : `Download ${selectedFileCount} selected file${selectedFileCount === 1 ? "" : "s"}`
         : hasOnlyFolders
           ? "Download applies to files only"
-          : "Select files to download";
+          : sftpSelection
+            ? "Select files or folders to download"
+            : "Select files to download";
     }
     if (batchDelete) {
       const deleteInFlight = batchDelete.dataset.operationInFlight === "true";
@@ -1093,6 +1114,8 @@ function ensureBucketListListeners(): void {
 
 export function renderBucketList(): void {
   const el = dom.bucketList;
+  const labels = protocolLabels(sessionProtocol(state));
+  applySidebarLabels(labels);
   // Preserve focus + scroll across the innerHTML rebuild (same pattern as the
   // object table's activeRowId restore) so filtering/selection keystrokes
   // don't destroy sidebar focus.
@@ -1109,12 +1132,12 @@ export function renderBucketList(): void {
   const parentScrollTop = scrollParent?.scrollTop ?? 0;
   el.setAttribute("aria-busy", "false");
   el.setAttribute("role", "listbox");
-  el.setAttribute("aria-label", "Buckets");
+  el.setAttribute("aria-label", labels.sidebarLabel);
   el.setAttribute("aria-multiselectable", "false");
   if (state.buckets.length === 0) {
     el.innerHTML = bucketSidebarEmptyHtml(
-      "No buckets found",
-      "This account has no buckets you can list here.",
+      labels.noEntriesTitle,
+      labels.noEntriesText,
     );
     return;
   }
@@ -1126,8 +1149,8 @@ export function renderBucketList(): void {
     : state.buckets;
   if (visibleBuckets.length === 0) {
     el.innerHTML = bucketSidebarEmptyHtml(
-      "No buckets match filter",
-      "Try a different term in the bucket filter.",
+      labels.noMatchTitle,
+      labels.noMatchText,
     );
     return;
   }
@@ -1148,7 +1171,7 @@ export function renderBucketList(): void {
       .map(
         (b) =>
           `<li class="list__item${b.name === state.currentBucket ? " list__item--active" : ""}" role="presentation">` +
-          `<button type="button" class="list__item-btn" role="option" aria-selected="${b.name === state.currentBucket ? "true" : "false"}" tabindex="${b.name === rovingBucket ? "0" : "-1"}" data-bucket="${escapeHtml(b.name)}" title="${escapeHtml(b.name)}" aria-label="Open bucket ${escapeHtml(b.name)}"${b.name === state.currentBucket ? ' aria-current="true"' : ""}>` +
+          `<button type="button" class="list__item-btn" role="option" aria-selected="${b.name === state.currentBucket ? "true" : "false"}" tabindex="${b.name === rovingBucket ? "0" : "-1"}" data-bucket="${escapeHtml(b.name)}" title="${escapeHtml(b.name)}" aria-label="${escapeHtml(labels.openAction)} ${escapeHtml(b.name)}"${b.name === state.currentBucket ? ' aria-current="true"' : ""}>` +
           bucketIcon +
           `<span class="list__item-label">${escapeHtml(b.name)}</span>` +
           `</button>` +
@@ -1292,6 +1315,41 @@ export function renderObjectTableSkeleton(rowCount = 8): void {
   }, SKELETON_DELAY_MS);
 }
 
+/**
+ * Sidebar, filter, toggle and empty-state words for the current session. The
+ * S3 words are the static HTML defaults, so an S3 session sets the same text.
+ */
+function applySidebarLabels(labels: ProtocolLabels): void {
+  const panel = document.getElementById("bucket-panel");
+  panel?.setAttribute("aria-label", labels.sidebarLabel);
+  document
+    .getElementById("bucket-list")
+    ?.setAttribute("aria-label", labels.sidebarLabel);
+  const title = panel?.querySelector(".sidebar__header > span");
+  if (title) title.textContent = labels.sidebarTitle;
+  const filter = document.getElementById("bucket-filter-input");
+  filter?.setAttribute("placeholder", labels.filterPlaceholder);
+  filter?.setAttribute("aria-label", labels.filterLabel);
+  const toggle = document.getElementById("sidebar-toggle");
+  toggle?.setAttribute("title", labels.sidebarToggleLabel);
+  toggle?.setAttribute("aria-label", labels.sidebarToggleLabel);
+  document
+    .getElementById("sidebar-resizer")
+    ?.setAttribute("aria-label", labels.sidebarResizeLabel);
+  const empty = document.getElementById("empty-state");
+  if (empty) {
+    const heading = empty.querySelector(".browse-empty__title");
+    if (heading) heading.textContent = labels.chooseTitle;
+    const text = empty.querySelector(".empty-state__text");
+    if (text) text.textContent = labels.chooseText;
+    const show = empty.querySelector(".empty-state__show-buckets");
+    if (show) show.textContent = labels.showListLabel;
+  }
+  document
+    .getElementById("location-omnibar-edit")
+    ?.setAttribute("placeholder", labels.pathPlaceholder);
+}
+
 function bucketSidebarEmptyHtml(title: string, text: string): string {
   return (
     `<li class="list__empty browse-sidebar-empty">` +
@@ -1304,8 +1362,9 @@ function bucketSidebarEmptyHtml(title: string, text: string): string {
 }
 
 function emptyFolderRowHtml(atBucketRoot: boolean): string {
-  const title = atBucketRoot ? "Empty bucket" : "Empty folder";
-  const text = atBucketRoot ? "This bucket is empty" : "This folder is empty";
+  const labels = protocolLabels(sessionProtocol(state));
+  const title = atBucketRoot ? labels.emptyRootTitle : "Empty folder";
+  const text = atBucketRoot ? labels.emptyRootText : "This folder is empty";
   return (
     `<tr role="row" aria-rowindex="2" data-table-placeholder><td role="gridcell" colspan="4" class="table-empty">` +
     `<div class="table-empty__content browse-empty">` +
@@ -2080,14 +2139,44 @@ export function renderBreadcrumb(): void {
   updateNavButtons();
 }
 
-export function formatLocationPath(bucket: string, prefix: string): string {
+/**
+ * The location text for the omnibar. S3 shows `bucket/prefix/`. SFTP shows the
+ * absolute remote folder, with a trailing slash below the root: `/home/demo/`.
+ */
+export function formatLocationPath(
+  bucket: string,
+  prefix: string,
+  protocol: LocationProtocol = "s3",
+): string {
   if (!bucket) return "";
+  if (protocol === "sftp") {
+    const path = displayLocation("sftp", bucket, prefix);
+    return path === "/" ? path : `${path}/`;
+  }
   return prefix ? `${bucket}/${prefix}` : `${bucket}/`;
 }
 
+/** The omnibar text for the session that is open now. */
+function currentLocationText(): string {
+  return formatLocationPath(
+    state.currentBucket,
+    state.currentPrefix,
+    sessionProtocol(state),
+  );
+}
+
+/**
+ * Parse what the user typed into the omnibar. Returns null for empty S3 input.
+ * SFTP reads an empty input as the root and throws a message for input it
+ * refuses, so the caller can show it. `host` is the connected server, the one
+ * virtual bucket an SFTP session has.
+ */
 export function parseLocationPath(
   raw: string,
+  protocol: LocationProtocol = "s3",
+  host = "",
 ): { bucket: string; prefix: string } | null {
+  if (protocol === "sftp") return parseSftpLocationPath(raw, host);
   let input = raw.trim();
   if (!input) return null;
   if (/^s3:\/\//i.test(input)) {
@@ -2108,13 +2197,54 @@ export function parseLocationPath(
   return { bucket, prefix };
 }
 
+/**
+ * SFTP forms: `/abs/path`, `/abs/path/`, `path` (from /), `host/path` when the
+ * first segment is the connected host, and `sftp://host/path`. Returns the
+ * virtual bucket (the host) and the key of the folder or file. Throws a message
+ * for a different host or a `.` or `..` segment.
+ */
+function parseSftpLocationPath(
+  raw: string,
+  host: string,
+): { bucket: string; prefix: string } {
+  let input = raw.trim();
+  const sameHost = (name: string): boolean =>
+    name.toLowerCase() === host.toLowerCase();
+  const refuseHost = (): Error =>
+    new Error(
+      `This session is connected to ${host}. Enter a path on that server.`,
+    );
+  if (/^sftp:\/\//i.test(input)) {
+    input = input.slice("sftp://".length);
+    const slash = input.indexOf("/");
+    const typedHost = slash < 0 ? input : input.slice(0, slash);
+    if (!sameHost(typedHost)) throw refuseHost();
+    input = slash < 0 ? "" : input.slice(slash);
+  } else if (!input.startsWith("/")) {
+    const slash = input.indexOf("/");
+    const first = slash < 0 ? input : input.slice(0, slash);
+    if (sameHost(first)) {
+      input = slash < 0 ? "" : input.slice(slash);
+    }
+  }
+  const segments = input.split("/").filter((segment) => segment !== "");
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    throw new Error(
+      'Paths cannot contain "." or ".." segments. Enter the full path instead.',
+    );
+  }
+  const isFolder = input === "" || input.endsWith("/");
+  const path = `/${segments.join("/")}`;
+  return { bucket: host, prefix: sftpKeyFromPath(path, isFolder) };
+}
+
 export function syncPathInput(): void {
   const input = document.getElementById(
     "location-omnibar-edit",
   ) as HTMLInputElement | null;
   if (!input || document.activeElement === input || isLocationEditMode())
     return;
-  input.value = formatLocationPath(state.currentBucket, state.currentPrefix);
+  input.value = currentLocationText();
 }
 
 let locationEditMode = false;
@@ -2139,7 +2269,7 @@ export function enterLocationEditMode(): void {
   omnibar.classList.add("location-omnibar--edit");
   browse.hidden = true;
   edit.hidden = false;
-  edit.value = formatLocationPath(state.currentBucket, state.currentPrefix);
+  edit.value = currentLocationText();
   edit.focus();
   edit.select();
 }
@@ -2156,19 +2286,34 @@ export function exitLocationEditMode(restorePath = true): void {
   edit.hidden = true;
   browse.hidden = false;
   if (restorePath) {
-    edit.value = formatLocationPath(state.currentBucket, state.currentPrefix);
+    edit.value = currentLocationText();
   }
 }
 
 export async function navigateToLocationPath(raw: string): Promise<boolean> {
-  const parsed = parseLocationPath(raw);
+  const protocol = sessionProtocol(state);
+  let parsed: { bucket: string; prefix: string } | null;
+  try {
+    parsed = parseLocationPath(
+      raw,
+      protocol,
+      protocol === "sftp" ? sftpVirtualBucket(state.endpoint) : "",
+    );
+  } catch (err) {
+    setStatus(friendlyError(err), 5000);
+    return false;
+  }
   if (!parsed) {
-    setStatus("Enter a path like bucket/prefix/", 5000);
+    setStatus(protocolLabels(protocol).pathHint, 5000);
     return false;
   }
 
   const knownBuckets = state.buckets.map((b) => b.name);
-  if (knownBuckets.length > 0 && !knownBuckets.includes(parsed.bucket)) {
+  if (
+    protocol === "s3" &&
+    knownBuckets.length > 0 &&
+    !knownBuckets.includes(parsed.bucket)
+  ) {
     setStatus(`Unknown bucket: ${parsed.bucket}`, 5000);
     return false;
   }
@@ -2270,7 +2415,11 @@ async function navigateToLocationFolder(parsed: {
       `Navigation failed: ${friendlyError(err)}`,
       () =>
         void navigateToLocationPath(
-          formatLocationPath(parsed.bucket, parsed.prefix),
+          formatLocationPath(
+            parsed.bucket,
+            parsed.prefix,
+            sessionProtocol(state),
+          ),
         ).catch((retryErr) => {
           setStatus(`Navigation failed: ${friendlyError(retryErr)}`, 5000);
         }),
@@ -2684,6 +2833,8 @@ export function showEmptyState(): void {
   dom.objectTbody.innerHTML = "";
   dom.breadcrumb.innerHTML = "";
   dom.bucketList.innerHTML = "";
+  // The sidebar is empty and no session is open, so it shows the S3 words.
+  applySidebarLabels(protocolLabels(sessionProtocol(state)));
   const countEl = document.getElementById("statusbar-count");
   if (countEl) countEl.textContent = "";
   const pathInput = document.getElementById(

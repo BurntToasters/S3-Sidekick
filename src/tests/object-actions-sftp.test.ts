@@ -33,6 +33,10 @@ import { SFTP_LOSSY_REASON } from "../sftp-move.ts";
  * - "Copy path" copies or labels as a key, or an SFTP move is labelled copy.
  * - A non-UTF-8 selection leaves rename, delete or move enabled.
  * - S3 selections lose an action or gain the SFTP-only label.
+ * - An SFTP folder-only, single-folder or mixed selection has no Download,
+ *   so the folder download the backend supports is unreachable.
+ * - An S3 folder-only selection gains Download (folders are not downloadable
+ *   on S3).
  */
 
 function context(
@@ -190,5 +194,53 @@ describe("isOfferedFor", () => {
     const s3 = context({ protocol: "s3", fileKeys: ["a.txt"], total: 1 });
     expect(isOfferedFor("copy-url", s3)).toBe(true);
     expect(isOfferedFor("no-such-action", s3)).toBe(false);
+  });
+});
+
+describe("download availability for folders", () => {
+  const sftpFolder = (overrides: Partial<ObjectActionContext> = {}) =>
+    context({
+      protocol: "sftp",
+      folderPrefixes: ["home/demo/bundle/"],
+      total: 1,
+      ...overrides,
+    });
+
+  it("offers Download for an SFTP folder-only selection", () => {
+    const value = sftpFolder({
+      folderPrefixes: ["home/demo/bundle/", "home/demo/archive/"],
+      total: 2,
+    });
+    expect(available("download", value)).toBe(true);
+  });
+
+  it("offers Download for a single SFTP folder", () => {
+    expect(available("download", sftpFolder())).toBe(true);
+  });
+
+  it("offers Download for an SFTP mixed selection", () => {
+    const value = sftpFolder({
+      fileKeys: ["home/demo/notes.txt"],
+      total: 2,
+    });
+    expect(available("download", value)).toBe(true);
+  });
+
+  it("keeps Download unavailable for an S3 folder-only selection", () => {
+    const value = context({
+      protocol: "s3",
+      folderPrefixes: ["reports/2024/"],
+      total: 1,
+    });
+    expect(available("download", value)).toBe(false);
+  });
+
+  it("keeps Download available for an S3 file selection", () => {
+    const value = context({
+      protocol: "s3",
+      fileKeys: ["reports/a.csv"],
+      total: 1,
+    });
+    expect(available("download", value)).toBe(true);
   });
 });

@@ -11,6 +11,21 @@ import type { SftpHostKeyUnknownStep, SftpPromptStep } from "./sftp.ts";
 
 const TRUST_OVERLAY = "sftp-trust-overlay";
 const PROMPT_OVERLAY = "sftp-prompt-overlay";
+const PROMPT_FALLBACK_LABEL = "Response";
+
+/** The action that opened the trust dialog: Connect or Test connection. */
+export type SftpConnectPurpose = "connect" | "test";
+
+/** Label of the trust button, so Test connection never says it connects. */
+export function sftpTrustConfirmLabel(purpose: SftpConnectPurpose): string {
+  return purpose === "test" ? "Trust and test" : "Trust and connect";
+}
+
+/** Accessible name for a keyboard-interactive prompt with no text. */
+export function sftpPromptLabel(text: string): string {
+  const trimmed = text.trim();
+  return trimmed === "" ? PROMPT_FALLBACK_LABEL : trimmed;
+}
 
 /** Closes the open SFTP dialog as cancelled. Only one is open at a time. */
 let closeOpenDialog: (() => void) | null = null;
@@ -22,6 +37,25 @@ function setText(id: string, text: string): void {
 
 function requireElement<T extends HTMLElement>(id: string): T | null {
   return document.getElementById(id) as T | null;
+}
+
+/** Copy the fingerprint and report the result in the dialog's status line. */
+async function copyFingerprint(
+  fingerprint: string,
+  status: HTMLElement | null,
+): Promise<void> {
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(fingerprint);
+    copied = true;
+  } catch {
+    copied = false;
+  }
+  if (status) {
+    status.textContent = copied
+      ? "Fingerprint copied."
+      : "Could not copy the fingerprint.";
+  }
 }
 
 /**
@@ -60,18 +94,21 @@ function openOverlay(
 
 /**
  * Ask whether to trust a server host key the client has never seen. Resolves
- * true only when the user presses Trust and connect. A missing dialog fails
+ * true only when the user presses the trust button. A missing dialog fails
  * closed, so the connect is refused rather than trusted.
  */
 export function promptSftpHostKeyTrust(
   endpoint: string,
   info: SftpHostKeyUnknownStep,
+  purpose: SftpConnectPurpose = "connect",
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const overlay = requireElement<HTMLElement>(TRUST_OVERLAY);
     const confirm = requireElement<HTMLButtonElement>("sftp-trust-confirm");
     const cancel = requireElement<HTMLButtonElement>("sftp-trust-cancel");
     const close = requireElement<HTMLButtonElement>("sftp-trust-close");
+    const copy = requireElement<HTMLButtonElement>("sftp-trust-copy");
+    const copyStatus = requireElement<HTMLElement>("sftp-trust-copy-status");
     if (!overlay || !confirm || !cancel) {
       resolve(false);
       return;
@@ -80,6 +117,8 @@ export function promptSftpHostKeyTrust(
     setText("sftp-trust-endpoint", endpoint);
     setText("sftp-trust-key-type", info.key_type);
     setText("sftp-trust-fingerprint", info.fingerprint_sha256);
+    setText("sftp-trust-confirm", sftpTrustConfirmLabel(purpose));
+    setText("sftp-trust-copy-status", "");
 
     let settled = false;
     let hide: () => void = () => undefined;
@@ -96,6 +135,13 @@ export function promptSftpHostKeyTrust(
       confirm.addEventListener("click", () => finish(true), { signal });
       cancel.addEventListener("click", dismiss, { signal });
       close?.addEventListener("click", dismiss, { signal });
+      copy?.addEventListener(
+        "click",
+        () => {
+          void copyFingerprint(info.fingerprint_sha256, copyStatus);
+        },
+        { signal },
+      );
     });
   });
 }
@@ -139,7 +185,7 @@ export function promptSftpKeyboardInteractive(
       const input = document.createElement("input");
       const id = `sftp-prompt-answer-${index}`;
       label.htmlFor = id;
-      label.textContent = prompt.text.trim();
+      label.textContent = sftpPromptLabel(prompt.text);
       input.id = id;
       input.className = "field field--full";
       input.type = prompt.echo ? "text" : "password";

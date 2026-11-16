@@ -10,6 +10,7 @@
 
 use std::borrow::Cow;
 use std::future::Future;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -105,6 +106,9 @@ const MAX_USERNAME_BYTES: usize = 256;
 // - An RSA host key negotiates, then fails signature verification with no
 //   explanation, because the crate's RSA verification is compiled out.
 // - Partial authentication is reported as a plain failure, or as success.
+// - A server that rejects the attempted method hides the methods it accepts.
+// - A black-holed first address spends the TCP budget, so a working second is never tried.
+// - A refused address waits out a timeout, or per-address limits outlast the budget.
 
 // - A failed password echoes the password or the server's raw text.
 // - An encrypted key with no passphrase, or a wrong one, fails opaquely.
@@ -119,6 +123,37 @@ pub(crate) enum AuthMethod {
     Password,
     Key,
     KeyboardInteractive,
+}
+
+impl AuthMethod {
+    /// The method name the SSH server uses in its accepted-methods list.
+    fn ssh_name(self) -> &'static str {
+        match self {
+            AuthMethod::Password => "password",
+            AuthMethod::Key => "publickey",
+            AuthMethod::KeyboardInteractive => "keyboard-interactive",
+        }
+    }
+
+    /// The name shown to the user.
+    fn label(self) -> &'static str {
+        match self {
+            AuthMethod::Password => "Password",
+            AuthMethod::Key => "Private key",
+            AuthMethod::KeyboardInteractive => "Keyboard-interactive",
+        }
+    }
+}
+
+/// The user-facing name for a method the server lists. Names this client does
+/// not know are returned as the server sent them.
+fn remote_method_label(name: &str) -> &str {
+    match name {
+        "password" => AuthMethod::Password.label(),
+        "publickey" => AuthMethod::Key.label(),
+        "keyboard-interactive" => AuthMethod::KeyboardInteractive.label(),
+        other => other,
+    }
 }
 
 /// Secrets handed to `sftp_connect`. Zeroized on every exit path, including
@@ -540,16 +575,36 @@ pub(crate) fn changed_host_key_message(endpoint: &str, fingerprint: &str) -> Str
     )
 }
 
-/// Message for a failed authentication, given the methods the server reports.
+/// Message for a failed authentication, given the attempted method and the
+/// methods the server reports.
 ///
 /// A partial success names the methods still required, which this client does
-/// not offer after the first one. Any other failure keeps the fixed message, so
-/// no server text or secret reaches the webview.
-pub(crate) fn auth_failure_message(partial_success: bool, remaining: &[String]) -> String {
+/// not offer after the first one. When the server reports methods and none of
+/// them is the attempted method, the message names the methods it does accept,
+/// so the user can see the method is the problem. Any other failure keeps the
+/// fixed message. The server's method names are the only server text shown.
+pub(crate) fn auth_failure_message(
+    method: AuthMethod,
+    partial_success: bool,
+    remaining: &[String],
+) -> String {
     if partial_success && !remaining.is_empty() {
         return format!(
             "The server requires another authentication method ({}) after this one. Multi-step authentication is not supported in this beta.",
             remaining.join(", ")
+        );
+    }
+    let attempted_accepted = remaining.iter().any(|name| name == method.ssh_name());
+    if !partial_success && !remaining.is_empty() && !attempted_accepted {
+        let accepted: Vec<&str> = remaining
+            .iter()
+            .map(|name| remote_method_label(name))
+            .collect();
+        return format!(
+            "{} This server does not accept {} sign-in for this user. It accepts: {}.",
+            AUTH_FAILED,
+            method.label(),
+            accepted.join(", ")
         );
     }
     AUTH_FAILED.to_string()
@@ -1051,6 +1106,41 @@ async fn resolve(
     Ok(addrs)
 }
 
+/// Addresses that share the connect budget. Each address gets an equal share of
+/// the budget, split across at most this many addresses.
+const TCP_ATTEMPT_SHARE: usize = 3;
+
+/// Try the addresses in order, each under its own time limit, within `budget`
+/// overall. A refused address moves on at once. Returns the first stream that
+/// connects, or the last error when every address fails.
+async fn connect_in_order<T, Fut>(
+    addrs: &[SocketAddr],
+    budget: Duration,
+    connect: impl Fn(SocketAddr) -> Fut,
+) -> io::Result<T>
+where
+    Fut: Future<Output = io::Result<T>>,
+{
+    let shares = u32::try_from(addrs.len().clamp(1, TCP_ATTEMPT_SHARE)).unwrap_or(1);
+    let per_attempt = budget / shares;
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut last = io::Error::new(io::ErrorKind::InvalidInput, "no address to connect to");
+    for addr in addrs {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(per_attempt.min(remaining), connect(*addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) => last = err,
+            Err(_) => {
+                last = io::Error::new(io::ErrorKind::TimedOut, format!("no answer from {}", addr))
+            }
+        }
+    }
+    Err(last)
+}
+
 /// Connect to the validated addresses only. No second lookup happens here, so
 /// the addresses checked above are the addresses dialled.
 async fn connect_tcp(
@@ -1062,7 +1152,7 @@ async fn connect_tcp(
         cancel,
         TCP_CONNECT_TIMEOUT,
         "connecting",
-        TcpStream::connect(addrs),
+        connect_in_order(addrs, TCP_CONNECT_TIMEOUT, TcpStream::connect),
     )
     .await?
     .map_err(|err| format!("Could not connect to {}: {}", request.endpoint, err))?;
@@ -1134,19 +1224,23 @@ fn handshake_error(endpoint: &str, record: &Mutex<HandshakeRecord>, err: russh::
 }
 
 /// Turn an authentication result into success or the refusal message.
-fn auth_outcome(result: AuthResult) -> Result<(), String> {
+fn auth_outcome(method: AuthMethod, result: AuthResult) -> Result<(), String> {
     match result {
         AuthResult::Success => Ok(()),
         AuthResult::Failure {
             remaining_methods,
             partial_success,
-        } => Err(failure_message(partial_success, &remaining_methods)),
+        } => Err(failure_message(method, partial_success, &remaining_methods)),
     }
 }
 
-fn failure_message(partial_success: bool, remaining: &russh::MethodSet) -> String {
+fn failure_message(
+    method: AuthMethod,
+    partial_success: bool,
+    remaining: &russh::MethodSet,
+) -> String {
     let names: Vec<String> = remaining.iter().map(String::from).collect();
-    auth_failure_message(partial_success, &names)
+    auth_failure_message(method, partial_success, &names)
 }
 
 fn connection_lost(_: russh::Error) -> String {
@@ -1174,7 +1268,7 @@ async fn authenticate(
             )
             .await?
             .map_err(connection_lost)?;
-            auth_outcome(result)
+            auth_outcome(AuthMethod::Password, result)
         }
         AuthMethod::Key => {
             let key = decode_private_key(secrets)?;
@@ -1186,7 +1280,7 @@ async fn authenticate(
             )
             .await?
             .map_err(connection_lost)?;
-            auth_outcome(result)
+            auth_outcome(AuthMethod::Key, result)
         }
         AuthMethod::KeyboardInteractive => {
             keyboard_interactive(ssh, &user, cancel, events, replies).await
@@ -1239,7 +1333,13 @@ async fn keyboard_interactive(
             KeyboardInteractiveAuthResponse::Failure {
                 remaining_methods,
                 partial_success,
-            } => return Err(failure_message(partial_success, &remaining_methods)),
+            } => {
+                return Err(failure_message(
+                    AuthMethod::KeyboardInteractive,
+                    partial_success,
+                    &remaining_methods,
+                ))
+            }
             KeyboardInteractiveAuthResponse::InfoRequest {
                 name,
                 instructions,
@@ -1658,19 +1758,186 @@ mod tests {
         assert!(message.contains(HOST_KEY_CHANGED_NOTE), "{message}");
     }
 
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| name.to_string()).collect()
+    }
+
     #[test]
     fn a_plain_authentication_failure_uses_the_fixed_message() {
         assert_eq!(
-            auth_failure_message(false, &["password".to_string()]),
+            auth_failure_message(AuthMethod::Password, false, &names(&["password"])),
             AUTH_FAILED
         );
     }
 
     #[test]
     fn partial_authentication_names_the_required_methods_as_unsupported() {
-        let message = auth_failure_message(true, &["password".to_string()]);
+        let message = auth_failure_message(AuthMethod::Password, true, &names(&["password"]));
         assert!(message.contains("password"), "{message}");
         assert!(message.contains("not supported in this beta"), "{message}");
+    }
+
+    #[test]
+    fn partial_authentication_message_is_unchanged_for_any_attempted_method() {
+        let remaining = names(&["publickey"]);
+        let message = auth_failure_message(AuthMethod::Password, true, &remaining);
+        assert_eq!(
+            message,
+            "The server requires another authentication method (publickey) after this one. Multi-step authentication is not supported in this beta."
+        );
+        assert_eq!(
+            auth_failure_message(AuthMethod::Key, true, &[]),
+            AUTH_FAILED
+        );
+    }
+
+    #[test]
+    fn a_method_absent_from_the_accepted_list_names_the_accepted_methods() {
+        assert_eq!(
+            auth_failure_message(AuthMethod::Password, false, &names(&["publickey"])),
+            "Authentication failed. This server does not accept Password sign-in for this user. It accepts: Private key."
+        );
+    }
+
+    #[test]
+    fn an_absent_method_maps_known_names_and_shows_unknown_names_as_is() {
+        let remaining = names(&["keyboard-interactive", "publickey", "gssapi-with-mic"]);
+        assert_eq!(
+            auth_failure_message(AuthMethod::Password, false, &remaining),
+            "Authentication failed. This server does not accept Password sign-in for this user. It accepts: Keyboard-interactive, Private key, gssapi-with-mic."
+        );
+        assert_eq!(
+            auth_failure_message(AuthMethod::KeyboardInteractive, false, &names(&["password"])),
+            "Authentication failed. This server does not accept Keyboard-interactive sign-in for this user. It accepts: Password."
+        );
+        assert_eq!(
+            auth_failure_message(AuthMethod::Key, false, &names(&["gssapi-with-mic"])),
+            "Authentication failed. This server does not accept Private key sign-in for this user. It accepts: gssapi-with-mic."
+        );
+    }
+
+    #[test]
+    fn a_method_present_in_the_accepted_list_keeps_the_fixed_message() {
+        let remaining = names(&["publickey", "password"]);
+        assert_eq!(
+            auth_failure_message(AuthMethod::Password, false, &remaining),
+            AUTH_FAILED
+        );
+        assert_eq!(
+            auth_failure_message(AuthMethod::Key, false, &remaining),
+            AUTH_FAILED
+        );
+    }
+
+    #[test]
+    fn an_empty_accepted_list_keeps_the_fixed_message() {
+        assert_eq!(
+            auth_failure_message(AuthMethod::Password, false, &[]),
+            AUTH_FAILED
+        );
+    }
+
+    #[test]
+    fn every_accepted_method_message_starts_with_the_authentication_failed_prefix() {
+        let message = auth_failure_message(AuthMethod::Password, false, &names(&["publickey"]));
+        assert!(message.starts_with(AUTH_FAILED), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_tcp_address_that_hangs_gives_way_to_the_next_address() {
+        // Black-holed first address: the budget (300 ms) is split across two
+        // addresses, so the first gets 150 ms and the second still connects.
+        let budget = Duration::from_millis(300);
+        let attempts = std::sync::Mutex::new(Vec::new());
+        let first = SocketAddr::from(([10, 0, 0, 1], 22));
+        let second = SocketAddr::from(([10, 0, 0, 2], 22));
+        let result = connect_in_order(&[first, second], budget, |addr| {
+            attempts.lock().expect("attempts").push(addr);
+            async move {
+                if addr == first {
+                    std::future::pending::<io::Result<SocketAddr>>().await
+                } else {
+                    Ok(addr)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.expect("second address connects"), second);
+        assert_eq!(*attempts.lock().expect("attempts"), vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn all_hanging_addresses_fail_within_the_overall_budget() {
+        let budget = Duration::from_millis(300);
+        let addrs = [
+            SocketAddr::from(([10, 0, 0, 1], 22)),
+            SocketAddr::from(([10, 0, 0, 2], 22)),
+        ];
+        let start = Instant::now();
+        let result = connect_in_order(&addrs, budget, |_| async {
+            std::future::pending::<io::Result<u8>>().await
+        })
+        .await;
+        let elapsed = start.elapsed();
+        let err = result.expect_err("every address hangs");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            elapsed <= budget + Duration::from_millis(150),
+            "took {elapsed:?} against a {budget:?} budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn more_than_three_hanging_addresses_still_stay_within_the_budget() {
+        let budget = Duration::from_millis(300);
+        let addrs: Vec<SocketAddr> = (1..=4)
+            .map(|last| SocketAddr::from(([10, 0, 0, last], 22)))
+            .collect();
+        let start = Instant::now();
+        let result = connect_in_order(&addrs, budget, |_| async {
+            std::future::pending::<io::Result<u8>>().await
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "every address hangs");
+        assert!(
+            elapsed <= budget + Duration::from_millis(150),
+            "took {elapsed:?} against a {budget:?} budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_address_moves_on_at_once() {
+        let budget = Duration::from_millis(300);
+        let first = SocketAddr::from(([10, 0, 0, 1], 22));
+        let second = SocketAddr::from(([10, 0, 0, 2], 22));
+        let start = Instant::now();
+        let result = connect_in_order(&[first, second], budget, |addr| async move {
+            if addr == first {
+                Err(io::Error::new(io::ErrorKind::ConnectionRefused, "refused"))
+            } else {
+                Ok(addr)
+            }
+        })
+        .await;
+        assert_eq!(result.expect("second address connects"), second);
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "a refusal must not wait out a timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_address_gets_the_whole_budget() {
+        let budget = Duration::from_millis(300);
+        let only = SocketAddr::from(([10, 0, 0, 1], 22));
+        // Slower than a third of the budget, faster than the whole of it.
+        let result = connect_in_order(&[only], budget, |addr| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(addr)
+        })
+        .await;
+        assert_eq!(result.expect("single address connects"), only);
     }
 
     #[test]

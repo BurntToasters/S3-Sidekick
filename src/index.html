@@ -520,18 +520,30 @@
                 <div class="form-row" id="conn-sftp-passphrase-row" hidden>
                   <div class="form-group">
                     <label for="conn-sftp-passphrase">Passphrase</label>
-                    <input
-                      id="conn-sftp-passphrase"
-                      class="field field--full"
-                      type="password"
-                      spellcheck="false"
-                      autocapitalize="off"
-                      autocorrect="off"
-                      autocomplete="off"
-                      maxlength="4096"
-                      aria-describedby="conn-sftp-passphrase-hint"
-                      disabled
-                    />
+                    <div class="field-with-toggle field-with-toggle--full">
+                      <input
+                        id="conn-sftp-passphrase"
+                        class="field field--full"
+                        type="password"
+                        spellcheck="false"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        autocomplete="off"
+                        maxlength="4096"
+                        aria-describedby="conn-sftp-passphrase-hint"
+                        disabled
+                      />
+                      <button
+                        id="sftp-passphrase-toggle"
+                        type="button"
+                        class="field-toggle-btn field-toggle-btn--text"
+                        aria-label="Show passphrase"
+                        aria-pressed="false"
+                        disabled
+                      >
+                        Show
+                      </button>
+                    </div>
                     <p id="conn-sftp-passphrase-hint" class="field-hint">
                       Needed only when the key is encrypted.
                     </p>
@@ -2984,6 +2996,20 @@
               ><code id="sftp-trust-fingerprint"></code></pre>
             </dd>
           </dl>
+          <div class="sftp-trust__copy">
+            <button
+              type="button"
+              id="sftp-trust-copy"
+              class="btn btn--ghost btn--sm"
+            >
+              Copy fingerprint
+            </button>
+            <span
+              id="sftp-trust-copy-status"
+              class="sftp-trust__copy-status"
+              role="status"
+            ></span>
+          </div>
           <p class="setting-note">
             A trusted key is remembered for saved connections, so a later
             connection is refused if the server presents a different key.

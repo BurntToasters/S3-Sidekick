@@ -11,6 +11,7 @@ import {
   type NativePathGrant,
 } from "./path-grants.ts";
 import { state } from "./state.ts";
+import { protocolLabels, sessionProtocol } from "./protocol-labels.ts";
 import {
   enqueueDownloads,
   type EnqueueResult,
@@ -482,7 +483,7 @@ export async function handleDownload(): Promise<void> {
   try {
     snap = captureConnectionSnapshot();
   } catch {
-    setStatus("Connect to a bucket first.", 5000);
+    setStatus(protocolLabels(sessionProtocol(state)).connectFirst, 5000);
     return;
   }
   const capturedKeys = [...keys];
