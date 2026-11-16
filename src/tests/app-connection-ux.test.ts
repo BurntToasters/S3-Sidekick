@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const connectMock = vi.fn(async () => "us-east-1");
 const disconnectMock = vi.fn(async () => true);
@@ -437,6 +437,81 @@ describe("connection UX polish", () => {
     await testing;
     expect(disconnectMock).toHaveBeenCalledWith("conn-test");
     state.connectionId = "";
+  });
+});
+
+describe("header + and New connection with a live session", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    disconnectMock.mockReset().mockResolvedValue(true);
+    showConfirmMock.mockReset().mockResolvedValue(true);
+    requestCloseInspectorMock.mockReset().mockResolvedValue(true);
+    setStatusMock.mockReset();
+    renderFixture();
+    const { state } = await import("../state.ts");
+    state.connected = true;
+    state.connectionId = "conn-live";
+    state.activeTransferCount = 1;
+  });
+
+  afterEach(async () => {
+    const { state } = await import("../state.ts");
+    state.connected = false;
+    state.connectionId = "";
+    state.activeTransferCount = 0;
+  });
+
+  it("keeps the session and never disconnects when the transfer warning is declined", async () => {
+    const app = await import("../app-connection.ts");
+    const { state } = await import("../state.ts");
+    showConfirmMock.mockResolvedValueOnce(false);
+
+    await app.handleNewConnection();
+
+    expect(showConfirmMock).toHaveBeenCalledTimes(1);
+    expect(disconnectMock).not.toHaveBeenCalled();
+    expect(state.connected).toBe(true);
+    expect(state.connectionId).toBe("conn-live");
+  });
+
+  it("disconnects the live session once the transfer warning is accepted", async () => {
+    const app = await import("../app-connection.ts");
+    showConfirmMock.mockResolvedValueOnce(true);
+
+    await app.handleNewConnection();
+
+    expect(showConfirmMock).toHaveBeenCalledTimes(1);
+    expect(disconnectMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("switcher and + action failures are reported (pure logic)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setStatusMock.mockReset();
+    logActivityMock.mockReset();
+  });
+
+  it("reports the status line and an error log entry as '<label> failed: <message>'", async () => {
+    const { reportAsyncActionFailure } =
+      await import("../async-action-report.ts");
+
+    reportAsyncActionFailure("Start new connection", new Error("Boom"));
+
+    const message = "Start new connection failed: Boom";
+    expect(setStatusMock).toHaveBeenCalledWith(message);
+    expect(logActivityMock).toHaveBeenCalledWith(message, "error");
+  });
+
+  it("uses the friendly form of a non-Error rejection", async () => {
+    const { reportAsyncActionFailure } =
+      await import("../async-action-report.ts");
+
+    reportAsyncActionFailure("Lock now", "AccessDenied: nope");
+
+    expect(setStatusMock).toHaveBeenCalledWith(
+      "Lock now failed: Access denied. Check your credentials and permissions.",
+    );
   });
 });
 

@@ -1,4 +1,7 @@
 import { init } from "./app-init.ts";
+import { installAsyncErrorReporter } from "./async-errors.ts";
+
+installAsyncErrorReporter();
 
 init().catch((err) => {
   console.error("Init error:", err);

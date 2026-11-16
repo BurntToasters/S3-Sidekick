@@ -390,6 +390,14 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
   -webkit-app-region: no-drag;
 }
 
+/* Top-bar "+" beside the switcher pill. It keeps its size when the title
+   shrinks and stays a click target, not a drag handle, in every titlebar mode. */
+.conn-switcher-add {
+  flex-shrink: 0;
+  margin-left: var(--space-1);
+  -webkit-app-region: no-drag;
+}
+
 .conn-switcher {
   display: inline-flex;
   align-items: center;
@@ -576,6 +584,13 @@ body:not(.titlebar-custom) .conn-switcher-wrap {
 .conn-switcher__action:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring-color);
   outline-offset: 2px;
+}
+
+/* Disabled while a connect or test runs (see setConnectionFormDisabled). */
+.conn-switcher__action:disabled {
+  color: var(--text-muted);
+  background: transparent;
+  cursor: default;
 }
 
 /* ==========================================================================

@@ -3,7 +3,7 @@
     "chromium",
     "webkit"
   ],
-  "testCount": 1008,
+  "testCount": 1026,
   "specs": {
     "a01-lock-security.spec.ts": 6,
     "first-run.spec.ts": 4,
@@ -12,9 +12,10 @@
     "transfer-lifecycle.spec.ts": 14,
     "ui-security-regressions.spec.ts": 8,
     "unguarded-write.spec.ts": 2,
+    "ux-async-errors.spec.ts": 4,
     "ux-browse-keyboard.spec.ts": 32,
     "ux-browse.spec.ts": 54,
-    "ux-connection.spec.ts": 88,
+    "ux-connection.spec.ts": 102,
     "ux-deferred-location.spec.ts": 14,
     "ux-deferred-modal-a11y.spec.ts": 6,
     "ux-deferred-reveal.spec.ts": 8,
@@ -42,5 +43,5 @@
     "ux-transfer-engine.spec.ts": 16,
     "ux-visual-tour.spec.ts": 100
   },
-  "titlesSha256": "921a938f72aa1e452e2836e67d93da66e5a6b7ce0769f59e0bd8740c5d68ea5c"
+  "titlesSha256": "3d12878109210df9807abca03856472af51f43d1a74c89bbdb8461bbbc8cd311"
 }

@@ -1430,10 +1430,6 @@ function installBucketResetListener(): void {
   });
 }
 
-export function isBucketRefreshInFlight(): boolean {
-  return bucketRefreshInFlight;
-}
-
 export async function handleRefreshBuckets(): Promise<void> {
   if (!state.connected || bucketRefreshInFlight) return;
   installBucketResetListener();

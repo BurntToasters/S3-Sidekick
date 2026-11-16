@@ -1,6 +1,6 @@
 [package]
 name = "s3-sidekick"
-version = "0.13.0-beta.1"
+version = "0.13.0-beta.2"
 description = "Cross-platform desktop client for S3-compatible object storage."
 authors = ["BurntToasters <code@rosie.run>"]
 license = "MPL-2.0"
@@ -23,7 +23,7 @@ aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = [
     "rt-tokio",
     "sigv4a",
 ] }
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 aes-gcm = "=0.10.3"
 argon2 = "=0.6.0"
 base64 = "=0.22.1"

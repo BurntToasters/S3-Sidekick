@@ -28,8 +28,6 @@ interface PreviewResponse {
   total_size: number;
 }
 
-/** Matches the native text read limit in s3/preview.rs. */
-export const PREVIEW_LIMIT_BYTES = 1_048_576;
 /** Matches the native image read cap in s3/preview.rs. */
 export const PREVIEW_IMAGE_LIMIT_BYTES = 16_777_216;
 

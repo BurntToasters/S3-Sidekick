@@ -174,14 +174,6 @@ export function setConnectionAccessLocked(locked: boolean): void {
   }
 }
 
-export function isConnectionAccessLocked(): boolean {
-  return connectionAccessLocked;
-}
-
-export function currentBucketRequest(): number {
-  return bucketRequest;
-}
-
 /**
  * Synthesize delimiter prefixes from trailing-`/` folder-marker objects.
  * The backend may return zero-byte `foo/` keys with `is_folder` without a
