@@ -326,29 +326,16 @@ test("Flatpak npm 12 install overrides sandbox offline mode", () => {
   assert.match(yaml, /CARGO_NET_OFFLINE:\s*"true"/);
 });
 
-test("--skip-check is explicit and never allowed for stable releases", () => {
+// --skip-check failure modes: a stable release accepts it; a beta demands an
+// extra confirmation variable instead of the flag alone (Zinnia's contract).
+test("--skip-check needs only the flag on beta and is refused on stable", () => {
   assert.equal(assertSkipCheckAllowed(false), false);
   assert.throws(
-    () =>
-      assertSkipCheckAllowed(true, {
-        environment: { ALLOW_RELEASE_SKIP_CHECK: "1" },
-        version: "0.12.0",
-      }),
+    () => assertSkipCheckAllowed(true, { version: "0.12.0" }),
     /stable release/,
   );
-  assert.throws(
-    () =>
-      assertSkipCheckAllowed(true, {
-        environment: {},
-        version: "0.12.0-beta.1",
-      }),
-    /ALLOW_RELEASE_SKIP_CHECK=1/,
-  );
   assert.equal(
-    assertSkipCheckAllowed(true, {
-      environment: { ALLOW_RELEASE_SKIP_CHECK: "1" },
-      version: "0.12.0-beta.1",
-    }),
+    assertSkipCheckAllowed(true, { environment: {}, version: "0.12.0-beta.1" }),
     true,
   );
 });
