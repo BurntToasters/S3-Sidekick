@@ -40,6 +40,8 @@ The S3 endpoint is resolved and every address checked once, at connect (`validat
 
 Webview module boundaries avoid runtime import cycles. `app-layout.ts` renders the object table through `layout-render-bridge.ts`; preview and properties call the inspector through `inspector-host.ts`; and transfer row/chrome rendering lives in `transfer-render.ts` rather than the queue and recovery flow.
 
+Unhandled promise rejections in the webview are caught by a global `unhandledrejection` reporter (`src/async-errors.ts`) as a safety net. It shows a friendly status line and an activity-log entry, and the console keeps the raw error. Click handlers should still catch their own failures and name the action through `reportAsyncActionFailure` in `src/async-action-report.ts`, so the message says what failed.
+
 ## Transfer integrity
 
 Uploads use S3 checksums when enabled. Large downloads use range requests pinned to a readable object version selector, including the literal `null`, or to an ETag when version IDs are unavailable. Resume checkpoints retain that identity and are rejected when the object generation changes. Copy receipts record source and destination ETags/version IDs plus canonical source HEAD, ACL-grant, and raw-tag fingerprints. Supported empty ACL/tag state is fingerprinted differently from a provider that explicitly reports the feature unsupported; ordinary read failures fail closed. Receipt-producing copies collect all three source fingerprints even for small objects.
@@ -93,6 +95,8 @@ Synchronous locks are taken in one global order, outer to inner: the storage gat
 ## Auto-lock
 
 The backend expires the vault key lazily. The webview polls the vault state and, when an inactivity timeout has locked it, disconnects the session and clears decrypted credentials and bookmarks from memory. Pointer and keyboard input count as activity, and so do running transfers: the timeout starts once the queue is idle, so an unattended transfer is never interrupted.
+
+Manual **Lock now** has one flow, `runManualLockNow` in `src/app-events.ts`, which Settings and the header switcher both run. The switcher reaches it through `setLockNowHandler` in `src/app-connection.ts`, which avoids an import cycle. Auto-lock and manual lock both end in `teardownLockedSession`, so dialogs, the preview, the inspector, inline edits, and revealed secrets are handled the same way on either path.
 
 ## Testing layers
 

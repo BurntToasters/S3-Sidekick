@@ -49,6 +49,7 @@ import {
   toggleInspector,
   setInspectorOpen,
 } from "./inspector.ts";
+import { reportAsyncActionFailure } from "./async-action-report.ts";
 import { wireWindowSizePersistence } from "./window-size.ts";
 import {
   checkUpdates,
@@ -186,13 +187,6 @@ import {
 
 let dragDropUnlisten: (() => void) | null = null;
 
-/** Surface an action that rejects after its click handler already returned. */
-function reportAsyncActionFailure(label: string, err: unknown): void {
-  const message = `${label} failed: ${friendlyError(err)}`;
-  setStatus(message);
-  logActivity(message, "error");
-}
-
 /**
  * Shared lock teardown for both the auto-lock watcher and the manual
  * "Lock now" button. A lock is only complete once nothing from the previous
@@ -240,6 +234,31 @@ export async function clearSessionAfterAutoLock(): Promise<boolean> {
     return false;
   }
   return true;
+}
+
+/**
+ * Manual "Lock now", reached from Settings and from the header switcher. Both
+ * run this one flow so they cannot drift: confirm when transfers run, disconnect
+ * first when connected, lock, then the shared teardown (H5), then the locked
+ * saved list. Callers attach their own failure reporting.
+ */
+export async function runManualLockNow(): Promise<void> {
+  // Ask before anything is torn down: running transfers stop on lock.
+  if (!(await confirmSessionTeardown("Lock now"))) return;
+  // Disconnect first so the backend cancels and drains operations that
+  // already cloned the S3 client before encrypted credentials are locked.
+  if (state.connected && !(await handleDisconnect())) return;
+  const locked = await handleLockNow(setStatus);
+  if (!locked) return;
+  cancelPendingConnect();
+  cancelPendingTestConnection();
+  setConnectionAccessLocked(true);
+  // Same single teardown as auto-lock (H5), then show the locked saved list
+  // rather than an empty one.
+  await teardownLockedSession();
+  setSavedConnectionsLocked(true);
+  clearBookmarks();
+  refreshBookmarkBar();
 }
 
 /** Connection form: connect, credentials, provider presets, saved list. */
@@ -732,25 +751,9 @@ function wireSecuritySettings(): void {
   document
     .getElementById("security-lock-btn")!
     .addEventListener("click", () => {
-      void (async () => {
-        // Ask before anything is torn down: running transfers stop on lock.
-        if (!(await confirmSessionTeardown("Lock now"))) return;
-        // Disconnect first so the backend cancels and drains operations that
-        // already cloned the S3 client before encrypted credentials are locked.
-        if (state.connected && !(await handleDisconnect())) return;
-        const locked = await handleLockNow(setStatus);
-        if (locked) {
-          cancelPendingConnect();
-          cancelPendingTestConnection();
-          setConnectionAccessLocked(true);
-          // Same single teardown as auto-lock (H5), then show the locked
-          // saved list rather than an empty one.
-          await teardownLockedSession();
-          setSavedConnectionsLocked(true);
-          clearBookmarks();
-          refreshBookmarkBar();
-        }
-      })().catch((err) => reportAsyncActionFailure("Lock now", err));
+      void runManualLockNow().catch((err) =>
+        reportAsyncActionFailure("Lock now", err),
+      );
     });
   document
     .getElementById("security-lock-timeout")!

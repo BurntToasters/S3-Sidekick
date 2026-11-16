@@ -91,12 +91,6 @@ export const dom = {
   get connectBtn() {
     return $<HTMLButtonElement>("connect-btn");
   },
-  get disconnectBtn() {
-    return $<HTMLButtonElement>("disconnect-btn");
-  },
-  get connectionStatus() {
-    return $("connection-status");
-  },
   get emptyState() {
     return $("empty-state");
   },

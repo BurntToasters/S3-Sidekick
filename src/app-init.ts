@@ -40,10 +40,15 @@ import {
   setConnectionUI,
   setSavedConnectionsLocked,
   setUnlockSavedConnectionsHandler,
+  setLockNowHandler,
   cancelPendingConnect,
   cancelPendingTestConnection,
 } from "./app-connection.ts";
-import { clearSessionAfterAutoLock, wireEvents } from "./app-events.ts";
+import {
+  clearSessionAfterAutoLock,
+  runManualLockNow,
+  wireEvents,
+} from "./app-events.ts";
 import {
   prepareTransferRecovery,
   recoverPendingTransfers,
@@ -277,6 +282,7 @@ async function loadSavedConnectionIntoInputs(): Promise<void> {
 export async function init(): Promise<void> {
   initializeIcons();
   setUnlockSavedConnectionsHandler(unlockSavedConnections);
+  setLockNowHandler(runManualLockNow);
   setConnectionUI(false);
 
   try {

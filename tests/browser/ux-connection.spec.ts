@@ -1010,6 +1010,165 @@ test.describe("P6 connection switcher and remembered locations", () => {
     await expect(page.locator("#conn-form-error")).toBeHidden();
     await expect(endpoint).not.toHaveAttribute("aria-invalid", "true");
   });
+
+  test("a visible + in the top bar is named New connection and reachable by keyboard", async ({
+    page,
+  }) => {
+    await openMockListing(page, { bookmarks: savedConnections });
+    const add = page.locator("#conn-switcher-add");
+    await expect(add).toBeVisible();
+    await expect(add).toHaveAccessibleName("New connection");
+    await expect(add).not.toHaveAttribute("tabindex", "-1");
+    await add.focus();
+    await expect(add).toBeFocused();
+  });
+
+  test("+ starts a new connection: disconnects, shows the blank form, and focuses the endpoint", async ({
+    page,
+  }) => {
+    await openMockListing(page, { bookmarks: savedConnections });
+    await page.locator("#conn-switcher-add").click();
+
+    await expect(page.locator("#connection-screen")).toBeVisible();
+    await expect(page.locator("#main-layout")).toBeHidden();
+    await expect(page.locator("#conn-endpoint")).toHaveValue("");
+    await expect(page.locator("#conn-endpoint")).toBeFocused();
+    await expect
+      .poll(async () => countOf(await readMockCallLog(page), "disconnect"))
+      .toBe(1);
+  });
+
+  test("clicking + while the switcher menu is open closes the menu", async ({
+    page,
+  }) => {
+    await openMockListing(page, { bookmarks: savedConnections });
+    await openSwitcherMenu(page);
+    await page.locator("#conn-switcher-add").click();
+    await expect(page.locator("#conn-switcher-menu")).toBeHidden();
+    await expect(page.locator("#conn-switcher-btn")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  test("+ does not overlap the title, the switcher, or the settings button at 820px and 700px", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await page.goto("/");
+    for (const width of [820, 700]) {
+      await page.setViewportSize({ width, height: 640 });
+      const overlap = await page.evaluate(() => {
+        const rect = (el: Element | null) => {
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { l: r.left, r: r.right, t: r.top, b: r.bottom, w: r.width };
+        };
+        const hit = (
+          a: ReturnType<typeof rect>,
+          b: ReturnType<typeof rect>,
+        ): boolean =>
+          Boolean(
+            a &&
+            b &&
+            a.w > 0 &&
+            b.w > 0 &&
+            a.l < b.r &&
+            b.l < a.r &&
+            a.t < b.b &&
+            b.t < a.b,
+          );
+        const add = rect(document.getElementById("conn-switcher-add"));
+        return {
+          addVisible: Boolean(add && add.w > 0),
+          addHitsTitle: hit(
+            add,
+            rect(document.querySelector(".header__brand")),
+          ),
+          addHitsSwitcher: hit(
+            add,
+            rect(document.getElementById("conn-switcher-btn")),
+          ),
+          addHitsSettings: hit(
+            add,
+            rect(document.getElementById("settings-btn")),
+          ),
+        };
+      });
+      expect(overlap, `width ${width}`).toEqual({
+        addVisible: true,
+        addHitsTitle: false,
+        addHitsSwitcher: false,
+        addHitsSettings: false,
+      });
+    }
+  });
+
+  test("+ and the switcher New item are disabled while a connection test is in flight", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await installUxHooks(page, { holdConnect: true });
+    await page.goto("/");
+    await fillCredentials(page);
+    await page.locator("#conn-test-btn").click();
+    await expect(page.locator("#conn-test-btn")).toBeDisabled();
+
+    await expect(page.locator("#conn-switcher-add")).toBeDisabled();
+    await openSwitcherMenu(page);
+    await expect(page.locator("#conn-switcher-new")).toBeDisabled();
+  });
+
+  test("+ and the switcher New item are disabled while a connect is in flight", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, { bookmarks: savedConnections });
+    await installUxHooks(page, { holdConnect: true });
+    await page.goto("/");
+    await fillCredentials(page);
+    await page.locator("#connect-btn").click();
+    await expect(page.locator("#connect-btn")).toHaveText("Cancel");
+
+    await expect(page.locator("#conn-switcher-add")).toBeDisabled();
+    await openSwitcherMenu(page);
+    await expect(page.locator("#conn-switcher-new")).toBeDisabled();
+  });
+
+  test("Lock now from the switcher re-masks revealed secrets and shows saved connections locked", async ({
+    page,
+  }) => {
+    await installLayoutTauriMock(page, {
+      bookmarks: savedConnections,
+      security: { encryption_enabled: true, unlocked: true },
+    });
+    await page.goto("/");
+    await fillCredentials(page);
+    await page.locator("#secret-key-toggle").click();
+    await expect(page.locator("#conn-secret-key")).toHaveAttribute(
+      "type",
+      "text",
+    );
+
+    await openSwitcherMenu(page);
+    await page.locator("#conn-switcher-lock").click();
+
+    await expect(page.locator("#conn-secret-key")).toHaveAttribute(
+      "type",
+      "password",
+    );
+    await expect(page.locator("#secret-key-toggle")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await expect(
+      page.locator("#conn-saved-list .conn-saved-empty--locked"),
+    ).toBeVisible();
+    await openSwitcherMenu(page);
+    await expect(
+      page.locator("#conn-switcher-saved [data-unlock]"),
+    ).toBeVisible();
+    expect(countOf(await readMockCallLog(page), "lock_security")).toBe(1);
+  });
 });
 
 test.describe("P6 saved rows, duplicates, and test connection guards", () => {

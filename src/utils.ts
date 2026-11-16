@@ -340,11 +340,6 @@ export function parseJsonArray(raw: string): unknown[] | null {
   }
 }
 
-export function reportError(message: string, err: unknown): string {
-  const detail = friendlyError(err);
-  return detail ? `${message}: ${detail}` : message;
-}
-
 /// Endpoints on this machine or the local network. They stay reachable when
 /// the OS reports no internet connection, and cleartext HTTP to them does not
 /// cross the internet.

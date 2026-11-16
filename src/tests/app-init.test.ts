@@ -15,6 +15,8 @@ const mockLoadConnection = vi.fn<() => Promise<unknown>>();
 const mockGetConnectionLoadError = vi.fn<() => string | null>(() => null);
 const mockLoadBookmarks = vi.fn<() => Promise<void>>();
 const mockSetBookmarkChangeHandler = vi.fn();
+const mockSetLockNowHandler = vi.fn();
+const mockRunManualLockNow = vi.fn<() => Promise<void>>();
 const mockInitUpdater = vi.fn<() => Promise<void>>();
 const mockAutoCheckUpdates = vi.fn<() => Promise<void>>();
 const mockLogActivity = vi.fn();
@@ -127,6 +129,7 @@ vi.mock("../app-connection.ts", () => ({
   setConnectionUI: mockSetConnectionUI,
   setSavedConnectionsLocked: vi.fn(),
   setUnlockSavedConnectionsHandler: vi.fn(),
+  setLockNowHandler: mockSetLockNowHandler,
   cancelPendingConnect: vi.fn(),
   cancelPendingTestConnection: vi.fn(),
 }));
@@ -134,6 +137,7 @@ vi.mock("../app-connection.ts", () => ({
 vi.mock("../app-events.ts", () => ({
   wireEvents: mockWireEvents,
   clearSessionAfterAutoLock: vi.fn(),
+  runManualLockNow: mockRunManualLockNow,
 }));
 
 vi.mock("../transfers.ts", () => ({
@@ -170,6 +174,8 @@ describe("app-init startup waterfall", () => {
     mockGetConnectionLoadError.mockReset().mockReturnValue(null);
     mockLoadBookmarks.mockReset();
     mockSetBookmarkChangeHandler.mockReset();
+    mockSetLockNowHandler.mockReset();
+    mockRunManualLockNow.mockReset();
     mockInitUpdater.mockReset();
     mockAutoCheckUpdates.mockReset();
     mockLogActivity.mockReset();
@@ -254,6 +260,7 @@ describe("app-init startup waterfall", () => {
     expect(mockPrepareTransferRecovery).toHaveBeenCalledTimes(1);
     expect(mockWireEvents).toHaveBeenCalledTimes(1);
     expect(mockWireTitlebar).toHaveBeenCalledTimes(1);
+    expect(mockSetLockNowHandler).toHaveBeenCalledWith(mockRunManualLockNow);
     expect(document.getElementById("version-label")?.textContent).toBe(
       "v0.11.0",
     );

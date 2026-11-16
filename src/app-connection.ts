@@ -13,7 +13,6 @@ import {
   CONNECTION_MEMORY_STORAGE_KEY,
   connectionMemoryKey,
   forgetConnectionLocation,
-  setConnectionAccessLocked,
   type SftpConnectCallbacks,
   type SftpConnectOutcome,
   type SftpConnectParams,
@@ -52,7 +51,6 @@ import {
 } from "./browser.ts";
 import {
   addBookmark,
-  clearBookmarks,
   getBookmarks,
   getBookmarkLoadError,
   renderBookmarkList,
@@ -66,12 +64,12 @@ import {
 import { friendlyError, isLocalEndpoint, plural, escapeHtml } from "./utils.ts";
 import { logActivity } from "./activity-log.ts";
 import { setStatus } from "./app-status.ts";
+import { reportAsyncActionFailure } from "./async-action-report.ts";
 import { clearFilterInputDebounce, setSidebarOpen } from "./app-layout.ts";
 import { requestCloseInspector, setInspectorOpen } from "./inspector.ts";
 import { showConfirm, showPrompt } from "./dialogs.ts";
 import { showToast } from "./toast.ts";
 import { openSettingsModal } from "./settings.ts";
-import { handleLockNow } from "./security.ts";
 import {
   recoverPendingTransfers,
   resumeRecoveredTransfersAfterConnect,
@@ -98,6 +96,8 @@ let connectedAccessKey = "";
 /** Startup or explicit lock: saved connections are unavailable until unlocked. */
 let savedConnectionsLocked = false;
 let unlockHandler: (() => Promise<boolean>) | null = null;
+/** Manual Lock now flow shared with Settings; registered by app-init. */
+let lockNowHandler: (() => Promise<void>) | null = null;
 
 /** Which backend the connect form is set up for. S3 is the default. */
 export type ConnectionProtocol = "s3" | "sftp";
@@ -769,6 +769,11 @@ export function setUnlockSavedConnectionsHandler(
   unlockHandler = handler;
 }
 
+/** Registers the manual Lock now flow that Settings and the switcher both run. */
+export function setLockNowHandler(handler: () => Promise<void>): void {
+  lockNowHandler = handler;
+}
+
 /**
  * Run the registered unlock flow (startup/auto-lock/Settings share it), so
  * bookmarks reload and the change handler is registered in one place.
@@ -996,22 +1001,14 @@ async function refreshSwitcherVaultStatus(): Promise<void> {
   lockItem.hidden = !switcherVaultUnlocked;
 }
 
-/** Mirror of the settings-modal Lock now flow, reachable from the switcher. */
+/**
+ * Switcher Lock now runs the same flow as Settings (app-events), so the lock
+ * teardown cannot drift between the two entry points. Fails loudly when no
+ * flow is registered rather than leaving the vault unlocked without a report.
+ */
 async function handleSwitcherLockNow(): Promise<void> {
-  if (state.connected || state.activeTransferCount > 0) {
-    if (!(await confirmSessionTeardown("Lock now"))) return;
-  }
-  if (state.connected && !(await handleDisconnect())) return;
-  const locked = await handleLockNow(setStatus);
-  if (locked) {
-    cancelPendingConnect();
-    cancelPendingTestConnection();
-    setConnectionAccessLocked(true);
-    setConnectionInputs("", "", "", "");
-    setSavedConnectionsLocked(true);
-    clearBookmarks();
-    refreshBookmarkBar();
-  }
+  if (!lockNowHandler) throw new Error("Lock now is not available yet.");
+  await lockNowHandler();
 }
 
 /** Repaint the switcher button: status dot, connection name, host. */
@@ -1055,7 +1052,9 @@ function renderSwitcherMenu(): void {
     saved.onclick = (event) => {
       if ((event.target as HTMLElement | null)?.closest("[data-unlock]")) {
         closeSwitcherMenu();
-        void unlockHandler?.();
+        void unlockHandler?.().catch((err) =>
+          reportAsyncActionFailure("Unlock saved connections", err),
+        );
       }
     };
     return;
@@ -1101,7 +1100,7 @@ function renderSwitcherMenu(): void {
       bookmark.access_key,
       bookmark.secret_key,
       bookmark.session_token ?? "",
-    );
+    ).catch((err) => reportAsyncActionFailure("Open bookmark", err));
   };
 }
 
@@ -1167,8 +1166,15 @@ export function wireConnectionSwitcher(): void {
   newBtn?.setAttribute("role", "menuitem");
   newBtn?.addEventListener("click", () => {
     closeSwitcherMenu();
-    void handleNewConnection();
+    startNewConnectionFromSwitcher();
   });
+  // Top-bar "+": the same flow as "New…", so one session at a time.
+  document
+    .getElementById("conn-switcher-add")
+    ?.addEventListener("click", () => {
+      closeSwitcherMenu();
+      startNewConnectionFromSwitcher();
+    });
   const manageBtn = document.getElementById("conn-switcher-manage");
   manageBtn?.setAttribute("role", "menuitem");
   manageBtn?.addEventListener("click", () => {
@@ -1181,14 +1187,25 @@ export function wireConnectionSwitcher(): void {
   disconnectBtn?.setAttribute("role", "menuitem");
   disconnectBtn?.addEventListener("click", () => {
     closeSwitcherMenu();
-    void handleDisconnectRequest();
+    void handleDisconnectRequest().catch((err) =>
+      reportAsyncActionFailure("Disconnect", err),
+    );
   });
   const lockBtn = document.getElementById("conn-switcher-lock");
   lockBtn?.setAttribute("role", "menuitem");
   lockBtn?.addEventListener("click", () => {
     closeSwitcherMenu();
-    void handleSwitcherLockNow();
+    void handleSwitcherLockNow().catch((err) =>
+      reportAsyncActionFailure("Lock now", err),
+    );
   });
+}
+
+/** "New…" and the top-bar "+" share this entry point and its failure report. */
+function startNewConnectionFromSwitcher(): void {
+  void handleNewConnection().catch((err) =>
+    reportAsyncActionFailure("Start new connection", err),
+  );
 }
 
 /**
@@ -1858,6 +1875,9 @@ function setConnectionFormDisabled(disabled: boolean): void {
     "conn-sftp-key-choose",
     "conn-sftp-reset-hostkey",
     "conn-new-btn",
+    // A new connection would clear the form under a running connect or test.
+    "conn-switcher-add",
+    "conn-switcher-new",
     "conn-saved-filter",
     "bookmark-save-btn",
   ];
